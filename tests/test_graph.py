@@ -1,0 +1,667 @@
+"""Integration tests for EventGraph — the full event-driven graph engine."""
+
+from dataclasses import dataclass
+
+import pytest
+
+from langgraph_events import Event, EventGraph, EventLog, Halt, Interrupted, Resumed, Scatter, on
+
+# ---------------------------------------------------------------------------
+# Test events
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Start(Event):
+    data: str = ""
+
+
+@dataclass(frozen=True)
+class Middle(Event):
+    data: str = ""
+
+
+@dataclass(frozen=True)
+class End(Event):
+    result: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Test: linear chain  A → B → C
+# ---------------------------------------------------------------------------
+
+
+class TestLinearChain:
+    def test_three_step_chain(self):
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=f"processed:{event.data}")
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=f"done:{event.data}")
+
+        graph = EventGraph([step1, step2])
+        log = graph.invoke(Start(data="hello"))
+
+        assert isinstance(log, EventLog)
+        assert len(log) == 3  # Start, Middle, End
+        assert log.latest(End) == End(result="done:processed:hello")
+
+    def test_async_handlers(self):
+        @on(Start)
+        async def step1(event: Start) -> Middle:
+            return Middle(data=event.data.upper())
+
+        @on(Middle)
+        async def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2])
+        log = graph.invoke(Start(data="hello"))
+        assert log.latest(End) == End(result="HELLO")
+
+
+# ---------------------------------------------------------------------------
+# Test: branching  A → B or C
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Input(Event):
+    kind: str = ""
+    data: str = ""
+
+
+@dataclass(frozen=True)
+class FastPath(Event):
+    data: str = ""
+
+
+@dataclass(frozen=True)
+class SlowPath(Event):
+    data: str = ""
+
+
+@dataclass(frozen=True)
+class Output(Event):
+    result: str = ""
+
+
+class TestBranching:
+    def test_conditional_routing(self):
+        @on(Input)
+        def route(event: Input) -> Event | None:
+            if event.kind == "fast":
+                return FastPath(data=event.data)
+            return SlowPath(data=event.data)
+
+        @on(FastPath)
+        def handle_fast(event: FastPath) -> Output:
+            return Output(result=f"fast:{event.data}")
+
+        @on(SlowPath)
+        def handle_slow(event: SlowPath) -> Output:
+            return Output(result=f"slow:{event.data}")
+
+        graph = EventGraph([route, handle_fast, handle_slow])
+
+        # Fast path
+        log = graph.invoke(Input(kind="fast", data="x"))
+        assert log.latest(Output) == Output(result="fast:x")
+        assert not log.has(SlowPath)
+
+        # Slow path
+        log = graph.invoke(Input(kind="slow", data="y"))
+        assert log.latest(Output) == Output(result="slow:y")
+        assert not log.has(FastPath)
+
+
+# ---------------------------------------------------------------------------
+# Test: fan-out via inheritance
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Auditable(Event):
+    action: str = ""
+
+
+@dataclass(frozen=True)
+class Processable(Event):
+    item: str = ""
+
+
+@dataclass(frozen=True)
+class AuditableItem(Auditable, Processable):
+    action: str = ""
+    item: str = ""
+
+
+@dataclass(frozen=True)
+class AuditDone(Event):
+    msg: str = ""
+
+
+@dataclass(frozen=True)
+class ProcessDone(Event):
+    msg: str = ""
+
+
+class TestFanOut:
+    def test_multiple_inheritance_triggers_both_handlers(self):
+        @on(Auditable)
+        def audit(event: Auditable) -> AuditDone:
+            return AuditDone(msg=f"audited:{event.action}")
+
+        @on(Processable)
+        def process(event: Processable) -> ProcessDone:
+            return ProcessDone(msg=f"processed:{event.item}")
+
+        graph = EventGraph([audit, process])
+        log = graph.invoke(AuditableItem(action="create", item="doc1"))
+
+        # Both handlers should have fired
+        assert log.has(AuditDone)
+        assert log.has(ProcessDone)
+        assert log.latest(AuditDone) == AuditDone(msg="audited:create")
+        assert log.latest(ProcessDone) == ProcessDone(msg="processed:doc1")
+
+    def test_single_inheritance_parent_handler(self):
+        @dataclass(frozen=True)
+        class Base(Event):
+            x: str = ""
+
+        @dataclass(frozen=True)
+        class Child(Base):
+            y: str = ""
+
+        @dataclass(frozen=True)
+        class Result(Event):
+            v: str = ""
+
+        @on(Base)
+        def handle_base(event: Base) -> Result:
+            return Result(v=event.x)
+
+        graph = EventGraph([handle_base])
+        log = graph.invoke(Child(x="hello", y="world"))
+
+        # Parent handler should fire for child event
+        assert log.latest(Result) == Result(v="hello")
+
+
+# ---------------------------------------------------------------------------
+# Test: side-effect handler (returns None)
+# ---------------------------------------------------------------------------
+
+
+class TestSideEffect:
+    def test_none_return(self):
+        side_effects: list[str] = []
+
+        @on(Start)
+        def produce(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def consume(event: Middle) -> None:
+            side_effects.append(event.data)
+
+        graph = EventGraph([produce, consume])
+        log = graph.invoke(Start(data="test"))
+
+        assert len(log) == 2  # Start, Middle
+        assert side_effects == ["test"]
+
+
+# ---------------------------------------------------------------------------
+# Test: Halt
+# ---------------------------------------------------------------------------
+
+
+class TestHalt:
+    def test_halt_stops_execution(self):
+        @on(Start)
+        def step1(event: Start) -> Halt:
+            return Halt(reason="stopped early")
+
+        @on(Halt)
+        def should_not_run(event: Halt) -> End:
+            return End(result="should not reach here")
+
+        graph = EventGraph([step1, should_not_run])
+        log = graph.invoke(Start(data="test"))
+
+        assert log.has(Halt)
+        assert not log.has(End)
+
+
+# ---------------------------------------------------------------------------
+# Test: EventLog injection
+# ---------------------------------------------------------------------------
+
+
+class TestEventLogInjection:
+    def test_handler_receives_full_log(self):
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle, log: EventLog) -> End:
+            # Should see Start and Middle in the log
+            assert log.has(Start)
+            count = len(log.filter(Event))
+            return End(result=f"saw {count} events")
+
+        graph = EventGraph([step1, step2])
+        log = graph.invoke(Start(data="hello"))
+        # Log at time of step2: [Start, Middle] = 2 events
+        assert log.latest(End) == End(result="saw 2 events")
+
+
+# ---------------------------------------------------------------------------
+# Test: handler return type enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestReturnTypeEnforcement:
+    def test_list_return_raises_error(self):
+        @on(Start)
+        def bad_handler(event: Start):
+            return [Middle(data="a"), Middle(data="b")]  # NOT allowed
+
+        graph = EventGraph([bad_handler])
+        with pytest.raises(TypeError, match="never a list"):
+            graph.invoke(Start(data="test"))
+
+
+# ---------------------------------------------------------------------------
+# Test: max_rounds safety
+# ---------------------------------------------------------------------------
+
+
+class TestMaxRounds:
+    def test_infinite_loop_detected(self):
+        @dataclass(frozen=True)
+        class LoopEvent(Event):
+            n: int = 0
+
+        @on(LoopEvent)
+        def looper(event: LoopEvent) -> Event:
+            return LoopEvent(n=event.n + 1)  # infinite loop
+
+        graph = EventGraph([looper], max_rounds=5)
+        with pytest.raises(RuntimeError, match="max_rounds"):
+            graph.invoke(LoopEvent(n=0))
+
+
+# ---------------------------------------------------------------------------
+# Test: checkpointer pass-through
+# ---------------------------------------------------------------------------
+
+
+class TestCheckpointer:
+    def test_checkpointer_works(self):
+        from langgraph.checkpoint.memory import MemorySaver
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step])
+        checkpointer = MemorySaver()
+        compiled = graph.compile(checkpointer=checkpointer)
+
+        config = {"configurable": {"thread_id": "test-1"}}
+        result = compiled.invoke({"events": [Start(data="hello")]}, config)
+
+        assert result["events"][-1] == End(result="hello")
+
+        # Verify checkpoint was saved
+        state = compiled.get_state(config)
+        assert len(state.values["events"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test: streaming
+# ---------------------------------------------------------------------------
+
+
+class TestStreaming:
+    def test_stream_mode_updates(self):
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2])
+        chunks = list(graph.stream(Start(data="hi"), stream_mode="updates"))
+
+        # Should have multiple update chunks
+        assert len(chunks) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test: interrupt / resume
+# ---------------------------------------------------------------------------
+
+
+class TestInterrupt:
+    def test_interrupted_and_resumed(self):
+        from langgraph.checkpoint.memory import MemorySaver
+        from langgraph.types import Command
+
+        @on(Start)
+        def need_input(event: Start) -> Interrupted:
+            return Interrupted(
+                prompt="Please confirm",
+                payload={"data": event.data},
+            )
+
+        @on(Resumed)
+        def handle_resume(event: Resumed) -> End:
+            return End(result=f"confirmed:{event.value}")
+
+        graph = EventGraph([need_input, handle_resume])
+        checkpointer = MemorySaver()
+        compiled = graph.compile(checkpointer=checkpointer)
+
+        config = {"configurable": {"thread_id": "interrupt-test"}}
+
+        # First invoke — should pause
+        result = compiled.invoke({"events": [Start(data="test")]}, config)
+        state = compiled.get_state(config)
+        assert state.next  # graph is paused
+
+        # Resume with human input
+        result = compiled.invoke(
+            Command(resume="yes"),
+            config,
+        )
+        events = result["events"]
+        end_events = [e for e in events if isinstance(e, End)]
+        assert len(end_events) == 1
+        assert end_events[0].result == "confirmed:yes"
+
+
+# ---------------------------------------------------------------------------
+# Test: multi-subscription @on(A, B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Ping(Event):
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class Pong(Event):
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class Reply(Event):
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class Done(Event):
+    result: str = ""
+
+
+class TestMultiSubscription:
+    def test_handler_fires_on_either_event_type(self):
+        """ReAct-style loop: one handler triggered by two different event types."""
+
+        @on(Ping, Pong)
+        def echo(event: Event) -> Reply:
+            if isinstance(event, Ping):
+                return Reply(value=f"ping:{event.value}")
+            return Reply(value=f"pong:{event.value}")
+
+        @on(Reply)
+        def finish(event: Reply) -> Done:
+            return Done(result=event.value)
+
+        graph = EventGraph([echo, finish])
+
+        # Trigger via Ping
+        log = graph.invoke(Ping(value="hello"))
+        assert log.latest(Done) == Done(result="ping:hello")
+
+        # Trigger via Pong
+        log = graph.invoke(Pong(value="world"))
+        assert log.latest(Done) == Done(result="pong:world")
+
+    def test_multi_sub_with_log(self):
+        """Multi-subscription handler that uses EventLog."""
+
+        @dataclass(frozen=True)
+        class MsgA(Event):
+            text: str = ""
+
+        @dataclass(frozen=True)
+        class MsgB(Event):
+            text: str = ""
+
+        @dataclass(frozen=True)
+        class Summary(Event):
+            count: int = 0
+
+        @on(MsgA, MsgB)
+        def summarize(event: Event, log: EventLog) -> Summary:
+            total = len(log.filter(Event))
+            return Summary(count=total)
+
+        graph = EventGraph([summarize])
+        log = graph.invoke(MsgA(text="hi"))
+        assert log.latest(Summary) == Summary(count=1)
+
+    def test_react_loop_pattern(self):
+        """Simulated ReAct loop: call_llm fires on UserMsg and ToolResult."""
+
+        @dataclass(frozen=True)
+        class UserMsg(Event):
+            content: str = ""
+
+        @dataclass(frozen=True)
+        class AssistantMsg(Event):
+            content: str = ""
+            needs_tool: bool = False
+
+        @dataclass(frozen=True)
+        class ToolResult(Event):
+            result: str = ""
+
+        @dataclass(frozen=True)
+        class FinalAnswer(Event):
+            answer: str = ""
+
+        call_count = 0
+
+        @on(UserMsg, ToolResult)
+        def call_llm(event: Event, log: EventLog) -> AssistantMsg:
+            nonlocal call_count
+            call_count += 1
+            if isinstance(event, UserMsg):
+                return AssistantMsg(content="need tool", needs_tool=True)
+            # Second call after tool result
+            return AssistantMsg(content=f"got:{event.result}", needs_tool=False)
+
+        @on(AssistantMsg)
+        def handle_response(event: AssistantMsg) -> ToolResult | FinalAnswer:
+            if event.needs_tool:
+                return ToolResult(result="42")
+            return FinalAnswer(answer=event.content)
+
+        graph = EventGraph([call_llm, handle_response])
+        log = graph.invoke(UserMsg(content="what is 6*7?"))
+
+        assert call_count == 2
+        assert log.latest(FinalAnswer) == FinalAnswer(answer="got:42")
+        assert log.has(ToolResult)
+        assert log.has(AssistantMsg)
+
+
+# ---------------------------------------------------------------------------
+# Test: Scatter + gather (map-reduce)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Batch(Event):
+    items: tuple = ()
+
+
+@dataclass(frozen=True)
+class WorkItem(Event):
+    item: str = ""
+    batch_size: int = 0
+
+
+@dataclass(frozen=True)
+class WorkDone(Event):
+    item: str = ""
+    result: str = ""
+
+
+@dataclass(frozen=True)
+class BatchResult(Event):
+    results: tuple = ()
+
+
+class TestScatter:
+    def test_scatter_fan_out_and_gather(self):
+        """Map-reduce: Scatter fan-out → parallel processing → gather."""
+
+        @on(Batch)
+        def split(event: Batch) -> Scatter:
+            return Scatter([
+                WorkItem(item=item, batch_size=len(event.items))
+                for item in event.items
+            ])
+
+        @on(WorkItem)
+        def process(event: WorkItem) -> WorkDone:
+            return WorkDone(item=event.item, result=f"done:{event.item}")
+
+        @on(WorkDone)
+        def gather(event: WorkDone, log: EventLog) -> BatchResult | None:
+            all_done = log.filter(WorkDone)
+            batch = log.latest(Batch)
+            if len(all_done) >= len(batch.items):
+                return BatchResult(results=tuple(e.result for e in all_done))
+            return None
+
+        graph = EventGraph([split, process, gather])
+        log = graph.invoke(Batch(items=("a", "b", "c")))
+
+        assert log.has(BatchResult)
+        result = log.latest(BatchResult)
+        assert len(result.results) == 3
+        assert set(result.results) == {"done:a", "done:b", "done:c"}
+
+    def test_scatter_single_item(self):
+        """Scatter with a single item still works."""
+
+        @on(Batch)
+        def split(event: Batch) -> Scatter:
+            return Scatter([WorkItem(item=event.items[0])])
+
+        @on(WorkItem)
+        def process(event: WorkItem) -> WorkDone:
+            return WorkDone(item=event.item, result=f"ok:{event.item}")
+
+        graph = EventGraph([split, process])
+        log = graph.invoke(Batch(items=("only",)))
+
+        assert log.latest(WorkDone) == WorkDone(item="only", result="ok:only")
+
+
+# ---------------------------------------------------------------------------
+# Test: reflection loop (generate → critique → revise cycle)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WriteRequest(Event):
+    topic: str = ""
+    max_revisions: int = 3
+
+
+@dataclass(frozen=True)
+class Draft(Event):
+    content: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True)
+class Critique(Event):
+    draft: str = ""
+    feedback: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True)
+class FinalDraft(Event):
+    content: str = ""
+
+
+class TestReflectionLoop:
+    def test_generate_critique_revise_terminates(self):
+        """Reflection loop: generate → critique → revise, terminates at max_revisions."""
+
+        @on(WriteRequest, Critique)
+        def generate(event: Event, log: EventLog) -> Draft:
+            if isinstance(event, Critique):
+                return Draft(
+                    content=f"revised({event.draft})",
+                    revision=event.revision + 1,
+                )
+            return Draft(content=f"first_draft({event.topic})")
+
+        @on(Draft)
+        def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
+            request = log.latest(WriteRequest)
+            if event.revision >= request.max_revisions:
+                return FinalDraft(content=event.content)
+            return Critique(
+                draft=event.content,
+                feedback="needs work",
+                revision=event.revision,
+            )
+
+        graph = EventGraph([generate, evaluate])
+        log = graph.invoke(WriteRequest(topic="AI", max_revisions=2))
+
+        assert log.has(FinalDraft)
+        final = log.latest(FinalDraft)
+        # Should have gone through: first_draft → critique → revised → critique → revised → final
+        assert "revised" in final.content
+
+        # Verify the number of drafts
+        drafts = log.filter(Draft)
+        assert len(drafts) == 3  # initial + 2 revisions
+
+    def test_reflection_early_pass(self):
+        """Reflection loop exits early when critique passes."""
+
+        @on(WriteRequest, Critique)
+        def generate(event: Event) -> Draft:
+            return Draft(content="perfect", revision=0)
+
+        @on(Draft)
+        def evaluate(event: Draft) -> Critique | FinalDraft:
+            # Always passes on first try
+            return FinalDraft(content=event.content)
+
+        graph = EventGraph([generate, evaluate])
+        log = graph.invoke(WriteRequest(topic="test"))
+
+        assert log.latest(FinalDraft) == FinalDraft(content="perfect")
+        assert len(log.filter(Draft)) == 1  # only one draft, no revisions
