@@ -18,7 +18,7 @@ def test_on_decorator_attaches_event_type():
     async def handler(event: SampleEvent):
         pass
 
-    assert handler._event_type is SampleEvent
+    assert handler._event_types == (SampleEvent,)
 
 
 def test_on_rejects_non_event():
@@ -34,7 +34,7 @@ def test_extract_handler_meta_basic():
         pass
 
     meta = extract_handler_meta(my_handler)
-    assert meta.event_type is SampleEvent
+    assert meta.event_types == (SampleEvent,)
     assert meta.wants_log is False
     assert meta.is_async is True
     assert "my_handler" in meta.name
@@ -64,3 +64,47 @@ def test_extract_handler_meta_not_decorated():
 
     with pytest.raises(ValueError, match="not decorated"):
         extract_handler_meta(plain_fn)
+
+
+# --- Multi-subscription tests ---
+
+@dataclass(frozen=True)
+class EventA(Event):
+    a: str = ""
+
+
+@dataclass(frozen=True)
+class EventB(Event):
+    b: str = ""
+
+
+def test_on_multi_subscription():
+    @on(EventA, EventB)
+    async def handler(event: Event):
+        pass
+
+    assert handler._event_types == (EventA, EventB)
+
+
+def test_on_multi_subscription_meta():
+    @on(EventA, EventB)
+    async def handler(event: Event, log: EventLog):
+        pass
+
+    meta = extract_handler_meta(handler)
+    assert meta.event_types == (EventA, EventB)
+    assert meta.wants_log is True
+
+
+def test_on_rejects_empty():
+    with pytest.raises(TypeError, match="at least one"):
+        @on()
+        async def handler(event):
+            pass
+
+
+def test_on_rejects_mixed_non_event():
+    with pytest.raises(TypeError, match="Event subclasses"):
+        @on(EventA, str)  # type: ignore
+        async def handler(event):
+            pass

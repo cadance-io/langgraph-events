@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from langgraph_events import Event, EventGraph, EventLog, Halt, Interrupted, Resumed, on
+from langgraph_events import Event, EventGraph, EventLog, Halt, Interrupted, Resumed, Scatter, on
 
 # ---------------------------------------------------------------------------
 # Test events
@@ -387,3 +387,281 @@ class TestInterrupt:
         end_events = [e for e in events if isinstance(e, End)]
         assert len(end_events) == 1
         assert end_events[0].result == "confirmed:yes"
+
+
+# ---------------------------------------------------------------------------
+# Test: multi-subscription @on(A, B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Ping(Event):
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class Pong(Event):
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class Reply(Event):
+    value: str = ""
+
+
+@dataclass(frozen=True)
+class Done(Event):
+    result: str = ""
+
+
+class TestMultiSubscription:
+    def test_handler_fires_on_either_event_type(self):
+        """ReAct-style loop: one handler triggered by two different event types."""
+
+        @on(Ping, Pong)
+        def echo(event: Event) -> Reply:
+            if isinstance(event, Ping):
+                return Reply(value=f"ping:{event.value}")
+            return Reply(value=f"pong:{event.value}")
+
+        @on(Reply)
+        def finish(event: Reply) -> Done:
+            return Done(result=event.value)
+
+        graph = EventGraph([echo, finish])
+
+        # Trigger via Ping
+        log = graph.invoke(Ping(value="hello"))
+        assert log.latest(Done) == Done(result="ping:hello")
+
+        # Trigger via Pong
+        log = graph.invoke(Pong(value="world"))
+        assert log.latest(Done) == Done(result="pong:world")
+
+    def test_multi_sub_with_log(self):
+        """Multi-subscription handler that uses EventLog."""
+
+        @dataclass(frozen=True)
+        class MsgA(Event):
+            text: str = ""
+
+        @dataclass(frozen=True)
+        class MsgB(Event):
+            text: str = ""
+
+        @dataclass(frozen=True)
+        class Summary(Event):
+            count: int = 0
+
+        @on(MsgA, MsgB)
+        def summarize(event: Event, log: EventLog) -> Summary:
+            total = len(log.filter(Event))
+            return Summary(count=total)
+
+        graph = EventGraph([summarize])
+        log = graph.invoke(MsgA(text="hi"))
+        assert log.latest(Summary) == Summary(count=1)
+
+    def test_react_loop_pattern(self):
+        """Simulated ReAct loop: call_llm fires on UserMsg and ToolResult."""
+
+        @dataclass(frozen=True)
+        class UserMsg(Event):
+            content: str = ""
+
+        @dataclass(frozen=True)
+        class AssistantMsg(Event):
+            content: str = ""
+            needs_tool: bool = False
+
+        @dataclass(frozen=True)
+        class ToolResult(Event):
+            result: str = ""
+
+        @dataclass(frozen=True)
+        class FinalAnswer(Event):
+            answer: str = ""
+
+        call_count = 0
+
+        @on(UserMsg, ToolResult)
+        def call_llm(event: Event, log: EventLog) -> AssistantMsg:
+            nonlocal call_count
+            call_count += 1
+            if isinstance(event, UserMsg):
+                return AssistantMsg(content="need tool", needs_tool=True)
+            # Second call after tool result
+            return AssistantMsg(content=f"got:{event.result}", needs_tool=False)
+
+        @on(AssistantMsg)
+        def handle_response(event: AssistantMsg) -> ToolResult | FinalAnswer:
+            if event.needs_tool:
+                return ToolResult(result="42")
+            return FinalAnswer(answer=event.content)
+
+        graph = EventGraph([call_llm, handle_response])
+        log = graph.invoke(UserMsg(content="what is 6*7?"))
+
+        assert call_count == 2
+        assert log.latest(FinalAnswer) == FinalAnswer(answer="got:42")
+        assert log.has(ToolResult)
+        assert log.has(AssistantMsg)
+
+
+# ---------------------------------------------------------------------------
+# Test: Scatter + gather (map-reduce)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Batch(Event):
+    items: tuple = ()
+
+
+@dataclass(frozen=True)
+class WorkItem(Event):
+    item: str = ""
+    batch_size: int = 0
+
+
+@dataclass(frozen=True)
+class WorkDone(Event):
+    item: str = ""
+    result: str = ""
+
+
+@dataclass(frozen=True)
+class BatchResult(Event):
+    results: tuple = ()
+
+
+class TestScatter:
+    def test_scatter_fan_out_and_gather(self):
+        """Map-reduce: Scatter fan-out → parallel processing → gather."""
+
+        @on(Batch)
+        def split(event: Batch) -> Scatter:
+            return Scatter([
+                WorkItem(item=item, batch_size=len(event.items))
+                for item in event.items
+            ])
+
+        @on(WorkItem)
+        def process(event: WorkItem) -> WorkDone:
+            return WorkDone(item=event.item, result=f"done:{event.item}")
+
+        @on(WorkDone)
+        def gather(event: WorkDone, log: EventLog) -> BatchResult | None:
+            all_done = log.filter(WorkDone)
+            batch = log.latest(Batch)
+            if len(all_done) >= len(batch.items):
+                return BatchResult(results=tuple(e.result for e in all_done))
+            return None
+
+        graph = EventGraph([split, process, gather])
+        log = graph.invoke(Batch(items=("a", "b", "c")))
+
+        assert log.has(BatchResult)
+        result = log.latest(BatchResult)
+        assert len(result.results) == 3
+        assert set(result.results) == {"done:a", "done:b", "done:c"}
+
+    def test_scatter_single_item(self):
+        """Scatter with a single item still works."""
+
+        @on(Batch)
+        def split(event: Batch) -> Scatter:
+            return Scatter([WorkItem(item=event.items[0])])
+
+        @on(WorkItem)
+        def process(event: WorkItem) -> WorkDone:
+            return WorkDone(item=event.item, result=f"ok:{event.item}")
+
+        graph = EventGraph([split, process])
+        log = graph.invoke(Batch(items=("only",)))
+
+        assert log.latest(WorkDone) == WorkDone(item="only", result="ok:only")
+
+
+# ---------------------------------------------------------------------------
+# Test: reflection loop (generate → critique → revise cycle)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WriteRequest(Event):
+    topic: str = ""
+    max_revisions: int = 3
+
+
+@dataclass(frozen=True)
+class Draft(Event):
+    content: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True)
+class Critique(Event):
+    draft: str = ""
+    feedback: str = ""
+    revision: int = 0
+
+
+@dataclass(frozen=True)
+class FinalDraft(Event):
+    content: str = ""
+
+
+class TestReflectionLoop:
+    def test_generate_critique_revise_terminates(self):
+        """Reflection loop: generate → critique → revise, terminates at max_revisions."""
+
+        @on(WriteRequest, Critique)
+        def generate(event: Event, log: EventLog) -> Draft:
+            if isinstance(event, Critique):
+                return Draft(
+                    content=f"revised({event.draft})",
+                    revision=event.revision + 1,
+                )
+            return Draft(content=f"first_draft({event.topic})")
+
+        @on(Draft)
+        def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
+            request = log.latest(WriteRequest)
+            if event.revision >= request.max_revisions:
+                return FinalDraft(content=event.content)
+            return Critique(
+                draft=event.content,
+                feedback="needs work",
+                revision=event.revision,
+            )
+
+        graph = EventGraph([generate, evaluate])
+        log = graph.invoke(WriteRequest(topic="AI", max_revisions=2))
+
+        assert log.has(FinalDraft)
+        final = log.latest(FinalDraft)
+        # Should have gone through: first_draft → critique → revised → critique → revised → final
+        assert "revised" in final.content
+
+        # Verify the number of drafts
+        drafts = log.filter(Draft)
+        assert len(drafts) == 3  # initial + 2 revisions
+
+    def test_reflection_early_pass(self):
+        """Reflection loop exits early when critique passes."""
+
+        @on(WriteRequest, Critique)
+        def generate(event: Event) -> Draft:
+            return Draft(content="perfect", revision=0)
+
+        @on(Draft)
+        def evaluate(event: Draft) -> Critique | FinalDraft:
+            # Always passes on first try
+            return FinalDraft(content=event.content)
+
+        graph = EventGraph([generate, evaluate])
+        log = graph.invoke(WriteRequest(topic="test"))
+
+        assert log.latest(FinalDraft) == FinalDraft(content="perfect")
+        assert len(log.filter(Draft)) == 1  # only one draft, no revisions

@@ -2,7 +2,9 @@
 
 from dataclasses import dataclass
 
-from langgraph_events import Event, Halt, Interrupted, Resumed
+import pytest
+
+from langgraph_events import Event, Halt, Interrupted, Resumed, Scatter
 
 
 def test_event_is_frozen():
@@ -76,3 +78,26 @@ def test_single_inheritance_chain():
     assert isinstance(e, Base)
     assert isinstance(e, Event)
     assert isinstance(e, Child)
+
+
+# --- Scatter tests ---
+
+
+def test_scatter_wraps_events():
+    @dataclass(frozen=True)
+    class Item(Event):
+        v: int = 0
+
+    s = Scatter([Item(v=1), Item(v=2), Item(v=3)])
+    assert len(s.events) == 3
+    assert s.events[0] == Item(v=1)
+
+
+def test_scatter_rejects_empty():
+    with pytest.raises(ValueError, match="at least one"):
+        Scatter([])
+
+
+def test_scatter_rejects_non_events():
+    with pytest.raises(TypeError, match="Event instances"):
+        Scatter(["not an event"])  # type: ignore

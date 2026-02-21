@@ -11,8 +11,9 @@ import operator
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END
+from langgraph.types import Send
 
-from langgraph_events._event import Event, Halt, Interrupted, Resumed
+from langgraph_events._event import Event, Halt, Interrupted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta
 
@@ -77,9 +78,11 @@ def make_dispatch(handler_metas: list[HandlerMeta]):
     """Create the dispatch conditional edge function.
 
     Uses isinstance to match pending event types to handler subscriptions.
+    ``handler.event_types`` is a tuple so ``isinstance(e, meta.event_types)``
+    matches any subscribed type.
     Returns handler node names (list for parallel) or END.
     """
-    def dispatch(state: _FullState) -> list[str] | str:
+    def dispatch(state: _FullState) -> list[str | Send] | str:
         pending = state["_pending"]
         if not pending:
             return END
@@ -88,10 +91,10 @@ def make_dispatch(handler_metas: list[HandlerMeta]):
         if any(isinstance(e, Halt) for e in pending):
             return END
 
-        # Find handlers whose event_type matches any pending event (isinstance)
+        # Find handlers whose event_types match any pending event
         matched: list[str] = []
         for meta in handler_metas:
-            if any(isinstance(e, meta.event_type) for e in pending):
+            if any(isinstance(e, meta.event_types) for e in pending):
                 if meta.name not in matched:
                     matched.append(meta.name)
 
@@ -109,9 +112,9 @@ def make_handler_node(meta: HandlerMeta):
     Uses ``RunnableLambda`` with both sync and async implementations so
     the graph works with both ``invoke()`` and ``ainvoke()``.
 
-    - Filters pending events by isinstance(e, handler.event_type)
+    - Filters pending events by isinstance(e, handler.event_types)
     - Loops: calls handler once per matching event (strict event→event)
-    - Normalises return: Event → [event], None → []
+    - Normalises return: Event → [event], None → [], Scatter → list of events
     - Handles Interrupted: calls interrupt(), creates Resumed on resume
     """
     from langchain_core.runnables import RunnableLambda
@@ -120,7 +123,7 @@ def make_handler_node(meta: HandlerMeta):
     def _run_handler_sync(state: _FullState) -> dict[str, Any]:
         matching = [
             e for e in state["_pending"]
-            if isinstance(e, meta.event_type)
+            if isinstance(e, meta.event_types)
         ]
         log = EventLog(state["events"]) if meta.wants_log else None
 
@@ -141,7 +144,7 @@ def make_handler_node(meta: HandlerMeta):
     async def _run_handler_async(state: _FullState) -> dict[str, Any]:
         matching = [
             e for e in state["_pending"]
-            if isinstance(e, meta.event_type)
+            if isinstance(e, meta.event_types)
         ]
         log = EventLog(state["events"]) if meta.wants_log else None
 
@@ -171,14 +174,18 @@ def _collect_result(
     new_events: list[Event],
     lg_interrupt: Any,
 ) -> None:
-    """Normalise handler return and handle Interrupted."""
+    """Normalise handler return and handle Interrupted / Scatter."""
     if result is None:
+        return
+
+    if isinstance(result, Scatter):
+        new_events.extend(result.events)
         return
 
     if not isinstance(result, Event):
         raise TypeError(
-            f"Handler must return Event | None, got {type(result).__name__}. "
-            f"Handlers return a single event (or None), never a list."
+            f"Handler must return Event | None | Scatter, got {type(result).__name__}. "
+            f"Handlers return a single event, None, or Scatter — never a list."
         )
 
     if isinstance(result, Interrupted):

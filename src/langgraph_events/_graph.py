@@ -54,7 +54,7 @@ class EventGraph:
                 meta = HandlerMeta(
                     name=f"{meta.name}_{seen_names[meta.name]}",
                     fn=meta.fn,
-                    event_type=meta.event_type,
+                    event_types=meta.event_types,
                     wants_log=meta.wants_log,
                     is_async=meta.is_async,
                 )
