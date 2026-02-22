@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import typing
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from langgraph_events._event import Event
-from langgraph_events._event_log import EventLog
+from langgraph_events._event_log import (
+    EventLog,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from langgraph_events._types import F, HandlerReturn
 
 
-def on(*event_types: type[Event]) -> Callable:
+def on(*event_types: type[Event]) -> Callable[[F], F]:
     """Decorator that subscribes a handler to one or more event types.
 
     Multi-subscription: the handler fires when ANY of the listed types arrive.
@@ -31,11 +39,9 @@ def on(*event_types: type[Event]) -> Callable:
 
     for et in event_types:
         if not (isinstance(et, type) and issubclass(et, Event)):
-            raise TypeError(
-                f"@on() requires Event subclasses, got {et!r}"
-            )
+            raise TypeError(f"@on() requires Event subclasses, got {et!r}")
 
-    def decorator(fn: Callable) -> Callable:
+    def decorator(fn: F) -> F:
         fn._event_types = event_types  # type: ignore[attr-defined]
         return fn
 
@@ -47,13 +53,22 @@ class HandlerMeta:
     """Extracted metadata about a registered handler."""
 
     name: str
-    fn: Callable[..., Any]
+    fn: Callable[..., HandlerReturn]
     event_types: tuple[type[Event], ...]
-    wants_log: bool
+    log_param: str | None
     is_async: bool
+    reducer_params: tuple[str, ...] = ()
+
+    @property
+    def wants_log(self) -> bool:
+        """Backward-compatible property."""
+        return self.log_param is not None
 
 
-def extract_handler_meta(fn: Callable) -> HandlerMeta:
+def extract_handler_meta(
+    fn: Callable[..., Any],
+    reducer_names: frozenset[str] = frozenset(),
+) -> HandlerMeta:
     """Extract handler metadata from a decorated function."""
     event_types = getattr(fn, "_event_types", None)
     if event_types is None:
@@ -61,18 +76,27 @@ def extract_handler_meta(fn: Callable) -> HandlerMeta:
             f"Function {fn.__qualname__!r} is not decorated with @on(EventType)"
         )
 
-    sig = inspect.signature(fn)
-    wants_log = False
-    for param in sig.parameters.values():
-        annotation = param.annotation
-        if annotation is EventLog:
-            wants_log = True
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        hints = {}
+
+    # Find the actual parameter name annotated with EventLog
+    log_param: str | None = None
+    for param_name, hint in hints.items():
+        if hint is EventLog:
+            log_param = param_name
             break
+
+    # Detect reducer parameters by name match
+    sig = inspect.signature(fn)
+    reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
 
     return HandlerMeta(
         name=fn.__qualname__,
         fn=fn,
         event_types=tuple(event_types),
-        wants_log=wants_log,
+        log_param=log_param,
         is_async=asyncio.iscoroutinefunction(fn),
+        reducer_params=reducer_params,
     )

@@ -3,8 +3,17 @@
 from dataclasses import dataclass
 
 import pytest
+from langchain_core.messages import HumanMessage, ToolMessage
 
-from langgraph_events import Event, Halt, Interrupted, Resumed, Scatter
+from langgraph_events import (
+    Auditable,
+    Event,
+    Halt,
+    Interrupted,
+    MessageEvent,
+    Resumed,
+    Scatter,
+)
 
 
 def test_event_is_frozen():
@@ -15,11 +24,8 @@ def test_event_is_frozen():
     e = MyEvent(x=42)
     assert e.x == 42
     # Frozen — can't mutate
-    try:
+    with pytest.raises(AttributeError):
         e.x = 99  # type: ignore
-        assert False, "Should have raised"
-    except AttributeError:
-        pass
 
 
 def test_halt_event():
@@ -101,3 +107,76 @@ def test_scatter_rejects_empty():
 def test_scatter_rejects_non_events():
     with pytest.raises(TypeError, match="Event instances"):
         Scatter(["not an event"])  # type: ignore
+
+
+# --- Auditable tests ---
+
+
+def test_auditable_trail_basic():
+    @dataclass(frozen=True)
+    class OrderPlaced(Auditable):
+        order_id: str = ""
+        total: float = 0.0
+
+    e = OrderPlaced(order_id="A1", total=99.99)
+    trail = e.trail()
+    assert trail.startswith("[OrderPlaced]")
+    assert "order_id='A1'" in trail
+    assert "total=99.99" in trail
+
+
+def test_auditable_trail_truncates_long_strings():
+    @dataclass(frozen=True)
+    class LongContent(Auditable):
+        content: str = ""
+
+    long_str = "x" * 200
+    e = LongContent(content=long_str)
+    trail = e.trail()
+    # String > 80 chars should be truncated with "..."
+    assert "..." in trail
+    assert len(trail) < len(long_str) + 50  # trail is much shorter than raw value
+
+
+def test_auditable_trail_truncates_long_tuples():
+    @dataclass(frozen=True)
+    class BatchEvent(Auditable):
+        items: tuple = ()
+
+    e = BatchEvent(items=(1, 2, 3, 4, 5))
+    trail = e.trail()
+    assert "(5 items)" in trail
+
+
+# --- MessageEvent tests ---
+
+
+def test_message_event_single_message():
+    @dataclass(frozen=True)
+    class UserMsg(MessageEvent):
+        message: HumanMessage = None  # type: ignore[assignment]
+
+    msg = HumanMessage(content="hello")
+    event = UserMsg(message=msg)
+    assert event.as_messages() == [msg]
+
+
+def test_message_event_messages_field():
+    @dataclass(frozen=True)
+    class ToolResults(MessageEvent):
+        messages: tuple[ToolMessage, ...] = ()
+
+    t1 = ToolMessage(content="42", tool_call_id="tc1")
+    t2 = ToolMessage(content="7", tool_call_id="tc2")
+    event = ToolResults(messages=(t1, t2))
+    assert event.as_messages() == [t1, t2]
+
+
+def test_message_event_neither_field_raises():
+    @dataclass(frozen=True)
+    class BadEvent(MessageEvent):
+        text: str = ""
+
+    event = BadEvent(text="hi")
+    with pytest.raises(NotImplementedError, match="must declare"):
+        event.as_messages()

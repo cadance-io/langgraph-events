@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TypeVar, overload
+from typing import TYPE_CHECKING, TypeVar, overload
 
 from langgraph_events._event import Event
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 T = TypeVar("T", bound=Event)
 
@@ -29,7 +32,7 @@ class EventLog:
         """Return the most recent event of *event_type*, or ``None``."""
         for e in reversed(self._events):
             if isinstance(e, event_type):
-                return e  # type: ignore[return-value]
+                return e
         return None
 
     def has(self, event_type: type[Event]) -> bool:
@@ -44,7 +47,7 @@ class EventLog:
     def __bool__(self) -> bool:
         return bool(self._events)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Event]:
         return iter(self._events)
 
     @overload
@@ -53,7 +56,7 @@ class EventLog:
     @overload
     def __getitem__(self, index: slice) -> list[Event]: ...
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int | slice) -> Event | list[Event]:
         return self._events[index]
 
     def __repr__(self) -> str:

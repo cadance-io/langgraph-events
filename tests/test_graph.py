@@ -4,7 +4,16 @@ from dataclasses import dataclass
 
 import pytest
 
-from langgraph_events import Event, EventGraph, EventLog, Halt, Interrupted, Resumed, Scatter, on
+from langgraph_events import (
+    Event,
+    EventGraph,
+    EventLog,
+    Halt,
+    Interrupted,
+    Resumed,
+    Scatter,
+    on,
+)
 
 # ---------------------------------------------------------------------------
 # Test events
@@ -123,7 +132,7 @@ class TestBranching:
 
 
 @dataclass(frozen=True)
-class Auditable(Event):
+class Trackable(Event):
     action: str = ""
 
 
@@ -133,7 +142,7 @@ class Processable(Event):
 
 
 @dataclass(frozen=True)
-class AuditableItem(Auditable, Processable):
+class TrackableItem(Trackable, Processable):
     action: str = ""
     item: str = ""
 
@@ -150,8 +159,8 @@ class ProcessDone(Event):
 
 class TestFanOut:
     def test_multiple_inheritance_triggers_both_handlers(self):
-        @on(Auditable)
-        def audit(event: Auditable) -> AuditDone:
+        @on(Trackable)
+        def audit(event: Trackable) -> AuditDone:
             return AuditDone(msg=f"audited:{event.action}")
 
         @on(Processable)
@@ -159,7 +168,7 @@ class TestFanOut:
             return ProcessDone(msg=f"processed:{event.item}")
 
         graph = EventGraph([audit, process])
-        log = graph.invoke(AuditableItem(action="create", item="doc1"))
+        log = graph.invoke(TrackableItem(action="create", item="doc1"))
 
         # Both handlers should have fired
         assert log.has(AuditDone)
@@ -541,10 +550,12 @@ class TestScatter:
 
         @on(Batch)
         def split(event: Batch) -> Scatter:
-            return Scatter([
-                WorkItem(item=item, batch_size=len(event.items))
-                for item in event.items
-            ])
+            return Scatter(
+                [
+                    WorkItem(item=item, batch_size=len(event.items))
+                    for item in event.items
+                ]
+            )
 
         @on(WorkItem)
         def process(event: WorkItem) -> WorkDone:
@@ -614,7 +625,7 @@ class FinalDraft(Event):
 
 class TestReflectionLoop:
     def test_generate_critique_revise_terminates(self):
-        """Reflection loop: generate → critique → revise, terminates at max_revisions."""
+        """Reflection loop: generate/critique/revise, terminates at max_revisions."""
 
         @on(WriteRequest, Critique)
         def generate(event: Event, log: EventLog) -> Draft:
@@ -641,7 +652,7 @@ class TestReflectionLoop:
 
         assert log.has(FinalDraft)
         final = log.latest(FinalDraft)
-        # Should have gone through: first_draft → critique → revised → critique → revised → final
+        # first_draft → critique → revised → critique → revised → final
         assert "revised" in final.content
 
         # Verify the number of drafts
@@ -665,3 +676,116 @@ class TestReflectionLoop:
 
         assert log.latest(FinalDraft) == FinalDraft(content="perfect")
         assert len(log.filter(Draft)) == 1  # only one draft, no revisions
+
+
+# ---------------------------------------------------------------------------
+# Test: EventLog isolation guarantees
+# ---------------------------------------------------------------------------
+
+
+class TestEventLogIsolation:
+    def test_log_snapshot_not_affected_by_later_events(self):
+        """Handler's log snapshot reflects only events that existed before it ran."""
+
+        log_lengths: list[int] = []
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data="from_step1")
+
+        @on(Middle)
+        def step2(event: Middle, log: EventLog) -> End:
+            log_lengths.append(len(log))
+            # At this point: [Start, Middle] = 2 events
+            # End has NOT been produced yet, so it must not appear
+            assert not log.has(End)
+            return End(result="done")
+
+        graph = EventGraph([step1, step2])
+        final_log = graph.invoke(Start(data="test"))
+
+        # step2 saw exactly 2 events (Start + Middle), not 3
+        assert log_lengths == [2]
+        # Final log has all 3
+        assert len(final_log) == 3
+
+    def test_handler_mutating_log_does_not_affect_graph(self):
+        """Mutating an injected log's internal list cannot corrupt graph state."""
+
+        @on(Start)
+        def evil_handler(event: Start, log: EventLog) -> Middle:
+            # Attempt to corrupt the log by mutating internal list
+            log._events.append(End(result="INJECTED"))
+            log._events.clear()
+            return Middle(data="honest")
+
+        @on(Middle)
+        def step2(event: Middle, log: EventLog) -> End:
+            # step2's log should be clean — no INJECTED event, Start is present
+            assert log.has(Start)
+            assert log.has(Middle)
+            injected = [e for e in log if isinstance(e, End) and e.result == "INJECTED"]
+            assert injected == []
+            return End(result="clean")
+
+        graph = EventGraph([evil_handler, step2])
+        final_log = graph.invoke(Start(data="test"))
+
+        # Final log should have Start, Middle, End(clean) — no INJECTED
+        assert len(final_log) == 3
+        assert final_log.latest(End) == End(result="clean")
+        injected = [
+            e for e in final_log if isinstance(e, End) and e.result == "INJECTED"
+        ]
+        assert injected == []
+
+    def test_parallel_handlers_get_independent_log_snapshots(self):
+        """Fan-out handlers each get their own independent EventLog snapshot."""
+
+        @dataclass(frozen=True)
+        class Trigger(Event):
+            value: str = ""
+
+        @dataclass(frozen=True)
+        class ResultA(Event):
+            saw_events: int = 0
+
+        @dataclass(frozen=True)
+        class ResultB(Event):
+            saw_events: int = 0
+
+        @dataclass(frozen=True)
+        class Collected(Event):
+            a_saw: int = 0
+            b_saw: int = 0
+
+        @on(Trigger)
+        def handler_a(event: Trigger, log: EventLog) -> ResultA:
+            # Attempt mutation — should NOT affect handler_b's log
+            log._events.append(End(result="from_a"))
+            return ResultA(saw_events=len(log))
+
+        @on(Trigger)
+        def handler_b(event: Trigger, log: EventLog) -> ResultB:
+            # Should not see the End event that handler_a injected
+            has_end = any(isinstance(e, End) for e in log)
+            assert not has_end, "handler_b should not see handler_a's mutation"
+            return ResultB(saw_events=len(log))
+
+        @on(ResultA, ResultB)
+        def collect(event: Event, log: EventLog) -> Collected | None:
+            if log.has(ResultA) and log.has(ResultB):
+                a = log.latest(ResultA)
+                b = log.latest(ResultB)
+                return Collected(a_saw=a.saw_events, b_saw=b.saw_events)
+            return None
+
+        graph = EventGraph([handler_a, handler_b, collect])
+        final_log = graph.invoke(Trigger(value="go"))
+
+        result = final_log.latest(Collected)
+        assert result is not None
+        # handler_a: log [Trigger] + mutated End → len 2
+        # handler_b: independent snapshot [Trigger] → len 1
+        # Key: handler_b did NOT see handler_a's mutation
+        assert result.b_saw == 1  # handler_b saw only [Trigger]

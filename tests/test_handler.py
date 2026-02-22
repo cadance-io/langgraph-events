@@ -1,11 +1,11 @@
 """Tests for @on decorator and handler metadata extraction."""
 
+from dataclasses import dataclass
+
 import pytest
 
 from langgraph_events import Event, EventLog, on
 from langgraph_events._handler import extract_handler_meta
-
-from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -23,6 +23,7 @@ def test_on_decorator_attaches_event_type():
 
 def test_on_rejects_non_event():
     with pytest.raises(TypeError, match="Event subclass"):
+
         @on(str)  # type: ignore
         async def handler(event):
             pass
@@ -68,6 +69,7 @@ def test_extract_handler_meta_not_decorated():
 
 # --- Multi-subscription tests ---
 
+
 @dataclass(frozen=True)
 class EventA(Event):
     a: str = ""
@@ -98,6 +100,7 @@ def test_on_multi_subscription_meta():
 
 def test_on_rejects_empty():
     with pytest.raises(TypeError, match="at least one"):
+
         @on()
         async def handler(event):
             pass
@@ -105,6 +108,33 @@ def test_on_rejects_empty():
 
 def test_on_rejects_mixed_non_event():
     with pytest.raises(TypeError, match="Event subclasses"):
+
         @on(EventA, str)  # type: ignore
         async def handler(event):
             pass
+
+
+# --- Reducer param detection tests ---
+
+
+def test_extract_handler_meta_with_reducer_params():
+    @on(SampleEvent)
+    def handler(event: SampleEvent, messages: list, history: list):
+        pass
+
+    meta = extract_handler_meta(
+        handler, reducer_names=frozenset({"messages", "history"})
+    )
+    assert set(meta.reducer_params) == {"messages", "history"}
+
+
+def test_extract_handler_meta_ignores_non_reducer_params():
+    @on(SampleEvent)
+    def handler(event: SampleEvent, messages: list, other: str):
+        pass
+
+    meta = extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+    assert meta.reducer_params == ("messages",)
+    # "other" is not a reducer param, and "event" is not either
+    assert "other" not in meta.reducer_params
+    assert "event" not in meta.reducer_params

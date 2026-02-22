@@ -8,57 +8,116 @@ from __future__ import annotations
 
 import asyncio
 import operator
-from typing import Annotated, Any, TypedDict
+from collections.abc import Callable  # noqa: TC003
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableLambda
 
 from langgraph.graph import END
-from langgraph.types import Send
+from langgraph.types import Send  # noqa: TC002
 
-from langgraph_events._event import Event, Halt, Interrupted, Resumed, Scatter
+from langgraph_events._event import Event, Halt, Scatter
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import HandlerMeta
-
+from langgraph_events._handler import HandlerMeta  # noqa: TC001
+from langgraph_events._reducer import Reducer  # noqa: TC001
+from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
 
 # ---------------------------------------------------------------------------
 # Internal state — users never see this
 # ---------------------------------------------------------------------------
 
-class _FullState(TypedDict):
-    events: Annotated[list, operator.add]  # append-only event log
-    _cursor: int                            # how far router has processed
-    _pending: list                          # current dispatch batch
-    _round: int                             # round counter for max_rounds
+# Base fields present on every graph (no reducers needed)
+_BASE_FIELDS: dict[str, Any] = {
+    "events": Annotated[list[Event], operator.add],
+    "_cursor": int,
+    "_pending": list[Event],
+    "_round": int,
+}
 
 
 class _InputState(TypedDict):
-    events: list
+    events: list[Event]
 
 
 class _OutputState(TypedDict):
-    events: list
+    events: list[Event]
+
+
+def build_state_schema(reducers: dict[str, Reducer]) -> type:
+    """Create a dynamic TypedDict with per-reducer state channels.
+
+    Each reducer gets its own ``_r_<name>`` channel annotated with its
+    ``reducer`` function, e.g. ``Annotated[list, add_messages]``.
+    """
+    fields: dict[str, Any] = dict(_BASE_FIELDS)
+    for name, r in reducers.items():
+        fields[f"_r_{name}"] = Annotated[list, r.reducer]
+    return TypedDict("_FullState", fields)  # type: ignore[operator]
 
 
 # ---------------------------------------------------------------------------
 # Node factories
 # ---------------------------------------------------------------------------
 
-def make_seed_node():
-    """Create the seed node that initialises cursor and pending from input."""
 
-    def seed(state: _FullState) -> dict[str, Any]:
-        return {
+def _validate_and_collect(
+    name: str,
+    reducer: Reducer,
+    events: list[Event],
+) -> list[Any]:
+    """Run a reducer fn over events with type validation."""
+    contributions: list[Any] = []
+    for event in events:
+        contrib = reducer.fn(event)
+        if contrib:
+            if not isinstance(contrib, list):
+                raise TypeError(
+                    f"Reducer {name!r} fn must return a list, "
+                    f"got {type(contrib).__name__}"
+                )
+            contributions.extend(contrib)
+    return contributions
+
+
+def make_seed_node(
+    reducers: dict[str, Reducer] | None = None,
+) -> Callable[[StateDict], StateDict]:
+    """Create the seed node that initialises cursor and pending from input."""
+    reds = reducers or {}
+
+    def seed(state: StateDict) -> StateDict:
+        result: dict[str, Any] = {
             "_cursor": len(state["events"]),
             "_pending": list(state["events"]),
             "_round": 0,
         }
+        if reds:
+            prev_cursor = state.get("_cursor", 0)
+            if prev_cursor == 0:
+                # First run — initialize with default + seed events
+                for name, r in reds.items():
+                    values = list(r.default)
+                    values.extend(_validate_and_collect(name, r, state["events"]))
+                    result[f"_r_{name}"] = values
+            else:
+                # Subsequent run (checkpointer) — only process new events
+                new_events = state["events"][prev_cursor:]
+                if new_events:
+                    for name, r in reds.items():
+                        contribs = _validate_and_collect(name, r, new_events)
+                        if contribs:
+                            result[f"_r_{name}"] = contribs
+        return result
 
     return seed
 
 
-def make_router_node(max_rounds: int):
+def make_router_node(max_rounds: int) -> Callable[[StateDict], StateDict]:
     """Create the router node that collects new events and advances the cursor."""
 
-    def router(state: _FullState) -> dict[str, Any]:
-        new_events = state["events"][state["_cursor"]:]
+    def router(state: StateDict) -> StateDict:
+        new_events = state["events"][state["_cursor"] :]
         current_round = state.get("_round", 0) + 1
         if current_round > max_rounds:
             raise RuntimeError(
@@ -74,7 +133,9 @@ def make_router_node(max_rounds: int):
     return router
 
 
-def make_dispatch(handler_metas: list[HandlerMeta]):
+def make_dispatch(
+    handler_metas: list[HandlerMeta],
+) -> Callable[[StateDict], list[str | Send] | str]:
     """Create the dispatch conditional edge function.
 
     Uses isinstance to match pending event types to handler subscriptions.
@@ -82,7 +143,8 @@ def make_dispatch(handler_metas: list[HandlerMeta]):
     matches any subscribed type.
     Returns handler node names (list for parallel) or END.
     """
-    def dispatch(state: _FullState) -> list[str | Send] | str:
+
+    def dispatch(state: StateDict) -> list[str | Send] | str:
         pending = state["_pending"]
         if not pending:
             return END
@@ -101,12 +163,44 @@ def make_dispatch(handler_metas: list[HandlerMeta]):
         if not matched:
             return END
 
-        return matched if len(matched) > 1 else matched[0]
+        return matched if len(matched) > 1 else matched[0]  # type: ignore[return-value]
 
     return dispatch
 
 
-def make_handler_node(meta: HandlerMeta):
+def _build_inject(
+    meta: HandlerMeta,
+    state: StateDict,
+) -> dict[str, Any]:
+    """Build keyword arguments to inject into a handler call."""
+    inject: dict[str, Any] = {}
+    if meta.log_param:
+        inject[meta.log_param] = EventLog(state["events"])
+    for param_name in meta.reducer_params:
+        inject[param_name] = state.get(f"_r_{param_name}", [])
+    return inject
+
+
+def _apply_reducers(
+    new_events: list[Event],
+    reducers: dict[str, Reducer],
+) -> dict[str, list[Any]]:
+    """Run reducer projections on newly produced events.
+
+    Returns per-channel updates keyed by ``_r_<name>``.
+    """
+    updates: dict[str, list[Any]] = {}
+    for name, r in reducers.items():
+        contributions = _validate_and_collect(name, r, new_events)
+        if contributions:
+            updates[f"_r_{name}"] = contributions
+    return updates
+
+
+def make_handler_node(
+    meta: HandlerMeta,
+    reducers: dict[str, Reducer] | None = None,
+) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
     Uses ``RunnableLambda`` with both sync and async implementations so
@@ -116,51 +210,57 @@ def make_handler_node(meta: HandlerMeta):
     - Loops: calls handler once per matching event (strict event→event)
     - Normalises return: Event → [event], None → [], Scatter → list of events
     - Handles Interrupted: calls interrupt(), creates Resumed on resume
+    - Applies reducer projections to new events
     """
-    from langchain_core.runnables import RunnableLambda
-    from langgraph.types import interrupt as lg_interrupt
+    from langchain_core.runnables import RunnableLambda  # noqa: PLC0415
+    from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
-    def _run_handler_sync(state: _FullState) -> dict[str, Any]:
-        matching = [
-            e for e in state["_pending"]
-            if isinstance(e, meta.event_types)
-        ]
-        log = EventLog(state["events"]) if meta.wants_log else None
+    reds = reducers or {}
 
-        new_events: list[Event] = []
-        for event in matching:
-            args: list[Any] = [event]
-            if meta.wants_log:
-                args.append(log)
-
-            if meta.is_async:
-                result = asyncio.get_event_loop().run_until_complete(meta.fn(*args))
-            else:
-                result = meta.fn(*args)
-            _collect_result(result, new_events, lg_interrupt)
-
-        return {"events": new_events}
-
-    async def _run_handler_async(state: _FullState) -> dict[str, Any]:
-        matching = [
-            e for e in state["_pending"]
-            if isinstance(e, meta.event_types)
-        ]
-        log = EventLog(state["events"]) if meta.wants_log else None
+    def _run_handler_sync(state: StateDict) -> StateDict:
+        matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
+        inject = _build_inject(meta, state)
 
         new_events: list[Event] = []
         for event in matching:
-            args: list[Any] = [event]
-            if meta.wants_log:
-                args.append(log)
-
             if meta.is_async:
-                result = await meta.fn(*args)
+                try:
+                    asyncio.get_running_loop()
+                    raise RuntimeError(
+                        f"Handler {meta.name!r} is async but invoke() was called "
+                        f"from within a running event loop (e.g. Jupyter, FastAPI). "
+                        f"Use ainvoke() instead."
+                    )
+                except RuntimeError as exc:
+                    if "invoke() was called" in str(exc):
+                        raise
+                    # No running loop — safe to use asyncio.run()
+                    result: HandlerReturn = asyncio.run(meta.fn(event, **inject))  # type: ignore[arg-type]
             else:
-                result = meta.fn(*args)
+                result = meta.fn(event, **inject)
             _collect_result(result, new_events, lg_interrupt)
 
-        return {"events": new_events}
+        output: StateDict = {"events": new_events}
+        if reds:
+            output.update(_apply_reducers(new_events, reds))
+        return output
+
+    async def _run_handler_async(state: StateDict) -> StateDict:
+        matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
+        inject = _build_inject(meta, state)
+
+        new_events: list[Event] = []
+        for event in matching:
+            if meta.is_async:
+                result = await meta.fn(event, **inject)  # type: ignore[misc]
+            else:
+                result = meta.fn(event, **inject)
+            _collect_result(result, new_events, lg_interrupt)
+
+        output: StateDict = {"events": new_events}
+        if reds:
+            output.update(_apply_reducers(new_events, reds))
+        return output
 
     return RunnableLambda(
         func=_run_handler_sync,
@@ -170,29 +270,18 @@ def make_handler_node(meta: HandlerMeta):
 
 
 def _collect_result(
-    result: Any,
+    result: HandlerReturn,
     new_events: list[Event],
-    lg_interrupt: Any,
+    lg_interrupt: Callable[[Any], Any],
 ) -> None:
     """Normalise handler return and handle Interrupted / Scatter."""
     if result is None:
         return
 
-    if isinstance(result, Scatter):
-        new_events.extend(result.events)
-        return
-
-    if not isinstance(result, Event):
+    if not isinstance(result, (Event, Scatter)):
         raise TypeError(
             f"Handler must return Event | None | Scatter, got {type(result).__name__}. "
             f"Handlers return a single event, None, or Scatter — never a list."
         )
 
-    if isinstance(result, Interrupted):
-        # Call LangGraph interrupt — pauses first time, returns value on resume
-        resume_value = lg_interrupt(result)
-        resumed = Resumed(value=resume_value, interrupted=result)
-        new_events.append(result)
-        new_events.append(resumed)
-    else:
-        new_events.append(result)
+    result._collect_into(new_events, lg_interrupt)
