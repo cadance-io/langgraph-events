@@ -21,6 +21,7 @@ dev = [
     "mypy>=1.14",
     "pre-commit>=4.0",
     "pytest-cov>=4.0",
+    "langchain-openai>=1.1.10",
 ]
 examples = [
     "langchain-openai>=0.2.0",

@@ -554,6 +554,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "langchain-openai" },
     { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -571,6 +572,7 @@ requires-dist = [{ name = "langgraph", specifier = ">=0.2.0" }]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "langchain-openai", specifier = ">=1.1.10" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pre-commit", specifier = ">=4.0" },
     { name = "pytest", specifier = ">=7.0" },

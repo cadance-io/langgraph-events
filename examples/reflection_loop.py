@@ -21,7 +21,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -33,25 +32,21 @@ from langgraph_events import Auditable, Event, EventGraph, EventLog, on
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class WriteRequest(Auditable):
     topic: str = ""
     max_revisions: int = 3
 
 
-@dataclass(frozen=True)
 class Draft(Auditable):
     content: str = ""
     revision: int = 0
 
 
-@dataclass(frozen=True)
 class Critique(Auditable):
     feedback: str = ""
     revision: int = 0
 
 
-@dataclass(frozen=True)
 class FinalDraft(Auditable):
     content: str = ""
 
