@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import typing
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,26 @@ def extract_handler_meta(
     # Detect reducer parameters by name match
     sig = inspect.signature(fn)
     reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
+
+    # Warn about handler params that don't match any known injection source
+    if reducer_names:
+        first_param = next(iter(sig.parameters), None)
+        known_params = {first_param}  # first param is always the event
+        if log_param:
+            known_params.add(log_param)
+        known_params.update(reducer_names)
+        unknown = [
+            name
+            for name in sig.parameters
+            if name not in known_params and name != "self"
+        ]
+        if unknown:
+            warnings.warn(
+                f"Handler {fn.__qualname__!r} has parameter(s) {unknown} that "
+                f"don't match any reducer. "
+                f"Available reducers: {sorted(reducer_names)}. Typo?",
+                stacklevel=3,
+            )
 
     return HandlerMeta(
         name=fn.__qualname__,

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import asyncio
 import math
-from dataclasses import dataclass
 
 from langchain_core.messages import (
     AIMessage,
@@ -46,22 +45,18 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class UserMessageReceived(MessageEvent, Auditable):
     message: HumanMessage = None  # type: ignore[assignment]
 
 
-@dataclass(frozen=True)
 class LLMResponded(MessageEvent, Auditable):
     message: AIMessage = None  # type: ignore[assignment]
 
 
-@dataclass(frozen=True)
 class ToolsExecuted(MessageEvent, Auditable):
     messages: tuple[ToolMessage, ...] = ()
 
 
-@dataclass(frozen=True)
 class AnswerProduced(Auditable):
     content: str = ""
 

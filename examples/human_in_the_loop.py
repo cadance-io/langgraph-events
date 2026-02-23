@@ -16,7 +16,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -38,25 +37,21 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class ContentRequested(Auditable):
     topic: str = ""
     tone: str = "professional"
 
 
-@dataclass(frozen=True)
 class RevisionRequested(Auditable):
     feedback: str = ""
     revision: int = 0
 
 
-@dataclass(frozen=True)
 class DraftGenerated(Auditable):
     content: str = ""
     revision: int = 0
 
 
-@dataclass(frozen=True)
 class ContentPublished(Auditable):
     content: str = ""
 

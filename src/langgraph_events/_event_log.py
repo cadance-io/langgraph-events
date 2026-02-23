@@ -60,4 +60,9 @@ class EventLog:
         return self._events[index]
 
     def __repr__(self) -> str:
-        return f"EventLog({self._events!r})"
+        n = len(self._events)
+        if n <= 5:
+            return f"EventLog({self._events!r})"
+        first = type(self._events[0]).__name__
+        last = type(self._events[-1]).__name__
+        return f"EventLog({n} events, {first} .. {last})"

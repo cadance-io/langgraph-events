@@ -191,3 +191,59 @@ class EventGraph:
             **kwargs,
         ):
             yield chunk
+
+    # --- High-level event streaming ---
+
+    def stream_events(
+        self, seed: Event | list[Event], **kwargs: Any
+    ) -> Iterator[Event]:
+        """Yield individual events as they are produced during graph execution.
+
+        Higher-level alternative to ``stream()`` — yields ``Event`` objects
+        directly instead of raw LangGraph state dicts.  Seed events are
+        yielded first, followed by events produced by handlers.
+        """
+        seeds = self._normalize_seed(seed)
+        yield from seeds
+
+        kwargs.pop("stream_mode", None)
+        compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
+        seen = set()
+        for chunk in compiled.stream(
+            {"events": seeds},
+            stream_mode="updates",
+            **kwargs,
+        ):
+            if isinstance(chunk, dict):
+                for node_output in chunk.values():
+                    if isinstance(node_output, dict):
+                        for event in node_output.get("events", []):
+                            eid = id(event)
+                            if eid not in seen:
+                                seen.add(eid)
+                                yield event
+
+    async def astream_events(
+        self, seed: Event | list[Event], **kwargs: Any
+    ) -> AsyncIterator[Event]:
+        """Async version of ``stream_events()``."""
+        seeds = self._normalize_seed(seed)
+        for s in seeds:
+            yield s
+
+        kwargs.pop("stream_mode", None)
+        compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
+        seen = set()
+        async for chunk in compiled.astream(
+            {"events": seeds},
+            stream_mode="updates",
+            **kwargs,
+        ):
+            if isinstance(chunk, dict):
+                for node_output in chunk.values():
+                    if isinstance(node_output, dict):
+                        for event in node_output.get("events", []):
+                            eid = id(event)
+                            if eid not in seen:
+                                seen.add(eid)
+                                yield event

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import dataclasses
+from dataclasses import field
 from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any
 
@@ -10,20 +11,28 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage, SystemMessage
 
 
-@dataclass(frozen=True)
 class Event:
     """Base class for all events.
 
-    Subclass as a frozen dataclass to define domain events.
-    Supports multiple inheritance for "one object, two interfaces" pattern.
+    Subclasses are automatically made into frozen dataclasses, so you can
+    simply write::
 
-    Example::
-
-        @dataclass(frozen=True)
         class DocumentReceived(Event):
             doc_id: str
             content: str
+
+    The ``@dataclass(frozen=True)`` decorator is no longer needed — it is
+    applied automatically by ``__init_subclass__``.
     """
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Auto-apply @dataclass(frozen=True) to every Event subclass.
+        # Check cls.__dict__ (not hasattr) because inherited
+        # __dataclass_fields__ from parent dataclasses would give a false
+        # positive with dataclasses.is_dataclass().
+        if "__dataclass_fields__" not in cls.__dict__:
+            dataclasses.dataclass(frozen=True)(cls)
 
     def as_messages(self) -> list[BaseMessage]:
         """Return LangChain messages represented by this event.
@@ -45,7 +54,6 @@ class Event:
         new_events.append(self)
 
 
-@dataclass(frozen=True)
 class MessageEvent(Event):
     """Mixin for events that wrap LangChain messages.
 
@@ -56,11 +64,9 @@ class MessageEvent(Event):
 
     Example::
 
-        @dataclass(frozen=True)
         class UserMessageReceived(MessageEvent, Auditable):
             message: HumanMessage
 
-        @dataclass(frozen=True)
         class ToolsExecuted(MessageEvent, Auditable):
             messages: tuple[ToolMessage, ...]
     """
@@ -78,7 +84,6 @@ class MessageEvent(Event):
         )
 
 
-@dataclass(frozen=True)
 class Auditable(Event):
     """Marker class for events that should be auto-logged.
 
@@ -88,7 +93,6 @@ class Auditable(Event):
 
     Example::
 
-        @dataclass(frozen=True)
         class UserMessageReceived(Auditable):
             content: str = ""
     """
@@ -110,14 +114,12 @@ class Auditable(Event):
         return f"[{name}] {', '.join(parts)}"
 
 
-@dataclass(frozen=True)
 class Halt(Event):
     """Special event that signals immediate graph termination."""
 
     reason: str = ""
 
 
-@dataclass(frozen=True)
 class Interrupted(Event):
     """Special event that pauses the graph for human input.
 
@@ -141,7 +143,6 @@ class Interrupted(Event):
         new_events.append(Resumed(value=resume_value, interrupted=self))
 
 
-@dataclass(frozen=True)
 class Resumed(Event):
     """Created by the framework when a graph resumes from an interrupt.
 
@@ -153,7 +154,6 @@ class Resumed(Event):
     interrupted: Interrupted | None = None
 
 
-@dataclass(frozen=True)
 class SystemPromptSet(MessageEvent):
     """Built-in event for setting the system prompt as a first-class citizen.
 
@@ -188,9 +188,9 @@ class SystemPromptSet(MessageEvent):
     @classmethod
     def from_str(cls, content: str) -> SystemPromptSet:
         """Create from a plain string, wrapping it in a ``SystemMessage``."""
-        from langchain_core.messages import SystemMessage as SM  # noqa: PLC0415
+        from langchain_core.messages import SystemMessage as SysMsg  # noqa: PLC0415
 
-        return cls(message=SM(content=content))
+        return cls(message=SysMsg(content=content))
 
 
 class Scatter:

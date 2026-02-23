@@ -87,7 +87,9 @@ def message_reducer(
     from langgraph.graph.message import add_messages  # noqa: PLC0415
 
     if system is not None and default is not None:
-        raise ValueError("Cannot specify both 'default' and 'system' — use one or the other")
+        raise ValueError(
+            "Cannot specify both 'default' and 'system' — use one or the other"
+        )
 
     if system is not None:
         from langchain_core.messages import SystemMessage  # noqa: PLC0415
