@@ -1,258 +1,231 @@
-"""Tests for Event base class and special events."""
+"""Tests for Event base class, Auditable, and MessageEvent."""
+
+import dataclasses
 
 import pytest
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from langgraph_events import (
-    Auditable,
-    Event,
-    Halt,
-    Interrupted,
-    MessageEvent,
-    Resumed,
-    Scatter,
-    SystemPromptSet,
-)
+from langgraph_events import Auditable, Event, MessageEvent
 
 
-def test_event_is_frozen():
-    class MyEvent(Event):
-        x: int = 0
+def describe_Event():
 
-    e = MyEvent(x=42)
-    assert e.x == 42
-    # Frozen — can't mutate
-    with pytest.raises(AttributeError):
-        e.x = 99  # type: ignore
+    def it_is_frozen_by_default():
+        class MyEvent(Event):
+            x: int = 0
 
+        e = MyEvent(x=42)
+        assert e.x == 42
+        with pytest.raises(AttributeError):
+            e.x = 99  # type: ignore
 
-def test_halt_event():
-    h = Halt(reason="done")
-    assert h.reason == "done"
-    assert isinstance(h, Event)
-    assert isinstance(h, Halt)
+    def it_auto_applies_dataclass_without_decorator():
+        class AutoEvent(Event):
+            value: str = ""
 
+        e = AutoEvent(value="hello")
+        assert e.value == "hello"
+        with pytest.raises(AttributeError):
+            e.value = "nope"  # type: ignore
 
-def test_interrupted_event():
-    i = Interrupted(prompt="Approve?", payload={"doc_id": "123"})
-    assert i.prompt == "Approve?"
-    assert i.payload == {"doc_id": "123"}
-    assert isinstance(i, Event)
+    def it_auto_dataclass_produces_real_dataclass():
+        class SimpleEvent(Event):
+            value: str = ""
 
+        assert dataclasses.is_dataclass(SimpleEvent)
+        assert SimpleEvent.__dataclass_params__.frozen
 
-def test_resumed_event():
-    i = Interrupted(prompt="Approve?")
-    r = Resumed(value="yes", interrupted=i)
-    assert r.value == "yes"
-    assert r.interrupted is i
-    assert isinstance(r, Event)
+    def when_single_inheritance():
 
+        def it_matches_isinstance_for_parent():
+            class Base(Event):
+                x: str = ""
 
-def test_multiple_inheritance():
-    class TypeA(Event):
-        a: str = ""
+            class Child(Base):
+                y: str = ""
 
-    class TypeB(Event):
-        b: str = ""
+            e = Child(x="a", y="b")
+            assert isinstance(e, Base)
+            assert isinstance(e, Event)
+            assert isinstance(e, Child)
 
-    class Both(TypeA, TypeB):
-        a: str = ""
-        b: str = ""
+    def when_multiple_inheritance():
 
-    e = Both(a="x", b="y")
-    assert isinstance(e, TypeA)
-    assert isinstance(e, TypeB)
-    assert isinstance(e, Event)
-    assert isinstance(e, Both)
+        def it_matches_isinstance_for_both_parents():
+            class TypeA(Event):
+                a: str = ""
 
+            class TypeB(Event):
+                b: str = ""
 
-def test_single_inheritance_chain():
-    class Base(Event):
-        x: str = ""
+            class Both(TypeA, TypeB):
+                a: str = ""
+                b: str = ""
 
-    class Child(Base):
-        y: str = ""
+            e = Both(a="x", b="y")
+            assert isinstance(e, TypeA)
+            assert isinstance(e, TypeB)
+            assert isinstance(e, Event)
+            assert isinstance(e, Both)
 
-    e = Child(x="a", y="b")
-    assert isinstance(e, Base)
-    assert isinstance(e, Event)
-    assert isinstance(e, Child)
 
+def describe_Auditable():
 
-# --- Scatter tests ---
+    def describe_trail():
 
+        def it_includes_class_name_and_field_values():
+            class OrderPlaced(Auditable):
+                order_id: str = ""
+                total: float = 0.0
 
-def test_scatter_wraps_events():
-    class Item(Event):
-        v: int = 0
+            e = OrderPlaced(order_id="A1", total=99.99)
+            trail = e.trail()
+            assert trail.startswith("[OrderPlaced]")
+            assert "order_id='A1'" in trail
+            assert "total=99.99" in trail
 
-    s = Scatter([Item(v=1), Item(v=2), Item(v=3)])
-    assert len(s.events) == 3
-    assert s.events[0] == Item(v=1)
+        def when_string_exceeds_80_chars():
 
+            def it_truncates_with_ellipsis():
+                class LongContent(Auditable):
+                    content: str = ""
 
-def test_scatter_rejects_empty():
-    with pytest.raises(ValueError, match="at least one"):
-        Scatter([])
+                long_str = "x" * 200
+                e = LongContent(content=long_str)
+                trail = e.trail()
+                assert "..." in trail
+                assert len(trail) < len(long_str) + 50
 
+        def when_tuple_exceeds_3_items():
 
-def test_scatter_rejects_non_events():
-    with pytest.raises(TypeError, match="Event instances"):
-        Scatter(["not an event"])  # type: ignore
+            def it_shows_item_count():
+                class BatchEvent(Auditable):
+                    items: tuple = ()
 
+                e = BatchEvent(items=(1, 2, 3, 4, 5))
+                trail = e.trail()
+                assert "(5 items)" in trail
 
-# --- Auditable tests ---
+        def when_tuple_has_exactly_3_items():
 
+            def it_shows_full_repr_not_summary():
+                class SmallBatch(Auditable):
+                    items: tuple = ()
 
-def test_auditable_trail_basic():
-    class OrderPlaced(Auditable):
-        order_id: str = ""
-        total: float = 0.0
+                e = SmallBatch(items=(1, 2, 3))
+                trail = e.trail()
+                # 3-item tuple should show individual values, not "(3 items)"
+                assert "(3 items)" not in trail
+                assert "1" in trail
+                assert "2" in trail
+                assert "3" in trail
 
-    e = OrderPlaced(order_id="A1", total=99.99)
-    trail = e.trail()
-    assert trail.startswith("[OrderPlaced]")
-    assert "order_id='A1'" in trail
-    assert "total=99.99" in trail
+        def when_repr_of_non_string_value_exceeds_80_chars():
 
+            def it_truncates_repr_with_ellipsis():
+                class BigData(Auditable):
+                    data: list = None  # type: ignore[assignment]
 
-def test_auditable_trail_truncates_long_strings():
-    class LongContent(Auditable):
-        content: str = ""
+                # Use a list (not str, not tuple) with a repr > 80 chars
+                long_list = list(range(50))
+                e = BigData(data=long_list)
+                trail = e.trail()
+                # The repr() of the list is truncated at 77 chars + "..."
+                assert "..." in trail
+                assert len(trail) < 200
 
-    long_str = "x" * 200
-    e = LongContent(content=long_str)
-    trail = e.trail()
-    # String > 80 chars should be truncated with "..."
-    assert "..." in trail
-    assert len(trail) < len(long_str) + 50  # trail is much shorter than raw value
+    def it_works_with_auto_dataclass():
+        class TrackedOrder(Auditable):
+            order_id: str = ""
 
+        e = TrackedOrder(order_id="A1")
+        trail = e.trail()
+        assert "[TrackedOrder]" in trail
+        assert "order_id='A1'" in trail
 
-def test_auditable_trail_truncates_long_tuples():
-    class BatchEvent(Auditable):
-        items: tuple = ()
 
-    e = BatchEvent(items=(1, 2, 3, 4, 5))
-    trail = e.trail()
-    assert "(5 items)" in trail
+def describe_MessageEvent():
 
+    def when_single_message_field():
 
-# --- MessageEvent tests ---
+        def it_returns_message_in_list():
+            class UserMsg(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
 
+            msg = HumanMessage(content="hello")
+            event = UserMsg(message=msg)
+            assert event.as_messages() == [msg]
 
-def test_message_event_single_message():
-    class UserMsg(MessageEvent):
-        message: HumanMessage = None  # type: ignore[assignment]
+    def when_messages_field():
 
-    msg = HumanMessage(content="hello")
-    event = UserMsg(message=msg)
-    assert event.as_messages() == [msg]
+        def it_converts_tuple_to_list():
+            class ToolResults(MessageEvent):
+                messages: tuple[ToolMessage, ...] = ()
 
+            t1 = ToolMessage(content="42", tool_call_id="tc1")
+            t2 = ToolMessage(content="7", tool_call_id="tc2")
+            event = ToolResults(messages=(t1, t2))
+            assert event.as_messages() == [t1, t2]
 
-def test_message_event_messages_field():
-    class ToolResults(MessageEvent):
-        messages: tuple[ToolMessage, ...] = ()
+    def when_empty_messages_field():
 
-    t1 = ToolMessage(content="42", tool_call_id="tc1")
-    t2 = ToolMessage(content="7", tool_call_id="tc2")
-    event = ToolResults(messages=(t1, t2))
-    assert event.as_messages() == [t1, t2]
+        def it_returns_empty_list():
+            class Empty(MessageEvent):
+                messages: tuple[ToolMessage, ...] = ()
 
+            event = Empty()
+            assert event.as_messages() == []
 
-def test_message_event_neither_field_raises():
-    class BadEvent(MessageEvent):
-        text: str = ""
+    def when_no_message_or_messages_field():
 
-    event = BadEvent(text="hi")
-    with pytest.raises(NotImplementedError, match="must declare"):
-        event.as_messages()
+        def it_raises_not_implemented():
+            class BadEvent(MessageEvent):
+                text: str = ""
 
+            event = BadEvent(text="hi")
+            with pytest.raises(NotImplementedError, match="must declare"):
+                event.as_messages()
 
-# --- SystemPromptSet tests ---
+    def when_custom_override():
 
+        def it_uses_overridden_method():
+            class Custom(MessageEvent):
+                text: str = ""
 
-def test_system_prompt_set_is_message_event():
-    msg = SystemMessage(content="You are helpful")
-    event = SystemPromptSet(message=msg)
-    assert isinstance(event, MessageEvent)
-    assert isinstance(event, Event)
-    assert event.message is msg
+                def as_messages(self) -> list[BaseMessage]:
+                    return [HumanMessage(content=self.text)]
 
+            event = Custom(text="hello")
+            result = event.as_messages()
+            assert len(result) == 1
+            assert result[0].content == "hello"
 
-def test_system_prompt_set_as_messages():
-    msg = SystemMessage(content="Be nice")
-    event = SystemPromptSet(message=msg)
-    result = event.as_messages()
-    assert result == [msg]
+    def when_ai_message_with_tool_calls():
 
+        def it_preserves_tool_calls():
+            class LLMResponse(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
 
-def test_system_prompt_set_from_str():
-    event = SystemPromptSet.from_str("You are a helpful assistant")
-    assert isinstance(event, SystemPromptSet)
-    assert isinstance(event, MessageEvent)
-    msgs = event.as_messages()
-    assert len(msgs) == 1
-    assert isinstance(msgs[0], SystemMessage)
-    assert msgs[0].content == "You are a helpful assistant"
+            ai_msg = AIMessage(
+                content="Let me check",
+                tool_calls=[{"id": "tc1", "name": "search", "args": {"q": "test"}}],
+            )
+            event = LLMResponse(message=ai_msg)
+            result = event.as_messages()
+            assert len(result) == 1
+            assert result[0] is ai_msg
+            assert result[0].tool_calls == ai_msg.tool_calls
 
+    def it_works_through_multi_level_auto_dataclass():
+        class Mid(MessageEvent):
+            message: HumanMessage = None  # type: ignore[assignment]
 
-def test_system_prompt_set_is_frozen():
-    event = SystemPromptSet.from_str("test")
-    with pytest.raises(AttributeError):
-        event.message = SystemMessage(content="changed")  # type: ignore
+        class Leaf(Mid):
+            content: str = ""
 
-
-# --- Auto-dataclass via __init_subclass__ tests ---
-
-
-def test_auto_dataclass_without_decorator():
-    """Event subclass without @dataclass is automatically frozen."""
-
-    class AutoEvent(Event):
-        value: str = ""
-
-    e = AutoEvent(value="hello")
-    assert e.value == "hello"
-    with pytest.raises(AttributeError):
-        e.value = "nope"  # type: ignore
-
-
-def test_auto_dataclass_is_real_dataclass():
-    """Auto-applied classes are proper dataclasses."""
-
-    class SimpleEvent(Event):
-        value: str = ""
-
-    import dataclasses
-
-    assert dataclasses.is_dataclass(SimpleEvent)
-    assert SimpleEvent.__dataclass_params__.frozen
-
-
-def test_auto_dataclass_multi_level_inheritance():
-    """Auto-dataclass works through multiple inheritance levels."""
-
-    class Mid(MessageEvent):
-        message: HumanMessage = None  # type: ignore[assignment]
-
-    class Leaf(Mid):
-        content: str = ""
-
-    msg = HumanMessage(content="hi")
-    e = Leaf(message=msg, content="extra")
-    assert e.content == "extra"
-    assert e.as_messages() == [msg]
-    with pytest.raises(AttributeError):
-        e.content = "nope"  # type: ignore
-
-
-def test_auto_dataclass_auditable_trail():
-    """Auditable subclass without decorator has working trail()."""
-
-    class TrackedOrder(Auditable):
-        order_id: str = ""
-
-    e = TrackedOrder(order_id="A1")
-    trail = e.trail()
-    assert "[TrackedOrder]" in trail
-    assert "order_id='A1'" in trail
+        msg = HumanMessage(content="hi")
+        e = Leaf(message=msg, content="extra")
+        assert e.content == "extra"
+        assert e.as_messages() == [msg]
+        with pytest.raises(AttributeError):
+            e.content = "nope"  # type: ignore
