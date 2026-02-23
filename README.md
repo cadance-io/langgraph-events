@@ -325,69 +325,37 @@ result = compiled.invoke(Command(resume="yes"), config)
 
 ## Patterns
 
+The patterns below show how these building blocks compose into complete architectures. Each is backed by a runnable example in the `examples/` directory.
+
 ### Reflection Loop (Generate / Critique / Revise)
 
-```python
-@dataclass(frozen=True)
-class WriteRequest(Event):
-    topic: str
-    max_revisions: int = 3
+A handler subscribes to both the seed event and critique events (`@on(WriteRequest, Critique)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
 
-@dataclass(frozen=True)
-class Draft(Event):
-    content: str
-    revision: int = 0
-
-@dataclass(frozen=True)
-class Critique(Event):
-    feedback: str
-    revision: int = 0
-
-@dataclass(frozen=True)
-class FinalDraft(Event):
-    content: str
-
-@on(WriteRequest, Critique)
-def generate(event: Event, log: EventLog) -> Draft:
-    if isinstance(event, Critique):
-        return Draft(
-            content=f"revised based on: {event.feedback}",
-            revision=event.revision + 1,
-        )
-    return Draft(content=f"first draft about {event.topic}")
-
-@on(Draft)
-def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
-    request = log.latest(WriteRequest)
-    if event.revision >= request.max_revisions:
-        return FinalDraft(content=event.content)
-    return Critique(feedback="needs more detail", revision=event.revision)
-
-graph = EventGraph([generate, evaluate])
-log = graph.invoke(WriteRequest(topic="AI Safety"))
-print(log.latest(FinalDraft))
-```
+See [`examples/reflection_loop.py`](examples/reflection_loop.py) for the full implementation.
 
 ### ReAct Agent with Message Reducer
 
-```python
-messages = message_reducer([SystemMessage(content="You are a helpful assistant with tools.")])
+Multi-subscription (`@on(UserMessageReceived, ToolsExecuted)`) creates the ReAct loop implicitly. The `message_reducer` maintains conversation history incrementally — handlers receive the accumulated message list as a parameter rather than reconstructing it from the event log.
 
-@on(UserMessageReceived, ToolsExecuted)
-async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
-    response = await llm.ainvoke(messages)
-    return LLMResponded(message=response)
+See [`examples/react_agent.py`](examples/react_agent.py) for the full implementation.
 
-@on(LLMResponded)
-def execute_tools(event: LLMResponded) -> ToolsExecuted | AnswerProduced:
-    if not event.message.tool_calls:
-        return AnswerProduced(content=event.message.content)
-    ...
+### Multi-Agent Supervisor
 
-graph = EventGraph([call_llm, execute_tools], reducers=[messages])
-```
+A supervisor handler fires on the initial task and on specialist completions (`@on(TaskReceived, ResearchCompleted, CodeProduced)`). It uses tool-calling to make structured routing decisions. A custom `Reducer` projects events into a context channel that the supervisor reads incrementally.
 
-The `messages` parameter is injected by the framework — no manual message history reconstruction needed.
+See [`examples/supervisor.py`](examples/supervisor.py) for the full implementation.
+
+### Fan-Out / Fan-In (Map-Reduce)
+
+`Scatter` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
+
+See [`examples/map_reduce.py`](examples/map_reduce.py) for the full implementation.
+
+### Human-in-the-Loop Approval
+
+`Interrupted` pauses the graph for human input. `Resumed` carries the response back in. Combined with a revision event type, this creates an approval-with-feedback cycle. Requires a checkpointer.
+
+See [`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) for the full implementation.
 
 ## Examples
 
@@ -395,10 +363,11 @@ See the `examples/` directory for complete, runnable demos:
 
 | Example | Pattern | Key Features |
 |---------|---------|--------------|
-| `react_agent.py` | ReAct tool-calling agent | `MessageEvent`, `message_reducer`, `Auditable` |
-| `supervisor.py` | Multi-agent supervisor | Custom `Reducer`, `Auditable` trait |
-| `map_reduce.py` | Fan-out/fan-in pipeline | `Scatter`, `Auditable` |
-| `human_in_the_loop.py` | Approval with revision loop | `Interrupted`/`Resumed`, checkpointer |
+| [`reflection_loop.py`](examples/reflection_loop.py) | Autonomous generate/critique/revise | Multi-subscription `@on`, `EventLog.latest()`, revision cap |
+| [`react_agent.py`](examples/react_agent.py) | ReAct tool-calling agent | `MessageEvent`, `message_reducer`, `Auditable` |
+| [`supervisor.py`](examples/supervisor.py) | Multi-agent supervisor | Custom `Reducer`, tool-calling routing, `Auditable` |
+| [`map_reduce.py`](examples/map_reduce.py) | Fan-out/fan-in pipeline | `Scatter`, `EventLog.filter()`, gather pattern |
+| [`human_in_the_loop.py`](examples/human_in_the_loop.py) | Approval with revision loop | `Interrupted`/`Resumed`, checkpointer, revision cycle |
 
 ## API Reference
 
