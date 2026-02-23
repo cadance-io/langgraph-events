@@ -8,12 +8,15 @@ from langgraph_events._event import (
     MessageEvent,
     Resumed,
     Scatter,
+    SystemPromptSet,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._graph import EventGraph
+from langgraph_events._graph import EventGraph, StreamFrame
 from langgraph_events._handler import on
 from langgraph_events._reducer import Reducer, message_reducer
-from langgraph_events._types import HandlerReturn
+from langgraph_events._types import (
+    HandlerReturn,  # noqa: F401 (importable but not promoted)
+)
 
 __all__ = [
     "Auditable",
@@ -21,12 +24,13 @@ __all__ = [
     "EventGraph",
     "EventLog",
     "Halt",
-    "HandlerReturn",
     "Interrupted",
     "MessageEvent",
     "Reducer",
     "Resumed",
     "Scatter",
+    "StreamFrame",
+    "SystemPromptSet",
     "message_reducer",
     "on",
 ]

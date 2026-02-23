@@ -1,14 +1,11 @@
 """Tests for @on decorator and handler metadata extraction."""
 
-from dataclasses import dataclass
-
 import pytest
 
 from langgraph_events import Event, EventLog, on
 from langgraph_events._handler import extract_handler_meta
 
 
-@dataclass(frozen=True)
 class SampleEvent(Event):
     x: int = 0
 
@@ -70,12 +67,10 @@ def test_extract_handler_meta_not_decorated():
 # --- Multi-subscription tests ---
 
 
-@dataclass(frozen=True)
 class EventA(Event):
     a: str = ""
 
 
-@dataclass(frozen=True)
 class EventB(Event):
     b: str = ""
 
@@ -138,3 +133,51 @@ def test_extract_handler_meta_ignores_non_reducer_params():
     # "other" is not a reducer param, and "event" is not either
     assert "other" not in meta.reducer_params
     assert "event" not in meta.reducer_params
+
+
+# --- Reducer name mismatch warning tests ---
+
+
+def test_warns_on_misspelled_reducer_param():
+    @on(SampleEvent)
+    def handler(event: SampleEvent, mesages: list):  # typo: "mesages"
+        pass
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+
+    assert len(w) == 1
+    assert "mesages" in str(w[0].message)
+    assert "messages" in str(w[0].message)
+    assert "Typo?" in str(w[0].message)
+
+
+def test_no_warning_on_correct_reducer_param():
+    @on(SampleEvent)
+    def handler(event: SampleEvent, messages: list):
+        pass
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+
+    assert len(w) == 0
+
+
+def test_no_warning_without_reducers():
+    @on(SampleEvent)
+    def handler(event: SampleEvent, whatever: str):
+        pass
+
+    import warnings
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        extract_handler_meta(handler, reducer_names=frozenset())
+
+    assert len(w) == 0

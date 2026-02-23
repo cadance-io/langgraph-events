@@ -23,41 +23,37 @@ Requires Python 3.10+ and `langgraph >= 0.2.0` (installed automatically).
 ## Quick Start
 
 ```python
-from dataclasses import dataclass
 from langgraph_events import Event, EventGraph, on
 
-# 1. Define events as frozen dataclasses
-@dataclass(frozen=True)
-class UserMessage(Event):
+# 1. Define events (auto-frozen dataclasses — no decorator needed)
+class MessageReceived(Event):
     text: str
 
-@dataclass(frozen=True)
-class Classified(Event):
+class MessageClassified(Event):
     label: str
 
-@dataclass(frozen=True)
-class Reply(Event):
+class ReplyProduced(Event):
     text: str
 
 # 2. Subscribe handlers with @on
-@on(UserMessage)
-def classify(event: UserMessage) -> Classified:
+@on(MessageReceived)
+def classify(event: MessageReceived) -> MessageClassified:
     if "help" in event.text.lower():
-        return Classified(label="support")
-    return Classified(label="general")
+        return MessageClassified(label="support")
+    return MessageClassified(label="general")
 
-@on(Classified)
-def respond(event: Classified) -> Reply:
+@on(MessageClassified)
+def respond(event: MessageClassified) -> ReplyProduced:
     if event.label == "support":
-        return Reply(text="Routing you to support...")
-    return Reply(text="Thanks for your message!")
+        return ReplyProduced(text="Routing you to support...")
+    return ReplyProduced(text="Thanks for your message!")
 
 # 3. Build the graph and run
 graph = EventGraph([classify, respond])
-log = graph.invoke(UserMessage(text="I need help with my order"))
+log = graph.invoke(MessageReceived(text="I need help with my order"))
 
-print(log.latest(Reply))
-# Reply(text='Routing you to support...')
+print(log.latest(ReplyProduced))
+# ReplyProduced(text='Routing you to support...')
 ```
 
 ## How It Works
@@ -92,10 +88,9 @@ seed event
 
 ### Events
 
-Events are frozen dataclasses that extend `Event`. Immutability guarantees a safe append-only log.
+Events are frozen dataclasses that extend `Event`. Immutability guarantees a safe append-only log. Subclasses are automatically made into frozen dataclasses — no decorator needed:
 
 ```python
-@dataclass(frozen=True)
 class OrderPlaced(Event):
     order_id: str
     total: float
@@ -150,13 +145,27 @@ graph = EventGraph(
     reducers=[my_reducer],      # optional — see Reducer section
 )
 
-# Synchronous
+# Single seed event
 log = graph.invoke(SeedEvent(...))
+
+# Multiple seed events (e.g. system prompt + user message)
+log = graph.invoke([
+    SystemPromptSet.from_str("You are helpful"),
+    UserMessageReceived(message=HumanMessage(content="Hi")),
+])
 
 # Asynchronous
 log = await graph.ainvoke(SeedEvent(...))
 
-# Streaming (pass-through to LangGraph)
+# High-level event streaming
+for event in graph.stream_events(SeedEvent(...)):
+    print(event)  # yields Event objects directly
+
+# Stream with reducer snapshots
+for event, reducers in graph.stream_events(SeedEvent(...), include_reducers=True):
+    print(event, reducers["messages"])  # accumulated reducer state
+
+# Low-level streaming (pass-through to LangGraph)
 for chunk in graph.stream(SeedEvent(...), stream_mode="updates"):
     print(chunk)
 ```
@@ -249,6 +258,34 @@ class LLMResponded(MessageEvent, Auditable):
     message: AIMessage
 ```
 
+### `SystemPromptSet`
+
+Built-in `MessageEvent` that wraps a `SystemMessage`. Makes the system prompt a first-class citizen in the event log — visible, queryable, and auditable.
+
+```python
+from langgraph_events import SystemPromptSet, message_reducer, EventGraph
+
+messages = message_reducer()  # no default needed — system prompt is a seed event
+
+graph = EventGraph([call_llm, execute_tools], reducers=[messages])
+
+log = graph.invoke([
+    SystemPromptSet.from_str("You are a helpful assistant with tools."),
+    UserMessageReceived(message=HumanMessage(content="What's the weather?")),
+])
+
+# The system prompt is now in the event log
+assert log.has(SystemPromptSet)
+```
+
+You can also construct it explicitly with a `SystemMessage`:
+
+```python
+from langchain_core.messages import SystemMessage
+
+seed = SystemPromptSet(message=SystemMessage(content="You are helpful"))
+```
+
 ### `Reducer` / `message_reducer`
 
 A `Reducer` maps events to contributions for a named LangGraph state channel. The framework maintains the channel incrementally — handlers receive the accumulated value by declaring a parameter whose name matches the reducer.
@@ -274,19 +311,28 @@ graph = EventGraph([respond], reducers=[history])
 `message_reducer()` is a built-in factory for the common case of accumulating LangChain messages from `MessageEvent` instances:
 
 ```python
-from langchain_core.messages import SystemMessage
-from langgraph_events import message_reducer
+from langgraph_events import message_reducer, SystemPromptSet
 
-messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
+# Preferred: system prompt as a seed event (visible in the event log)
+messages = message_reducer()
 graph = EventGraph([call_llm, handle_tools], reducers=[messages])
+log = graph.invoke([
+    SystemPromptSet.from_str("You are a helpful assistant."),
+    UserMessageReceived(message=HumanMessage(content="Hi")),
+])
 
+# Alternative: explicit default list
+messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
+```
+
+The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically:
+
+```python
 @on(UserMessageReceived, ToolsExecuted)
 async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
     response = await llm.ainvoke(messages)
     ...
 ```
-
-The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically.
 
 ### `Interrupted` / `Resumed`
 
@@ -374,11 +420,10 @@ See the `examples/` directory for complete, runnable demos:
 | Export            | Type       | Description                                     |
 |-------------------|------------|-------------------------------------------------|
 | `Auditable`       | Base class | Marker class for auto-logged events             |
-| `Event`           | Base class | Subclass with `@dataclass(frozen=True)`         |
+| `Event`           | Base class | Subclass to define events (auto-frozen)         |
 | `EventGraph`      | Class      | Build and run the event-driven graph            |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `Halt`            | Event      | Signal immediate graph termination              |
-| `HandlerReturn`   | Type alias | `Event \| Scatter \| None`                      |
 | `Interrupted`     | Event      | Pause graph for human input                     |
 | `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
@@ -386,6 +431,8 @@ See the `examples/` directory for complete, runnable demos:
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `Resumed`         | Event      | Created on resume with human's response         |
 | `Scatter`         | Class      | Fan-out into multiple events (map-reduce)       |
+| `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
+| `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 
 ## Checkpointer & Graph Evolution
 

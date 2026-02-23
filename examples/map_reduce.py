@@ -15,7 +15,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -27,25 +26,21 @@ from langgraph_events import Auditable, EventGraph, EventLog, Scatter, on
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class BatchReceived(Auditable):
     documents: tuple = ()  # tuple of (title, content) pairs
 
 
-@dataclass(frozen=True)
 class DocDispatched(Auditable):
     title: str = ""
     content: str = ""
     batch_size: int = 0
 
 
-@dataclass(frozen=True)
 class DocSummarized(Auditable):
     title: str = ""
     summary: str = ""
 
 
-@dataclass(frozen=True)
 class BatchSummarized(Auditable):
     combined: str = ""
     individual: tuple = ()  # tuple of (title, summary) pairs

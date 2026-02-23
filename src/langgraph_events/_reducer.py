@@ -65,14 +65,22 @@ def message_reducer(
 
     Example::
 
-        from langchain_core.messages import SystemMessage
-
-        messages = message_reducer([SystemMessage(content="You are helpful")])
+        # Using a SystemPromptSet seed event (preferred — prompt is in the event log):
+        messages = message_reducer()
         graph = EventGraph([call_llm], reducers=[messages])
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are helpful"),
+            UserMessageReceived(message=HumanMessage(content="Hi")),
+        ])
+
+        # Using an explicit default list:
+        messages = message_reducer([SystemMessage(content="You are helpful")])
     """
     from langgraph.graph.message import add_messages  # noqa: PLC0415
+
+    resolved_default = default or []
 
     def fn(event: Event) -> list[BaseMessage]:
         return event.as_messages()
 
-    return Reducer(name=name, fn=fn, reducer=add_messages, default=default or [])  # type: ignore[arg-type]
+    return Reducer(name=name, fn=fn, reducer=add_messages, default=resolved_default)  # type: ignore[arg-type]

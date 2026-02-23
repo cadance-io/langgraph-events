@@ -1,7 +1,5 @@
 """Tests for the Reducer primitive."""
 
-from dataclasses import dataclass
-
 import pytest
 from langchain_core.messages import (
     AIMessage,
@@ -17,6 +15,7 @@ from langgraph_events import (
     EventLog,
     MessageEvent,
     Reducer,
+    SystemPromptSet,
     message_reducer,
     on,
 )
@@ -26,17 +25,14 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class MsgIn(Event):
     text: str = ""
 
 
-@dataclass(frozen=True)
 class MsgOut(Event):
     text: str = ""
 
 
-@dataclass(frozen=True)
 class Done(Event):
     result: str = ""
 
@@ -92,7 +88,6 @@ class TestReducerBasic:
         call_count = 0
         snapshots: list[list] = []
 
-        @dataclass(frozen=True)
         class ToolResult(Event):
             result: str = ""
 
@@ -219,19 +214,15 @@ class TestReducerParallelHandlers:
     def test_fan_out_both_contribute(self):
         """Two parallel handlers both contribute to the same reducer."""
 
-        @dataclass(frozen=True)
         class Trigger(Event):
             value: str = ""
 
-        @dataclass(frozen=True)
         class ResultA(Event):
             value: str = ""
 
-        @dataclass(frozen=True)
         class ResultB(Event):
             value: str = ""
 
-        @dataclass(frozen=True)
         class Collected(Event):
             items: tuple = ()
 
@@ -275,20 +266,16 @@ class TestReducerReactLoop:
     def test_react_loop_with_reducer(self):
         """Full ReAct-style loop using reducer instead of rebuild."""
 
-        @dataclass(frozen=True)
         class UserMsg(Event):
             content: str = ""
 
-        @dataclass(frozen=True)
         class AssistantMsg(Event):
             content: str = ""
             needs_tool: bool = False
 
-        @dataclass(frozen=True)
         class ToolResult(Event):
             result: str = ""
 
-        @dataclass(frozen=True)
         class FinalAnswer(Event):
             answer: str = ""
 
@@ -451,7 +438,6 @@ class TestReducerEdgeCases:
 
         snapshots: list[list] = []
 
-        @dataclass(frozen=True)
         class Continue(Event):
             text: str = ""
 
@@ -499,7 +485,6 @@ class TestMessageEventConvention:
     def test_single_message_field(self):
         """MessageEvent with a ``message`` field auto-wraps in a list."""
 
-        @dataclass(frozen=True)
         class UserMsg(MessageEvent):
             message: HumanMessage = None  # type: ignore[assignment]
 
@@ -510,7 +495,6 @@ class TestMessageEventConvention:
     def test_messages_field(self):
         """MessageEvent with a ``messages`` field auto-converts tuple to list."""
 
-        @dataclass(frozen=True)
         class ToolResults(MessageEvent):
             messages: tuple[ToolMessage, ...] = ()
 
@@ -522,7 +506,6 @@ class TestMessageEventConvention:
     def test_empty_messages_field(self):
         """MessageEvent with empty ``messages`` tuple returns empty list."""
 
-        @dataclass(frozen=True)
         class Empty(MessageEvent):
             messages: tuple[ToolMessage, ...] = ()
 
@@ -532,7 +515,6 @@ class TestMessageEventConvention:
     def test_neither_field_raises(self):
         """MessageEvent without message/messages raises NotImplementedError."""
 
-        @dataclass(frozen=True)
         class BadEvent(MessageEvent):
             text: str = ""
 
@@ -543,7 +525,6 @@ class TestMessageEventConvention:
     def test_custom_override(self):
         """Subclass can override as_messages() for custom behavior."""
 
-        @dataclass(frozen=True)
         class Custom(MessageEvent):
             text: str = ""
 
@@ -558,7 +539,6 @@ class TestMessageEventConvention:
     def test_ai_message_field(self):
         """MessageEvent works with AIMessage including tool_calls."""
 
-        @dataclass(frozen=True)
         class LLMResponse(MessageEvent):
             message: AIMessage = None  # type: ignore[assignment]
 
@@ -582,11 +562,9 @@ class TestMessageReducer:
     def test_projects_message_events(self):
         """message_reducer auto-projects MessageEvent instances."""
 
-        @dataclass(frozen=True)
         class UserMsg(MessageEvent):
             message: HumanMessage = None  # type: ignore[assignment]
 
-        @dataclass(frozen=True)
         class Reply(Event):
             text: str = ""
 
@@ -620,15 +598,12 @@ class TestMessageReducer:
     def test_integration_with_event_graph(self):
         """MessageEvent + message_reducer work together in an EventGraph."""
 
-        @dataclass(frozen=True)
         class UserMsg(MessageEvent):
             message: HumanMessage = None  # type: ignore[assignment]
 
-        @dataclass(frozen=True)
         class BotReply(MessageEvent):
             message: AIMessage = None  # type: ignore[assignment]
 
-        @dataclass(frozen=True)
         class Finished(Event):
             answer: str = ""
 
@@ -657,3 +632,72 @@ class TestMessageReducer:
         assert len(msgs) == 2
         assert msgs[0].content == "You are a test bot"
         assert msgs[1].content == "hello"
+
+
+# ---------------------------------------------------------------------------
+# SystemPromptSet + message_reducer integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptSetReducer:
+    def test_system_prompt_as_seed_event(self):
+        """SystemPromptSet as seed event contributes to message_reducer."""
+
+        class UserMsg(MessageEvent):
+            message: HumanMessage = None  # type: ignore[assignment]
+
+        class Finished(Event):
+            answer: str = ""
+
+        r = message_reducer()  # no default — system prompt via seed event
+
+        received_messages: list[list[BaseMessage]] = []
+
+        @on(UserMsg)
+        def respond(event: UserMsg, messages: list[BaseMessage]) -> Finished:
+            received_messages.append(list(messages))
+            return Finished(answer="ok")
+
+        graph = EventGraph([respond], reducers=[r])
+        log = graph.invoke(
+            [
+                SystemPromptSet.from_str("You are a test bot"),
+                UserMsg(message=HumanMessage(content="hello")),
+            ]
+        )
+
+        assert log.latest(Finished) is not None
+        assert log.has(SystemPromptSet)
+
+        # Handler received: system message (from seed) + user message
+        msgs = received_messages[0]
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[0].content == "You are a test bot"
+        assert msgs[1].content == "hello"
+
+    def test_system_prompt_queryable_in_log(self):
+        """SystemPromptSet is queryable via EventLog inside handlers."""
+
+        class UserMsg(MessageEvent):
+            message: HumanMessage = None  # type: ignore[assignment]
+
+        class Finished(Event):
+            prompt_content: str = ""
+
+        r = message_reducer()
+
+        @on(UserMsg)
+        def respond(event: UserMsg, log: EventLog) -> Finished:
+            prompt = log.latest(SystemPromptSet)
+            return Finished(prompt_content=prompt.message.content if prompt else "none")
+
+        graph = EventGraph([respond], reducers=[r])
+        log = graph.invoke(
+            [
+                SystemPromptSet.from_str("You are helpful"),
+                UserMsg(message=HumanMessage(content="hi")),
+            ]
+        )
+
+        assert log.latest(Finished) == Finished(prompt_content="You are helpful")

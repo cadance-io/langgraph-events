@@ -20,13 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import math
-from dataclasses import dataclass
 
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
-    SystemMessage,
     ToolMessage,
 )
 from langchain_core.tools import tool
@@ -37,6 +35,7 @@ from langgraph_events import (
     Event,
     EventGraph,
     MessageEvent,
+    SystemPromptSet,
     message_reducer,
     on,
 )
@@ -46,22 +45,18 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class UserMessageReceived(MessageEvent, Auditable):
     message: HumanMessage = None  # type: ignore[assignment]
 
 
-@dataclass(frozen=True)
 class LLMResponded(MessageEvent, Auditable):
     message: AIMessage = None  # type: ignore[assignment]
 
 
-@dataclass(frozen=True)
 class ToolsExecuted(MessageEvent, Auditable):
     messages: tuple[ToolMessage, ...] = ()
 
 
-@dataclass(frozen=True)
 class AnswerProduced(Auditable):
     content: str = ""
 
@@ -117,17 +112,10 @@ llm = ChatOpenAI(model="gpt-4o-mini").bind_tools(TOOLS)
 
 
 # ---------------------------------------------------------------------------
-# Reducer — one-liner replaces the manual to_messages() chain
+# Reducer — no default needed, system prompt is a seed event
 # ---------------------------------------------------------------------------
 
-messages = message_reducer(
-    [
-        SystemMessage(
-            content="You are a helpful assistant with access to tools. "
-            "Use them when needed to answer the user's question accurately."
-        )
-    ]
-)
+messages = message_reducer()
 
 
 # ---------------------------------------------------------------------------
@@ -189,9 +177,13 @@ async def main():
     print(f"Question: {question}\n")
     print("--- Event Flow ---")
 
-    log = await graph.ainvoke(
-        UserMessageReceived(message=HumanMessage(content=question))
-    )
+    log = await graph.ainvoke([
+        SystemPromptSet.from_str(
+            "You are a helpful assistant with access to tools. "
+            "Use them when needed to answer the user's question accurately."
+        ),
+        UserMessageReceived(message=HumanMessage(content=question)),
+    ])
 
     print()
     answer = log.latest(AnswerProduced)

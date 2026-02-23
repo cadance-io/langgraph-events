@@ -16,7 +16,6 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
@@ -29,33 +28,27 @@ from langgraph_events import Auditable, Event, EventGraph, EventLog, Reducer, on
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class TaskReceived(Auditable):
     task: str = ""
 
 
-@dataclass(frozen=True)
 class ResearchDispatched(Auditable):
     query: str = ""
 
 
-@dataclass(frozen=True)
 class CodeDispatched(Auditable):
     spec: str = ""
     context: str = ""
 
 
-@dataclass(frozen=True)
 class ResearchCompleted(Auditable):
     findings: str = ""
 
 
-@dataclass(frozen=True)
 class CodeProduced(Auditable):
     code: str = ""
 
 
-@dataclass(frozen=True)
 class ResultFinalized(Auditable):
     answer: str = ""
 

@@ -1,21 +1,16 @@
 """Tests for EventLog query container."""
 
-from dataclasses import dataclass
-
 from langgraph_events import Event, EventLog
 
 
-@dataclass(frozen=True)
 class Alpha(Event):
     v: int = 0
 
 
-@dataclass(frozen=True)
 class Beta(Event):
     v: int = 0
 
 
-@dataclass(frozen=True)
 class AlphaChild(Alpha):
     extra: str = ""
 
@@ -80,3 +75,22 @@ def test_getitem():
 def test_repr():
     log = EventLog([Alpha(v=1)])
     assert "EventLog" in repr(log)
+
+
+def test_repr_small_log_shows_events():
+    log = EventLog([Alpha(v=1), Beta(v=2)])
+    r = repr(log)
+    assert "Alpha" in r
+    assert "Beta" in r
+
+
+def test_repr_large_log_truncated():
+    events = [Alpha(v=i) for i in range(10)]
+    events.append(Beta(v=99))
+    log = EventLog(events)
+    r = repr(log)
+    assert "11 events" in r
+    assert "Alpha" in r
+    assert "Beta" in r
+    # Should NOT contain the full list repr
+    assert "v=0" not in r

@@ -1,7 +1,5 @@
 """Integration tests for EventGraph — the full event-driven graph engine."""
 
-from dataclasses import dataclass
-
 import pytest
 
 from langgraph_events import (
@@ -10,8 +8,11 @@ from langgraph_events import (
     EventLog,
     Halt,
     Interrupted,
+    Reducer,
     Resumed,
     Scatter,
+    StreamFrame,
+    SystemPromptSet,
     on,
 )
 
@@ -20,17 +21,14 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class Start(Event):
     data: str = ""
 
 
-@dataclass(frozen=True)
 class Middle(Event):
     data: str = ""
 
 
-@dataclass(frozen=True)
 class End(Event):
     result: str = ""
 
@@ -76,23 +74,19 @@ class TestLinearChain:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class Input(Event):
     kind: str = ""
     data: str = ""
 
 
-@dataclass(frozen=True)
 class FastPath(Event):
     data: str = ""
 
 
-@dataclass(frozen=True)
 class SlowPath(Event):
     data: str = ""
 
 
-@dataclass(frozen=True)
 class Output(Event):
     result: str = ""
 
@@ -131,28 +125,23 @@ class TestBranching:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class Trackable(Event):
     action: str = ""
 
 
-@dataclass(frozen=True)
 class Processable(Event):
     item: str = ""
 
 
-@dataclass(frozen=True)
 class TrackableItem(Trackable, Processable):
     action: str = ""
     item: str = ""
 
 
-@dataclass(frozen=True)
 class AuditDone(Event):
     msg: str = ""
 
 
-@dataclass(frozen=True)
 class ProcessDone(Event):
     msg: str = ""
 
@@ -177,15 +166,12 @@ class TestFanOut:
         assert log.latest(ProcessDone) == ProcessDone(msg="processed:doc1")
 
     def test_single_inheritance_parent_handler(self):
-        @dataclass(frozen=True)
         class Base(Event):
             x: str = ""
 
-        @dataclass(frozen=True)
         class Child(Base):
             y: str = ""
 
-        @dataclass(frozen=True)
         class Result(Event):
             v: str = ""
 
@@ -293,7 +279,6 @@ class TestReturnTypeEnforcement:
 
 class TestMaxRounds:
     def test_infinite_loop_detected(self):
-        @dataclass(frozen=True)
         class LoopEvent(Event):
             n: int = 0
 
@@ -354,6 +339,57 @@ class TestStreaming:
         # Should have multiple update chunks
         assert len(chunks) > 0
 
+    def test_stream_events_yields_events(self):
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2])
+        events = list(graph.stream_events(Start(data="hi")))
+
+        # Should yield Event objects, not dicts
+        from langgraph_events import Event
+
+        assert all(isinstance(e, Event) for e in events)
+        # Should contain the seed, middle, and end events
+        types = [type(e).__name__ for e in events]
+        assert "Start" in types
+        assert "Middle" in types
+        assert "End" in types
+
+    def test_stream_events_order(self):
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data="mid")
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result="done")
+
+        graph = EventGraph([step1, step2])
+        events = list(graph.stream_events(Start(data="go")))
+
+        # Seed event should come first
+        assert isinstance(events[0], Start)
+        # End event should come last
+        assert isinstance(events[-1], End)
+
+    def test_stream_events_with_multi_seed(self):
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step])
+        events = list(graph.stream_events([Start(data="a")]))
+
+        types = [type(e).__name__ for e in events]
+        assert "Start" in types
+        assert "End" in types
+
 
 # ---------------------------------------------------------------------------
 # Test: interrupt / resume
@@ -403,22 +439,18 @@ class TestInterrupt:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class Ping(Event):
     value: str = ""
 
 
-@dataclass(frozen=True)
 class Pong(Event):
     value: str = ""
 
 
-@dataclass(frozen=True)
 class Reply(Event):
     value: str = ""
 
 
-@dataclass(frozen=True)
 class Done(Event):
     result: str = ""
 
@@ -450,15 +482,12 @@ class TestMultiSubscription:
     def test_multi_sub_with_log(self):
         """Multi-subscription handler that uses EventLog."""
 
-        @dataclass(frozen=True)
         class MsgA(Event):
             text: str = ""
 
-        @dataclass(frozen=True)
         class MsgB(Event):
             text: str = ""
 
-        @dataclass(frozen=True)
         class Summary(Event):
             count: int = 0
 
@@ -474,20 +503,16 @@ class TestMultiSubscription:
     def test_react_loop_pattern(self):
         """Simulated ReAct loop: call_llm fires on UserMsg and ToolResult."""
 
-        @dataclass(frozen=True)
         class UserMsg(Event):
             content: str = ""
 
-        @dataclass(frozen=True)
         class AssistantMsg(Event):
             content: str = ""
             needs_tool: bool = False
 
-        @dataclass(frozen=True)
         class ToolResult(Event):
             result: str = ""
 
-        @dataclass(frozen=True)
         class FinalAnswer(Event):
             answer: str = ""
 
@@ -522,24 +547,20 @@ class TestMultiSubscription:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class Batch(Event):
     items: tuple = ()
 
 
-@dataclass(frozen=True)
 class WorkItem(Event):
     item: str = ""
     batch_size: int = 0
 
 
-@dataclass(frozen=True)
 class WorkDone(Event):
     item: str = ""
     result: str = ""
 
 
-@dataclass(frozen=True)
 class BatchResult(Event):
     results: tuple = ()
 
@@ -599,26 +620,22 @@ class TestScatter:
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
 class WriteRequest(Event):
     topic: str = ""
     max_revisions: int = 3
 
 
-@dataclass(frozen=True)
 class Draft(Event):
     content: str = ""
     revision: int = 0
 
 
-@dataclass(frozen=True)
 class Critique(Event):
     draft: str = ""
     feedback: str = ""
     revision: int = 0
 
 
-@dataclass(frozen=True)
 class FinalDraft(Event):
     content: str = ""
 
@@ -742,19 +759,15 @@ class TestEventLogIsolation:
     def test_parallel_handlers_get_independent_log_snapshots(self):
         """Fan-out handlers each get their own independent EventLog snapshot."""
 
-        @dataclass(frozen=True)
         class Trigger(Event):
             value: str = ""
 
-        @dataclass(frozen=True)
         class ResultA(Event):
             saw_events: int = 0
 
-        @dataclass(frozen=True)
         class ResultB(Event):
             saw_events: int = 0
 
-        @dataclass(frozen=True)
         class Collected(Event):
             a_saw: int = 0
             b_saw: int = 0
@@ -789,3 +802,220 @@ class TestEventLogIsolation:
         # handler_b: independent snapshot [Trigger] → len 1
         # Key: handler_b did NOT see handler_a's mutation
         assert result.b_saw == 1  # handler_b saw only [Trigger]
+
+
+# ---------------------------------------------------------------------------
+# Test: multi-seed events
+# ---------------------------------------------------------------------------
+
+
+class TestMultiSeed:
+    def test_list_of_seed_events(self):
+        """invoke() accepts a list of seed events."""
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2])
+        log = graph.invoke([Start(data="hello")])
+
+        assert log.latest(End) == End(result="hello")
+
+    def test_multiple_seed_events_all_in_log(self):
+        """Multiple seed events all appear in the event log."""
+
+        class Config(Event):
+            setting: str = ""
+
+        @on(Start)
+        def handle(event: Start, log: EventLog) -> End:
+            config = log.latest(Config)
+            return End(result=f"{config.setting}:{event.data}")
+
+        graph = EventGraph([handle])
+        log = graph.invoke([Config(setting="v1"), Start(data="go")])
+
+        assert log.has(Config)
+        assert log.has(Start)
+        assert log.latest(End) == End(result="v1:go")
+
+    def test_system_prompt_set_as_seed(self):
+        """SystemPromptSet can be used as a seed event alongside other events."""
+
+        @on(Start)
+        def handle(event: Start, log: EventLog) -> End:
+            has_prompt = log.has(SystemPromptSet)
+            return End(result=f"has_prompt={has_prompt}")
+
+        graph = EventGraph([handle])
+        log = graph.invoke(
+            [
+                SystemPromptSet.from_str("You are helpful"),
+                Start(data="go"),
+            ]
+        )
+
+        assert log.has(SystemPromptSet)
+        assert log.latest(End) == End(result="has_prompt=True")
+
+    def test_single_event_still_works(self):
+        """Single event (not wrapped in list) still works as before."""
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step])
+        log = graph.invoke(Start(data="solo"))
+
+        assert log.latest(End) == End(result="solo")
+
+
+# ---------------------------------------------------------------------------
+# Test: stream_events with include_reducers
+# ---------------------------------------------------------------------------
+
+
+def _data_reducer() -> Reducer:
+    """Simple reducer that accumulates Start.data values."""
+
+    def fn(event: Event) -> list[str]:
+        if isinstance(event, Start):
+            return [event.data]
+        return []
+
+    return Reducer(name="data_items", fn=fn)
+
+
+class TestStreamEventsIncludeReducers:
+    def test_stream_events_include_reducers_true(self):
+        """include_reducers=True yields StreamFrame with reducer snapshots."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2], reducers=[reducer])
+        frames = list(graph.stream_events(Start(data="hello"), include_reducers=True))
+
+        # All items should be StreamFrame tuples
+        assert all(isinstance(f, StreamFrame) for f in frames)
+        # Should contain seed, middle, and end events
+        types = [type(f.event).__name__ for f in frames]
+        assert "Start" in types
+        assert "Middle" in types
+        assert "End" in types
+        # The reducer snapshot should contain accumulated data
+        seed_frame = next(f for f in frames if isinstance(f.event, Start))
+        assert "data_items" in seed_frame.reducers
+        assert "hello" in seed_frame.reducers["data_items"]
+
+    def test_stream_events_include_reducers_selective(self):
+        """include_reducers=['name'] only includes named reducers."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step], reducers=[reducer])
+        frames = list(
+            graph.stream_events(Start(data="x"), include_reducers=["data_items"])
+        )
+
+        assert all(isinstance(f, StreamFrame) for f in frames)
+        assert "data_items" in frames[0].reducers
+
+    def test_stream_events_include_reducers_unknown_name(self):
+        """Unknown reducer names are silently ignored."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step], reducers=[reducer])
+        # "nonexistent" is not a real reducer — should fall back to bare events
+        frames = list(
+            graph.stream_events(Start(data="x"), include_reducers=["nonexistent"])
+        )
+        # With no valid reducer names, should yield bare Events
+        assert all(isinstance(f, Event) for f in frames)
+
+    def test_stream_events_default_no_reducers(self):
+        """Default include_reducers=False yields bare Event objects."""
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step])
+        events = list(graph.stream_events(Start(data="hi")))
+
+        assert all(isinstance(e, Event) for e in events)
+        assert not any(isinstance(e, StreamFrame) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_astream_events_include_reducers(self):
+        """Async variant yields StreamFrame with reducer snapshots."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2], reducers=[reducer])
+        frames = [
+            f
+            async for f in graph.astream_events(
+                Start(data="async"), include_reducers=True
+            )
+        ]
+
+        assert all(isinstance(f, StreamFrame) for f in frames)
+        types = [type(f.event).__name__ for f in frames]
+        assert "Start" in types
+        assert "End" in types
+        seed_frame = next(f for f in frames if isinstance(f.event, Start))
+        assert "async" in seed_frame.reducers["data_items"]
+
+    def test_stream_events_reducer_accumulates(self):
+        """Reducer values accumulate across multiple events."""
+        reducer = _data_reducer()
+
+        class StartA(Start):
+            pass
+
+        class StartB(Start):
+            pass
+
+        @on(StartA)
+        def step_a(event: StartA) -> StartB:
+            return StartB(data=f"b_from_{event.data}")
+
+        @on(StartB)
+        def step_b(event: StartB) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step_a, step_b], reducers=[reducer])
+        frames = list(graph.stream_events(StartA(data="a1"), include_reducers=True))
+
+        # The last frame should show accumulated data from both Start subclasses
+        last_frame = frames[-1]
+        data_items = last_frame.reducers["data_items"]
+        assert "a1" in data_items
+        assert "b_from_a1" in data_items
