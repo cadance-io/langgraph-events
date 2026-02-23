@@ -161,6 +161,10 @@ log = await graph.ainvoke(SeedEvent(...))
 for event in graph.stream_events(SeedEvent(...)):
     print(event)  # yields Event objects directly
 
+# Stream with reducer snapshots
+for event, reducers in graph.stream_events(SeedEvent(...), include_reducers=True):
+    print(event, reducers["messages"])  # accumulated reducer state
+
 # Low-level streaming (pass-through to LangGraph)
 for chunk in graph.stream(SeedEvent(...), stream_mode="updates"):
     print(chunk)
@@ -317,9 +321,6 @@ log = graph.invoke([
     UserMessageReceived(message=HumanMessage(content="Hi")),
 ])
 
-# Alternative: system= shorthand (static prompt, not in the event log)
-messages = message_reducer(system="You are a helpful assistant.")
-
 # Alternative: explicit default list
 messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
 ```
@@ -430,6 +431,7 @@ See the `examples/` directory for complete, runnable demos:
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `Resumed`         | Event      | Created on resume with human's response         |
 | `Scatter`         | Class      | Fan-out into multiple events (map-reduce)       |
+| `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 
 ## Checkpointer & Graph Evolution

@@ -8,8 +8,10 @@ from langgraph_events import (
     EventLog,
     Halt,
     Interrupted,
+    Reducer,
     Resumed,
     Scatter,
+    StreamFrame,
     SystemPromptSet,
     on,
 )
@@ -851,10 +853,12 @@ class TestMultiSeed:
             return End(result=f"has_prompt={has_prompt}")
 
         graph = EventGraph([handle])
-        log = graph.invoke([
-            SystemPromptSet.from_str("You are helpful"),
-            Start(data="go"),
-        ])
+        log = graph.invoke(
+            [
+                SystemPromptSet.from_str("You are helpful"),
+                Start(data="go"),
+            ]
+        )
 
         assert log.has(SystemPromptSet)
         assert log.latest(End) == End(result="has_prompt=True")
@@ -870,3 +874,148 @@ class TestMultiSeed:
         log = graph.invoke(Start(data="solo"))
 
         assert log.latest(End) == End(result="solo")
+
+
+# ---------------------------------------------------------------------------
+# Test: stream_events with include_reducers
+# ---------------------------------------------------------------------------
+
+
+def _data_reducer() -> Reducer:
+    """Simple reducer that accumulates Start.data values."""
+
+    def fn(event: Event) -> list[str]:
+        if isinstance(event, Start):
+            return [event.data]
+        return []
+
+    return Reducer(name="data_items", fn=fn)
+
+
+class TestStreamEventsIncludeReducers:
+    def test_stream_events_include_reducers_true(self):
+        """include_reducers=True yields StreamFrame with reducer snapshots."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2], reducers=[reducer])
+        frames = list(graph.stream_events(Start(data="hello"), include_reducers=True))
+
+        # All items should be StreamFrame tuples
+        assert all(isinstance(f, StreamFrame) for f in frames)
+        # Should contain seed, middle, and end events
+        types = [type(f.event).__name__ for f in frames]
+        assert "Start" in types
+        assert "Middle" in types
+        assert "End" in types
+        # The reducer snapshot should contain accumulated data
+        seed_frame = next(f for f in frames if isinstance(f.event, Start))
+        assert "data_items" in seed_frame.reducers
+        assert "hello" in seed_frame.reducers["data_items"]
+
+    def test_stream_events_include_reducers_selective(self):
+        """include_reducers=['name'] only includes named reducers."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step], reducers=[reducer])
+        frames = list(
+            graph.stream_events(Start(data="x"), include_reducers=["data_items"])
+        )
+
+        assert all(isinstance(f, StreamFrame) for f in frames)
+        assert "data_items" in frames[0].reducers
+
+    def test_stream_events_include_reducers_unknown_name(self):
+        """Unknown reducer names are silently ignored."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step], reducers=[reducer])
+        # "nonexistent" is not a real reducer — should fall back to bare events
+        frames = list(
+            graph.stream_events(Start(data="x"), include_reducers=["nonexistent"])
+        )
+        # With no valid reducer names, should yield bare Events
+        assert all(isinstance(f, Event) for f in frames)
+
+    def test_stream_events_default_no_reducers(self):
+        """Default include_reducers=False yields bare Event objects."""
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step])
+        events = list(graph.stream_events(Start(data="hi")))
+
+        assert all(isinstance(e, Event) for e in events)
+        assert not any(isinstance(e, StreamFrame) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_astream_events_include_reducers(self):
+        """Async variant yields StreamFrame with reducer snapshots."""
+        reducer = _data_reducer()
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2], reducers=[reducer])
+        frames = [
+            f
+            async for f in graph.astream_events(
+                Start(data="async"), include_reducers=True
+            )
+        ]
+
+        assert all(isinstance(f, StreamFrame) for f in frames)
+        types = [type(f.event).__name__ for f in frames]
+        assert "Start" in types
+        assert "End" in types
+        seed_frame = next(f for f in frames if isinstance(f.event, Start))
+        assert "async" in seed_frame.reducers["data_items"]
+
+    def test_stream_events_reducer_accumulates(self):
+        """Reducer values accumulate across multiple events."""
+        reducer = _data_reducer()
+
+        class StartA(Start):
+            pass
+
+        class StartB(Start):
+            pass
+
+        @on(StartA)
+        def step_a(event: StartA) -> StartB:
+            return StartB(data=f"b_from_{event.data}")
+
+        @on(StartB)
+        def step_b(event: StartB) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step_a, step_b], reducers=[reducer])
+        frames = list(graph.stream_events(StartA(data="a1"), include_reducers=True))
+
+        # The last frame should show accumulated data from both Start subclasses
+        last_frame = frames[-1]
+        data_items = last_frame.reducers["data_items"]
+        assert "a1" in data_items
+        assert "b_from_a1" in data_items

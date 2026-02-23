@@ -101,7 +101,7 @@ class Auditable(Event):
         """Return a compact, human-readable summary of this event."""
         name = type(self).__name__
         parts = []
-        for f in dc_fields(self):
+        for f in dc_fields(self):  # type: ignore[arg-type]
             val = getattr(self, f.name)
             if isinstance(val, str) and len(val) > 80:
                 val = val[:80] + "..."
@@ -140,7 +140,7 @@ class Interrupted(Event):
         """Record the interrupt, pause, and create a Resumed event."""
         new_events.append(self)
         resume_value = interrupt_fn(self)
-        new_events.append(Resumed(value=resume_value, interrupted=self))
+        new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
 
 
 class Resumed(Event):
@@ -190,7 +190,7 @@ class SystemPromptSet(MessageEvent):
         """Create from a plain string, wrapping it in a ``SystemMessage``."""
         from langchain_core.messages import SystemMessage as SysMsg  # noqa: PLC0415
 
-        return cls(message=SysMsg(content=content))
+        return cls(message=SysMsg(content=content))  # type: ignore[call-arg]
 
 
 class Scatter:
