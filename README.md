@@ -298,7 +298,7 @@ def project(event: Event) -> list:
         return [event.text]
     return []
 
-history = Reducer("history", fn=project, default=["system prompt here"])
+history = Reducer("history", fn=project, default=[])
 
 @on(UserMsg)
 def respond(event: UserMsg, history: list) -> Reply:
@@ -369,51 +369,39 @@ compiled.invoke({"events": [OrderPlaced(order_id="A1", total=99.99)]}, config)
 result = compiled.invoke(Command(resume="yes"), config)
 ```
 
-## Patterns
+## Patterns & Examples
 
-The patterns below show how these building blocks compose into complete architectures. Each is backed by a runnable example in the `examples/` directory.
+The patterns below show how these building blocks compose into complete architectures. Each links to a runnable example in `examples/`.
 
 ### Reflection Loop (Generate / Critique / Revise)
 
 A handler subscribes to both the seed event and critique events (`@on(WriteRequest, Critique)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
 
-See [`examples/reflection_loop.py`](examples/reflection_loop.py) for the full implementation.
+[`examples/reflection_loop.py`](examples/reflection_loop.py) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
 
 ### ReAct Agent with Message Reducer
 
 Multi-subscription (`@on(UserMessageReceived, ToolsExecuted)`) creates the ReAct loop implicitly. The `message_reducer` maintains conversation history incrementally — handlers receive the accumulated message list as a parameter rather than reconstructing it from the event log.
 
-See [`examples/react_agent.py`](examples/react_agent.py) for the full implementation.
+[`examples/react_agent.py`](examples/react_agent.py) — `MessageEvent`, `message_reducer`, `Auditable`
 
 ### Multi-Agent Supervisor
 
 A supervisor handler fires on the initial task and on specialist completions (`@on(TaskReceived, ResearchCompleted, CodeProduced)`). It uses tool-calling to make structured routing decisions. A custom `Reducer` projects events into a context channel that the supervisor reads incrementally.
 
-See [`examples/supervisor.py`](examples/supervisor.py) for the full implementation.
+[`examples/supervisor.py`](examples/supervisor.py) — Custom `Reducer`, tool-calling routing, `Auditable`
 
 ### Fan-Out / Fan-In (Map-Reduce)
 
 `Scatter` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
 
-See [`examples/map_reduce.py`](examples/map_reduce.py) for the full implementation.
+[`examples/map_reduce.py`](examples/map_reduce.py) — `Scatter`, `EventLog.filter()`, gather pattern
 
 ### Human-in-the-Loop Approval
 
 `Interrupted` pauses the graph for human input. `Resumed` carries the response back in. Combined with a revision event type, this creates an approval-with-feedback cycle. Requires a checkpointer.
 
-See [`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) for the full implementation.
-
-## Examples
-
-See the `examples/` directory for complete, runnable demos:
-
-| Example | Pattern | Key Features |
-|---------|---------|--------------|
-| [`reflection_loop.py`](examples/reflection_loop.py) | Autonomous generate/critique/revise | Multi-subscription `@on`, `EventLog.latest()`, revision cap |
-| [`react_agent.py`](examples/react_agent.py) | ReAct tool-calling agent | `MessageEvent`, `message_reducer`, `Auditable` |
-| [`supervisor.py`](examples/supervisor.py) | Multi-agent supervisor | Custom `Reducer`, tool-calling routing, `Auditable` |
-| [`map_reduce.py`](examples/map_reduce.py) | Fan-out/fan-in pipeline | `Scatter`, `EventLog.filter()`, gather pattern |
-| [`human_in_the_loop.py`](examples/human_in_the_loop.py) | Approval with revision loop | `Interrupted`/`Resumed`, checkpointer, revision cycle |
+[`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) — `Interrupted`/`Resumed`, checkpointer, revision cycle
 
 ## API Reference
 
