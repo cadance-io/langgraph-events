@@ -150,8 +150,14 @@ graph = EventGraph(
     reducers=[my_reducer],      # optional — see Reducer section
 )
 
-# Synchronous
+# Single seed event
 log = graph.invoke(SeedEvent(...))
+
+# Multiple seed events (e.g. system prompt + user message)
+log = graph.invoke([
+    SystemPromptSet.from_str("You are helpful"),
+    UserMessageReceived(message=HumanMessage(content="Hi")),
+])
 
 # Asynchronous
 log = await graph.ainvoke(SeedEvent(...))
@@ -249,6 +255,34 @@ class LLMResponded(MessageEvent, Auditable):
     message: AIMessage
 ```
 
+### `SystemPromptSet`
+
+Built-in `MessageEvent` that wraps a `SystemMessage`. Makes the system prompt a first-class citizen in the event log — visible, queryable, and auditable.
+
+```python
+from langgraph_events import SystemPromptSet, message_reducer, EventGraph
+
+messages = message_reducer()  # no default needed — system prompt is a seed event
+
+graph = EventGraph([call_llm, execute_tools], reducers=[messages])
+
+log = graph.invoke([
+    SystemPromptSet.from_str("You are a helpful assistant with tools."),
+    UserMessageReceived(message=HumanMessage(content="What's the weather?")),
+])
+
+# The system prompt is now in the event log
+assert log.has(SystemPromptSet)
+```
+
+You can also construct it explicitly with a `SystemMessage`:
+
+```python
+from langchain_core.messages import SystemMessage
+
+seed = SystemPromptSet(message=SystemMessage(content="You are helpful"))
+```
+
 ### `Reducer` / `message_reducer`
 
 A `Reducer` maps events to contributions for a named LangGraph state channel. The framework maintains the channel incrementally — handlers receive the accumulated value by declaring a parameter whose name matches the reducer.
@@ -274,19 +308,31 @@ graph = EventGraph([respond], reducers=[history])
 `message_reducer()` is a built-in factory for the common case of accumulating LangChain messages from `MessageEvent` instances:
 
 ```python
-from langchain_core.messages import SystemMessage
-from langgraph_events import message_reducer
+from langgraph_events import message_reducer, SystemPromptSet
 
-messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
+# Preferred: system prompt as a seed event (visible in the event log)
+messages = message_reducer()
 graph = EventGraph([call_llm, handle_tools], reducers=[messages])
+log = graph.invoke([
+    SystemPromptSet.from_str("You are a helpful assistant."),
+    UserMessageReceived(message=HumanMessage(content="Hi")),
+])
 
+# Alternative: system= shorthand (static prompt, not in the event log)
+messages = message_reducer(system="You are a helpful assistant.")
+
+# Alternative: explicit default list
+messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
+```
+
+The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically:
+
+```python
 @on(UserMessageReceived, ToolsExecuted)
 async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
     response = await llm.ainvoke(messages)
     ...
 ```
-
-The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically.
 
 ### `Interrupted` / `Resumed`
 
@@ -386,6 +432,7 @@ See the `examples/` directory for complete, runnable demos:
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `Resumed`         | Event      | Created on resume with human's response         |
 | `Scatter`         | Class      | Fan-out into multiple events (map-reduce)       |
+| `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 
 ## Checkpointer & Graph Evolution
 

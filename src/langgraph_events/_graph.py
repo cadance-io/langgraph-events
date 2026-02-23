@@ -33,11 +33,18 @@ class EventGraph:
     Topology is auto-derived from handler subscriptions.  Internally builds
     a LangGraph ``StateGraph`` with a hub-and-spoke reactive loop.
 
-    Example::
+    Accepts a single seed event or a list of seed events::
 
         graph = EventGraph([classify, route, review])
+
+        # Single seed event
         log = graph.invoke(DocumentReceived(doc_id="1", content="..."))
-        print(log.latest(ProcessingComplete))
+
+        # Multiple seed events (e.g. system prompt + user message)
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are helpful"),
+            UserMessageReceived(message=HumanMessage(content="Hi")),
+        ])
     """
 
     def __init__(
@@ -126,29 +133,43 @@ class EventGraph:
         self._compiled_cache[cache_key] = compiled
         return compiled
 
-    def invoke(self, seed_event: Event, **kwargs: Any) -> EventLog:
-        """Run the graph synchronously with a seed event.
+    @staticmethod
+    def _normalize_seed(seed: Event | list[Event]) -> list[Event]:
+        """Normalize seed input to a list of events."""
+        if isinstance(seed, list):
+            return seed
+        return [seed]
+
+    def invoke(
+        self, seed: Event | list[Event], **kwargs: Any
+    ) -> EventLog:
+        """Run the graph synchronously with one or more seed events.
+
+        Args:
+            seed: A single event or list of events to start the graph.
 
         Returns an ``EventLog`` containing all events produced during the run.
         """
         compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
         result = compiled.invoke(
-            {"events": [seed_event]},
+            {"events": self._normalize_seed(seed)},
             **kwargs,
         )
         return EventLog(result["events"])
 
-    async def ainvoke(self, seed_event: Event, **kwargs: Any) -> EventLog:
-        """Run the graph asynchronously with a seed event."""
+    async def ainvoke(
+        self, seed: Event | list[Event], **kwargs: Any
+    ) -> EventLog:
+        """Run the graph asynchronously with one or more seed events."""
         compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
         result = await compiled.ainvoke(
-            {"events": [seed_event]},
+            {"events": self._normalize_seed(seed)},
             **kwargs,
         )
         return EventLog(result["events"])
 
     def stream(
-        self, seed_event: Event, **kwargs: Any
+        self, seed: Event | list[Event], **kwargs: Any
     ) -> Iterator[dict[str, Any] | Any]:
         """Stream graph execution. Pass-through to compiled graph's stream.
 
@@ -156,17 +177,17 @@ class EventGraph:
         """
         compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
         return compiled.stream(
-            {"events": [seed_event]},
+            {"events": self._normalize_seed(seed)},
             **kwargs,
         )
 
     async def astream(
-        self, seed_event: Event, **kwargs: Any
+        self, seed: Event | list[Event], **kwargs: Any
     ) -> AsyncIterator[dict[str, Any] | Any]:
         """Async stream graph execution."""
         compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
         async for chunk in compiled.astream(
-            {"events": [seed_event]},
+            {"events": self._normalize_seed(seed)},
             **kwargs,
         ):
             yield chunk

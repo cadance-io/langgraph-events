@@ -12,6 +12,7 @@ from langgraph_events import (
     Interrupted,
     Resumed,
     Scatter,
+    SystemPromptSet,
     on,
 )
 
@@ -789,3 +790,74 @@ class TestEventLogIsolation:
         # handler_b: independent snapshot [Trigger] → len 1
         # Key: handler_b did NOT see handler_a's mutation
         assert result.b_saw == 1  # handler_b saw only [Trigger]
+
+
+# ---------------------------------------------------------------------------
+# Test: multi-seed events
+# ---------------------------------------------------------------------------
+
+
+class TestMultiSeed:
+    def test_list_of_seed_events(self):
+        """invoke() accepts a list of seed events."""
+
+        @on(Start)
+        def step1(event: Start) -> Middle:
+            return Middle(data=event.data)
+
+        @on(Middle)
+        def step2(event: Middle) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step1, step2])
+        log = graph.invoke([Start(data="hello")])
+
+        assert log.latest(End) == End(result="hello")
+
+    def test_multiple_seed_events_all_in_log(self):
+        """Multiple seed events all appear in the event log."""
+
+        @dataclass(frozen=True)
+        class Config(Event):
+            setting: str = ""
+
+        @on(Start)
+        def handle(event: Start, log: EventLog) -> End:
+            config = log.latest(Config)
+            return End(result=f"{config.setting}:{event.data}")
+
+        graph = EventGraph([handle])
+        log = graph.invoke([Config(setting="v1"), Start(data="go")])
+
+        assert log.has(Config)
+        assert log.has(Start)
+        assert log.latest(End) == End(result="v1:go")
+
+    def test_system_prompt_set_as_seed(self):
+        """SystemPromptSet can be used as a seed event alongside other events."""
+
+        @on(Start)
+        def handle(event: Start, log: EventLog) -> End:
+            has_prompt = log.has(SystemPromptSet)
+            return End(result=f"has_prompt={has_prompt}")
+
+        graph = EventGraph([handle])
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are helpful"),
+            Start(data="go"),
+        ])
+
+        assert log.has(SystemPromptSet)
+        assert log.latest(End) == End(result="has_prompt=True")
+
+    def test_single_event_still_works(self):
+        """Single event (not wrapped in list) still works as before."""
+
+        @on(Start)
+        def step(event: Start) -> End:
+            return End(result=event.data)
+
+        graph = EventGraph([step])
+        log = graph.invoke(Start(data="solo"))
+
+        assert log.latest(End) == End(result="solo")

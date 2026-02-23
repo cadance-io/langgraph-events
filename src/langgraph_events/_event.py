@@ -7,7 +7,7 @@ from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from langchain_core.messages import BaseMessage
+    from langchain_core.messages import BaseMessage, SystemMessage
 
 
 @dataclass(frozen=True)
@@ -151,6 +151,46 @@ class Resumed(Event):
 
     value: Any = None
     interrupted: Interrupted | None = None
+
+
+@dataclass(frozen=True)
+class SystemPromptSet(MessageEvent):
+    """Built-in event for setting the system prompt as a first-class citizen.
+
+    Wraps a ``SystemMessage`` so that the system prompt appears in the event
+    log, is queryable via ``EventLog``, and participates in the ``Auditable``
+    trail when mixed in.
+
+    Pairs naturally with ``message_reducer()`` — the system message is
+    automatically included in the accumulated message history via
+    ``as_messages()``.
+
+    Example::
+
+        from langchain_core.messages import SystemMessage
+        from langgraph_events import SystemPromptSet, EventGraph
+
+        log = graph.invoke([
+            SystemPromptSet(message=SystemMessage(content="You are helpful")),
+            UserMessageReceived(message=HumanMessage(content="Hi")),
+        ])
+
+    Or as a convenience with a plain string::
+
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are helpful"),
+            UserMessageReceived(message=HumanMessage(content="Hi")),
+        ])
+    """
+
+    message: SystemMessage = None  # type: ignore[assignment]
+
+    @classmethod
+    def from_str(cls, content: str) -> SystemPromptSet:
+        """Create from a plain string, wrapping it in a ``SystemMessage``."""
+        from langchain_core.messages import SystemMessage as SM  # noqa: PLC0415
+
+        return cls(message=SM(content=content))
 
 
 class Scatter:

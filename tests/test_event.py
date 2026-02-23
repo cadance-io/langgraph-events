@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 import pytest
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from langgraph_events import (
     Auditable,
@@ -13,6 +13,7 @@ from langgraph_events import (
     MessageEvent,
     Resumed,
     Scatter,
+    SystemPromptSet,
 )
 
 
@@ -180,3 +181,37 @@ def test_message_event_neither_field_raises():
     event = BadEvent(text="hi")
     with pytest.raises(NotImplementedError, match="must declare"):
         event.as_messages()
+
+
+# --- SystemPromptSet tests ---
+
+
+def test_system_prompt_set_is_message_event():
+    msg = SystemMessage(content="You are helpful")
+    event = SystemPromptSet(message=msg)
+    assert isinstance(event, MessageEvent)
+    assert isinstance(event, Event)
+    assert event.message is msg
+
+
+def test_system_prompt_set_as_messages():
+    msg = SystemMessage(content="Be nice")
+    event = SystemPromptSet(message=msg)
+    result = event.as_messages()
+    assert result == [msg]
+
+
+def test_system_prompt_set_from_str():
+    event = SystemPromptSet.from_str("You are a helpful assistant")
+    assert isinstance(event, SystemPromptSet)
+    assert isinstance(event, MessageEvent)
+    msgs = event.as_messages()
+    assert len(msgs) == 1
+    assert isinstance(msgs[0], SystemMessage)
+    assert msgs[0].content == "You are a helpful assistant"
+
+
+def test_system_prompt_set_is_frozen():
+    event = SystemPromptSet.from_str("test")
+    with pytest.raises(AttributeError):
+        event.message = SystemMessage(content="changed")  # type: ignore

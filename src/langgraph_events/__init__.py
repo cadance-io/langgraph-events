@@ -8,6 +8,7 @@ from langgraph_events._event import (
     MessageEvent,
     Resumed,
     Scatter,
+    SystemPromptSet,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._graph import EventGraph
@@ -27,6 +28,7 @@ __all__ = [
     "Reducer",
     "Resumed",
     "Scatter",
+    "SystemPromptSet",
     "message_reducer",
     "on",
 ]

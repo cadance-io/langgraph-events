@@ -17,6 +17,7 @@ from langgraph_events import (
     EventLog,
     MessageEvent,
     Reducer,
+    SystemPromptSet,
     message_reducer,
     on,
 )
@@ -657,3 +658,124 @@ class TestMessageReducer:
         assert len(msgs) == 2
         assert msgs[0].content == "You are a test bot"
         assert msgs[1].content == "hello"
+
+
+# ---------------------------------------------------------------------------
+# message_reducer(system=...) convenience tests
+# ---------------------------------------------------------------------------
+
+
+class TestMessageReducerSystemParam:
+    def test_system_string_creates_system_message(self):
+        """message_reducer(system='...') wraps string in SystemMessage."""
+        r = message_reducer(system="You are helpful")
+        assert len(r.default) == 1
+        assert isinstance(r.default[0], SystemMessage)
+        assert r.default[0].content == "You are helpful"
+
+    def test_system_and_default_raises(self):
+        """Cannot specify both system= and default=."""
+        with pytest.raises(ValueError, match="Cannot specify both"):
+            message_reducer(
+                [SystemMessage(content="a")],
+                system="b",
+            )
+
+    def test_system_param_integration(self):
+        """message_reducer(system=...) works end-to-end with EventGraph."""
+
+        @dataclass(frozen=True)
+        class UserMsg(MessageEvent):
+            message: HumanMessage = None  # type: ignore[assignment]
+
+        @dataclass(frozen=True)
+        class Finished(Event):
+            answer: str = ""
+
+        r = message_reducer(system="Be concise")
+
+        received_messages: list[list[BaseMessage]] = []
+
+        @on(UserMsg)
+        def respond(event: UserMsg, messages: list[BaseMessage]) -> Finished:
+            received_messages.append(list(messages))
+            return Finished(answer="ok")
+
+        graph = EventGraph([respond], reducers=[r])
+        log = graph.invoke(UserMsg(message=HumanMessage(content="hi")))
+
+        assert log.latest(Finished) is not None
+        msgs = received_messages[0]
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[0].content == "Be concise"
+        assert msgs[1].content == "hi"
+
+
+# ---------------------------------------------------------------------------
+# SystemPromptSet + message_reducer integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptSetReducer:
+    def test_system_prompt_as_seed_event(self):
+        """SystemPromptSet as seed event contributes to message_reducer."""
+
+        @dataclass(frozen=True)
+        class UserMsg(MessageEvent):
+            message: HumanMessage = None  # type: ignore[assignment]
+
+        @dataclass(frozen=True)
+        class Finished(Event):
+            answer: str = ""
+
+        r = message_reducer()  # no default — system prompt via seed event
+
+        received_messages: list[list[BaseMessage]] = []
+
+        @on(UserMsg)
+        def respond(event: UserMsg, messages: list[BaseMessage]) -> Finished:
+            received_messages.append(list(messages))
+            return Finished(answer="ok")
+
+        graph = EventGraph([respond], reducers=[r])
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are a test bot"),
+            UserMsg(message=HumanMessage(content="hello")),
+        ])
+
+        assert log.latest(Finished) is not None
+        assert log.has(SystemPromptSet)
+
+        # Handler received: system message (from seed) + user message
+        msgs = received_messages[0]
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[0].content == "You are a test bot"
+        assert msgs[1].content == "hello"
+
+    def test_system_prompt_queryable_in_log(self):
+        """SystemPromptSet is queryable via EventLog inside handlers."""
+
+        @dataclass(frozen=True)
+        class UserMsg(MessageEvent):
+            message: HumanMessage = None  # type: ignore[assignment]
+
+        @dataclass(frozen=True)
+        class Finished(Event):
+            prompt_content: str = ""
+
+        r = message_reducer()
+
+        @on(UserMsg)
+        def respond(event: UserMsg, log: EventLog) -> Finished:
+            prompt = log.latest(SystemPromptSet)
+            return Finished(prompt_content=prompt.message.content if prompt else "none")
+
+        graph = EventGraph([respond], reducers=[r])
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are helpful"),
+            UserMsg(message=HumanMessage(content="hi")),
+        ])
+
+        assert log.latest(Finished) == Finished(prompt_content="You are helpful")
