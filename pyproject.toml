@@ -20,6 +20,7 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "pre-commit>=4.0",
+    "pytest-cov>=4.0",
 ]
 examples = [
     "langchain-openai>=0.2.0",
@@ -32,6 +33,7 @@ packages = ["src/langgraph_events"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 describe_prefixes = ["describe_", "when_"]
+addopts = "--cov --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 88
@@ -90,3 +92,16 @@ allow_redefinition = true
 module = "examples.*"
 disallow_untyped_defs = false
 warn_return_any = false
+
+[tool.coverage.run]
+source = ["langgraph_events"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "@overload",
+]
