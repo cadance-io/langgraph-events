@@ -114,7 +114,7 @@ class Auditable(Event):
         return f"[{name}] {', '.join(parts)}"
 
 
-class Halt(Event):
+class Halted(Event):
     """Special event that signals immediate graph termination."""
 
     reason: str = ""

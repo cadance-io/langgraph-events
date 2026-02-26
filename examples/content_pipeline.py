@@ -4,7 +4,7 @@ Demonstrates event streaming, halt-based early termination, and post-run
 inspection in a content classification + analysis pipeline.
 
 Covers APIs not shown in other examples:
-  - ``Halt`` — immediate graph termination (unsafe content stops the pipeline)
+  - ``Halted`` — immediate graph termination (unsafe content stops the pipeline)
   - ``StreamFrame`` — NamedTuple yielded by ``astream_events()`` with reducer snapshots
   - ``stream_events()`` / ``astream_events()`` — high-level event streaming
   - ``EventLog.has()`` — boolean existence check
@@ -25,7 +25,7 @@ from langgraph_events import (
     Event,
     EventGraph,
     EventLog,
-    Halt,
+    Halted,
     Reducer,
     StreamFrame,
     on,
@@ -107,13 +107,13 @@ def classify(event: ContentReceived) -> ContentClassified:
 
 
 @on(ContentClassified)
-def gate(event: ContentClassified, log: EventLog) -> Halt | ContentApproved:
+def gate(event: ContentClassified, log: EventLog) -> Halted | ContentApproved:
     """Safety gate — halts the pipeline for unsafe content.
 
     Uses ``log.latest(ContentReceived)`` to pass the original text forward.
     """
     if not event.safe:
-        return Halt(reason=f"blocked: {event.category} content")
+        return Halted(reason=f"blocked: {event.category} content")
     original = log.latest(ContentReceived)
     return ContentApproved(text=original.text, category=event.category)
 
@@ -152,18 +152,18 @@ async def main():
         event_name = type(frame.event).__name__
         print(f"  {event_name:25s} stages={frame.reducers['stages']}")
 
-    # --- Scenario 2: Halt with post-run inspection ---
-    print("\n=== Scenario 2: Halt + EventLog.has() ===")
+    # --- Scenario 2: Halted with post-run inspection ---
+    print("\n=== Scenario 2: Halted + EventLog.has() ===")
     print("Input: unsafe content\n")
 
     log = await graph.ainvoke(
         ContentReceived(text="How to hack a server exploit attack")
     )
 
-    print(f"  Halt in log?     {log.has(Halt)}")
+    print(f"  Halted in log?   {log.has(Halted)}")
     print(f"  Analysis done?   {log.has(AnalysisProduced)}")
-    halt = log.latest(Halt)
-    print(f"  Halt reason:     {halt.reason}")
+    halted = log.latest(Halted)
+    print(f"  Halted reason:   {halted.reason}")
 
     # --- Scenario 3: Bare event stream (sync) ---
     print("\n=== Scenario 3: stream_events (sync, no reducers) ===")

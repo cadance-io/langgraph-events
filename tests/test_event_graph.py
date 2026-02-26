@@ -13,7 +13,7 @@ from langgraph_events import (
     Event,
     EventGraph,
     EventLog,
-    Halt,
+    Halted,
     Interrupted,
     MessageEvent,
     Reducer,
@@ -502,16 +502,16 @@ def describe_EventGraph():
 
             async def it_stops_on_halt():
                 @on(Start)
-                async def halter(event: Start) -> Halt:
-                    return Halt(reason="stop")
+                async def halter(event: Start) -> Halted:
+                    return Halted(reason="stop")
 
-                @on(Halt)
-                async def unreachable(event: Halt) -> End:
+                @on(Halted)
+                async def unreachable(event: Halted) -> End:
                     return End(result="should not run")
 
                 graph = EventGraph([halter, unreachable])
                 log = await graph.ainvoke(Start(data="go"))
-                assert log.has(Halt)
+                assert log.has(Halted)
                 assert not log.has(End)
 
             async def it_injects_reducer_values():
@@ -528,23 +528,23 @@ def describe_EventGraph():
     def describe_halt():
 
         def it_stores_reason_and_is_Event_subclass():
-            h = Halt(reason="done")
+            h = Halted(reason="done")
             assert h.reason == "done"
             assert isinstance(h, Event)
-            assert isinstance(h, Halt)
+            assert isinstance(h, Halted)
 
         def it_stops_execution_immediately():
             @on(Start)
-            def step1(event: Start) -> Halt:
-                return Halt(reason="stopped early")
+            def step1(event: Start) -> Halted:
+                return Halted(reason="stopped early")
 
-            @on(Halt)
-            def should_not_run(event: Halt) -> End:
+            @on(Halted)
+            def should_not_run(event: Halted) -> End:
                 return End(result="should not reach here")
 
             graph = EventGraph([step1, should_not_run])
             log = graph.invoke(Start(data="test"))
-            assert log.has(Halt)
+            assert log.has(Halted)
             assert not log.has(End)
 
     def describe_interrupt():

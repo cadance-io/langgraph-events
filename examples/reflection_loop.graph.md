@@ -3,9 +3,9 @@
 
 ```mermaid
 graph LR
-    WriteRequest -->|generate| Draft
-    Critique -->|generate| Draft
-    Draft -->|evaluate| Critique
-    Draft -->|evaluate| FinalDraft
+    WriteRequested -->|generate| DraftProduced
+    CritiqueReceived -->|generate| DraftProduced
+    DraftProduced -->|evaluate| CritiqueReceived
+    DraftProduced -->|evaluate| FinalDraftProduced
 %% Side-effect handlers: audit_trail (Auditable)
 ```

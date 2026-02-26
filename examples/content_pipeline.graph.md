@@ -4,7 +4,7 @@
 ```mermaid
 graph LR
     ContentReceived -->|classify| ContentClassified
-    ContentClassified -->|gate| Halt
+    ContentClassified -->|gate| Halted
     ContentClassified -->|gate| ContentApproved
     ContentApproved -->|analyze| AnalysisProduced
 ```

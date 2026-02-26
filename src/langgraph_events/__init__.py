@@ -3,7 +3,7 @@
 from langgraph_events._event import (
     Auditable,
     Event,
-    Halt,
+    Halted,
     Interrupted,
     MessageEvent,
     Resumed,
@@ -23,7 +23,7 @@ __all__ = [
     "Event",
     "EventGraph",
     "EventLog",
-    "Halt",
+    "Halted",
     "Interrupted",
     "MessageEvent",
     "Reducer",

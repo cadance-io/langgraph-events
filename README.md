@@ -82,7 +82,7 @@ seed event
 1. A **seed event** enters the graph.
 2. The **router** collects new events, then **dispatch** uses `isinstance` to match each pending event to subscribed handlers.
 3. Matched handlers run, emit new events.
-4. The loop repeats until no handler matches or a `Halt` event appears.
+4. The loop repeats until no handler matches or a `Halted` event appears.
 
 ## Key Concepts
 
@@ -190,11 +190,11 @@ graph LR
 Immutable, ordered container returned by `invoke`/`ainvoke`. Handlers can also receive it as a second parameter.
 
 ```python
-@on(Draft)
-def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
-    request = log.latest(WriteRequest)   # most recent event of this type
-    all_drafts = log.filter(Draft)       # all events matching this type
-    if log.has(Critique):                # boolean check
+@on(DraftProduced)
+def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDraftProduced:
+    request = log.latest(WriteRequested)        # most recent event of this type
+    all_drafts = log.filter(DraftProduced)      # all events matching this type
+    if log.has(CritiqueReceived):               # boolean check
         ...
 ```
 
@@ -206,15 +206,15 @@ def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
 | `len(log)`      | `int`      | Total event count                    |
 | `log[i]`        | `Event`    | Index or slice access                |
 
-### `Halt`
+### `Halted`
 
-Return a `Halt` event from any handler to immediately stop the graph. No further handlers are dispatched.
+Return a `Halted` event from any handler to immediately stop the graph. No further handlers are dispatched.
 
 ```python
 @on(Classified)
-def guard(event: Classified) -> Reply | Halt:
+def guard(event: Classified) -> Reply | Halted:
     if event.label == "blocked":
-        return Halt(reason="Content policy violation")
+        return Halted(reason="Content policy violation")
     return Reply(text="OK")
 ```
 
@@ -385,7 +385,7 @@ The patterns below show how these building blocks compose into complete architec
 
 ### Reflection Loop (Generate / Critique / Revise)
 
-A handler subscribes to both the seed event and critique events (`@on(WriteRequest, Critique)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
+A handler subscribes to both the seed event and critique events (`@on(WriteRequested, CritiqueReceived)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
 
 [`examples/reflection_loop.py`](examples/reflection_loop.py) · [event flow](examples/reflection_loop.graph.md) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
 
@@ -413,11 +413,11 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 
 [`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) · [event flow](examples/human_in_the_loop.graph.md) — `Interrupted`/`Resumed`, checkpointer, revision cycle
 
-### Content Pipeline (Halt + Streaming)
+### Content Pipeline (Halted + Streaming)
 
-`Halt` terminates the pipeline immediately for unsafe content. `stream_events()` yields events as they're produced, with optional `StreamFrame` reducer snapshots. No LLM dependency — runs with keyword rules.
+`Halted` terminates the pipeline immediately for unsafe content. `stream_events()` yields events as they're produced, with optional `StreamFrame` reducer snapshots. No LLM dependency — runs with keyword rules.
 
-[`examples/content_pipeline.py`](examples/content_pipeline.py) · [event flow](examples/content_pipeline.graph.md) — `Halt`, `Reducer`, `stream_events`, `StreamFrame`
+[`examples/content_pipeline.py`](examples/content_pipeline.py) · [event flow](examples/content_pipeline.graph.md) — `Halted`, `Reducer`, `stream_events`, `StreamFrame`
 
 ## API Reference
 
@@ -428,7 +428,7 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 | `EventGraph`      | Class      | Build and run the event-driven graph            |
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `EventLog`        | Class      | Immutable query container over events           |
-| `Halt`            | Event      | Signal immediate graph termination              |
+| `Halted`          | Event      | Signal immediate graph termination              |
 | `Interrupted`     | Event      | Pause graph for human input                     |
 | `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |

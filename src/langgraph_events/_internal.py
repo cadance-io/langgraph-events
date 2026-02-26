@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
-from langgraph_events._event import Event, Halt, Scatter
+from langgraph_events._event import Event, Halted, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import Reducer  # noqa: TC001
@@ -150,8 +150,8 @@ def make_dispatch(
         if not pending:
             return END
 
-        # Check for Halt
-        if any(isinstance(e, Halt) for e in pending):
+        # Check for Halted
+        if any(isinstance(e, Halted) for e in pending):
             return END
 
         # Find handlers whose event_types match any pending event
