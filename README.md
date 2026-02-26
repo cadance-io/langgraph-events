@@ -181,6 +181,8 @@ print(graph.mermaid())
 
 ```mermaid
 graph LR
+    classDef seed fill:#dae8fc,stroke:#6c8ebf
+    MessageReceived([MessageReceived]):::seed
     MessageReceived -->|classify| MessageClassified
     MessageClassified -->|respond| ReplyProduced
 ```
@@ -220,11 +222,11 @@ def guard(event: Classified) -> Reply | Halted:
 
 ### `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan-out into multiple events. Each becomes a separate pending event, dispatched in the next round.
+Return `Scatter([event1, event2, ...])` to fan-out into multiple events. Each becomes a separate pending event, dispatched in the next round. Use `Scatter[WorkItem]` to annotate the produced type — this renders as a dashed edge in `mermaid()` diagrams.
 
 ```python
 @on(Batch)
-def split(event: Batch) -> Scatter:
+def split(event: Batch) -> Scatter[WorkItem]:
     return Scatter([WorkItem(item=i) for i in event.items])
 
 @on(WorkItem)
@@ -403,7 +405,7 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 
 ### Fan-Out / Fan-In (Map-Reduce)
 
-`Scatter` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
+`Scatter[WorkItem]` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
 
 [`examples/map_reduce.py`](examples/map_reduce.py) · [event flow](examples/map_reduce.graph.md) — `Scatter`, `EventLog.filter()`, gather pattern
 
@@ -435,7 +437,7 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `Resumed`         | Event      | Created on resume with human's response         |
-| `Scatter`         | Class      | Fan-out into multiple events (map-reduce)       |
+| `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 | `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import types
 from dataclasses import field
 from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any
@@ -208,6 +209,12 @@ class Scatter:
     """
 
     __slots__ = ("events",)
+
+    def __class_getitem__(cls, params: Any) -> types.GenericAlias:
+        """Support ``Scatter[EventType]`` in type annotations."""
+        if not isinstance(params, tuple):
+            params = (params,)
+        return types.GenericAlias(cls, params)
 
     def __init__(self, events: list[Event]) -> None:
         if not events:

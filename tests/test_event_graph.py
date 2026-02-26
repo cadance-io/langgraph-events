@@ -1665,6 +1665,36 @@ def describe_EventGraph():
             assert "Start -->|handle_both| End" in output
             assert "Middle -->|handle_both| End" in output
 
+        def it_styles_seed_events_with_stadium_shape():
+            @on(Start)
+            def step1(event: Start) -> Middle:
+                return Middle(data=event.data)
+
+            @on(Middle)
+            def step2(event: Middle) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1, step2])
+            output = graph.mermaid()
+            assert "classDef seed fill:#dae8fc,stroke:#6c8ebf" in output
+            assert "Start([Start]):::seed" in output
+            # Middle is a target, not a seed
+            assert "Middle([Middle]):::seed" not in output
+
+        def it_shows_typed_scatter_as_dashed_edge():
+            @on(Start)
+            def split(event: Start) -> Scatter[Middle]:
+                return Scatter([Middle(data="a")])
+
+            @on(Middle)
+            def step2(event: Middle) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([split, step2])
+            output = graph.mermaid()
+            assert "Start -.->|split| Middle" in output
+            assert "%% Scatter handlers" not in output
+
     def describe_construction_validation():
 
         def when_no_handlers():

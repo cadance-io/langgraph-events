@@ -3,8 +3,10 @@
 
 ```mermaid
 graph LR
+    classDef seed fill:#dae8fc,stroke:#6c8ebf
+    BatchReceived([BatchReceived]):::seed
+    BatchReceived -.->|split_batch| DocDispatched
     DocDispatched -->|summarize_one| DocSummarized
     DocSummarized -->|gather_summaries| BatchSummarized
-%% Scatter handlers: split_batch (BatchReceived)
 %% Side-effect handlers: audit_trail (Auditable)
 ```

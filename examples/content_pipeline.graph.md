@@ -3,6 +3,8 @@
 
 ```mermaid
 graph LR
+    classDef seed fill:#dae8fc,stroke:#6c8ebf
+    ContentReceived([ContentReceived]):::seed
     ContentReceived -->|classify| ContentClassified
     ContentClassified -->|gate| Halted
     ContentClassified -->|gate| ContentApproved

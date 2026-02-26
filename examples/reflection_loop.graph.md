@@ -3,6 +3,8 @@
 
 ```mermaid
 graph LR
+    classDef seed fill:#dae8fc,stroke:#6c8ebf
+    WriteRequested([WriteRequested]):::seed
     WriteRequested -->|generate| DraftProduced
     CritiqueReceived -->|generate| DraftProduced
     DraftProduced -->|evaluate| CritiqueReceived

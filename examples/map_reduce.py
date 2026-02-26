@@ -105,7 +105,7 @@ def audit_trail(event: Auditable) -> None:
 
 
 @on(BatchReceived)
-def split_batch(event: BatchReceived) -> Scatter:
+def split_batch(event: BatchReceived) -> Scatter[DocDispatched]:
     """Fan out: split the batch into individual summarization tasks."""
     return Scatter(
         [
