@@ -140,9 +140,10 @@ async def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    graph = EventGraph([generate, evaluate, audit_trail])
+graph = EventGraph([generate, evaluate, audit_trail])
 
+
+async def main():
     topic = "why event-driven architecture leads to simpler agent designs"
     print(f"Topic: {topic}")
     print("Max revisions: 3\n")

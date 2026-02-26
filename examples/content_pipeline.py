@@ -133,12 +133,13 @@ def analyze(event: ContentApproved) -> AnalysisProduced:
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    graph = EventGraph(
-        [classify, gate, analyze],
-        reducers=[stages],
-    )
+graph = EventGraph(
+    [classify, gate, analyze],
+    reducers=[stages],
+)
 
+
+async def main():
     # --- Scenario 1: Streaming with reducer snapshots ---
     print("=== Scenario 1: astream_events + StreamFrame ===")
     print("Input: safe technical content\n")

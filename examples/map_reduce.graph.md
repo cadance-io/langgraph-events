@@ -3,8 +3,8 @@
 
 ```mermaid
 graph LR
-    BatchReceived -->|split_batch| Scatter
     DocDispatched -->|summarize_one| DocSummarized
     DocSummarized -->|gather_summaries| BatchSummarized
+%% Scatter handlers: split_batch (BatchReceived)
 %% Side-effect handlers: audit_trail (Auditable)
 ```

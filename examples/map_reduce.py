@@ -151,9 +151,10 @@ def gather_summaries(event: DocSummarized, log: EventLog) -> BatchSummarized | N
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    graph = EventGraph([split_batch, summarize_one, gather_summaries, audit_trail])
+graph = EventGraph([split_batch, summarize_one, gather_summaries, audit_trail])
 
+
+async def main():
     print(f"Summarizing {len(DOCUMENTS)} documents...\n")
     for title, _ in DOCUMENTS:
         print(f"  - {title}")

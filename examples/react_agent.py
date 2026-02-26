@@ -164,12 +164,13 @@ def execute_tools(event: LLMResponded) -> ToolsExecuted | AnswerProduced:
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    graph = EventGraph(
-        [call_llm, execute_tools, audit_trail],
-        reducers=[messages],
-    )
+graph = EventGraph(
+    [call_llm, execute_tools, audit_trail],
+    reducers=[messages],
+)
 
+
+async def main():
     question = (
         "What's the weather in Tokyo? "
         "If the temperature is in Celsius, convert it to Fahrenheit."
@@ -177,13 +178,15 @@ async def main():
     print(f"Question: {question}\n")
     print("--- Event Flow ---")
 
-    log = await graph.ainvoke([
-        SystemPromptSet.from_str(
-            "You are a helpful assistant with access to tools. "
-            "Use them when needed to answer the user's question accurately."
-        ),
-        UserMessageReceived(message=HumanMessage(content=question)),
-    ])
+    log = await graph.ainvoke(
+        [
+            SystemPromptSet.from_str(
+                "You are a helpful assistant with access to tools. "
+                "Use them when needed to answer the user's question accurately."
+            ),
+            UserMessageReceived(message=HumanMessage(content=question)),
+        ]
+    )
 
     print()
     answer = log.latest(AnswerProduced)

@@ -1621,14 +1621,30 @@ def describe_EventGraph():
             assert "%% Side-effect handlers: side_effect (Start)" in output
             assert "Start -->|producer| End" in output
 
-        def it_shows_scatter_as_target():
+        def it_shows_scatter_in_footer():
             @on(Start)
             def split(event: Start) -> Scatter:
                 return Scatter([Middle(data="a")])
 
             graph = EventGraph([split])
             output = graph.mermaid()
-            assert "Start -->|split| Scatter" in output
+            # No edge to a Scatter node
+            assert "-->|split| Scatter" not in output
+            assert "%% Scatter handlers: split (Start)" in output
+
+        def it_connects_interrupted_to_resumed_with_dashed_edge():
+            @on(Start)
+            def request_approval(event: Start) -> Interrupted:
+                return Interrupted(prompt="approve?")
+
+            @on(Resumed)
+            def handle_review(event: Resumed) -> End:
+                return End(result="ok")
+
+            graph = EventGraph([request_approval, handle_review])
+            output = graph.mermaid()
+            assert "Interrupted -.-> Resumed" in output
+            assert "Resumed -->|handle_review| End" in output
 
         def it_shows_question_mark_for_unannotated_handlers():
             @on(Start)

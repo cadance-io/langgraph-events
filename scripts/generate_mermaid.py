@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from types import ModuleType  # noqa: TC003
 
-from langgraph_events import EventGraph, Reducer
+from langgraph_events import EventGraph
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES_DIR = ROOT / "examples"
@@ -35,13 +35,12 @@ def _load_module(path: Path) -> ModuleType:
     return module
 
 
-def _find_handlers(module: ModuleType) -> list:
-    """Return callables that have ``_event_types`` (set by ``@on``)."""
-    return [
-        obj
-        for obj in vars(module).values()
-        if callable(obj) and hasattr(obj, "_event_types")
-    ]
+def _find_graph(module: ModuleType) -> EventGraph | None:
+    """Return the first module-level ``EventGraph`` instance, if any."""
+    for obj in vars(module).values():
+        if isinstance(obj, EventGraph):
+            return obj
+    return None
 
 
 def _render_graph_md(name: str, mermaid_text: str) -> str:
@@ -78,13 +77,10 @@ def main(check: bool = False) -> int:
             errors.append(f"{py_path.name}: failed to load — {exc}")
             continue
 
-        handlers = _find_handlers(module)
-        if not handlers:
+        graph = _find_graph(module)
+        if graph is None:
             continue
 
-        reducers = [obj for obj in vars(module).values() if isinstance(obj, Reducer)]
-
-        graph = EventGraph(handlers, reducers=reducers)
         mermaid_text = graph.mermaid()
         expected = _render_graph_md(py_path.stem, mermaid_text)
 

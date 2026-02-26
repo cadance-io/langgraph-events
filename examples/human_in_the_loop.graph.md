@@ -8,5 +8,6 @@ graph LR
     DraftGenerated -->|request_approval| Interrupted
     Resumed -->|handle_review| ContentPublished
     Resumed -->|handle_review| RevisionRequested
+    Interrupted -.-> Resumed
 %% Side-effect handlers: audit_trail (Auditable)
 ```

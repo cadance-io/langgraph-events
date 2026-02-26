@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from langgraph_events._event import Event, Scatter
+from langgraph_events._event import Event, Interrupted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta, extract_handler_meta
 from langgraph_events._internal import (
@@ -30,12 +30,15 @@ if TYPE_CHECKING:
 
 def _parse_return_types(
     fn: Callable[..., Any],
-) -> tuple[list[type[Event]], bool, bool]:
-    """Parse handler return annotation into (event_types, has_scatter, has_annotation).
+) -> tuple[list[type[Event]], bool, bool, bool]:
+    """Parse handler return annotation.
+
+    Returns ``(event_types, has_scatter, has_interrupted, has_annotation)``.
 
     Returns:
         event_types: Event subclasses the handler can produce.
         has_scatter: Whether the handler returns Scatter.
+        has_interrupted: Whether the handler returns Interrupted.
         has_annotation: Whether the handler has a return type annotation at all.
     """
     try:
@@ -45,22 +48,25 @@ def _parse_return_types(
 
     return_hint = hints.get("return")
     if return_hint is None:
-        return [], False, False
+        return [], False, False, False
 
     args = typing.get_args(return_hint)
     candidates = args if args else (return_hint,)
 
     event_types: list[type[Event]] = []
     has_scatter = False
+    has_interrupted = False
     for arg in candidates:
         if arg is type(None):
             continue
         if arg is Scatter:
             has_scatter = True
         elif isinstance(arg, type) and issubclass(arg, Event):
+            if issubclass(arg, Interrupted):
+                has_interrupted = True
             event_types.append(arg)
 
-    return event_types, has_scatter, True
+    return event_types, has_scatter, has_interrupted, True
 
 
 class StreamFrame(NamedTuple):
@@ -132,20 +138,37 @@ class EventGraph:
         """Return a Mermaid flowchart showing event correlation.
 
         Events are nodes, handlers are edge labels.
-        Side-effect handlers (-> None) are listed in a comment footer.
+        Side-effect handlers (-> None) and scatter handlers are listed in a
+        comment footer.  If any handler produces ``Interrupted`` and any handler
+        subscribes to ``Resumed``, a dashed edge connects them (framework
+        guarantee).
         """
         lines = ["graph LR"]
         side_effects: list[str] = []
+        scatter_handlers: list[str] = []
+        any_produces_interrupted = False
+        any_subscribes_resumed = False
 
         for meta in self._handler_metas:
-            event_types, has_scatter, has_annotation = _parse_return_types(meta.fn)
+            event_types, has_scatter, has_interrupted, has_annotation = (
+                _parse_return_types(meta.fn)
+            )
             label = meta.fn.__name__
 
+            if has_interrupted:
+                any_produces_interrupted = True
+            if any(issubclass(t, Resumed) for t in meta.event_types):
+                any_subscribes_resumed = True
+
             targets = [t.__name__ for t in event_types]
-            if has_scatter:
-                targets.append("Scatter")
             if not has_annotation:
                 targets.append("?")
+
+            # Scatter-only handlers go to footer (no dead-end Scatter node)
+            if has_scatter and not targets:
+                subscribed = ", ".join(t.__name__ for t in meta.event_types)
+                scatter_handlers.append(f"{label} ({subscribed})")
+                continue
 
             if not targets:
                 subscribed = ", ".join(t.__name__ for t in meta.event_types)
@@ -156,6 +179,11 @@ class EventGraph:
                 for target in targets:
                     lines.append(f"    {src_type.__name__} -->|{label}| {target}")
 
+        if any_produces_interrupted and any_subscribes_resumed:
+            lines.append("    Interrupted -.-> Resumed")
+
+        if scatter_handlers:
+            lines.append(f"%% Scatter handlers: {', '.join(scatter_handlers)}")
         if side_effects:
             lines.append(f"%% Side-effect handlers: {', '.join(side_effects)}")
 

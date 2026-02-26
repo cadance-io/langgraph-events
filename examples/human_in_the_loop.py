@@ -154,8 +154,10 @@ def handle_review(
 # ---------------------------------------------------------------------------
 
 
+graph = EventGraph([generate_draft, request_approval, handle_review, audit_trail])
+
+
 async def main():
-    graph = EventGraph([generate_draft, request_approval, handle_review, audit_trail])
     checkpointer = MemorySaver()
     compiled = graph.compile(checkpointer=checkpointer)
 
