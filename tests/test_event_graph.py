@@ -1574,6 +1574,81 @@ def describe_EventGraph():
                 with pytest.raises(RuntimeError, match="max_rounds"):
                     graph.invoke(LoopEvent(n=0))
 
+    def describe_mermaid():
+
+        def it_shows_linear_chain_as_edges():
+            @on(Start)
+            def step1(event: Start) -> Middle:
+                return Middle(data=event.data)
+
+            @on(Middle)
+            def step2(event: Middle) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1, step2])
+            output = graph.mermaid()
+            assert "graph LR" in output
+            assert "Start -->|step1| Middle" in output
+            assert "Middle -->|step2| End" in output
+
+        def it_shows_branching_return_types():
+            class Good(Event):
+                pass
+
+            class Bad(Event):
+                pass
+
+            @on(Start)
+            def classify(event: Start) -> Good | Bad:
+                return Good()
+
+            graph = EventGraph([classify])
+            output = graph.mermaid()
+            assert "Start -->|classify| Good" in output
+            assert "Start -->|classify| Bad" in output
+
+        def it_lists_side_effect_handlers_in_footer():
+            @on(Start)
+            def side_effect(event: Start) -> None:
+                pass
+
+            @on(Start)
+            def producer(event: Start) -> End:
+                return End(result="ok")
+
+            graph = EventGraph([side_effect, producer])
+            output = graph.mermaid()
+            assert "%% Side-effect handlers: side_effect (Start)" in output
+            assert "Start -->|producer| End" in output
+
+        def it_shows_scatter_as_target():
+            @on(Start)
+            def split(event: Start) -> Scatter:
+                return Scatter([Middle(data="a")])
+
+            graph = EventGraph([split])
+            output = graph.mermaid()
+            assert "Start -->|split| Scatter" in output
+
+        def it_shows_question_mark_for_unannotated_handlers():
+            @on(Start)
+            def mystery(event: Start):
+                return End(result="ok")
+
+            graph = EventGraph([mystery])
+            output = graph.mermaid()
+            assert "Start -->|mystery| ?" in output
+
+        def it_shows_multi_subscription_edges():
+            @on(Start, Middle)
+            def handle_both(event: Event) -> End:
+                return End(result="ok")
+
+            graph = EventGraph([handle_both])
+            output = graph.mermaid()
+            assert "Start -->|handle_both| End" in output
+            assert "Middle -->|handle_both| End" in output
+
     def describe_construction_validation():
 
         def when_no_handlers():

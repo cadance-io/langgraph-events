@@ -170,6 +170,21 @@ for chunk in graph.stream(SeedEvent(...), stream_mode="updates"):
 
 `max_rounds` (default: 100) prevents infinite loops. `reducers` accepts an optional list of `Reducer` instances for incremental state channels.
 
+#### Visualizing the Event Flow
+
+`graph.mermaid()` returns a Mermaid flowchart showing how events correlate through handlers. Events are nodes, handler names are edge labels, and side-effect handlers (returning `None`) are listed in a footer comment.
+
+```python
+# Visualize the event correlation graph
+print(graph.mermaid())
+```
+
+```mermaid
+graph LR
+    MessageReceived -->|classify| MessageClassified
+    MessageClassified -->|respond| ReplyProduced
+```
+
 ### `EventLog`
 
 Immutable, ordered container returned by `invoke`/`ainvoke`. Handlers can also receive it as a second parameter.
@@ -372,31 +387,37 @@ The patterns below show how these building blocks compose into complete architec
 
 A handler subscribes to both the seed event and critique events (`@on(WriteRequest, Critique)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
 
-[`examples/reflection_loop.py`](examples/reflection_loop.py) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
+[`examples/reflection_loop.py`](examples/reflection_loop.py) · [event flow](examples/reflection_loop.graph.md) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
 
 ### ReAct Agent with Message Reducer
 
 Multi-subscription (`@on(UserMessageReceived, ToolsExecuted)`) creates the ReAct loop implicitly. The `message_reducer` maintains conversation history incrementally — handlers receive the accumulated message list as a parameter rather than reconstructing it from the event log.
 
-[`examples/react_agent.py`](examples/react_agent.py) — `MessageEvent`, `message_reducer`, `Auditable`
+[`examples/react_agent.py`](examples/react_agent.py) · [event flow](examples/react_agent.graph.md) — `MessageEvent`, `message_reducer`, `Auditable`
 
 ### Multi-Agent Supervisor
 
 A supervisor handler fires on the initial task and on specialist completions (`@on(TaskReceived, ResearchCompleted, CodeProduced)`). It uses tool-calling to make structured routing decisions. A custom `Reducer` projects events into a context channel that the supervisor reads incrementally.
 
-[`examples/supervisor.py`](examples/supervisor.py) — Custom `Reducer`, tool-calling routing, `Auditable`
+[`examples/supervisor.py`](examples/supervisor.py) · [event flow](examples/supervisor.graph.md) — Custom `Reducer`, tool-calling routing, `Auditable`
 
 ### Fan-Out / Fan-In (Map-Reduce)
 
 `Scatter` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
 
-[`examples/map_reduce.py`](examples/map_reduce.py) — `Scatter`, `EventLog.filter()`, gather pattern
+[`examples/map_reduce.py`](examples/map_reduce.py) · [event flow](examples/map_reduce.graph.md) — `Scatter`, `EventLog.filter()`, gather pattern
 
 ### Human-in-the-Loop Approval
 
 `Interrupted` pauses the graph for human input. `Resumed` carries the response back in. Combined with a revision event type, this creates an approval-with-feedback cycle. Requires a checkpointer.
 
-[`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) — `Interrupted`/`Resumed`, checkpointer, revision cycle
+[`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) · [event flow](examples/human_in_the_loop.graph.md) — `Interrupted`/`Resumed`, checkpointer, revision cycle
+
+### Content Pipeline (Halt + Streaming)
+
+`Halt` terminates the pipeline immediately for unsafe content. `stream_events()` yields events as they're produced, with optional `StreamFrame` reducer snapshots. No LLM dependency — runs with keyword rules.
+
+[`examples/content_pipeline.py`](examples/content_pipeline.py) · [event flow](examples/content_pipeline.graph.md) — `Halt`, `Reducer`, `stream_events`, `StreamFrame`
 
 ## API Reference
 
@@ -405,6 +426,7 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 | `Auditable`       | Base class | Marker class for auto-logged events             |
 | `Event`           | Base class | Subclass to define events (auto-frozen)         |
 | `EventGraph`      | Class      | Build and run the event-driven graph            |
+| `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `Halt`            | Event      | Signal immediate graph termination              |
 | `Interrupted`     | Event      | Pause graph for human input                     |
