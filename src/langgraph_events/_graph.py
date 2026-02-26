@@ -165,7 +165,7 @@ class EventGraph:
         """Return a Mermaid flowchart showing event correlation.
 
         Events are nodes, handlers are edge labels.
-        Seed events (no incoming edges) get a stadium shape and distinct fill.
+        Seed events (no incoming edges) get a thick entry edge.
         Typed ``Scatter[X]`` produces dashed edges; bare ``Scatter`` goes to a
         comment footer.  Side-effect handlers (-> None) are listed in a footer.
         If any handler produces ``Interrupted`` and any subscribes to
@@ -224,9 +224,9 @@ class EventGraph:
         # Seed events: sources that never appear as targets
         seed_events = sorted(all_sources - all_targets)
         if seed_events:
-            lines.append("    classDef seed fill:#dae8fc,stroke:#6c8ebf")
-            for seed in seed_events:
-                lines.append(f"    {seed}([{seed}]):::seed")
+            lines.append("    classDef entry fill:none,stroke:none,color:none")
+            for i, seed in enumerate(seed_events):
+                lines.append(f"    _e{i}_[ ]:::entry ==> {seed}")
 
         lines.extend(edge_lines)
 

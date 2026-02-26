@@ -3,8 +3,8 @@
 
 ```mermaid
 graph LR
-    classDef seed fill:#dae8fc,stroke:#6c8ebf
-    ContentRequested([ContentRequested]):::seed
+    classDef entry fill:none,stroke:none,color:none
+    _e0_[ ]:::entry ==> ContentRequested
     ContentRequested -->|generate_draft| DraftGenerated
     RevisionRequested -->|generate_draft| DraftGenerated
     DraftGenerated -->|request_approval| Interrupted

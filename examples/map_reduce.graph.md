@@ -3,8 +3,8 @@
 
 ```mermaid
 graph LR
-    classDef seed fill:#dae8fc,stroke:#6c8ebf
-    BatchReceived([BatchReceived]):::seed
+    classDef entry fill:none,stroke:none,color:none
+    _e0_[ ]:::entry ==> BatchReceived
     BatchReceived -.->|split_batch| DocDispatched
     DocDispatched -->|summarize_one| DocSummarized
     DocSummarized -->|gather_summaries| BatchSummarized

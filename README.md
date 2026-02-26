@@ -181,8 +181,8 @@ print(graph.mermaid())
 
 ```mermaid
 graph LR
-    classDef seed fill:#dae8fc,stroke:#6c8ebf
-    MessageReceived([MessageReceived]):::seed
+    classDef entry fill:none,stroke:none,color:none
+    _e0_[ ]:::entry ==> MessageReceived
     MessageReceived -->|classify| MessageClassified
     MessageClassified -->|respond| ReplyProduced
 ```

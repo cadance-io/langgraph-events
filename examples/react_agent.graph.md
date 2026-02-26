@@ -3,8 +3,8 @@
 
 ```mermaid
 graph LR
-    classDef seed fill:#dae8fc,stroke:#6c8ebf
-    UserMessageReceived([UserMessageReceived]):::seed
+    classDef entry fill:none,stroke:none,color:none
+    _e0_[ ]:::entry ==> UserMessageReceived
     UserMessageReceived -->|call_llm| LLMResponded
     ToolsExecuted -->|call_llm| LLMResponded
     LLMResponded -->|execute_tools| ToolsExecuted

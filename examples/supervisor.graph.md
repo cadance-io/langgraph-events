@@ -3,8 +3,8 @@
 
 ```mermaid
 graph LR
-    classDef seed fill:#dae8fc,stroke:#6c8ebf
-    TaskReceived([TaskReceived]):::seed
+    classDef entry fill:none,stroke:none,color:none
+    _e0_[ ]:::entry ==> TaskReceived
     TaskReceived -->|supervisor| ResearchDispatched
     TaskReceived -->|supervisor| CodeDispatched
     TaskReceived -->|supervisor| ResultFinalized

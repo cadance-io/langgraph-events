@@ -1665,7 +1665,7 @@ def describe_EventGraph():
             assert "Start -->|handle_both| End" in output
             assert "Middle -->|handle_both| End" in output
 
-        def it_styles_seed_events_with_stadium_shape():
+        def it_marks_seed_events_with_thick_entry_edge():
             @on(Start)
             def step1(event: Start) -> Middle:
                 return Middle(data=event.data)
@@ -1676,10 +1676,10 @@ def describe_EventGraph():
 
             graph = EventGraph([step1, step2])
             output = graph.mermaid()
-            assert "classDef seed fill:#dae8fc,stroke:#6c8ebf" in output
-            assert "Start([Start]):::seed" in output
+            assert "classDef entry fill:none,stroke:none,color:none" in output
+            assert "_e0_[ ]:::entry ==> Start" in output
             # Middle is a target, not a seed
-            assert "Middle([Middle]):::seed" not in output
+            assert "==> Middle" not in output
 
         def it_shows_typed_scatter_as_dashed_edge():
             @on(Start)
