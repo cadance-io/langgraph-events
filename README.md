@@ -2,7 +2,7 @@
 
 Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
-> **Experimental (v0.1.0)** — This library is under active development. The API may change without notice. Not recommended for production use.
+> **Experimental (v0.1.1)** — This library is under active development. The API may change without notice. Not recommended for production use.
 
 ## What is this?
 
@@ -101,11 +101,9 @@ Events support **inheritance**. A handler subscribed to a parent type fires for 
 ```python
 from langgraph_events import Auditable, on
 
-@dataclass(frozen=True)
 class OrderPlaced(Auditable):
     order_id: str
 
-@dataclass(frozen=True)
 class OrderShipped(Auditable):
     order_id: str
 
@@ -232,7 +230,6 @@ def gather(event: WorkDone, log: EventLog) -> BatchResult | None:
 Marker base class for events that should be auto-logged. Subclass it and subscribe a single `@on(Auditable)` handler to capture every marked event automatically. The built-in `trail()` method returns a compact summary of the event's fields.
 
 ```python
-@dataclass(frozen=True)
 class TaskStarted(Auditable):
     name: str
 
@@ -249,11 +246,9 @@ Base class for events that wrap LangChain `BaseMessage` objects. Declare a `mess
 ```python
 from langchain_core.messages import HumanMessage, AIMessage
 
-@dataclass(frozen=True)
 class UserMessageReceived(MessageEvent, Auditable):
     message: HumanMessage
 
-@dataclass(frozen=True)
 class LLMResponded(MessageEvent, Auditable):
     message: AIMessage
 ```

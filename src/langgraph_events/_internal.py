@@ -87,27 +87,28 @@ def make_seed_node(
     reds = reducers or {}
 
     def seed(state: StateDict) -> StateDict:
+        prev_cursor = state.get("_cursor", 0)
+        all_events = state["events"]
+        new_events = all_events[prev_cursor:]
+
         result: dict[str, Any] = {
-            "_cursor": len(state["events"]),
-            "_pending": list(state["events"]),
+            "_cursor": len(all_events),
+            "_pending": new_events,
             "_round": 0,
         }
         if reds:
-            prev_cursor = state.get("_cursor", 0)
             if prev_cursor == 0:
                 # First run — initialize with default + seed events
                 for name, r in reds.items():
                     values = list(r.default)
-                    values.extend(_validate_and_collect(name, r, state["events"]))
+                    values.extend(_validate_and_collect(name, r, new_events))
                     result[f"_r_{name}"] = values
-            else:
+            elif new_events:
                 # Subsequent run (checkpointer) — only process new events
-                new_events = state["events"][prev_cursor:]
-                if new_events:
-                    for name, r in reds.items():
-                        contribs = _validate_and_collect(name, r, new_events)
-                        if contribs:
-                            result[f"_r_{name}"] = contribs
+                for name, r in reds.items():
+                    contribs = _validate_and_collect(name, r, new_events)
+                    if contribs:
+                        result[f"_r_{name}"] = contribs
         return result
 
     return seed

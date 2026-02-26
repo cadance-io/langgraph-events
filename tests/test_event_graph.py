@@ -1202,6 +1202,54 @@ def describe_EventGraph():
                 state = compiled.get_state(config)
                 assert len(state.values["events"]) == 2
 
+            def it_only_processes_new_events_on_re_invoke():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                seen: list[list[str]] = []
+
+                @on(Start)
+                def step(event: Start) -> End:
+                    seen.append([event.data])
+                    return End(result=event.data)
+
+                graph = EventGraph([step])
+                checkpointer = MemorySaver()
+                compiled = graph.compile(checkpointer=checkpointer)
+                config = {"configurable": {"thread_id": "re-invoke-1"}}
+
+                # Run 1
+                compiled.invoke({"events": [Start(data="a")]}, config)
+                assert len(seen) == 1
+                assert seen[-1] == ["a"]
+
+                # Run 2 — same thread, only Start("b") should be pending
+                compiled.invoke({"events": [Start(data="b")]}, config)
+                assert len(seen) == 2
+                assert seen[-1] == ["b"]
+
+            def it_handles_three_sequential_re_invokes():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                @on(Start)
+                def step(event: Start) -> End:
+                    return End(result=event.data)
+
+                graph = EventGraph([step])
+                checkpointer = MemorySaver()
+                compiled = graph.compile(checkpointer=checkpointer)
+                config = {"configurable": {"thread_id": "re-invoke-3"}}
+
+                compiled.invoke({"events": [Start(data="first")]}, config)
+                compiled.invoke({"events": [Start(data="second")]}, config)
+                result = compiled.invoke({"events": [Start(data="third")]}, config)
+
+                # Final result only reflects third run's input
+                assert result["events"][-1] == End(result="third")
+
+                # Full state has all 6 events (3 Start + 3 End)
+                state = compiled.get_state(config)
+                assert len(state.values["events"]) == 6
+
         def it_returns_cached_instance_on_second_call():
             @on(Start)
             def step(event: Start) -> End:
