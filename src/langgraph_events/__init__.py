@@ -11,7 +11,7 @@ from langgraph_events._event import (
     SystemPromptSet,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._graph import EventGraph, StreamFrame
+from langgraph_events._graph import EventGraph, GraphState, StreamFrame
 from langgraph_events._handler import on
 from langgraph_events._reducer import Reducer, message_reducer
 from langgraph_events._types import (
@@ -23,6 +23,7 @@ __all__ = [
     "Event",
     "EventGraph",
     "EventLog",
+    "GraphState",
     "Halted",
     "Interrupted",
     "MessageEvent",

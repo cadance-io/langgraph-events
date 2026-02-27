@@ -564,7 +564,6 @@ def describe_EventGraph():
 
         def it_pauses_and_resumes_with_human_input():
             from langgraph.checkpoint.memory import MemorySaver
-            from langgraph.types import Command
 
             @on(Start)
             def need_input(event: Start) -> Interrupted:
@@ -577,20 +576,18 @@ def describe_EventGraph():
             def handle_resume(event: Resumed) -> End:
                 return End(result=f"confirmed:{event.value}")
 
-            graph = EventGraph([need_input, handle_resume])
-            checkpointer = MemorySaver()
-            compiled = graph.compile(checkpointer=checkpointer)
+            graph = EventGraph(
+                [need_input, handle_resume],
+                checkpointer=MemorySaver(),
+            )
 
             config = {"configurable": {"thread_id": "interrupt-test"}}
-            compiled.invoke({"events": [Start(data="test")]}, config)
-            state = compiled.get_state(config)
-            assert state.next
+            graph.invoke(Start(data="test"), config=config)
+            state = graph.get_state(config)
+            assert state.is_interrupted
 
-            result = compiled.invoke(Command(resume="yes"), config)
-            events = result["events"]
-            end_events = [e for e in events if isinstance(e, End)]
-            assert len(end_events) == 1
-            assert end_events[0].result == "confirmed:yes"
+            log = graph.resume("yes", config=config)
+            assert log.latest(End) == End(result="confirmed:yes")
 
     def describe_scatter():
 
@@ -996,18 +993,14 @@ def describe_EventGraph():
                     def step(event: MsgIn, texts: list) -> Done:
                         return Done(result=",".join(texts))
 
-                    graph = EventGraph([step], reducers=[r])
-                    checkpointer = MemorySaver()
-                    compiled = graph.compile(checkpointer=checkpointer)
+                    graph = EventGraph([step], reducers=[r], checkpointer=MemorySaver())
 
                     config = {"configurable": {"thread_id": "reducer-test"}}
-                    result = compiled.invoke({"events": [MsgIn(text="a")]}, config)
-                    end_events = [e for e in result["events"] if isinstance(e, Done)]
-                    assert end_events[-1].result == "init,a"
+                    log = graph.invoke(MsgIn(text="a"), config=config)
+                    assert log.latest(Done).result == "init,a"
 
-                    result = compiled.invoke({"events": [MsgIn(text="b")]}, config)
-                    end_events = [e for e in result["events"] if isinstance(e, Done)]
-                    assert end_events[-1].result == "init,a,b"
+                    log = graph.invoke(MsgIn(text="b"), config=config)
+                    assert log.latest(Done).result == "init,a,b"
 
             def it_supports_custom_reducer_function():
                 def always_keep_last_n(left: list, right: list) -> list:
@@ -1180,7 +1173,17 @@ def describe_EventGraph():
                         prompt_content="You are helpful"
                     )
 
-    def describe_compile():
+    def describe_compiled():
+
+        def it_returns_same_instance():
+            @on(Start)
+            def step(event: Start) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step])
+            first = graph.compiled
+            second = graph.compiled
+            assert first is second
 
         def when_checkpointer():
 
@@ -1191,16 +1194,14 @@ def describe_EventGraph():
                 def step(event: Start) -> End:
                     return End(result=event.data)
 
-                graph = EventGraph([step])
-                checkpointer = MemorySaver()
-                compiled = graph.compile(checkpointer=checkpointer)
+                graph = EventGraph([step], checkpointer=MemorySaver())
 
                 config = {"configurable": {"thread_id": "test-1"}}
-                result = compiled.invoke({"events": [Start(data="hello")]}, config)
-                assert result["events"][-1] == End(result="hello")
+                log = graph.invoke(Start(data="hello"), config=config)
+                assert log[-1] == End(result="hello")
 
-                state = compiled.get_state(config)
-                assert len(state.values["events"]) == 2
+                state = graph.get_state(config)
+                assert len(state.events) == 2
 
             def it_only_processes_new_events_on_re_invoke():
                 from langgraph.checkpoint.memory import MemorySaver
@@ -1212,18 +1213,16 @@ def describe_EventGraph():
                     seen.append([event.data])
                     return End(result=event.data)
 
-                graph = EventGraph([step])
-                checkpointer = MemorySaver()
-                compiled = graph.compile(checkpointer=checkpointer)
+                graph = EventGraph([step], checkpointer=MemorySaver())
                 config = {"configurable": {"thread_id": "re-invoke-1"}}
 
                 # Run 1
-                compiled.invoke({"events": [Start(data="a")]}, config)
+                graph.invoke(Start(data="a"), config=config)
                 assert len(seen) == 1
                 assert seen[-1] == ["a"]
 
                 # Run 2 — same thread, only Start("b") should be pending
-                compiled.invoke({"events": [Start(data="b")]}, config)
+                graph.invoke(Start(data="b"), config=config)
                 assert len(seen) == 2
                 assert seen[-1] == ["b"]
 
@@ -1234,21 +1233,19 @@ def describe_EventGraph():
                 def step(event: Start) -> End:
                     return End(result=event.data)
 
-                graph = EventGraph([step])
-                checkpointer = MemorySaver()
-                compiled = graph.compile(checkpointer=checkpointer)
+                graph = EventGraph([step], checkpointer=MemorySaver())
                 config = {"configurable": {"thread_id": "re-invoke-3"}}
 
-                compiled.invoke({"events": [Start(data="first")]}, config)
-                compiled.invoke({"events": [Start(data="second")]}, config)
-                result = compiled.invoke({"events": [Start(data="third")]}, config)
+                graph.invoke(Start(data="first"), config=config)
+                graph.invoke(Start(data="second"), config=config)
+                log = graph.invoke(Start(data="third"), config=config)
 
                 # Final result only reflects third run's input
-                assert result["events"][-1] == End(result="third")
+                assert log[-1] == End(result="third")
 
                 # Full state has all 6 events (3 Start + 3 End)
-                state = compiled.get_state(config)
-                assert len(state.values["events"]) == 6
+                state = graph.get_state(config)
+                assert len(state.events) == 6
 
         def it_returns_cached_instance_on_second_call():
             @on(Start)
@@ -1256,39 +1253,9 @@ def describe_EventGraph():
                 return End(result=event.data)
 
             graph = EventGraph([step])
-            first = graph.compile()
-            second = graph.compile()
+            first = graph.compiled
+            second = graph.compiled
             assert first is second
-
-    def describe_stream():
-
-        def it_yields_update_chunks():
-            @on(Start)
-            def step1(event: Start) -> Middle:
-                return Middle(data=event.data)
-
-            @on(Middle)
-            def step2(event: Middle) -> End:
-                return End(result=event.data)
-
-            graph = EventGraph([step1, step2])
-            chunks = list(graph.stream(Start(data="hi"), stream_mode="updates"))
-            assert len(chunks) > 0
-
-        async def it_yields_chunks_via_astream():
-            @on(Start)
-            def step1(event: Start) -> Middle:
-                return Middle(data=event.data)
-
-            @on(Middle)
-            def step2(event: Middle) -> End:
-                return End(result=event.data)
-
-            graph = EventGraph([step1, step2])
-            chunks = []
-            async for chunk in graph.astream(Start(data="hi"), stream_mode="updates"):
-                chunks.append(chunk)
-            assert len(chunks) > 0
 
     def describe_stream_events():
 
@@ -1573,6 +1540,45 @@ def describe_EventGraph():
                 graph = EventGraph([looper], max_rounds=5)
                 with pytest.raises(RuntimeError, match="max_rounds"):
                     graph.invoke(LoopEvent(n=0))
+
+            def it_resets_round_counter_on_resume():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                @on(Start)
+                def ask(event: Start) -> Interrupted:
+                    return Interrupted(prompt="approve?")
+
+                @on(Resumed)
+                def after_resume(event: Resumed) -> Interrupted | End:
+                    step = event.interrupted.payload.get("step", 0)  # type: ignore[union-attr]
+                    if step >= 2:
+                        return End(result="done")
+                    return Interrupted(prompt="again?", payload={"step": step + 1})
+
+                # max_rounds=2 would be exceeded without reset:
+                # Run 1 uses round 1 (seed→ask), then pauses.
+                # Run 2: resume resets to 1, after_resume uses round 2,
+                #   then pauses again — OK with reset but would be
+                #   round 3 without it.
+                graph = EventGraph(
+                    [ask, after_resume],
+                    max_rounds=2,
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "resume-rounds"}}
+
+                # Run 1: Start → Interrupted (pause)
+                graph.invoke(Start(data="go"), config=config)
+
+                # Run 2: resume → Interrupted (round resets on Resumed)
+                graph.resume("ok", config=config)
+
+                # Run 3: resume → Interrupted (round resets again)
+                graph.resume("ok", config=config)
+
+                # Run 4: resume → End (round resets, step=2 → done)
+                log = graph.resume("ok", config=config)
+                assert log.latest(End) is not None
 
     def describe_mermaid():
 
