@@ -89,7 +89,7 @@ def describe_EventGraph():
             @pytest.fixture
             def branching_graph():
                 @on(Input)
-                def route(event: Input) -> Event | None:
+                def route(event: Input) -> FastPath | SlowPath | None:
                     if event.kind == "fast":
                         return FastPath(data=event.data)
                     return SlowPath(data=event.data)
@@ -1543,7 +1543,7 @@ def describe_EventGraph():
                     n: int = 0
 
                 @on(LoopEvent)
-                def looper(event: LoopEvent) -> Event:
+                def looper(event: LoopEvent) -> LoopEvent:
                     return LoopEvent(n=event.n + 1)
 
                 graph = EventGraph([looper], max_rounds=5)
@@ -1741,3 +1741,32 @@ def describe_EventGraph():
                 output = graph.mermaid()
                 assert "-->|handler|" in output
                 assert "-->|handler_2|" in output
+
+        def when_base_event_return_type():
+
+            def it_rejects_base_event_return_type():
+                @on(Start)
+                def handler(event: Start) -> Event:
+                    return Middle(data=event.data)
+
+                with pytest.raises(ValueError, match="base 'Event'"):
+                    EventGraph([handler])
+
+            def it_rejects_event_in_union_return_type():
+                @on(Start)
+                def handler(event: Start) -> Event | None:
+                    return Middle(data=event.data)
+
+                with pytest.raises(ValueError, match="base 'Event'"):
+                    EventGraph([handler])
+
+            def it_allows_event_subclass_return_type():
+                class Auditable(Event):
+                    data: str = ""
+
+                @on(Start)
+                def handler(event: Start) -> Auditable:
+                    return Auditable(data=event.data)
+
+                # Should not raise
+                EventGraph([handler])
