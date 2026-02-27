@@ -589,6 +589,15 @@ def describe_EventGraph():
             log = graph.resume("yes", config=config)
             assert log.latest(End) == End(result="confirmed:yes")
 
+        def it_raises_without_checkpointer():
+            @on(Start)
+            def need_input(event: Start) -> Interrupted:
+                return Interrupted(prompt="confirm?")
+
+            graph = EventGraph([need_input])
+            with pytest.raises(ValueError, match=r"resume.*requires a checkpointer"):
+                graph.resume("yes")
+
     def describe_scatter():
 
         class Batch(Event):
@@ -1722,3 +1731,13 @@ def describe_EventGraph():
                 assert len(names) == 2
                 assert names[0] != names[1]
                 assert "_2" in names[1]
+
+            def it_uses_deduped_names_in_mermaid_labels():
+                @on(Start)
+                def handler(event: Start) -> Middle:
+                    return Middle(data=event.data)
+
+                graph = EventGraph([handler, handler])
+                output = graph.mermaid()
+                assert "-->|handler|" in output
+                assert "-->|handler_2|" in output
