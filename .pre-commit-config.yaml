@@ -19,6 +19,14 @@ repos:
         pass_filenames: false
         require_serial: true
 
+      - id: mermaid-graphs
+        name: mermaid-graphs
+        language: system
+        entry: uv run python scripts/generate_mermaid.py
+        pass_filenames: false
+        require_serial: true
+        files: ^examples/.*\.py$
+
       - id: pytest
         name: pytest
         language: system

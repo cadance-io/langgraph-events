@@ -82,7 +82,7 @@ seed event
 1. A **seed event** enters the graph.
 2. The **router** collects new events, then **dispatch** uses `isinstance` to match each pending event to subscribed handlers.
 3. Matched handlers run, emit new events.
-4. The loop repeats until no handler matches or a `Halt` event appears.
+4. The loop repeats until no handler matches or a `Halted` event appears.
 
 ## Key Concepts
 
@@ -170,16 +170,33 @@ for chunk in graph.stream(SeedEvent(...), stream_mode="updates"):
 
 `max_rounds` (default: 100) prevents infinite loops. `reducers` accepts an optional list of `Reducer` instances for incremental state channels.
 
+#### Visualizing the Event Flow
+
+`graph.mermaid()` returns a Mermaid flowchart showing how events correlate through handlers. Events are nodes, handler names are edge labels, and side-effect handlers (returning `None`) are listed in a footer comment.
+
+```python
+# Visualize the event correlation graph
+print(graph.mermaid())
+```
+
+```mermaid
+graph LR
+    classDef entry fill:none,stroke:none,color:none
+    _e0_[ ]:::entry ==> MessageReceived
+    MessageReceived -->|classify| MessageClassified
+    MessageClassified -->|respond| ReplyProduced
+```
+
 ### `EventLog`
 
 Immutable, ordered container returned by `invoke`/`ainvoke`. Handlers can also receive it as a second parameter.
 
 ```python
-@on(Draft)
-def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
-    request = log.latest(WriteRequest)   # most recent event of this type
-    all_drafts = log.filter(Draft)       # all events matching this type
-    if log.has(Critique):                # boolean check
+@on(DraftProduced)
+def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDraftProduced:
+    request = log.latest(WriteRequested)        # most recent event of this type
+    all_drafts = log.filter(DraftProduced)      # all events matching this type
+    if log.has(CritiqueReceived):               # boolean check
         ...
 ```
 
@@ -191,25 +208,25 @@ def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
 | `len(log)`      | `int`      | Total event count                    |
 | `log[i]`        | `Event`    | Index or slice access                |
 
-### `Halt`
+### `Halted`
 
-Return a `Halt` event from any handler to immediately stop the graph. No further handlers are dispatched.
+Return a `Halted` event from any handler to immediately stop the graph. No further handlers are dispatched.
 
 ```python
 @on(Classified)
-def guard(event: Classified) -> Reply | Halt:
+def guard(event: Classified) -> Reply | Halted:
     if event.label == "blocked":
-        return Halt(reason="Content policy violation")
+        return Halted(reason="Content policy violation")
     return Reply(text="OK")
 ```
 
 ### `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan-out into multiple events. Each becomes a separate pending event, dispatched in the next round.
+Return `Scatter([event1, event2, ...])` to fan-out into multiple events. Each becomes a separate pending event, dispatched in the next round. Use `Scatter[WorkItem]` to annotate the produced type — this renders as a dashed edge in `mermaid()` diagrams.
 
 ```python
 @on(Batch)
-def split(event: Batch) -> Scatter:
+def split(event: Batch) -> Scatter[WorkItem]:
     return Scatter([WorkItem(item=i) for i in event.items])
 
 @on(WorkItem)
@@ -370,33 +387,39 @@ The patterns below show how these building blocks compose into complete architec
 
 ### Reflection Loop (Generate / Critique / Revise)
 
-A handler subscribes to both the seed event and critique events (`@on(WriteRequest, Critique)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
+A handler subscribes to both the seed event and critique events (`@on(WriteRequested, CritiqueReceived)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
 
-[`examples/reflection_loop.py`](examples/reflection_loop.py) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
+[`examples/reflection_loop.py`](examples/reflection_loop.py) · [event flow](examples/reflection_loop.graph.md) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
 
 ### ReAct Agent with Message Reducer
 
 Multi-subscription (`@on(UserMessageReceived, ToolsExecuted)`) creates the ReAct loop implicitly. The `message_reducer` maintains conversation history incrementally — handlers receive the accumulated message list as a parameter rather than reconstructing it from the event log.
 
-[`examples/react_agent.py`](examples/react_agent.py) — `MessageEvent`, `message_reducer`, `Auditable`
+[`examples/react_agent.py`](examples/react_agent.py) · [event flow](examples/react_agent.graph.md) — `MessageEvent`, `message_reducer`, `Auditable`
 
 ### Multi-Agent Supervisor
 
 A supervisor handler fires on the initial task and on specialist completions (`@on(TaskReceived, ResearchCompleted, CodeProduced)`). It uses tool-calling to make structured routing decisions. A custom `Reducer` projects events into a context channel that the supervisor reads incrementally.
 
-[`examples/supervisor.py`](examples/supervisor.py) — Custom `Reducer`, tool-calling routing, `Auditable`
+[`examples/supervisor.py`](examples/supervisor.py) · [event flow](examples/supervisor.graph.md) — Custom `Reducer`, tool-calling routing, `Auditable`
 
 ### Fan-Out / Fan-In (Map-Reduce)
 
-`Scatter` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
+`Scatter[WorkItem]` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
 
-[`examples/map_reduce.py`](examples/map_reduce.py) — `Scatter`, `EventLog.filter()`, gather pattern
+[`examples/map_reduce.py`](examples/map_reduce.py) · [event flow](examples/map_reduce.graph.md) — `Scatter`, `EventLog.filter()`, gather pattern
 
 ### Human-in-the-Loop Approval
 
 `Interrupted` pauses the graph for human input. `Resumed` carries the response back in. Combined with a revision event type, this creates an approval-with-feedback cycle. Requires a checkpointer.
 
-[`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) — `Interrupted`/`Resumed`, checkpointer, revision cycle
+[`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) · [event flow](examples/human_in_the_loop.graph.md) — `Interrupted`/`Resumed`, checkpointer, revision cycle
+
+### Content Pipeline (Halted + Streaming)
+
+`Halted` terminates the pipeline immediately for unsafe content. `stream_events()` yields events as they're produced, with optional `StreamFrame` reducer snapshots. No LLM dependency — runs with keyword rules.
+
+[`examples/content_pipeline.py`](examples/content_pipeline.py) · [event flow](examples/content_pipeline.graph.md) — `Halted`, `Reducer`, `stream_events`, `StreamFrame`
 
 ## API Reference
 
@@ -405,15 +428,16 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 | `Auditable`       | Base class | Marker class for auto-logged events             |
 | `Event`           | Base class | Subclass to define events (auto-frozen)         |
 | `EventGraph`      | Class      | Build and run the event-driven graph            |
+| `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `EventLog`        | Class      | Immutable query container over events           |
-| `Halt`            | Event      | Signal immediate graph termination              |
+| `Halted`          | Event      | Signal immediate graph termination              |
 | `Interrupted`     | Event      | Pause graph for human input                     |
 | `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `Resumed`         | Event      | Created on resume with human's response         |
-| `Scatter`         | Class      | Fan-out into multiple events (map-reduce)       |
+| `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 | `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 

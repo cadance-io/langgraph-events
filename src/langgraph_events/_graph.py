@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from langgraph_events._event import Event, Interrupted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta, extract_handler_meta
 from langgraph_events._internal import (
@@ -23,8 +25,62 @@ if TYPE_CHECKING:
 
     from langgraph.graph.state import CompiledStateGraph
 
-    from langgraph_events._event import Event
     from langgraph_events._reducer import Reducer
+
+
+def _parse_return_types(
+    fn: Callable[..., Any],
+) -> tuple[list[type[Event]], list[type[Event]], bool, bool, bool]:
+    """Parse handler return annotation.
+
+    Returns a 5-tuple:
+    ``(event_types, scatter_types, has_scatter, has_interrupted, has_annotation)``.
+
+    Returns:
+        event_types: Event subclasses the handler can produce (solid edges).
+        scatter_types: Event subclasses produced via Scatter (dashed edges).
+        has_scatter: Whether the handler returns bare (untyped) Scatter.
+        has_interrupted: Whether the handler returns Interrupted.
+        has_annotation: Whether the handler has a return type annotation at all.
+    """
+    try:
+        hints = typing.get_type_hints(fn)
+    except Exception:
+        hints = {}
+
+    return_hint = hints.get("return")
+    if return_hint is None:
+        return [], [], False, False, False
+
+    # If the top-level hint is Scatter[X], wrap it so the loop sees Scatter[X]
+    # as a single candidate (otherwise get_args returns the type params).
+    origin = typing.get_origin(return_hint)
+    if origin is Scatter:
+        candidates = (return_hint,)
+    else:
+        args = typing.get_args(return_hint)
+        candidates = args if args else (return_hint,)
+
+    event_types: list[type[Event]] = []
+    scatter_types: list[type[Event]] = []
+    has_scatter = False
+    has_interrupted = False
+    for arg in candidates:
+        if arg is type(None):
+            continue
+        if arg is Scatter:
+            has_scatter = True
+        elif typing.get_origin(arg) is Scatter:
+            # Parameterized Scatter[X] — extract event types
+            for scatter_arg in typing.get_args(arg):
+                if isinstance(scatter_arg, type) and issubclass(scatter_arg, Event):
+                    scatter_types.append(scatter_arg)
+        elif isinstance(arg, type) and issubclass(arg, Event):
+            if issubclass(arg, Interrupted):
+                has_interrupted = True
+            event_types.append(arg)
+
+    return event_types, scatter_types, has_scatter, has_interrupted, True
 
 
 class StreamFrame(NamedTuple):
@@ -91,6 +147,95 @@ class EventGraph:
             else:
                 seen_names[meta.name] = 1
             self._handler_metas.append(meta)
+
+    @staticmethod
+    def _mermaid_footer_entry(
+        meta: HandlerMeta, has_scatter: bool, solid: list[str], dashed: list[str]
+    ) -> tuple[str, str] | None:
+        """Return ``(kind, entry)`` if handler belongs in footer, else None."""
+        if has_scatter and not solid and not dashed:
+            subscribed = ", ".join(t.__name__ for t in meta.event_types)
+            return "scatter", f"{meta.fn.__name__} ({subscribed})"
+        if not solid and not dashed:
+            subscribed = ", ".join(t.__name__ for t in meta.event_types)
+            return "side_effect", f"{meta.fn.__name__} ({subscribed})"
+        return None
+
+    def mermaid(self) -> str:  # noqa: PLR0912
+        """Return a Mermaid flowchart showing event correlation.
+
+        Events are nodes, handlers are edge labels.
+        Seed events (no incoming edges) get a thick entry edge.
+        Typed ``Scatter[X]`` produces dashed edges; bare ``Scatter`` goes to a
+        comment footer.  Side-effect handlers (-> None) are listed in a footer.
+        If any handler produces ``Interrupted`` and any subscribes to
+        ``Resumed``, a dashed framework edge connects them.
+        """
+        lines = ["graph LR"]
+        edge_lines: list[str] = []
+        side_effects: list[str] = []
+        scatter_handlers: list[str] = []
+        any_produces_interrupted = False
+        any_subscribes_resumed = False
+        all_sources: set[str] = set()
+        all_targets: set[str] = set()
+
+        for meta in self._handler_metas:
+            event_types, scatter_types, has_scatter, has_interrupted, has_annotation = (
+                _parse_return_types(meta.fn)
+            )
+            label = meta.fn.__name__
+
+            if has_interrupted:
+                any_produces_interrupted = True
+            if any(issubclass(t, Resumed) for t in meta.event_types):
+                any_subscribes_resumed = True
+
+            solid_targets = [t.__name__ for t in event_types]
+            dashed_targets = [t.__name__ for t in scatter_types]
+            if not has_annotation:
+                solid_targets.append("?")
+
+            footer = self._mermaid_footer_entry(
+                meta, has_scatter, solid_targets, dashed_targets
+            )
+            if footer is not None:
+                (scatter_handlers if footer[0] == "scatter" else side_effects).append(
+                    footer[1]
+                )
+                continue
+
+            for src_type in meta.event_types:
+                src = src_type.__name__
+                all_sources.add(src)
+                for target in solid_targets:
+                    all_targets.add(target)
+                    edge_lines.append(f"    {src} -->|{label}| {target}")
+                for target in dashed_targets:
+                    all_targets.add(target)
+                    edge_lines.append(f"    {src} -.->|{label}| {target}")
+
+        if any_produces_interrupted and any_subscribes_resumed:
+            edge_lines.append("    Interrupted -.-> Resumed")
+            all_sources.add("Interrupted")
+            all_targets.add("Interrupted")
+            all_targets.add("Resumed")
+
+        # Seed events: sources that never appear as targets
+        seed_events = sorted(all_sources - all_targets)
+        if seed_events:
+            lines.append("    classDef entry fill:none,stroke:none,color:none")
+            for i, seed in enumerate(seed_events):
+                lines.append(f"    _e{i}_[ ]:::entry ==> {seed}")
+
+        lines.extend(edge_lines)
+
+        if scatter_handlers:
+            lines.append(f"%% Scatter handlers: {', '.join(scatter_handlers)}")
+        if side_effects:
+            lines.append(f"%% Side-effect handlers: {', '.join(side_effects)}")
+
+        return "\n".join(lines)
 
     def compile(
         self,

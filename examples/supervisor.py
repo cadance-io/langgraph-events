@@ -202,12 +202,13 @@ async def coder(event: CodeDispatched) -> CodeProduced:
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    graph = EventGraph(
-        [supervisor, researcher, coder, audit_trail],
-        reducers=[context_reducer],
-    )
+graph = EventGraph(
+    [supervisor, researcher, coder, audit_trail],
+    reducers=[context_reducer],
+)
 
+
+async def main():
     task = "Research what FastAPI is, then write a simple hello world API endpoint."
     print(f"Task: {task}\n")
     print("--- Event Flow ---")

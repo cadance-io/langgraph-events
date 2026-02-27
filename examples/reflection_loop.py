@@ -1,13 +1,13 @@
 """Reflection Loop — langgraph-events demo.
 
 Demonstrates the autonomous generate/critique/revise pattern using
-multi-subscription handlers. The `@on(WriteRequest, Critique)` pattern
+multi-subscription handlers. The `@on(WriteRequested, CritiqueReceived)` pattern
 creates the revision cycle implicitly — the generate handler fires on
 both the initial request and on critique feedback, looping until a
 quality threshold or revision cap is reached.
 
 Uses `EventLog.latest()` for lookback to enforce a revision cap,
-and union return types (`Critique | FinalDraft`) to branch the flow.
+and union return types (`CritiqueReceived | FinalDraftProduced`) to branch the flow.
 
 Also demonstrates the **Auditable trait pattern**: events inherit from a marker
 class, and a single `@on(Auditable)` handler auto-logs every marked event as
@@ -32,22 +32,22 @@ from langgraph_events import Auditable, Event, EventGraph, EventLog, on
 # ---------------------------------------------------------------------------
 
 
-class WriteRequest(Auditable):
+class WriteRequested(Auditable):
     topic: str = ""
     max_revisions: int = 3
 
 
-class Draft(Auditable):
+class DraftProduced(Auditable):
     content: str = ""
     revision: int = 0
 
 
-class Critique(Auditable):
+class CritiqueReceived(Auditable):
     feedback: str = ""
     revision: int = 0
 
 
-class FinalDraft(Auditable):
+class FinalDraftProduced(Auditable):
     content: str = ""
 
 
@@ -69,15 +69,15 @@ def audit_trail(event: Auditable) -> None:
     print(f"  {event.trail()}")
 
 
-@on(WriteRequest, Critique)
-async def generate(event: Event, log: EventLog) -> Draft:
+@on(WriteRequested, CritiqueReceived)
+async def generate(event: Event, log: EventLog) -> DraftProduced:
     """Generate or revise a draft.
 
-    Fires on both WriteRequest (initial generation) and Critique
+    Fires on both WriteRequested (initial generation) and CritiqueReceived
     (revision based on feedback), creating the revision cycle automatically.
     """
-    if isinstance(event, Critique):
-        prev_draft = log.latest(Draft)
+    if isinstance(event, CritiqueReceived):
+        prev_draft = log.latest(DraftProduced)
         messages = [
             SystemMessage(
                 content=(
@@ -107,19 +107,21 @@ async def generate(event: Event, log: EventLog) -> Draft:
         revision = 0
 
     response = await llm.ainvoke(messages)
-    return Draft(content=response.content, revision=revision)
+    return DraftProduced(content=response.content, revision=revision)
 
 
-@on(Draft)
-async def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
+@on(DraftProduced)
+async def evaluate(
+    event: DraftProduced, log: EventLog
+) -> CritiqueReceived | FinalDraftProduced:
     """Evaluate a draft — either critique it or accept it as final.
 
-    Uses EventLog.latest() to look back at the original WriteRequest
+    Uses EventLog.latest() to look back at the original WriteRequested
     for the revision cap.
     """
-    request = log.latest(WriteRequest)
+    request = log.latest(WriteRequested)
     if event.revision >= request.max_revisions:
-        return FinalDraft(content=event.content)
+        return FinalDraftProduced(content=event.content)
 
     messages = [
         SystemMessage(
@@ -132,7 +134,7 @@ async def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
         HumanMessage(content=event.content),
     ]
     response = await llm.ainvoke(messages)
-    return Critique(feedback=response.content, revision=event.revision)
+    return CritiqueReceived(feedback=response.content, revision=event.revision)
 
 
 # ---------------------------------------------------------------------------
@@ -140,21 +142,22 @@ async def evaluate(event: Draft, log: EventLog) -> Critique | FinalDraft:
 # ---------------------------------------------------------------------------
 
 
-async def main():
-    graph = EventGraph([generate, evaluate, audit_trail])
+graph = EventGraph([generate, evaluate, audit_trail])
 
+
+async def main():
     topic = "why event-driven architecture leads to simpler agent designs"
     print(f"Topic: {topic}")
     print("Max revisions: 3\n")
     print("--- Event Flow ---")
 
-    log = await graph.ainvoke(WriteRequest(topic=topic, max_revisions=3))
+    log = await graph.ainvoke(WriteRequested(topic=topic, max_revisions=3))
 
     print()
-    drafts = log.filter(Draft)
+    drafts = log.filter(DraftProduced)
     print(f"Total drafts: {len(drafts)} (1 initial + {len(drafts) - 1} revisions)")
 
-    final = log.latest(FinalDraft)
+    final = log.latest(FinalDraftProduced)
     print(f"\n=== Final Draft ===\n{final.content}")
 
 

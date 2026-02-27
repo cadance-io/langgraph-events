@@ -13,7 +13,7 @@ from langgraph_events import (
     Event,
     EventGraph,
     EventLog,
-    Halt,
+    Halted,
     Interrupted,
     MessageEvent,
     Reducer,
@@ -502,16 +502,16 @@ def describe_EventGraph():
 
             async def it_stops_on_halt():
                 @on(Start)
-                async def halter(event: Start) -> Halt:
-                    return Halt(reason="stop")
+                async def halter(event: Start) -> Halted:
+                    return Halted(reason="stop")
 
-                @on(Halt)
-                async def unreachable(event: Halt) -> End:
+                @on(Halted)
+                async def unreachable(event: Halted) -> End:
                     return End(result="should not run")
 
                 graph = EventGraph([halter, unreachable])
                 log = await graph.ainvoke(Start(data="go"))
-                assert log.has(Halt)
+                assert log.has(Halted)
                 assert not log.has(End)
 
             async def it_injects_reducer_values():
@@ -528,23 +528,23 @@ def describe_EventGraph():
     def describe_halt():
 
         def it_stores_reason_and_is_Event_subclass():
-            h = Halt(reason="done")
+            h = Halted(reason="done")
             assert h.reason == "done"
             assert isinstance(h, Event)
-            assert isinstance(h, Halt)
+            assert isinstance(h, Halted)
 
         def it_stops_execution_immediately():
             @on(Start)
-            def step1(event: Start) -> Halt:
-                return Halt(reason="stopped early")
+            def step1(event: Start) -> Halted:
+                return Halted(reason="stopped early")
 
-            @on(Halt)
-            def should_not_run(event: Halt) -> End:
+            @on(Halted)
+            def should_not_run(event: Halted) -> End:
                 return End(result="should not reach here")
 
             graph = EventGraph([step1, should_not_run])
             log = graph.invoke(Start(data="test"))
-            assert log.has(Halt)
+            assert log.has(Halted)
             assert not log.has(End)
 
     def describe_interrupt():
@@ -1573,6 +1573,127 @@ def describe_EventGraph():
                 graph = EventGraph([looper], max_rounds=5)
                 with pytest.raises(RuntimeError, match="max_rounds"):
                     graph.invoke(LoopEvent(n=0))
+
+    def describe_mermaid():
+
+        def it_shows_linear_chain_as_edges():
+            @on(Start)
+            def step1(event: Start) -> Middle:
+                return Middle(data=event.data)
+
+            @on(Middle)
+            def step2(event: Middle) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1, step2])
+            output = graph.mermaid()
+            assert "graph LR" in output
+            assert "Start -->|step1| Middle" in output
+            assert "Middle -->|step2| End" in output
+
+        def it_shows_branching_return_types():
+            class Good(Event):
+                pass
+
+            class Bad(Event):
+                pass
+
+            @on(Start)
+            def classify(event: Start) -> Good | Bad:
+                return Good()
+
+            graph = EventGraph([classify])
+            output = graph.mermaid()
+            assert "Start -->|classify| Good" in output
+            assert "Start -->|classify| Bad" in output
+
+        def it_lists_side_effect_handlers_in_footer():
+            @on(Start)
+            def side_effect(event: Start) -> None:
+                pass
+
+            @on(Start)
+            def producer(event: Start) -> End:
+                return End(result="ok")
+
+            graph = EventGraph([side_effect, producer])
+            output = graph.mermaid()
+            assert "%% Side-effect handlers: side_effect (Start)" in output
+            assert "Start -->|producer| End" in output
+
+        def it_shows_scatter_in_footer():
+            @on(Start)
+            def split(event: Start) -> Scatter:
+                return Scatter([Middle(data="a")])
+
+            graph = EventGraph([split])
+            output = graph.mermaid()
+            # No edge to a Scatter node
+            assert "-->|split| Scatter" not in output
+            assert "%% Scatter handlers: split (Start)" in output
+
+        def it_connects_interrupted_to_resumed_with_dashed_edge():
+            @on(Start)
+            def request_approval(event: Start) -> Interrupted:
+                return Interrupted(prompt="approve?")
+
+            @on(Resumed)
+            def handle_review(event: Resumed) -> End:
+                return End(result="ok")
+
+            graph = EventGraph([request_approval, handle_review])
+            output = graph.mermaid()
+            assert "Interrupted -.-> Resumed" in output
+            assert "Resumed -->|handle_review| End" in output
+
+        def it_shows_question_mark_for_unannotated_handlers():
+            @on(Start)
+            def mystery(event: Start):
+                return End(result="ok")
+
+            graph = EventGraph([mystery])
+            output = graph.mermaid()
+            assert "Start -->|mystery| ?" in output
+
+        def it_shows_multi_subscription_edges():
+            @on(Start, Middle)
+            def handle_both(event: Event) -> End:
+                return End(result="ok")
+
+            graph = EventGraph([handle_both])
+            output = graph.mermaid()
+            assert "Start -->|handle_both| End" in output
+            assert "Middle -->|handle_both| End" in output
+
+        def it_marks_seed_events_with_thick_entry_edge():
+            @on(Start)
+            def step1(event: Start) -> Middle:
+                return Middle(data=event.data)
+
+            @on(Middle)
+            def step2(event: Middle) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1, step2])
+            output = graph.mermaid()
+            assert "classDef entry fill:none,stroke:none,color:none" in output
+            assert "_e0_[ ]:::entry ==> Start" in output
+            # Middle is a target, not a seed
+            assert "==> Middle" not in output
+
+        def it_shows_typed_scatter_as_dashed_edge():
+            @on(Start)
+            def split(event: Start) -> Scatter[Middle]:
+                return Scatter([Middle(data="a")])
+
+            @on(Middle)
+            def step2(event: Middle) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([split, step2])
+            output = graph.mermaid()
+            assert "Start -.->|split| Middle" in output
+            assert "%% Scatter handlers" not in output
 
     def describe_construction_validation():
 
