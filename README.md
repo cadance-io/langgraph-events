@@ -163,8 +163,9 @@ for event in graph.stream_events(SeedEvent(...)):
 for event, reducers in graph.stream_events(SeedEvent(...), include_reducers=True):
     print(event, reducers["messages"])  # accumulated reducer state
 
-# Low-level streaming (pass-through to LangGraph)
-for chunk in graph.stream(SeedEvent(...), stream_mode="updates"):
+# Full LangGraph access
+compiled = graph.compiled
+for chunk in compiled.stream({"events": [SeedEvent(...)]}, stream_mode="updates"):
     print(chunk)
 ```
 
@@ -348,13 +349,12 @@ async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
 
 ### `Interrupted` / `Resumed`
 
-Return an `Interrupted` event to pause the graph and wait for human input. When the graph is resumed (via LangGraph's `Command(resume=value)`), the framework creates a `Resumed` event containing the human's response.
+Return an `Interrupted` event to pause the graph and wait for human input. When the graph is resumed (via `graph.resume()`), the framework creates a `Resumed` event containing the human's response.
 
 Requires a **checkpointer** (e.g., `MemorySaver`).
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 @on(OrderPlaced)
 def confirm(event: OrderPlaced) -> Interrupted:
@@ -370,15 +370,17 @@ def finalize(event: Resumed) -> OrderConfirmed | OrderCancelled:
         return OrderConfirmed(order_id=event.interrupted.payload["order_id"])
     return OrderCancelled(reason="User declined")
 
-graph = EventGraph([confirm, finalize])
-compiled = graph.compile(checkpointer=MemorySaver())
+graph = EventGraph([confirm, finalize], checkpointer=MemorySaver())
 config = {"configurable": {"thread_id": "order-1"}}
 
 # First call — pauses at the interrupt
-compiled.invoke({"events": [OrderPlaced(order_id="A1", total=99.99)]}, config)
+graph.invoke(OrderPlaced(order_id="A1", total=99.99), config=config)
 
-# Resume with human input
-result = compiled.invoke(Command(resume="yes"), config)
+# Check state and resume with human input
+state = graph.get_state(config)
+if state.is_interrupted:
+    print(state.interrupted.prompt)
+log = graph.resume("yes", config=config)
 ```
 
 ## Patterns & Examples
@@ -458,7 +460,7 @@ When using a checkpointer (`MemorySaver`, `SqliteSaver`, etc.), existing threads
 | Change | Risk |
 |---|---|
 | **Remove a handler** (normal checkpoint) | Events that *only* the removed handler subscribed to become undeliverable. The graph halts early — no crash, but incomplete execution. |
-| **Remove a handler** (interrupted checkpoint) | If the graph was paused inside the removed handler via `Interrupted`, the `Command(resume=value)` silently does nothing. The pending Send to the missing node is dropped. The human-in-the-loop flow breaks without error. |
+| **Remove a handler** (interrupted checkpoint) | If the graph was paused inside the removed handler via `Interrupted`, `graph.resume(value)` silently does nothing. The pending Send to the missing node is dropped. The human-in-the-loop flow breaks without error. |
 | **Rename a handler** | Same as remove + add. If an `Interrupted` checkpoint targeted the old name, the resume is lost. |
 | **Add a reducer** | The new reducer starts cold — it **misses its default values and all historical event projections**. Only events added after the resume point contribute. |
 | **Remove a reducer** | The reducer's channel data is silently dropped from the checkpoint. |

@@ -114,7 +114,7 @@ def extract_handler_meta(
             )
 
     return HandlerMeta(
-        name=fn.__qualname__,
+        name=fn.__name__,
         fn=fn,
         event_types=tuple(event_types),
         log_param=log_param,

@@ -83,6 +83,14 @@ def _parse_return_types(
     return event_types, scatter_types, has_scatter, has_interrupted, True
 
 
+class GraphState(NamedTuple):
+    """Event-focused snapshot of a checkpointed thread."""
+
+    events: EventLog
+    is_interrupted: bool
+    interrupted: Interrupted | None
+
+
 class StreamFrame(NamedTuple):
     """A yielded frame from ``stream_events()`` when ``include_reducers`` is enabled.
 
@@ -120,14 +128,16 @@ class EventGraph:
         *,
         max_rounds: int = 100,
         reducers: list[Reducer] | None = None,
+        checkpointer: Any = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
 
         self._max_rounds = max_rounds
+        self._checkpointer = checkpointer
         self._reducers: dict[str, Reducer] = {r.name: r for r in (reducers or [])}
         self._handler_metas: list[HandlerMeta] = []
-        self._compiled_cache: dict[frozenset[tuple[str, Any]], CompiledStateGraph] = {}
+        self._compiled_graph: CompiledStateGraph | None = None
 
         reducer_names = frozenset(self._reducers.keys())
         seen_names: dict[str, int] = {}
@@ -153,12 +163,10 @@ class EventGraph:
         meta: HandlerMeta, has_scatter: bool, solid: list[str], dashed: list[str]
     ) -> tuple[str, str] | None:
         """Return ``(kind, entry)`` if handler belongs in footer, else None."""
-        if has_scatter and not solid and not dashed:
-            subscribed = ", ".join(t.__name__ for t in meta.event_types)
-            return "scatter", f"{meta.fn.__name__} ({subscribed})"
         if not solid and not dashed:
             subscribed = ", ".join(t.__name__ for t in meta.event_types)
-            return "side_effect", f"{meta.fn.__name__} ({subscribed})"
+            kind = "scatter" if has_scatter else "side_effect"
+            return kind, f"{meta.name} ({subscribed})"
         return None
 
     def mermaid(self) -> str:  # noqa: PLR0912
@@ -184,7 +192,7 @@ class EventGraph:
             event_types, scatter_types, has_scatter, has_interrupted, has_annotation = (
                 _parse_return_types(meta.fn)
             )
-            label = meta.fn.__name__
+            label = meta.name
 
             if has_interrupted:
                 any_produces_interrupted = True
@@ -237,41 +245,33 @@ class EventGraph:
 
         return "\n".join(lines)
 
-    def compile(
-        self,
-        *,
-        _output_reducer_names: frozenset[str] | None = None,
-        **kwargs: Any,
-    ) -> CompiledStateGraph:
-        """Compile into a LangGraph ``CompiledStateGraph``.
+    @property
+    def compiled(self) -> CompiledStateGraph:
+        """The underlying LangGraph ``CompiledStateGraph``.
 
-        All keyword arguments are forwarded to ``StateGraph.compile()``,
-        e.g. ``checkpointer=MemorySaver()``.
+        This is the bridge to full LangGraph when you need features
+        beyond the EventGraph API: subgraph composition, custom
+        streaming modes, direct state access, or advanced checkpointer
+        workflows.
 
-        Results are cached — calling with the same kwargs returns the same
-        compiled graph.
+        The instance is compiled lazily on first access and cached.
         """
-        cache_key = frozenset(
-            [
-                *((k, id(v)) for k, v in kwargs.items()),
-                ("_output_reducer_names", _output_reducer_names),
-            ]
-        )
-        if cache_key in self._compiled_cache:
-            return self._compiled_cache[cache_key]
+        return self._compile()
+
+    def _compile(self) -> CompiledStateGraph:
+        """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
+        if self._compiled_graph is not None:
+            return self._compiled_graph
 
         # Dynamic state schema with per-reducer channels
         state_schema = build_state_schema(self._reducers)
 
-        # Build output schema — include reducer channels when requested
+        # Always include reducer channels — filtering is an output concern
         out_schema: Any = _OutputState
-        if _output_reducer_names:
-            from langgraph_events._event import Event as _Event  # noqa: PLC0415
-
-            reducer_fields: dict[str, Any] = {"events": list[_Event]}
-            for name in _output_reducer_names:
-                if name in self._reducers:
-                    reducer_fields[f"_r_{name}"] = list
+        if self._reducers:
+            reducer_fields: dict[str, Any] = {"events": list[Event]}
+            for name in self._reducers:
+                reducer_fields[f"_r_{name}"] = list
             out_schema = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc,no-redef]
 
         graph: StateGraph[Any] = StateGraph(
@@ -306,16 +306,32 @@ class EventGraph:
         for name in handler_names:
             graph.add_edge(name, "__router__")
 
-        compiled = graph.compile(**kwargs)
-        self._compiled_cache[cache_key] = compiled
-        return compiled
+        compile_kwargs: dict[str, Any] = {}
+        if self._checkpointer is not None:
+            compile_kwargs["checkpointer"] = self._checkpointer
+        self._compiled_graph = graph.compile(**compile_kwargs)
+        return self._compiled_graph
+
+    def _require_checkpointer(self, method: str) -> None:
+        if self._checkpointer is None:
+            raise ValueError(f"{method}() requires a checkpointer")
 
     @staticmethod
-    def _normalize_seed(seed: Event | list[Event]) -> list[Event]:
-        """Normalize seed input to a list of events."""
+    def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
+        """Build the input dict from a seed event or list of events."""
         if isinstance(seed, list):
-            return seed
-        return [seed]
+            return {"events": seed}
+        return {"events": [seed]}
+
+    def _run(self, inp: Any, **kwargs: Any) -> EventLog:
+        compiled = self._compile()
+        result = compiled.invoke(inp, **kwargs)
+        return EventLog(result["events"])
+
+    async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
+        compiled = self._compile()
+        result = await compiled.ainvoke(inp, **kwargs)
+        return EventLog(result["events"])
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph synchronously with one or more seed events.
@@ -325,45 +341,39 @@ class EventGraph:
 
         Returns an ``EventLog`` containing all events produced during the run.
         """
-        compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
-        result = compiled.invoke(
-            {"events": self._normalize_seed(seed)},
-            **kwargs,
-        )
-        return EventLog(result["events"])
+        return self._run(self._prepare_input(seed), **kwargs)
 
     async def ainvoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph asynchronously with one or more seed events."""
-        compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
-        result = await compiled.ainvoke(
-            {"events": self._normalize_seed(seed)},
-            **kwargs,
+        return await self._arun(self._prepare_input(seed), **kwargs)
+
+    def resume(self, value: Any, **kwargs: Any) -> EventLog:
+        """Resume an interrupted graph with a human response."""
+        self._require_checkpointer("resume")
+        from langgraph.types import Command  # noqa: PLC0415
+
+        return self._run(Command(resume=value), **kwargs)
+
+    async def aresume(self, value: Any, **kwargs: Any) -> EventLog:
+        """Async version of resume()."""
+        self._require_checkpointer("aresume")
+        from langgraph.types import Command  # noqa: PLC0415
+
+        return await self._arun(Command(resume=value), **kwargs)
+
+    def get_state(self, config: Any) -> GraphState:
+        """Get event-level state of a checkpointed thread."""
+        self._require_checkpointer("get_state")
+        compiled = self._compile()
+        snapshot = compiled.get_state(config)
+        all_events = snapshot.values.get("events", [])
+        log = EventLog(all_events)
+        is_interrupted = bool(snapshot.next)
+        return GraphState(
+            events=log,
+            is_interrupted=is_interrupted,
+            interrupted=log.latest(Interrupted) if is_interrupted else None,
         )
-        return EventLog(result["events"])
-
-    def stream(
-        self, seed: Event | list[Event], **kwargs: Any
-    ) -> Iterator[dict[str, Any] | Any]:
-        """Stream graph execution. Pass-through to compiled graph's stream.
-
-        Accepts all LangGraph ``stream_mode`` options.
-        """
-        compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
-        return compiled.stream(
-            {"events": self._normalize_seed(seed)},
-            **kwargs,
-        )
-
-    async def astream(
-        self, seed: Event | list[Event], **kwargs: Any
-    ) -> AsyncIterator[dict[str, Any] | Any]:
-        """Async stream graph execution."""
-        compiled = self.compile(**kwargs.pop("compile_kwargs", {}))
-        async for chunk in compiled.astream(
-            {"events": self._normalize_seed(seed)},
-            **kwargs,
-        ):
-            yield chunk
 
     # --- High-level event streaming ---
 
@@ -374,6 +384,20 @@ class EventGraph:
         if include_reducers:  # non-empty list
             return [n for n in include_reducers if n in self._reducers]
         return []
+
+    @staticmethod
+    def _events_from_chunk(chunk: Any, seen: set[int]) -> list[Event]:
+        """Extract unseen events from an updates-mode stream chunk."""
+        events: list[Event] = []
+        if isinstance(chunk, dict):
+            for node_output in chunk.values():
+                if isinstance(node_output, dict):
+                    for event in node_output.get("events", []):
+                        eid = id(event)
+                        if eid not in seen:
+                            seen.add(eid)
+                            events.append(event)
+        return events
 
     @staticmethod
     def _frames_from_values(
@@ -400,9 +424,9 @@ class EventGraph:
     ) -> Iterator[Event | StreamFrame]:
         """Yield individual events as they are produced during graph execution.
 
-        Higher-level alternative to ``stream()`` — yields ``Event`` objects
-        directly instead of raw LangGraph state dicts.  Seed events are
-        yielded first, followed by events produced by handlers.
+        Higher-level alternative to ``compiled.stream()`` — yields ``Event``
+        objects directly instead of raw LangGraph state dicts.  Seed events
+        are yielded first, followed by events produced by handlers.
 
         Args:
             seed: A single event or list of events to start the graph.
@@ -410,37 +434,27 @@ class EventGraph:
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
         """
-        seeds = self._normalize_seed(seed)
+        inp = self._prepare_input(seed)
+        seeds = inp["events"]
         kwargs.pop("stream_mode", None)
-        compile_kwargs = kwargs.pop("compile_kwargs", {})
 
         reducer_names = self._resolve_reducer_names(include_reducers)
         if not reducer_names:
-            compiled = self.compile(**compile_kwargs)
+            compiled = self._compile()
             yield from seeds
             seen: set[int] = set()
             for chunk in compiled.stream(
-                {"events": seeds},
+                inp,
                 stream_mode="updates",
                 **kwargs,
             ):
-                if isinstance(chunk, dict):
-                    for node_output in chunk.values():
-                        if isinstance(node_output, dict):
-                            for event in node_output.get("events", []):
-                                eid = id(event)
-                                if eid not in seen:
-                                    seen.add(eid)
-                                    yield event
+                yield from self._events_from_chunk(chunk, seen)
         else:
-            compiled = self.compile(
-                _output_reducer_names=frozenset(reducer_names),
-                **compile_kwargs,
-            )
+            compiled = self._compile()
             prev_count = 0
             first = True
             for state in compiled.stream(
-                {"events": seeds},
+                inp,
                 stream_mode="values",
                 **kwargs,
             ):
@@ -468,38 +482,29 @@ class EventGraph:
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
         """
-        seeds = self._normalize_seed(seed)
+        inp = self._prepare_input(seed)
+        seeds = inp["events"]
         kwargs.pop("stream_mode", None)
-        compile_kwargs = kwargs.pop("compile_kwargs", {})
 
         reducer_names = self._resolve_reducer_names(include_reducers)
         if not reducer_names:
-            compiled = self.compile(**compile_kwargs)
+            compiled = self._compile()
             for s in seeds:
                 yield s
             seen: set[int] = set()
             async for chunk in compiled.astream(
-                {"events": seeds},
+                inp,
                 stream_mode="updates",
                 **kwargs,
             ):
-                if isinstance(chunk, dict):
-                    for node_output in chunk.values():
-                        if isinstance(node_output, dict):
-                            for event in node_output.get("events", []):
-                                eid = id(event)
-                                if eid not in seen:
-                                    seen.add(eid)
-                                    yield event
+                for event in self._events_from_chunk(chunk, seen):
+                    yield event
         else:
-            compiled = self.compile(
-                _output_reducer_names=frozenset(reducer_names),
-                **compile_kwargs,
-            )
+            compiled = self._compile()
             prev_count = 0
             first = True
             async for state in compiled.astream(
-                {"events": seeds},
+                inp,
                 stream_mode="values",
                 **kwargs,
             ):

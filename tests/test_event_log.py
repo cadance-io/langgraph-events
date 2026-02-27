@@ -66,6 +66,15 @@ def describe_EventLog():
             log = EventLog([Alpha(v=1)])
             assert log.has(Event) is True
 
+    def describe_events():
+
+        def it_returns_a_tuple_of_all_events(log):
+            assert log.events == (Alpha(v=1), Beta(v=2), Alpha(v=3))
+            assert isinstance(log.events, tuple)
+
+        def it_matches_iteration_order(log):
+            assert list(log.events) == list(log)
+
     def describe_container_protocol():
 
         def it_reports_length():
