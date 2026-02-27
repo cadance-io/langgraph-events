@@ -39,6 +39,11 @@ class EventLog:
         """Return ``True`` if any event of *event_type* exists."""
         return any(isinstance(e, event_type) for e in self._events)
 
+    @property
+    def events(self) -> tuple[Event, ...]:
+        """The events in this log as an immutable tuple."""
+        return tuple(self._events)
+
     # --- container protocol ---
 
     def __len__(self) -> int:

@@ -20,7 +20,6 @@ import asyncio
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 from langgraph_events import (
     Auditable,
@@ -154,42 +153,36 @@ def handle_review(
 # ---------------------------------------------------------------------------
 
 
-graph = EventGraph([generate_draft, request_approval, handle_review, audit_trail])
+graph = EventGraph(
+    [generate_draft, request_approval, handle_review, audit_trail],
+    checkpointer=MemorySaver(),
+)
 
 
 async def main():
-    checkpointer = MemorySaver()
-    compiled = graph.compile(checkpointer=checkpointer)
-
     config = {"configurable": {"thread_id": "human-in-the-loop-demo"}}
     topic = "the benefits of event-driven architecture in modern software systems"
     print(f"Topic: {topic}\n")
     print("--- Event Flow ---")
 
     # First invoke — generates draft and pauses
-    result = compiled.invoke(
-        {"events": [ContentRequested(topic=topic)]},
-        config,
-    )
+    log = await graph.ainvoke(ContentRequested(topic=topic), config=config)
 
     while True:
-        state = compiled.get_state(config)
+        state = graph.get_state(config)
 
-        if not state.next:
+        if not state.is_interrupted:
             # Graph completed — extract final events
-            events = result["events"]
-            published = [e for e in events if isinstance(e, ContentPublished)]
-            if published:
+            if log.latest(ContentPublished):
                 print("\n=== Published! ===")
-                drafts = [e for e in events if isinstance(e, DraftGenerated)]
-                if drafts:
-                    print(drafts[-1].content)
+                draft = log.latest(DraftGenerated)
+                if draft:
+                    print(draft.content)
             break
 
-        # Graph is paused — find the Interrupted event and show its prompt
-        interrupted_events = [e for e in result["events"] if isinstance(e, Interrupted)]
-        if interrupted_events:
-            print(interrupted_events[-1].prompt)
+        # Graph is paused — show the interrupt prompt
+        if state.interrupted:
+            print(state.interrupted.prompt)
 
         # Get human input
         human_input = input("\n> ").strip()
@@ -199,10 +192,7 @@ async def main():
         print()
 
         # Resume the graph with the human's input
-        result = compiled.invoke(
-            Command(resume=human_input),
-            config,
-        )
+        log = await graph.aresume(human_input, config=config)
 
 
 if __name__ == "__main__":

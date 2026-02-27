@@ -126,7 +126,7 @@ class Interrupted(Event):
 
     When a handler returns an ``Interrupted`` event, the framework calls
     LangGraph's ``interrupt()`` and the graph pauses. Resume with
-    ``Command(resume=value)`` to continue — the framework creates a
+    ``graph.resume(value)`` to continue — the framework creates a
     ``Resumed`` event automatically.
     """
 

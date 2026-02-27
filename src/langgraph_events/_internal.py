@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
-from langgraph_events._event import Event, Halted, Scatter
+from langgraph_events._event import Event, Halted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import Reducer  # noqa: TC001
@@ -119,7 +119,8 @@ def make_router_node(max_rounds: int) -> Callable[[StateDict], StateDict]:
 
     def router(state: StateDict) -> StateDict:
         new_events = state["events"][state["_cursor"] :]
-        current_round = state.get("_round", 0) + 1
+        has_resume = any(isinstance(e, Resumed) for e in new_events)
+        current_round = 1 if has_resume else state.get("_round", 0) + 1
         if current_round > max_rounds:
             raise RuntimeError(
                 f"EventGraph exceeded max_rounds={max_rounds}. "
