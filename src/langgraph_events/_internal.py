@@ -12,7 +12,7 @@ from collections.abc import Callable  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict
 
 if TYPE_CHECKING:
-    from langchain_core.runnables import RunnableLambda
+    from langchain_core.runnables import RunnableConfig, RunnableLambda
 
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
@@ -173,6 +173,7 @@ def make_dispatch(
 def _build_inject(
     meta: HandlerMeta,
     state: StateDict,
+    config: RunnableConfig | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
@@ -180,6 +181,11 @@ def _build_inject(
         inject[meta.log_param] = EventLog(state["events"])
     for param_name in meta.reducer_params:
         inject[param_name] = state.get(f"_r_{param_name}", [])
+    if meta.config_param and config is not None:
+        inject[meta.config_param] = config
+    if meta.store_param and config is not None:
+        runtime = config.get("configurable", {}).get("__pregel_runtime")
+        inject[meta.store_param] = runtime.store if runtime is not None else None
     return inject
 
 
@@ -219,9 +225,9 @@ def make_handler_node(
 
     reds = reducers or {}
 
-    def _run_handler_sync(state: StateDict) -> StateDict:
+    def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
         matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
-        inject = _build_inject(meta, state)
+        inject = _build_inject(meta, state, config)
 
         new_events: list[Event] = []
         for event in matching:
@@ -247,9 +253,9 @@ def make_handler_node(
             output.update(_apply_reducers(new_events, reds))
         return output
 
-    async def _run_handler_async(state: StateDict) -> StateDict:
+    async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
         matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
-        inject = _build_inject(meta, state)
+        inject = _build_inject(meta, state, config)
 
         new_events: list[Event] = []
         for event in matching:

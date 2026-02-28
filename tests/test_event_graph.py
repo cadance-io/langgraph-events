@@ -525,6 +525,71 @@ def describe_EventGraph():
                 log = await graph.ainvoke(Start(data="x"))
                 assert log.latest(End) == End(result="x")
 
+    def describe_config_and_store():
+
+        def when_handler_requests_config():
+
+            def it_receives_a_runnable_config_dict():
+                from langchain_core.runnables import RunnableConfig
+
+                captured: list[RunnableConfig] = []
+
+                @on(Start)
+                def step(event: Start, config: RunnableConfig) -> End:
+                    captured.append(config)
+                    return End(result="ok")
+
+                graph = EventGraph([step])
+                graph.invoke(Start(data="x"))
+                assert len(captured) == 1
+                assert "configurable" in captured[0]
+
+        def when_handler_requests_store():
+
+            def it_can_put_and_get_via_store():
+                from langgraph.store.base import BaseStore
+                from langgraph.store.memory import InMemoryStore
+
+                store = InMemoryStore()
+
+                @on(Start)
+                async def step(event: Start, store: BaseStore) -> End:
+                    await store.aput(("test",), "key1", {"val": event.data})
+                    items = await store.aget(("test",), "key1")
+                    return End(result=items.value["val"])
+
+                graph = EventGraph([step], store=store)
+                log = graph.invoke(Start(data="hello"))
+                assert log.latest(End) == End(result="hello")
+
+        def when_handler_requests_neither():
+
+            def it_works_without_config_or_store():
+                @on(Start)
+                def step(event: Start) -> End:
+                    return End(result=event.data)
+
+                graph = EventGraph([step])
+                log = graph.invoke(Start(data="hi"))
+                assert log.latest(End) == End(result="hi")
+
+        def when_handler_requests_config_and_log():
+
+            def it_injects_both():
+                from langchain_core.runnables import RunnableConfig
+
+                captured: list[tuple] = []
+
+                @on(Start)
+                def step(event: Start, log: EventLog, config: RunnableConfig) -> End:
+                    captured.append((len(log), "configurable" in config))
+                    return End(result="ok")
+
+                graph = EventGraph([step])
+                graph.invoke(Start(data="x"))
+                assert len(captured) == 1
+                assert captured[0] == (1, True)
+
     def describe_halt():
 
         def it_stores_reason_and_is_Event_subclass():
