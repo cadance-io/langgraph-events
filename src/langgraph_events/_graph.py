@@ -28,21 +28,18 @@ if TYPE_CHECKING:
     from langgraph_events._reducer import Reducer
 
 
-def _parse_return_types(
-    fn: Callable[..., Any],
-) -> tuple[list[type[Event]], list[type[Event]], bool, bool, bool]:
-    """Parse handler return annotation.
+class ReturnInfo(NamedTuple):
+    """Parsed handler return-type annotation."""
 
-    Returns a 5-tuple:
-    ``(event_types, scatter_types, has_scatter, has_interrupted, has_annotation)``.
+    event_types: list[type[Event]]
+    scatter_types: list[type[Event]]
+    has_scatter: bool
+    has_interrupted: bool
+    has_annotation: bool
 
-    Returns:
-        event_types: Event subclasses the handler can produce (solid edges).
-        scatter_types: Event subclasses produced via Scatter (dashed edges).
-        has_scatter: Whether the handler returns bare (untyped) Scatter.
-        has_interrupted: Whether the handler returns Interrupted.
-        has_annotation: Whether the handler has a return type annotation at all.
-    """
+
+def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
+    """Parse handler return annotation into a ``ReturnInfo``."""
     try:
         hints = typing.get_type_hints(fn)
     except Exception:
@@ -50,7 +47,7 @@ def _parse_return_types(
 
     return_hint = hints.get("return")
     if return_hint is None:
-        return [], [], False, False, False
+        return ReturnInfo([], [], False, False, False)
 
     # If the top-level hint is Scatter[X], wrap it so the loop sees Scatter[X]
     # as a single candidate (otherwise get_args returns the type params).
@@ -80,7 +77,7 @@ def _parse_return_types(
                 has_interrupted = True
             event_types.append(arg)
 
-    return event_types, scatter_types, has_scatter, has_interrupted, True
+    return ReturnInfo(event_types, scatter_types, has_scatter, has_interrupted, True)
 
 
 class GraphState(NamedTuple):
@@ -158,6 +155,16 @@ class EventGraph:
                 seen_names[meta.name] = 1
             self._handler_metas.append(meta)
 
+        self._return_info: dict[str, ReturnInfo] = {}
+        for meta in self._handler_metas:
+            info = _parse_return_types(meta.fn)
+            self._return_info[meta.name] = info
+            if info.has_annotation and any(t is Event for t in info.event_types):
+                raise ValueError(
+                    f"Handler '{meta.name}' return type includes base 'Event'. "
+                    f"Use specific types (e.g., TypeA | TypeB)."
+                )
+
     @staticmethod
     def _mermaid_footer_entry(
         meta: HandlerMeta, has_scatter: bool, solid: list[str], dashed: list[str]
@@ -189,23 +196,21 @@ class EventGraph:
         all_targets: set[str] = set()
 
         for meta in self._handler_metas:
-            event_types, scatter_types, has_scatter, has_interrupted, has_annotation = (
-                _parse_return_types(meta.fn)
-            )
+            info = self._return_info[meta.name]
             label = meta.name
 
-            if has_interrupted:
+            if info.has_interrupted:
                 any_produces_interrupted = True
             if any(issubclass(t, Resumed) for t in meta.event_types):
                 any_subscribes_resumed = True
 
-            solid_targets = [t.__name__ for t in event_types]
-            dashed_targets = [t.__name__ for t in scatter_types]
-            if not has_annotation:
+            solid_targets = [t.__name__ for t in info.event_types]
+            dashed_targets = [t.__name__ for t in info.scatter_types]
+            if not info.has_annotation:
                 solid_targets.append("?")
 
             footer = self._mermaid_footer_entry(
-                meta, has_scatter, solid_targets, dashed_targets
+                meta, info.has_scatter, solid_targets, dashed_targets
             )
             if footer is not None:
                 (scatter_handlers if footer[0] == "scatter" else side_effects).append(
