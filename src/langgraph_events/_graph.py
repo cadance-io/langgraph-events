@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
     from langgraph.graph.state import CompiledStateGraph
+    from langgraph.store.base import BaseStore
 
     from langgraph_events._reducer import Reducer
 
@@ -126,7 +127,7 @@ class EventGraph:
         max_rounds: int = 100,
         reducers: list[Reducer] | None = None,
         checkpointer: Any = None,
-        store: Any = None,
+        store: BaseStore | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
