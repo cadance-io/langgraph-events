@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
     from langgraph.graph.state import CompiledStateGraph
+    from langgraph.store.base import BaseStore
 
     from langgraph_events._reducer import Reducer
 
@@ -126,12 +127,14 @@ class EventGraph:
         max_rounds: int = 100,
         reducers: list[Reducer] | None = None,
         checkpointer: Any = None,
+        store: BaseStore | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
 
         self._max_rounds = max_rounds
         self._checkpointer = checkpointer
+        self._store = store
         self._reducers: dict[str, Reducer] = {r.name: r for r in (reducers or [])}
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
@@ -150,6 +153,8 @@ class EventGraph:
                     log_param=meta.log_param,
                     is_async=meta.is_async,
                     reducer_params=meta.reducer_params,
+                    config_param=meta.config_param,
+                    store_param=meta.store_param,
                 )
             else:
                 seen_names[meta.name] = 1
@@ -314,6 +319,8 @@ class EventGraph:
         compile_kwargs: dict[str, Any] = {}
         if self._checkpointer is not None:
             compile_kwargs["checkpointer"] = self._checkpointer
+        if self._store is not None:
+            compile_kwargs["store"] = self._store
         self._compiled_graph = graph.compile(**compile_kwargs)
         return self._compiled_graph
 

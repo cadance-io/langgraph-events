@@ -59,6 +59,8 @@ class HandlerMeta:
     log_param: str | None
     is_async: bool
     reducer_params: tuple[str, ...] = ()
+    config_param: str | None = None
+    store_param: str | None = None
 
     @property
     def wants_log(self) -> bool:
@@ -89,6 +91,18 @@ def extract_handler_meta(
             log_param = param_name
             break
 
+    # Detect config and store parameters by type hint
+    from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
+    from langgraph.store.base import BaseStore  # noqa: PLC0415
+
+    config_param: str | None = None
+    store_param: str | None = None
+    for param_name, hint in hints.items():
+        if hint is RunnableConfig:
+            config_param = param_name
+        elif hint is BaseStore:
+            store_param = param_name
+
     # Detect reducer parameters by name match
     sig = inspect.signature(fn)
     reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
@@ -99,6 +113,10 @@ def extract_handler_meta(
         known_params = {first_param}  # first param is always the event
         if log_param:
             known_params.add(log_param)
+        if config_param:
+            known_params.add(config_param)
+        if store_param:
+            known_params.add(store_param)
         known_params.update(reducer_names)
         unknown = [
             name
@@ -120,4 +138,6 @@ def extract_handler_meta(
         log_param=log_param,
         is_async=asyncio.iscoroutinefunction(fn),
         reducer_params=reducer_params,
+        config_param=config_param,
+        store_param=store_param,
     )
