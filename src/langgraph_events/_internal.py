@@ -20,7 +20,7 @@ from langgraph.types import Send  # noqa: TC002
 from langgraph_events._event import Event, Halted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
-from langgraph_events._reducer import Reducer  # noqa: TC001
+from langgraph_events._reducer import BaseReducer  # noqa: TC001
 from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
 
 # ---------------------------------------------------------------------------
@@ -44,15 +44,15 @@ class _OutputState(TypedDict):
     events: list[Event]
 
 
-def build_state_schema(reducers: dict[str, Reducer]) -> type:
+def build_state_schema(reducers: dict[str, BaseReducer]) -> type:
     """Create a dynamic TypedDict with per-reducer state channels.
 
-    Each reducer gets its own ``_r_<name>`` channel annotated with its
-    ``reducer`` function, e.g. ``Annotated[list, add_messages]``.
+    Each reducer gets its own ``_r_<name>`` channel with a type annotation
+    determined by the reducer's ``state_annotation()`` method.
     """
     fields: dict[str, Any] = dict(_BASE_FIELDS)
     for name, r in reducers.items():
-        fields[f"_r_{name}"] = Annotated[list, r.reducer]
+        fields[f"_r_{name}"] = r.state_annotation()
     return TypedDict("_FullState", fields)  # type: ignore[operator]
 
 
@@ -61,27 +61,8 @@ def build_state_schema(reducers: dict[str, Reducer]) -> type:
 # ---------------------------------------------------------------------------
 
 
-def _validate_and_collect(
-    name: str,
-    reducer: Reducer,
-    events: list[Event],
-) -> list[Any]:
-    """Run a reducer fn over events with type validation."""
-    contributions: list[Any] = []
-    for event in events:
-        contrib = reducer.fn(event)
-        if contrib:
-            if not isinstance(contrib, list):
-                raise TypeError(
-                    f"Reducer {name!r} fn must return a list, "
-                    f"got {type(contrib).__name__}"
-                )
-            contributions.extend(contrib)
-    return contributions
-
-
 def make_seed_node(
-    reducers: dict[str, Reducer] | None = None,
+    reducers: dict[str, BaseReducer] | None = None,
 ) -> Callable[[StateDict], StateDict]:
     """Create the seed node that initialises cursor and pending from input."""
     reds = reducers or {}
@@ -100,15 +81,13 @@ def make_seed_node(
             if prev_cursor == 0:
                 # First run — initialize with default + seed events
                 for name, r in reds.items():
-                    values = list(r.default)
-                    values.extend(_validate_and_collect(name, r, new_events))
-                    result[f"_r_{name}"] = values
+                    result[f"_r_{name}"] = r.seed(new_events)
             elif new_events:
                 # Subsequent run (checkpointer) — only process new events
                 for name, r in reds.items():
-                    contribs = _validate_and_collect(name, r, new_events)
-                    if contribs:
-                        result[f"_r_{name}"] = contribs
+                    collected = r.collect(new_events)
+                    if r.has_contributions(collected):
+                        result[f"_r_{name}"] = collected
         return result
 
     return seed
@@ -173,6 +152,7 @@ def make_dispatch(
 def _build_inject(
     meta: HandlerMeta,
     state: StateDict,
+    reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
@@ -180,7 +160,8 @@ def _build_inject(
     if meta.log_param:
         inject[meta.log_param] = EventLog(state["events"])
     for param_name in meta.reducer_params:
-        inject[param_name] = state.get(f"_r_{param_name}", [])
+        r = reducers.get(param_name)
+        inject[param_name] = state.get(f"_r_{param_name}", r.empty if r else [])
     if meta.config_param and config is not None:
         inject[meta.config_param] = config
     if meta.store_param and config is not None:
@@ -191,23 +172,23 @@ def _build_inject(
 
 def _apply_reducers(
     new_events: list[Event],
-    reducers: dict[str, Reducer],
-) -> dict[str, list[Any]]:
+    reducers: dict[str, BaseReducer],
+) -> dict[str, Any]:
     """Run reducer projections on newly produced events.
 
     Returns per-channel updates keyed by ``_r_<name>``.
     """
-    updates: dict[str, list[Any]] = {}
+    updates: dict[str, Any] = {}
     for name, r in reducers.items():
-        contributions = _validate_and_collect(name, r, new_events)
-        if contributions:
-            updates[f"_r_{name}"] = contributions
+        result = r.collect(new_events)
+        if r.has_contributions(result):
+            updates[f"_r_{name}"] = result
     return updates
 
 
 def make_handler_node(
     meta: HandlerMeta,
-    reducers: dict[str, Reducer] | None = None,
+    reducers: dict[str, BaseReducer] | None = None,
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
@@ -227,7 +208,7 @@ def make_handler_node(
 
     def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
         matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
-        inject = _build_inject(meta, state, config)
+        inject = _build_inject(meta, state, reds, config)
 
         new_events: list[Event] = []
         for event in matching:
@@ -255,7 +236,7 @@ def make_handler_node(
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
         matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
-        inject = _build_inject(meta, state, config)
+        inject = _build_inject(meta, state, reds, config)
 
         new_events: list[Event] = []
         for event in matching:
