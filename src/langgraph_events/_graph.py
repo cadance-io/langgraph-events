@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
@@ -252,6 +253,85 @@ class EventGraph:
             lines.append(f"%% Scatter handlers: {', '.join(scatter_handlers)}")
         if side_effects:
             lines.append(f"%% Side-effect handlers: {', '.join(side_effects)}")
+
+        return "\n".join(lines)
+
+    def mermaid_types(self, *, show_fields: bool = True) -> str:  # noqa: PLR0912
+        """Return a Mermaid class diagram showing event type hierarchy.
+
+        Renders inheritance relationships between all event types used
+        in the graph.  Only types in the inheritance path of types
+        actually referenced by handlers are shown.
+
+        Args:
+            show_fields: When True (default), show own (non-inherited)
+                dataclass fields in each class block.
+        """
+        # 1. Collect leaf types from subscriptions and return annotations
+        leaf_types: set[type[Event]] = set()
+        for meta in self._handler_metas:
+            leaf_types.update(meta.event_types)
+        for info in self._return_info.values():
+            for t in info.event_types:
+                if isinstance(t, type) and issubclass(t, Event):
+                    leaf_types.add(t)
+            for t in info.scatter_types:
+                if isinstance(t, type) and issubclass(t, Event):
+                    leaf_types.add(t)
+
+        # 2. Walk MRO of each leaf to collect all intermediate Event types
+        all_types: set[type[Event]] = set()
+        for leaf in leaf_types:
+            for cls in leaf.__mro__:
+                if cls is object:
+                    continue
+                if isinstance(cls, type) and issubclass(cls, Event):
+                    all_types.add(cls)
+
+        # 3. Build inheritance edges (direct parents only, within collected set)
+        edges: list[tuple[str, str]] = []
+        for cls in all_types:
+            if cls is Event:
+                continue
+            for base in cls.__bases__:
+                if base in all_types:
+                    edges.append((base.__name__, cls.__name__))
+
+        # 4. Sort for deterministic output
+        sorted_types = sorted(all_types, key=lambda t: t.__name__)
+        edges.sort()
+
+        # 5. Render classDiagram
+        lines = ["classDiagram"]
+
+        for cls in sorted_types:
+            if show_fields and dataclasses.is_dataclass(cls):
+                # Own fields = fields declared on this class, not inherited
+                parent_fields: set[str] = set()
+                for base in cls.__mro__[1:]:
+                    if dataclasses.is_dataclass(base):
+                        for f in dataclasses.fields(base):
+                            parent_fields.add(f.name)
+                own_fields = [
+                    f for f in dataclasses.fields(cls) if f.name not in parent_fields
+                ]
+                if own_fields:
+                    lines.append(f"    class {cls.__name__} {{")
+                    for f in own_fields:
+                        ft = (
+                            f.type
+                            if isinstance(f.type, str)
+                            else getattr(f.type, "__name__", str(f.type))
+                        )
+                        lines.append(f"        {f.name}: {ft}")
+                    lines.append("    }")
+                else:
+                    lines.append(f"    class {cls.__name__}")
+            else:
+                lines.append(f"    class {cls.__name__}")
+
+        for parent, child in edges:
+            lines.append(f"    {parent} <|-- {child}")
 
         return "\n".join(lines)
 
