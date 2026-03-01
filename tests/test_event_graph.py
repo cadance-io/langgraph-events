@@ -1227,6 +1227,70 @@ def describe_EventGraph():
             log = graph.invoke(Trigger(tag="x"))
             assert log.latest(Result) == Result(summary="tags=['x'],last=x")
 
+        def it_handles_parallel_handler_contributions():
+            class Trigger(Event):
+                value: str = ""
+
+            class ResultA(Event):
+                data: str = ""
+
+            class ResultB(Event):
+                data: str = ""
+
+            sr = ScalarReducer(
+                name="latest",
+                fn=lambda e: (
+                    e.value
+                    if isinstance(e, Trigger)
+                    else (e.data if isinstance(e, (ResultA, ResultB)) else None)
+                ),
+            )
+
+            @on(Trigger)
+            def handler_a(event: Trigger, latest: object) -> ResultA:
+                return ResultA(data=f"a:{event.value}")
+
+            @on(Trigger)
+            def handler_b(event: Trigger, latest: object) -> ResultB:
+                return ResultB(data=f"b:{event.value}")
+
+            graph = EventGraph([handler_a, handler_b], reducers=[sr])
+            log = graph.invoke(Trigger(value="x"))
+            # Both handlers run in parallel — should not crash
+            assert log.has(ResultA)
+            assert log.has(ResultB)
+
+        def when_checkpointer():
+
+            def it_does_not_lose_scalar_on_re_invoke():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class Trigger(Event):
+                    value: str = ""
+
+                class Result(Event):
+                    got: str = ""
+
+                sr = ScalarReducer(
+                    name="latest",
+                    fn=lambda e: e.value if isinstance(e, Trigger) else None,
+                )
+
+                @on(Trigger)
+                def handle(event: Trigger, latest: object) -> Result:
+                    return Result(got=str(latest))
+
+                graph = EventGraph([handle], reducers=[sr], checkpointer=MemorySaver())
+                config = {"configurable": {"thread_id": "scalar-re-invoke"}}
+
+                # Run 1
+                log1 = graph.invoke(Trigger(value="first"), config=config)
+                assert log1.latest(Result) == Result(got="first")
+
+                # Run 2 — re-invoke on same thread
+                log2 = graph.invoke(Trigger(value="second"), config=config)
+                assert log2.latest(Result) == Result(got="second")
+
     def describe_message_reducer():
 
         def it_projects_message_events():

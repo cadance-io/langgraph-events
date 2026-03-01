@@ -16,6 +16,11 @@ if TYPE_CHECKING:
     from langgraph_events._types import ReducerFn
 
 
+def _last_write_wins(existing: Any, new: Any) -> Any:
+    """Binary operator that always takes the newer value."""
+    return new
+
+
 class BaseReducer(ABC):
     """Abstract base for all reducer types."""
 
@@ -119,6 +124,9 @@ class ScalarReducer(BaseReducer):
     The ``fn`` is called once per event. It should return ``T | None``;
     the last non-None value wins and is injected directly into the handler.
 
+    Note: ``None`` signals "no contribution". To store ``None`` as
+    a meaningful value, wrap it (e.g. use a sentinel dataclass).
+
     Example::
 
         strategy = ScalarReducer(
@@ -136,7 +144,7 @@ class ScalarReducer(BaseReducer):
     default: Any = None
 
     def state_annotation(self) -> Any:
-        return Any | None
+        return Annotated[Any, _last_write_wins]
 
     @property
     def empty(self) -> Any:

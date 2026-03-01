@@ -411,8 +411,8 @@ class EventGraph:
                             events.append(event)
         return events
 
-    @staticmethod
     def _frames_from_values(
+        self,
         state: dict[str, Any],
         prev_count: int,
         reducer_names: list[str],
@@ -422,7 +422,10 @@ class EventGraph:
         new_events = all_events[prev_count:]
         if not new_events:
             return prev_count, []
-        reducers = {name: state.get(f"_r_{name}", []) for name in reducer_names}
+        reducers = {
+            name: state.get(f"_r_{name}", self._reducers[name].empty)
+            for name in reducer_names
+        }
         return len(all_events), [
             StreamFrame(event=e, reducers=reducers) for e in new_events
         ]
