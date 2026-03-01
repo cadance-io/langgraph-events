@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
 
-    from langgraph_events._reducer import Reducer
+    from langgraph_events._reducer import BaseReducer
 
 
 class ReturnInfo(NamedTuple):
@@ -125,7 +125,7 @@ class EventGraph:
         handlers: list[Callable[..., Any]],
         *,
         max_rounds: int = 100,
-        reducers: list[Reducer] | None = None,
+        reducers: list[BaseReducer] | None = None,
         checkpointer: Any = None,
         store: BaseStore | None = None,
     ) -> None:
@@ -135,7 +135,7 @@ class EventGraph:
         self._max_rounds = max_rounds
         self._checkpointer = checkpointer
         self._store = store
-        self._reducers: dict[str, Reducer] = {r.name: r for r in (reducers or [])}
+        self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
 
@@ -280,8 +280,8 @@ class EventGraph:
         out_schema: Any = _OutputState
         if self._reducers:
             reducer_fields: dict[str, Any] = {"events": list[Event]}
-            for name in self._reducers:
-                reducer_fields[f"_r_{name}"] = list
+            for name, r in self._reducers.items():
+                reducer_fields[f"_r_{name}"] = r.output_type()
             out_schema = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc,no-redef]
 
         graph: StateGraph[Any] = StateGraph(
@@ -411,8 +411,8 @@ class EventGraph:
                             events.append(event)
         return events
 
-    @staticmethod
     def _frames_from_values(
+        self,
         state: dict[str, Any],
         prev_count: int,
         reducer_names: list[str],
@@ -422,7 +422,10 @@ class EventGraph:
         new_events = all_events[prev_count:]
         if not new_events:
             return prev_count, []
-        reducers = {name: state.get(f"_r_{name}", []) for name in reducer_names}
+        reducers = {
+            name: state.get(f"_r_{name}", self._reducers[name].empty)
+            for name in reducer_names
+        }
         return len(all_events), [
             StreamFrame(event=e, reducers=reducers) for e in new_events
         ]

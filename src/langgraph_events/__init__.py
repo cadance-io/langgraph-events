@@ -13,7 +13,7 @@ from langgraph_events._event import (
 from langgraph_events._event_log import EventLog
 from langgraph_events._graph import EventGraph, GraphState, StreamFrame
 from langgraph_events._handler import on
-from langgraph_events._reducer import Reducer, message_reducer
+from langgraph_events._reducer import Reducer, ScalarReducer, message_reducer
 from langgraph_events._types import (
     HandlerReturn,  # noqa: F401 (importable but not promoted)
 )
@@ -29,6 +29,7 @@ __all__ = [
     "MessageEvent",
     "Reducer",
     "Resumed",
+    "ScalarReducer",
     "Scatter",
     "StreamFrame",
     "SystemPromptSet",

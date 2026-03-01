@@ -18,6 +18,7 @@ from langgraph_events import (
     MessageEvent,
     Reducer,
     Resumed,
+    ScalarReducer,
     Scatter,
     StreamFrame,
     SystemPromptSet,
@@ -1114,6 +1115,181 @@ def describe_EventGraph():
                 graph.invoke(MsgIn(text="a"))
                 assert snapshots[0] == ["y", "z", "a"]
                 assert snapshots[1] == ["z", "a", "b"]
+
+    def describe_scalar_reducer():
+
+        def it_injects_last_value():
+            class StrategyChosen(Event):
+                strategy: str = ""
+
+            class TaskDone(Event):
+                result: str = ""
+
+            sr = ScalarReducer(
+                name="strategy",
+                fn=lambda e: e.strategy if isinstance(e, StrategyChosen) else None,
+            )
+
+            @on(StrategyChosen)
+            def handle(event: StrategyChosen, strategy: str) -> TaskDone:
+                return TaskDone(result=f"used:{strategy}")
+
+            graph = EventGraph([handle], reducers=[sr])
+            log = graph.invoke(StrategyChosen(strategy="aggressive"))
+            assert log.latest(TaskDone) == TaskDone(result="used:aggressive")
+
+        def it_defaults_to_none():
+            class Trigger(Event):
+                pass
+
+            class Result(Event):
+                got: str = ""
+
+            sr = ScalarReducer(
+                name="mode",
+                fn=lambda e: None,
+            )
+
+            @on(Trigger)
+            def handle(event: Trigger, mode: object) -> Result:
+                return Result(got=str(mode))
+
+            graph = EventGraph([handle], reducers=[sr])
+            log = graph.invoke(Trigger())
+            assert log.latest(Result) == Result(got="None")
+
+        def it_takes_last_non_none_value():
+            class Step(Event):
+                value: str = ""
+
+            class Final(Event):
+                result: str = ""
+
+            sr = ScalarReducer(
+                name="chosen",
+                fn=lambda e: e.value if isinstance(e, Step) and e.value else None,
+            )
+
+            @on(Step)
+            def advance(event: Step, chosen: object) -> Step | Final:
+                if event.value == "b":
+                    return Final(result=f"chosen={chosen}")
+                return Step(value="b")
+
+            graph = EventGraph([advance], reducers=[sr])
+            log = graph.invoke(Step(value="a"))
+            # After seed "a", handler sees "a"; produces Step("b"),
+            # then handler sees "b" (last non-None wins).
+            assert log.latest(Final) == Final(result="chosen=b")
+
+        def it_uses_custom_default():
+            class Trigger(Event):
+                pass
+
+            class Result(Event):
+                got: str = ""
+
+            sr = ScalarReducer(
+                name="mode",
+                fn=lambda e: None,
+                default="fallback",
+            )
+
+            @on(Trigger)
+            def handle(event: Trigger, mode: str) -> Result:
+                return Result(got=mode)
+
+            graph = EventGraph([handle], reducers=[sr])
+            log = graph.invoke(Trigger())
+            assert log.latest(Result) == Result(got="fallback")
+
+        def it_works_alongside_list_reducers():
+            class Trigger(Event):
+                tag: str = ""
+
+            class Result(Event):
+                summary: str = ""
+
+            list_r = Reducer(
+                name="tags",
+                fn=lambda e: [e.tag] if isinstance(e, Trigger) and e.tag else [],
+            )
+            scalar_r = ScalarReducer(
+                name="last_tag",
+                fn=lambda e: e.tag if isinstance(e, Trigger) and e.tag else None,
+            )
+
+            @on(Trigger)
+            def handle(event: Trigger, tags: list, last_tag: object) -> Result:
+                return Result(summary=f"tags={tags},last={last_tag}")
+
+            graph = EventGraph([handle], reducers=[list_r, scalar_r])
+            log = graph.invoke(Trigger(tag="x"))
+            assert log.latest(Result) == Result(summary="tags=['x'],last=x")
+
+        def it_handles_parallel_handler_contributions():
+            class Trigger(Event):
+                value: str = ""
+
+            class ResultA(Event):
+                data: str = ""
+
+            class ResultB(Event):
+                data: str = ""
+
+            sr = ScalarReducer(
+                name="latest",
+                fn=lambda e: (
+                    e.value
+                    if isinstance(e, Trigger)
+                    else (e.data if isinstance(e, (ResultA, ResultB)) else None)
+                ),
+            )
+
+            @on(Trigger)
+            def handler_a(event: Trigger, latest: object) -> ResultA:
+                return ResultA(data=f"a:{event.value}")
+
+            @on(Trigger)
+            def handler_b(event: Trigger, latest: object) -> ResultB:
+                return ResultB(data=f"b:{event.value}")
+
+            graph = EventGraph([handler_a, handler_b], reducers=[sr])
+            log = graph.invoke(Trigger(value="x"))
+            # Both handlers run in parallel — should not crash
+            assert log.has(ResultA)
+            assert log.has(ResultB)
+
+        def when_checkpointer():
+
+            def it_does_not_lose_scalar_on_re_invoke():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class Trigger(Event):
+                    value: str = ""
+
+                class Result(Event):
+                    got: str = ""
+
+                sr = ScalarReducer(
+                    name="latest",
+                    fn=lambda e: e.value if isinstance(e, Trigger) else None,
+                )
+
+                @on(Trigger)
+                def handle(event: Trigger, latest: object) -> Result:
+                    return Result(got=str(latest))
+
+                graph = EventGraph([handle], reducers=[sr], checkpointer=MemorySaver())
+                config = {"configurable": {"thread_id": "scalar-re-invoke"}}
+
+                # Run 1
+                log1 = graph.invoke(Trigger(value="first"), config=config)
+                assert log1.latest(Result) == Result(got="first")
+
+                # Run 2 — re-invoke on same thread
+                log2 = graph.invoke(Trigger(value="second"), config=config)
+                assert log2.latest(Result) == Result(got="second")
 
     def describe_message_reducer():
 
