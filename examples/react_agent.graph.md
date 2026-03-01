@@ -11,3 +11,33 @@ graph LR
     LLMResponded -->|execute_tools| AnswerProduced
 %% Side-effect handlers: audit_trail (Auditable)
 ```
+
+## Type Hierarchy
+
+```mermaid
+classDiagram
+    class AnswerProduced {
+        content: str
+    }
+    class Auditable
+    class Event
+    class LLMResponded {
+        message: AIMessage
+    }
+    class MessageEvent
+    class ToolsExecuted {
+        messages: tuple[ToolMessage, ...]
+    }
+    class UserMessageReceived {
+        message: HumanMessage
+    }
+    Auditable <|-- AnswerProduced
+    Auditable <|-- LLMResponded
+    Auditable <|-- ToolsExecuted
+    Auditable <|-- UserMessageReceived
+    Event <|-- Auditable
+    Event <|-- MessageEvent
+    MessageEvent <|-- LLMResponded
+    MessageEvent <|-- ToolsExecuted
+    MessageEvent <|-- UserMessageReceived
+```

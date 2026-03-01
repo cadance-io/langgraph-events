@@ -18,3 +18,37 @@ graph LR
     CodeDispatched -->|coder| CodeProduced
 %% Side-effect handlers: audit_trail (Auditable)
 ```
+
+## Type Hierarchy
+
+```mermaid
+classDiagram
+    class Auditable
+    class CodeDispatched {
+        spec: str
+        context: str
+    }
+    class CodeProduced {
+        code: str
+    }
+    class Event
+    class ResearchCompleted {
+        findings: str
+    }
+    class ResearchDispatched {
+        query: str
+    }
+    class ResultFinalized {
+        answer: str
+    }
+    class TaskReceived {
+        task: str
+    }
+    Auditable <|-- CodeDispatched
+    Auditable <|-- CodeProduced
+    Auditable <|-- ResearchCompleted
+    Auditable <|-- ResearchDispatched
+    Auditable <|-- ResultFinalized
+    Auditable <|-- TaskReceived
+    Event <|-- Auditable
+```

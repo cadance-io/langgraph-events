@@ -10,3 +10,32 @@ graph LR
     DocSummarized -->|gather_summaries| BatchSummarized
 %% Side-effect handlers: audit_trail (Auditable)
 ```
+
+## Type Hierarchy
+
+```mermaid
+classDiagram
+    class Auditable
+    class BatchReceived {
+        documents: tuple
+    }
+    class BatchSummarized {
+        combined: str
+        individual: tuple
+    }
+    class DocDispatched {
+        title: str
+        content: str
+        batch_size: int
+    }
+    class DocSummarized {
+        title: str
+        summary: str
+    }
+    class Event
+    Auditable <|-- BatchReceived
+    Auditable <|-- BatchSummarized
+    Auditable <|-- DocDispatched
+    Auditable <|-- DocSummarized
+    Event <|-- Auditable
+```
