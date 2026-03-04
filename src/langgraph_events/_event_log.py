@@ -39,6 +39,35 @@ class EventLog:
         """Return ``True`` if any event of *event_type* exists."""
         return any(isinstance(e, event_type) for e in self._events)
 
+    def first(self, event_type: type[T]) -> T | None:
+        """Return the earliest event of *event_type*, or ``None``."""
+        for e in self._events:
+            if isinstance(e, event_type):
+                return e
+        return None
+
+    def count(self, event_type: type[Event]) -> int:
+        """Return the number of events matching *event_type*."""
+        return sum(1 for e in self._events if isinstance(e, event_type))
+
+    def after(self, event_type: type[Event]) -> EventLog:
+        """Return an ``EventLog`` of events after the first *event_type*."""
+        for i, e in enumerate(self._events):
+            if isinstance(e, event_type):
+                return EventLog(self._events[i + 1 :])
+        return EventLog([])
+
+    def before(self, event_type: type[Event]) -> EventLog:
+        """Return an ``EventLog`` of events before the first *event_type*."""
+        for i, e in enumerate(self._events):
+            if isinstance(e, event_type):
+                return EventLog(self._events[:i])
+        return EventLog([])
+
+    def select(self, event_type: type[T]) -> EventLog:
+        """Like ``filter()`` but returns an ``EventLog`` for chaining."""
+        return EventLog([e for e in self._events if isinstance(e, event_type)])
+
     @property
     def events(self) -> tuple[Event, ...]:
         """The events in this log as an immutable tuple."""
