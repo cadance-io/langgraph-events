@@ -1951,6 +1951,100 @@ def describe_EventGraph():
             assert "Start -.->|split| Middle" in output
             assert "%% Scatter handlers" not in output
 
+    def describe_mermaid_types():
+
+        def it_produces_classDiagram():
+            @on(Start)
+            def step1(event: Start) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types()
+            assert output.startswith("classDiagram")
+
+        def it_shows_flat_hierarchy():
+            @on(Start)
+            def step1(event: Start) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types()
+            assert "Event <|-- Start" in output
+            assert "Event <|-- End" in output
+
+        def it_shows_diamond_inheritance():
+            class Trackable(Event):
+                pass
+
+            class Processable(Event):
+                pass
+
+            class TrackableItem(Trackable, Processable):
+                value: str = ""
+
+            @on(Start)
+            def step1(event: Start) -> TrackableItem:
+                return TrackableItem(value="x")
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types()
+            assert "Trackable <|-- TrackableItem" in output
+            assert "Processable <|-- TrackableItem" in output
+
+        def it_includes_intermediate_types():
+            class Base(Event):
+                pass
+
+            class Mid(Base):
+                pass
+
+            class Leaf(Mid):
+                value: str = ""
+
+            @on(Start)
+            def step1(event: Start) -> Leaf:
+                return Leaf(value="x")
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types()
+            assert "Event <|-- Base" in output
+            assert "Base <|-- Mid" in output
+            assert "Mid <|-- Leaf" in output
+
+        def it_shows_fields_by_default():
+            @on(Start)
+            def step1(event: Start) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types()
+            assert "data: str" in output
+            assert "result: str" in output
+
+        def it_hides_fields_when_disabled():
+            @on(Start)
+            def step1(event: Start) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types(show_fields=False)
+            assert "data:" not in output
+            assert "result:" not in output
+            # Classes should still appear
+            assert "class Start" in output
+            assert "class End" in output
+
+        def it_excludes_unused_framework_types():
+            @on(Start)
+            def step1(event: Start) -> End:
+                return End(result=event.data)
+
+            graph = EventGraph([step1])
+            output = graph.mermaid_types()
+            assert "Halted" not in output
+            assert "Interrupted" not in output
+            assert "Resumed" not in output
+
     def describe_construction_validation():
 
         def when_no_handlers():

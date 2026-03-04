@@ -11,3 +11,31 @@ graph LR
     DraftProduced -->|evaluate| FinalDraftProduced
 %% Side-effect handlers: audit_trail (Auditable)
 ```
+
+## Type Hierarchy
+
+```mermaid
+classDiagram
+    class Auditable
+    class CritiqueReceived {
+        feedback: str
+        revision: int
+    }
+    class DraftProduced {
+        content: str
+        revision: int
+    }
+    class Event
+    class FinalDraftProduced {
+        content: str
+    }
+    class WriteRequested {
+        topic: str
+        max_revisions: int
+    }
+    Auditable <|-- CritiqueReceived
+    Auditable <|-- DraftProduced
+    Auditable <|-- FinalDraftProduced
+    Auditable <|-- WriteRequested
+    Event <|-- Auditable
+```
