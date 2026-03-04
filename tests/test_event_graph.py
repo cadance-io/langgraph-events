@@ -1830,6 +1830,41 @@ def describe_EventGraph():
                 log = graph.resume("ok", config=config)
                 assert log.latest(End) is not None
 
+            def it_raises_max_rounds_not_recursion_error():
+                """max_rounds fires before LangGraph's recursion_limit."""
+
+                class Ping(Event):
+                    n: int = 0
+
+                @on(Ping)
+                def pong(event: Ping) -> Ping:
+                    return Ping(n=event.n + 1)
+
+                graph = EventGraph([pong], max_rounds=5)
+                with pytest.raises(RuntimeError, match="max_rounds"):
+                    graph.invoke(Ping())
+
+            def it_raises_max_rounds_with_multiple_handlers():
+                """recursion_limit accounts for multiple handlers per round."""
+
+                class Tick(Event):
+                    n: int = 0
+
+                class Tock(Event):
+                    n: int = 0
+
+                @on(Tick)
+                def handle_tick(event: Tick) -> Tock:
+                    return Tock(n=event.n)
+
+                @on(Tock)
+                def handle_tock(event: Tock) -> Tick:
+                    return Tick(n=event.n + 1)
+
+                graph = EventGraph([handle_tick, handle_tock], max_rounds=5)
+                with pytest.raises(RuntimeError, match="max_rounds"):
+                    graph.invoke(Tick())
+
     def describe_mermaid():
 
         def it_shows_linear_chain_as_edges():

@@ -123,6 +123,8 @@ def greet(event: UserMessage) -> Greeting:
     return Greeting(text=f"Hello!")
 ```
 
+Handlers may also request `config: RunnableConfig` or `store: BaseStore` by parameter name.
+
 **Multi-subscription** — a single handler fires on multiple event types:
 
 ```python
@@ -143,10 +145,12 @@ graph = EventGraph(
     reducers=[my_reducer],      # optional — see Reducer section
 )
 
-# Single seed event
+# --- Event-driven API (recommended) ---
+
+# Synchronous
 log = graph.invoke(SeedEvent(...))
 
-# Multiple seed events (e.g. system prompt + user message)
+# Multiple seed events
 log = graph.invoke([
     SystemPromptSet.from_str("You are helpful"),
     UserMessageReceived(message=HumanMessage(content="Hi")),
@@ -155,21 +159,27 @@ log = graph.invoke([
 # Asynchronous
 log = await graph.ainvoke(SeedEvent(...))
 
-# High-level event streaming
+# Stream events as they're produced
 for event in graph.stream_events(SeedEvent(...)):
     print(event)  # yields Event objects directly
 
 # Stream with reducer snapshots
-for event, reducers in graph.stream_events(SeedEvent(...), include_reducers=True):
-    print(event, reducers["messages"])  # accumulated reducer state
+for frame in graph.stream_events(SeedEvent(...), include_reducers=True):
+    print(frame.event, frame.reducers["messages"])
+```
 
-# Full LangGraph access
+```python
+# --- LangGraph escape hatch ---
+# Access the underlying CompiledStateGraph for advanced patterns:
+# subgraph composition, custom streaming modes, or direct state access.
 compiled = graph.compiled
 for chunk in compiled.stream({"events": [SeedEvent(...)]}, stream_mode="updates"):
     print(chunk)
 ```
 
-`max_rounds` (default: 100) prevents infinite loops. `reducers` accepts an optional list of `Reducer` instances for incremental state channels.
+`max_rounds` (default: 100) prevents infinite loops. The library auto-sets LangGraph's `recursion_limit` so `max_rounds` is the only limit you need to think about. Override via `invoke(seed, recursion_limit=N)` if needed. `reducers` accepts an optional list of `Reducer` instances for incremental state channels.
+
+All methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`.
 
 #### Visualizing the Event Flow
 
@@ -201,13 +211,18 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
         ...
 ```
 
-| Method          | Returns    | Description                          |
-|-----------------|------------|--------------------------------------|
-| `log.filter(T)` | `list[T]` | All events matching type `T`         |
-| `log.latest(T)` | `T \| None` | Most recent event of type `T`      |
-| `log.has(T)`    | `bool`     | Whether any event of type `T` exists |
-| `len(log)`      | `int`      | Total event count                    |
-| `log[i]`        | `Event`    | Index or slice access                |
+| Method               | Returns             | Description                                    |
+|----------------------|---------------------|------------------------------------------------|
+| `log.filter(T)`      | `list[T]`           | All events of type T                           |
+| `log.latest(T)`      | `T \| None`         | Most recent event of type T                    |
+| `log.first(T)`       | `T \| None`         | Earliest event of type T                       |
+| `log.has(T)`         | `bool`              | Whether any event of type T exists             |
+| `log.count(T)`       | `int`               | Number of events matching type T               |
+| `log.select(T)`      | `EventLog`          | Filtered log (chainable)                       |
+| `log.after(T)`       | `EventLog`          | Events after first occurrence of T             |
+| `log.before(T)`      | `EventLog`          | Events before first occurrence of T            |
+| `len(log)`           | `int`               | Total events                                   |
+| `log[i]`             | `Event`             | Index access                                   |
 
 ### `Halted`
 
@@ -301,6 +316,8 @@ seed = SystemPromptSet(message=SystemMessage(content="You are helpful"))
 
 ### `Reducer` / `message_reducer`
 
+**When to use reducers:** Pure event-driven handlers (`log.filter()`, `log.latest()`) are the default and work for most patterns. Add a `Reducer` when you need incremental accumulation that would be expensive to recompute from the full log each round — the canonical case is `message_reducer()` for LLM conversation history. Add a `ScalarReducer` for last-write-wins configuration values injected directly into handlers. If you find yourself calling `log.filter(X)` and transforming the result the same way in multiple handlers, that's a signal a reducer would help.
+
 A `Reducer` maps events to contributions for a named LangGraph state channel. The framework maintains the channel incrementally — handlers receive the accumulated value by declaring a parameter whose name matches the reducer.
 
 ```python
@@ -336,6 +353,14 @@ log = graph.invoke([
 
 # Alternative: explicit default list
 messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
+```
+
+`ScalarReducer` works like `Reducer` but for single values — last non-`None` write wins, injected as a bare value (not a list):
+
+```python
+from langgraph_events import ScalarReducer
+
+temperature = ScalarReducer("temperature", fn=lambda e: e.value if isinstance(e, TempSet) else None, default=0.7)
 ```
 
 The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically:
@@ -430,14 +455,24 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 | `Auditable`       | Base class | Marker class for auto-logged events             |
 | `Event`           | Base class | Subclass to define events (auto-frozen)         |
 | `EventGraph`      | Class      | Build and run the event-driven graph            |
+| `EventGraph.invoke()` | Method | Run graph synchronously, returns `EventLog` |
+| `EventGraph.ainvoke()` | Method | Async version of `invoke()` |
+| `EventGraph.stream_events()` | Method | Yield events as produced; optional reducer snapshots via `StreamFrame` |
+| `EventGraph.astream_events()` | Method | Async version of `stream_events()` |
+| `EventGraph.resume()` | Method | Resume interrupted graph with human input (requires checkpointer) |
+| `EventGraph.aresume()` | Method | Async version of `resume()` |
+| `EventGraph.get_state()` | Method | Get `GraphState` for a checkpointed thread |
+| `EventGraph.compiled` | Property | Access underlying `CompiledStateGraph` for advanced LangGraph patterns |
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `EventLog`        | Class      | Immutable query container over events           |
+| `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
 | `Halted`          | Event      | Signal immediate graph termination              |
 | `Interrupted`     | Event      | Pause graph for human input                     |
 | `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
+| `ScalarReducer`   | Class      | Last-write-wins reducer for single values       |
 | `Resumed`         | Event      | Created on resume with human's response         |
 | `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 | `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |

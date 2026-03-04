@@ -322,6 +322,18 @@ class EventGraph:
         if self._store is not None:
             compile_kwargs["store"] = self._store
         self._compiled_graph = graph.compile(**compile_kwargs)
+
+        # EventGraph controls termination via max_rounds. Set recursion_limit
+        # high enough that it never fires before max_rounds does.
+        # Each round is at most 1 router + all handlers.
+        n_handlers = len(self._handler_metas)
+        needed = self._max_rounds * (n_handlers + 1) + 1
+        existing = (self._compiled_graph.config or {}).get("recursion_limit", 25)
+        self._compiled_graph.config = {
+            **(self._compiled_graph.config or {}),
+            "recursion_limit": max(needed, existing),
+        }
+
         return self._compiled_graph
 
     def _require_checkpointer(self, method: str) -> None:
