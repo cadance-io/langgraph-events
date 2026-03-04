@@ -66,6 +66,74 @@ def describe_EventLog():
             log = EventLog([Alpha(v=1)])
             assert log.has(Event) is True
 
+    def describe_first():
+
+        def it_returns_first_match(log):
+            assert log.first(Alpha) == Alpha(v=1)
+            assert log.first(Beta) == Beta(v=2)
+
+        def when_no_match():
+
+            def it_returns_none():
+                log = EventLog([Alpha(v=1)])
+                assert log.first(Beta) is None
+
+    def describe_count():
+
+        def it_counts_matching_events(log):
+            assert log.count(Alpha) == 2
+            assert log.count(Beta) == 1
+
+        def it_returns_zero_for_absent_type(log):
+            class Gamma(Event):
+                pass
+
+            assert log.count(Gamma) == 0
+
+    def describe_after():
+
+        def it_returns_events_after_first_occurrence(log):
+            result = log.after(Alpha)
+            assert list(result) == [Beta(v=2), Alpha(v=3)]
+
+        def it_returns_empty_log_when_type_absent(log):
+            class Gamma(Event):
+                pass
+
+            result = log.after(Gamma)
+            assert len(result) == 0
+            assert isinstance(result, EventLog)
+
+        def it_supports_chaining(log):
+            result = log.after(Alpha).latest(Alpha)
+            assert result == Alpha(v=3)
+
+    def describe_before():
+
+        def it_returns_events_before_first_occurrence(log):
+            result = log.before(Beta)
+            assert list(result) == [Alpha(v=1)]
+
+        def it_returns_empty_log_when_type_absent(log):
+            class Gamma(Event):
+                pass
+
+            result = log.before(Gamma)
+            assert len(result) == 0
+            assert isinstance(result, EventLog)
+
+    def describe_select():
+
+        def it_returns_event_log_of_matching_events(log):
+            result = log.select(Alpha)
+            assert isinstance(result, EventLog)
+            assert list(result) == [Alpha(v=1), Alpha(v=3)]
+
+        def it_supports_chaining_with_after():
+            log = EventLog([Alpha(v=1), Beta(v=2), Alpha(v=3), Beta(v=4)])
+            result = log.after(Alpha).select(Beta)
+            assert list(result) == [Beta(v=2), Beta(v=4)]
+
     def describe_events():
 
         def it_returns_a_tuple_of_all_events(log):
