@@ -748,6 +748,20 @@ def describe_EventGraph():
 
     def describe_reducer():
 
+        @pytest.mark.parametrize(
+            "reserved_name",
+            ["events", "_cursor", "_pending", "_round"],
+        )
+        def it_rejects_reducer_name_colliding_with_reserved_field(reserved_name):
+            r = Reducer(name=reserved_name, fn=lambda e: [])
+
+            @on(Start)
+            def noop(event: Start) -> Done:
+                return Done(result="x")
+
+            with pytest.raises(ValueError, match="conflict with reserved state fields"):
+                EventGraph([noop], reducers=[r])
+
         def describe_injection():
 
             def it_passes_accumulated_values_to_handler():
@@ -1259,6 +1273,35 @@ def describe_EventGraph():
             # Both handlers run in parallel — should not crash
             assert log.has(ResultA)
             assert log.has(ResultB)
+
+        def it_persists_value_when_subsequent_round_has_no_contribution():
+            class SetValue(Event):
+                value: str = ""
+
+            class Unrelated(Event):
+                pass
+
+            class Result(Event):
+                got: str = ""
+
+            sr = ScalarReducer(
+                name="kept",
+                fn=lambda e: e.value if isinstance(e, SetValue) else None,
+            )
+
+            @on(SetValue)
+            def step1(event: SetValue) -> Unrelated:
+                return Unrelated()
+
+            @on(Unrelated)
+            def step2(event: Unrelated, kept: object) -> Result:
+                return Result(got=str(kept))
+
+            graph = EventGraph([step1, step2], reducers=[sr])
+            log = graph.invoke(SetValue(value="hello"))
+            # Round 2 produces Unrelated (fn returns None) —
+            # scalar must still be "hello", not reverted to None.
+            assert log.latest(Result) == Result(got="hello")
 
         def when_checkpointer():
 
