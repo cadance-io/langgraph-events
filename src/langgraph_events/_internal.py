@@ -47,12 +47,17 @@ class _OutputState(TypedDict):
 def build_state_schema(reducers: dict[str, BaseReducer]) -> type:
     """Create a dynamic TypedDict with per-reducer state channels.
 
-    Each reducer gets its own ``_r_<name>`` channel with a type annotation
-    determined by the reducer's ``state_annotation()`` method.
+    Each reducer gets its own channel (keyed by reducer name) with a type
+    annotation determined by the reducer's ``state_annotation()`` method.
     """
     fields: dict[str, Any] = dict(_BASE_FIELDS)
+    conflicts = set(reducers.keys()) & set(_BASE_FIELDS.keys())
+    if conflicts:
+        raise ValueError(
+            f"Reducer name(s) {conflicts} conflict with reserved state fields"
+        )
     for name, r in reducers.items():
-        fields[f"_r_{name}"] = r.state_annotation()
+        fields[name] = r.state_annotation()
     return TypedDict("_FullState", fields)  # type: ignore[operator]
 
 
@@ -81,13 +86,13 @@ def make_seed_node(
             if prev_cursor == 0:
                 # First run — initialize with default + seed events
                 for name, r in reds.items():
-                    result[f"_r_{name}"] = r.seed(new_events)
+                    result[name] = r.seed(new_events)
             elif new_events:
                 # Subsequent run (checkpointer) — only process new events
                 for name, r in reds.items():
                     collected = r.collect(new_events)
                     if r.has_contributions(collected):
-                        result[f"_r_{name}"] = collected
+                        result[name] = collected
         return result
 
     return seed
@@ -161,7 +166,7 @@ def _build_inject(
         inject[meta.log_param] = EventLog(state["events"])
     for param_name in meta.reducer_params:
         r = reducers.get(param_name)
-        inject[param_name] = state.get(f"_r_{param_name}", r.empty if r else [])
+        inject[param_name] = state.get(param_name, r.empty if r else [])
     if meta.config_param and config is not None:
         inject[meta.config_param] = config
     if meta.store_param and config is not None:
@@ -176,13 +181,13 @@ def _apply_reducers(
 ) -> dict[str, Any]:
     """Run reducer projections on newly produced events.
 
-    Returns per-channel updates keyed by ``_r_<name>``.
+    Returns per-channel updates keyed by reducer name.
     """
     updates: dict[str, Any] = {}
     for name, r in reducers.items():
         result = r.collect(new_events)
         if r.has_contributions(result):
-            updates[f"_r_{name}"] = result
+            updates[name] = result
     return updates
 
 

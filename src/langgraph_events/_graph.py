@@ -11,6 +11,7 @@ from langgraph_events._event import Event, Interrupted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta, extract_handler_meta
 from langgraph_events._internal import (
+    _BASE_FIELDS,
     _InputState,
     _OutputState,
     build_state_schema,
@@ -136,6 +137,11 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
+        conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
+        if conflicts:
+            raise ValueError(
+                f"Reducer name(s) {conflicts} conflict with reserved state fields"
+            )
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
 
@@ -281,7 +287,7 @@ class EventGraph:
         if self._reducers:
             reducer_fields: dict[str, Any] = {"events": list[Event]}
             for name, r in self._reducers.items():
-                reducer_fields[f"_r_{name}"] = r.output_type()
+                reducer_fields[name] = r.output_type()
             out_schema = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc,no-redef]
 
         graph: StateGraph[Any] = StateGraph(
@@ -435,8 +441,7 @@ class EventGraph:
         if not new_events:
             return prev_count, []
         reducers = {
-            name: state.get(f"_r_{name}", self._reducers[name].empty)
-            for name in reducer_names
+            name: state.get(name, self._reducers[name].empty) for name in reducer_names
         }
         return len(all_events), [
             StreamFrame(event=e, reducers=reducers) for e in new_events
