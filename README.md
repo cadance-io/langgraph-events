@@ -346,12 +346,15 @@ async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
 
 ### `Interrupted` / `Resumed`
 
-Return an `Interrupted` event to pause the graph and wait for human input. When the graph is resumed (via `graph.resume()`), the framework creates a `Resumed` event containing the human's response.
+Return an `Interrupted` event to pause the graph and wait for human input. Resume with `graph.resume(event)` — the event is auto-dispatched (handlers subscribed to its type fire), then the framework creates a `Resumed` event alongside it. `resume()` requires an `Event` instance; passing a plain string or dict raises `TypeError`.
 
 Requires a **checkpointer** (e.g., `MemorySaver`).
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
+
+class Approval(Event):
+    approved: bool
 
 @on(OrderPlaced)
 def confirm(event: OrderPlaced) -> Interrupted:
@@ -360,24 +363,24 @@ def confirm(event: OrderPlaced) -> Interrupted:
         payload={"order_id": event.order_id},
     )
 
-@on(Resumed)
-def finalize(event: Resumed) -> OrderConfirmed | OrderCancelled:
-    if event.value == "yes":
-        # interrupted is always set by the framework when resuming
-        return OrderConfirmed(order_id=event.interrupted.payload["order_id"])
+@on(Approval)
+def handle_approval(event: Approval, log: EventLog) -> OrderConfirmed | OrderCancelled:
+    interrupted = log.latest(Interrupted)
+    if event.approved:
+        return OrderConfirmed(order_id=interrupted.payload["order_id"])
     return OrderCancelled(reason="User declined")
 
-graph = EventGraph([confirm, finalize], checkpointer=MemorySaver())
+graph = EventGraph([confirm, handle_approval], checkpointer=MemorySaver())
 config = {"configurable": {"thread_id": "order-1"}}
 
 # First call — pauses at the interrupt
 graph.invoke(OrderPlaced(order_id="A1", total=99.99), config=config)
 
-# Check state and resume with human input
+# Check state and resume with a typed event
 state = graph.get_state(config)
 if state.is_interrupted:
     print(state.interrupted.prompt)
-log = graph.resume("yes", config=config)
+log = graph.resume(Approval(approved=True), config=config)
 ```
 
 ## Patterns & Examples
@@ -431,10 +434,11 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `EventGraph.ainvoke()` | Method | Async version of `invoke()` |
 | `EventGraph.stream_events()` | Method | Yield events as produced; optional reducer snapshots via `StreamFrame` |
 | `EventGraph.astream_events()` | Method | Async version of `stream_events()` |
-| `EventGraph.resume()` | Method | Resume interrupted graph with human input (requires checkpointer) |
+| `EventGraph.resume()` | Method | Resume interrupted graph with a domain event (requires checkpointer) |
 | `EventGraph.aresume()` | Method | Async version of `resume()` |
 | `EventGraph.get_state()` | Method | Get `GraphState` for a checkpointed thread |
 | `EventGraph.compiled` | Property | Access underlying `CompiledStateGraph` for advanced LangGraph patterns |
+| `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
@@ -445,7 +449,7 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `ScalarReducer`   | Class      | Last-write-wins reducer for single values (None is a valid value) |
-| `Resumed`         | Event      | Created on resume with human's response         |
+| `Resumed`         | Event      | Created on resume with the dispatched event and `interrupted` backref |
 | `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 | `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
