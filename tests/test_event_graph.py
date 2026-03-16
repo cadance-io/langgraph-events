@@ -33,13 +33,7 @@ from langgraph_events import (
 
 def _data_reducer() -> Reducer:
     """Simple reducer that accumulates Start.data values."""
-
-    def fn(event: Event) -> list[str]:
-        if isinstance(event, Start):
-            return [event.data]
-        return []
-
-    return Reducer(name="data_items", fn=fn)
+    return Reducer(name="data_items", event_type=Start, fn=lambda e: [e.data])
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +764,7 @@ def describe_EventGraph():
             ["events", "_cursor", "_pending", "_round"],
         )
         def it_rejects_reducer_name_colliding_with_reserved_field(reserved_name):
-            r = Reducer(name=reserved_name, fn=lambda e: [])
+            r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
 
             @on(Start)
             def noop(event: Start) -> Done:
@@ -789,7 +783,7 @@ def describe_EventGraph():
                         return [f"out:{event.text}"]
                     return []
 
-                r = Reducer("history", fn=project, default=["start"])
+                r = Reducer("history", event_type=Event, fn=project, default=["start"])
                 received_history = []
 
                 @on(MsgIn)
@@ -807,12 +801,7 @@ def describe_EventGraph():
                 assert log.latest(Done) == Done(result="HELLO")
 
             def it_injects_default_plus_projected_seed():
-                def project(event: Event) -> list:
-                    if isinstance(event, MsgIn):
-                        return [event.text]
-                    return []
-
-                r = Reducer("texts", fn=project)
+                r = Reducer("texts", event_type=MsgIn, fn=lambda e: [e.text])
 
                 @on(MsgIn)
                 def step(event: MsgIn, log: EventLog, texts: list) -> Done:
@@ -837,7 +826,7 @@ def describe_EventGraph():
                         return [f"tool:{event.result}"]
                     return []
 
-                r = Reducer("history", fn=project_all)
+                r = Reducer("history", event_type=Event, fn=project_all)
                 call_count = 0
                 snapshots: list[list] = []
 
@@ -871,12 +860,7 @@ def describe_EventGraph():
             def when_events_have_no_contribution():
 
                 def it_does_not_change_reducer_value():
-                    def project(event: Event) -> list:
-                        if isinstance(event, MsgIn):
-                            return [event.text]
-                        return []
-
-                    r = Reducer("texts", fn=project)
+                    r = Reducer("texts", event_type=MsgIn, fn=lambda e: [e.text])
                     snapshots: list[list] = []
 
                     @on(MsgIn)
@@ -897,18 +881,16 @@ def describe_EventGraph():
         def describe_multiple_reducers():
 
             def it_accumulates_independently():
-                def project_upper(event: Event) -> list:
-                    if isinstance(event, MsgIn):
-                        return [event.text.upper()]
-                    return []
+                def project_upper(event: MsgIn) -> list:
+                    return [event.text.upper()]
 
-                def project_lower(event: Event) -> list:
-                    if isinstance(event, MsgIn):
-                        return [event.text.lower()]
-                    return []
+                def project_lower(event: MsgIn) -> list:
+                    return [event.text.lower()]
 
-                upper = Reducer("upper", fn=project_upper, default=["INIT"])
-                lower = Reducer("lower", fn=project_lower)
+                upper = Reducer(
+                    "upper", event_type=MsgIn, fn=project_upper, default=["INIT"]
+                )
+                lower = Reducer("lower", event_type=MsgIn, fn=project_lower)
 
                 @on(MsgIn)
                 def step(event: MsgIn, upper: list, lower: list) -> Done:
@@ -944,7 +926,7 @@ def describe_EventGraph():
                         return [f"b:{event.value}"]
                     return []
 
-                r = Reducer("items", fn=project)
+                r = Reducer("items", event_type=Event, fn=project)
 
                 @on(Trigger)
                 def handle_a(event: Trigger) -> ResultA:
@@ -997,6 +979,7 @@ def describe_EventGraph():
 
                 r = Reducer(
                     "messages",
+                    event_type=Event,
                     fn=to_messages,
                     default=[("system", "You are helpful")],
                 )
@@ -1046,7 +1029,7 @@ def describe_EventGraph():
                 def project(event: Event) -> list:
                     return [1]
 
-                r = Reducer("counter", fn=project)
+                r = Reducer("counter", event_type=Event, fn=project)
 
                 @on(MsgIn)
                 def step(event: MsgIn, log: EventLog) -> Done:
@@ -1064,7 +1047,7 @@ def describe_EventGraph():
                     def bad_project(event: Event) -> list:
                         return "not a list"  # type: ignore
 
-                    r = Reducer("bad", fn=bad_project)
+                    r = Reducer("bad", event_type=MsgIn, fn=bad_project)
 
                     @on(MsgIn)
                     def step(event: MsgIn) -> Done:
@@ -1088,12 +1071,12 @@ def describe_EventGraph():
                 def it_does_not_double_values_on_re_invoke():
                     from langgraph.checkpoint.memory import MemorySaver
 
-                    def project(event: Event) -> list:
-                        if isinstance(event, MsgIn):
-                            return [event.text]
-                        return []
-
-                    r = Reducer("texts", fn=project, default=["init"])
+                    r = Reducer(
+                        "texts",
+                        event_type=MsgIn,
+                        fn=lambda e: [e.text],
+                        default=["init"],
+                    )
 
                     @on(MsgIn)
                     def step(event: MsgIn, texts: list) -> Done:
@@ -1125,6 +1108,7 @@ def describe_EventGraph():
 
                 r = Reducer(
                     "recent",
+                    event_type=Event,
                     fn=project_all,
                     reducer=always_keep_last_n,
                     default=["x", "y", "z"],
@@ -1158,7 +1142,8 @@ def describe_EventGraph():
 
             sr = ScalarReducer(
                 name="strategy",
-                fn=lambda e: e.strategy if isinstance(e, StrategyChosen) else None,
+                event_type=StrategyChosen,
+                fn=lambda e: e.strategy,
             )
 
             @on(StrategyChosen)
@@ -1173,12 +1158,16 @@ def describe_EventGraph():
             class Trigger(Event):
                 pass
 
+            class Unmatched(Event):
+                pass
+
             class Result(Event):
                 got: str = ""
 
             sr = ScalarReducer(
                 name="mode",
-                fn=lambda e: None,
+                event_type=Unmatched,
+                fn=lambda e: "irrelevant",
             )
 
             @on(Trigger)
@@ -1189,7 +1178,7 @@ def describe_EventGraph():
             log = graph.invoke(Trigger())
             assert log.latest(Result) == Result(got="None")
 
-        def it_takes_last_non_none_value():
+        def it_takes_last_matching_value():
             class Step(Event):
                 value: str = ""
 
@@ -1198,7 +1187,8 @@ def describe_EventGraph():
 
             sr = ScalarReducer(
                 name="chosen",
-                fn=lambda e: e.value if isinstance(e, Step) and e.value else None,
+                event_type=Step,
+                fn=lambda e: e.value,
             )
 
             @on(Step)
@@ -1217,12 +1207,16 @@ def describe_EventGraph():
             class Trigger(Event):
                 pass
 
+            class Unmatched(Event):
+                pass
+
             class Result(Event):
                 got: str = ""
 
             sr = ScalarReducer(
                 name="mode",
-                fn=lambda e: None,
+                event_type=Unmatched,
+                fn=lambda e: "irrelevant",
                 default="fallback",
             )
 
@@ -1234,24 +1228,30 @@ def describe_EventGraph():
             log = graph.invoke(Trigger())
             assert log.latest(Result) == Result(got="fallback")
 
-        def it_collects_last_non_none_from_multiple_events():
+        def it_collects_from_last_matching_event():
             class Step(Event):
                 tag: str = ""
 
             sr = ScalarReducer(
                 name="val",
-                fn=lambda e: e.tag if isinstance(e, Step) and e.tag else None,
+                event_type=Step,
+                fn=lambda e: e.tag,
             )
-            events = [Step(), Step(tag="a"), Step(), Step(tag="b"), Step()]
+            events = [Step(tag="a"), Step(tag="b"), Step(tag="c")]
             result = sr.collect(events)
-            assert result == "b"
+            assert result == "c"
 
-        def it_returns_none_when_all_none():
+        def it_returns_unset_when_no_matching_events():
             class Step(Event):
                 pass
 
-            sr = ScalarReducer(name="val", fn=lambda e: None)
-            assert sr.collect([Step(), Step(), Step()]) is None
+            class Other(Event):
+                pass
+
+            from langgraph_events._reducer import _UNSET
+
+            sr = ScalarReducer(name="val", event_type=Other, fn=lambda e: "x")
+            assert sr.collect([Step(), Step(), Step()]) is _UNSET
 
         def it_works_alongside_list_reducers():
             class Trigger(Event):
@@ -1262,11 +1262,13 @@ def describe_EventGraph():
 
             list_r = Reducer(
                 name="tags",
-                fn=lambda e: [e.tag] if isinstance(e, Trigger) and e.tag else [],
+                event_type=Trigger,
+                fn=lambda e: [e.tag] if e.tag else [],
             )
             scalar_r = ScalarReducer(
                 name="last_tag",
-                fn=lambda e: e.tag if isinstance(e, Trigger) and e.tag else None,
+                event_type=Trigger,
+                fn=lambda e: e.tag,
             )
 
             @on(Trigger)
@@ -1289,6 +1291,7 @@ def describe_EventGraph():
 
             sr = ScalarReducer(
                 name="latest",
+                event_type=Event,
                 fn=lambda e: (
                     e.value
                     if isinstance(e, Trigger)
@@ -1322,7 +1325,8 @@ def describe_EventGraph():
 
             sr = ScalarReducer(
                 name="kept",
-                fn=lambda e: e.value if isinstance(e, SetValue) else None,
+                event_type=SetValue,
+                fn=lambda e: e.value,
             )
 
             @on(SetValue)
@@ -1335,9 +1339,67 @@ def describe_EventGraph():
 
             graph = EventGraph([step1, step2], reducers=[sr])
             log = graph.invoke(SetValue(value="hello"))
-            # Round 2 produces Unrelated (fn returns None) —
-            # scalar must still be "hello", not reverted to None.
+            # Round 2 produces Unrelated (doesn't match event_type) —
+            # scalar must still be "hello", not reverted.
             assert log.latest(Result) == Result(got="hello")
+
+        def it_stores_none_as_valid_contribution():
+            class ClearSignal(Event):
+                pass
+
+            class Result(Event):
+                got: str = ""
+
+            sr = ScalarReducer(
+                name="value",
+                event_type=ClearSignal,
+                fn=lambda e: None,
+                default="initial",
+            )
+
+            @on(ClearSignal)
+            def handle(event: ClearSignal, value: object) -> Result:
+                return Result(got=repr(value))
+
+            graph = EventGraph([handle], reducers=[sr])
+            log = graph.invoke(ClearSignal())
+            # fn returns None — this is a real contribution, not "no contribution"
+            assert log.latest(Result) == Result(got="None")
+
+        def it_supports_protocol_event_type():
+            from typing import Protocol, runtime_checkable
+
+            @runtime_checkable
+            class HasScore(Protocol):
+                score: int
+
+            class ScoreA(Event):
+                score: int = 0
+
+            class ScoreB(Event):
+                score: int = 0
+
+            class Result(Event):
+                got: str = ""
+
+            sr = ScalarReducer(
+                name="last_score",
+                event_type=HasScore,
+                fn=lambda e: e.score,
+            )
+
+            @on(ScoreA)
+            def step_a(event: ScoreA, last_score: object) -> ScoreB:
+                return ScoreB(score=event.score + 10)
+
+            @on(ScoreB)
+            def step_b(event: ScoreB, last_score: object) -> Result:
+                return Result(got=str(last_score))
+
+            graph = EventGraph([step_a, step_b], reducers=[sr])
+            log = graph.invoke(ScoreA(score=5))
+            # ScoreA(5) → fn returns 5, then ScoreB(15) → fn returns 15
+            assert log.latest(Result) == Result(got="15")
 
         def when_checkpointer():
 
@@ -1352,7 +1414,8 @@ def describe_EventGraph():
 
                 sr = ScalarReducer(
                     name="latest",
-                    fn=lambda e: e.value if isinstance(e, Trigger) else None,
+                    event_type=Trigger,
+                    fn=lambda e: e.value,
                 )
 
                 @on(Trigger)
@@ -1384,12 +1447,12 @@ def describe_EventGraph():
             result = r.fn(UserMsg(message=msg))
             assert result == [msg]
 
-        def it_returns_empty_for_non_message_events():
+        def it_skips_non_message_events_at_collect_level():
             class Reply(Event):
                 text: str = ""
 
             r = message_reducer([SystemMessage(content="You are helpful")])
-            result = r.fn(Reply(text="hi"))
+            result = r.collect([Reply(text="hi")])
             assert result == []
 
         def it_includes_default_messages():

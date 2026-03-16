@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol, runtime_checkable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
@@ -28,8 +29,18 @@ from langgraph_events import Auditable, Event, EventGraph, EventLog, Reducer, on
 # ---------------------------------------------------------------------------
 
 
+@runtime_checkable
+class Contextualizable(Protocol):
+    """Events that contribute context to the supervisor reducer."""
+
+    def context_part(self) -> str: ...
+
+
 class TaskReceived(Auditable):
     task: str = ""
+
+    def context_part(self) -> str:
+        return f"[User Task] {self.task}"
 
 
 class ResearchDispatched(Auditable):
@@ -44,9 +55,15 @@ class CodeDispatched(Auditable):
 class ResearchCompleted(Auditable):
     findings: str = ""
 
+    def context_part(self) -> str:
+        return f"[Research Result] {self.findings}"
+
 
 class CodeProduced(Auditable):
     code: str = ""
+
+    def context_part(self) -> str:
+        return f"[Code Result]\n{self.code}"
 
 
 class ResultFinalized(Auditable):
@@ -94,18 +111,11 @@ coder_llm = ChatOpenAI(model="gpt-4o-mini")
 # ---------------------------------------------------------------------------
 
 
-def to_context_parts(event: Event) -> list[str]:
-    """Map each event to its context contribution for the supervisor."""
-    if isinstance(event, TaskReceived):
-        return [f"[User Task] {event.task}"]
-    if isinstance(event, ResearchCompleted):
-        return [f"[Research Result] {event.findings}"]
-    if isinstance(event, CodeProduced):
-        return [f"[Code Result]\n{event.code}"]
-    return []
-
-
-context_reducer = Reducer("context_parts", fn=to_context_parts)
+context_reducer = Reducer(
+    "context_parts",
+    event_type=Contextualizable,
+    fn=lambda e: [e.context_part()],
+)
 
 
 # ---------------------------------------------------------------------------
