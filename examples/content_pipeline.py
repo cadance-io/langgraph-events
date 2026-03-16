@@ -22,7 +22,6 @@ import asyncio
 
 from langgraph_events import (
     Auditable,
-    Event,
     EventGraph,
     EventLog,
     Halted,
@@ -80,14 +79,11 @@ class AnalysisProduced(PipelineStage):
 UNSAFE_KEYWORDS = {"hack", "exploit", "attack", "malware", "phishing"}
 
 
-def to_pipeline_stage(event: Event) -> list[str]:
-    """Map events to pipeline stage labels via polymorphic dispatch."""
-    if isinstance(event, PipelineStage):
-        return [event.stage_label()]
-    return []
-
-
-stages = Reducer("stages", fn=to_pipeline_stage)
+stages = Reducer(
+    "stages",
+    event_type=PipelineStage,
+    fn=lambda e: [e.stage_label()],
+)
 
 
 # ---------------------------------------------------------------------------

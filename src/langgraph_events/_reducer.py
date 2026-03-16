@@ -5,15 +5,19 @@ from __future__ import annotations
 import operator
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Generic, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from langchain_core.messages import BaseMessage
 
-    from langgraph_events._event import Event
+    from langgraph_events._event import Event, MessageEvent
     from langgraph_events._types import ReducerFn
+
+E = TypeVar("E", bound="Event")
+
+_UNSET = object()
 
 
 def _last_write_wins(existing: Any, new: Any) -> Any:
@@ -21,10 +25,19 @@ def _last_write_wins(existing: Any, new: Any) -> Any:
     return new
 
 
-class BaseReducer(ABC):
-    """Abstract base for all reducer types."""
+class BaseReducer(ABC, Generic[E]):
+    """Abstract base for all reducer types.
+
+    Parameterised by ``E``, the event type this reducer matches.
+    Subclasses declare ``event_type: type[E]`` so the framework can
+    filter events before calling ``fn``.
+
+    Use a ``@runtime_checkable Protocol`` as ``E`` for structural
+    multi-type matching.
+    """
 
     name: str
+    event_type: type[E]
 
     @abstractmethod
     def state_annotation(self) -> Any:
@@ -53,12 +66,13 @@ class BaseReducer(ABC):
 
 
 @dataclass
-class Reducer(BaseReducer):
+class Reducer(BaseReducer[E]):
     """Maps events to contributions for a named LangGraph state channel.
 
-    The ``fn`` is called once per event when it is produced. Its return
-    value is merged into the state channel using the ``reducer`` function
-    (defaults to ``operator.add`` for simple list concatenation).
+    The reducer filters events by ``event_type``, then calls ``fn`` on each
+    matching event.  Its return value is merged into the state channel using
+    the ``reducer`` function (defaults to ``operator.add`` for simple list
+    concatenation).
 
     Any LangGraph-compatible reducer can be used — e.g., ``add_messages``
     from ``langchain_core.messages`` for smart message deduplication.
@@ -81,7 +95,8 @@ class Reducer(BaseReducer):
     """
 
     name: str
-    fn: Callable[[Event], list[Any]]
+    event_type: type[E]
+    fn: Callable[[E], list[Any]]
     reducer: ReducerFn = field(default=operator.add)
     default: list[Any] = field(default_factory=list)
 
@@ -95,14 +110,15 @@ class Reducer(BaseReducer):
     def collect(self, events: list[Event]) -> Any:
         contributions: list[Any] = []
         for event in events:
-            contrib = self.fn(event)
-            if contrib:
-                if not isinstance(contrib, list):
-                    raise TypeError(
-                        f"Reducer {self.name!r} fn must return a list, "
-                        f"got {type(contrib).__name__}"
-                    )
-                contributions.extend(contrib)
+            if isinstance(event, self.event_type):
+                contrib = self.fn(event)
+                if contrib:
+                    if not isinstance(contrib, list):
+                        raise TypeError(
+                            f"Reducer {self.name!r} fn must return a list, "
+                            f"got {type(contrib).__name__}"
+                        )
+                    contributions.extend(contrib)
         return contributions
 
     def has_contributions(self, result: Any) -> bool:
@@ -118,20 +134,22 @@ class Reducer(BaseReducer):
 
 
 @dataclass
-class ScalarReducer(BaseReducer):
+class ScalarReducer(BaseReducer[E]):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
-    The ``fn`` is called once per event. It should return ``T | None``;
-    the last non-None value wins and is injected directly into the handler.
+    The reducer filters events by ``event_type``, then calls ``fn`` on the
+    last matching event.  The return value — including ``None`` — is injected
+    directly into the handler.
 
-    Note: ``None`` signals "no contribution". To store ``None`` as
-    a meaningful value, wrap it (e.g. use a sentinel dataclass).
+    Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
+    multiple event types structurally.
 
     Example::
 
-        strategy = ScalarReducer(
+        strategy = ScalarReducer[StrategyChosen](
             name="strategy",
-            fn=lambda e: e.strategy if isinstance(e, StrategyChosen) else None,
+            event_type=StrategyChosen,
+            fn=lambda e: e.strategy,
         )
 
         @on(TaskReceived)
@@ -140,7 +158,8 @@ class ScalarReducer(BaseReducer):
     """
 
     name: str
-    fn: Callable[[Event], Any]
+    event_type: type[E]
+    fn: Callable[[E], Any]
     default: Any = None
 
     def state_annotation(self) -> Any:
@@ -151,14 +170,14 @@ class ScalarReducer(BaseReducer):
         return self.default
 
     def collect(self, events: list[Event]) -> Any:
-        for event in reversed(events):
-            val = self.fn(event)
-            if val is not None:
-                return val
-        return None
+        last: Any = _UNSET
+        for event in events:
+            if isinstance(event, self.event_type):
+                last = event
+        return self.fn(last) if last is not _UNSET else _UNSET
 
     def has_contributions(self, result: Any) -> bool:
-        return result is not None
+        return result is not _UNSET
 
     def output_type(self) -> Any:
         return Any
@@ -172,7 +191,7 @@ def message_reducer(
     default: list[BaseMessage] | None = None,
     *,
     name: str = "messages",
-) -> Reducer:
+) -> Reducer[MessageEvent]:
     """Built-in reducer for MessageEvent -> BaseMessage projection.
 
     Calls ``as_messages()`` on any ``MessageEvent`` and accumulates
@@ -197,9 +216,17 @@ def message_reducer(
     """
     from langgraph.graph.message import add_messages  # noqa: PLC0415
 
+    from langgraph_events._event import MessageEvent  # noqa: PLC0415
+
     resolved_default = default or []
 
-    def fn(event: Event) -> list[BaseMessage]:
+    def fn(event: MessageEvent) -> list[BaseMessage]:
         return event.as_messages()
 
-    return Reducer(name=name, fn=fn, reducer=add_messages, default=resolved_default)  # type: ignore[arg-type]
+    return Reducer(
+        name=name,
+        event_type=MessageEvent,
+        fn=fn,
+        reducer=add_messages,  # type: ignore[arg-type]
+        default=resolved_default,
+    )

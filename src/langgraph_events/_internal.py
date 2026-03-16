@@ -131,7 +131,7 @@ def make_dispatch(
     """
 
     def dispatch(state: StateDict) -> list[str | Send] | str:
-        pending = state["_pending"]
+        pending = state.get("_pending", [])
         if not pending:
             return END
 
