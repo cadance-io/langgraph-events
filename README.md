@@ -2,17 +2,18 @@
 
 Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
-> **Experimental (v0.1.1)** — This library is under active development. The API may change without notice. Not recommended for production use.
+> [!CAUTION]
+> **Experimental (v0.1.1)** — This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything you can't easily rewrite. Not published to PyPI.
 
 ## What is this?
 
-LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious and error-prone.
-
-**langgraph-events** replaces that boilerplate with a reactive, event-driven model. Define domain events as frozen dataclasses, subscribe handler functions with `@on(EventType)`, and let `EventGraph` derive the full graph topology automatically.
+LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. **langgraph-events** replaces that boilerplate with a reactive, event-driven model: define domain events as frozen dataclasses, subscribe handler functions with `@on(EventType)`, and let `EventGraph` derive the full graph topology automatically.
 
 The core principle: **state IS events.** The entire state of a run is an append-only log of typed, immutable events. Handlers read events in; handlers emit events out. The framework does the rest.
 
 ## Installation
+
+Not published to PyPI yet. Install directly from GitHub:
 
 ```bash
 pip install git+https://github.com/cadance-io/langgraph-events.git
@@ -64,25 +65,24 @@ print(log.latest(ReplyProduced))
 seed event
     │
     v
-[__seed__] ──> [dispatch] ──> handler_a ──┐
-                   ^           handler_b ──┤
-                   │                       │
-                [__router__] <─────────────┘
-                   │
-                   v
-                [dispatch] ──> handler_c ──┐
-                   ^                       │
-                   │                       │
-                [__router__] <─────────────┘
-                   │
-                   v
-                [dispatch] ──> END (no pending events)
+[seed] ──> [dispatch] ──> handler_a ──┐
+                ^          handler_b ──┤
+                │                      │
+             [router] <────────────────┘
+                │
+                v
+             [dispatch] ──> handler_c ──┐
+                ^                       │
+                │                       │
+             [router] <─────────────────┘
+                │
+                v
+             [dispatch] ──> END (no pending events)
 ```
 
 1. A **seed event** enters the graph.
-2. The **router** collects new events, then **dispatch** uses `isinstance` to match each pending event to subscribed handlers.
-3. Matched handlers run, emit new events.
-4. The loop repeats until no handler matches or a `Halted` event appears.
+2. The **router** collects new events, then **dispatch** matches each to subscribed handlers via `isinstance`. Matched handlers run and emit new events.
+3. The loop repeats until no handler matches or a `Halted` event appears.
 
 ## Key Concepts
 
@@ -141,11 +141,9 @@ The main entry point. Pass a list of handler functions and `EventGraph` derives 
 ```python
 graph = EventGraph(
     [classify, respond, audit],
-    max_rounds=50,
-    reducers=[my_reducer],      # optional — see Reducer section
+    max_rounds=50,           # default: 100; prevents infinite loops
+    reducers=[my_reducer],   # optional — see Reducer section
 )
-
-# --- Event-driven API (recommended) ---
 
 # Synchronous
 log = graph.invoke(SeedEvent(...))
@@ -161,14 +159,12 @@ log = await graph.ainvoke(SeedEvent(...))
 
 # Stream events as they're produced
 for event in graph.stream_events(SeedEvent(...)):
-    print(event)  # yields Event objects directly
+    print(event)
 
 # Stream with reducer snapshots
 for frame in graph.stream_events(SeedEvent(...), include_reducers=True):
     print(frame.event, frame.reducers["messages"])
-```
 
-```python
 # --- LangGraph escape hatch ---
 # Access the underlying CompiledStateGraph for advanced patterns:
 # subgraph composition, custom streaming modes, or direct state access.
@@ -177,9 +173,7 @@ for chunk in compiled.stream({"events": [SeedEvent(...)]}, stream_mode="updates"
     print(chunk)
 ```
 
-`max_rounds` (default: 100) prevents infinite loops. The library auto-sets LangGraph's `recursion_limit` so `max_rounds` is the only limit you need to think about. Override via `invoke(seed, recursion_limit=N)` if needed. `reducers` accepts an optional list of `Reducer` instances for incremental state channels.
-
-All methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`.
+`max_rounds` (default: 100) prevents infinite loops — the library auto-sets LangGraph's `recursion_limit` so this is the only knob you need. Override via `invoke(seed, recursion_limit=N)` if needed. All methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`.
 
 #### Visualizing the Event Flow
 
@@ -292,25 +286,18 @@ Built-in `MessageEvent` that wraps a `SystemMessage`. Makes the system prompt a 
 
 ```python
 from langgraph_events import SystemPromptSet, message_reducer, EventGraph
+from langchain_core.messages import SystemMessage
 
-messages = message_reducer()  # no default needed — system prompt is a seed event
-
+messages = message_reducer()
 graph = EventGraph([call_llm, execute_tools], reducers=[messages])
 
+# Convenience factory
 log = graph.invoke([
     SystemPromptSet.from_str("You are a helpful assistant with tools."),
     UserMessageReceived(message=HumanMessage(content="What's the weather?")),
 ])
 
-# The system prompt is now in the event log
-assert log.has(SystemPromptSet)
-```
-
-You can also construct it explicitly with a `SystemMessage`:
-
-```python
-from langchain_core.messages import SystemMessage
-
+# Or construct explicitly
 seed = SystemPromptSet(message=SystemMessage(content="You are helpful"))
 ```
 
@@ -321,8 +308,9 @@ seed = SystemPromptSet(message=SystemMessage(content="You are helpful"))
 A `Reducer` maps events to contributions for a named LangGraph state channel. The framework maintains the channel incrementally — handlers receive the accumulated value by declaring a parameter whose name matches the reducer.
 
 ```python
-from langgraph_events import Reducer, EventGraph, on
+from langgraph_events import Reducer, ScalarReducer, message_reducer, EventGraph, on
 
+# --- Generic reducer ---
 def project(event: Event) -> list:
     if isinstance(event, UserMsg):
         return [event.text]
@@ -336,14 +324,8 @@ def respond(event: UserMsg, history: list) -> Reply:
     ...
 
 graph = EventGraph([respond], reducers=[history])
-```
 
-`message_reducer()` is a built-in factory for the common case of accumulating LangChain messages from `MessageEvent` instances:
-
-```python
-from langgraph_events import message_reducer, SystemPromptSet
-
-# Preferred: system prompt as a seed event (visible in the event log)
+# --- message_reducer: built-in for LangChain message accumulation ---
 messages = message_reducer()
 graph = EventGraph([call_llm, handle_tools], reducers=[messages])
 log = graph.invoke([
@@ -353,13 +335,8 @@ log = graph.invoke([
 
 # Alternative: explicit default list
 messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
-```
 
-`ScalarReducer` works like `Reducer` but for single values — last non-`None` write wins, injected as a bare value (not a list):
-
-```python
-from langgraph_events import ScalarReducer
-
+# --- ScalarReducer: last non-None write wins, injected as a bare value ---
 temperature = ScalarReducer("temperature", fn=lambda e: e.value if isinstance(e, TempSet) else None, default=0.7)
 ```
 
@@ -414,37 +391,37 @@ The patterns below show how these building blocks compose into complete architec
 
 ### Reflection Loop (Generate / Critique / Revise)
 
-A handler subscribes to both the seed event and critique events (`@on(WriteRequested, CritiqueReceived)`), creating an autonomous improvement cycle. A second handler evaluates each draft and either produces a critique (looping back) or a final result (terminating). `EventLog.latest()` provides lookback to enforce a revision cap.
+Multi-subscription creates an autonomous generate/critique/revise cycle; `EventLog.latest()` enforces a revision cap.
 
 [`examples/reflection_loop.py`](examples/reflection_loop.py) · [event flow](examples/reflection_loop.graph.md) — Multi-subscription `@on`, `EventLog.latest()`, revision cap
 
 ### ReAct Agent with Message Reducer
 
-Multi-subscription (`@on(UserMessageReceived, ToolsExecuted)`) creates the ReAct loop implicitly. The `message_reducer` maintains conversation history incrementally — handlers receive the accumulated message list as a parameter rather than reconstructing it from the event log.
+Multi-subscription creates the ReAct loop implicitly; `message_reducer` maintains conversation history incrementally as a handler parameter.
 
 [`examples/react_agent.py`](examples/react_agent.py) · [event flow](examples/react_agent.graph.md) — `MessageEvent`, `message_reducer`, `Auditable`
 
 ### Multi-Agent Supervisor
 
-A supervisor handler fires on the initial task and on specialist completions (`@on(TaskReceived, ResearchCompleted, CodeProduced)`). It uses tool-calling to make structured routing decisions. A custom `Reducer` projects events into a context channel that the supervisor reads incrementally.
+A supervisor handler fires on task and specialist completions, using tool-calling for structured routing; a custom `Reducer` projects events into a context channel.
 
 [`examples/supervisor.py`](examples/supervisor.py) · [event flow](examples/supervisor.graph.md) — Custom `Reducer`, tool-calling routing, `Auditable`
 
 ### Fan-Out / Fan-In (Map-Reduce)
 
-`Scatter[WorkItem]` fans a batch into individual work items. Per-item handlers process in parallel. A gathering handler uses `EventLog.filter()` to detect completion and produce the combined result.
+`Scatter[WorkItem]` fans a batch into individual items; a gathering handler uses `EventLog.filter()` to detect completion.
 
 [`examples/map_reduce.py`](examples/map_reduce.py) · [event flow](examples/map_reduce.graph.md) — `Scatter`, `EventLog.filter()`, gather pattern
 
 ### Human-in-the-Loop Approval
 
-`Interrupted` pauses the graph for human input. `Resumed` carries the response back in. Combined with a revision event type, this creates an approval-with-feedback cycle. Requires a checkpointer.
+`Interrupted` pauses for human input; `Resumed` carries the response back, creating an approval-with-feedback cycle.
 
 [`examples/human_in_the_loop.py`](examples/human_in_the_loop.py) · [event flow](examples/human_in_the_loop.graph.md) — `Interrupted`/`Resumed`, checkpointer, revision cycle
 
 ### Content Pipeline (Halted + Streaming)
 
-`Halted` terminates the pipeline immediately for unsafe content. `stream_events()` yields events as they're produced, with optional `StreamFrame` reducer snapshots. No LLM dependency — runs with keyword rules.
+`Halted` terminates immediately for unsafe content; `stream_events()` yields events live with optional `StreamFrame` reducer snapshots.
 
 [`examples/content_pipeline.py`](examples/content_pipeline.py) · [event flow](examples/content_pipeline.graph.md) — `Halted`, `Reducer`, `stream_events`, `StreamFrame`
 
@@ -480,6 +457,8 @@ A supervisor handler fires on the initial task and on specialist completions (`@
 
 ## Checkpointer & Graph Evolution
 
+> *This documents current behavior. Details may change between versions — there are no stability guarantees yet.*
+
 When using a checkpointer (`MemorySaver`, `SqliteSaver`, etc.), existing threads retain their checkpoint state across invocations. If you modify the graph between invocations on the same thread, LangGraph handles mismatches through **graceful degradation** — no crashes, but some changes have silent side effects.
 
 ### What's safe
@@ -506,6 +485,14 @@ When using a checkpointer (`MemorySaver`, `SqliteSaver`, etc.), existing threads
 2. **Treat reducer addition as a fresh start.** A newly added reducer on an existing thread won't replay historical events. If you need the full history, start a new thread.
 3. **Prefer additive changes.** Adding handlers and event types is always safe. Removing them is safe only if no in-flight threads depend on them.
 4. **Use separate `thread_id`s after structural changes.** The simplest way to avoid all edge cases is to use a new thread for a modified graph.
+
+## Status
+
+This is a solo experiment, not a team-backed product. Expect:
+
+- No changelog or migration guides between versions
+- API surface may shrink or change significantly
+- Bug reports welcome, but no SLA on fixes
 
 ## Development
 
