@@ -356,12 +356,12 @@ class EventGraph:
     def _run(self, inp: Any, **kwargs: Any) -> EventLog:
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
-        return EventLog(result["events"])
+        return EventLog._from_owned(result["events"])
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
-        return EventLog(result["events"])
+        return EventLog._from_owned(result["events"])
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph synchronously with one or more seed events.

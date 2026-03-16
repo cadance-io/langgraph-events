@@ -219,12 +219,14 @@ class Scatter:
     def __init__(self, events: list[Event]) -> None:
         if not events:
             raise ValueError("Scatter requires at least one event")
+        validated: list[Event] = []
         for e in events:
             if not isinstance(e, Event):
                 raise TypeError(
                     f"Scatter events must be Event instances, got {type(e).__name__}"
                 )
-        self.events = list(events)
+            validated.append(e)
+        self.events = validated
 
     def _collect_into(
         self,
