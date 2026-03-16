@@ -310,13 +310,8 @@ A `Reducer` maps events to contributions for a named LangGraph state channel. Th
 ```python
 from langgraph_events import Reducer, ScalarReducer, message_reducer, EventGraph, on
 
-# --- Generic reducer ---
-def project(event: Event) -> list:
-    if isinstance(event, UserMsg):
-        return [event.text]
-    return []
-
-history = Reducer("history", fn=project, default=[])
+# --- Reducer: accumulates contributions from matching events ---
+history = Reducer("history", event_type=UserMsg, fn=lambda e: [e.text], default=[])
 
 @on(UserMsg)
 def respond(event: UserMsg, history: list) -> Reply:
@@ -336,8 +331,8 @@ log = graph.invoke([
 # Alternative: explicit default list
 messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
 
-# --- ScalarReducer: last non-None write wins, injected as a bare value ---
-temperature = ScalarReducer("temperature", fn=lambda e: e.value if isinstance(e, TempSet) else None, default=0.7)
+# --- ScalarReducer: last-write-wins, injected as a bare value ---
+temperature = ScalarReducer("temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7)
 ```
 
 The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically:
@@ -449,7 +444,7 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
-| `ScalarReducer`   | Class      | Last-write-wins reducer for single values       |
+| `ScalarReducer`   | Class      | Last-write-wins reducer for single values (None is a valid value) |
 | `Resumed`         | Event      | Created on resume with human's response         |
 | `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 | `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |

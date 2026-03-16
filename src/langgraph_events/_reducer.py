@@ -5,17 +5,15 @@ from __future__ import annotations
 import operator
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from langchain_core.messages import BaseMessage
 
-    from langgraph_events._event import Event, MessageEvent
+    from langgraph_events._event import Event
     from langgraph_events._types import ReducerFn
-
-E = TypeVar("E", bound="Event")
 
 _UNSET = object()
 
@@ -25,19 +23,16 @@ def _last_write_wins(existing: Any, new: Any) -> Any:
     return new
 
 
-class BaseReducer(ABC, Generic[E]):
+class BaseReducer(ABC):
     """Abstract base for all reducer types.
 
-    Parameterised by ``E``, the event type this reducer matches.
-    Subclasses declare ``event_type: type[E]`` so the framework can
-    filter events before calling ``fn``.
-
-    Use a ``@runtime_checkable Protocol`` as ``E`` for structural
-    multi-type matching.
+    Subclasses declare ``event_type`` so the framework can filter events
+    before calling ``fn``.  Use a ``@runtime_checkable Protocol`` for
+    structural multi-type matching.
     """
 
     name: str
-    event_type: type[E]
+    event_type: type
 
     @abstractmethod
     def state_annotation(self) -> Any:
@@ -66,7 +61,7 @@ class BaseReducer(ABC, Generic[E]):
 
 
 @dataclass
-class Reducer(BaseReducer[E]):
+class Reducer(BaseReducer):
     """Maps events to contributions for a named LangGraph state channel.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on each
@@ -95,8 +90,8 @@ class Reducer(BaseReducer[E]):
     """
 
     name: str
-    event_type: type[E]
-    fn: Callable[[E], list[Any]]
+    event_type: type
+    fn: Callable[[Any], list[Any]]
     reducer: ReducerFn = field(default=operator.add)
     default: list[Any] = field(default_factory=list)
 
@@ -134,7 +129,7 @@ class Reducer(BaseReducer[E]):
 
 
 @dataclass
-class ScalarReducer(BaseReducer[E]):
+class ScalarReducer(BaseReducer):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
@@ -146,7 +141,7 @@ class ScalarReducer(BaseReducer[E]):
 
     Example::
 
-        strategy = ScalarReducer[StrategyChosen](
+        strategy = ScalarReducer(
             name="strategy",
             event_type=StrategyChosen,
             fn=lambda e: e.strategy,
@@ -158,8 +153,8 @@ class ScalarReducer(BaseReducer[E]):
     """
 
     name: str
-    event_type: type[E]
-    fn: Callable[[E], Any]
+    event_type: type
+    fn: Callable[[Any], Any]
     default: Any = None
 
     def state_annotation(self) -> Any:
@@ -191,7 +186,7 @@ def message_reducer(
     default: list[BaseMessage] | None = None,
     *,
     name: str = "messages",
-) -> Reducer[MessageEvent]:
+) -> Reducer:
     """Built-in reducer for MessageEvent -> BaseMessage projection.
 
     Calls ``as_messages()`` on any ``MessageEvent`` and accumulates
