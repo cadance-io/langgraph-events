@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import types
-from dataclasses import field
 from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any
 
@@ -124,14 +123,17 @@ class Halted(Event):
 class Interrupted(Event):
     """Special event that pauses the graph for human input.
 
-    When a handler returns an ``Interrupted`` event, the framework calls
-    LangGraph's ``interrupt()`` and the graph pauses. Resume with
+    Subclass with domain-specific fields instead of generic payloads::
+
+        class ApprovalRequested(Interrupted):
+            draft: str
+            revision: int
+
+    When a handler returns an ``Interrupted`` subclass, the framework
+    calls LangGraph's ``interrupt()`` and the graph pauses.  Resume with
     ``graph.resume(event)`` to continue — the event is auto-dispatched
     and a ``Resumed`` event is created alongside it.
     """
-
-    prompt: str = ""
-    payload: dict[str, Any] = field(default_factory=dict)
 
     def _collect_into(
         self,

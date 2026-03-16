@@ -9,7 +9,7 @@ graph LR
     _e2_[ ]:::entry ==> RevisionFeedback
     ContentRequested -->|generate_draft| DraftGenerated
     RevisionRequested -->|generate_draft| DraftGenerated
-    DraftGenerated -->|request_approval| Interrupted
+    DraftGenerated -->|request_approval| ApprovalRequested
     ReviewApproved -->|publish| ContentPublished
     RevisionFeedback -->|request_revision| RevisionRequested
 %% Side-effect handlers: audit_trail (Auditable)

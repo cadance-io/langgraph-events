@@ -31,6 +31,16 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 
 
+class _StepInterrupt(Interrupted):
+    """Module-level Interrupted subclass for checkpoint-aware tests.
+
+    Defined here (not inside test functions) so that LangGraph's
+    serializer can resolve the class on checkpoint restore.
+    """
+
+    step: int = 0
+
+
 def _data_reducer() -> Reducer:
     """Simple reducer that accumulates Start.data values."""
     return Reducer(name="data_items", event_type=Start, fn=lambda e: [e.data])
@@ -626,17 +636,21 @@ def describe_EventGraph():
 
     def describe_interrupt():
 
-        def it_stores_prompt_and_payload():
-            i = Interrupted(prompt="Approve?", payload={"doc_id": "123"})
-            assert i.prompt == "Approve?"
-            assert i.payload == {"doc_id": "123"}
-            assert isinstance(i, Event)
+        def it_is_a_bare_marker_supporting_typed_subclasses():
+            assert isinstance(Interrupted(), Event)
+
+            class ConfirmNeeded(Interrupted):
+                data: str
+
+            c = ConfirmNeeded(data="test")
+            assert c.data == "test"
+            assert isinstance(c, Interrupted)
 
         def it_stores_value_and_interrupted_reference():
             class Confirm(Event):
                 pass
 
-            i = Interrupted(prompt="Approve?")
+            i = Interrupted()
             confirm = Confirm()
             r = Resumed(value=confirm, interrupted=i)
             assert r.value is confirm
@@ -646,15 +660,15 @@ def describe_EventGraph():
         def it_pauses_and_resumes_with_human_input():
             from langgraph.checkpoint.memory import MemorySaver
 
+            class ConfirmNeeded(Interrupted):
+                data: str
+
             class Confirm(Event):
                 pass
 
             @on(Start)
-            def need_input(event: Start) -> Interrupted:
-                return Interrupted(
-                    prompt="Please confirm",
-                    payload={"data": event.data},
-                )
+            def need_input(event: Start) -> ConfirmNeeded:
+                return ConfirmNeeded(data=event.data)
 
             @on(Confirm)
             def handle_confirm(event: Confirm) -> End:
@@ -679,7 +693,7 @@ def describe_EventGraph():
 
             @on(Start)
             def need_input(event: Start) -> Interrupted:
-                return Interrupted(prompt="confirm?")
+                return Interrupted()
 
             graph = EventGraph([need_input])
             with pytest.raises(ValueError, match=r"resume.*requires a checkpointer"):
@@ -690,7 +704,7 @@ def describe_EventGraph():
 
             @on(Start)
             def need_input(event: Start) -> Interrupted:
-                return Interrupted(prompt="confirm?")
+                return Interrupted()
 
             @on(Resumed)
             def handle_resume(event: Resumed) -> End:
@@ -716,7 +730,7 @@ def describe_EventGraph():
 
             @on(Start)
             def need_input(event: Start) -> Interrupted:
-                return Interrupted(prompt="Approve?")
+                return Interrupted()
 
             @on(Approval)
             def handle_approval(event: Approval) -> End:
@@ -765,7 +779,7 @@ def describe_EventGraph():
 
             @on(Start)
             def need_input(event: Start) -> Interrupted:
-                return Interrupted(prompt="Say something")
+                return Interrupted()
 
             received_messages: list = []
 
@@ -2076,15 +2090,16 @@ def describe_EventGraph():
                     pass
 
                 @on(Start)
-                def ask(event: Start) -> Interrupted:
-                    return Interrupted(prompt="approve?")
+                def ask(event: Start) -> _StepInterrupt:
+                    return _StepInterrupt()
 
                 @on(Resumed)
-                def after_resume(event: Resumed) -> Interrupted | End:
-                    step = event.interrupted.payload.get("step", 0)  # type: ignore[union-attr]
+                def after_resume(event: Resumed) -> _StepInterrupt | End:
+                    prev = event.interrupted
+                    step = prev.step if isinstance(prev, _StepInterrupt) else 0
                     if step >= 2:
                         return End(result="done")
-                    return Interrupted(prompt="again?", payload={"step": step + 1})
+                    return _StepInterrupt(step=step + 1)
 
                 # max_rounds=2 would be exceeded without reset:
                 # Run 1 uses round 1 (seed→ask), then pauses.
@@ -2207,7 +2222,7 @@ def describe_EventGraph():
         def it_connects_interrupted_to_resumed_with_dashed_edge():
             @on(Start)
             def request_approval(event: Start) -> Interrupted:
-                return Interrupted(prompt="approve?")
+                return Interrupted()
 
             @on(Resumed)
             def handle_review(event: Resumed) -> End:
