@@ -325,6 +325,23 @@ def describe_EventGraph():
                 log = graph.invoke(Pong(value="world"))
                 assert log.latest(Done) == Done(result="pong:world")
 
+            def it_dispatches_handler_only_once_when_both_types_pending():
+                @on(Ping, Pong)
+                def echo(event: Event) -> Reply:
+                    return Reply(value="seen")
+
+                @on(Reply)
+                def finish(event: Reply) -> Done:
+                    return Done(result=event.value)
+
+                graph = EventGraph([echo, finish])
+                log = graph.invoke([Ping(value="a"), Pong(value="b")])
+                # Handler fires once per matching event, but is dispatched
+                # only once (not duplicated in matched list)
+                replies = log.filter(Reply)
+                assert len(replies) == 2
+                assert log.filter(Done) == [Done(result="seen"), Done(result="seen")]
+
             def it_provides_log_to_multi_sub_handler():
                 class MsgA(Event):
                     text: str = ""
@@ -1202,6 +1219,25 @@ def describe_EventGraph():
             graph = EventGraph([handle], reducers=[sr])
             log = graph.invoke(Trigger())
             assert log.latest(Result) == Result(got="fallback")
+
+        def it_collects_last_non_none_from_multiple_events():
+            class Step(Event):
+                tag: str = ""
+
+            sr = ScalarReducer(
+                name="val",
+                fn=lambda e: e.tag if isinstance(e, Step) and e.tag else None,
+            )
+            events = [Step(), Step(tag="a"), Step(), Step(tag="b"), Step()]
+            result = sr.collect(events)
+            assert result == "b"
+
+        def it_returns_none_when_all_none():
+            class Step(Event):
+                pass
+
+            sr = ScalarReducer(name="val", fn=lambda e: None)
+            assert sr.collect([Step(), Step(), Step()]) is None
 
         def it_works_alongside_list_reducers():
             class Trigger(Event):

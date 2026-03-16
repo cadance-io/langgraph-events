@@ -209,3 +209,39 @@ def describe_EventLog():
             assert "Alpha" in r
             assert "Beta" in r
             assert "v=0" not in r
+
+    def describe_from_owned():
+
+        def it_shares_the_same_list_object():
+            events = [Alpha(v=1), Beta(v=2)]
+            log = EventLog._from_owned(events)
+            assert log._events is events
+
+        def it_produces_functionally_identical_log():
+            events = [Alpha(v=1), Beta(v=2), Alpha(v=3)]
+            log = EventLog._from_owned(list(events))
+            assert log.filter(Alpha) == [Alpha(v=1), Alpha(v=3)]
+            assert log.latest(Beta) == Beta(v=2)
+            assert len(log) == 3
+
+    def describe_events_caching():
+
+        def it_returns_same_tuple_on_repeated_access():
+            log = EventLog([Alpha(v=1), Beta(v=2)])
+            first = log.events
+            second = log.events
+            assert first is second
+
+    def describe_query_independence():
+
+        def it_returns_independent_logs_from_after():
+            log = EventLog([Alpha(v=1), Beta(v=2), Alpha(v=3)])
+            sub = log.after(Alpha)
+            assert list(sub) == [Beta(v=2), Alpha(v=3)]
+            assert list(log) == [Alpha(v=1), Beta(v=2), Alpha(v=3)]
+
+        def it_returns_independent_logs_from_select():
+            log = EventLog([Alpha(v=1), Beta(v=2), Alpha(v=3)])
+            sub = log.select(Alpha)
+            assert list(sub) == [Alpha(v=1), Alpha(v=3)]
+            assert len(log) == 3

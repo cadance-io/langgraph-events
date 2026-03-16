@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from langgraph_events._event import Event
 
@@ -19,10 +19,19 @@ class EventLog:
     All queries use ``isinstance`` so subclass events match parent types.
     """
 
-    __slots__ = ("_events",)
+    __slots__ = ("_events", "_events_tuple")
 
     def __init__(self, events: list[Event]) -> None:
         self._events = list(events)
+        self._events_tuple: tuple[Event, ...] | None = None
+
+    @classmethod
+    def _from_owned(cls, events: list[Any]) -> EventLog:
+        """Create an EventLog taking ownership of the list (no copy)."""
+        obj = object.__new__(cls)
+        obj._events = events
+        obj._events_tuple = None
+        return obj
 
     def filter(self, event_type: type[T]) -> list[T]:
         """Return all events matching *event_type* (including subclasses)."""
@@ -54,24 +63,27 @@ class EventLog:
         """Return an ``EventLog`` of events after the first *event_type*."""
         for i, e in enumerate(self._events):
             if isinstance(e, event_type):
-                return EventLog(self._events[i + 1 :])
-        return EventLog([])
+                return EventLog._from_owned(self._events[i + 1 :])
+        return EventLog._from_owned([])
 
     def before(self, event_type: type[Event]) -> EventLog:
         """Return an ``EventLog`` of events before the first *event_type*."""
         for i, e in enumerate(self._events):
             if isinstance(e, event_type):
-                return EventLog(self._events[:i])
-        return EventLog([])
+                return EventLog._from_owned(self._events[:i])
+        return EventLog._from_owned([])
 
     def select(self, event_type: type[T]) -> EventLog:
         """Like ``filter()`` but returns an ``EventLog`` for chaining."""
-        return EventLog([e for e in self._events if isinstance(e, event_type)])
+        filtered = [e for e in self._events if isinstance(e, event_type)]
+        return EventLog._from_owned(filtered)
 
     @property
     def events(self) -> tuple[Event, ...]:
         """The events in this log as an immutable tuple."""
-        return tuple(self._events)
+        if self._events_tuple is None:
+            self._events_tuple = tuple(self._events)
+        return self._events_tuple
 
     # --- container protocol ---
 

@@ -136,10 +136,13 @@ def make_dispatch(
 
         # Find handlers whose event_types match any pending event
         matched: list[str] = []
+        seen: set[str] = set()
         for meta in handler_metas:
-            if any(isinstance(e, meta.event_types) for e in pending):
-                if meta.name not in matched:
-                    matched.append(meta.name)
+            if meta.name not in seen and any(
+                isinstance(e, meta.event_types) for e in pending
+            ):
+                seen.add(meta.name)
+                matched.append(meta.name)
 
         if not matched:
             return END
@@ -178,6 +181,8 @@ def _apply_reducers(
 
     Returns per-channel updates keyed by ``_r_<name>``.
     """
+    if not new_events:
+        return {}
     updates: dict[str, Any] = {}
     for name, r in reducers.items():
         result = r.collect(new_events)

@@ -151,12 +151,11 @@ class ScalarReducer(BaseReducer):
         return self.default
 
     def collect(self, events: list[Event]) -> Any:
-        result = None
-        for event in events:
+        for event in reversed(events):
             val = self.fn(event)
             if val is not None:
-                result = val
-        return result
+                return val
+        return None
 
     def has_contributions(self, result: Any) -> bool:
         return result is not None
