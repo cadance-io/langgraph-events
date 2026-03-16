@@ -141,6 +141,8 @@ class Interrupted(Event):
         """Record the interrupt, pause, and create a Resumed event."""
         new_events.append(self)
         resume_value = interrupt_fn(self)
+        if isinstance(resume_value, Event):
+            new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
 
 

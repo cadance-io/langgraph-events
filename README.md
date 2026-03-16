@@ -380,6 +380,22 @@ if state.is_interrupted:
 log = graph.resume("yes", config=config)
 ```
 
+**Typed Event resume** — if you pass an `Event` to `resume()`, it is auto-dispatched alongside `Resumed`. This lets handlers subscribed to the event type fire without manual state injection:
+
+```python
+class Approval(Event):
+    approved: bool
+
+@on(Approval)
+def handle_approval(event: Approval) -> OrderConfirmed | OrderCancelled:
+    if event.approved:
+        return OrderConfirmed(order_id=event.interrupted.payload["order_id"])
+    return OrderCancelled(reason="User declined")
+
+# Resume with a typed event — Approval handler fires automatically
+log = graph.resume(Approval(approved=True), config=config)
+```
+
 ## Patterns & Examples
 
 The patterns below show how these building blocks compose into complete architectures. Each links to a runnable example in `examples/`.
@@ -435,6 +451,7 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `EventGraph.aresume()` | Method | Async version of `resume()` |
 | `EventGraph.get_state()` | Method | Get `GraphState` for a checkpointed thread |
 | `EventGraph.compiled` | Property | Access underlying `CompiledStateGraph` for advanced LangGraph patterns |
+| `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
@@ -445,7 +462,7 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `ScalarReducer`   | Class      | Last-write-wins reducer for single values (None is a valid value) |
-| `Resumed`         | Event      | Created on resume with human's response         |
+| `Resumed`         | Event      | Created on resume; if value is an `Event`, it's auto-dispatched |
 | `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 | `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |

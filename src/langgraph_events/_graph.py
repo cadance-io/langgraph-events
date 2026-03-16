@@ -262,6 +262,11 @@ class EventGraph:
         return "\n".join(lines)
 
     @property
+    def reducer_names(self) -> frozenset[str]:
+        """The names of all registered reducers."""
+        return frozenset(self._reducers.keys())
+
+    @property
     def compiled(self) -> CompiledStateGraph:
         """The underlying LangGraph ``CompiledStateGraph``.
 
@@ -378,14 +383,20 @@ class EventGraph:
         return await self._arun(self._prepare_input(seed), **kwargs)
 
     def resume(self, value: Any, **kwargs: Any) -> EventLog:
-        """Resume an interrupted graph with a human response."""
+        """Resume an interrupted graph with a human response.
+
+        If *value* is an ``Event``, it is auto-dispatched alongside ``Resumed``.
+        """
         self._require_checkpointer("resume")
         from langgraph.types import Command  # noqa: PLC0415
 
         return self._run(Command(resume=value), **kwargs)
 
     async def aresume(self, value: Any, **kwargs: Any) -> EventLog:
-        """Async version of resume()."""
+        """Async version of resume().
+
+        If *value* is an ``Event``, it is auto-dispatched alongside ``Resumed``.
+        """
         self._require_checkpointer("aresume")
         from langgraph.types import Command  # noqa: PLC0415
 

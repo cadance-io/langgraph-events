@@ -675,6 +675,90 @@ def describe_EventGraph():
             with pytest.raises(ValueError, match=r"resume.*requires a checkpointer"):
                 graph.resume("yes")
 
+        def it_auto_dispatches_event_resume_value():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            class Approval(Event):
+                approved: bool = False
+
+            handler_fired = []
+
+            @on(Start)
+            def need_input(event: Start) -> Interrupted:
+                return Interrupted(prompt="Approve?")
+
+            @on(Approval)
+            def handle_approval(event: Approval) -> End:
+                handler_fired.append(event)
+                return End(result=f"approved={event.approved}")
+
+            @on(Resumed)
+            def handle_resume(event: Resumed) -> Done:
+                return Done(result=f"resumed:{event.value}")
+
+            graph = EventGraph(
+                [need_input, handle_approval, handle_resume],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "auto-dispatch-test"}}
+            graph.invoke(Start(data="test"), config=config)
+
+            approval = Approval(approved=True)
+            log = graph.resume(approval, config=config)
+
+            # Handler subscribed to Approval fires
+            assert len(handler_fired) == 1
+            assert handler_fired[0] == approval
+
+            # Approval appears before Resumed in the log
+            events = list(log)
+            approval_idx = next(
+                i for i, e in enumerate(events) if isinstance(e, Approval)
+            )
+            resumed_idx = next(
+                i for i, e in enumerate(events) if isinstance(e, Resumed)
+            )
+            assert approval_idx < resumed_idx
+
+            # Resumed.value holds the Event reference
+            resumed = log.latest(Resumed)
+            assert resumed.value is approval
+
+        def it_processes_event_through_reducer():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            class UserMsg(MessageEvent):
+                message: HumanMessage
+
+            @on(Start)
+            def need_input(event: Start) -> Interrupted:
+                return Interrupted(prompt="Say something")
+
+            received_messages: list = []
+
+            @on(Resumed)
+            def handle_resume(event: Resumed, messages: list) -> End:
+                received_messages.extend(messages)
+                return End(result="done")
+
+            graph = EventGraph(
+                [need_input, handle_resume],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer()],
+            )
+            config = {"configurable": {"thread_id": "reducer-dispatch-test"}}
+            graph.invoke(Start(data="test"), config=config)
+
+            user_msg = UserMsg(message=HumanMessage(content="hello from human"))
+            log = graph.resume(user_msg, config=config)
+
+            # The message reducer saw the auto-dispatched UserMsg
+            assert any(
+                isinstance(m, HumanMessage) and m.content == "hello from human"
+                for m in received_messages
+            )
+            assert log.latest(End) == End(result="done")
+
     def describe_scatter():
 
         class Batch(Event):
@@ -758,6 +842,25 @@ def describe_EventGraph():
                 assert log.latest(WorkDone) == WorkDone(item="only", result="ok:only")
 
     def describe_reducer():
+
+        def it_returns_frozenset_of_reducer_names():
+            r1 = Reducer(name="alpha", event_type=Start, fn=lambda e: [e.data])
+            r2 = Reducer(name="beta", event_type=Start, fn=lambda e: [e.data])
+
+            @on(Start)
+            def noop(event: Start) -> Done:
+                return Done(result="x")
+
+            graph = EventGraph([noop], reducers=[r1, r2])
+            assert graph.reducer_names == frozenset({"alpha", "beta"})
+
+        def it_returns_empty_frozenset_when_no_reducers():
+            @on(Start)
+            def noop(event: Start) -> Done:
+                return Done(result="x")
+
+            graph = EventGraph([noop])
+            assert graph.reducer_names == frozenset()
 
         @pytest.mark.parametrize(
             "reserved_name",
