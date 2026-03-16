@@ -382,20 +382,22 @@ class EventGraph:
         """Run the graph asynchronously with one or more seed events."""
         return await self._arun(self._prepare_input(seed), **kwargs)
 
-    def resume(self, value: Any, **kwargs: Any) -> EventLog:
-        """Resume an interrupted graph with a human response.
+    def resume(self, value: Event, **kwargs: Any) -> EventLog:
+        """Resume an interrupted graph with a domain event.
 
-        If *value* is an ``Event``, it is auto-dispatched alongside ``Resumed``.
+        The event is auto-dispatched (handlers subscribed to its type fire),
+        then a ``Resumed`` event is created alongside it.
         """
         self._require_checkpointer("resume")
         from langgraph.types import Command  # noqa: PLC0415
 
         return self._run(Command(resume=value), **kwargs)
 
-    async def aresume(self, value: Any, **kwargs: Any) -> EventLog:
+    async def aresume(self, value: Event, **kwargs: Any) -> EventLog:
         """Async version of resume().
 
-        If *value* is an ``Event``, it is auto-dispatched alongside ``Resumed``.
+        The event is auto-dispatched (handlers subscribed to its type fire),
+        then a ``Resumed`` event is created alongside it.
         """
         self._require_checkpointer("aresume")
         from langgraph.types import Command  # noqa: PLC0415

@@ -126,8 +126,8 @@ class Interrupted(Event):
 
     When a handler returns an ``Interrupted`` event, the framework calls
     LangGraph's ``interrupt()`` and the graph pauses. Resume with
-    ``graph.resume(value)`` to continue — the framework creates a
-    ``Resumed`` event automatically.
+    ``graph.resume(event)`` to continue — the event is auto-dispatched
+    and a ``Resumed`` event is created alongside it.
     """
 
     prompt: str = ""
@@ -141,19 +141,21 @@ class Interrupted(Event):
         """Record the interrupt, pause, and create a Resumed event."""
         new_events.append(self)
         resume_value = interrupt_fn(self)
-        if isinstance(resume_value, Event):
-            new_events.append(resume_value)
+        if not isinstance(resume_value, Event):
+            got = type(resume_value).__name__
+            raise TypeError(f"resume() requires an Event instance, got {got}")
+        new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
 
 
 class Resumed(Event):
     """Created by the framework when a graph resumes from an interrupt.
 
-    Contains the human's response and a reference to the original
+    Contains the resume event and a reference to the original
     ``Interrupted`` event.
     """
 
-    value: Any = None
+    value: Event | None = None
     interrupted: Interrupted | None = None
 
 

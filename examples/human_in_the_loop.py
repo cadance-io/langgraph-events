@@ -27,7 +27,6 @@ from langgraph_events import (
     EventGraph,
     EventLog,
     Interrupted,
-    Resumed,
     on,
 )
 
@@ -39,6 +38,14 @@ from langgraph_events import (
 class ContentRequested(Auditable):
     topic: str = ""
     tone: str = "professional"
+
+
+class ReviewApproved(Auditable):
+    """Human approved the draft."""
+
+
+class RevisionFeedback(Auditable):
+    feedback: str = ""
 
 
 class RevisionRequested(Auditable):
@@ -129,23 +136,19 @@ def request_approval(event: DraftGenerated) -> Interrupted:
     )
 
 
-@on(Resumed)
-def handle_review(
-    event: Resumed, log: EventLog
-) -> ContentPublished | RevisionRequested:
-    """Process the human's review decision.
+@on(ReviewApproved)
+def publish(event: ReviewApproved, log: EventLog) -> ContentPublished:
+    """Publish the draft when the human approves."""
+    draft = log.latest(DraftGenerated)
+    return ContentPublished(content=draft.content)
 
-    Returns ContentPublished if approved, or RevisionRequested to trigger
-    another revision cycle.
-    """
-    if str(event.value).strip().lower() == "approve":
-        draft = log.latest(DraftGenerated)
-        return ContentPublished(content=draft.content)
 
-    revision = (
-        event.interrupted.payload.get("revision", 0) + 1 if event.interrupted else 1
-    )
-    return RevisionRequested(feedback=str(event.value), revision=revision)
+@on(RevisionFeedback)
+def request_revision(event: RevisionFeedback, log: EventLog) -> RevisionRequested:
+    """Request a revision cycle with the human's feedback."""
+    interrupted = log.latest(Interrupted)
+    revision = (interrupted.payload.get("revision", 0) + 1) if interrupted else 1
+    return RevisionRequested(feedback=event.feedback, revision=revision)
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +157,7 @@ def handle_review(
 
 
 graph = EventGraph(
-    [generate_draft, request_approval, handle_review, audit_trail],
+    [generate_draft, request_approval, publish, request_revision, audit_trail],
     checkpointer=MemorySaver(),
 )
 
@@ -191,8 +194,13 @@ async def main():
 
         print()
 
-        # Resume the graph with the human's input
-        log = await graph.aresume(human_input, config=config)
+        # Resume with a typed event
+        if human_input.strip().lower() == "approve":
+            log = await graph.aresume(ReviewApproved(), config=config)
+        else:
+            log = await graph.aresume(
+                RevisionFeedback(feedback=human_input), config=config
+            )
 
 
 if __name__ == "__main__":

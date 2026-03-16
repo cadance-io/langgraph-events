@@ -633,14 +633,21 @@ def describe_EventGraph():
             assert isinstance(i, Event)
 
         def it_stores_value_and_interrupted_reference():
+            class Confirm(Event):
+                pass
+
             i = Interrupted(prompt="Approve?")
-            r = Resumed(value="yes", interrupted=i)
-            assert r.value == "yes"
+            confirm = Confirm()
+            r = Resumed(value=confirm, interrupted=i)
+            assert r.value is confirm
             assert r.interrupted is i
             assert isinstance(r, Event)
 
         def it_pauses_and_resumes_with_human_input():
             from langgraph.checkpoint.memory import MemorySaver
+
+            class Confirm(Event):
+                pass
 
             @on(Start)
             def need_input(event: Start) -> Interrupted:
@@ -649,12 +656,12 @@ def describe_EventGraph():
                     payload={"data": event.data},
                 )
 
-            @on(Resumed)
-            def handle_resume(event: Resumed) -> End:
-                return End(result=f"confirmed:{event.value}")
+            @on(Confirm)
+            def handle_confirm(event: Confirm) -> End:
+                return End(result="confirmed")
 
             graph = EventGraph(
-                [need_input, handle_resume],
+                [need_input, handle_confirm],
                 checkpointer=MemorySaver(),
             )
 
@@ -663,17 +670,41 @@ def describe_EventGraph():
             state = graph.get_state(config)
             assert state.is_interrupted
 
-            log = graph.resume("yes", config=config)
-            assert log.latest(End) == End(result="confirmed:yes")
+            log = graph.resume(Confirm(), config=config)
+            assert log.latest(End) == End(result="confirmed")
 
         def it_raises_without_checkpointer():
+            class Confirm(Event):
+                pass
+
             @on(Start)
             def need_input(event: Start) -> Interrupted:
                 return Interrupted(prompt="confirm?")
 
             graph = EventGraph([need_input])
             with pytest.raises(ValueError, match=r"resume.*requires a checkpointer"):
-                graph.resume("yes")
+                graph.resume(Confirm())
+
+        def it_raises_type_error_for_non_event_resume():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Start)
+            def need_input(event: Start) -> Interrupted:
+                return Interrupted(prompt="confirm?")
+
+            @on(Resumed)
+            def handle_resume(event: Resumed) -> End:
+                return End(result="done")
+
+            graph = EventGraph(
+                [need_input, handle_resume],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "type-error-test"}}
+            graph.invoke(Start(data="test"), config=config)
+
+            with pytest.raises(TypeError, match=r"resume\(\) requires an Event"):
+                graph.resume("yes", config=config)  # type: ignore[arg-type]
 
         def it_auto_dispatches_event_resume_value():
             from langgraph.checkpoint.memory import MemorySaver
@@ -694,7 +725,9 @@ def describe_EventGraph():
 
             @on(Resumed)
             def handle_resume(event: Resumed) -> Done:
-                return Done(result=f"resumed:{event.value}")
+                val = event.value
+                approved = val.approved if isinstance(val, Approval) else False
+                return Done(result=f"resumed:approved={approved}")
 
             graph = EventGraph(
                 [need_input, handle_approval, handle_resume],
@@ -2039,6 +2072,9 @@ def describe_EventGraph():
             def it_resets_round_counter_on_resume():
                 from langgraph.checkpoint.memory import MemorySaver
 
+                class ResumeOk(Event):
+                    pass
+
                 @on(Start)
                 def ask(event: Start) -> Interrupted:
                     return Interrupted(prompt="approve?")
@@ -2066,13 +2102,13 @@ def describe_EventGraph():
                 graph.invoke(Start(data="go"), config=config)
 
                 # Run 2: resume → Interrupted (round resets on Resumed)
-                graph.resume("ok", config=config)
+                graph.resume(ResumeOk(), config=config)
 
                 # Run 3: resume → Interrupted (round resets again)
-                graph.resume("ok", config=config)
+                graph.resume(ResumeOk(), config=config)
 
                 # Run 4: resume → End (round resets, step=2 → done)
-                log = graph.resume("ok", config=config)
+                log = graph.resume(ResumeOk(), config=config)
                 assert log.latest(End) is not None
 
             def it_raises_max_rounds_not_recursion_error():

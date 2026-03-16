@@ -5,11 +5,12 @@
 graph LR
     classDef entry fill:none,stroke:none,color:none
     _e0_[ ]:::entry ==> ContentRequested
+    _e1_[ ]:::entry ==> ReviewApproved
+    _e2_[ ]:::entry ==> RevisionFeedback
     ContentRequested -->|generate_draft| DraftGenerated
     RevisionRequested -->|generate_draft| DraftGenerated
     DraftGenerated -->|request_approval| Interrupted
-    Resumed -->|handle_review| ContentPublished
-    Resumed -->|handle_review| RevisionRequested
-    Interrupted -.-> Resumed
+    ReviewApproved -->|publish| ContentPublished
+    RevisionFeedback -->|request_revision| RevisionRequested
 %% Side-effect handlers: audit_trail (Auditable)
 ```
