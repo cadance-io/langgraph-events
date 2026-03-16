@@ -62,6 +62,13 @@ class ContentPublished(Auditable):
     content: str = ""
 
 
+class ApprovalRequested(Interrupted):
+    """Pause for human review of a draft."""
+
+    draft: str
+    revision: int = 0
+
+
 # ---------------------------------------------------------------------------
 # LLM
 # ---------------------------------------------------------------------------
@@ -123,17 +130,9 @@ async def generate_draft(event: Event, log: EventLog) -> DraftGenerated:
 
 
 @on(DraftGenerated)
-def request_approval(event: DraftGenerated) -> Interrupted:
+def request_approval(event: DraftGenerated) -> ApprovalRequested:
     """Pause the graph and ask the human to review the draft."""
-    return Interrupted(
-        prompt=(
-            f"--- Draft (revision {event.revision}) ---\n\n"
-            f"{event.content}\n\n"
-            "---\n"
-            "Type 'approve' to publish, or provide feedback for revision:"
-        ),
-        payload={"revision": event.revision},
-    )
+    return ApprovalRequested(draft=event.content, revision=event.revision)
 
 
 @on(ReviewApproved)
@@ -146,8 +145,8 @@ def publish(event: ReviewApproved, log: EventLog) -> ContentPublished:
 @on(RevisionFeedback)
 def request_revision(event: RevisionFeedback, log: EventLog) -> RevisionRequested:
     """Request a revision cycle with the human's feedback."""
-    interrupted = log.latest(Interrupted)
-    revision = (interrupted.payload.get("revision", 0) + 1) if interrupted else 1
+    interrupted = log.latest(ApprovalRequested)
+    revision = (interrupted.revision + 1) if interrupted else 1
     return RevisionRequested(feedback=event.feedback, revision=revision)
 
 
@@ -183,9 +182,15 @@ async def main():
                     print(draft.content)
             break
 
-        # Graph is paused — show the interrupt prompt
-        if state.interrupted:
-            print(state.interrupted.prompt)
+        # Graph is paused — show the interrupt details
+        if state.interrupted and isinstance(state.interrupted, ApprovalRequested):
+            i = state.interrupted
+            print(
+                f"--- Draft (revision {i.revision}) ---\n\n"
+                f"{i.draft}\n\n"
+                "---\n"
+                "Type 'approve' to publish, or provide feedback for revision:"
+            )
 
         # Get human input
         human_input = input("\n> ").strip()

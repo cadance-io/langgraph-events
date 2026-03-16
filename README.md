@@ -346,28 +346,29 @@ async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
 
 ### `Interrupted` / `Resumed`
 
-Return an `Interrupted` event to pause the graph and wait for human input. Resume with `graph.resume(event)` — the event is auto-dispatched (handlers subscribed to its type fire), then the framework creates a `Resumed` event alongside it. `resume()` requires an `Event` instance; passing a plain string or dict raises `TypeError`.
+`Interrupted` is a bare marker class — subclass it with domain-specific fields to pause the graph and wait for human input. Resume with `graph.resume(event)` — the event is auto-dispatched (handlers subscribed to its type fire), then the framework creates a `Resumed` event alongside it. `resume()` requires an `Event` instance; passing a plain string or dict raises `TypeError`.
 
 Requires a **checkpointer** (e.g., `MemorySaver`).
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
 
+class ConfirmOrder(Interrupted):
+    order_id: str
+    total: float
+
 class Approval(Event):
     approved: bool
 
 @on(OrderPlaced)
-def confirm(event: OrderPlaced) -> Interrupted:
-    return Interrupted(
-        prompt=f"Approve order {event.order_id} for ${event.total}?",
-        payload={"order_id": event.order_id},
-    )
+def confirm(event: OrderPlaced) -> ConfirmOrder:
+    return ConfirmOrder(order_id=event.order_id, total=event.total)
 
 @on(Approval)
 def handle_approval(event: Approval, log: EventLog) -> OrderConfirmed | OrderCancelled:
-    interrupted = log.latest(Interrupted)
+    confirm_event = log.latest(ConfirmOrder)
     if event.approved:
-        return OrderConfirmed(order_id=interrupted.payload["order_id"])
+        return OrderConfirmed(order_id=confirm_event.order_id)
     return OrderCancelled(reason="User declined")
 
 graph = EventGraph([confirm, handle_approval], checkpointer=MemorySaver())
@@ -379,7 +380,8 @@ graph.invoke(OrderPlaced(order_id="A1", total=99.99), config=config)
 # Check state and resume with a typed event
 state = graph.get_state(config)
 if state.is_interrupted:
-    print(state.interrupted.prompt)
+    confirm_event = state.interrupted
+    print(f"Approve order {confirm_event.order_id} for ${confirm_event.total}?")
 log = graph.resume(Approval(approved=True), config=config)
 ```
 
@@ -443,7 +445,7 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
 | `Halted`          | Event      | Signal immediate graph termination              |
-| `Interrupted`     | Event      | Pause graph for human input                     |
+| `Interrupted`     | Base class | Bare marker — subclass with typed fields to pause graph |
 | `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
 | `on`              | Decorator  | Subscribe a handler to one or more event types  |
