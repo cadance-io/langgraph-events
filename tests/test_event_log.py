@@ -212,10 +212,11 @@ def describe_EventLog():
 
     def describe_from_owned():
 
-        def it_shares_the_same_list_object():
+        def it_normalizes_to_immutable_tuple_storage():
             events = [Alpha(v=1), Beta(v=2)]
             log = EventLog._from_owned(events)
-            assert log._events is events
+            assert isinstance(log._events, tuple)
+            assert log._events == tuple(events)
 
         def it_produces_functionally_identical_log():
             events = [Alpha(v=1), Beta(v=2), Alpha(v=3)]

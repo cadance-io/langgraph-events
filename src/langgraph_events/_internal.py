@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import operator
-from collections.abc import Callable  # noqa: TC003
-from typing import TYPE_CHECKING, Annotated, Any, TypedDict
+from collections.abc import Callable, Coroutine  # noqa: TC003
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig, RunnableLambda
@@ -172,9 +172,20 @@ def _build_inject(
         inject[param_name] = state.get(param_name, r.empty if r else [])
     if meta.config_param and config is not None:
         inject[meta.config_param] = config
-    if meta.store_param and config is not None:
+    if meta.store_param:
+        if config is None:
+            raise ValueError(
+                f"Handler '{meta.name}' requested BaseStore injection, but runtime "
+                "config is missing."
+            )
         runtime = config.get("configurable", {}).get("__pregel_runtime")
-        inject[meta.store_param] = runtime.store if runtime is not None else None
+        store = runtime.store if runtime is not None else None
+        if store is None:
+            raise ValueError(
+                f"Handler '{meta.name}' requested BaseStore injection, but no store "
+                "is configured. Pass store=... to EventGraph(...)."
+            )
+        inject[meta.store_param] = store
     return inject
 
 
@@ -225,16 +236,18 @@ def make_handler_node(
             if meta.is_async:
                 try:
                     asyncio.get_running_loop()
+                except RuntimeError:
+                    # No running loop — safe to use asyncio.run().
+                    coro = cast(
+                        "Coroutine[Any, Any, HandlerReturn]", meta.fn(event, **inject)
+                    )
+                    result = asyncio.run(coro)
+                else:
                     raise RuntimeError(
                         f"Handler {meta.name!r} is async but invoke() was called "
                         f"from within a running event loop (e.g. Jupyter, FastAPI). "
                         f"Use ainvoke() instead."
                     )
-                except RuntimeError as exc:
-                    if "invoke() was called" in str(exc):
-                        raise
-                    # No running loop — safe to use asyncio.run()
-                    result: HandlerReturn = asyncio.run(meta.fn(event, **inject))  # type: ignore[arg-type]
             else:
                 result = meta.fn(event, **inject)
             _collect_result(result, new_events, lg_interrupt)
@@ -251,7 +264,10 @@ def make_handler_node(
         new_events: list[Event] = []
         for event in matching:
             if meta.is_async:
-                result = await meta.fn(event, **inject)  # type: ignore[misc]
+                coro = cast(
+                    "Coroutine[Any, Any, HandlerReturn]", meta.fn(event, **inject)
+                )
+                result = await coro
             else:
                 result = meta.fn(event, **inject)
             _collect_result(result, new_events, lg_interrupt)

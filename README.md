@@ -123,7 +123,7 @@ def greet(event: UserMessage) -> Greeting:
     return Greeting(text=f"Hello!")
 ```
 
-Handlers may also request `config: RunnableConfig` or `store: BaseStore` by parameter name.
+Handlers may also request `config: RunnableConfig` or `store: BaseStore` by type annotation (reducer channels are still injected by parameter name).
 
 **Multi-subscription** — a single handler fires on multiple event types:
 

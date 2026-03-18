@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, overload
 from langgraph_events._event import Event
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
 T = TypeVar("T", bound=Event)
 
@@ -19,18 +19,16 @@ class EventLog:
     All queries use ``isinstance`` so subclass events match parent types.
     """
 
-    __slots__ = ("_events", "_events_tuple")
+    __slots__ = ("_events",)
 
-    def __init__(self, events: list[Event]) -> None:
-        self._events = list(events)
-        self._events_tuple: tuple[Event, ...] | None = None
+    def __init__(self, events: Iterable[Event]) -> None:
+        self._events = tuple(events)
 
     @classmethod
-    def _from_owned(cls, events: list[Any]) -> EventLog:
-        """Create an EventLog taking ownership of the list (no copy)."""
+    def _from_owned(cls, events: list[Any] | tuple[Any, ...]) -> EventLog:
+        """Create an EventLog from an already-built events sequence."""
         obj = object.__new__(cls)
-        obj._events = events
-        obj._events_tuple = None
+        obj._events = tuple(events)
         return obj
 
     def filter(self, event_type: type[T]) -> list[T]:
@@ -81,9 +79,7 @@ class EventLog:
     @property
     def events(self) -> tuple[Event, ...]:
         """The events in this log as an immutable tuple."""
-        if self._events_tuple is None:
-            self._events_tuple = tuple(self._events)
-        return self._events_tuple
+        return self._events
 
     # --- container protocol ---
 
@@ -103,6 +99,8 @@ class EventLog:
     def __getitem__(self, index: slice) -> list[Event]: ...
 
     def __getitem__(self, index: int | slice) -> Event | list[Event]:
+        if isinstance(index, slice):
+            return list(self._events[index])
         return self._events[index]
 
     def __repr__(self) -> str:
