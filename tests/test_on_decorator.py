@@ -4,7 +4,7 @@ import warnings
 
 import pytest
 
-from langgraph_events import Event, EventLog, on
+from langgraph_events import Event, EventGraph, EventLog, on
 from langgraph_events._handler import extract_handler_meta
 
 
@@ -194,3 +194,46 @@ def describe_extract_handler_meta():
             meta = extract_handler_meta(handler)
             assert meta.event_types == (EventA, EventB)
             assert meta.wants_log is True
+
+    def when_type_hints_cannot_be_resolved():
+
+        def it_warns_and_falls_back_to_signature_only_detection():
+            @on(SampleEvent)
+            def handler(event: SampleEvent, log: EventLog) -> None:
+                pass
+
+            handler.__annotations__["event"] = "MissingEvent"
+            handler.__annotations__["log"] = "MissingLog"
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                meta = extract_handler_meta(handler)
+
+            assert len(w) == 1
+            assert "Failed to resolve type hints" in str(w[0].message)
+            assert meta.log_param is None
+            assert meta.event_types == (SampleEvent,)
+
+
+def describe_return_hint_parsing():
+
+    def when_return_type_hints_cannot_be_resolved():
+
+        def it_warns_and_treats_handler_as_unannotated():
+            @on(SampleEvent)
+            def handler(event: SampleEvent) -> SampleEvent:
+                return SampleEvent()
+
+            handler.__annotations__["return"] = "MissingReturnEvent"
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                graph = EventGraph([handler])
+
+                messages = [str(item.message) for item in w]
+                assert any("Failed to resolve type hints" in msg for msg in messages)
+                assert any(
+                    "Failed to resolve return type hints" in msg for msg in messages
+                )
+                assert all(item.filename == __file__ for item in w)
+                assert "-->|handler| ?" in graph.mermaid()

@@ -81,7 +81,12 @@ def extract_handler_meta(
 
     try:
         hints = typing.get_type_hints(fn)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"Failed to resolve type hints for handler {fn.__qualname__!r}; "
+            f"falling back to signature-only detection. ({exc})",
+            stacklevel=3,
+        )
         hints = {}
 
     # Find the actual parameter name annotated with EventLog

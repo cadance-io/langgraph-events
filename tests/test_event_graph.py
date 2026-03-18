@@ -76,6 +76,16 @@ def describe_EventGraph():
                 log = await graph.ainvoke(Started(data="hello"))
                 assert log.latest(Ended) == Ended(result="HELLO")
 
+            @pytest.mark.asyncio
+            async def it_raises_clear_error_for_invoke_inside_running_loop():
+                @on(Started)
+                async def step(event: Started) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                with pytest.raises(RuntimeError, match=r"Use ainvoke\(\) instead"):
+                    graph.invoke(Started(data="hello"))
+
         def describe_branching():
 
             class InputReceived(Event):
@@ -239,8 +249,8 @@ def describe_EventGraph():
             def it_prevents_mutation_from_corrupting_graph_state():
                 @on(Started)
                 def evil_handler(event: Started, log: EventLog) -> Processed:
-                    log._events.append(Ended(result="INJECTED"))
-                    log._events.clear()
+                    with pytest.raises(AttributeError):
+                        log._events.append(Ended(result="INJECTED"))  # type: ignore[attr-defined]
                     return Processed(data="honest")
 
                 @on(Processed)
@@ -282,7 +292,8 @@ def describe_EventGraph():
 
                 @on(Triggered)
                 def handler_a(event: Triggered, log: EventLog) -> ResultAProduced:
-                    log._events.append(Ended(result="from_a"))
+                    with pytest.raises(AttributeError):
+                        log._events.append(Ended(result="from_a"))  # type: ignore[attr-defined]
                     return ResultAProduced(saw_events=len(log))
 
                 @on(Triggered)
@@ -595,6 +606,28 @@ def describe_EventGraph():
                 graph = EventGraph([step], store=store)
                 log = graph.invoke(Started(data="hello"))
                 assert log.latest(Ended) == Ended(result="hello")
+
+            def it_raises_when_store_not_configured_for_sync_handler():
+                from langgraph.store.base import BaseStore
+
+                @on(Started)
+                def step(event: Started, store: BaseStore) -> Ended:
+                    return Ended(result="ok")
+
+                graph = EventGraph([step])
+                with pytest.raises(ValueError, match="no store is configured"):
+                    graph.invoke(Started(data="hello"))
+
+            async def it_raises_when_store_not_configured_for_async_handler():
+                from langgraph.store.base import BaseStore
+
+                @on(Started)
+                async def step(event: Started, store: BaseStore) -> Ended:
+                    return Ended(result="ok")
+
+                graph = EventGraph([step])
+                with pytest.raises(ValueError, match="no store is configured"):
+                    await graph.ainvoke(Started(data="hello"))
 
         def when_handler_requests_neither():
 

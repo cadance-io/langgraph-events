@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import typing
+import warnings
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -44,7 +45,12 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     """Parse handler return annotation into a ``ReturnInfo``."""
     try:
         hints = typing.get_type_hints(fn)
-    except Exception:
+    except Exception as exc:
+        warnings.warn(
+            f"Failed to resolve return type hints for handler {fn.__qualname__!r}; "
+            f"treating as unannotated for topology parsing. ({exc})",
+            stacklevel=3,
+        )
         hints = {}
 
     return_hint = hints.get("return")
