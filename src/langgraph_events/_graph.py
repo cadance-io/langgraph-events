@@ -518,6 +518,111 @@ class EventGraph:
                 )
                 yield from frames
 
+    def stream_resume(
+        self,
+        value: Event,
+        *,
+        include_reducers: bool | list[str] = False,
+        **kwargs: Any,
+    ) -> Iterator[Event | StreamFrame]:
+        """Yield events produced when resuming an interrupted graph.
+
+        Streaming equivalent of ``resume()`` — accepts a domain ``Event``,
+        yields events as they are produced.  The ``Command(resume=value)``
+        stays internal, exactly like ``resume()``.
+
+        Args:
+            value: The domain event to resume with.
+            include_reducers: When truthy, yields ``StreamFrame`` tuples
+                instead of bare events.  Pass ``True`` for all reducers or
+                a list of reducer names for selective inclusion.
+        """
+        self._require_checkpointer("stream_resume")
+        from langgraph.types import Command  # noqa: PLC0415
+
+        inp: Any = Command(resume=value)
+        kwargs.pop("stream_mode", None)
+
+        reducer_names = self._resolve_reducer_names(include_reducers)
+        if not reducer_names:
+            compiled = self._compile()
+            seen: set[int] = set()
+            for chunk in compiled.stream(
+                inp,
+                stream_mode="updates",
+                **kwargs,
+            ):
+                yield from self._events_from_chunk(chunk, seen)
+        else:
+            compiled = self._compile()
+            prev_count = 0
+            first = True
+            for state in compiled.stream(
+                inp,
+                stream_mode="values",
+                **kwargs,
+            ):
+                if first:
+                    first = False
+                    continue
+                prev_count, frames = self._frames_from_values(
+                    state, prev_count, reducer_names
+                )
+                yield from frames
+
+    async def astream_resume(
+        self,
+        value: Event,
+        *,
+        include_reducers: bool | list[str] = False,
+        **kwargs: Any,
+    ) -> AsyncIterator[Event | StreamFrame]:
+        """Async version of ``stream_resume()``.
+
+        Streaming equivalent of ``aresume()`` — accepts a domain ``Event``,
+        yields events as they are produced.
+
+        Args:
+            value: The domain event to resume with.
+            include_reducers: When truthy, yields ``StreamFrame`` tuples
+                instead of bare events.  Pass ``True`` for all reducers or
+                a list of reducer names for selective inclusion.
+        """
+        self._require_checkpointer("astream_resume")
+        from langgraph.types import Command  # noqa: PLC0415
+
+        inp: Any = Command(resume=value)
+        kwargs.pop("stream_mode", None)
+
+        reducer_names = self._resolve_reducer_names(include_reducers)
+        if not reducer_names:
+            compiled = self._compile()
+            seen: set[int] = set()
+            async for chunk in compiled.astream(
+                inp,
+                stream_mode="updates",
+                **kwargs,
+            ):
+                for event in self._events_from_chunk(chunk, seen):
+                    yield event
+        else:
+            compiled = self._compile()
+            prev_count = 0
+            first = True
+            async for state in compiled.astream(
+                inp,
+                stream_mode="values",
+                **kwargs,
+            ):
+                if first:
+                    first = False
+                    continue
+                prev_count, frames = self._frames_from_values(
+                    state, prev_count, reducer_names
+                )
+                for frame in frames:
+                    yield frame
+
     async def astream_events(
         self,
         seed: Event | list[Event],
