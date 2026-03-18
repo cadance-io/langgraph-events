@@ -148,7 +148,7 @@ class ScalarReducer(BaseReducer):
         )
 
         @on(TaskReceived)
-        def handle(event: TaskReceived, strategy: str) -> Done:
+        def handle(event: TaskReceived, strategy: str) -> Completed:
             ...
     """
 

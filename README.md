@@ -353,20 +353,20 @@ Requires a **checkpointer** (e.g., `MemorySaver`).
 ```python
 from langgraph.checkpoint.memory import MemorySaver
 
-class ConfirmOrder(Interrupted):
+class OrderConfirmationRequested(Interrupted):
     order_id: str
     total: float
 
-class Approval(Event):
+class ApprovalSubmitted(Event):
     approved: bool
 
 @on(OrderPlaced)
-def confirm(event: OrderPlaced) -> ConfirmOrder:
-    return ConfirmOrder(order_id=event.order_id, total=event.total)
+def confirm(event: OrderPlaced) -> OrderConfirmationRequested:
+    return OrderConfirmationRequested(order_id=event.order_id, total=event.total)
 
-@on(Approval)
-def handle_approval(event: Approval, log: EventLog) -> OrderConfirmed | OrderCancelled:
-    confirm_event = log.latest(ConfirmOrder)
+@on(ApprovalSubmitted)
+def handle_approval(event: ApprovalSubmitted, log: EventLog) -> OrderConfirmed | OrderCancelled:
+    confirm_event = log.latest(OrderConfirmationRequested)
     if event.approved:
         return OrderConfirmed(order_id=confirm_event.order_id)
     return OrderCancelled(reason="User declined")
@@ -382,7 +382,7 @@ state = graph.get_state(config)
 if state.is_interrupted:
     confirm_event = state.interrupted
     print(f"Approve order {confirm_event.order_id} for ${confirm_event.total}?")
-log = graph.resume(Approval(approved=True), config=config)
+log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 ```
 
 ## Patterns & Examples

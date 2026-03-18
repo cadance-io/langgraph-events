@@ -44,7 +44,7 @@ class ReviewApproved(Auditable):
     """Human approved the draft."""
 
 
-class RevisionFeedback(Auditable):
+class FeedbackReceived(Auditable):
     feedback: str = ""
 
 
@@ -142,8 +142,8 @@ def publish(event: ReviewApproved, log: EventLog) -> ContentPublished:
     return ContentPublished(content=draft.content)
 
 
-@on(RevisionFeedback)
-def request_revision(event: RevisionFeedback, log: EventLog) -> RevisionRequested:
+@on(FeedbackReceived)
+def request_revision(event: FeedbackReceived, log: EventLog) -> RevisionRequested:
     """Request a revision cycle with the human's feedback."""
     interrupted = log.latest(ApprovalRequested)
     revision = (interrupted.revision + 1) if interrupted else 1
@@ -204,7 +204,7 @@ async def main():
             log = await graph.aresume(ReviewApproved(), config=config)
         else:
             log = await graph.aresume(
-                RevisionFeedback(feedback=human_input), config=config
+                FeedbackReceived(feedback=human_input), config=config
             )
 
 

@@ -9,27 +9,27 @@ from langgraph_events import Event, EventGraph, on
 # ---------------------------------------------------------------------------
 
 
-class Start(Event):
+class Started(Event):
     data: str = ""
 
 
-class Middle(Event):
+class Processed(Event):
     data: str = ""
 
 
-class End(Event):
+class Ended(Event):
     result: str = ""
 
 
-class MsgIn(Event):
+class MessageReceived(Event):
     text: str = ""
 
 
-class MsgOut(Event):
+class MessageSent(Event):
     text: str = ""
 
 
-class Done(Event):
+class Completed(Event):
     result: str = ""
 
 
@@ -40,14 +40,14 @@ class Done(Event):
 
 @pytest.fixture
 def linear_chain():
-    """A simple Start -> Middle -> End three-step EventGraph."""
+    """A simple Started -> Processed -> Ended three-step EventGraph."""
 
-    @on(Start)
-    def step1(event: Start) -> Middle:
-        return Middle(data=f"processed:{event.data}")
+    @on(Started)
+    def step1(event: Started) -> Processed:
+        return Processed(data=f"processed:{event.data}")
 
-    @on(Middle)
-    def step2(event: Middle) -> End:
-        return End(result=f"done:{event.data}")
+    @on(Processed)
+    def step2(event: Processed) -> Ended:
+        return Ended(result=f"done:{event.data}")
 
     return EventGraph([step1, step2])
