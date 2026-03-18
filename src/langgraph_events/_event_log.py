@@ -28,7 +28,7 @@ class EventLog:
     def _from_owned(cls, events: list[Any] | tuple[Any, ...]) -> EventLog:
         """Create an EventLog from an already-built events sequence."""
         obj = object.__new__(cls)
-        obj._events = tuple(events)
+        obj._events = events if isinstance(events, tuple) else tuple(events)
         return obj
 
     def filter(self, event_type: type[T]) -> list[T]:
@@ -62,14 +62,14 @@ class EventLog:
         for i, e in enumerate(self._events):
             if isinstance(e, event_type):
                 return EventLog._from_owned(self._events[i + 1 :])
-        return EventLog._from_owned([])
+        return EventLog._from_owned(())
 
     def before(self, event_type: type[Event]) -> EventLog:
         """Return an ``EventLog`` of events before the first *event_type*."""
         for i, e in enumerate(self._events):
             if isinstance(e, event_type):
                 return EventLog._from_owned(self._events[:i])
-        return EventLog._from_owned([])
+        return EventLog._from_owned(())
 
     def select(self, event_type: type[T]) -> EventLog:
         """Like ``filter()`` but returns an ``EventLog`` for chaining."""
