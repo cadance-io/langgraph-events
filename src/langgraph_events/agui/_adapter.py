@@ -14,6 +14,7 @@ from ag_ui.core import (
     RunStartedEvent,
 )
 
+from langgraph_events._event import Interrupted
 from langgraph_events._graph import StreamFrame
 
 from ._context import MapperContext
@@ -90,7 +91,7 @@ class AGUIAdapter:
                     result.append(value)
         return result
 
-    async def _stream_event_source(
+    async def _stream_event_source(  # noqa: PLR0912
         self,
         input_data: RunAgentInput,
         ctx: MapperContext,
@@ -116,15 +117,20 @@ class AGUIAdapter:
                 config=config,
             )
 
-        prev_messages_len = 0
+        prev_message_ids: tuple[int, ...] = ()
 
         async for item in event_stream:
+            event = item.event if isinstance(item, StreamFrame) else item
+            if resume_event is not None and isinstance(event, Interrupted):
+                continue
             if isinstance(item, StreamFrame):
                 yield build_state_snapshot(item.reducers)
                 messages = item.reducers.get("messages")
-                if messages is not None and len(messages) != prev_messages_len:
-                    prev_messages_len = len(messages)
-                    yield build_messages_snapshot(messages)
+                if messages is not None:
+                    current_ids = tuple(id(m) for m in messages)
+                    if current_ids != prev_message_ids:
+                        prev_message_ids = current_ids
+                        yield build_messages_snapshot(messages)
                 for agui_event in self._map_event(item.event, ctx):
                     yield agui_event
             else:

@@ -13,7 +13,7 @@ from ag_ui.core import (
     EventType,
     RunAgentInput,
 )
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -477,6 +477,50 @@ def describe_AGUIAdapter():
                     1 for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 )
                 assert state_count > msg_count
+
+            async def it_detects_message_content_changes():
+                """MessagesSnapshot emits when add_messages replaces in-place."""
+
+                class UserSent(MessageEvent):
+                    message: HumanMessage = None  # type: ignore[assignment]
+
+                class AgentDrafted(MessageEvent):
+                    message: AIMessage = None  # type: ignore[assignment]
+
+                class AgentRevised(MessageEvent):
+                    message: AIMessage = None  # type: ignore[assignment]
+
+                @on(UserSent)
+                def draft(event: UserSent) -> AgentDrafted:
+                    return AgentDrafted(
+                        message=AIMessage(content="draft v1", id="msg-ai")
+                    )
+
+                @on(AgentDrafted)
+                def revise(event: AgentDrafted) -> AgentRevised:
+                    # Same ID, different content — add_messages replaces in-place
+                    return AgentRevised(
+                        message=AIMessage(content="draft v2", id="msg-ai")
+                    )
+
+                graph = EventGraph(
+                    [draft, revise],
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserSent(
+                        message=HumanMessage(content="go")
+                    ),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                ]
+                # Must have at least 2: one after draft, one after revise
+                assert len(msg_snapshots) >= 2
 
     def describe_custom_mappers():
         async def it_allows_user_mapper_to_claim_events():

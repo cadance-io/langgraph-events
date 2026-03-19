@@ -559,9 +559,7 @@ class EventGraph:
                 stream_mode="updates",
                 **kwargs,
             ):
-                for event in self._events_from_chunk(chunk, seen):
-                    if not isinstance(event, Interrupted):
-                        yield event
+                yield from self._events_from_chunk(chunk, seen)
         else:
             compiled = self._compile()
             prev_count = 0
@@ -577,9 +575,7 @@ class EventGraph:
                 prev_count, frames = self._frames_from_values(
                     state, prev_count, reducer_names
                 )
-                for frame in frames:
-                    if not isinstance(frame.event, Interrupted):
-                        yield frame
+                yield from frames
 
     async def astream_resume(
         self,
@@ -615,8 +611,7 @@ class EventGraph:
                 **kwargs,
             ):
                 for event in self._events_from_chunk(chunk, seen):
-                    if not isinstance(event, Interrupted):
-                        yield event
+                    yield event
         else:
             compiled = self._compile()
             prev_count = 0
@@ -633,8 +628,7 @@ class EventGraph:
                     state, prev_count, reducer_names
                 )
                 for frame in frames:
-                    if not isinstance(frame.event, Interrupted):
-                        yield frame
+                    yield frame
 
     async def astream_events(
         self,

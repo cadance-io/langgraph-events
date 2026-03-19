@@ -2138,7 +2138,7 @@ def describe_EventGraph():
             types = [type(e).__name__ for e in events]
             assert "Ended" in types
 
-        def it_does_not_replay_stale_interrupted():
+        def it_includes_stale_interrupted_in_raw_stream():
             from langgraph.checkpoint.memory import MemorySaver
 
             @on(Started)
@@ -2157,7 +2157,8 @@ def describe_EventGraph():
             graph.invoke(Started(data="go"), config=config)
 
             events = list(graph.stream_resume(Completed(result="done"), config=config))
-            assert not any(isinstance(e, Interrupted) for e in events)
+            # Raw stream_resume is semantically complete — stale Interrupted appears
+            assert any(isinstance(e, Interrupted) for e in events)
 
         def it_yields_stream_frames_with_reducers():
             from langgraph.checkpoint.memory import MemorySaver
@@ -2216,7 +2217,40 @@ def describe_EventGraph():
             ]
             types = [type(e).__name__ for e in events]
             assert "Ended" in types
-            assert not any(isinstance(e, Interrupted) for e in events)
+
+        def it_yields_new_interrupted_during_resume():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def step_one(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def step_two(event: Completed) -> _StepInterrupted:
+                return _StepInterrupted(step=2)
+
+            graph = EventGraph(
+                [step_one, step_two],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-new-interrupt"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            events = list(graph.stream_resume(Completed(result="next"), config=config))
+            # Stale step=1 interrupt appears in raw stream (not filtered)
+            assert any(isinstance(e, _StepInterrupted) and e.step == 1 for e in events)
+            # New interrupt (step=2) is in checkpoint tasks, detectable post-stream
+            snapshot = graph.compiled.get_state(config)
+            assert snapshot.next  # graph is still interrupted
+            interrupt_values = [
+                getattr(intr, "value", None)
+                for task in snapshot.tasks
+                for intr in getattr(task, "interrupts", ())
+            ]
+            assert any(
+                isinstance(v, _StepInterrupted) and v.step == 2
+                for v in interrupt_values
+            )
 
     def describe_reflection_loop():
 
