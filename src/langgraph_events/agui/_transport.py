@@ -8,11 +8,14 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ag_ui.core import BaseEvent
+    from ag_ui.encoder import EventEncoder
 
 
 async def encode_sse_stream(
     events: AsyncIterator[BaseEvent],
     accept: str | None = None,
+    *,
+    _encoder: EventEncoder | None = None,
 ) -> AsyncIterator[str]:
     """Encode AG-UI events as SSE strings.
 
@@ -22,12 +25,15 @@ async def encode_sse_stream(
     Args:
         events: Async iterator of AG-UI BaseEvent objects.
         accept: The ``Accept`` header value (passed to EventEncoder).
+        _encoder: Pre-built encoder instance (internal — used by
+            ``create_starlette_response`` to share a single encoder).
     """
-    from ag_ui.encoder import EventEncoder  # noqa: PLC0415
+    if _encoder is None:
+        from ag_ui.encoder import EventEncoder as _Enc  # noqa: PLC0415
 
-    encoder = EventEncoder(accept=accept)  # type: ignore[arg-type]
+        _encoder = _Enc(accept=accept)  # type: ignore[arg-type]
     async for event in events:
-        yield encoder.encode(event)
+        yield _encoder.encode(event)
 
 
 def create_starlette_response(
@@ -50,6 +56,6 @@ def create_starlette_response(
 
     encoder = EventEncoder(accept=accept)  # type: ignore[arg-type]
     return StreamingResponse(
-        encode_sse_stream(events, accept=accept),
+        encode_sse_stream(events, _encoder=encoder),
         media_type=encoder.get_content_type(),
     )

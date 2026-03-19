@@ -2014,6 +2014,25 @@ def describe_EventGraph():
 
         def when_include_reducers_unknown_name():
 
+            def it_warns_about_unknown_reducer_names():
+                reducer = _data_reducer()
+
+                @on(Started)
+                def step(event: Started) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step], reducers=[reducer])
+                with pytest.warns(
+                    UserWarning,
+                    match="Unknown reducer name.*nonexistent",
+                ):
+                    list(
+                        graph.stream_events(
+                            Started(data="x"),
+                            include_reducers=["nonexistent"],
+                        )
+                    )
+
             def it_falls_back_to_bare_events():
                 reducer = _data_reducer()
 
@@ -2094,6 +2113,110 @@ def describe_EventGraph():
             data_items = last_frame.reducers["data_items"]
             assert "a1" in data_items
             assert "b_from_a1" in data_items
+
+    def describe_stream_resume():
+
+        def it_yields_resume_handler_events():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-handler"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            events = list(graph.stream_resume(Completed(result="done"), config=config))
+            types = [type(e).__name__ for e in events]
+            assert "Ended" in types
+
+        def it_does_not_replay_stale_interrupted():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-no-stale"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            events = list(graph.stream_resume(Completed(result="done"), config=config))
+            assert not any(isinstance(e, Interrupted) for e in events)
+
+        def it_yields_stream_frames_with_reducers():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            reducer = _data_reducer()
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+                reducers=[reducer],
+            )
+            config = {"configurable": {"thread_id": "sr-reducers"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            frames = list(
+                graph.stream_resume(
+                    Completed(result="done"),
+                    include_reducers=True,
+                    config=config,
+                )
+            )
+            assert all(isinstance(f, StreamFrame) for f in frames)
+            assert any("data_items" in f.reducers for f in frames)
+
+        @pytest.mark.asyncio
+        async def it_yields_resume_events_async():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-async"}}
+            await graph.ainvoke(Started(data="go"), config=config)
+
+            events = [
+                e
+                async for e in graph.astream_resume(
+                    Completed(result="async-done"), config=config
+                )
+            ]
+            types = [type(e).__name__ for e in events]
+            assert "Ended" in types
+            assert not any(isinstance(e, Interrupted) for e in events)
 
     def describe_reflection_loop():
 

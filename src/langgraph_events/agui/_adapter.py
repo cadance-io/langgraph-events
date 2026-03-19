@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +14,6 @@ from ag_ui.core import (
     RunStartedEvent,
 )
 
-from langgraph_events._event import Interrupted
 from langgraph_events._graph import StreamFrame
 
 from ._context import MapperContext
@@ -23,6 +23,8 @@ from ._mappers import (
     build_state_snapshot,
     default_mappers,
 )
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -49,6 +51,10 @@ class AGUIAdapter:
         mappers: list[EventMapper] | None = None,
         include_reducers: bool | list[str] = False,
     ) -> None:
+        if resume_factory is not None and graph._checkpointer is None:
+            raise ValueError(
+                "AGUIAdapter resume_factory requires a checkpointer on the EventGraph"
+            )
         self._graph = graph
         self._seed_factory = seed_factory
         self._resume_factory = resume_factory
@@ -110,17 +116,15 @@ class AGUIAdapter:
                 config=config,
             )
 
+        prev_messages_len = 0
+
         async for item in event_stream:
-            # During resume, LangGraph replays the stale Interrupted event
-            # from the checkpoint. Skip it — new interrupts are detected
-            # post-stream via _get_interrupt_events().
-            event = item.event if isinstance(item, StreamFrame) else item
-            if resume_event is not None and isinstance(event, Interrupted):
-                continue
             if isinstance(item, StreamFrame):
                 yield build_state_snapshot(item.reducers)
-                if "messages" in item.reducers:
-                    yield build_messages_snapshot(item.reducers["messages"])
+                messages = item.reducers.get("messages")
+                if messages is not None and len(messages) != prev_messages_len:
+                    prev_messages_len = len(messages)
+                    yield build_messages_snapshot(messages)
                 for agui_event in self._map_event(item.event, ctx):
                     yield agui_event
             else:
@@ -163,6 +167,7 @@ class AGUIAdapter:
                 yield agui_event
 
         except Exception as exc:
+            logger.exception("EventGraph stream failed")
             yield RunErrorEvent(
                 type=EventType.RUN_ERROR,
                 message=str(exc),

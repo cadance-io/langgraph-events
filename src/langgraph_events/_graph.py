@@ -431,6 +431,13 @@ class EventGraph:
         if include_reducers is True:
             return list(self._reducers.keys())
         if include_reducers:  # non-empty list
+            unknown = set(include_reducers) - set(self._reducers.keys())
+            if unknown:
+                warnings.warn(
+                    f"Unknown reducer name(s) {unknown} in include_reducers; "
+                    f"available: {set(self._reducers.keys())}",
+                    stacklevel=2,
+                )
             return [n for n in include_reducers if n in self._reducers]
         return []
 
@@ -552,7 +559,9 @@ class EventGraph:
                 stream_mode="updates",
                 **kwargs,
             ):
-                yield from self._events_from_chunk(chunk, seen)
+                for event in self._events_from_chunk(chunk, seen):
+                    if not isinstance(event, Interrupted):
+                        yield event
         else:
             compiled = self._compile()
             prev_count = 0
@@ -568,7 +577,9 @@ class EventGraph:
                 prev_count, frames = self._frames_from_values(
                     state, prev_count, reducer_names
                 )
-                yield from frames
+                for frame in frames:
+                    if not isinstance(frame.event, Interrupted):
+                        yield frame
 
     async def astream_resume(
         self,
@@ -604,7 +615,8 @@ class EventGraph:
                 **kwargs,
             ):
                 for event in self._events_from_chunk(chunk, seen):
-                    yield event
+                    if not isinstance(event, Interrupted):
+                        yield event
         else:
             compiled = self._compile()
             prev_count = 0
@@ -621,7 +633,8 @@ class EventGraph:
                     state, prev_count, reducer_names
                 )
                 for frame in frames:
-                    yield frame
+                    if not isinstance(frame.event, Interrupted):
+                        yield frame
 
     async def astream_events(
         self,

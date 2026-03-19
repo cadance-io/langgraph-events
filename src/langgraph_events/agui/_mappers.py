@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import warnings
 from typing import TYPE_CHECKING, Any
 
 from ag_ui.core import (
@@ -29,6 +30,20 @@ if TYPE_CHECKING:
     from ag_ui.core import Message
 
     from ._context import MapperContext
+
+
+_warned_classes: set[type] = set()
+
+
+def _warn_missing_agui_dict(cls: type) -> None:
+    if cls not in _warned_classes:
+        _warned_classes.add(cls)
+        warnings.warn(
+            f"{cls.__name__} does not implement agui_dict(); "
+            f"skipping AG-UI serialization. Implement AGUISerializable "
+            f"to include this event in the AG-UI stream.",
+            stacklevel=3,
+        )
 
 
 def _serialize_event(event: Event) -> dict[str, Any]:
@@ -112,11 +127,14 @@ class InterruptedMapper:
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
         if not isinstance(event, Interrupted):
             return None
+        if not isinstance(event, AGUISerializable):
+            _warn_missing_agui_dict(type(event))
+            return []
         return [
             CustomEvent(
                 type=EventType.CUSTOM,
                 name="interrupted",
-                value=_serialize_event(event),
+                value=event.agui_dict(),
             )
         ]
 
@@ -223,11 +241,14 @@ class FallbackMapper:
     """Map any unclaimed event to AG-UI CustomEvent."""
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+        if not isinstance(event, AGUISerializable):
+            _warn_missing_agui_dict(type(event))
+            return []
         return [
             CustomEvent(
                 type=EventType.CUSTOM,
                 name=type(event).__name__,
-                value=_serialize_event(event),
+                value=event.agui_dict(),
             )
         ]
 

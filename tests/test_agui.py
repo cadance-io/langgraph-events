@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from typing import Any
 
 import pytest
@@ -27,7 +28,7 @@ from langgraph_events.agui import (
     AGUIAdapter,
     MapperContext,
 )
-from langgraph_events.agui._mappers import _serialize_event
+from langgraph_events.agui._mappers import _serialize_event, _warned_classes
 
 # ---------------------------------------------------------------------------
 # Test event classes
@@ -36,6 +37,9 @@ from langgraph_events.agui._mappers import _serialize_event
 
 class UserAsked(Event):
     question: str = ""
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"question": self.question}
 
 
 class AgentReplied(MessageEvent):
@@ -53,17 +57,27 @@ class ToolsExecuted(MessageEvent):
 class TaskCreated(Event):
     title: str = ""
 
+    def agui_dict(self) -> dict[str, Any]:
+        return {"title": self.title}
+
 
 class ApprovalRequested(Interrupted):
     draft: str = ""
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"draft": self.draft}
 
 
 class ApprovalGiven(Event):
     approved: bool = True
 
+    def agui_dict(self) -> dict[str, Any]:
+        return {"approved": self.approved}
+
 
 class ErrorTrigger(Event):
-    pass
+    def agui_dict(self) -> dict[str, Any]:
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +371,113 @@ def describe_AGUIAdapter():
             # RunFinished should NOT appear after error
             assert events[-1].type == EventType.RUN_ERROR
 
+        async def it_skips_events_without_agui_dict():
+            class PlainEvent(Event):
+                value: str = "no-dict"
+
+            @on(UserAsked)
+            def emit_plain(event: UserAsked) -> PlainEvent:
+                return PlainEvent(value="hello")
+
+            graph = EventGraph([emit_plain])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_classes.discard(PlainEvent)
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                events = await _collect(adapter, _make_input())
+
+            custom_events = [
+                e
+                for e in events
+                if e.type == EventType.CUSTOM and e.name == "PlainEvent"
+            ]
+            assert len(custom_events) == 0
+            assert any("PlainEvent" in str(warning.message) for warning in w)
+
+        async def it_emits_events_with_agui_dict():
+            @on(UserAsked)
+            def create_task(event: UserAsked) -> TaskCreated:
+                return TaskCreated(title="with dict")
+
+            graph = EventGraph([create_task])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            custom_events = [
+                e
+                for e in events
+                if e.type == EventType.CUSTOM and e.name == "TaskCreated"
+            ]
+            assert len(custom_events) == 1
+            assert custom_events[0].value == {"title": "with dict"}
+
+        async def it_warns_once_per_class():
+            class NoDict1(Event):
+                x: int = 0
+
+            class NoDict2(Event):
+                x: int = 0
+
+            @on(UserAsked)
+            def step1(event: UserAsked) -> NoDict1:
+                return NoDict1(x=1)
+
+            @on(NoDict1)
+            def step2(event: NoDict1) -> NoDict2:
+                return NoDict2(x=2)
+
+            graph = EventGraph([step1, step2])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_classes.discard(NoDict1)
+            _warned_classes.discard(NoDict2)
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
+
+            nodict1_warnings = [x for x in w if "NoDict1" in str(x.message)]
+            nodict2_warnings = [x for x in w if "NoDict2" in str(x.message)]
+            # Each class warned exactly once
+            assert len(nodict1_warnings) == 1
+            assert len(nodict2_warnings) == 1
+
+        def describe_when_messages_unchanged():
+            async def it_skips_redundant_messages_snapshots():
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hello"))
+
+                @on(AgentReplied)
+                def followup(event: AgentReplied) -> TaskCreated:
+                    return TaskCreated(title="no new messages")
+
+                graph = EventGraph(
+                    [reply, followup],
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                state_count = sum(
+                    1 for e in events if e.type == EventType.STATE_SNAPSHOT
+                )
+                msg_count = sum(
+                    1 for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                )
+                assert state_count > msg_count
+
     def describe_custom_mappers():
         async def it_allows_user_mapper_to_claim_events():
             class TaskMapper:
@@ -526,6 +647,22 @@ def describe_AGUIAdapter():
             ]
             assert len(interrupted_events) == 0
 
+    def describe_init():
+        def it_raises_when_resume_factory_without_checkpointer():
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="hi"))
+
+            graph = EventGraph([reply])  # no checkpointer
+            with pytest.raises(
+                ValueError, match="resume_factory requires a checkpointer"
+            ):
+                AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+
     def describe_seed_factory():
         async def it_calls_seed_factory_with_input():
             received_inputs: list[Any] = []
@@ -595,6 +732,95 @@ def describe_serialize_event():
         # datetime should be coerced to string, and result must be JSON-safe
         json.dumps(result)
         assert isinstance(result["created_at"], str)
+
+
+def describe_transport():
+    async def it_encodes_events_as_sse():
+        from ag_ui.core import RunStartedEvent
+
+        from langgraph_events.agui import encode_sse_stream
+
+        async def _events():
+            yield RunStartedEvent(
+                type=EventType.RUN_STARTED,
+                thread_id="t1",
+                run_id="r1",
+            )
+
+        lines = [line async for line in encode_sse_stream(_events())]
+        assert len(lines) == 1
+        assert lines[0].startswith("data: ")
+        assert lines[0].endswith("\n\n")
+
+    async def it_creates_starlette_response():
+        pytest.importorskip("starlette")
+        from ag_ui.core import RunStartedEvent
+        from starlette.responses import StreamingResponse
+
+        from langgraph_events.agui import create_starlette_response
+
+        async def _events():
+            yield RunStartedEvent(
+                type=EventType.RUN_STARTED,
+                thread_id="t1",
+                run_id="r1",
+            )
+
+        response = create_starlette_response(_events())
+        assert isinstance(response, StreamingResponse)
+
+
+def describe_interrupt_detection():
+    async def it_detects_interrupts_from_checkpoint():
+        """Adapter emits interrupted CustomEvent from checkpoint."""
+
+        @on(UserAsked)
+        def ask_approval(event: UserAsked) -> ApprovalRequested:
+            return ApprovalRequested(draft="needs review")
+
+        graph = EventGraph([ask_approval], checkpointer=MemorySaver())
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="check"),
+        )
+        events = await _collect(adapter, _make_input())
+
+        interrupted_events = [
+            e for e in events if e.type == EventType.CUSTOM and e.name == "interrupted"
+        ]
+        assert len(interrupted_events) == 1
+        assert interrupted_events[0].value["draft"] == "needs review"
+
+
+def describe_resume_with_reducers():
+    async def it_emits_state_snapshot_during_resume():
+        @on(UserAsked)
+        def ask(event: UserAsked) -> ApprovalRequested:
+            return ApprovalRequested(draft="draft")
+
+        @on(ApprovalGiven)
+        def approve(event: ApprovalGiven) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="Approved!"))
+
+        graph = EventGraph(
+            [ask, approve],
+            checkpointer=MemorySaver(),
+            reducers=[message_reducer()],
+        )
+
+        config = {"configurable": {"thread_id": "t-resume-reducers"}}
+        await graph.ainvoke(UserAsked(question="go"), config=config)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="unused"),
+            resume_factory=lambda inp: ApprovalGiven(approved=True),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input(thread_id="t-resume-reducers"))
+
+        snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+        assert len(snapshots) >= 1
 
 
 def describe_MapperContext():

@@ -499,7 +499,7 @@ from ag_ui.core import RunAgentInput
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import Event, EventGraph, on, MessageEvent
-from langgraph_events.agui import AGUIAdapter, SeedFactory, create_starlette_response
+from langgraph_events.agui import AGUIAdapter, create_starlette_response
 from langchain_core.messages import HumanMessage, AIMessage
 
 class UserMessageReceived(MessageEvent):
@@ -539,7 +539,9 @@ Events flow through a priority chain of mappers. The first mapper to claim an ev
 | 3 | `MessageEventMapper` | `MessageEvent` with `AIMessage` | `TextMessageStart/Content/End`, `ToolCallStart/Args/End` |
 | 4 | `ToolResultMapper` | `MessageEvent` with `ToolMessage` | `ToolCallResult` |
 | 5 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
-| 6 | `FallbackMapper` | Any unclaimed event | `CustomEvent` (name=class name, value=serialized fields) |
+| 6 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=class name, value=`agui_dict()`) |
+
+Events without `agui_dict()` are skipped with a one-time warning.
 
 `StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (when `include_reducers` is enabled).
 
