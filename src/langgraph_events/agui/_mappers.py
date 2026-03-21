@@ -121,6 +121,14 @@ class SkipInternalMapper:
         return None
 
 
+def _extract_messages_by_type(event: Event, msg_type: str) -> list[Any] | None:
+    """Extract typed messages from a MessageEvent, or None."""
+    if not isinstance(event, MessageEvent):
+        return None
+    filtered = [m for m in event.as_messages() if m.type == msg_type]
+    return filtered if filtered else None
+
+
 class InterruptedMapper:
     """Map Interrupted events to AG-UI CustomEvent."""
 
@@ -143,12 +151,8 @@ class MessageEventMapper:
     """Map MessageEvent with AIMessage content to AG-UI text/tool events."""
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        if not isinstance(event, MessageEvent):
-            return None
-
-        messages = event.as_messages()
-        ai_messages = [m for m in messages if m.type == "ai"]
-        if not ai_messages:
+        ai_messages = _extract_messages_by_type(event, "ai")
+        if ai_messages is None:
             return None
 
         result: list[BaseEvent] = []
@@ -217,12 +221,8 @@ class ToolResultMapper:
     """Map MessageEvent with ToolMessages to AG-UI ToolCallResultEvent."""
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        if not isinstance(event, MessageEvent):
-            return None
-
-        messages = event.as_messages()
-        tool_messages = [m for m in messages if m.type == "tool"]
-        if not tool_messages:
+        tool_messages = _extract_messages_by_type(event, "tool")
+        if tool_messages is None:
             return None
 
         result: list[BaseEvent] = []

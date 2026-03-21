@@ -583,6 +583,61 @@ class EventGraph:
                 else:
                     yield event
 
+    def _stream_sync(
+        self,
+        inp: Any,
+        seeds: list[Event],
+        reducer_names: list[str],
+        **kwargs: Any,
+    ) -> Iterator[Event | StreamFrame]:
+        """Shared sync streaming core for stream_events/stream_resume."""
+        compiled = self._compile()
+        if not reducer_names:
+            yield from seeds
+            seen: set[int] = set()
+            for chunk in compiled.stream(inp, stream_mode="updates", **kwargs):
+                yield from self._events_from_chunk(chunk, seen)
+        else:
+            prev_count = 0
+            first = True
+            for state in compiled.stream(inp, stream_mode="values", **kwargs):
+                if first:
+                    first = False
+                    continue
+                prev_count, frames = self._frames_from_values(
+                    state, prev_count, reducer_names
+                )
+                yield from frames
+
+    async def _astream_core(
+        self,
+        inp: Any,
+        seeds: list[Event],
+        reducer_names: list[str],
+        **kwargs: Any,
+    ) -> AsyncIterator[Event | StreamFrame]:
+        """Shared async streaming core for astream_events/astream_resume."""
+        compiled = self._compile()
+        if not reducer_names:
+            for s in seeds:
+                yield s
+            seen: set[int] = set()
+            async for chunk in compiled.astream(inp, stream_mode="updates", **kwargs):
+                for event in self._events_from_chunk(chunk, seen):
+                    yield event
+        else:
+            prev_count = 0
+            first = True
+            async for state in compiled.astream(inp, stream_mode="values", **kwargs):
+                if first:
+                    first = False
+                    continue
+                prev_count, frames = self._frames_from_values(
+                    state, prev_count, reducer_names
+                )
+                for frame in frames:
+                    yield frame
+
     def stream_events(
         self,
         seed: Event | list[Event],
@@ -603,37 +658,9 @@ class EventGraph:
                 a list of reducer names for selective inclusion.
         """
         inp = self._prepare_input(seed)
-        seeds = inp["events"]
         kwargs.pop("stream_mode", None)
-
         reducer_names = self._resolve_reducer_names(include_reducers)
-        if not reducer_names:
-            compiled = self._compile()
-            yield from seeds
-            seen: set[int] = set()
-            for chunk in compiled.stream(
-                inp,
-                stream_mode="updates",
-                **kwargs,
-            ):
-                yield from self._events_from_chunk(chunk, seen)
-        else:
-            compiled = self._compile()
-            prev_count = 0
-            first = True
-            for state in compiled.stream(
-                inp,
-                stream_mode="values",
-                **kwargs,
-            ):
-                if first:
-                    # Skip initial input state — reducers not yet populated
-                    first = False
-                    continue
-                prev_count, frames = self._frames_from_values(
-                    state, prev_count, reducer_names
-                )
-                yield from frames
+        yield from self._stream_sync(inp, inp["events"], reducer_names, **kwargs)
 
     def stream_resume(
         self,
@@ -657,35 +684,9 @@ class EventGraph:
         self._require_checkpointer("stream_resume")
         from langgraph.types import Command  # noqa: PLC0415
 
-        inp: Any = Command(resume=value)
         kwargs.pop("stream_mode", None)
-
         reducer_names = self._resolve_reducer_names(include_reducers)
-        if not reducer_names:
-            compiled = self._compile()
-            seen: set[int] = set()
-            for chunk in compiled.stream(
-                inp,
-                stream_mode="updates",
-                **kwargs,
-            ):
-                yield from self._events_from_chunk(chunk, seen)
-        else:
-            compiled = self._compile()
-            prev_count = 0
-            first = True
-            for state in compiled.stream(
-                inp,
-                stream_mode="values",
-                **kwargs,
-            ):
-                if first:
-                    first = False
-                    continue
-                prev_count, frames = self._frames_from_values(
-                    state, prev_count, reducer_names
-                )
-                yield from frames
+        yield from self._stream_sync(Command(resume=value), [], reducer_names, **kwargs)
 
     async def astream_resume(
         self,
@@ -713,41 +714,15 @@ class EventGraph:
 
         inp: Any = Command(resume=value)
         kwargs.pop("stream_mode", None)
-
         reducer_names = self._resolve_reducer_names(include_reducers)
 
-        if include_llm_tokens:
-            async for item in self._astream_v2(
-                inp, [], reducer_names=reducer_names, **kwargs
-            ):
-                yield item
-        elif not reducer_names:
-            compiled = self._compile()
-            seen: set[int] = set()
-            async for chunk in compiled.astream(
-                inp,
-                stream_mode="updates",
-                **kwargs,
-            ):
-                for event in self._events_from_chunk(chunk, seen):
-                    yield event
-        else:
-            compiled = self._compile()
-            prev_count = 0
-            first = True
-            async for state in compiled.astream(
-                inp,
-                stream_mode="values",
-                **kwargs,
-            ):
-                if first:
-                    first = False
-                    continue
-                prev_count, frames = self._frames_from_values(
-                    state, prev_count, reducer_names
-                )
-                for frame in frames:
-                    yield frame
+        delegate = (
+            self._astream_v2(inp, [], reducer_names=reducer_names, **kwargs)
+            if include_llm_tokens
+            else self._astream_core(inp, [], reducer_names, **kwargs)
+        )
+        async for item in delegate:
+            yield item
 
     async def astream_events(
         self,
@@ -770,41 +745,12 @@ class EventGraph:
         inp = self._prepare_input(seed)
         seeds = inp["events"]
         kwargs.pop("stream_mode", None)
-
         reducer_names = self._resolve_reducer_names(include_reducers)
 
-        if include_llm_tokens:
-            async for item in self._astream_v2(
-                inp, seeds, reducer_names=reducer_names, **kwargs
-            ):
-                yield item
-        elif not reducer_names:
-            compiled = self._compile()
-            for s in seeds:
-                yield s
-            seen: set[int] = set()
-            async for chunk in compiled.astream(
-                inp,
-                stream_mode="updates",
-                **kwargs,
-            ):
-                for event in self._events_from_chunk(chunk, seen):
-                    yield event
-        else:
-            compiled = self._compile()
-            prev_count = 0
-            first = True
-            async for state in compiled.astream(
-                inp,
-                stream_mode="values",
-                **kwargs,
-            ):
-                if first:
-                    # Skip initial input state — reducers not yet populated
-                    first = False
-                    continue
-                prev_count, frames = self._frames_from_values(
-                    state, prev_count, reducer_names
-                )
-                for frame in frames:
-                    yield frame
+        delegate = (
+            self._astream_v2(inp, seeds, reducer_names=reducer_names, **kwargs)
+            if include_llm_tokens
+            else self._astream_core(inp, seeds, reducer_names, **kwargs)
+        )
+        async for item in delegate:
+            yield item
