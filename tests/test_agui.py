@@ -13,6 +13,7 @@ from ag_ui.core import (
     EventType,
     RunAgentInput,
 )
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -370,6 +371,62 @@ def describe_AGUIAdapter():
             assert "boom" in error_events[0].message
             # RunFinished should NOT appear after error
             assert events[-1].type == EventType.RUN_ERROR
+
+        async def it_uses_custom_error_message_when_provided():
+            @on(ErrorTrigger)
+            def blow_up(event: ErrorTrigger) -> None:
+                raise RuntimeError("boom")
+
+            graph = EventGraph([blow_up])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: ErrorTrigger(),
+                error_message="Something went wrong. Please try again.",
+            )
+            events = await _collect(adapter, _make_input())
+
+            error_events = [e for e in events if e.type == EventType.RUN_ERROR]
+            assert len(error_events) == 1
+            assert error_events[0].message == "Something went wrong. Please try again."
+
+        async def it_streams_text_message_content_during_llm_calls():
+            llm = FakeListChatModel(responses=["stream me"], sleep=0)
+
+            @on(UserAsked)
+            async def stream_reply(
+                event: UserAsked,
+                messages: list[Any],
+            ) -> AgentReplied:
+                response = await llm.ainvoke(
+                    [*messages, HumanMessage(content=event.question)]
+                )
+                return AgentReplied(message=response)
+
+            graph = EventGraph([stream_reply], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+                include_reducers=True,
+            )
+            events = await _collect(adapter, _make_input())
+
+            text_events = [
+                e
+                for e in events
+                if e.type
+                in (
+                    EventType.TEXT_MESSAGE_START,
+                    EventType.TEXT_MESSAGE_CONTENT,
+                    EventType.TEXT_MESSAGE_END,
+                )
+            ]
+            assert text_events[0].type == EventType.TEXT_MESSAGE_START
+            deltas = [
+                e.delta for e in text_events if e.type == EventType.TEXT_MESSAGE_CONTENT
+            ]
+            assert len(deltas) > 1
+            assert "".join(deltas) == "stream me"
+            assert text_events[-1].type == EventType.TEXT_MESSAGE_END
 
         async def it_skips_events_without_agui_dict():
             class PlainEvent(Event):

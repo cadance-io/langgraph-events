@@ -107,6 +107,20 @@ class StreamFrame(NamedTuple):
     reducers: dict[str, list[Any]]
 
 
+class LLMToken(NamedTuple):
+    """A text delta from an LLM invocation during handler execution."""
+
+    run_id: str
+    content: str
+
+
+class LLMStreamEnd(NamedTuple):
+    """Signals an LLM stream completed."""
+
+    run_id: str
+    message_id: str | None  # LangChain AIMessage.id for dedup
+
+
 class EventGraph:
     """Build and run an event-driven graph from ``@on`` handlers.
 
@@ -424,6 +438,42 @@ class EventGraph:
             interrupted=log.latest(Interrupted) if is_interrupted else None,
         )
 
+    # --- LLM token helpers ---
+
+    @staticmethod
+    def _extract_text_content(chunk: Any) -> str:
+        """Extract text from a LangChain chat model stream chunk."""
+        content = getattr(chunk, "content", None)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+
+    def _update_reducer_state(
+        self,
+        state: dict[str, Any],
+        event: Event,
+        reducer_names: list[str],
+    ) -> None:
+        """Incrementally update reducer state with a single new event."""
+        for name in reducer_names:
+            r = self._reducers[name]
+            contribution = r.collect([event])
+            if r.has_contributions(contribution):
+                if hasattr(r, "reducer"):
+                    state[name] = r.reducer(state[name], contribution)
+                else:
+                    state[name] = contribution
+
     # --- High-level event streaming ---
 
     def _resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
@@ -472,6 +522,66 @@ class EventGraph:
         return len(all_events), [
             StreamFrame(event=e, reducers=reducers) for e in new_events
         ]
+
+    async def _astream_v2(  # noqa: PLR0912
+        self,
+        inp: Any,
+        seeds: list[Event],
+        *,
+        reducer_names: list[str],
+        **kwargs: Any,
+    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
+        """Stream events using LangGraph's v2 event API with LLM token support."""
+        compiled = self._compile()
+
+        # Initialize incremental reducer state from seeds
+        reducer_state: dict[str, Any] = {}
+        for name in reducer_names:
+            reducer_state[name] = self._reducers[name].seed(seeds)
+
+        # Yield seed events
+        for s in seeds:
+            if reducer_names:
+                yield StreamFrame(event=s, reducers=dict(reducer_state))
+            else:
+                yield s
+
+        seen: set[int] = set()
+
+        async for raw in compiled.astream_events(
+            inp,
+            version="v2",
+            stream_mode="updates",
+            **kwargs,
+        ):
+            raw_event = raw.get("event")
+
+            if raw_event == "on_chat_model_stream":
+                run_id = raw.get("run_id", "")
+                chunk = raw.get("data", {}).get("chunk")
+                delta = self._extract_text_content(chunk)
+                if run_id and delta:
+                    yield LLMToken(run_id=run_id, content=delta)
+                continue
+
+            if raw_event == "on_chat_model_end":
+                run_id = raw.get("run_id", "")
+                if run_id:
+                    output = raw.get("data", {}).get("output")
+                    message_id = getattr(output, "id", None)
+                    yield LLMStreamEnd(run_id=run_id, message_id=message_id)
+                continue
+
+            if raw_event != "on_chain_stream" or raw.get("name") != "LangGraph":
+                continue
+
+            chunk = raw.get("data", {}).get("chunk")
+            for event in self._events_from_chunk(chunk, seen):
+                if reducer_names:
+                    self._update_reducer_state(reducer_state, event, reducer_names)
+                    yield StreamFrame(event=event, reducers=dict(reducer_state))
+                else:
+                    yield event
 
     def stream_events(
         self,
@@ -582,8 +692,9 @@ class EventGraph:
         value: Event,
         *,
         include_reducers: bool | list[str] = False,
+        include_llm_tokens: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[Event | StreamFrame]:
+    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
         """Async version of ``stream_resume()``.
 
         Streaming equivalent of ``aresume()`` — accepts a domain ``Event``,
@@ -594,6 +705,8 @@ class EventGraph:
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
+            include_llm_tokens: When True, yields ``LLMToken`` and
+                ``LLMStreamEnd`` frames for LLM token-level streaming.
         """
         self._require_checkpointer("astream_resume")
         from langgraph.types import Command  # noqa: PLC0415
@@ -602,7 +715,13 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
 
         reducer_names = self._resolve_reducer_names(include_reducers)
-        if not reducer_names:
+
+        if include_llm_tokens:
+            async for item in self._astream_v2(
+                inp, [], reducer_names=reducer_names, **kwargs
+            ):
+                yield item
+        elif not reducer_names:
             compiled = self._compile()
             seen: set[int] = set()
             async for chunk in compiled.astream(
@@ -635,8 +754,9 @@ class EventGraph:
         seed: Event | list[Event],
         *,
         include_reducers: bool | list[str] = False,
+        include_llm_tokens: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[Event | StreamFrame]:
+    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
         """Async version of ``stream_events()``.
 
         Args:
@@ -644,13 +764,21 @@ class EventGraph:
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
+            include_llm_tokens: When True, yields ``LLMToken`` and
+                ``LLMStreamEnd`` frames for LLM token-level streaming.
         """
         inp = self._prepare_input(seed)
         seeds = inp["events"]
         kwargs.pop("stream_mode", None)
 
         reducer_names = self._resolve_reducer_names(include_reducers)
-        if not reducer_names:
+
+        if include_llm_tokens:
+            async for item in self._astream_v2(
+                inp, seeds, reducer_names=reducer_names, **kwargs
+            ):
+                yield item
+        elif not reducer_names:
             compiled = self._compile()
             for s in seeds:
                 yield s

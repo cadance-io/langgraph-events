@@ -2604,3 +2604,139 @@ def describe_EventGraph():
 
                 # Should not raise
                 EventGraph([handler])
+
+    def describe_astream_llm_tokens():
+
+        @pytest.mark.asyncio
+        async def it_yields_llm_token_and_stream_end_frames():
+            from typing import Any
+
+            from langchain_core.language_models.fake_chat_models import (
+                FakeListChatModel,
+            )
+
+            from langgraph_events._graph import LLMStreamEnd, LLMToken
+
+            llm = FakeListChatModel(responses=["hello world"], sleep=0)
+
+            class UserSent(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
+
+            class AgentReplied(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
+
+            @on(UserSent)
+            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
+                response = await llm.ainvoke([*messages, HumanMessage(content="hi")])
+                return AgentReplied(message=response)
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    UserSent(message=HumanMessage(content="hi")),
+                    include_llm_tokens=True,
+                )
+            ]
+
+            tokens = [i for i in items if isinstance(i, LLMToken)]
+            ends = [i for i in items if isinstance(i, LLMStreamEnd)]
+
+            # Should have at least one token and one end
+            assert len(tokens) >= 1
+            assert len(ends) >= 1
+            # Token content should reconstruct the response
+            assert "".join(t.content for t in tokens) == "hello world"
+            # LLMStreamEnd should have a message_id (AIMessage.id)
+            assert ends[0].message_id is not None
+
+        @pytest.mark.asyncio
+        async def it_yields_domain_events_alongside_llm_tokens():
+            from typing import Any
+
+            from langchain_core.language_models.fake_chat_models import (
+                FakeListChatModel,
+            )
+
+            from langgraph_events._graph import LLMToken
+
+            llm = FakeListChatModel(responses=["reply"], sleep=0)
+
+            class UserSent(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
+
+            class AgentReplied(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
+
+            @on(UserSent)
+            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
+                response = await llm.ainvoke([*messages, HumanMessage(content="hi")])
+                return AgentReplied(message=response)
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    UserSent(message=HumanMessage(content="hi")),
+                    include_llm_tokens=True,
+                )
+            ]
+
+            domain_events = [i for i in items if isinstance(i, Event)]
+            tokens = [i for i in items if isinstance(i, LLMToken)]
+            assert len(domain_events) >= 2  # at least seed + reply
+            assert len(tokens) >= 1
+
+        @pytest.mark.asyncio
+        async def it_yields_stream_frames_with_reducers_and_llm_tokens():
+            from typing import Any
+
+            from langchain_core.language_models.fake_chat_models import (
+                FakeListChatModel,
+            )
+
+            from langgraph_events._graph import LLMToken
+
+            llm = FakeListChatModel(responses=["hi back"], sleep=0)
+
+            class UserSent(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
+
+            class AgentReplied(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
+
+            @on(UserSent)
+            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
+                response = await llm.ainvoke([*messages, HumanMessage(content="go")])
+                return AgentReplied(message=response)
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    UserSent(message=HumanMessage(content="go")),
+                    include_reducers=True,
+                    include_llm_tokens=True,
+                )
+            ]
+
+            frames = [i for i in items if isinstance(i, StreamFrame)]
+            tokens = [i for i in items if isinstance(i, LLMToken)]
+            assert len(frames) >= 2  # seed + reply
+            assert len(tokens) >= 1
+            # Frames should have reducer data
+            assert all("messages" in f.reducers for f in frames)
+
+        @pytest.mark.asyncio
+        async def it_is_backward_compatible_without_flag():
+            """Without include_llm_tokens, no LLMToken/LLMStreamEnd are yielded."""
+            from langgraph_events._graph import LLMStreamEnd, LLMToken
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+            items = [item async for item in graph.astream_events(Started(data="hi"))]
+            assert all(isinstance(i, Event) for i in items)
+            assert not any(isinstance(i, (LLMToken, LLMStreamEnd)) for i in items)

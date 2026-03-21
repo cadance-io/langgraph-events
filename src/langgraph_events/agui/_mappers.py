@@ -153,6 +153,8 @@ class MessageEventMapper:
 
         result: list[BaseEvent] = []
         for msg in ai_messages:
+            if ctx.was_streamed_ai_message(getattr(msg, "id", None)):
+                continue
             msg_id = ctx.next_message_id()
 
             # Text content
