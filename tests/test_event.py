@@ -10,30 +10,32 @@ from langgraph_events import Auditable, Event, MessageEvent
 
 def describe_Event():
 
-    def it_is_frozen_by_default():
-        class MyEvent(Event):
-            x: int = 0
+    def when_base_behavior():
 
-        e = MyEvent(x=42)
-        assert e.x == 42
-        with pytest.raises(AttributeError):
-            e.x = 99  # type: ignore
+        def it_is_frozen_by_default():
+            class MyEvent(Event):
+                x: int = 0
 
-    def it_auto_applies_dataclass_without_decorator():
-        class AutoEvent(Event):
-            value: str = ""
+            e = MyEvent(x=42)
+            assert e.x == 42
+            with pytest.raises(AttributeError):
+                e.x = 99  # type: ignore
 
-        e = AutoEvent(value="hello")
-        assert e.value == "hello"
-        with pytest.raises(AttributeError):
-            e.value = "nope"  # type: ignore
+        def it_auto_applies_dataclass_without_decorator():
+            class AutoEvent(Event):
+                value: str = ""
 
-    def it_auto_dataclass_produces_real_dataclass():
-        class SimpleEvent(Event):
-            value: str = ""
+            e = AutoEvent(value="hello")
+            assert e.value == "hello"
+            with pytest.raises(AttributeError):
+                e.value = "nope"  # type: ignore
 
-        assert dataclasses.is_dataclass(SimpleEvent)
-        assert SimpleEvent.__dataclass_params__.frozen
+        def it_auto_dataclass_produces_real_dataclass():
+            class SimpleEvent(Event):
+                value: str = ""
+
+            assert dataclasses.is_dataclass(SimpleEvent)
+            assert SimpleEvent.__dataclass_params__.frozen
 
     def when_single_inheritance():
 
@@ -73,16 +75,18 @@ def describe_Auditable():
 
     def describe_trail():
 
-        def it_includes_class_name_and_field_values():
-            class OrderPlaced(Auditable):
-                order_id: str = ""
-                total: float = 0.0
+        def when_default_formatting():
 
-            e = OrderPlaced(order_id="A1", total=99.99)
-            trail = e.trail()
-            assert trail.startswith("[OrderPlaced]")
-            assert "order_id='A1'" in trail
-            assert "total=99.99" in trail
+            def it_includes_class_name_and_field_values():
+                class OrderPlaced(Auditable):
+                    order_id: str = ""
+                    total: float = 0.0
+
+                e = OrderPlaced(order_id="A1", total=99.99)
+                trail = e.trail()
+                assert trail.startswith("[OrderPlaced]")
+                assert "order_id='A1'" in trail
+                assert "total=99.99" in trail
 
         def when_string_exceeds_80_chars():
 
@@ -216,16 +220,18 @@ def describe_MessageEvent():
             assert result[0] is ai_msg
             assert result[0].tool_calls == ai_msg.tool_calls
 
-    def it_works_through_multi_level_auto_dataclass():
-        class Mid(MessageEvent):
-            message: HumanMessage = None  # type: ignore[assignment]
+    def when_multi_level_inheritance():
 
-        class Leaf(Mid):
-            content: str = ""
+        def it_works_through_multi_level_auto_dataclass():
+            class Mid(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
 
-        msg = HumanMessage(content="hi")
-        e = Leaf(message=msg, content="extra")
-        assert e.content == "extra"
-        assert e.as_messages() == [msg]
-        with pytest.raises(AttributeError):
-            e.content = "nope"  # type: ignore
+            class Leaf(Mid):
+                content: str = ""
+
+            msg = HumanMessage(content="hi")
+            e = Leaf(message=msg, content="extra")
+            assert e.content == "extra"
+            assert e.as_messages() == [msg]
+            with pytest.raises(AttributeError):
+                e.content = "nope"  # type: ignore

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ag_ui.core import (
     BaseEvent,
@@ -55,6 +56,7 @@ class AGUIAdapter:
         mappers: list[EventMapper] | None = None,
         include_reducers: bool | list[str] = False,
         error_message: str | None = None,
+        interrupt_gate: bool = True,
     ) -> None:
         if resume_factory is not None and graph._checkpointer is None:
             raise ValueError(
@@ -65,6 +67,7 @@ class AGUIAdapter:
         self._resume_factory = resume_factory
         self._include_reducers = include_reducers
         self._error_message = error_message
+        self._interrupt_gate = interrupt_gate
 
         # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers()
@@ -81,11 +84,9 @@ class AGUIAdapter:
                 return result
         return []  # pragma: no cover — FallbackMapper always claims
 
-    def _get_interrupt_events(self, config: Any) -> list[Any]:
-        """Extract Interrupted events from checkpoint after stream ends."""
-        if self._graph._checkpointer is None:
-            return []
-        snapshot = self._graph.compiled.get_state(config)
+    @staticmethod
+    def _interrupts_from_snapshot(snapshot: Any) -> list[Any]:
+        """Extract Interrupted payload events from a checkpoint snapshot."""
         if not snapshot.next:
             return []
         result: list[Any] = []
@@ -96,6 +97,131 @@ class AGUIAdapter:
                     result.append(value)
         return result
 
+    async def _aget_checkpoint_snapshot(self, config: Any) -> Any | None:
+        """Return async checkpoint snapshot, or None when unsupported."""
+        if self._graph._checkpointer is None:
+            return None
+        return await self._graph.compiled.aget_state(config)
+
+    async def _get_interrupt_events(self, config: Any) -> list[Any]:
+        """Extract Interrupted events from checkpoint after stream ends."""
+        snapshot = await self._aget_checkpoint_snapshot(config)
+        if snapshot is None:
+            return []
+        return self._interrupts_from_snapshot(snapshot)
+
+    async def _build_resume_factory_state(self, config: Any) -> dict[str, Any] | None:
+        """Build optional checkpoint-side state for resume factories."""
+        snapshot = await self._aget_checkpoint_snapshot(config)
+        if snapshot is None:
+            return None
+        reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
+        return {
+            "reducers": reducers,
+            "events": reducers.get("events"),
+            "messages": reducers.get("messages"),
+            "pending_interrupts": self._interrupts_from_snapshot(snapshot),
+            "is_interrupted": bool(snapshot.next),
+        }
+
+    @staticmethod
+    def _accepts_extra_positional(fn: Any) -> bool:
+        """Whether *fn* accepts a second positional arg (checkpoint state)."""
+        parameters = tuple(inspect.signature(fn).parameters.values())
+        if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters):
+            return True
+        positional = [
+            p
+            for p in parameters
+            if p.kind
+            in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+        return len(positional) >= 2
+
+    def _call_resume_factory(
+        self,
+        input_data: RunAgentInput,
+        checkpoint_state: dict[str, Any] | None,
+    ) -> Any:
+        """Call resume_factory with optional checkpoint state if supported."""
+        if self._resume_factory is None:
+            return None
+        factory = cast("Any", self._resume_factory)
+        if self._accepts_extra_positional(factory):
+            return factory(input_data, checkpoint_state)
+        return factory(input_data)
+
+    def _call_seed_factory(
+        self,
+        input_data: RunAgentInput,
+        checkpoint_state: dict[str, Any] | None,
+    ) -> Any:
+        """Call seed_factory with optional checkpoint state if supported."""
+        factory = cast("Any", self._seed_factory)
+        if self._accepts_extra_positional(factory):
+            return factory(input_data, checkpoint_state)
+        return factory(input_data)
+
+    @staticmethod
+    def _build_config(input_data: RunAgentInput, thread_id: str) -> dict[str, Any]:
+        """Build LangGraph config, including passthrough forwarded props."""
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        forwarded_raw = input_data.forwarded_props
+        forwarded = forwarded_raw if isinstance(forwarded_raw, dict) else {}
+        candidate: Any = None
+
+        if isinstance(forwarded.get("langgraph_config"), dict):
+            candidate = forwarded["langgraph_config"]
+        elif isinstance(forwarded.get("config"), dict):
+            candidate = forwarded["config"]
+        elif isinstance(forwarded, dict) and (
+            "configurable" in forwarded or "recursion_limit" in forwarded
+        ):
+            candidate = forwarded
+
+        if not isinstance(candidate, dict):
+            return config
+
+        merged = {**candidate}
+        configurable = candidate.get("configurable")
+        merged["configurable"] = {
+            **(configurable if isinstance(configurable, dict) else {}),
+            "thread_id": thread_id,
+        }
+        return merged
+
+    async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
+        """Emit checkpoint-backed state without executing the graph."""
+        run_id = input_data.run_id or str(uuid.uuid4())
+        thread_id = input_data.thread_id or str(uuid.uuid4())
+        ctx = MapperContext(
+            run_id=run_id,
+            thread_id=thread_id,
+            input_data=input_data,
+        )
+        config = self._build_config(input_data, thread_id)
+        snapshot = await self._aget_checkpoint_snapshot(config)
+        if snapshot is None:
+            return
+
+        reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
+        yield build_state_snapshot(reducers)
+        messages = reducers.get("messages")
+        if messages is not None:
+            yield build_messages_snapshot(messages)
+
+        for interrupted in self._interrupts_from_snapshot(snapshot):
+            for agui_event in self._map_event(interrupted, ctx):
+                yield agui_event
+
+    async def reconnect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
+        """Alias for connect()."""
+        async for event in self.connect(input_data):
+            yield event
+
     async def _stream_event_source(  # noqa: PLR0912
         self,
         input_data: RunAgentInput,
@@ -104,13 +230,26 @@ class AGUIAdapter:
     ) -> AsyncIterator[BaseEvent]:
         """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run
-        resume_event = (
-            self._resume_factory(input_data)
-            if self._resume_factory is not None
-            else None
-        )
+        checkpoint_state = await self._build_resume_factory_state(config)
+        resume_event = self._call_resume_factory(input_data, checkpoint_state)
         is_resume = resume_event is not None
         prev_message_ids: tuple[int | str, ...] = ()
+
+        # Interrupt gate: re-emit state without executing when interrupted
+        if (
+            resume_event is None
+            and self._interrupt_gate
+            and checkpoint_state is not None
+            and checkpoint_state["is_interrupted"]
+        ):
+            yield build_state_snapshot(checkpoint_state["reducers"])
+            messages = checkpoint_state["messages"]
+            if messages is not None:
+                yield build_messages_snapshot(messages)
+            for interrupted in checkpoint_state["pending_interrupts"]:
+                for agui_event in self._map_event(interrupted, ctx):
+                    yield agui_event
+            return
 
         if resume_event is not None:
             event_stream = self._graph.astream_resume(
@@ -120,7 +259,7 @@ class AGUIAdapter:
                 config=config,
             )
         else:
-            seed = self._seed_factory(input_data)
+            seed = self._call_seed_factory(input_data, checkpoint_state)
             event_stream = self._graph.astream_events(
                 seed,
                 include_reducers=self._include_reducers,
@@ -178,7 +317,7 @@ class AGUIAdapter:
             )
 
         # Detect interrupts from checkpoint state
-        for interrupted in self._get_interrupt_events(config):
+        for interrupted in await self._get_interrupt_events(config):
             for agui_event in self._map_event(interrupted, ctx):
                 yield agui_event
 
@@ -204,9 +343,7 @@ class AGUIAdapter:
             run_id=run_id,
         )
 
-        config: Any = {
-            "configurable": {"thread_id": thread_id},
-        }
+        config: Any = self._build_config(input_data, thread_id)
 
         try:
             async for agui_event in self._stream_event_source(input_data, ctx, config):

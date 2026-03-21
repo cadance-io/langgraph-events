@@ -22,6 +22,20 @@ class AGUISerializable(Protocol):
 
 
 @runtime_checkable
+class AGUICustomEvent(AGUISerializable, Protocol):
+    """Events that control their AG-UI custom event name.
+
+    Implement ``agui_event_name`` to override the default
+    ``type(event).__name__`` used by ``FallbackMapper``.
+    """
+
+    @property
+    def agui_event_name(self) -> str:
+        """The custom event name for AG-UI forwarding."""
+        ...
+
+
+@runtime_checkable
 class EventMapper(Protocol):
     """Maps a domain Event to zero or more AG-UI events.
 
@@ -38,17 +52,36 @@ class EventMapper(Protocol):
 
 @runtime_checkable
 class SeedFactory(Protocol):
-    """Convert AG-UI RunAgentInput into domain seed event(s)."""
+    """Convert AG-UI RunAgentInput into domain seed event(s).
 
-    def __call__(self, input_data: RunAgentInput) -> Event | list[Event]:
+    Optionally accepts a second ``checkpoint_state`` dict containing
+    reducer snapshots, events, messages, and interrupt info from the
+    checkpoint.  The adapter detects the arity at runtime, so single-arg
+    factories remain fully supported.
+    """
+
+    def __call__(
+        self,
+        input_data: RunAgentInput,
+        checkpoint_state: dict[str, Any] | None = ...,
+    ) -> Event | list[Event]:
         """Produce seed event(s) from an AG-UI run request."""
         ...
 
 
 @runtime_checkable
 class ResumeFactory(Protocol):
-    """Detect whether an AG-UI request is a resume and produce the domain event."""
+    """Detect whether an AG-UI request is a resume and produce the domain event.
 
-    def __call__(self, input_data: RunAgentInput) -> Event | None:
+    Optionally accepts a second ``checkpoint_state`` dict.  The adapter
+    detects the arity at runtime, so single-arg factories remain fully
+    supported.
+    """
+
+    def __call__(
+        self,
+        input_data: RunAgentInput,
+        checkpoint_state: dict[str, Any] | None = ...,
+    ) -> Event | None:
         """Return a domain Event to resume with, or None for a fresh run."""
         ...

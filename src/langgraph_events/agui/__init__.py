@@ -10,6 +10,7 @@ from langgraph_events.agui._mappers import (
     ToolResultMapper,
 )
 from langgraph_events.agui._protocols import (
+    AGUICustomEvent,
     AGUISerializable,
     EventMapper,
     ResumeFactory,
@@ -22,6 +23,7 @@ from langgraph_events.agui._transport import (
 
 __all__ = [
     "AGUIAdapter",
+    "AGUICustomEvent",
     "AGUISerializable",
     "EventMapper",
     "FallbackMapper",

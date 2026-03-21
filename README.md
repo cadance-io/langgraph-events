@@ -487,7 +487,12 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `LLMStreamEnd`    | NamedTuple | `(run_id, message_id)` marker yielded when an LLM stream completes |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 | `langgraph_events.agui` | Subpackage | AG-UI protocol adapter (requires `[agui]` extra) |
-| `AGUIAdapter`     | Class      | Map EventGraph streams to AG-UI protocol events  |
+| `AGUIAdapter`     | Class      | Map EventGraph streams to AG-UI protocol events |
+| `AGUIAdapter.stream()` | Method | Execute graph and emit AG-UI events for one request |
+| `AGUIAdapter.connect()` | Method | Rehydrate current checkpoint state without graph execution |
+| `AGUIAdapter.reconnect()` | Method | Alias of `connect()` for refresh/reconnect flows |
+| `AGUICustomEvent` | Protocol   | Optional protocol for overriding fallback custom event names via `agui_event_name` |
+| `AGUISerializable` | Protocol  | Optional protocol for defining AG-UI payload serialization via `agui_dict()` |
 | `SeedFactory`     | Protocol   | Convert `RunAgentInput` to domain seed event(s)  |
 | `ResumeFactory`   | Protocol   | Detect resume requests and produce domain events |
 | `EventMapper`     | Protocol   | Map domain events to AG-UI events in the mapper chain |
@@ -503,6 +508,8 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 RunAgentInput → SeedFactory → EventGraph.astream_events → [Mapper Chain] → SSE
                                                   ↑
                               ResumeFactory → astream_resume (if resuming)
+
+RunAgentInput → AGUIAdapter.connect/reconnect → checkpoint snapshots + interrupts
 ```
 
 `AGUIAdapter` enables real-time assistant token streaming by default (it internally uses `include_llm_tokens=True`), emitting `TextMessageStart`/`TextMessageContent`/`TextMessageEnd` while the model is generating.
@@ -567,13 +574,58 @@ Events flow through a priority chain of mappers. The first mapper to claim an ev
 | 3 | `MessageEventMapper` | `MessageEvent` with `AIMessage` | `TextMessageStart/Content/End`, `ToolCallStart/Args/End` |
 | 4 | `ToolResultMapper` | `MessageEvent` with `ToolMessage` | `ToolCallResult` |
 | 5 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
-| 6 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=class name, value=`agui_dict()`) |
+| 6 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` when implemented, else class name; value=`agui_dict()`) |
 
 Events without `agui_dict()` are skipped with a one-time warning.
 
 `StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (when `include_reducers` is enabled).
 
 The adapter also emits lifecycle events automatically: `RunStarted` at the beginning, `RunFinished` at the end (or `RunError` on exception).
+
+### Connect/Reconnect (No Execution)
+
+For page refreshes and reconnects, use `connect()` to emit checkpoint-backed state without running handlers again:
+
+```python
+events = [event async for event in adapter.connect(input_data)]
+```
+
+`connect()` emits:
+
+- `StateSnapshot` from checkpoint reducers
+- `MessagesSnapshot` when a `messages` reducer is present
+- pending `Interrupted` events (mapped via the normal mapper chain)
+
+`reconnect()` is an alias for `connect()`.
+
+This is the general HITL rehydration path; it restores UI state and pending interrupts without advancing the graph.
+
+### Endpoint Pattern (Run + Connect)
+
+AG-UI does not require fixed endpoint names. A practical pattern is to expose separate execution and rehydration endpoints:
+
+```python
+from fastapi import FastAPI, Request
+from ag_ui.core import RunAgentInput
+from langgraph_events.agui import create_starlette_response
+
+app = FastAPI()
+
+@app.post("/api/copilotkit")
+async def run(request: Request):
+    input_data = RunAgentInput.model_validate_json(await request.body())
+    return create_starlette_response(adapter.stream(input_data))
+
+@app.post("/api/copilotkit/connect")
+async def connect(request: Request):
+    input_data = RunAgentInput.model_validate_json(await request.body())
+    return create_starlette_response(adapter.connect(input_data))
+```
+
+Recommended client behavior:
+
+- call `connect` on page load/refresh to rehydrate state and pending interrupts
+- call `stream` only when starting or resuming execution
 
 ### Custom Mappers
 
@@ -602,7 +654,7 @@ User mappers run after the built-in mappers (priority 5) but before `FallbackMap
 
 ### Resume Support
 
-To handle resumed conversations (e.g., after a human-in-the-loop interrupt), implement the `ResumeFactory` protocol:
+To handle resumed conversations (e.g., after a human-in-the-loop interrupt), implement `resume_factory`:
 
 ```python
 from ag_ui.core import RunAgentInput
@@ -611,7 +663,16 @@ from langgraph_events.agui import ResumeFactory
 class ApprovalSubmitted(Event):
     approved: bool
 
-def resume_factory(input_data: RunAgentInput) -> Event | None:
+def resume_factory(
+    input_data: RunAgentInput,
+    checkpoint_state: dict[str, Any] | None,
+) -> Event | None:
+    # checkpoint_state includes:
+    # - reducers: full reducer snapshot dict
+    # - events: reducer-projected event list (if present)
+    # - messages: reducer-projected messages (if present)
+    # - pending_interrupts: pending Interrupted payloads
+    # - is_interrupted: bool
     state = input_data.state or {}
     if "approved" in state:
         return ApprovalSubmitted(approved=state["approved"])
@@ -625,6 +686,20 @@ adapter = AGUIAdapter(
 ```
 
 When `resume_factory` returns an `Event`, the adapter uses `graph.astream_resume()` internally instead of `graph.astream_events()`. When it returns `None`, a fresh run is started with the `seed_factory`.
+
+The second `checkpoint_state` argument is optional; one-argument factories continue to work.
+
+### LangGraph Config Passthrough
+
+`AGUIAdapter.stream()` and `AGUIAdapter.connect()` accept LangGraph config via `RunAgentInput.forwarded_props`.
+
+Supported shapes:
+
+- `forwarded_props["langgraph_config"] = {...}`
+- `forwarded_props["config"] = {...}`
+- `forwarded_props = {...}` when it already looks like a LangGraph config
+
+The adapter always injects/overrides `configurable.thread_id` from `RunAgentInput.thread_id`, while preserving any other keys (for example `recursion_limit` or tenant/user routing keys in `configurable`).
 
 ### AG-UI Spec Coverage
 

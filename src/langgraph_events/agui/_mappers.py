@@ -24,7 +24,7 @@ from ag_ui.core import (
 
 from langgraph_events._event import Event, Interrupted, MessageEvent, Resumed
 
-from ._protocols import AGUISerializable
+from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
     from ag_ui.core import Message
@@ -246,10 +246,15 @@ class FallbackMapper:
         if not isinstance(event, AGUISerializable):
             _warn_missing_agui_dict(type(event))
             return []
+        name = (
+            event.agui_event_name
+            if isinstance(event, AGUICustomEvent)
+            else type(event).__name__
+        )
         return [
             CustomEvent(
                 type=EventType.CUSTOM,
-                name=type(event).__name__,
+                name=name,
                 value=event.agui_dict(),
             )
         ]
