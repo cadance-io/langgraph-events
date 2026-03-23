@@ -29,7 +29,7 @@ from langgraph_events.agui import (
     AGUIAdapter,
     MapperContext,
 )
-from langgraph_events.agui._mappers import _serialize_event, _warned_classes
+from langgraph_events.agui._mappers import _warned_classes
 
 # ---------------------------------------------------------------------------
 # Test event classes
@@ -53,6 +53,10 @@ class AgentCalledTools(MessageEvent):
 
 class ToolsExecuted(MessageEvent):
     messages: tuple[ToolMessage, ...] = ()
+
+
+class AgentAndToolMessages(MessageEvent):
+    messages: tuple[Any, ...] = ()
 
 
 class TaskCreated(Event):
@@ -235,6 +239,34 @@ def describe_AGUIAdapter():
                 assert len(result_events) == 1
                 assert result_events[0].tool_call_id == "tc-1"
                 assert result_events[0].content == "result-1"
+
+            async def it_maps_mixed_ai_and_tool_messages():
+                @on(UserAsked)
+                def reply_with_tool_result(event: UserAsked) -> AgentAndToolMessages:
+                    return AgentAndToolMessages(
+                        messages=(
+                            AIMessage(content="I used a tool"),
+                            ToolMessage(content="tool output", tool_call_id="tc-mixed"),
+                        )
+                    )
+
+                graph = EventGraph([reply_with_tool_result])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="mixed"),
+                )
+                events = await _collect(adapter, _make_input())
+
+                text_events = [
+                    e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT
+                ]
+                result_events = [
+                    e for e in events if e.type == EventType.TOOL_CALL_RESULT
+                ]
+                assert any("I used a tool" in e.delta for e in text_events)
+                assert len(result_events) == 1
+                assert result_events[0].tool_call_id == "tc-mixed"
+                assert result_events[0].content == "tool output"
 
             async def it_maps_interrupted_to_custom_event():
                 @on(UserAsked)
@@ -767,6 +799,57 @@ def describe_AGUIAdapter():
                 ]
                 assert len(interrupted_events) == 0
 
+            def when_stream_emits_interrupt():
+
+                async def it_skips_post_stream_checkpoint_read(
+                    monkeypatch,
+                ):
+                    @on(UserAsked)
+                    def reply(event: UserAsked) -> AgentReplied:
+                        return AgentReplied(message=AIMessage(content="ok"))
+
+                    graph = EventGraph([reply], checkpointer=MemorySaver())
+                    adapter = AGUIAdapter(
+                        graph=graph,
+                        seed_factory=lambda inp: UserAsked(question="go"),
+                    )
+
+                    called = {"checkpoint": 0}
+
+                    async def fake_astream_events(
+                        seed,
+                        *,
+                        include_reducers,
+                        include_llm_tokens,
+                        config,
+                    ):
+                        del seed, include_reducers, include_llm_tokens, config
+                        yield ApprovalRequested(draft="stream-first")
+
+                    original_aget_state = graph.compiled.aget_state
+
+                    async def count_aget_state(config):
+                        called["checkpoint"] += 1
+                        return await original_aget_state(config)
+
+                    monkeypatch.setattr(
+                        adapter._graph,
+                        "astream_events",
+                        fake_astream_events,
+                    )
+                    monkeypatch.setattr(graph.compiled, "aget_state", count_aget_state)
+                    events = await _collect(
+                        adapter, _make_input(thread_id="t-stream-int")
+                    )
+
+                    interrupted_events = [
+                        e
+                        for e in events
+                        if e.type == EventType.CUSTOM and e.name == "interrupted"
+                    ]
+                    assert len(interrupted_events) == 1
+                    assert called["checkpoint"] == 1
+
             async def it_passes_checkpoint_state_to_resume_factory():
                 seen_state: dict[str, Any] = {}
 
@@ -855,52 +938,6 @@ def describe_AGUIAdapter():
                 e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT
             ]
             assert any("from factory" in e.delta for e in text_events)
-
-
-def describe_serialize_event():
-    def when_simple_event():
-        def it_serializes_simple_events():
-            event = TaskCreated(title="test")
-            result = _serialize_event(event)
-            assert result == {"title": "test"}
-
-    def when_non_serializable_fields():
-        def it_handles_non_serializable_fields():
-            class WithObj(Event):
-                data: object = object()
-
-            event = WithObj()
-            result = _serialize_event(event)
-            assert "data" in result
-            # Result must be JSON-round-trip safe
-            json.dumps(result)
-
-    def when_agui_dict_available():
-        def it_uses_agui_dict():
-            from langgraph_events.agui import AGUISerializable
-
-            class CustomSerialized(Event):
-                raw: str = "raw-value"
-
-                def agui_dict(self) -> dict[str, Any]:
-                    return {"custom_key": self.raw.upper()}
-
-            assert isinstance(CustomSerialized(), AGUISerializable)
-            result = _serialize_event(CustomSerialized())
-            assert result == {"custom_key": "RAW-VALUE"}
-
-    def when_asdict_returns_non_json_values():
-        def it_coerces_to_string():
-            from datetime import datetime
-
-            class WithDatetime(Event):
-                created_at: datetime = datetime(2025, 1, 15, 12, 0, 0)
-
-            result = _serialize_event(WithDatetime())
-            assert "created_at" in result
-            # datetime should be coerced to string, and result must be JSON-safe
-            json.dumps(result)
-            assert isinstance(result["created_at"], str)
 
 
 def describe_transport():
@@ -993,6 +1030,11 @@ def describe_resume_with_reducers():
 
 
 def describe_connect():
+    def when_reconnect():
+
+        def it_is_alias_for_connect():
+            assert AGUIAdapter.reconnect is AGUIAdapter.connect
+
     def when_checkpointer_present():
 
         async def it_emits_state_without_executing_graph():
@@ -1028,35 +1070,6 @@ def describe_connect():
             ]
             assert len(interrupted) == 1
             assert interrupted[0].value["draft"] == "pending"
-
-        async def it_reconnect_aliases_connect():
-            @on(UserAsked)
-            def ask(event: UserAsked) -> ApprovalRequested:
-                return ApprovalRequested(draft="pending")
-
-            graph = EventGraph([ask], checkpointer=MemorySaver())
-            await graph.ainvoke(
-                UserAsked(question="go"),
-                config={"configurable": {"thread_id": "t-reconnect"}},
-            )
-
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="unused"),
-            )
-
-            connect_events = [
-                event
-                async for event in adapter.connect(_make_input(thread_id="t-reconnect"))
-            ]
-            reconnect_events = [
-                event
-                async for event in adapter.reconnect(
-                    _make_input(thread_id="t-reconnect")
-                )
-            ]
-
-            assert _types(connect_events) == _types(reconnect_events)
 
     def when_no_checkpointer():
 
@@ -1491,3 +1504,20 @@ def describe_MapperContext():
         assert ctx.next_message_id() == "msg-1"
         assert ctx.next_message_id() == "msg-2"
         assert ctx.next_message_id() == "msg-3"
+
+    def it_allows_reused_llm_run_id_after_close():
+        ctx = MapperContext(
+            run_id="r1",
+            thread_id="t1",
+            input_data=_make_input(),
+        )
+
+        first_id, is_new_first = ctx.ensure_stream_message_id("llm-run")
+        assert is_new_first is True
+        assert first_id == "msg-1"
+
+        assert ctx.close_stream_message_id("llm-run") == "msg-1"
+
+        second_id, is_new_second = ctx.ensure_stream_message_id("llm-run")
+        assert is_new_second is True
+        assert second_id == "msg-2"

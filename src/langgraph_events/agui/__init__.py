@@ -7,7 +7,6 @@ from langgraph_events.agui._mappers import (
     InterruptedMapper,
     MessageEventMapper,
     SkipInternalMapper,
-    ToolResultMapper,
 )
 from langgraph_events.agui._protocols import (
     AGUICustomEvent,
@@ -33,7 +32,6 @@ __all__ = [
     "ResumeFactory",
     "SeedFactory",
     "SkipInternalMapper",
-    "ToolResultMapper",
     "create_starlette_response",
     "encode_sse_stream",
 ]

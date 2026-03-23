@@ -45,7 +45,7 @@ class EventMapper(Protocol):
     - ``[..]``  — "I claim this event, emit these AG-UI events"
     """
 
-    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+    def map(self, event: Any, ctx: MapperContext) -> list[BaseEvent] | None:
         """Map a domain event to AG-UI events."""
         ...
 

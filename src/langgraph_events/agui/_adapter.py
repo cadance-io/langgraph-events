@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from ag_ui.core import (
     BaseEvent,
@@ -31,11 +31,23 @@ from ._mappers import (
 
 logger = logging.getLogger(__name__)
 
+
+class CheckpointState(TypedDict):
+    """Checkpoint-derived state passed to seed/resume factories."""
+
+    reducers: dict[str, Any]
+    events: Any
+    messages: Any
+    pending_interrupts: list[Any]
+    is_interrupted: bool
+
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ag_ui.core import RunAgentInput
 
+    from langgraph_events._event import Event
     from langgraph_events._graph import EventGraph
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
@@ -103,24 +115,15 @@ class AGUIAdapter:
             return None
         return await self._graph.compiled.aget_state(config)
 
-    async def _get_interrupt_events(self, config: Any) -> list[Any]:
-        """Extract Interrupted events from checkpoint after stream ends."""
-        snapshot = await self._aget_checkpoint_snapshot(config)
-        if snapshot is None:
-            return []
-        return self._interrupts_from_snapshot(snapshot)
-
-    async def _build_resume_factory_state(self, config: Any) -> dict[str, Any] | None:
-        """Build optional checkpoint-side state for resume factories."""
-        snapshot = await self._aget_checkpoint_snapshot(config)
-        if snapshot is None:
-            return None
+    @staticmethod
+    def _build_checkpoint_state(snapshot: Any) -> CheckpointState:
+        """Build resume-factory state payload from a checkpoint snapshot."""
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
         return {
             "reducers": reducers,
             "events": reducers.get("events"),
             "messages": reducers.get("messages"),
-            "pending_interrupts": self._interrupts_from_snapshot(snapshot),
+            "pending_interrupts": AGUIAdapter._interrupts_from_snapshot(snapshot),
             "is_interrupted": bool(snapshot.next),
         }
 
@@ -144,7 +147,7 @@ class AGUIAdapter:
     def _call_resume_factory(
         self,
         input_data: RunAgentInput,
-        checkpoint_state: dict[str, Any] | None,
+        checkpoint_state: CheckpointState | None,
     ) -> Any:
         """Call resume_factory with optional checkpoint state if supported."""
         if self._resume_factory is None:
@@ -157,7 +160,7 @@ class AGUIAdapter:
     def _call_seed_factory(
         self,
         input_data: RunAgentInput,
-        checkpoint_state: dict[str, Any] | None,
+        checkpoint_state: CheckpointState | None,
     ) -> Any:
         """Call seed_factory with optional checkpoint state if supported."""
         factory = cast("Any", self._seed_factory)
@@ -217,10 +220,121 @@ class AGUIAdapter:
             for agui_event in self._map_event(interrupted, ctx):
                 yield agui_event
 
-    async def reconnect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
-        """Alias for connect()."""
-        async for event in self.connect(input_data):
-            yield event
+    reconnect = connect
+
+    def _should_gate_with_checkpoint_replay(
+        self,
+        resume_event: Any,
+        checkpoint_state: CheckpointState | None,
+    ) -> bool:
+        """Whether interrupt gate should short-circuit to checkpoint replay."""
+        return (
+            resume_event is None
+            and self._interrupt_gate
+            and checkpoint_state is not None
+            and checkpoint_state["is_interrupted"]
+        )
+
+    def _build_event_stream(
+        self,
+        input_data: RunAgentInput,
+        checkpoint_state: CheckpointState | None,
+        resume_event: Any,
+        config: Any,
+    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
+        """Create the underlying EventGraph async event stream."""
+        if resume_event is not None:
+            return self._graph.astream_resume(
+                resume_event,
+                include_reducers=self._include_reducers,
+                include_llm_tokens=True,
+                config=config,
+            )
+        seed = self._call_seed_factory(input_data, checkpoint_state)
+        return self._graph.astream_events(
+            seed,
+            include_reducers=self._include_reducers,
+            include_llm_tokens=True,
+            config=config,
+        )
+
+    @staticmethod
+    def _is_interrupt(event: Any) -> bool:
+        return isinstance(event, Interrupted)
+
+    def _events_from_llm_token(
+        self, item: LLMToken, ctx: MapperContext
+    ) -> list[BaseEvent]:
+        message_id, is_new = ctx.ensure_stream_message_id(item.run_id)
+        events: list[BaseEvent] = []
+        if is_new:
+            events.append(
+                TextMessageStartEvent(
+                    type=EventType.TEXT_MESSAGE_START,
+                    message_id=message_id,
+                    role="assistant",
+                )
+            )
+        events.append(
+            TextMessageContentEvent(
+                type=EventType.TEXT_MESSAGE_CONTENT,
+                message_id=message_id,
+                delta=item.content,
+            )
+        )
+        return events
+
+    def _events_from_llm_stream_end(
+        self,
+        item: LLMStreamEnd,
+        ctx: MapperContext,
+    ) -> list[BaseEvent]:
+        if item.message_id:
+            ctx.mark_streamed_ai_message(item.message_id)
+        closed_id = ctx.close_stream_message_id(item.run_id)
+        if closed_id is None:
+            return []
+        return [
+            TextMessageEndEvent(
+                type=EventType.TEXT_MESSAGE_END,
+                message_id=closed_id,
+            )
+        ]
+
+    def _events_from_stream_frame(
+        self,
+        item: StreamFrame,
+        ctx: MapperContext,
+        *,
+        is_resume: bool,
+        prev_message_ids: tuple[int | str, ...],
+    ) -> tuple[list[BaseEvent], tuple[int | str, ...], bool]:
+        event = item.event
+        if is_resume and self._is_interrupt(event):
+            return [], prev_message_ids, False
+
+        events: list[BaseEvent] = [build_state_snapshot(item.reducers)]
+        messages = item.reducers.get("messages")
+        next_message_ids = prev_message_ids
+        if messages is not None:
+            current_ids = tuple(getattr(m, "id", id(m)) for m in messages)
+            if current_ids != prev_message_ids:
+                next_message_ids = current_ids
+                events.append(build_messages_snapshot(messages))
+
+        events.extend(self._map_event(event, ctx))
+        return events, next_message_ids, self._is_interrupt(event)
+
+    def _events_from_bare_item(
+        self,
+        item: Any,
+        ctx: MapperContext,
+        *,
+        is_resume: bool,
+    ) -> tuple[list[BaseEvent], bool]:
+        if is_resume and self._is_interrupt(item):
+            return [], False
+        return self._map_event(item, ctx), self._is_interrupt(item)
 
     async def _stream_event_source(  # noqa: PLR0912
         self,
@@ -230,84 +344,68 @@ class AGUIAdapter:
     ) -> AsyncIterator[BaseEvent]:
         """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run
-        checkpoint_state = await self._build_resume_factory_state(config)
+        checkpoint_snapshot = await self._aget_checkpoint_snapshot(config)
+        checkpoint_state = (
+            self._build_checkpoint_state(checkpoint_snapshot)
+            if checkpoint_snapshot is not None
+            else None
+        )
         resume_event = self._call_resume_factory(input_data, checkpoint_state)
         is_resume = resume_event is not None
         prev_message_ids: tuple[int | str, ...] = ()
+        emitted_interrupt_in_stream = False
 
         # Interrupt gate: re-emit state without executing when interrupted
-        if (
-            resume_event is None
-            and self._interrupt_gate
-            and checkpoint_state is not None
-            and checkpoint_state["is_interrupted"]
-        ):
-            yield build_state_snapshot(checkpoint_state["reducers"])
-            messages = checkpoint_state["messages"]
+        if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
+            state = cast("CheckpointState", checkpoint_state)
+            yield build_state_snapshot(state["reducers"])
+            messages = state["messages"]
             if messages is not None:
                 yield build_messages_snapshot(messages)
-            for interrupted in checkpoint_state["pending_interrupts"]:
+            for interrupted in state["pending_interrupts"]:
                 for agui_event in self._map_event(interrupted, ctx):
                     yield agui_event
             return
 
-        if resume_event is not None:
-            event_stream = self._graph.astream_resume(
-                resume_event,
-                include_reducers=self._include_reducers,
-                include_llm_tokens=True,
-                config=config,
-            )
-        else:
-            seed = self._call_seed_factory(input_data, checkpoint_state)
-            event_stream = self._graph.astream_events(
-                seed,
-                include_reducers=self._include_reducers,
-                include_llm_tokens=True,
-                config=config,
-            )
+        event_stream = self._build_event_stream(
+            input_data,
+            checkpoint_state,
+            resume_event,
+            config,
+        )
 
         async for item in event_stream:
             if isinstance(item, LLMToken):
-                message_id, is_new = ctx.ensure_stream_message_id(item.run_id)
-                if is_new:
-                    yield TextMessageStartEvent(
-                        type=EventType.TEXT_MESSAGE_START,
-                        message_id=message_id,
-                        role="assistant",
-                    )
-                yield TextMessageContentEvent(
-                    type=EventType.TEXT_MESSAGE_CONTENT,
-                    message_id=message_id,
-                    delta=item.content,
-                )
+                for agui_event in self._events_from_llm_token(item, ctx):
+                    yield agui_event
             elif isinstance(item, LLMStreamEnd):
-                if item.message_id:
-                    ctx.mark_streamed_ai_message(item.message_id)
-                closed_id = ctx.close_stream_message_id(item.run_id)
-                if closed_id is not None:
-                    yield TextMessageEndEvent(
-                        type=EventType.TEXT_MESSAGE_END,
-                        message_id=closed_id,
-                    )
+                for agui_event in self._events_from_llm_stream_end(item, ctx):
+                    yield agui_event
             elif isinstance(item, StreamFrame):
-                event = item.event
-                if is_resume and isinstance(event, Interrupted):
-                    continue
-                yield build_state_snapshot(item.reducers)
-                messages = item.reducers.get("messages")
-                if messages is not None:
-                    current_ids = tuple(getattr(m, "id", id(m)) for m in messages)
-                    if current_ids != prev_message_ids:
-                        prev_message_ids = current_ids
-                        yield build_messages_snapshot(messages)
-                for agui_event in self._map_event(event, ctx):
+                agui_events, next_message_ids, emitted_interrupt = (
+                    self._events_from_stream_frame(
+                        item,
+                        ctx,
+                        is_resume=is_resume,
+                        prev_message_ids=prev_message_ids,
+                    )
+                )
+                prev_message_ids = next_message_ids
+                emitted_interrupt_in_stream = (
+                    emitted_interrupt_in_stream or emitted_interrupt
+                )
+                for agui_event in agui_events:
                     yield agui_event
             else:
-                # Bare Event (no reducers)
-                if is_resume and isinstance(item, Interrupted):
-                    continue
-                for agui_event in self._map_event(item, ctx):
+                agui_events, emitted_interrupt = self._events_from_bare_item(
+                    item,
+                    ctx,
+                    is_resume=is_resume,
+                )
+                emitted_interrupt_in_stream = (
+                    emitted_interrupt_in_stream or emitted_interrupt
+                )
+                for agui_event in agui_events:
                     yield agui_event
 
         for message_id in ctx.drain_open_stream_message_ids():
@@ -317,9 +415,14 @@ class AGUIAdapter:
             )
 
         # Detect interrupts from checkpoint state
-        for interrupted in await self._get_interrupt_events(config):
-            for agui_event in self._map_event(interrupted, ctx):
-                yield agui_event
+        if not is_resume and not emitted_interrupt_in_stream:
+            snapshot = await self._aget_checkpoint_snapshot(config)
+            interrupt_events = (
+                self._interrupts_from_snapshot(snapshot) if snapshot is not None else []
+            )
+            for interrupted in interrupt_events:
+                for agui_event in self._map_event(interrupted, ctx):
+                    yield agui_event
 
     async def stream(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
         """Yield AG-UI events for one request.

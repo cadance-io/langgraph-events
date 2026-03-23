@@ -52,7 +52,7 @@ class MapperContext:
 
     def close_stream_message_id(self, llm_run_id: str) -> str | None:
         """Mark a streamed message as closed and return its message_id."""
-        message_id = self._stream_message_ids.get(llm_run_id)
+        message_id = self._stream_message_ids.pop(llm_run_id, None)
         if message_id is None:
             return None
         self._open_stream_runs.discard(llm_run_id)
@@ -60,11 +60,14 @@ class MapperContext:
 
     def drain_open_stream_message_ids(self) -> list[str]:
         """Close and return all message_ids still open."""
+        open_run_ids = list(self._open_stream_runs)
         message_ids = [
             self._stream_message_ids[run_id]
-            for run_id in list(self._open_stream_runs)
+            for run_id in open_run_ids
             if run_id in self._stream_message_ids
         ]
+        for run_id in open_run_ids:
+            self._stream_message_ids.pop(run_id, None)
         self._open_stream_runs.clear()
         return message_ids
 

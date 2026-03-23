@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import warnings
 from typing import TYPE_CHECKING, Any
@@ -22,7 +21,13 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 
-from langgraph_events._event import Event, Interrupted, MessageEvent, Resumed
+from langgraph_events._event import (
+    Event,
+    Interrupted,
+    MessageEvent,
+    Resumed,
+    SystemPromptSet,
+)
 
 from ._protocols import AGUICustomEvent, AGUISerializable
 
@@ -44,17 +49,6 @@ def _warn_missing_agui_dict(cls: type) -> None:
             f"to include this event in the AG-UI stream.",
             stacklevel=3,
         )
-
-
-def _serialize_event(event: Event) -> dict[str, Any]:
-    """Serialize a domain event to a JSON-compatible dict."""
-    if isinstance(event, AGUISerializable):
-        return event.agui_dict()
-    try:
-        raw = dataclasses.asdict(event)  # type: ignore[call-overload]
-    except TypeError:
-        raw = {f.name: getattr(event, f.name) for f in dataclasses.fields(event)}  # type: ignore[arg-type]
-    return json.loads(json.dumps(raw, default=str))
 
 
 def _langchain_to_agui_messages(messages: list[Any]) -> list[Message]:
@@ -114,19 +108,9 @@ class SkipInternalMapper:
     """Suppress framework-internal events (Resumed, SystemPromptSet)."""
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        from langgraph_events._event import SystemPromptSet  # noqa: PLC0415
-
         if isinstance(event, (Resumed, SystemPromptSet)):
             return []
         return None
-
-
-def _extract_messages_by_type(event: Event, msg_type: str) -> list[Any] | None:
-    """Extract typed messages from a MessageEvent, or None."""
-    if not isinstance(event, MessageEvent):
-        return None
-    filtered = [m for m in event.as_messages() if m.type == msg_type]
-    return filtered if filtered else None
 
 
 class InterruptedMapper:
@@ -151,8 +135,12 @@ class MessageEventMapper:
     """Map MessageEvent with AIMessage content to AG-UI text/tool events."""
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        ai_messages = _extract_messages_by_type(event, "ai")
-        if ai_messages is None:
+        if not isinstance(event, MessageEvent):
+            return None
+        messages = event.as_messages()
+        ai_messages = [m for m in messages if m.type == "ai"]
+        tool_messages = [m for m in messages if m.type == "tool"]
+        if not ai_messages and not tool_messages:
             return None
 
         result: list[BaseEvent] = []
@@ -214,18 +202,6 @@ class MessageEventMapper:
                         )
                     )
 
-        return result
-
-
-class ToolResultMapper:
-    """Map MessageEvent with ToolMessages to AG-UI ToolCallResultEvent."""
-
-    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        tool_messages = _extract_messages_by_type(event, "tool")
-        if tool_messages is None:
-            return None
-
-        result: list[BaseEvent] = []
         for msg in tool_messages:
             result.append(
                 ToolCallResultEvent(
@@ -236,6 +212,7 @@ class ToolResultMapper:
                     role="tool",
                 )
             )
+
         return result
 
 
@@ -266,7 +243,6 @@ def default_mappers() -> list[Any]:
         SkipInternalMapper(),
         InterruptedMapper(),
         MessageEventMapper(),
-        ToolResultMapper(),
         # FallbackMapper is always last — added by the adapter after user mappers
     ]
 
