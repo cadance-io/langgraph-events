@@ -40,6 +40,7 @@ class CheckpointState(TypedDict):
     messages: Any
     pending_interrupts: list[Any]
     is_interrupted: bool
+    snapshot: Any  # raw LangGraph StateSnapshot for advanced access
 
 
 if TYPE_CHECKING:
@@ -80,6 +81,12 @@ class AGUIAdapter:
         self._include_reducers = include_reducers
         self._error_message = error_message
         self._interrupt_gate = interrupt_gate
+        self._seed_accepts_state = self._accepts_extra_positional(seed_factory)
+        self._resume_accepts_state = (
+            self._accepts_extra_positional(resume_factory)
+            if resume_factory is not None
+            else False
+        )
 
         # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers()
@@ -125,6 +132,7 @@ class AGUIAdapter:
             "messages": reducers.get("messages"),
             "pending_interrupts": AGUIAdapter._interrupts_from_snapshot(snapshot),
             "is_interrupted": bool(snapshot.next),
+            "snapshot": snapshot,
         }
 
     @staticmethod
@@ -153,7 +161,7 @@ class AGUIAdapter:
         if self._resume_factory is None:
             return None
         factory = cast("Any", self._resume_factory)
-        if self._accepts_extra_positional(factory):
+        if self._resume_accepts_state:
             return factory(input_data, checkpoint_state)
         return factory(input_data)
 
@@ -164,7 +172,7 @@ class AGUIAdapter:
     ) -> Any:
         """Call seed_factory with optional checkpoint state if supported."""
         factory = cast("Any", self._seed_factory)
-        if self._accepts_extra_positional(factory):
+        if self._seed_accepts_state:
             return factory(input_data, checkpoint_state)
         return factory(input_data)
 
@@ -317,9 +325,12 @@ class AGUIAdapter:
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
         if messages is not None:
-            current_ids = tuple(getattr(m, "id", id(m)) for m in messages)
-            if current_ids != prev_message_ids:
-                next_message_ids = current_ids
+            changed = len(messages) != len(prev_message_ids) or any(
+                getattr(m, "id", id(m)) != pid
+                for m, pid in zip(messages, prev_message_ids, strict=True)
+            )
+            if changed:
+                next_message_ids = tuple(getattr(m, "id", id(m)) for m in messages)
                 events.append(build_messages_snapshot(messages))
 
         events.extend(self._map_event(event, ctx))
@@ -343,8 +354,15 @@ class AGUIAdapter:
         config: Any,
     ) -> AsyncIterator[BaseEvent]:
         """Stream domain events through the mapper chain."""
-        # Determine resume vs fresh run
-        checkpoint_snapshot = await self._aget_checkpoint_snapshot(config)
+        # Determine resume vs fresh run — lazy checkpoint read
+        needs_checkpoint = (
+            self._seed_accepts_state
+            or self._resume_accepts_state
+            or self._interrupt_gate
+        )
+        checkpoint_snapshot = (
+            await self._aget_checkpoint_snapshot(config) if needs_checkpoint else None
+        )
         checkpoint_state = (
             self._build_checkpoint_state(checkpoint_snapshot)
             if checkpoint_snapshot is not None

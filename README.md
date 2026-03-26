@@ -571,10 +571,9 @@ Events flow through a priority chain of mappers. The first mapper to claim an ev
 |----------|--------|---------|-----------------------|
 | 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet` | *(suppressed — claims but emits nothing)* |
 | 2 | `InterruptedMapper` | `Interrupted` subclasses | `CustomEvent` (name=`"interrupted"`) |
-| 3 | `MessageEventMapper` | `MessageEvent` with `AIMessage` | `TextMessageStart/Content/End`, `ToolCallStart/Args/End` |
-| 4 | `ToolResultMapper` | `MessageEvent` with `ToolMessage` | `ToolCallResult` |
-| 5 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
-| 6 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` when implemented, else class name; value=`agui_dict()`) |
+| 3 | `MessageEventMapper` | `MessageEvent` (AI + tool messages) | `TextMessage*`, `ToolCall*`, `ToolCallResult` |
+| 4 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
+| 5 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` when implemented, else class name; value=`agui_dict()`) |
 
 Events without `agui_dict()` are skipped with a one-time warning.
 
