@@ -12,6 +12,9 @@ dependencies = [
     "langgraph>=0.2.0",
 ]
 
+[project.optional-dependencies]
+agui = ["ag-ui-protocol>=0.1.0"]
+
 [dependency-groups]
 dev = [
     "pytest>=7.0",
@@ -22,6 +25,7 @@ dev = [
     "pre-commit>=4.0",
     "pytest-cov>=4.0",
     "langchain-openai>=1.1.10",
+    "ag-ui-protocol>=0.1.0",
 ]
 examples = [
     "langchain-openai>=0.2.0",
@@ -81,7 +85,7 @@ mypy_path = "src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["langgraph.*", "langchain_core.*", "langchain_openai.*"]
+module = ["langgraph.*", "langchain_core.*", "langchain_openai.*", "ag_ui.*", "starlette.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

@@ -227,10 +227,21 @@ def make_handler_node(
 
     reds = reducers or {}
 
-    def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
+    def _prepare(
+        state: StateDict, config: RunnableConfig
+    ) -> tuple[list[Event], dict[str, Any]]:
         matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
         inject = _build_inject(meta, state, reds, config)
+        return matching, inject
 
+    def _finalize(new_events: list[Event]) -> StateDict:
+        output: StateDict = {"events": new_events}
+        if reds:
+            output.update(_apply_reducers(new_events, reds))
+        return output
+
+    def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
+        matching, inject = _prepare(state, config)
         new_events: list[Event] = []
         for event in matching:
             if meta.is_async:
@@ -251,16 +262,10 @@ def make_handler_node(
             else:
                 result = meta.fn(event, **inject)
             _collect_result(result, new_events, lg_interrupt)
-
-        output: StateDict = {"events": new_events}
-        if reds:
-            output.update(_apply_reducers(new_events, reds))
-        return output
+        return _finalize(new_events)
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
-        matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
-        inject = _build_inject(meta, state, reds, config)
-
+        matching, inject = _prepare(state, config)
         new_events: list[Event] = []
         for event in matching:
             if meta.is_async:
@@ -271,11 +276,7 @@ def make_handler_node(
             else:
                 result = meta.fn(event, **inject)
             _collect_result(result, new_events, lg_interrupt)
-
-        output: StateDict = {"events": new_events}
-        if reds:
-            output.update(_apply_reducers(new_events, reds))
-        return output
+        return _finalize(new_events)
 
     return RunnableLambda(
         func=_run_handler_sync,

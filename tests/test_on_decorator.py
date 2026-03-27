@@ -70,30 +70,32 @@ def describe_on_decorator():
 
 def describe_extract_handler_meta():
 
-    def it_extracts_event_types_and_name():
-        @on(SampleEvent)
-        async def my_handler(event: SampleEvent):
-            pass
+    def when_basic_handler():
 
-        meta = extract_handler_meta(my_handler)
-        assert meta.event_types == (SampleEvent,)
-        assert "my_handler" in meta.name
+        def it_extracts_event_types_and_name():
+            @on(SampleEvent)
+            async def my_handler(event: SampleEvent):
+                pass
 
-    def it_detects_async_handlers():
-        @on(SampleEvent)
-        async def handler(event: SampleEvent):
-            pass
+            meta = extract_handler_meta(my_handler)
+            assert meta.event_types == (SampleEvent,)
+            assert "my_handler" in meta.name
 
-        meta = extract_handler_meta(handler)
-        assert meta.is_async is True
+        def it_detects_async_handlers():
+            @on(SampleEvent)
+            async def handler(event: SampleEvent):
+                pass
 
-    def it_detects_sync_handlers():
-        @on(SampleEvent)
-        def handler(event: SampleEvent):
-            pass
+            meta = extract_handler_meta(handler)
+            assert meta.is_async is True
 
-        meta = extract_handler_meta(handler)
-        assert meta.is_async is False
+        def it_detects_sync_handlers():
+            @on(SampleEvent)
+            def handler(event: SampleEvent):
+                pass
+
+            meta = extract_handler_meta(handler)
+            assert meta.is_async is False
 
     def when_handler_wants_log():
 

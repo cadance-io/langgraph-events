@@ -11,6 +11,12 @@ repos:
 
   - repo: local
     hooks:
+      - id: validate-tests
+        name: validate tests
+        entry: bash -c "uv run python scripts/validate_tests.py"
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: mypy
         name: mypy
         language: system
@@ -18,6 +24,15 @@ repos:
         types: [python]
         pass_filenames: false
         require_serial: true
+
+      - id: jscpd
+        name: jscpd
+        language: system
+        entry: npx jscpd src/ tests/ --min-tokens 30 --min-lines 2 --threshold 5
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+        files: ^(src/|tests/)
 
       - id: mermaid-graphs
         name: mermaid-graphs

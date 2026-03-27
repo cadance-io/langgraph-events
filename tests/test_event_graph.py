@@ -327,105 +327,111 @@ def describe_EventGraph():
             class Replied(Event):
                 value: str = ""
 
-            def it_fires_on_either_event_type():
-                @on(PingSent, PongReceived)
-                def echo(event: Event) -> Replied:
-                    if isinstance(event, PingSent):
-                        return Replied(value=f"ping:{event.value}")
-                    return Replied(value=f"pong:{event.value}")
+            def when_single_type_pending():
 
-                @on(Replied)
-                def finish(event: Replied) -> Completed:
-                    return Completed(result=event.value)
+                def it_fires_on_either_event_type():
+                    @on(PingSent, PongReceived)
+                    def echo(event: Event) -> Replied:
+                        if isinstance(event, PingSent):
+                            return Replied(value=f"ping:{event.value}")
+                        return Replied(value=f"pong:{event.value}")
 
-                graph = EventGraph([echo, finish])
-                log = graph.invoke(PingSent(value="hello"))
-                assert log.latest(Completed) == Completed(result="ping:hello")
-                log = graph.invoke(PongReceived(value="world"))
-                assert log.latest(Completed) == Completed(result="pong:world")
+                    @on(Replied)
+                    def finish(event: Replied) -> Completed:
+                        return Completed(result=event.value)
 
-            def it_dispatches_handler_only_once_when_both_types_pending():
-                @on(PingSent, PongReceived)
-                def echo(event: Event) -> Replied:
-                    return Replied(value="seen")
+                    graph = EventGraph([echo, finish])
+                    log = graph.invoke(PingSent(value="hello"))
+                    assert log.latest(Completed) == Completed(result="ping:hello")
+                    log = graph.invoke(PongReceived(value="world"))
+                    assert log.latest(Completed) == Completed(result="pong:world")
 
-                @on(Replied)
-                def finish(event: Replied) -> Completed:
-                    return Completed(result=event.value)
+                def it_provides_log_to_multi_sub_handler():
+                    class MsgAReceived(Event):
+                        text: str = ""
 
-                graph = EventGraph([echo, finish])
-                log = graph.invoke([PingSent(value="a"), PongReceived(value="b")])
-                # Handler fires once per matching event, but is dispatched
-                # only once (not duplicated in matched list)
-                replies = log.filter(Replied)
-                assert len(replies) == 2
-                assert log.filter(Completed) == [
-                    Completed(result="seen"),
-                    Completed(result="seen"),
-                ]
+                    class MsgBReceived(Event):
+                        text: str = ""
 
-            def it_provides_log_to_multi_sub_handler():
-                class MsgAReceived(Event):
-                    text: str = ""
+                    class Summarized(Event):
+                        count: int = 0
 
-                class MsgBReceived(Event):
-                    text: str = ""
+                    @on(MsgAReceived, MsgBReceived)
+                    def summarize(event: Event, log: EventLog) -> Summarized:
+                        total = len(log.filter(Event))
+                        return Summarized(count=total)
 
-                class Summarized(Event):
-                    count: int = 0
+                    graph = EventGraph([summarize])
+                    log = graph.invoke(MsgAReceived(text="hi"))
+                    assert log.latest(Summarized) == Summarized(count=1)
 
-                @on(MsgAReceived, MsgBReceived)
-                def summarize(event: Event, log: EventLog) -> Summarized:
-                    total = len(log.filter(Event))
-                    return Summarized(count=total)
+                def it_supports_react_loop_pattern():
+                    class UserMsgReceived(Event):
+                        content: str = ""
 
-                graph = EventGraph([summarize])
-                log = graph.invoke(MsgAReceived(text="hi"))
-                assert log.latest(Summarized) == Summarized(count=1)
+                    class AssistantMsgSent(Event):
+                        content: str = ""
+                        needs_tool: bool = False
 
-            def it_supports_react_loop_pattern():
-                class UserMsgReceived(Event):
-                    content: str = ""
+                    class ToolResultReturned(Event):
+                        result: str = ""
 
-                class AssistantMsgSent(Event):
-                    content: str = ""
-                    needs_tool: bool = False
+                    class FinalAnswerProduced(Event):
+                        answer: str = ""
 
-                class ToolResultReturned(Event):
-                    result: str = ""
+                    call_count = 0
 
-                class FinalAnswerProduced(Event):
-                    answer: str = ""
+                    @on(UserMsgReceived, ToolResultReturned)
+                    def call_llm(event: Event, log: EventLog) -> AssistantMsgSent:
+                        nonlocal call_count
+                        call_count += 1
+                        if isinstance(event, UserMsgReceived):
+                            return AssistantMsgSent(
+                                content="need tool", needs_tool=True
+                            )
+                        return AssistantMsgSent(
+                            content=f"got:{event.result}",
+                            needs_tool=False,
+                        )
 
-                call_count = 0
+                    @on(AssistantMsgSent)
+                    def handle_response(
+                        event: AssistantMsgSent,
+                    ) -> ToolResultReturned | FinalAnswerProduced:
+                        if event.needs_tool:
+                            return ToolResultReturned(result="42")
+                        return FinalAnswerProduced(answer=event.content)
 
-                @on(UserMsgReceived, ToolResultReturned)
-                def call_llm(event: Event, log: EventLog) -> AssistantMsgSent:
-                    nonlocal call_count
-                    call_count += 1
-                    if isinstance(event, UserMsgReceived):
-                        return AssistantMsgSent(content="need tool", needs_tool=True)
-                    return AssistantMsgSent(
-                        content=f"got:{event.result}",
-                        needs_tool=False,
+                    graph = EventGraph([call_llm, handle_response])
+                    log = graph.invoke(UserMsgReceived(content="what is 6*7?"))
+                    assert call_count == 2
+                    assert log.latest(FinalAnswerProduced) == (
+                        FinalAnswerProduced(answer="got:42")
                     )
+                    assert log.has(ToolResultReturned)
+                    assert log.has(AssistantMsgSent)
 
-                @on(AssistantMsgSent)
-                def handle_response(
-                    event: AssistantMsgSent,
-                ) -> ToolResultReturned | FinalAnswerProduced:
-                    if event.needs_tool:
-                        return ToolResultReturned(result="42")
-                    return FinalAnswerProduced(answer=event.content)
+            def when_both_types_pending():
 
-                graph = EventGraph([call_llm, handle_response])
-                log = graph.invoke(UserMsgReceived(content="what is 6*7?"))
-                assert call_count == 2
-                assert log.latest(FinalAnswerProduced) == (
-                    FinalAnswerProduced(answer="got:42")
-                )
-                assert log.has(ToolResultReturned)
-                assert log.has(AssistantMsgSent)
+                def it_dispatches_handler_only_once():
+                    @on(PingSent, PongReceived)
+                    def echo(event: Event) -> Replied:
+                        return Replied(value="seen")
+
+                    @on(Replied)
+                    def finish(event: Replied) -> Completed:
+                        return Completed(result=event.value)
+
+                    graph = EventGraph([echo, finish])
+                    log = graph.invoke([PingSent(value="a"), PongReceived(value="b")])
+                    # Handler fires once per matching event, but is dispatched
+                    # only once (not duplicated in matched list)
+                    replies = log.filter(Replied)
+                    assert len(replies) == 2
+                    assert log.filter(Completed) == [
+                        Completed(result="seen"),
+                        Completed(result="seen"),
+                    ]
 
         def describe_multi_seed():
 
@@ -591,43 +597,47 @@ def describe_EventGraph():
 
         def when_handler_requests_store():
 
-            def it_can_put_and_get_via_store():
-                from langgraph.store.base import BaseStore
-                from langgraph.store.memory import InMemoryStore
+            def when_store_configured():
 
-                store = InMemoryStore()
+                def it_can_put_and_get_via_store():
+                    from langgraph.store.base import BaseStore
+                    from langgraph.store.memory import InMemoryStore
 
-                @on(Started)
-                async def step(event: Started, store: BaseStore) -> Ended:
-                    await store.aput(("test",), "key1", {"val": event.data})
-                    items = await store.aget(("test",), "key1")
-                    return Ended(result=items.value["val"])
+                    store = InMemoryStore()
 
-                graph = EventGraph([step], store=store)
-                log = graph.invoke(Started(data="hello"))
-                assert log.latest(Ended) == Ended(result="hello")
+                    @on(Started)
+                    async def step(event: Started, store: BaseStore) -> Ended:
+                        await store.aput(("test",), "key1", {"val": event.data})
+                        items = await store.aget(("test",), "key1")
+                        return Ended(result=items.value["val"])
 
-            def it_raises_when_store_not_configured_for_sync_handler():
-                from langgraph.store.base import BaseStore
+                    graph = EventGraph([step], store=store)
+                    log = graph.invoke(Started(data="hello"))
+                    assert log.latest(Ended) == Ended(result="hello")
 
-                @on(Started)
-                def step(event: Started, store: BaseStore) -> Ended:
-                    return Ended(result="ok")
+            def when_store_not_configured():
 
-                graph = EventGraph([step])
-                with pytest.raises(ValueError, match="no store is configured"):
-                    graph.invoke(Started(data="hello"))
+                def it_raises_for_sync_handler():
+                    from langgraph.store.base import BaseStore
 
-            async def it_raises_when_store_not_configured_for_async_handler():
-                from langgraph.store.base import BaseStore
+                    @on(Started)
+                    def step(event: Started, store: BaseStore) -> Ended:
+                        return Ended(result="ok")
 
-                @on(Started)
-                async def step(event: Started, store: BaseStore) -> Ended:
-                    return Ended(result="ok")
+                    graph = EventGraph([step])
+                    with pytest.raises(ValueError, match="no store is configured"):
+                        graph.invoke(Started(data="hello"))
 
-                graph = EventGraph([step])
-                with pytest.raises(ValueError, match="no store is configured"):
-                    await graph.ainvoke(Started(data="hello"))
+                async def it_raises_for_async_handler():
+                    from langgraph.store.base import BaseStore
+
+                    @on(Started)
+                    async def step(event: Started, store: BaseStore) -> Ended:
+                        return Ended(result="ok")
+
+                    graph = EventGraph([step])
+                    with pytest.raises(ValueError, match="no store is configured"):
+                        await graph.ainvoke(Started(data="hello"))
 
         def when_handler_requests_neither():
 
@@ -873,19 +883,21 @@ def describe_EventGraph():
 
         def describe_construction():
 
-            def it_wraps_a_list_of_events():
-                class ItemDispatched(Event):
-                    v: int = 0
+            def when_valid_events():
 
-                s = Scatter(
-                    [
-                        ItemDispatched(v=1),
-                        ItemDispatched(v=2),
-                        ItemDispatched(v=3),
-                    ]
-                )
-                assert len(s.events) == 3
-                assert s.events[0] == ItemDispatched(v=1)
+                def it_wraps_a_list_of_events():
+                    class ItemDispatched(Event):
+                        v: int = 0
+
+                    s = Scatter(
+                        [
+                            ItemDispatched(v=1),
+                            ItemDispatched(v=2),
+                            ItemDispatched(v=3),
+                        ]
+                    )
+                    assert len(s.events) == 3
+                    assert s.events[0] == ItemDispatched(v=1)
 
             def when_empty():
 
@@ -899,36 +911,40 @@ def describe_EventGraph():
                     with pytest.raises(TypeError, match="Event instances"):
                         Scatter(["not an event"])  # type: ignore
 
-        def it_fans_out_work_items_and_gathers_results():
-            @on(BatchReceived)
-            def split(event: BatchReceived) -> Scatter:
-                return Scatter(
-                    [
-                        WorkItemDispatched(item=item, batch_size=len(event.items))
-                        for item in event.items
-                    ]
-                )
+        def when_multiple_items():
 
-            @on(WorkItemDispatched)
-            def process(event: WorkItemDispatched) -> WorkDone:
-                return WorkDone(item=event.item, result=f"done:{event.item}")
-
-            @on(WorkDone)
-            def gather(event: WorkDone, log: EventLog) -> BatchResultCollected | None:
-                all_done = log.filter(WorkDone)
-                batch = log.latest(BatchReceived)
-                if len(all_done) >= len(batch.items):
-                    return BatchResultCollected(
-                        results=tuple(e.result for e in all_done)
+            def it_fans_out_work_items_and_gathers_results():
+                @on(BatchReceived)
+                def split(event: BatchReceived) -> Scatter:
+                    return Scatter(
+                        [
+                            WorkItemDispatched(item=item, batch_size=len(event.items))
+                            for item in event.items
+                        ]
                     )
-                return None
 
-            graph = EventGraph([split, process, gather])
-            log = graph.invoke(BatchReceived(items=("a", "b", "c")))
-            assert log.has(BatchResultCollected)
-            result = log.latest(BatchResultCollected)
-            assert len(result.results) == 3
-            assert set(result.results) == {"done:a", "done:b", "done:c"}
+                @on(WorkItemDispatched)
+                def process(event: WorkItemDispatched) -> WorkDone:
+                    return WorkDone(item=event.item, result=f"done:{event.item}")
+
+                @on(WorkDone)
+                def gather(
+                    event: WorkDone, log: EventLog
+                ) -> BatchResultCollected | None:
+                    all_done = log.filter(WorkDone)
+                    batch = log.latest(BatchReceived)
+                    if len(all_done) >= len(batch.items):
+                        return BatchResultCollected(
+                            results=tuple(e.result for e in all_done)
+                        )
+                    return None
+
+                graph = EventGraph([split, process, gather])
+                log = graph.invoke(BatchReceived(items=("a", "b", "c")))
+                assert log.has(BatchResultCollected)
+                result = log.latest(BatchResultCollected)
+                assert len(result.results) == 3
+                assert set(result.results) == {"done:a", "done:b", "done:c"}
 
         def when_single_item():
 
@@ -947,38 +963,46 @@ def describe_EventGraph():
 
     def describe_reducer():
 
-        def it_returns_frozenset_of_reducer_names():
-            r1 = Reducer(name="alpha", event_type=Started, fn=lambda e: [e.data])
-            r2 = Reducer(name="beta", event_type=Started, fn=lambda e: [e.data])
+        def when_reducers_configured():
 
-            @on(Started)
-            def noop(event: Started) -> Completed:
-                return Completed(result="x")
+            def it_returns_frozenset_of_reducer_names():
+                r1 = Reducer(name="alpha", event_type=Started, fn=lambda e: [e.data])
+                r2 = Reducer(name="beta", event_type=Started, fn=lambda e: [e.data])
 
-            graph = EventGraph([noop], reducers=[r1, r2])
-            assert graph.reducer_names == frozenset({"alpha", "beta"})
+                @on(Started)
+                def noop(event: Started) -> Completed:
+                    return Completed(result="x")
 
-        def it_returns_empty_frozenset_when_no_reducers():
-            @on(Started)
-            def noop(event: Started) -> Completed:
-                return Completed(result="x")
+                graph = EventGraph([noop], reducers=[r1, r2])
+                assert graph.reducer_names == frozenset({"alpha", "beta"})
 
-            graph = EventGraph([noop])
-            assert graph.reducer_names == frozenset()
+        def when_no_reducers():
 
-        @pytest.mark.parametrize(
-            "reserved_name",
-            ["events", "_cursor", "_pending", "_round"],
-        )
-        def it_rejects_reducer_name_colliding_with_reserved_field(reserved_name):
-            r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
+            def it_returns_empty_frozenset():
+                @on(Started)
+                def noop(event: Started) -> Completed:
+                    return Completed(result="x")
 
-            @on(Started)
-            def noop(event: Started) -> Completed:
-                return Completed(result="x")
+                graph = EventGraph([noop])
+                assert graph.reducer_names == frozenset()
 
-            with pytest.raises(ValueError, match="conflict with reserved state fields"):
-                EventGraph([noop], reducers=[r])
+        def when_reserved_name():
+
+            @pytest.mark.parametrize(
+                "reserved_name",
+                ["events", "_cursor", "_pending", "_round"],
+            )
+            def it_rejects_reducer_name_colliding_with_reserved_field(reserved_name):
+                r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
+
+                @on(Started)
+                def noop(event: Started) -> Completed:
+                    return Completed(result="x")
+
+                with pytest.raises(
+                    ValueError, match="conflict with reserved state fields"
+                ):
+                    EventGraph([noop], reducers=[r])
 
         def describe_injection():
 
@@ -1024,49 +1048,51 @@ def describe_EventGraph():
 
         def describe_accumulation():
 
-            def it_grows_across_multiple_rounds():
-                class ToolResultReturned(Event):
-                    result: str = ""
+            def when_events_contribute():
 
-                def project_all(event: Event) -> list:
-                    if isinstance(event, MessageReceived):
-                        return [f"in:{event.text}"]
-                    if isinstance(event, MessageSent):
-                        return [f"out:{event.text}"]
-                    if isinstance(event, ToolResultReturned):
-                        return [f"tool:{event.result}"]
-                    return []
+                def it_grows_across_multiple_rounds():
+                    class ToolResultReturned(Event):
+                        result: str = ""
 
-                r = Reducer("history", event_type=Event, fn=project_all)
-                call_count = 0
-                snapshots: list[list] = []
+                    def project_all(event: Event) -> list:
+                        if isinstance(event, MessageReceived):
+                            return [f"in:{event.text}"]
+                        if isinstance(event, MessageSent):
+                            return [f"out:{event.text}"]
+                        if isinstance(event, ToolResultReturned):
+                            return [f"tool:{event.result}"]
+                        return []
 
-                @on(MessageReceived, ToolResultReturned)
-                def call_llm(event: Event, history: list) -> MessageSent:
-                    nonlocal call_count
-                    call_count += 1
-                    snapshots.append(list(history))
-                    if isinstance(event, MessageReceived):
-                        return MessageSent(text="need_tool")
-                    return MessageSent(text=f"final:{event.result}")
+                    r = Reducer("history", event_type=Event, fn=project_all)
+                    call_count = 0
+                    snapshots: list[list] = []
 
-                @on(MessageSent)
-                def handle_response(
-                    event: MessageSent,
-                ) -> ToolResultReturned | Completed:
-                    if event.text == "need_tool":
-                        return ToolResultReturned(result="42")
-                    return Completed(result=event.text)
+                    @on(MessageReceived, ToolResultReturned)
+                    def call_llm(event: Event, history: list) -> MessageSent:
+                        nonlocal call_count
+                        call_count += 1
+                        snapshots.append(list(history))
+                        if isinstance(event, MessageReceived):
+                            return MessageSent(text="need_tool")
+                        return MessageSent(text=f"final:{event.result}")
 
-                graph = EventGraph([call_llm, handle_response], reducers=[r])
-                graph.invoke(MessageReceived(text="question"))
-                assert call_count == 2
-                assert snapshots[0] == ["in:question"]
-                assert snapshots[1] == [
-                    "in:question",
-                    "out:need_tool",
-                    "tool:42",
-                ]
+                    @on(MessageSent)
+                    def handle_response(
+                        event: MessageSent,
+                    ) -> ToolResultReturned | Completed:
+                        if event.text == "need_tool":
+                            return ToolResultReturned(result="42")
+                        return Completed(result=event.text)
+
+                    graph = EventGraph([call_llm, handle_response], reducers=[r])
+                    graph.invoke(MessageReceived(text="question"))
+                    assert call_count == 2
+                    assert snapshots[0] == ["in:question"]
+                    assert snapshots[1] == [
+                        "in:question",
+                        "out:need_tool",
+                        "tool:42",
+                    ]
 
             def when_events_have_no_contribution():
 
@@ -1280,14 +1306,16 @@ def describe_EventGraph():
                     with pytest.raises(TypeError, match="must return a list"):
                         graph.invoke(MessageReceived(text="hello"))
 
-            def it_supports_custom_log_parameter_name():
-                @on(MessageReceived)
-                def step(event: MessageReceived, event_log: EventLog) -> Completed:
-                    return Completed(result=f"events={len(event_log)}")
+            def when_custom_log_parameter_name():
 
-                graph = EventGraph([step])
-                log = graph.invoke(MessageReceived(text="hi"))
-                assert log.latest(Completed) == Completed(result="events=1")
+                def it_supports_custom_log_parameter_name():
+                    @on(MessageReceived)
+                    def step(event: MessageReceived, event_log: EventLog) -> Completed:
+                        return Completed(result=f"events={len(event_log)}")
+
+                    graph = EventGraph([step])
+                    log = graph.invoke(MessageReceived(text="hi"))
+                    assert log.latest(Completed) == Completed(result="events=1")
 
             def when_checkpointer():
 
@@ -1314,335 +1342,353 @@ def describe_EventGraph():
                     log = graph.invoke(MessageReceived(text="b"), config=config)
                     assert log.latest(Completed).result == "init,a,b"
 
-            def it_supports_custom_reducer_function():
-                def always_keep_last_n(left: list, right: list) -> list:
-                    combined = left + right
-                    return combined[-3:]
+            def when_custom_reducer_function():
 
-                class Continued(Event):
-                    text: str = ""
+                def it_supports_custom_reducer_function():
+                    def always_keep_last_n(left: list, right: list) -> list:
+                        combined = left + right
+                        return combined[-3:]
 
-                def project_all(event: Event) -> list:
-                    if isinstance(event, MessageReceived):
-                        return [event.text]
-                    if isinstance(event, Continued):
-                        return [event.text]
-                    return []
+                    class Continued(Event):
+                        text: str = ""
 
-                r = Reducer(
-                    "recent",
-                    event_type=Event,
-                    fn=project_all,
-                    reducer=always_keep_last_n,
-                    default=["x", "y", "z"],
-                )
-                snapshots: list[list] = []
+                    def project_all(event: Event) -> list:
+                        if isinstance(event, MessageReceived):
+                            return [event.text]
+                        if isinstance(event, Continued):
+                            return [event.text]
+                        return []
 
-                @on(MessageReceived, Continued)
-                def step(event: Event, recent: list) -> MessageSent | Continued:
-                    snapshots.append(list(recent))
-                    if isinstance(event, MessageReceived):
-                        return Continued(text="b")
-                    return MessageSent(text="done")
+                    r = Reducer(
+                        "recent",
+                        event_type=Event,
+                        fn=project_all,
+                        reducer=always_keep_last_n,
+                        default=["x", "y", "z"],
+                    )
+                    snapshots: list[list] = []
 
-                @on(MessageSent)
-                def finish(event: MessageSent) -> Completed:
-                    return Completed(result="ok")
+                    @on(MessageReceived, Continued)
+                    def step(event: Event, recent: list) -> MessageSent | Continued:
+                        snapshots.append(list(recent))
+                        if isinstance(event, MessageReceived):
+                            return Continued(text="b")
+                        return MessageSent(text="done")
 
-                graph = EventGraph([step, finish], reducers=[r])
-                graph.invoke(MessageReceived(text="a"))
-                assert snapshots[0] == ["y", "z", "a"]
-                assert snapshots[1] == ["z", "a", "b"]
+                    @on(MessageSent)
+                    def finish(event: MessageSent) -> Completed:
+                        return Completed(result="ok")
+
+                    graph = EventGraph([step, finish], reducers=[r])
+                    graph.invoke(MessageReceived(text="a"))
+                    assert snapshots[0] == ["y", "z", "a"]
+                    assert snapshots[1] == ["z", "a", "b"]
 
     def describe_scalar_reducer():
 
-        def it_injects_last_value():
-            class StrategyChosen(Event):
-                strategy: str = ""
+        def when_matching_events():
 
-            class TaskDone(Event):
-                result: str = ""
+            def it_injects_last_value():
+                class StrategyChosen(Event):
+                    strategy: str = ""
 
-            sr = ScalarReducer(
-                name="strategy",
-                event_type=StrategyChosen,
-                fn=lambda e: e.strategy,
-            )
+                class TaskDone(Event):
+                    result: str = ""
 
-            @on(StrategyChosen)
-            def handle(event: StrategyChosen, strategy: str) -> TaskDone:
-                return TaskDone(result=f"used:{strategy}")
+                sr = ScalarReducer(
+                    name="strategy",
+                    event_type=StrategyChosen,
+                    fn=lambda e: e.strategy,
+                )
 
-            graph = EventGraph([handle], reducers=[sr])
-            log = graph.invoke(StrategyChosen(strategy="aggressive"))
-            assert log.latest(TaskDone) == TaskDone(result="used:aggressive")
+                @on(StrategyChosen)
+                def handle(event: StrategyChosen, strategy: str) -> TaskDone:
+                    return TaskDone(result=f"used:{strategy}")
 
-        def it_defaults_to_none():
-            class Triggered(Event):
-                pass
+                graph = EventGraph([handle], reducers=[sr])
+                log = graph.invoke(StrategyChosen(strategy="aggressive"))
+                assert log.latest(TaskDone) == TaskDone(result="used:aggressive")
 
-            class Unmatched(Event):
-                pass
+            def it_takes_last_matching_value():
+                class StepCompleted(Event):
+                    value: str = ""
 
-            class ResultProduced(Event):
-                got: str = ""
+                class Finalized(Event):
+                    result: str = ""
 
-            sr = ScalarReducer(
-                name="mode",
-                event_type=Unmatched,
-                fn=lambda e: "irrelevant",
-            )
+                sr = ScalarReducer(
+                    name="chosen",
+                    event_type=StepCompleted,
+                    fn=lambda e: e.value,
+                )
 
-            @on(Triggered)
-            def handle(event: Triggered, mode: object) -> ResultProduced:
-                return ResultProduced(got=str(mode))
+                @on(StepCompleted)
+                def advance(
+                    event: StepCompleted,
+                    chosen: object,
+                ) -> StepCompleted | Finalized:
+                    if event.value == "b":
+                        return Finalized(result=f"chosen={chosen}")
+                    return StepCompleted(value="b")
 
-            graph = EventGraph([handle], reducers=[sr])
-            log = graph.invoke(Triggered())
-            assert log.latest(ResultProduced) == ResultProduced(got="None")
+                graph = EventGraph([advance], reducers=[sr])
+                log = graph.invoke(StepCompleted(value="a"))
+                # After seed "a", handler sees "a"; produces StepCompleted("b"),
+                # then handler sees "b" (last non-None wins).
+                assert log.latest(Finalized) == Finalized(result="chosen=b")
 
-        def it_takes_last_matching_value():
-            class StepCompleted(Event):
-                value: str = ""
+            def it_collects_from_last_matching_event():
+                class StepCompleted(Event):
+                    tag: str = ""
 
-            class Finalized(Event):
-                result: str = ""
+                sr = ScalarReducer(
+                    name="val",
+                    event_type=StepCompleted,
+                    fn=lambda e: e.tag,
+                )
+                events = [
+                    StepCompleted(tag="a"),
+                    StepCompleted(tag="b"),
+                    StepCompleted(tag="c"),
+                ]
+                result = sr.collect(events)
+                assert result == "c"
 
-            sr = ScalarReducer(
-                name="chosen",
-                event_type=StepCompleted,
-                fn=lambda e: e.value,
-            )
+        def when_no_matching_events():
 
-            @on(StepCompleted)
-            def advance(
-                event: StepCompleted,
-                chosen: object,
-            ) -> StepCompleted | Finalized:
-                if event.value == "b":
-                    return Finalized(result=f"chosen={chosen}")
-                return StepCompleted(value="b")
+            def it_defaults_to_none():
+                class Triggered(Event):
+                    pass
 
-            graph = EventGraph([advance], reducers=[sr])
-            log = graph.invoke(StepCompleted(value="a"))
-            # After seed "a", handler sees "a"; produces StepCompleted("b"),
-            # then handler sees "b" (last non-None wins).
-            assert log.latest(Finalized) == Finalized(result="chosen=b")
+                class Unmatched(Event):
+                    pass
 
-        def it_uses_custom_default():
-            class Triggered(Event):
-                pass
+                class ResultProduced(Event):
+                    got: str = ""
 
-            class Unmatched(Event):
-                pass
+                sr = ScalarReducer(
+                    name="mode",
+                    event_type=Unmatched,
+                    fn=lambda e: "irrelevant",
+                )
 
-            class ResultProduced(Event):
-                got: str = ""
+                @on(Triggered)
+                def handle(event: Triggered, mode: object) -> ResultProduced:
+                    return ResultProduced(got=str(mode))
 
-            sr = ScalarReducer(
-                name="mode",
-                event_type=Unmatched,
-                fn=lambda e: "irrelevant",
-                default="fallback",
-            )
+                graph = EventGraph([handle], reducers=[sr])
+                log = graph.invoke(Triggered())
+                assert log.latest(ResultProduced) == ResultProduced(got="None")
 
-            @on(Triggered)
-            def handle(event: Triggered, mode: str) -> ResultProduced:
-                return ResultProduced(got=mode)
+            def it_returns_unset():
+                class StepCompleted(Event):
+                    pass
 
-            graph = EventGraph([handle], reducers=[sr])
-            log = graph.invoke(Triggered())
-            assert log.latest(ResultProduced) == ResultProduced(got="fallback")
+                class OtherReceived(Event):
+                    pass
 
-        def it_collects_from_last_matching_event():
-            class StepCompleted(Event):
-                tag: str = ""
+                from langgraph_events._reducer import _UNSET
 
-            sr = ScalarReducer(
-                name="val",
-                event_type=StepCompleted,
-                fn=lambda e: e.tag,
-            )
-            events = [
-                StepCompleted(tag="a"),
-                StepCompleted(tag="b"),
-                StepCompleted(tag="c"),
-            ]
-            result = sr.collect(events)
-            assert result == "c"
+                sr = ScalarReducer(
+                    name="val", event_type=OtherReceived, fn=lambda e: "x"
+                )
+                assert (
+                    sr.collect([StepCompleted(), StepCompleted(), StepCompleted()])
+                    is _UNSET
+                )
 
-        def it_returns_unset_when_no_matching_events():
-            class StepCompleted(Event):
-                pass
+            def it_uses_custom_default():
+                class Triggered(Event):
+                    pass
 
-            class OtherReceived(Event):
-                pass
+                class Unmatched(Event):
+                    pass
 
-            from langgraph_events._reducer import _UNSET
+                class ResultProduced(Event):
+                    got: str = ""
 
-            sr = ScalarReducer(name="val", event_type=OtherReceived, fn=lambda e: "x")
-            assert (
-                sr.collect([StepCompleted(), StepCompleted(), StepCompleted()])
-                is _UNSET
-            )
+                sr = ScalarReducer(
+                    name="mode",
+                    event_type=Unmatched,
+                    fn=lambda e: "irrelevant",
+                    default="fallback",
+                )
 
-        def it_works_alongside_list_reducers():
-            class Triggered(Event):
-                tag: str = ""
+                @on(Triggered)
+                def handle(event: Triggered, mode: str) -> ResultProduced:
+                    return ResultProduced(got=mode)
 
-            class ResultProduced(Event):
-                summary: str = ""
+                graph = EventGraph([handle], reducers=[sr])
+                log = graph.invoke(Triggered())
+                assert log.latest(ResultProduced) == ResultProduced(got="fallback")
 
-            list_r = Reducer(
-                name="tags",
-                event_type=Triggered,
-                fn=lambda e: [e.tag] if e.tag else [],
-            )
-            scalar_r = ScalarReducer(
-                name="last_tag",
-                event_type=Triggered,
-                fn=lambda e: e.tag,
-            )
+        def when_mixed_with_list_reducers():
 
-            @on(Triggered)
-            def handle(
-                event: Triggered,
-                tags: list,
-                last_tag: object,
-            ) -> ResultProduced:
-                return ResultProduced(summary=f"tags={tags},last={last_tag}")
+            def it_works_alongside_list_reducers():
+                class Triggered(Event):
+                    tag: str = ""
 
-            graph = EventGraph([handle], reducers=[list_r, scalar_r])
-            log = graph.invoke(Triggered(tag="x"))
-            assert log.latest(ResultProduced) == (
-                ResultProduced(summary="tags=['x'],last=x")
-            )
+                class ResultProduced(Event):
+                    summary: str = ""
 
-        def it_handles_parallel_handler_contributions():
-            class Triggered(Event):
-                value: str = ""
+                list_r = Reducer(
+                    name="tags",
+                    event_type=Triggered,
+                    fn=lambda e: [e.tag] if e.tag else [],
+                )
+                scalar_r = ScalarReducer(
+                    name="last_tag",
+                    event_type=Triggered,
+                    fn=lambda e: e.tag,
+                )
 
-            class ResultAProduced(Event):
-                data: str = ""
+                @on(Triggered)
+                def handle(
+                    event: Triggered,
+                    tags: list,
+                    last_tag: object,
+                ) -> ResultProduced:
+                    return ResultProduced(summary=f"tags={tags},last={last_tag}")
 
-            class ResultBProduced(Event):
-                data: str = ""
+                graph = EventGraph([handle], reducers=[list_r, scalar_r])
+                log = graph.invoke(Triggered(tag="x"))
+                assert log.latest(ResultProduced) == (
+                    ResultProduced(summary="tags=['x'],last=x")
+                )
 
-            sr = ScalarReducer(
-                name="latest",
-                event_type=Event,
-                fn=lambda e: (
-                    e.value
-                    if isinstance(e, Triggered)
-                    else (
-                        e.data
-                        if isinstance(e, (ResultAProduced, ResultBProduced))
-                        else None
-                    )
-                ),
-            )
+        def when_parallel_handlers():
 
-            @on(Triggered)
-            def handler_a(event: Triggered, latest: object) -> ResultAProduced:
-                return ResultAProduced(data=f"a:{event.value}")
+            def it_handles_parallel_handler_contributions():
+                class Triggered(Event):
+                    value: str = ""
 
-            @on(Triggered)
-            def handler_b(event: Triggered, latest: object) -> ResultBProduced:
-                return ResultBProduced(data=f"b:{event.value}")
+                class ResultAProduced(Event):
+                    data: str = ""
 
-            graph = EventGraph([handler_a, handler_b], reducers=[sr])
-            log = graph.invoke(Triggered(value="x"))
-            # Both handlers run in parallel — should not crash
-            assert log.has(ResultAProduced)
-            assert log.has(ResultBProduced)
+                class ResultBProduced(Event):
+                    data: str = ""
 
-        def it_persists_value_when_subsequent_round_has_no_contribution():
-            class ValueSet(Event):
-                value: str = ""
+                sr = ScalarReducer(
+                    name="latest",
+                    event_type=Event,
+                    fn=lambda e: (
+                        e.value
+                        if isinstance(e, Triggered)
+                        else (
+                            e.data
+                            if isinstance(e, (ResultAProduced, ResultBProduced))
+                            else None
+                        )
+                    ),
+                )
 
-            class UnrelatedReceived(Event):
-                pass
+                @on(Triggered)
+                def handler_a(event: Triggered, latest: object) -> ResultAProduced:
+                    return ResultAProduced(data=f"a:{event.value}")
 
-            class ResultProduced(Event):
-                got: str = ""
+                @on(Triggered)
+                def handler_b(event: Triggered, latest: object) -> ResultBProduced:
+                    return ResultBProduced(data=f"b:{event.value}")
 
-            sr = ScalarReducer(
-                name="kept",
-                event_type=ValueSet,
-                fn=lambda e: e.value,
-            )
+                graph = EventGraph([handler_a, handler_b], reducers=[sr])
+                log = graph.invoke(Triggered(value="x"))
+                # Both handlers run in parallel — should not crash
+                assert log.has(ResultAProduced)
+                assert log.has(ResultBProduced)
 
-            @on(ValueSet)
-            def step1(event: ValueSet) -> UnrelatedReceived:
-                return UnrelatedReceived()
+        def when_subsequent_round_has_no_contribution():
 
-            @on(UnrelatedReceived)
-            def step2(event: UnrelatedReceived, kept: object) -> ResultProduced:
-                return ResultProduced(got=str(kept))
+            def it_persists_value():
+                class ValueSet(Event):
+                    value: str = ""
 
-            graph = EventGraph([step1, step2], reducers=[sr])
-            log = graph.invoke(ValueSet(value="hello"))
-            # Round 2 produces UnrelatedReceived (doesn't match event_type) —
-            # scalar must still be "hello", not reverted.
-            assert log.latest(ResultProduced) == ResultProduced(got="hello")
+                class UnrelatedReceived(Event):
+                    pass
 
-        def it_stores_none_as_valid_contribution():
-            class ClearSignaled(Event):
-                pass
+                class ResultProduced(Event):
+                    got: str = ""
 
-            class ResultProduced(Event):
-                got: str = ""
+                sr = ScalarReducer(
+                    name="kept",
+                    event_type=ValueSet,
+                    fn=lambda e: e.value,
+                )
 
-            sr = ScalarReducer(
-                name="value",
-                event_type=ClearSignaled,
-                fn=lambda e: None,
-                default="initial",
-            )
+                @on(ValueSet)
+                def step1(event: ValueSet) -> UnrelatedReceived:
+                    return UnrelatedReceived()
 
-            @on(ClearSignaled)
-            def handle(event: ClearSignaled, value: object) -> ResultProduced:
-                return ResultProduced(got=repr(value))
+                @on(UnrelatedReceived)
+                def step2(event: UnrelatedReceived, kept: object) -> ResultProduced:
+                    return ResultProduced(got=str(kept))
 
-            graph = EventGraph([handle], reducers=[sr])
-            log = graph.invoke(ClearSignaled())
-            # fn returns None — this is a real contribution, not "no contribution"
-            assert log.latest(ResultProduced) == ResultProduced(got="None")
+                graph = EventGraph([step1, step2], reducers=[sr])
+                log = graph.invoke(ValueSet(value="hello"))
+                # Round 2 produces UnrelatedReceived (doesn't match event_type) —
+                # scalar must still be "hello", not reverted.
+                assert log.latest(ResultProduced) == ResultProduced(got="hello")
 
-        def it_supports_protocol_event_type():
-            from typing import Protocol, runtime_checkable
+        def when_fn_returns_none():
 
-            @runtime_checkable
-            class HasScore(Protocol):
-                score: int
+            def it_stores_none_as_valid_contribution():
+                class ClearSignaled(Event):
+                    pass
 
-            class ScoreARecorded(Event):
-                score: int = 0
+                class ResultProduced(Event):
+                    got: str = ""
 
-            class ScoreBRecorded(Event):
-                score: int = 0
+                sr = ScalarReducer(
+                    name="value",
+                    event_type=ClearSignaled,
+                    fn=lambda e: None,
+                    default="initial",
+                )
 
-            class ResultProduced(Event):
-                got: str = ""
+                @on(ClearSignaled)
+                def handle(event: ClearSignaled, value: object) -> ResultProduced:
+                    return ResultProduced(got=repr(value))
 
-            sr = ScalarReducer(
-                name="last_score",
-                event_type=HasScore,
-                fn=lambda e: e.score,
-            )
+                graph = EventGraph([handle], reducers=[sr])
+                log = graph.invoke(ClearSignaled())
+                # fn returns None — this is a real contribution, not "no contribution"
+                assert log.latest(ResultProduced) == ResultProduced(got="None")
 
-            @on(ScoreARecorded)
-            def step_a(event: ScoreARecorded, last_score: object) -> ScoreBRecorded:
-                return ScoreBRecorded(score=event.score + 10)
+        def when_protocol_event_type():
 
-            @on(ScoreBRecorded)
-            def step_b(event: ScoreBRecorded, last_score: object) -> ResultProduced:
-                return ResultProduced(got=str(last_score))
+            def it_supports_protocol_event_type():
+                from typing import Protocol, runtime_checkable
 
-            graph = EventGraph([step_a, step_b], reducers=[sr])
-            log = graph.invoke(ScoreARecorded(score=5))
-            # ScoreARecorded(5) → fn returns 5, then ScoreBRecorded(15) → fn returns 15
-            assert log.latest(ResultProduced) == ResultProduced(got="15")
+                @runtime_checkable
+                class HasScore(Protocol):
+                    score: int
+
+                class ScoreARecorded(Event):
+                    score: int = 0
+
+                class ScoreBRecorded(Event):
+                    score: int = 0
+
+                class ResultProduced(Event):
+                    got: str = ""
+
+                sr = ScalarReducer(
+                    name="last_score",
+                    event_type=HasScore,
+                    fn=lambda e: e.score,
+                )
+
+                @on(ScoreARecorded)
+                def step_a(event: ScoreARecorded, last_score: object) -> ScoreBRecorded:
+                    return ScoreBRecorded(score=event.score + 10)
+
+                @on(ScoreBRecorded)
+                def step_b(event: ScoreBRecorded, last_score: object) -> ResultProduced:
+                    return ResultProduced(got=str(last_score))
+
+                graph = EventGraph([step_a, step_b], reducers=[sr])
+                log = graph.invoke(ScoreARecorded(score=5))
+                # ScoreA(5) → 5, then ScoreB(15) → 15
+                assert log.latest(ResultProduced) == ResultProduced(got="15")
 
         def when_checkpointer():
 
@@ -1678,77 +1724,85 @@ def describe_EventGraph():
 
     def describe_message_reducer():
 
-        def it_projects_message_events():
-            class UserMsgReceived(MessageEvent):
-                message: HumanMessage = None  # type: ignore[assignment]
+        def when_defaults_provided():
 
-            class Replied(Event):
-                text: str = ""
-
-            r = message_reducer([SystemMessage(content="You are helpful")])
-            msg = HumanMessage(content="hello")
-            result = r.fn(UserMsgReceived(message=msg))
-            assert result == [msg]
-
-        def it_skips_non_message_events_at_collect_level():
-            class Replied(Event):
-                text: str = ""
-
-            r = message_reducer([SystemMessage(content="You are helpful")])
-            result = r.collect([Replied(text="hi")])
-            assert result == []
-
-        def it_includes_default_messages():
-            r = message_reducer([SystemMessage(content="Be nice")])
-            assert len(r.default) == 1
-            assert r.default[0].content == "Be nice"
-
-        def it_has_empty_default_when_none_given():
-            r = message_reducer()
-            assert r.default == []
-
-        def it_respects_custom_channel_name():
-            r = message_reducer(name="chat_history")
-            assert r.name == "chat_history"
-
-        def describe_integration():
-
-            def it_accumulates_system_and_user_messages():
+            def it_projects_message_events():
                 class UserMsgReceived(MessageEvent):
                     message: HumanMessage = None  # type: ignore[assignment]
 
-                class BotReplied(MessageEvent):
-                    message: AIMessage = None  # type: ignore[assignment]
+                class Replied(Event):
+                    text: str = ""
 
-                class Finished(Event):
-                    answer: str = ""
+                r = message_reducer([SystemMessage(content="You are helpful")])
+                msg = HumanMessage(content="hello")
+                result = r.fn(UserMsgReceived(message=msg))
+                assert result == [msg]
 
-                r = message_reducer([SystemMessage(content="You are a test bot")])
-                received_messages: list[list[BaseMessage]] = []
+            def it_skips_non_message_events_at_collect_level():
+                class Replied(Event):
+                    text: str = ""
 
-                @on(UserMsgReceived)
-                def respond(
-                    event: UserMsgReceived,
-                    messages: list[BaseMessage],
-                ) -> BotReplied:
-                    received_messages.append(list(messages))
-                    return BotReplied(
-                        message=AIMessage(content="I got: " + event.message.content)
+                r = message_reducer([SystemMessage(content="You are helpful")])
+                result = r.collect([Replied(text="hi")])
+                assert result == []
+
+            def it_includes_default_messages():
+                r = message_reducer([SystemMessage(content="Be nice")])
+                assert len(r.default) == 1
+                assert r.default[0].content == "Be nice"
+
+        def when_none_given():
+
+            def it_has_empty_default():
+                r = message_reducer()
+                assert r.default == []
+
+        def when_custom_channel_name():
+
+            def it_respects_custom_channel_name():
+                r = message_reducer(name="chat_history")
+                assert r.name == "chat_history"
+
+        def describe_integration():
+
+            def when_default_system_message():
+
+                def it_accumulates_system_and_user_messages():
+                    class UserMsgReceived(MessageEvent):
+                        message: HumanMessage = None  # type: ignore[assignment]
+
+                    class BotReplied(MessageEvent):
+                        message: AIMessage = None  # type: ignore[assignment]
+
+                    class Finished(Event):
+                        answer: str = ""
+
+                    r = message_reducer([SystemMessage(content="You are a test bot")])
+                    received_messages: list[list[BaseMessage]] = []
+
+                    @on(UserMsgReceived)
+                    def respond(
+                        event: UserMsgReceived,
+                        messages: list[BaseMessage],
+                    ) -> BotReplied:
+                        received_messages.append(list(messages))
+                        return BotReplied(
+                            message=AIMessage(content="I got: " + event.message.content)
+                        )
+
+                    @on(BotReplied)
+                    def finish(event: BotReplied) -> Finished:
+                        return Finished(answer=event.message.content)
+
+                    graph = EventGraph([respond, finish], reducers=[r])
+                    log = graph.invoke(
+                        UserMsgReceived(message=HumanMessage(content="hello"))
                     )
-
-                @on(BotReplied)
-                def finish(event: BotReplied) -> Finished:
-                    return Finished(answer=event.message.content)
-
-                graph = EventGraph([respond, finish], reducers=[r])
-                log = graph.invoke(
-                    UserMsgReceived(message=HumanMessage(content="hello"))
-                )
-                assert log.latest(Finished) == Finished(answer="I got: hello")
-                msgs = received_messages[0]
-                assert len(msgs) == 2
-                assert msgs[0].content == "You are a test bot"
-                assert msgs[1].content == "hello"
+                    assert log.latest(Finished) == Finished(answer="I got: hello")
+                    msgs = received_messages[0]
+                    assert len(msgs) == 2
+                    assert msgs[0].content == "You are a test bot"
+                    assert msgs[1].content == "hello"
 
             def when_system_prompt_set_seed():
 
@@ -1815,15 +1869,27 @@ def describe_EventGraph():
 
     def describe_compiled():
 
-        def it_returns_same_instance():
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
+        def when_no_checkpointer():
 
-            graph = EventGraph([step])
-            first = graph.compiled
-            second = graph.compiled
-            assert first is second
+            def it_returns_same_instance():
+                @on(Started)
+                def step(event: Started) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                first = graph.compiled
+                second = graph.compiled
+                assert first is second
+
+            def it_returns_cached_instance_on_second_call():
+                @on(Started)
+                def step(event: Started) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                first = graph.compiled
+                second = graph.compiled
+                assert first is second
 
         def when_checkpointer():
 
@@ -1887,48 +1953,40 @@ def describe_EventGraph():
                 state = graph.get_state(config)
                 assert len(state.events) == 6
 
-        def it_returns_cached_instance_on_second_call():
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step])
-            first = graph.compiled
-            second = graph.compiled
-            assert first is second
-
     def describe_stream_events():
 
-        def it_yields_event_objects():
-            @on(Started)
-            def step1(event: Started) -> Processed:
-                return Processed(data=event.data)
+        def when_default():
 
-            @on(Processed)
-            def step2(event: Processed) -> Ended:
-                return Ended(result=event.data)
+            def it_yields_event_objects():
+                @on(Started)
+                def step1(event: Started) -> Processed:
+                    return Processed(data=event.data)
 
-            graph = EventGraph([step1, step2])
-            events = list(graph.stream_events(Started(data="hi")))
-            assert all(isinstance(e, Event) for e in events)
-            types = [type(e).__name__ for e in events]
-            assert "Started" in types
-            assert "Processed" in types
-            assert "Ended" in types
+                @on(Processed)
+                def step2(event: Processed) -> Ended:
+                    return Ended(result=event.data)
 
-        def it_yields_events_in_order():
-            @on(Started)
-            def step1(event: Started) -> Processed:
-                return Processed(data="mid")
+                graph = EventGraph([step1, step2])
+                events = list(graph.stream_events(Started(data="hi")))
+                assert all(isinstance(e, Event) for e in events)
+                types = [type(e).__name__ for e in events]
+                assert "Started" in types
+                assert "Processed" in types
+                assert "Ended" in types
 
-            @on(Processed)
-            def step2(event: Processed) -> Ended:
-                return Ended(result="done")
+            def it_yields_events_in_order():
+                @on(Started)
+                def step1(event: Started) -> Processed:
+                    return Processed(data="mid")
 
-            graph = EventGraph([step1, step2])
-            events = list(graph.stream_events(Started(data="go")))
-            assert isinstance(events[0], Started)
-            assert isinstance(events[-1], Ended)
+                @on(Processed)
+                def step2(event: Processed) -> Ended:
+                    return Ended(result="done")
+
+                graph = EventGraph([step1, step2])
+                events = list(graph.stream_events(Started(data="go")))
+                assert isinstance(events[0], Started)
+                assert isinstance(events[-1], Ended)
 
         def when_multi_seed():
 
@@ -2014,6 +2072,25 @@ def describe_EventGraph():
 
         def when_include_reducers_unknown_name():
 
+            def it_warns_about_unknown_reducer_names():
+                reducer = _data_reducer()
+
+                @on(Started)
+                def step(event: Started) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step], reducers=[reducer])
+                with pytest.warns(
+                    UserWarning,
+                    match="Unknown reducer name.*nonexistent",
+                ):
+                    list(
+                        graph.stream_events(
+                            Started(data="x"),
+                            include_reducers=["nonexistent"],
+                        )
+                    )
+
             def it_falls_back_to_bare_events():
                 reducer = _data_reducer()
 
@@ -2042,58 +2119,200 @@ def describe_EventGraph():
                 assert all(isinstance(e, Event) for e in events)
                 assert not any(isinstance(e, StreamFrame) for e in events)
 
-        @pytest.mark.asyncio
-        async def it_works_with_astream_events():
-            reducer = _data_reducer()
+        def when_async():
+
+            @pytest.mark.asyncio
+            async def it_works_with_astream_events():
+                reducer = _data_reducer()
+
+                @on(Started)
+                def step1(event: Started) -> Processed:
+                    return Processed(data=event.data)
+
+                @on(Processed)
+                def step2(event: Processed) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step1, step2], reducers=[reducer])
+                frames = [
+                    f
+                    async for f in graph.astream_events(
+                        Started(data="async"),
+                        include_reducers=True,
+                    )
+                ]
+                assert all(isinstance(f, StreamFrame) for f in frames)
+                types = [type(f.event).__name__ for f in frames]
+                assert "Started" in types
+                assert "Ended" in types
+                seed_frame = next(f for f in frames if isinstance(f.event, Started))
+                assert "async" in seed_frame.reducers["data_items"]
+
+        def when_reducer_accumulation():
+
+            def it_accumulates_reducer_values_across_events():
+                reducer = _data_reducer()
+
+                class StartedA(Started):
+                    pass
+
+                class StartedB(Started):
+                    pass
+
+                @on(StartedA)
+                def step_a(event: StartedA) -> StartedB:
+                    return StartedB(data=f"b_from_{event.data}")
+
+                @on(StartedB)
+                def step_b(event: StartedB) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step_a, step_b], reducers=[reducer])
+                frames = list(
+                    graph.stream_events(StartedA(data="a1"), include_reducers=True)
+                )
+                last_frame = frames[-1]
+                data_items = last_frame.reducers["data_items"]
+                assert "a1" in data_items
+                assert "b_from_a1" in data_items
+
+    def describe_stream_resume():
+
+        def it_yields_resume_handler_events():
+            from langgraph.checkpoint.memory import MemorySaver
 
             @on(Started)
-            def step1(event: Started) -> Processed:
-                return Processed(data=event.data)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
 
-            @on(Processed)
-            def step2(event: Processed) -> Ended:
-                return Ended(result=event.data)
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
 
-            graph = EventGraph([step1, step2], reducers=[reducer])
-            frames = [
-                f
-                async for f in graph.astream_events(
-                    Started(data="async"),
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-handler"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            events = list(graph.stream_resume(Completed(result="done"), config=config))
+            types = [type(e).__name__ for e in events]
+            assert "Ended" in types
+
+        def it_includes_stale_interrupted_in_raw_stream():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-no-stale"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            events = list(graph.stream_resume(Completed(result="done"), config=config))
+            # Raw stream_resume is semantically complete — stale Interrupted appears
+            assert any(isinstance(e, Interrupted) for e in events)
+
+        def it_yields_stream_frames_with_reducers():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            reducer = _data_reducer()
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+                reducers=[reducer],
+            )
+            config = {"configurable": {"thread_id": "sr-reducers"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            frames = list(
+                graph.stream_resume(
+                    Completed(result="done"),
                     include_reducers=True,
+                    config=config,
+                )
+            )
+            assert all(isinstance(f, StreamFrame) for f in frames)
+            assert any("data_items" in f.reducers for f in frames)
+
+        @pytest.mark.asyncio
+        async def it_yields_resume_events_async():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "sr-async"}}
+            await graph.ainvoke(Started(data="go"), config=config)
+
+            events = [
+                e
+                async for e in graph.astream_resume(
+                    Completed(result="async-done"), config=config
                 )
             ]
-            assert all(isinstance(f, StreamFrame) for f in frames)
-            types = [type(f.event).__name__ for f in frames]
-            assert "Started" in types
+            types = [type(e).__name__ for e in events]
             assert "Ended" in types
-            seed_frame = next(f for f in frames if isinstance(f.event, Started))
-            assert "async" in seed_frame.reducers["data_items"]
 
-        def it_accumulates_reducer_values_across_events():
-            reducer = _data_reducer()
+        def it_yields_new_interrupted_during_resume():
+            from langgraph.checkpoint.memory import MemorySaver
 
-            class StartedA(Started):
-                pass
+            @on(Started)
+            def step_one(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
 
-            class StartedB(Started):
-                pass
+            @on(Completed)
+            def step_two(event: Completed) -> _StepInterrupted:
+                return _StepInterrupted(step=2)
 
-            @on(StartedA)
-            def step_a(event: StartedA) -> StartedB:
-                return StartedB(data=f"b_from_{event.data}")
-
-            @on(StartedB)
-            def step_b(event: StartedB) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step_a, step_b], reducers=[reducer])
-            frames = list(
-                graph.stream_events(StartedA(data="a1"), include_reducers=True)
+            graph = EventGraph(
+                [step_one, step_two],
+                checkpointer=MemorySaver(),
             )
-            last_frame = frames[-1]
-            data_items = last_frame.reducers["data_items"]
-            assert "a1" in data_items
-            assert "b_from_a1" in data_items
+            config = {"configurable": {"thread_id": "sr-new-interrupt"}}
+            graph.invoke(Started(data="go"), config=config)
+
+            events = list(graph.stream_resume(Completed(result="next"), config=config))
+            # Stale step=1 interrupt appears in raw stream (not filtered)
+            assert any(isinstance(e, _StepInterrupted) and e.step == 1 for e in events)
+            # New interrupt (step=2) is in checkpoint tasks, detectable post-stream
+            snapshot = graph.compiled.get_state(config)
+            assert snapshot.next  # graph is still interrupted
+            interrupt_values = [
+                getattr(intr, "value", None)
+                for task in snapshot.tasks
+                for intr in getattr(task, "interrupts", ())
+            ]
+            assert any(
+                isinstance(v, _StepInterrupted) and v.step == 2
+                for v in interrupt_values
+            )
 
     def describe_reflection_loop():
 
@@ -2447,3 +2666,139 @@ def describe_EventGraph():
 
                 # Should not raise
                 EventGraph([handler])
+
+    def describe_astream_llm_tokens():
+
+        @pytest.mark.asyncio
+        async def it_yields_llm_token_and_stream_end_frames():
+            from typing import Any
+
+            from langchain_core.language_models.fake_chat_models import (
+                FakeListChatModel,
+            )
+
+            from langgraph_events._graph import LLMStreamEnd, LLMToken
+
+            llm = FakeListChatModel(responses=["hello world"], sleep=0)
+
+            class UserSent(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
+
+            class AgentReplied(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
+
+            @on(UserSent)
+            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
+                response = await llm.ainvoke([*messages, HumanMessage(content="hi")])
+                return AgentReplied(message=response)
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    UserSent(message=HumanMessage(content="hi")),
+                    include_llm_tokens=True,
+                )
+            ]
+
+            tokens = [i for i in items if isinstance(i, LLMToken)]
+            ends = [i for i in items if isinstance(i, LLMStreamEnd)]
+
+            # Should have at least one token and one end
+            assert len(tokens) >= 1
+            assert len(ends) >= 1
+            # Token content should reconstruct the response
+            assert "".join(t.content for t in tokens) == "hello world"
+            # LLMStreamEnd should have a message_id (AIMessage.id)
+            assert ends[0].message_id is not None
+
+        @pytest.mark.asyncio
+        async def it_yields_domain_events_alongside_llm_tokens():
+            from typing import Any
+
+            from langchain_core.language_models.fake_chat_models import (
+                FakeListChatModel,
+            )
+
+            from langgraph_events._graph import LLMToken
+
+            llm = FakeListChatModel(responses=["reply"], sleep=0)
+
+            class UserSent(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
+
+            class AgentReplied(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
+
+            @on(UserSent)
+            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
+                response = await llm.ainvoke([*messages, HumanMessage(content="hi")])
+                return AgentReplied(message=response)
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    UserSent(message=HumanMessage(content="hi")),
+                    include_llm_tokens=True,
+                )
+            ]
+
+            domain_events = [i for i in items if isinstance(i, Event)]
+            tokens = [i for i in items if isinstance(i, LLMToken)]
+            assert len(domain_events) >= 2  # at least seed + reply
+            assert len(tokens) >= 1
+
+        @pytest.mark.asyncio
+        async def it_yields_stream_frames_with_reducers_and_llm_tokens():
+            from typing import Any
+
+            from langchain_core.language_models.fake_chat_models import (
+                FakeListChatModel,
+            )
+
+            from langgraph_events._graph import LLMToken
+
+            llm = FakeListChatModel(responses=["hi back"], sleep=0)
+
+            class UserSent(MessageEvent):
+                message: HumanMessage = None  # type: ignore[assignment]
+
+            class AgentReplied(MessageEvent):
+                message: AIMessage = None  # type: ignore[assignment]
+
+            @on(UserSent)
+            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
+                response = await llm.ainvoke([*messages, HumanMessage(content="go")])
+                return AgentReplied(message=response)
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    UserSent(message=HumanMessage(content="go")),
+                    include_reducers=True,
+                    include_llm_tokens=True,
+                )
+            ]
+
+            frames = [i for i in items if isinstance(i, StreamFrame)]
+            tokens = [i for i in items if isinstance(i, LLMToken)]
+            assert len(frames) >= 2  # seed + reply
+            assert len(tokens) >= 1
+            # Frames should have reducer data
+            assert all("messages" in f.reducers for f in frames)
+
+        @pytest.mark.asyncio
+        async def it_is_backward_compatible_without_flag():
+            """Without include_llm_tokens, no LLMToken/LLMStreamEnd are yielded."""
+            from langgraph_events._graph import LLMStreamEnd, LLMToken
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+            items = [item async for item in graph.astream_events(Started(data="hi"))]
+            assert all(isinstance(i, Event) for i in items)
+            assert not any(isinstance(i, (LLMToken, LLMStreamEnd)) for i in items)
