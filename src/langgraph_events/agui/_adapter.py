@@ -433,7 +433,7 @@ class AGUIAdapter:
             )
 
         # Detect interrupts from checkpoint state
-        if not is_resume and not emitted_interrupt_in_stream:
+        if not emitted_interrupt_in_stream:
             snapshot = await self._aget_checkpoint_snapshot(config)
             interrupt_events = (
                 self._interrupts_from_snapshot(snapshot) if snapshot is not None else []

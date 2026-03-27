@@ -799,6 +799,45 @@ def describe_AGUIAdapter():
                 ]
                 assert len(interrupted_events) == 0
 
+            async def it_emits_new_interrupted_event_created_during_resume():
+                @on(UserAsked)
+                def ask(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="walkthrough preference")
+
+                @on(ApprovalGiven)
+                def request_persona_review(event: ApprovalGiven) -> ApprovalRequested:
+                    return ApprovalRequested(draft="persona review")
+
+                graph = EventGraph(
+                    [ask, request_persona_review],
+                    checkpointer=MemorySaver(),
+                )
+
+                # First run creates an interrupt.
+                config = {"configurable": {"thread_id": "t-resume-new-interrupt"}}
+                await graph.ainvoke(UserAsked(question="go"), config=config)
+
+                # Resume creates a new interrupt, which is suppressed
+                # in-stream and must be detected from the post-stream
+                # checkpoint read.
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                events = await _collect(
+                    adapter, _make_input(thread_id="t-resume-new-interrupt")
+                )
+
+                interrupted_events = [
+                    e
+                    for e in events
+                    if e.type == EventType.CUSTOM and e.name == "interrupted"
+                ]
+                assert len(interrupted_events) == 1
+                assert interrupted_events[0].value["draft"] == "persona review"
+                assert events[-1].type == EventType.RUN_FINISHED
+
             def when_stream_emits_interrupt():
 
                 async def it_skips_post_stream_checkpoint_read(
