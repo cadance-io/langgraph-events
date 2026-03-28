@@ -121,6 +121,13 @@ class LLMStreamEnd(NamedTuple):
     message_id: str | None  # LangChain AIMessage.id for dedup
 
 
+class CustomEventFrame(NamedTuple):
+    """A custom event frame emitted from LangGraph's v2 stream API."""
+
+    name: str
+    data: Any
+
+
 class EventGraph:
     """Build and run an event-driven graph from ``@on`` handlers.
 
@@ -529,8 +536,12 @@ class EventGraph:
         seeds: list[Event],
         *,
         reducer_names: list[str],
+        include_llm_tokens: bool,
+        include_custom_events: bool,
         **kwargs: Any,
-    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
+    ) -> AsyncIterator[
+        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
+    ]:
         """Stream events using LangGraph's v2 event API with LLM token support."""
         compiled = self._compile()
 
@@ -557,6 +568,8 @@ class EventGraph:
             raw_event = raw.get("event")
 
             if raw_event == "on_chat_model_stream":
+                if not include_llm_tokens:
+                    continue
                 run_id = raw.get("run_id", "")
                 chunk = raw.get("data", {}).get("chunk")
                 delta = self._extract_text_content(chunk)
@@ -565,11 +578,22 @@ class EventGraph:
                 continue
 
             if raw_event == "on_chat_model_end":
+                if not include_llm_tokens:
+                    continue
                 run_id = raw.get("run_id", "")
                 if run_id:
                     output = raw.get("data", {}).get("output")
                     message_id = getattr(output, "id", None)
                     yield LLMStreamEnd(run_id=run_id, message_id=message_id)
+                continue
+
+            if raw_event == "on_custom_event":
+                if not include_custom_events:
+                    continue
+                yield CustomEventFrame(
+                    name=raw.get("name", ""),
+                    data=raw.get("data"),
+                )
                 continue
 
             if raw_event != "on_chain_stream" or raw.get("name") != "LangGraph":
@@ -694,8 +718,11 @@ class EventGraph:
         *,
         include_reducers: bool | list[str] = False,
         include_llm_tokens: bool = False,
+        include_custom_events: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
+    ) -> AsyncIterator[
+        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
+    ]:
         """Async version of ``stream_resume()``.
 
         Streaming equivalent of ``aresume()`` — accepts a domain ``Event``,
@@ -708,6 +735,8 @@ class EventGraph:
                 a list of reducer names for selective inclusion.
             include_llm_tokens: When True, yields ``LLMToken`` and
                 ``LLMStreamEnd`` frames for LLM token-level streaming.
+            include_custom_events: When True, yields ``CustomEventFrame``
+                frames for ``on_custom_event`` payloads from LangGraph.
         """
         self._require_checkpointer("astream_resume")
         from langgraph.types import Command  # noqa: PLC0415
@@ -717,8 +746,15 @@ class EventGraph:
         reducer_names = self._resolve_reducer_names(include_reducers)
 
         delegate = (
-            self._astream_v2(inp, [], reducer_names=reducer_names, **kwargs)
-            if include_llm_tokens
+            self._astream_v2(
+                inp,
+                [],
+                reducer_names=reducer_names,
+                include_llm_tokens=include_llm_tokens,
+                include_custom_events=include_custom_events,
+                **kwargs,
+            )
+            if include_llm_tokens or include_custom_events
             else self._astream_core(inp, [], reducer_names, **kwargs)
         )
         async for item in delegate:
@@ -730,8 +766,11 @@ class EventGraph:
         *,
         include_reducers: bool | list[str] = False,
         include_llm_tokens: bool = False,
+        include_custom_events: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
+    ) -> AsyncIterator[
+        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
+    ]:
         """Async version of ``stream_events()``.
 
         Args:
@@ -741,6 +780,8 @@ class EventGraph:
                 a list of reducer names for selective inclusion.
             include_llm_tokens: When True, yields ``LLMToken`` and
                 ``LLMStreamEnd`` frames for LLM token-level streaming.
+            include_custom_events: When True, yields ``CustomEventFrame``
+                frames for ``on_custom_event`` payloads from LangGraph.
         """
         inp = self._prepare_input(seed)
         seeds = inp["events"]
@@ -748,8 +789,15 @@ class EventGraph:
         reducer_names = self._resolve_reducer_names(include_reducers)
 
         delegate = (
-            self._astream_v2(inp, seeds, reducer_names=reducer_names, **kwargs)
-            if include_llm_tokens
+            self._astream_v2(
+                inp,
+                seeds,
+                reducer_names=reducer_names,
+                include_llm_tokens=include_llm_tokens,
+                include_custom_events=include_custom_events,
+                **kwargs,
+            )
+            if include_llm_tokens or include_custom_events
             else self._astream_core(inp, seeds, reducer_names, **kwargs)
         )
         async for item in delegate:

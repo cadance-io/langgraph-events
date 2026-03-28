@@ -175,7 +175,7 @@ def describe_extract_handler_meta():
 
             assert len(w) == 0
 
-        def it_does_not_warn_without_reducers():
+        def it_does_not_warn_for_empty_reducer_set():
             @on(SampleEvent)
             def handler(event: SampleEvent, whatever: str):
                 pass

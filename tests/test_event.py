@@ -21,7 +21,7 @@ def describe_Event():
             with pytest.raises(AttributeError):
                 e.x = 99  # type: ignore
 
-        def it_auto_applies_dataclass_without_decorator():
+        def it_auto_applies_dataclass():
             class AutoEvent(Event):
                 value: str = ""
 
@@ -90,7 +90,7 @@ def describe_Auditable():
 
         def when_string_exceeds_80_chars():
 
-            def it_truncates_with_ellipsis():
+            def it_truncates():
                 class LongContent(Auditable):
                     content: str = ""
 
@@ -126,7 +126,7 @@ def describe_Auditable():
 
         def when_repr_of_non_string_value_exceeds_80_chars():
 
-            def it_truncates_repr_with_ellipsis():
+            def it_truncates_repr():
                 class BigData(Auditable):
                     data: list = None  # type: ignore[assignment]
 
@@ -138,7 +138,7 @@ def describe_Auditable():
                 assert "..." in trail
                 assert len(trail) < 200
 
-    def it_works_with_auto_dataclass():
+    def it_produces_trail_for_auto_dataclass():
         class TrackedOrder(Auditable):
             order_id: str = ""
 

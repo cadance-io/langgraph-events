@@ -143,7 +143,7 @@ def describe_EventLog():
             assert isinstance(result, EventLog)
             assert list(result) == [Alpha(v=1), Alpha(v=3)]
 
-        def it_supports_chaining_with_after():
+        def it_filters_after_anchor():
             log = EventLog([Alpha(v=1), Beta(v=2), Alpha(v=3), Beta(v=4)])
             result = log.after(Alpha).select(Beta)
             assert list(result) == [Beta(v=2), Beta(v=4)]

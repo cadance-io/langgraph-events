@@ -406,7 +406,7 @@ def describe_AGUIAdapter():
                 assert "".join(deltas) == "stream me"
                 assert text_events[-1].type == EventType.TEXT_MESSAGE_END
 
-            async def it_skips_events_without_agui_dict():
+            async def it_skips_events_lacking_agui_dict():
                 class PlainEvent(Event):
                     value: str = "no-dict"
 
@@ -432,7 +432,7 @@ def describe_AGUIAdapter():
                 assert len(custom_events) == 0
                 assert any("PlainEvent" in str(warning.message) for warning in w)
 
-            async def it_emits_events_with_agui_dict():
+            async def it_emits_events_having_agui_dict():
                 @on(UserAsked)
                 def create_task(event: UserAsked) -> TaskCreated:
                     return TaskCreated(title="with dict")
@@ -860,9 +860,16 @@ def describe_AGUIAdapter():
                         *,
                         include_reducers,
                         include_llm_tokens,
+                        include_custom_events,
                         config,
                     ):
-                        del seed, include_reducers, include_llm_tokens, config
+                        del (
+                            seed,
+                            include_reducers,
+                            include_llm_tokens,
+                            include_custom_events,
+                            config,
+                        )
                         yield ApprovalRequested(draft="stream-first")
 
                     original_aget_state = graph.compiled.aget_state
@@ -951,7 +958,7 @@ def describe_AGUIAdapter():
                     )
 
     def describe_seed_factory():
-        async def it_calls_seed_factory_with_input():
+        async def it_passes_input_to_factory():
             received_inputs: list[Any] = []
 
             def tracking_factory(inp: RunAgentInput) -> UserAsked:
@@ -1037,7 +1044,7 @@ def describe_interrupt_detection():
         assert interrupted_events[0].value["draft"] == "needs review"
 
 
-def describe_resume_with_reducers():
+def describe_resume_reducers():
     async def it_emits_state_snapshot_during_resume():
         @on(UserAsked)
         def ask(event: UserAsked) -> ApprovalRequested:
@@ -1076,7 +1083,7 @@ def describe_connect():
 
     def when_checkpointer_present():
 
-        async def it_emits_state_without_executing_graph():
+        async def it_replays_state_from_checkpoint():
             @on(UserAsked)
             def ask(event: UserAsked) -> ApprovalRequested:
                 return ApprovalRequested(draft="pending")
@@ -1192,8 +1199,10 @@ def describe_config_passthrough():
             *,
             include_reducers,
             include_llm_tokens,
+            include_custom_events,
             config,
         ):
+            del seed, include_reducers, include_llm_tokens, include_custom_events
             captured.append(config)
             if False:  # pragma: no cover
                 yield None
@@ -1290,6 +1299,104 @@ def describe_config_passthrough():
         assert "foo" not in captured[0]
 
 
+def describe_custom_event_passthrough():
+    async def it_maps_intermediate_state_to_state_snapshot(monkeypatch):
+        from langgraph_events._graph import CustomEventFrame
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply])
+        calls: list[dict[str, Any]] = []
+
+        async def fake_astream_events(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            calls.append(
+                {
+                    "include_reducers": include_reducers,
+                    "include_llm_tokens": include_llm_tokens,
+                    "include_custom_events": include_custom_events,
+                }
+            )
+            del (
+                seed,
+                include_reducers,
+                include_llm_tokens,
+                include_custom_events,
+                config,
+            )
+            yield CustomEventFrame(
+                name="intermediate_state",
+                data={"messages": [], "step": "draft"},
+            )
+
+        monkeypatch.setattr(graph, "astream_events", fake_astream_events)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+
+        events = await _collect(adapter, _make_input())
+        snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+
+        assert len(calls) == 1
+        assert calls[0]["include_llm_tokens"] is True
+        assert calls[0]["include_custom_events"] is True
+        assert len(snapshots) == 1
+        assert snapshots[0].snapshot == {"messages": [], "step": "draft"}
+
+    async def it_maps_custom_event_frame_to_custom_event(monkeypatch):
+        from langgraph_events._graph import CustomEventFrame
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply])
+
+        async def fake_astream_events(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            del (
+                seed,
+                include_reducers,
+                include_llm_tokens,
+                include_custom_events,
+                config,
+            )
+            yield CustomEventFrame(name="tool.progress", data={"pct": 80})
+
+        monkeypatch.setattr(graph, "astream_events", fake_astream_events)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+
+        events = await _collect(adapter, _make_input())
+        custom_events = [
+            e
+            for e in events
+            if e.type == EventType.CUSTOM and e.name == "tool.progress"
+        ]
+
+        assert len(custom_events) == 1
+        assert custom_events[0].value == {"pct": 80}
+
+
 def describe_async_checkpoint_reads():
     async def it_uses_aget_state_for_interrupt_detection(monkeypatch):
         @on(UserAsked)
@@ -1318,7 +1425,7 @@ def describe_async_checkpoint_reads():
         assert len(interrupted) == 1
 
 
-def describe_seed_factory_with_state():
+def describe_seed_factory_state():
     def when_factory_accepts_state():
         async def it_passes_checkpoint_state_to_seed_factory():
             received_states: list[Any] = []
@@ -1358,7 +1465,7 @@ def describe_seed_factory_with_state():
             assert snapshot_vals == state["reducers"]
 
     def when_single_arg_seed_factory():
-        async def it_works_without_state():
+        async def it_accepts_single_arg_factory():
             @on(UserAsked)
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
@@ -1398,7 +1505,7 @@ def describe_seed_factory_with_state():
 
 def describe_interrupt_gate():
     def when_gated():
-        async def it_reemits_interrupt_without_executing():
+        async def it_reemits_interrupt():
             call_count = {"n": 0}
 
             @on(UserAsked)
@@ -1543,7 +1650,7 @@ def describe_AGUICustomEvent():
 
 
 def describe_connect_completed_thread():
-    async def it_emits_state_and_messages_without_interrupt():
+    async def it_emits_state_and_messages():
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="done"))

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from ag_ui.core import (
     BaseEvent,
+    CustomEvent,
     EventType,
     RunErrorEvent,
     RunFinishedEvent,
@@ -19,7 +20,12 @@ from ag_ui.core import (
 )
 
 from langgraph_events._event import Interrupted
-from langgraph_events._graph import LLMStreamEnd, LLMToken, StreamFrame
+from langgraph_events._graph import (
+    CustomEventFrame,
+    LLMStreamEnd,
+    LLMToken,
+    StreamFrame,
+)
 
 from ._context import MapperContext
 from ._mappers import (
@@ -249,13 +255,16 @@ class AGUIAdapter:
         checkpoint_state: CheckpointState | None,
         resume_event: Any,
         config: Any,
-    ) -> AsyncIterator[Event | StreamFrame | LLMToken | LLMStreamEnd]:
+    ) -> AsyncIterator[
+        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
+    ]:
         """Create the underlying EventGraph async event stream."""
         if resume_event is not None:
             return self._graph.astream_resume(
                 resume_event,
                 include_reducers=self._include_reducers,
                 include_llm_tokens=True,
+                include_custom_events=True,
                 config=config,
             )
         seed = self._call_seed_factory(input_data, checkpoint_state)
@@ -263,6 +272,7 @@ class AGUIAdapter:
             seed,
             include_reducers=self._include_reducers,
             include_llm_tokens=True,
+            include_custom_events=True,
             config=config,
         )
 
@@ -399,6 +409,15 @@ class AGUIAdapter:
             elif isinstance(item, LLMStreamEnd):
                 for agui_event in self._events_from_llm_stream_end(item, ctx):
                     yield agui_event
+            elif isinstance(item, CustomEventFrame):
+                if item.name == "intermediate_state":
+                    yield build_state_snapshot(item.data)
+                else:
+                    yield CustomEvent(
+                        type=EventType.CUSTOM,
+                        name=item.name,
+                        value=item.data,
+                    )
             elif isinstance(item, StreamFrame):
                 agui_events, next_message_ids, emitted_interrupt = (
                     self._events_from_stream_frame(

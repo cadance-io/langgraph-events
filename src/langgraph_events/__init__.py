@@ -12,6 +12,7 @@ from langgraph_events._event import (
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._graph import (
+    CustomEventFrame,
     EventGraph,
     GraphState,
     LLMStreamEnd,
@@ -26,6 +27,7 @@ from langgraph_events._types import (
 
 __all__ = [
     "Auditable",
+    "CustomEventFrame",
     "Event",
     "EventGraph",
     "EventLog",

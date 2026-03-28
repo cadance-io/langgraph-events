@@ -63,7 +63,7 @@ def describe_EventGraph():
                 assert len(log) == 3
                 assert log.latest(Ended) == Ended(result="done:processed:hello")
 
-            async def it_works_with_async_handlers():
+            async def it_processes_async_handlers():
                 @on(Started)
                 async def step1(event: Started) -> Processed:
                     return Processed(data=event.data.upper())
@@ -641,7 +641,7 @@ def describe_EventGraph():
 
         def when_handler_requests_neither():
 
-            def it_works_without_config_or_store():
+            def it_runs_handler():
                 @on(Started)
                 def step(event: Started) -> Ended:
                     return Ended(result=event.data)
@@ -716,7 +716,7 @@ def describe_EventGraph():
             assert r.interrupted is i
             assert isinstance(r, Event)
 
-        def it_pauses_and_resumes_with_human_input():
+        def it_pauses_and_resumes():
             from langgraph.checkpoint.memory import MemorySaver
 
             class ConfirmationRequested(Interrupted):
@@ -746,7 +746,7 @@ def describe_EventGraph():
             log = graph.resume(Confirmed(), config=config)
             assert log.latest(Ended) == Ended(result="confirmed")
 
-        def it_raises_without_checkpointer():
+        def it_raises_on_resume_missing_checkpointer():
             class Confirmed(Event):
                 pass
 
@@ -992,7 +992,7 @@ def describe_EventGraph():
                 "reserved_name",
                 ["events", "_cursor", "_pending", "_round"],
             )
-            def it_rejects_reducer_name_colliding_with_reserved_field(reserved_name):
+            def it_rejects_collisions(reserved_name):
                 r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
 
                 @on(Started)
@@ -1265,7 +1265,7 @@ def describe_EventGraph():
 
         def describe_backward_compatibility():
 
-            def it_works_without_any_reducers():
+            def it_handles_no_reducers():
                 @on(MessageReceived)
                 def step(event: MessageReceived) -> Completed:
                     return Completed(result=event.text)
@@ -1274,7 +1274,7 @@ def describe_EventGraph():
                 log = graph.invoke(MessageReceived(text="hello"))
                 assert log.latest(Completed) == Completed(result="hello")
 
-            def it_coexists_with_event_log_injection():
+            def it_coexists_alongside_event_log_injection():
                 def project(event: Event) -> list:
                     return [1]
 
@@ -2003,7 +2003,7 @@ def describe_EventGraph():
 
         def when_include_reducers_true():
 
-            def it_yields_stream_frames_with_reducer_snapshots():
+            def it_yields_stream_frames():
                 reducer = _data_reducer()
 
                 @on(Started)
@@ -2122,7 +2122,7 @@ def describe_EventGraph():
         def when_async():
 
             @pytest.mark.asyncio
-            async def it_works_with_astream_events():
+            async def it_yields_stream_frames():
                 reducer = _data_reducer()
 
                 @on(Started)
@@ -2222,7 +2222,7 @@ def describe_EventGraph():
             # Raw stream_resume is semantically complete — stale Interrupted appears
             assert any(isinstance(e, Interrupted) for e in events)
 
-        def it_yields_stream_frames_with_reducers():
+        def it_yields_reducer_stream_frames():
             from langgraph.checkpoint.memory import MemorySaver
 
             @on(Started)
@@ -2464,7 +2464,7 @@ def describe_EventGraph():
                 with pytest.raises(RuntimeError, match="max_rounds"):
                     graph.invoke(PingSent())
 
-            def it_raises_max_rounds_with_multiple_handlers():
+            def it_raises_max_rounds_for_multiple_handlers():
                 """recursion_limit accounts for multiple handlers per round."""
 
                 class Ticked(Event):
@@ -2543,7 +2543,7 @@ def describe_EventGraph():
             assert "-->|split| Scatter" not in output
             assert "%% Scatter handlers: split (Started)" in output
 
-        def it_connects_interrupted_to_resumed_with_dashed_edge():
+        def it_dashes_interrupted_to_resumed_edge():
             @on(Started)
             def request_approval(event: Started) -> Interrupted:
                 return Interrupted()
@@ -2576,7 +2576,7 @@ def describe_EventGraph():
             assert "Started -->|handle_both| Ended" in output
             assert "Processed -->|handle_both| Ended" in output
 
-        def it_marks_seed_events_with_thick_entry_edge():
+        def it_uses_thick_entry_edges_for_seeds():
             @on(Started)
             def step1(event: Started) -> Processed:
                 return Processed(data=event.data)
@@ -2616,7 +2616,7 @@ def describe_EventGraph():
 
         def when_duplicate_handler_names():
 
-            def it_deduplicates_with_suffix():
+            def it_appends_numeric_suffix():
                 @on(Started)
                 def handler(event: Started) -> Processed:
                     return Processed(data=event.data)
@@ -2750,7 +2750,7 @@ def describe_EventGraph():
             assert len(tokens) >= 1
 
         @pytest.mark.asyncio
-        async def it_yields_stream_frames_with_reducers_and_llm_tokens():
+        async def it_yields_reducer_frames_and_tokens():
             from typing import Any
 
             from langchain_core.language_models.fake_chat_models import (
@@ -2790,7 +2790,7 @@ def describe_EventGraph():
             assert all("messages" in f.reducers for f in frames)
 
         @pytest.mark.asyncio
-        async def it_is_backward_compatible_without_flag():
+        async def it_omits_tokens_by_default():
             """Without include_llm_tokens, no LLMToken/LLMStreamEnd are yielded."""
             from langgraph_events._graph import LLMStreamEnd, LLMToken
 
@@ -2802,3 +2802,166 @@ def describe_EventGraph():
             items = [item async for item in graph.astream_events(Started(data="hi"))]
             assert all(isinstance(i, Event) for i in items)
             assert not any(isinstance(i, (LLMToken, LLMStreamEnd)) for i in items)
+
+        @pytest.mark.asyncio
+        async def it_yields_custom_event_frames_from_v2_custom_events(monkeypatch):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [
+                item
+                async for item in graph.astream_events(
+                    Started(data="hi"),
+                    include_llm_tokens=True,
+                    include_custom_events=True,
+                )
+            ]
+
+            custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+            assert len(custom_frames) == 1
+            assert custom_frames[0].name == "progress"
+            assert custom_frames[0].data == {"pct": 50}
+
+        @pytest.mark.asyncio
+        async def it_does_not_yield_custom_event_frames_by_default(monkeypatch):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            called = False
+
+            async def fake_astream_events(*args, **kwargs):
+                nonlocal called
+                called = True
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [item async for item in graph.astream_events(Started(data="hi"))]
+            assert not any(isinstance(i, CustomEventFrame) for i in items)
+            # Default flags route to _astream_core, not v2 — confirm the fake
+            # was not called so the test's intent is clear.
+            assert not called
+
+        @pytest.mark.asyncio
+        async def it_filters_custom_events_in_v2_path(monkeypatch):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            # include_llm_tokens routes to _astream_v2 but custom events off
+            items = [
+                item
+                async for item in graph.astream_events(
+                    Started(data="hi"),
+                    include_llm_tokens=True,
+                    include_custom_events=False,
+                )
+            ]
+            assert not any(isinstance(i, CustomEventFrame) for i in items)
+
+        @pytest.mark.asyncio
+        async def it_yields_custom_event_frames_on_opt_in(
+            monkeypatch,
+        ):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [
+                item
+                async for item in graph.astream_events(
+                    Started(data="hi"),
+                    include_custom_events=True,
+                )
+            ]
+            custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+            assert len(custom_frames) == 1
+
+        @pytest.mark.asyncio
+        async def it_yields_custom_event_frames_in_astream_resume(
+            monkeypatch,
+        ):
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step], checkpointer=MemorySaver())
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "resume.progress",
+                    "data": {"pct": 90},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [
+                item
+                async for item in graph.astream_resume(
+                    Started(data="resume"),
+                    include_custom_events=True,
+                )
+            ]
+
+            custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+            assert len(custom_frames) == 1
+            assert custom_frames[0].name == "resume.progress"
