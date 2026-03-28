@@ -22,6 +22,8 @@ from langgraph_events import (
     Scatter,
     StreamFrame,
     SystemPromptSet,
+    aemit_custom,
+    emit_custom,
     message_reducer,
     on,
 )
@@ -2668,6 +2670,63 @@ def describe_EventGraph():
                 EventGraph([handler])
 
     def describe_astream_llm_tokens():
+
+        def describe_custom_event_helpers():
+
+            @pytest.mark.asyncio
+            async def it_emits_custom_frames_from_sync_handler():
+                from langgraph_events import CustomEventFrame
+
+                @on(Started)
+                def step(event: Started) -> Ended:
+                    emit_custom("tool.progress", {"pct": 25})
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                items = [
+                    item
+                    async for item in graph.astream_events(
+                        Started(data="hello"),
+                        include_custom_events=True,
+                    )
+                ]
+
+                custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+                assert len(custom_frames) == 1
+                assert custom_frames[0].name == "tool.progress"
+                assert custom_frames[0].data == {"pct": 25}
+
+            @pytest.mark.asyncio
+            async def it_emits_custom_frames_from_async_handler():
+                from langgraph_events import CustomEventFrame
+
+                @on(Started)
+                async def step(event: Started) -> Ended:
+                    await aemit_custom("tool.progress", {"pct": 80})
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                items = [
+                    item
+                    async for item in graph.astream_events(
+                        Started(data="hello"),
+                        include_custom_events=True,
+                    )
+                ]
+
+                custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+                assert len(custom_frames) == 1
+                assert custom_frames[0].name == "tool.progress"
+                assert custom_frames[0].data == {"pct": 80}
+
+            def it_raises_for_emit_custom_outside_handler():
+                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
+                    emit_custom("tool.progress", {"pct": 1})
+
+            @pytest.mark.asyncio
+            async def it_raises_for_aemit_custom_outside_handler():
+                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
+                    await aemit_custom("tool.progress", {"pct": 1})
 
         @pytest.mark.asyncio
         async def it_yields_llm_token_and_stream_end_frames():

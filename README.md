@@ -173,7 +173,17 @@ async for event in graph.astream_resume(ApprovalSubmitted(approved=True), config
     print(event)
 
 # Async stream with real-time LLM token deltas and passthrough custom frames
-from langgraph_events import CustomEventFrame, LLMStreamEnd, LLMToken
+from langgraph_events import (
+    CustomEventFrame,
+    LLMStreamEnd,
+    LLMToken,
+    emit_custom,
+)
+
+@on(SeedEvent)
+def step(event: SeedEvent) -> ReplyProduced:
+    emit_custom("tool.progress", {"pct": 50})
+    return ReplyProduced(...)
 
 async for item in graph.astream_events(
     SeedEvent(...),
@@ -198,6 +208,8 @@ for chunk in compiled.stream({"events": [SeedEvent(...)]}, stream_mode="updates"
 ```
 
 `max_rounds` (default: 100) prevents infinite loops — the library auto-sets LangGraph's `recursion_limit` so this is the only knob you need. Override via `invoke(seed, recursion_limit=N)` if needed. All methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`. Use `include_llm_tokens=True` for LLM token frames and `include_custom_events=True` for `CustomEventFrame` passthrough.
+
+Use `emit_custom(name, data)` (or `await aemit_custom(name, data)` in async handlers) to emit stream-only telemetry from handlers without importing LangGraph callback APIs directly.
 
 #### Visualizing the Event Flow
 
@@ -474,6 +486,8 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `EventGraph.compiled` | Property | Access underlying `CompiledStateGraph` for advanced LangGraph patterns |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
+| `emit_custom`    | Function   | Emit a LangGraph custom stream event from a handler |
+| `aemit_custom`   | Function   | Async variant of `emit_custom` for async handlers |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
 | `Halted`          | Event      | Signal immediate graph termination              |
