@@ -5,7 +5,7 @@ import sys
 
 
 def describe_mermaid_sync():
-    def it_keeps_graph_files_in_sync_with_example_handlers():
+    def it_keeps_graph_files_current():
         result = subprocess.run(  # noqa: S603
             [sys.executable, "scripts/generate_mermaid.py", "--check"],
             capture_output=True,

@@ -20,7 +20,7 @@ def _categorize_children(body):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             if node.name.startswith("describe_"):
                 result["describe"].append(node)
-            elif node.name.startswith(("when_", "with_")):
+            elif node.name.startswith(("when_", "with_", "without_", "for_")):
                 result["when"].append(node)
             elif node.name.startswith("given_"):
                 result["given"].append(node)
@@ -29,15 +29,21 @@ def _categorize_children(body):
     return result
 
 
+_CONDITION_INFIXES = ("_when_", "_with_", "_without_")
+
+
 def _check_embedded_conditions(func, filepath: Path) -> list[str]:
-    """Flag test/describe names that embed '_when_' — should be a when_* block."""
-    if func.name.startswith(("when_", "with_", "given_")):
+    """Flag test/describe names embedding condition keywords."""
+    if func.name.startswith(("when_", "with_", "without_", "given_")):
         return []  # already a condition block
-    if "_when_" in func.name:
-        return [
-            f"{filepath}:{func.lineno} - '{func.name}' embeds '_when_' in its name. "
-            f"Extract the condition into a nested when_* block instead."
-        ]
+    for infix in _CONDITION_INFIXES:
+        if infix in func.name:
+            keyword = infix.strip("_")
+            return [
+                f"{filepath}:{func.lineno} - '{func.name}' embeds "
+                f"'{infix}' in its name. Extract the condition "
+                f"into a nested {keyword}_ block instead."
+            ]
     return []
 
 

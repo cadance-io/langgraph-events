@@ -406,7 +406,7 @@ def describe_AGUIAdapter():
                 assert "".join(deltas) == "stream me"
                 assert text_events[-1].type == EventType.TEXT_MESSAGE_END
 
-            async def it_skips_events_without_agui_dict():
+            async def it_skips_events_lacking_agui_dict():
                 class PlainEvent(Event):
                     value: str = "no-dict"
 
@@ -432,7 +432,7 @@ def describe_AGUIAdapter():
                 assert len(custom_events) == 0
                 assert any("PlainEvent" in str(warning.message) for warning in w)
 
-            async def it_emits_events_with_agui_dict():
+            async def it_emits_events_having_agui_dict():
                 @on(UserAsked)
                 def create_task(event: UserAsked) -> TaskCreated:
                     return TaskCreated(title="with dict")
@@ -958,7 +958,7 @@ def describe_AGUIAdapter():
                     )
 
     def describe_seed_factory():
-        async def it_calls_seed_factory_with_input():
+        async def it_passes_input_to_factory():
             received_inputs: list[Any] = []
 
             def tracking_factory(inp: RunAgentInput) -> UserAsked:
@@ -1044,7 +1044,7 @@ def describe_interrupt_detection():
         assert interrupted_events[0].value["draft"] == "needs review"
 
 
-def describe_resume_with_reducers():
+def describe_resume_reducers():
     async def it_emits_state_snapshot_during_resume():
         @on(UserAsked)
         def ask(event: UserAsked) -> ApprovalRequested:
@@ -1083,7 +1083,7 @@ def describe_connect():
 
     def when_checkpointer_present():
 
-        async def it_emits_state_without_executing_graph():
+        async def it_replays_state_from_checkpoint():
             @on(UserAsked)
             def ask(event: UserAsked) -> ApprovalRequested:
                 return ApprovalRequested(draft="pending")
@@ -1425,7 +1425,7 @@ def describe_async_checkpoint_reads():
         assert len(interrupted) == 1
 
 
-def describe_seed_factory_with_state():
+def describe_seed_factory_state():
     def when_factory_accepts_state():
         async def it_passes_checkpoint_state_to_seed_factory():
             received_states: list[Any] = []
@@ -1465,7 +1465,7 @@ def describe_seed_factory_with_state():
             assert snapshot_vals == state["reducers"]
 
     def when_single_arg_seed_factory():
-        async def it_works_without_state():
+        async def it_accepts_single_arg_factory():
             @on(UserAsked)
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
@@ -1505,7 +1505,7 @@ def describe_seed_factory_with_state():
 
 def describe_interrupt_gate():
     def when_gated():
-        async def it_reemits_interrupt_without_executing():
+        async def it_reemits_interrupt():
             call_count = {"n": 0}
 
             @on(UserAsked)
@@ -1650,7 +1650,7 @@ def describe_AGUICustomEvent():
 
 
 def describe_connect_completed_thread():
-    async def it_emits_state_and_messages_without_interrupt():
+    async def it_emits_state_and_messages():
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="done"))
