@@ -1,5 +1,6 @@
 """langgraph-events — Opinionated event-driven abstraction for LangGraph."""
 
+from langgraph_events._custom_event import aemit_custom, emit_custom
 from langgraph_events._event import (
     Auditable,
     Event,
@@ -43,6 +44,8 @@ __all__ = [
     "Scatter",
     "StreamFrame",
     "SystemPromptSet",
+    "aemit_custom",
+    "emit_custom",
     "message_reducer",
     "on",
 ]

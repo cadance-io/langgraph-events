@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
+from langgraph_events._custom_event import _reset_custom_emitters, _set_custom_emitters
 from langgraph_events._event import Event, Halted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
@@ -222,6 +223,10 @@ def make_handler_node(
     - Handles Interrupted: calls interrupt(), creates Resumed on resume
     - Applies reducer projections to new events
     """
+    from langchain_core.callbacks.manager import (  # noqa: PLC0415
+        adispatch_custom_event,
+        dispatch_custom_event,
+    )
     from langchain_core.runnables import RunnableLambda  # noqa: PLC0415
     from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
@@ -243,39 +248,71 @@ def make_handler_node(
     def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
         matching, inject = _prepare(state, config)
         new_events: list[Event] = []
-        for event in matching:
-            if meta.is_async:
-                try:
-                    asyncio.get_running_loop()
-                except RuntimeError:
-                    # No running loop — safe to use asyncio.run().
-                    coro = cast(
-                        "Coroutine[Any, Any, HandlerReturn]", meta.fn(event, **inject)
-                    )
-                    result = asyncio.run(coro)
+        tokens = _set_custom_emitters(
+            sync_emitter=lambda name, data: dispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+            async_emitter=lambda name, data: adispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+        )
+        try:
+            for event in matching:
+                if meta.is_async:
+                    try:
+                        asyncio.get_running_loop()
+                    except RuntimeError:
+                        # No running loop — safe to use asyncio.run().
+                        coro = cast(
+                            "Coroutine[Any, Any, HandlerReturn]",
+                            meta.fn(event, **inject),
+                        )
+                        result = asyncio.run(coro)
+                    else:
+                        raise RuntimeError(
+                            f"Handler {meta.name!r} is async but invoke() was called "
+                            "from within a running event loop (e.g. Jupyter, "
+                            "FastAPI). "
+                            f"Use ainvoke() instead."
+                        )
                 else:
-                    raise RuntimeError(
-                        f"Handler {meta.name!r} is async but invoke() was called "
-                        f"from within a running event loop (e.g. Jupyter, FastAPI). "
-                        f"Use ainvoke() instead."
-                    )
-            else:
-                result = meta.fn(event, **inject)
-            _collect_result(result, new_events, lg_interrupt)
+                    result = meta.fn(event, **inject)
+                _collect_result(result, new_events, lg_interrupt)
+        finally:
+            _reset_custom_emitters(tokens)
         return _finalize(new_events)
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
         matching, inject = _prepare(state, config)
         new_events: list[Event] = []
-        for event in matching:
-            if meta.is_async:
-                coro = cast(
-                    "Coroutine[Any, Any, HandlerReturn]", meta.fn(event, **inject)
-                )
-                result = await coro
-            else:
-                result = meta.fn(event, **inject)
-            _collect_result(result, new_events, lg_interrupt)
+        tokens = _set_custom_emitters(
+            sync_emitter=lambda name, data: dispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+            async_emitter=lambda name, data: adispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+        )
+        try:
+            for event in matching:
+                if meta.is_async:
+                    coro = cast(
+                        "Coroutine[Any, Any, HandlerReturn]", meta.fn(event, **inject)
+                    )
+                    result = await coro
+                else:
+                    result = meta.fn(event, **inject)
+                _collect_result(result, new_events, lg_interrupt)
+        finally:
+            _reset_custom_emitters(tokens)
         return _finalize(new_events)
 
     return RunnableLambda(
