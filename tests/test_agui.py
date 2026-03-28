@@ -860,9 +860,16 @@ def describe_AGUIAdapter():
                         *,
                         include_reducers,
                         include_llm_tokens,
+                        include_custom_events,
                         config,
                     ):
-                        del seed, include_reducers, include_llm_tokens, config
+                        del (
+                            seed,
+                            include_reducers,
+                            include_llm_tokens,
+                            include_custom_events,
+                            config,
+                        )
                         yield ApprovalRequested(draft="stream-first")
 
                     original_aget_state = graph.compiled.aget_state
@@ -1192,8 +1199,10 @@ def describe_config_passthrough():
             *,
             include_reducers,
             include_llm_tokens,
+            include_custom_events,
             config,
         ):
+            del seed, include_reducers, include_llm_tokens, include_custom_events
             captured.append(config)
             if False:  # pragma: no cover
                 yield None
@@ -1288,6 +1297,104 @@ def describe_config_passthrough():
         assert len(captured) == 1
         assert captured[0]["configurable"]["thread_id"] == "t-default-config"
         assert "foo" not in captured[0]
+
+
+def describe_custom_event_passthrough():
+    async def it_maps_intermediate_state_to_state_snapshot(monkeypatch):
+        from langgraph_events._graph import CustomEventFrame
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply])
+        calls: list[dict[str, Any]] = []
+
+        async def fake_astream_events(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            calls.append(
+                {
+                    "include_reducers": include_reducers,
+                    "include_llm_tokens": include_llm_tokens,
+                    "include_custom_events": include_custom_events,
+                }
+            )
+            del (
+                seed,
+                include_reducers,
+                include_llm_tokens,
+                include_custom_events,
+                config,
+            )
+            yield CustomEventFrame(
+                name="intermediate_state",
+                data={"messages": [], "step": "draft"},
+            )
+
+        monkeypatch.setattr(graph, "astream_events", fake_astream_events)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+
+        events = await _collect(adapter, _make_input())
+        snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+
+        assert len(calls) == 1
+        assert calls[0]["include_llm_tokens"] is True
+        assert calls[0]["include_custom_events"] is True
+        assert len(snapshots) == 1
+        assert snapshots[0].snapshot == {"messages": [], "step": "draft"}
+
+    async def it_maps_custom_event_frame_to_custom_event(monkeypatch):
+        from langgraph_events._graph import CustomEventFrame
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply])
+
+        async def fake_astream_events(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            del (
+                seed,
+                include_reducers,
+                include_llm_tokens,
+                include_custom_events,
+                config,
+            )
+            yield CustomEventFrame(name="tool.progress", data={"pct": 80})
+
+        monkeypatch.setattr(graph, "astream_events", fake_astream_events)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+
+        events = await _collect(adapter, _make_input())
+        custom_events = [
+            e
+            for e in events
+            if e.type == EventType.CUSTOM and e.name == "tool.progress"
+        ]
+
+        assert len(custom_events) == 1
+        assert custom_events[0].value == {"pct": 80}
 
 
 def describe_async_checkpoint_reads():

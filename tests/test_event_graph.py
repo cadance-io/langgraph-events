@@ -2802,3 +2802,128 @@ def describe_EventGraph():
             items = [item async for item in graph.astream_events(Started(data="hi"))]
             assert all(isinstance(i, Event) for i in items)
             assert not any(isinstance(i, (LLMToken, LLMStreamEnd)) for i in items)
+
+        @pytest.mark.asyncio
+        async def it_yields_custom_event_frames_from_v2_custom_events(monkeypatch):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [
+                item
+                async for item in graph.astream_events(
+                    Started(data="hi"),
+                    include_llm_tokens=True,
+                    include_custom_events=True,
+                )
+            ]
+
+            custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+            assert len(custom_frames) == 1
+            assert custom_frames[0].name == "progress"
+            assert custom_frames[0].data == {"pct": 50}
+
+        @pytest.mark.asyncio
+        async def it_does_not_yield_custom_event_frames_by_default(monkeypatch):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [item async for item in graph.astream_events(Started(data="hi"))]
+            assert not any(isinstance(i, CustomEventFrame) for i in items)
+
+        @pytest.mark.asyncio
+        async def it_yields_custom_event_frames_with_include_custom_events(
+            monkeypatch,
+        ):
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step])
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "progress",
+                    "data": {"pct": 50},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [
+                item
+                async for item in graph.astream_events(
+                    Started(data="hi"),
+                    include_custom_events=True,
+                )
+            ]
+            custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+            assert len(custom_frames) == 1
+
+        @pytest.mark.asyncio
+        async def it_yields_custom_event_frames_in_astream_resume(
+            monkeypatch,
+        ):
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events._graph import CustomEventFrame
+
+            @on(Started)
+            def step(event: Started) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step], checkpointer=MemorySaver())
+
+            async def fake_astream_events(*args, **kwargs):
+                del args, kwargs
+                yield {
+                    "event": "on_custom_event",
+                    "name": "resume.progress",
+                    "data": {"pct": 90},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+
+            items = [
+                item
+                async for item in graph.astream_resume(
+                    Started(data="resume"),
+                    include_custom_events=True,
+                )
+            ]
+
+            custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
+            assert len(custom_frames) == 1
+            assert custom_frames[0].name == "resume.progress"
