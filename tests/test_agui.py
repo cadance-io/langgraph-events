@@ -1119,7 +1119,7 @@ def describe_connect():
 
     def when_no_checkpointer():
 
-        async def it_returns_no_events():
+        async def it_emits_empty_snapshots():
             @on(UserAsked)
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
@@ -1131,7 +1131,11 @@ def describe_connect():
             )
 
             events = [event async for event in adapter.connect(_make_input())]
-            assert events == []
+            assert len(events) == 2
+            assert events[0].type == EventType.STATE_SNAPSHOT
+            assert events[0].snapshot == {}
+            assert events[1].type == EventType.MESSAGES_SNAPSHOT
+            assert events[1].messages == []
 
     def when_forwarded_props():
 

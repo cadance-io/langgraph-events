@@ -222,6 +222,8 @@ class AGUIAdapter:
         config = self._build_config(input_data, thread_id)
         snapshot = await self._aget_checkpoint_snapshot(config)
         if snapshot is None:
+            yield build_state_snapshot({})
+            yield build_messages_snapshot([])
             return
 
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}

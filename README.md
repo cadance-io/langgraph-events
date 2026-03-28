@@ -614,8 +614,8 @@ events = [event async for event in adapter.connect(input_data)]
 
 `connect()` emits:
 
-- `StateSnapshot` from checkpoint reducers
-- `MessagesSnapshot` when a `messages` reducer is present
+- `StateSnapshot` from checkpoint reducers (empty `{}` for new threads)
+- `MessagesSnapshot` from the `messages` reducer (empty `[]` for new threads or when no messages reducer is present)
 - pending `Interrupted` events (mapped via the normal mapper chain)
 
 `reconnect()` is an alias for `connect()`.
