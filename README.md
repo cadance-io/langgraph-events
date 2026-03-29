@@ -177,11 +177,15 @@ from langgraph_events import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,
+    STATE_SNAPSHOT_EVENT_NAME,
+    StateSnapshotFrame,
+    emit_state_snapshot,
     emit_custom,
 )
 
 @on(SeedEvent)
 def step(event: SeedEvent) -> ReplyProduced:
+    emit_state_snapshot({"messages": [], "step": "draft"})
     emit_custom("tool.progress", {"pct": 50})
     return ReplyProduced(...)
 
@@ -194,6 +198,8 @@ async for item in graph.astream_events(
         print(item.content, end="")
     elif isinstance(item, LLMStreamEnd):
         print("\n[done]", item.message_id)
+    elif isinstance(item, StateSnapshotFrame):
+        print("snapshot:", item.data)
     elif isinstance(item, CustomEventFrame):
         print("custom:", item.name, item.data)
     else:
@@ -209,7 +215,7 @@ for chunk in compiled.stream({"events": [SeedEvent(...)]}, stream_mode="updates"
 
 `max_rounds` (default: 100) prevents infinite loops — the library auto-sets LangGraph's `recursion_limit` so this is the only knob you need. Override via `invoke(seed, recursion_limit=N)` if needed. All methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`. Use `include_llm_tokens=True` for LLM token frames and `include_custom_events=True` for `CustomEventFrame` passthrough.
 
-Use `emit_custom(name, data)` (or `await aemit_custom(name, data)` in async handlers) to emit stream-only telemetry from handlers without importing LangGraph callback APIs directly.
+Use `emit_state_snapshot(data)` / `await aemit_state_snapshot(data)` for typed snapshot frames, and `emit_custom(name, data)` / `await aemit_custom(name, data)` for all other stream-only telemetry without importing LangGraph callback APIs directly. `STATE_SNAPSHOT_EVENT_NAME` is exported for protocol-level integrations.
 
 #### Visualizing the Event Flow
 
@@ -477,9 +483,9 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `EventGraph.invoke()` | Method | Run graph synchronously, returns `EventLog` |
 | `EventGraph.ainvoke()` | Method | Async version of `invoke()` |
 | `EventGraph.stream_events()` | Method | Yield events as produced; optional reducer snapshots via `StreamFrame` |
-| `EventGraph.astream_events()` | Method | Async version of `stream_events()`; supports `include_llm_tokens=True` (`LLMToken`/`LLMStreamEnd`) and `include_custom_events=True` (`CustomEventFrame`) |
+| `EventGraph.astream_events()` | Method | Async version of `stream_events()`; supports `include_llm_tokens=True` (`LLMToken`/`LLMStreamEnd`) and `include_custom_events=True` (`CustomEventFrame`/`StateSnapshotFrame`) |
 | `EventGraph.stream_resume()` | Method | Yield events during resume; streaming equivalent of `resume()` |
-| `EventGraph.astream_resume()` | Method | Async version of `stream_resume()`; supports `include_llm_tokens=True` (`LLMToken`/`LLMStreamEnd`) and `include_custom_events=True` (`CustomEventFrame`) |
+| `EventGraph.astream_resume()` | Method | Async version of `stream_resume()`; supports `include_llm_tokens=True` (`LLMToken`/`LLMStreamEnd`) and `include_custom_events=True` (`CustomEventFrame`/`StateSnapshotFrame`) |
 | `EventGraph.resume()` | Method | Resume interrupted graph with a domain event (requires checkpointer) |
 | `EventGraph.aresume()` | Method | Async version of `resume()` |
 | `EventGraph.get_state()` | Method | Get `GraphState` for a checkpointed thread |
@@ -488,6 +494,9 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
 | `emit_custom`    | Function   | Emit a LangGraph custom stream event from a handler |
 | `aemit_custom`   | Function   | Async variant of `emit_custom` for async handlers |
+| `emit_state_snapshot` | Function | Emit a typed state snapshot stream frame from a handler |
+| `aemit_state_snapshot` | Function | Async variant of `emit_state_snapshot` for async handlers |
+| `STATE_SNAPSHOT_EVENT_NAME` | Constant | Protocol name used for snapshot custom events (`"intermediate_state"`) |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
 | `Halted`          | Event      | Signal immediate graph termination              |
@@ -503,6 +512,7 @@ A supervisor handler fires on task and specialist completions, using tool-callin
 | `LLMToken`        | NamedTuple | `(run_id, content)` token delta yielded by async streams with `include_llm_tokens=True` |
 | `LLMStreamEnd`    | NamedTuple | `(run_id, message_id)` marker yielded when an LLM stream completes |
 | `CustomEventFrame` | NamedTuple | `(name, data)` custom payload yielded from LangGraph `on_custom_event` with `include_custom_events=True` |
+| `StateSnapshotFrame` | NamedTuple | `(data)` typed snapshot frame yielded when `on_custom_event` uses `STATE_SNAPSHOT_EVENT_NAME` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
 | `langgraph_events.agui` | Subpackage | AG-UI protocol adapter (requires `[agui]` extra) |
 | `AGUIAdapter`     | Class      | Map EventGraph streams to AG-UI protocol events |
@@ -597,10 +607,9 @@ Events without `agui_dict()` are skipped with a one-time warning.
 
 `StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (when `include_reducers` is enabled).
 
-`CustomEventFrame` passthrough is also handled outside the mapper chain:
+`StateSnapshotFrame` is handled outside the mapper chain as AG-UI `StateSnapshot`.
 
-- name=`"intermediate_state"` → `StateSnapshot`
-- any other name → AG-UI `CustomEvent` with `name`/`value` copied through
+`CustomEventFrame` passthrough is also handled outside the mapper chain as AG-UI `CustomEvent` with `name`/`value` copied through.
 
 The adapter also emits lifecycle events automatically: `RunStarted` at the beginning, `RunFinished` at the end (or `RunError` on exception).
 

@@ -24,7 +24,9 @@ from langgraph_events._graph import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,
+    StateSnapshotFrame,
     StreamFrame,
+    StreamItem,
 )
 
 from ._context import MapperContext
@@ -54,7 +56,6 @@ if TYPE_CHECKING:
 
     from ag_ui.core import RunAgentInput
 
-    from langgraph_events._event import Event
     from langgraph_events._graph import EventGraph
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
@@ -257,9 +258,7 @@ class AGUIAdapter:
         checkpoint_state: CheckpointState | None,
         resume_event: Any,
         config: Any,
-    ) -> AsyncIterator[
-        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
-    ]:
+    ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream."""
         if resume_event is not None:
             return self._graph.astream_resume(
@@ -411,15 +410,14 @@ class AGUIAdapter:
             elif isinstance(item, LLMStreamEnd):
                 for agui_event in self._events_from_llm_stream_end(item, ctx):
                     yield agui_event
+            elif isinstance(item, StateSnapshotFrame):
+                yield build_state_snapshot(item.data)
             elif isinstance(item, CustomEventFrame):
-                if item.name == "intermediate_state":
-                    yield build_state_snapshot(item.data)
-                else:
-                    yield CustomEvent(
-                        type=EventType.CUSTOM,
-                        name=item.name,
-                        value=item.data,
-                    )
+                yield CustomEvent(
+                    type=EventType.CUSTOM,
+                    name=item.name,
+                    value=item.data,
+                )
             elif isinstance(item, StreamFrame):
                 agui_events, next_message_ids, emitted_interrupt = (
                     self._events_from_stream_frame(

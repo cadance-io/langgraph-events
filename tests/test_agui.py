@@ -1304,8 +1304,8 @@ def describe_config_passthrough():
 
 
 def describe_custom_event_passthrough():
-    async def it_maps_intermediate_state_to_state_snapshot(monkeypatch):
-        from langgraph_events._graph import CustomEventFrame
+    async def it_maps_state_snapshot_frame_to_state_snapshot(monkeypatch):
+        from langgraph_events._graph import StateSnapshotFrame
 
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
@@ -1336,10 +1336,7 @@ def describe_custom_event_passthrough():
                 include_custom_events,
                 config,
             )
-            yield CustomEventFrame(
-                name="intermediate_state",
-                data={"messages": [], "step": "draft"},
-            )
+            yield StateSnapshotFrame(data={"messages": [], "step": "draft"})
 
         monkeypatch.setattr(graph, "astream_events", fake_astream_events)
 
@@ -1356,6 +1353,53 @@ def describe_custom_event_passthrough():
         assert calls[0]["include_custom_events"] is True
         assert len(snapshots) == 1
         assert snapshots[0].snapshot == {"messages": [], "step": "draft"}
+
+    async def it_passes_intermediate_state_custom_event_frame_through(monkeypatch):
+        from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
+        from langgraph_events._graph import CustomEventFrame
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply])
+
+        async def fake_astream_events(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            del (
+                seed,
+                include_reducers,
+                include_llm_tokens,
+                include_custom_events,
+                config,
+            )
+            yield CustomEventFrame(
+                name=STATE_SNAPSHOT_EVENT_NAME,
+                data={"messages": [], "step": "draft"},
+            )
+
+        monkeypatch.setattr(graph, "astream_events", fake_astream_events)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+
+        events = await _collect(adapter, _make_input())
+        custom_events = [
+            e
+            for e in events
+            if e.type == EventType.CUSTOM and e.name == STATE_SNAPSHOT_EVENT_NAME
+        ]
+
+        assert len(custom_events) == 1
+        assert custom_events[0].value == {"messages": [], "step": "draft"}
 
     async def it_maps_custom_event_frame_to_custom_event(monkeypatch):
         from langgraph_events._graph import CustomEventFrame

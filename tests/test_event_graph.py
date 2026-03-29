@@ -10,6 +10,7 @@ from langchain_core.messages import (
 )
 
 from langgraph_events import (
+    STATE_SNAPSHOT_EVENT_NAME,
     Event,
     EventGraph,
     EventLog,
@@ -20,10 +21,13 @@ from langgraph_events import (
     Resumed,
     ScalarReducer,
     Scatter,
+    StateSnapshotFrame,
     StreamFrame,
     SystemPromptSet,
     aemit_custom,
+    aemit_state_snapshot,
     emit_custom,
+    emit_state_snapshot,
     message_reducer,
     on,
 )
@@ -2719,14 +2723,63 @@ def describe_EventGraph():
                 assert custom_frames[0].name == "tool.progress"
                 assert custom_frames[0].data == {"pct": 80}
 
+            @pytest.mark.asyncio
+            async def it_emits_state_snapshot_frames_from_sync_handler():
+                @on(Started)
+                def step(event: Started) -> Ended:
+                    emit_state_snapshot({"step": "draft"})
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                items = [
+                    item
+                    async for item in graph.astream_events(
+                        Started(data="hello"),
+                        include_custom_events=True,
+                    )
+                ]
+
+                snapshots = [i for i in items if isinstance(i, StateSnapshotFrame)]
+                assert len(snapshots) == 1
+                assert snapshots[0].data == {"step": "draft"}
+
+            @pytest.mark.asyncio
+            async def it_emits_state_snapshot_frames_from_async_handler():
+                @on(Started)
+                async def step(event: Started) -> Ended:
+                    await aemit_state_snapshot({"step": "review"})
+                    return Ended(result=event.data)
+
+                graph = EventGraph([step])
+                items = [
+                    item
+                    async for item in graph.astream_events(
+                        Started(data="hello"),
+                        include_custom_events=True,
+                    )
+                ]
+
+                snapshots = [i for i in items if isinstance(i, StateSnapshotFrame)]
+                assert len(snapshots) == 1
+                assert snapshots[0].data == {"step": "review"}
+
             def it_raises_for_emit_custom_outside_handler():
                 with pytest.raises(RuntimeError, match="while an EventGraph handler"):
                     emit_custom("tool.progress", {"pct": 1})
+
+            def it_raises_for_emit_state_snapshot_outside_handler():
+                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
+                    emit_state_snapshot({"step": "x"})
 
             @pytest.mark.asyncio
             async def it_raises_for_aemit_custom_outside_handler():
                 with pytest.raises(RuntimeError, match="while an EventGraph handler"):
                     await aemit_custom("tool.progress", {"pct": 1})
+
+            @pytest.mark.asyncio
+            async def it_raises_for_aemit_state_snapshot_outside_handler():
+                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
+                    await aemit_state_snapshot({"step": "x"})
 
         @pytest.mark.asyncio
         async def it_yields_llm_token_and_stream_end_frames():
@@ -2864,7 +2917,7 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_yields_custom_event_frames_from_v2_custom_events(monkeypatch):
-            from langgraph_events._graph import CustomEventFrame
+            from langgraph_events._graph import CustomEventFrame, StateSnapshotFrame
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -2878,6 +2931,11 @@ def describe_EventGraph():
                     "event": "on_custom_event",
                     "name": "progress",
                     "data": {"pct": 50},
+                }
+                yield {
+                    "event": "on_custom_event",
+                    "name": STATE_SNAPSHOT_EVENT_NAME,
+                    "data": {"step": "draft"},
                 }
 
             monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
@@ -2895,6 +2953,10 @@ def describe_EventGraph():
             assert len(custom_frames) == 1
             assert custom_frames[0].name == "progress"
             assert custom_frames[0].data == {"pct": 50}
+
+            snapshots = [i for i in items if isinstance(i, StateSnapshotFrame)]
+            assert len(snapshots) == 1
+            assert snapshots[0].data == {"step": "draft"}
 
         @pytest.mark.asyncio
         async def it_does_not_yield_custom_event_frames_by_default(monkeypatch):
