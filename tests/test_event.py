@@ -204,7 +204,7 @@ def describe_MessageEvent():
             assert len(result) == 1
             assert result[0].content == "hello"
 
-    def when_ai_message_with_tool_calls():
+    def when_ai_message_has_tool_calls():
 
         def it_preserves_tool_calls():
             class LLMResponse(MessageEvent):

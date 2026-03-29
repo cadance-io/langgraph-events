@@ -229,9 +229,7 @@ class AGUIAdapter:
 
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
         yield build_state_snapshot(reducers)
-        messages = reducers.get("messages")
-        if messages is not None:
-            yield build_messages_snapshot(messages)
+        yield build_messages_snapshot(reducers.get("messages") or [])
 
         for interrupted in self._interrupts_from_snapshot(snapshot):
             for agui_event in self._map_event(interrupted, ctx):

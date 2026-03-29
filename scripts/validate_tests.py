@@ -34,20 +34,19 @@ _CONDITION_INFIXES = ("_when_", "_with_", "_without_")
 
 def _check_embedded_conditions(func, filepath: Path) -> list[str]:
     """Flag test/describe names embedding condition keywords."""
-    if func.name.startswith(("when_", "with_", "without_", "given_")):
-        return []  # already a condition block
     for infix in _CONDITION_INFIXES:
         if infix in func.name:
             keyword = infix.strip("_")
             return [
                 f"{filepath}:{func.lineno} - '{func.name}' embeds "
                 f"'{infix}' in its name. Extract the condition "
-                f"into a nested {keyword}_ block instead."
+                f"into a nested {keyword}_* block instead. "
+                f"Do not rephrase with conjunctions like 'and'."
             ]
     return []
 
 
-def _validate_module_level(tree: ast.AST, filepath: Path) -> list[str]:
+def _validate_module_level(tree: ast.Module, filepath: Path) -> list[str]:
     """Validate module-level test structure.
 
     At module level, we expect:
@@ -73,7 +72,6 @@ def _validate_module_level(tree: ast.AST, filepath: Path) -> list[str]:
         )
 
     for describe_func in children["describe"]:
-        violations.extend(_check_embedded_conditions(describe_func, filepath))
         violations.extend(_validate_describe_block(describe_func, filepath))
 
     return violations
@@ -157,23 +155,36 @@ def _validate_when_block(when_func, filepath: Path) -> list[str]:
     return violations
 
 
-def _validate_child_funcs(children, filepath, *, skip=frozenset()):
+def _validate_child_funcs(
+    children,
+    filepath,
+    *,
+    skip: set[str] | frozenset[str] = frozenset(),
+):
     violations = []
     for func in children.get("when", []):
         if "when" not in skip:
-            violations.extend(_check_embedded_conditions(func, filepath))
             violations.extend(_validate_when_block(func, filepath))
     for func in children.get("given", []):
         if "given" not in skip:
             violations.extend(_validate_given_block(func, filepath))
     for func in children.get("describe", []):
         if "describe" not in skip:
-            violations.extend(_check_embedded_conditions(func, filepath))
             violations.extend(_validate_describe_block(func, filepath))
     for func in children.get("test", []):
         if "test" not in skip:
-            violations.extend(_check_embedded_conditions(func, filepath))
             violations.extend(_validate_test_function(func, filepath))
+    return violations
+
+
+def _validate_embedded_conditions_everywhere(
+    tree: ast.AST,
+    filepath: Path,
+) -> list[str]:
+    violations = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            violations.extend(_check_embedded_conditions(node, filepath))
     return violations
 
 
@@ -210,6 +221,9 @@ def validate_directory(path: Path) -> int:
 
         tree = _parse_file(test_file)
         if tree is not None:
+            all_violations.extend(
+                _validate_embedded_conditions_everywhere(tree, test_file)
+            )
             all_violations.extend(_validate_module_level(tree, test_file))
 
     if all_violations:

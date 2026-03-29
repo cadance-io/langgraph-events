@@ -1528,7 +1528,7 @@ def describe_EventGraph():
                 log = graph.invoke(Triggered())
                 assert log.latest(ResultProduced) == ResultProduced(got="fallback")
 
-        def when_mixed_with_list_reducers():
+        def when_mixed_list_reducers():
 
             def it_works_alongside_list_reducers():
                 class Triggered(Event):
