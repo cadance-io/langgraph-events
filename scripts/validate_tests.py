@@ -40,7 +40,8 @@ def _check_embedded_conditions(func, filepath: Path) -> list[str]:
             return [
                 f"{filepath}:{func.lineno} - '{func.name}' embeds "
                 f"'{infix}' in its name. Extract the condition "
-                f"into a nested {keyword}_ block instead."
+                f"into a nested {keyword}_* block instead. "
+                f"Do not rephrase with conjunctions like 'and'."
             ]
     return []
 
