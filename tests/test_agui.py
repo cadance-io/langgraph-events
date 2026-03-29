@@ -242,7 +242,7 @@ def describe_AGUIAdapter():
 
             async def it_maps_mixed_ai_and_tool_messages():
                 @on(UserAsked)
-                def reply_with_tool_result(event: UserAsked) -> AgentAndToolMessages:
+                def reply_tool_result(event: UserAsked) -> AgentAndToolMessages:
                     return AgentAndToolMessages(
                         messages=(
                             AIMessage(content="I used a tool"),
@@ -250,7 +250,7 @@ def describe_AGUIAdapter():
                         )
                     )
 
-                graph = EventGraph([reply_with_tool_result])
+                graph = EventGraph([reply_tool_result])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="mixed"),
@@ -916,7 +916,7 @@ def describe_AGUIAdapter():
                 config = {"configurable": {"thread_id": "t-resume-state"}}
                 await graph.ainvoke(UserAsked(question="go"), config=config)
 
-                def resume_with_state(
+                def resume_state(
                     input_data: RunAgentInput,
                     checkpoint_state: dict[str, Any] | None,
                 ) -> Event | None:
@@ -927,7 +927,7 @@ def describe_AGUIAdapter():
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="unused"),
-                    resume_factory=resume_with_state,
+                    resume_factory=resume_state,
                 )
                 events = await _collect(
                     adapter, _make_input(thread_id="t-resume-state")
@@ -941,7 +941,7 @@ def describe_AGUIAdapter():
                 assert len(seen_state["pending_interrupts"]) == 1
 
     def describe_init():
-        def when_resume_factory_without_checkpointer():
+        def when_resume_factory_missing_checkpointer():
             def it_raises():
                 @on(UserAsked)
                 def reply(event: UserAsked) -> AgentReplied:
@@ -1117,7 +1117,7 @@ def describe_connect():
             assert len(interrupted) == 1
             assert interrupted[0].value["draft"] == "pending"
 
-    def when_new_thread_with_checkpointer():
+    def when_new_thread_and_checkpointer():
 
         async def it_emits_empty_snapshots():
             @on(UserAsked)
