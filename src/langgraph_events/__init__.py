@@ -1,6 +1,12 @@
 """langgraph-events — Opinionated event-driven abstraction for LangGraph."""
 
-from langgraph_events._custom_event import aemit_custom, emit_custom
+from langgraph_events._custom_event import (
+    STATE_SNAPSHOT_EVENT_NAME,
+    aemit_custom,
+    aemit_state_snapshot,
+    emit_custom,
+    emit_state_snapshot,
+)
 from langgraph_events._event import (
     Auditable,
     Event,
@@ -18,6 +24,7 @@ from langgraph_events._graph import (
     GraphState,
     LLMStreamEnd,
     LLMToken,
+    StateSnapshotFrame,
     StreamFrame,
 )
 from langgraph_events._handler import on
@@ -27,6 +34,7 @@ from langgraph_events._types import (
 )
 
 __all__ = [
+    "STATE_SNAPSHOT_EVENT_NAME",
     "Auditable",
     "CustomEventFrame",
     "Event",
@@ -42,10 +50,13 @@ __all__ = [
     "Resumed",
     "ScalarReducer",
     "Scatter",
+    "StateSnapshotFrame",
     "StreamFrame",
     "SystemPromptSet",
     "aemit_custom",
+    "aemit_state_snapshot",
     "emit_custom",
+    "emit_state_snapshot",
     "message_reducer",
     "on",
 ]

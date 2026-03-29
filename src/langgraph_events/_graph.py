@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import typing
 import warnings
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict
+from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 
+from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import Event, Interrupted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta, extract_handler_meta
@@ -126,6 +127,28 @@ class CustomEventFrame(NamedTuple):
 
     name: str
     data: Any
+
+
+class StateSnapshotFrame(NamedTuple):
+    """A typed state snapshot custom frame emitted from v2 stream events."""
+
+    data: dict[str, Any]
+
+
+StreamItem = (
+    Event
+    | StreamFrame
+    | LLMToken
+    | LLMStreamEnd
+    | CustomEventFrame
+    | StateSnapshotFrame
+)
+
+
+def _coerce_snapshot_data(data: Any) -> dict[str, Any]:
+    if isinstance(data, dict):
+        return cast("dict[str, Any]", data)
+    return {}
 
 
 class EventGraph:
@@ -320,7 +343,8 @@ class EventGraph:
             reducer_fields: dict[str, Any] = {"events": list[Event]}
             for name, r in self._reducers.items():
                 reducer_fields[name] = r.output_type()
-            out_schema = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc,no-redef]
+            _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
+            out_schema = _OutputWithReducers
 
         graph: StateGraph[Any] = StateGraph(
             state_schema,
@@ -333,13 +357,13 @@ class EventGraph:
         router_node = make_router_node(self._max_rounds)
         dispatch_fn = make_dispatch(self._handler_metas)
 
-        graph.add_node("__seed__", seed_node)  # type: ignore[call-overload]
-        graph.add_node("__router__", router_node)  # type: ignore[call-overload]
+        graph.add_node("__seed__", cast("Any", seed_node))
+        graph.add_node("__router__", cast("Any", router_node))
 
         handler_names: list[str] = []
         for meta in self._handler_metas:
             handler_node = make_handler_node(meta, reducers=self._reducers)
-            graph.add_node(meta.name, handler_node)
+            graph.add_node(meta.name, cast("Any", handler_node))
             handler_names.append(meta.name)
 
         # --- edges ---
@@ -476,8 +500,9 @@ class EventGraph:
             r = self._reducers[name]
             contribution = r.collect([event])
             if r.has_contributions(contribution):
-                if hasattr(r, "reducer"):
-                    state[name] = r.reducer(state[name], contribution)
+                reducer_fn = getattr(r, "reducer", None)
+                if callable(reducer_fn):
+                    state[name] = reducer_fn(state[name], contribution)
                 else:
                     state[name] = contribution
 
@@ -539,9 +564,7 @@ class EventGraph:
         include_llm_tokens: bool,
         include_custom_events: bool,
         **kwargs: Any,
-    ) -> AsyncIterator[
-        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
-    ]:
+    ) -> AsyncIterator[StreamItem]:
         """Stream events using LangGraph's v2 event API with LLM token support."""
         compiled = self._compile()
 
@@ -590,10 +613,15 @@ class EventGraph:
             if raw_event == "on_custom_event":
                 if not include_custom_events:
                     continue
-                yield CustomEventFrame(
-                    name=raw.get("name", ""),
-                    data=raw.get("data"),
-                )
+                if raw.get("name", "") == STATE_SNAPSHOT_EVENT_NAME:
+                    yield StateSnapshotFrame(
+                        data=_coerce_snapshot_data(raw.get("data")),
+                    )
+                else:
+                    yield CustomEventFrame(
+                        name=raw.get("name", ""),
+                        data=raw.get("data"),
+                    )
                 continue
 
             if raw_event != "on_chain_stream" or raw.get("name") != "LangGraph":
@@ -720,9 +748,7 @@ class EventGraph:
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[
-        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
-    ]:
+    ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_resume()``.
 
         Streaming equivalent of ``aresume()`` — accepts a domain ``Event``,
@@ -736,7 +762,8 @@ class EventGraph:
             include_llm_tokens: When True, yields ``LLMToken`` and
                 ``LLMStreamEnd`` frames for LLM token-level streaming.
             include_custom_events: When True, yields ``CustomEventFrame``
-                frames for ``on_custom_event`` payloads from LangGraph.
+                and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
+                from LangGraph.
         """
         self._require_checkpointer("astream_resume")
         from langgraph.types import Command  # noqa: PLC0415
@@ -768,9 +795,7 @@ class EventGraph:
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
         **kwargs: Any,
-    ) -> AsyncIterator[
-        Event | StreamFrame | LLMToken | LLMStreamEnd | CustomEventFrame
-    ]:
+    ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_events()``.
 
         Args:
@@ -781,7 +806,8 @@ class EventGraph:
             include_llm_tokens: When True, yields ``LLMToken`` and
                 ``LLMStreamEnd`` frames for LLM token-level streaming.
             include_custom_events: When True, yields ``CustomEventFrame``
-                frames for ``on_custom_event`` payloads from LangGraph.
+                and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
+                from LangGraph.
         """
         inp = self._prepare_input(seed)
         seeds = inp["events"]

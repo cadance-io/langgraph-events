@@ -10,6 +10,8 @@ from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from typing import Any
 
+STATE_SNAPSHOT_EVENT_NAME = "intermediate_state"
+
 _SyncEmitter = Callable[[str, Any], None]
 _AsyncEmitter = Callable[[str, Any], Awaitable[None]]
 
@@ -47,7 +49,8 @@ def _require_sync_emitter() -> _SyncEmitter:
     emitter = _SYNC_EMITTER.get()
     if emitter is None:
         raise RuntimeError(
-            "emit_custom() can only be called while an EventGraph handler is running."
+            "Custom emission helpers can only be called while an EventGraph "
+            "handler is running."
         )
     return emitter
 
@@ -56,7 +59,8 @@ def _require_async_emitter() -> _AsyncEmitter:
     emitter = _ASYNC_EMITTER.get()
     if emitter is None:
         raise RuntimeError(
-            "aemit_custom() can only be called while an EventGraph handler is running."
+            "Custom emission helpers can only be called while an EventGraph "
+            "handler is running."
         )
     return emitter
 
@@ -73,3 +77,13 @@ def emit_custom(name: str, data: Any) -> None:
 async def aemit_custom(name: str, data: Any) -> None:
     """Async variant of ``emit_custom`` for async handlers."""
     await _require_async_emitter()(name, data)
+
+
+def emit_state_snapshot(data: dict[str, Any]) -> None:
+    """Emit a typed state snapshot frame from inside a handler."""
+    _require_sync_emitter()(STATE_SNAPSHOT_EVENT_NAME, data)
+
+
+async def aemit_state_snapshot(data: dict[str, Any]) -> None:
+    """Async variant of ``emit_state_snapshot`` for async handlers."""
+    await _require_async_emitter()(STATE_SNAPSHOT_EVENT_NAME, data)
