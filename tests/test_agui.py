@@ -1117,6 +1117,35 @@ def describe_connect():
             assert len(interrupted) == 1
             assert interrupted[0].value["draft"] == "pending"
 
+    def when_new_thread_with_checkpointer():
+
+        async def it_emits_empty_snapshots():
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer()],
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="unused"),
+            )
+
+            events = [
+                event
+                async for event in adapter.connect(
+                    _make_input(thread_id="brand-new-thread")
+                )
+            ]
+            assert len(events) == 2
+            assert events[0].type == EventType.STATE_SNAPSHOT
+            assert events[0].snapshot == {}
+            assert events[1].type == EventType.MESSAGES_SNAPSHOT
+            assert events[1].messages == []
+
     def when_no_checkpointer():
 
         async def it_emits_empty_snapshots():
