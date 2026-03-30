@@ -42,6 +42,7 @@ class MapperContext:
         default_factory=set,
         repr=False,
     )
+    snapshot_mode: bool = dataclasses.field(default=False, repr=False)
 
     def next_message_id(self) -> str:
         """Return a monotonically increasing message ID for this stream."""
