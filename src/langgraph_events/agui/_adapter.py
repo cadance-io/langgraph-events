@@ -311,6 +311,8 @@ class AGUIAdapter:
         closed_id = ctx.close_stream_message_id(item.run_id)
         if closed_id is None:
             return []
+        if item.message_id:
+            ctx.record_lc_to_stream_id(item.message_id, closed_id)
         return [
             TextMessageEndEvent(
                 type=EventType.TEXT_MESSAGE_END,
@@ -340,7 +342,9 @@ class AGUIAdapter:
             )
             if changed:
                 next_message_ids = tuple(getattr(m, "id", id(m)) for m in messages)
-                events.append(build_messages_snapshot(messages))
+                events.append(
+                    build_messages_snapshot(messages, id_overrides=ctx.lc_id_overrides)
+                )
 
         events.extend(self._map_event(event, ctx))
         return events, next_message_ids, self._is_interrupt(event)

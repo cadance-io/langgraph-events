@@ -31,6 +31,10 @@ class MapperContext:
         default_factory=set,
         repr=False,
     )
+    _lc_to_stream_id: dict[str, str] = dataclasses.field(
+        default_factory=dict,
+        repr=False,
+    )
 
     def next_message_id(self) -> str:
         """Return a monotonically increasing message ID for this stream."""
@@ -70,6 +74,15 @@ class MapperContext:
             self._stream_message_ids.pop(run_id, None)
         self._open_stream_runs.clear()
         return message_ids
+
+    def record_lc_to_stream_id(self, lc_message_id: str, stream_id: str) -> None:
+        """Map a LangChain message ID to its AG-UI streaming message ID."""
+        self._lc_to_stream_id[lc_message_id] = stream_id
+
+    @property
+    def lc_id_overrides(self) -> dict[str, str]:
+        """LangChain message ID -> AG-UI streaming ID overrides."""
+        return self._lc_to_stream_id
 
     def mark_streamed_ai_message(self, message_id: str) -> None:
         """Remember a LangChain AI message id that was token-streamed."""
