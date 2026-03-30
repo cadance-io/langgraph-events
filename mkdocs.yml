@@ -1,0 +1,25 @@
+site_name: langgraph-events
+site_description: Event-driven abstraction for LangGraph
+site_url: https://cadance-io.github.io/langgraph-events/
+repo_url: https://github.com/cadance-io/langgraph-events
+repo_name: cadance-io/langgraph-events
+
+theme:
+  name: material
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Concepts: concepts.md
+  - Patterns: patterns.md
+  - API Reference: api.md
+  - AG-UI Adapter: agui.md
+  - Checkpointer & Graph Evolution: checkpointer-evolution.md
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
