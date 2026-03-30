@@ -315,6 +315,7 @@ class AGUIAdapter:
     ) -> list[BaseEvent]:
         if item.message_id:
             ctx.mark_streamed_ai_message(item.message_id)
+            ctx.mark_emitted_message(item.message_id)
         closed_id = ctx.close_stream_message_id(item.run_id)
         if closed_id is None:
             return []

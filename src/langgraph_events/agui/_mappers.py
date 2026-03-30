@@ -152,7 +152,10 @@ class MessageEventMapper:
 
         result: list[BaseEvent] = []
         for msg in ai_messages:
-            if ctx.was_streamed_ai_message(getattr(msg, "id", None)):
+            lc_msg_id = getattr(msg, "id", None)
+            if ctx.was_streamed_ai_message(lc_msg_id):
+                continue
+            if ctx.was_emitted_message(lc_msg_id):
                 continue
             msg_id = ctx.next_message_id()
 
@@ -209,7 +212,13 @@ class MessageEventMapper:
                         )
                     )
 
+            if lc_msg_id:
+                ctx.mark_emitted_message(lc_msg_id)
+
         for msg in tool_messages:
+            lc_msg_id = getattr(msg, "id", None)
+            if ctx.was_emitted_message(lc_msg_id):
+                continue
             result.append(
                 ToolCallResultEvent(
                     type=EventType.TOOL_CALL_RESULT,
@@ -219,6 +228,8 @@ class MessageEventMapper:
                     role="tool",
                 )
             )
+            if lc_msg_id:
+                ctx.mark_emitted_message(lc_msg_id)
 
         return result
 

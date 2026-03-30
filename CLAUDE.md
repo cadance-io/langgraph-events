@@ -21,4 +21,4 @@ Event-driven abstraction for LangGraph. State IS events.
 - Use `uv` to run all tooling (not bare `python` or `pytest`)
 - Ruff for linting and formatting (config in pyproject.toml)
 - mypy strict mode
-- Tests: `describe_` groups by API surface, `when_` mirrors code branches, `it_` names the assertion. Test each behavior once at the API boundary where it's consumed. Shared event classes in `conftest.py`; scenario-specific events inline.
+- Tests: `describe_` groups by API surface, `when_` mirrors code branches, `it_` names the assertion. Test each behavior once at the API boundary where it's consumed. Shared event classes in `conftest.py`; scenario-specific events inline. Event classes used as handler type annotations must be defined at module level (not inside `describe_`/`when_` blocks) so Python can resolve forward references at runtime.

@@ -38,6 +38,10 @@ class MapperContext:
         default_factory=dict,
         repr=False,
     )
+    _emitted_message_ids: set[str] = dataclasses.field(
+        default_factory=set,
+        repr=False,
+    )
 
     def next_message_id(self) -> str:
         """Return a monotonically increasing message ID for this stream."""
@@ -86,6 +90,16 @@ class MapperContext:
     def lc_id_overrides(self) -> Mapping[str, str]:
         """LangChain message ID -> AG-UI streaming ID overrides (read-only)."""
         return MappingProxyType(self._lc_to_stream_id)
+
+    def mark_emitted_message(self, message_id: str) -> None:
+        """Remember a LangChain message id emitted by MessageEventMapper."""
+        self._emitted_message_ids.add(message_id)
+
+    def was_emitted_message(self, message_id: str | None) -> bool:
+        """Whether this LangChain message id was already emitted by a mapper."""
+        if not message_id:
+            return False
+        return message_id in self._emitted_message_ids
 
     def mark_streamed_ai_message(self, message_id: str) -> None:
         """Remember a LangChain AI message id that was token-streamed."""
