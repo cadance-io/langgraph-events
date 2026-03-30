@@ -91,6 +91,14 @@ class ApprovalGiven(Event):
         return {"approved": self.approved}
 
 
+class PhaseA(MessageEvent):
+    messages: tuple[Any, ...] = ()
+
+
+class PhaseB(MessageEvent):
+    messages: tuple[Any, ...] = ()
+
+
 class ErrorTrigger(Event):
     def agui_dict(self) -> dict[str, Any]:
         return {}
@@ -1893,6 +1901,126 @@ def describe_ai_message_dedup():
         starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
         # Exactly one start — from streaming, not doubled by mapper
         assert len(starts) == 1
+
+
+def describe_message_event_dedup():
+    """Multiple MessageEvents carrying the same AI message must not duplicate."""
+
+    def when_same_ai_id_across_events():
+        async def it_emits_text_message_start_once():
+            shared_ai = AIMessage(content="hello", id="ai-shared")
+
+            @on(UserAsked)
+            def step1(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(shared_ai,))
+
+            @on(PhaseA)
+            def step2(event: PhaseA) -> PhaseB:
+                return PhaseB(messages=(shared_ai,))
+
+            graph = EventGraph([step1, step2])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 1
+
+    def when_streamed_ai_reappears_via_message_event():
+        async def it_does_not_reemit():
+            llm = FakeListChatModel(responses=["streamed"], sleep=0)
+
+            @on(UserAsked)
+            async def stream_then_wrap(
+                event: UserAsked,
+                messages: list[Any],
+            ) -> PhaseA:
+                response = await llm.ainvoke(
+                    [*messages, HumanMessage(content=event.question)]
+                )
+                return PhaseA(messages=(response,))
+
+            graph = EventGraph([stream_then_wrap], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+                include_reducers=True,
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 1
+
+    def without_message_ids():
+        async def it_emits_both_because_dedup_cannot_apply():
+            no_id = AIMessage(content="no id", id=None)
+
+            @on(UserAsked)
+            def step1(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(no_id,))
+
+            @on(PhaseA)
+            def step2(event: PhaseA) -> PhaseB:
+                return PhaseB(messages=(no_id,))
+
+            graph = EventGraph([step1, step2])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 2
+
+    def when_distinct_ai_ids_across_events():
+        async def it_emits_both():
+            ai1 = AIMessage(content="first", id="ai-1")
+            ai2 = AIMessage(content="second", id="ai-2")
+
+            @on(UserAsked)
+            def step1(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(ai1,))
+
+            @on(PhaseA)
+            def step2(event: PhaseA) -> PhaseB:
+                return PhaseB(messages=(ai2,))
+
+            graph = EventGraph([step1, step2])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 2
+
+    def when_same_tool_message_id_across_events():
+        async def it_emits_tool_call_result_once():
+            shared_tool = ToolMessage(
+                content="result", tool_call_id="tc-1", id="tool-shared"
+            )
+
+            @on(UserAsked)
+            def step1(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(shared_tool,))
+
+            @on(PhaseA)
+            def step2(event: PhaseA) -> PhaseB:
+                return PhaseB(messages=(shared_tool,))
+
+            graph = EventGraph([step1, step2])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            results = [e for e in events if e.type == EventType.TOOL_CALL_RESULT]
+            assert len(results) == 1
 
 
 def describe_llm_streaming_on_resume():
