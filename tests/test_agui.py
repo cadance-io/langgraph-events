@@ -59,6 +59,17 @@ class AgentAndToolMessages(MessageEvent):
     messages: tuple[Any, ...] = ()
 
 
+class UserSent(MessageEvent):
+    message: HumanMessage = None  # type: ignore[assignment]
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"content": self.message.content if self.message else ""}
+
+
+class FollowUpReply(MessageEvent):
+    message: AIMessage = None  # type: ignore[assignment]
+
+
 class TaskCreated(Event):
     title: str = ""
 
@@ -1922,3 +1933,180 @@ def describe_MapperContext():
         second_id, is_new_second = ctx.ensure_stream_message_id("llm-run")
         assert is_new_second is True
         assert second_id == "msg-2"
+
+    def it_records_lc_to_stream_id_mapping():
+        ctx = MapperContext(
+            run_id="r1",
+            thread_id="t1",
+            input_data=_make_input(),
+        )
+        ctx.record_lc_to_stream_id("lc-run-123", "msg-1")
+        ctx.record_lc_to_stream_id("lc-run-456", "msg-2")
+        assert ctx.lc_id_overrides == {
+            "lc-run-123": "msg-1",
+            "lc-run-456": "msg-2",
+        }
+
+
+def describe_streaming_id_reconciliation():
+    """Snapshot message IDs must match streaming event IDs."""
+
+    async def it_uses_streaming_ids_in_messages_snapshot():
+        """AI message ID in MessagesSnapshot must match TextMessageStart ID."""
+        llm = FakeListChatModel(responses=["reconcile me"], sleep=0)
+
+        @on(UserAsked)
+        async def stream_reply(
+            event: UserAsked,
+            messages: list[Any],
+        ) -> AgentReplied:
+            response = await llm.ainvoke(
+                [*messages, HumanMessage(content=event.question)]
+            )
+            return AgentReplied(message=response)
+
+        graph = EventGraph([stream_reply], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input())
+
+        starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+        assert len(starts) == 1
+        stream_msg_id = starts[0].message_id
+
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+        assert len(msg_snapshots) >= 1
+        last_snap = msg_snapshots[-1]
+        ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+        assert len(ai_msgs) >= 1
+        # Key assertion: snapshot ID matches streaming ID
+        assert ai_msgs[-1].id == stream_msg_id
+
+    async def it_preserves_non_streamed_message_ids():
+        """Human messages in snapshot keep their LangChain IDs."""
+        llm = FakeListChatModel(responses=["reply"], sleep=0)
+
+        @on(UserSent)
+        async def stream_reply(
+            event: UserSent,
+            messages: list[Any],
+        ) -> AgentReplied:
+            response = await llm.ainvoke(messages)
+            return AgentReplied(message=response)
+
+        graph = EventGraph([stream_reply], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserSent(
+                message=HumanMessage(content="hello", id="human-1")
+            ),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input())
+
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+        assert len(msg_snapshots) >= 1
+        last_snap = msg_snapshots[-1]
+
+        human_msgs = [m for m in last_snap.messages if m.role == "user"]
+        assert len(human_msgs) >= 1
+        # Human message keeps its original LangChain ID
+        assert human_msgs[0].id == "human-1"
+
+        # AI message uses the streaming ID, not LangChain's
+        stream_msg_id = next(
+            e for e in events if e.type == EventType.TEXT_MESSAGE_START
+        ).message_id
+        ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+        assert len(ai_msgs) >= 1
+        assert ai_msgs[-1].id == stream_msg_id
+
+    async def it_reconciles_ids_across_multiple_llm_calls():
+        """Each streamed AI message gets its own consistent ID mapping."""
+        llm = FakeListChatModel(responses=["first reply", "second reply"], sleep=0)
+
+        @on(UserAsked)
+        async def first_reply(
+            event: UserAsked,
+            messages: list[Any],
+        ) -> AgentReplied:
+            response = await llm.ainvoke(
+                [*messages, HumanMessage(content=event.question)]
+            )
+            return AgentReplied(message=response)
+
+        @on(AgentReplied)
+        async def second_reply(
+            event: AgentReplied,
+            messages: list[Any],
+        ) -> FollowUpReply:
+            response = await llm.ainvoke([*messages, HumanMessage(content="follow up")])
+            return FollowUpReply(message=response)
+
+        graph = EventGraph([first_reply, second_reply], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input())
+
+        starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+        assert len(starts) == 2
+        stream_id_1 = starts[0].message_id
+        stream_id_2 = starts[1].message_id
+
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+        assert len(msg_snapshots) >= 1
+        last_snap = msg_snapshots[-1]
+        ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+        assert len(ai_msgs) == 2
+        assert ai_msgs[0].id == stream_id_1
+        assert ai_msgs[1].id == stream_id_2
+
+    async def it_records_mapping_before_snapshot_containing_ai_message():
+        """LLMStreamEnd must precede the StreamFrame that carries the AI message.
+
+        This guarantees the LC->stream ID mapping is recorded before the
+        snapshot is built.  If this ordering invariant ever breaks, the
+        snapshot would carry a stale LangChain ID.
+        """
+        llm = FakeListChatModel(responses=["ordering check"], sleep=0)
+
+        @on(UserAsked)
+        async def stream_reply(
+            event: UserAsked,
+            messages: list[Any],
+        ) -> AgentReplied:
+            response = await llm.ainvoke(
+                [*messages, HumanMessage(content=event.question)]
+            )
+            return AgentReplied(message=response)
+
+        graph = EventGraph([stream_reply], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input())
+
+        # Find positions: TEXT_MESSAGE_END (emitted from LLMStreamEnd) must
+        # appear before the first MESSAGES_SNAPSHOT that contains an assistant.
+        end_idx = next(
+            i for i, e in enumerate(events) if e.type == EventType.TEXT_MESSAGE_END
+        )
+        snap_indices = [
+            i
+            for i, e in enumerate(events)
+            if e.type == EventType.MESSAGES_SNAPSHOT
+            and any(m.role == "assistant" for m in e.messages)
+        ]
+        assert snap_indices, "Expected at least one snapshot with an assistant message"
+        assert end_idx < snap_indices[0], (
+            "TextMessageEnd (from LLMStreamEnd) must precede the first "
+            "MessagesSnapshot containing the AI message"
+        )
