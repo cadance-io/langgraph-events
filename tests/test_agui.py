@@ -2332,3 +2332,35 @@ def describe_non_streamed_id_reconciliation():
             ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
             snapshot_ids = {m.id for m in ai_msgs}
             assert snapshot_ids == text_ids
+
+    def when_ai_message_has_no_content_or_tool_calls():
+        async def it_does_not_create_orphan_id_override():
+            """Empty AI message must not register an override."""
+            empty_ai = AIMessage(content="", id="lc-empty")
+
+            @on(UserAsked)
+            def emit(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(empty_ai,))
+
+            graph = EventGraph([emit], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+                include_reducers=True,
+            )
+            events = await _collect(adapter, _make_input())
+
+            # No TextMessageStart should have been emitted
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 0
+
+            # Snapshot should keep the original LC ID, not rewrite to an orphan msg-*
+            snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            assert len(snapshots) >= 1
+            last_snap = snapshots[-1]
+            ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+            for m in ai_msgs:
+                assert not m.id.startswith("msg-"), (
+                    f"Orphan override: snapshot rewrote to {m.id} with no "
+                    f"corresponding TextMessageStart"
+                )
