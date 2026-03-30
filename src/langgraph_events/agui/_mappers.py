@@ -32,8 +32,6 @@ from langgraph_events._event import (
 from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from ag_ui.core import Message
 
     from ._context import MapperContext
@@ -55,8 +53,6 @@ def _warn_missing_agui_dict(cls: type) -> None:
 
 def _langchain_to_agui_messages(
     messages: list[Any],
-    *,
-    id_overrides: Mapping[str, str] | None = None,
 ) -> list[Message]:
     """Convert LangChain BaseMessage list to AG-UI Message format."""
     from ag_ui.core import (  # noqa: PLC0415
@@ -71,8 +67,7 @@ def _langchain_to_agui_messages(
     result: list[Message] = []
     for msg in messages:
         msg_type = msg.type
-        raw_id = getattr(msg, "id", None) or ""
-        msg_id = id_overrides.get(raw_id, raw_id) if id_overrides and raw_id else raw_id
+        msg_id = getattr(msg, "id", None) or ""
         if msg_type == "human":
             result.append(UserMessage(id=msg_id, role="user", content=msg.content))
         elif msg_type == "ai":
@@ -219,7 +214,6 @@ class MessageEventMapper:
                     )
 
             if lc_msg_id:
-                ctx.record_lc_to_stream_id(lc_msg_id, msg_id)
                 ctx.mark_emitted_message(lc_msg_id)
 
         for msg in tool_messages:
@@ -282,11 +276,9 @@ def build_state_snapshot(reducers: dict[str, Any]) -> StateSnapshotEvent:
 
 def build_messages_snapshot(
     messages: list[Any],
-    *,
-    id_overrides: Mapping[str, str] | None = None,
 ) -> MessagesSnapshotEvent:
     """Build a MessagesSnapshotEvent from a LangChain message list."""
     return MessagesSnapshotEvent(
         type=EventType.MESSAGES_SNAPSHOT,
-        messages=_langchain_to_agui_messages(messages, id_overrides=id_overrides),
+        messages=_langchain_to_agui_messages(messages),
     )
