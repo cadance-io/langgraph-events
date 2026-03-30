@@ -36,24 +36,47 @@ graph = EventGraph([classify, respond])
 log = graph.invoke(MessageReceived(text="I need help with my order"))
 
 print(log.latest(ReplyProduced))
+# ReplyProduced(text='Routing you to support...')
 ```
 
 ## How It Works
 
-1. A seed event enters the graph.
-2. The dispatcher matches events to subscribed handlers.
-3. Handler outputs become new events.
-4. Processing repeats until there are no pending events, or a `Halted` event appears.
+`EventGraph` compiles your handlers into a LangGraph `StateGraph` with a hub-and-spoke reactive loop:
 
-```text
-seed -> dispatch -> handlers -> dispatch -> ... -> end
 ```
+seed event
+    |
+    v
+[seed] --> [dispatch] --> handler_a --+
+                ^          handler_b --+
+                |                      |
+             [router] <----------------+
+                |
+                v
+             [dispatch] --> handler_c --+
+                ^                       |
+                |                       |
+             [router] <-----------------+
+                |
+                v
+             [dispatch] --> END (no pending events)
+```
+
+1. A **seed event** enters the graph.
+2. The **router** collects new events, then **dispatch** matches each to subscribed handlers via `isinstance`. Matched handlers run and emit new events.
+3. The loop repeats until no handler matches or a `Halted` event appears.
 
 ## Useful Operations
 
 ```python
-# Sync
+# Synchronous
 log = graph.invoke(MessageReceived(text="hello"))
+
+# Multiple seed events
+log = graph.invoke([
+    SystemPromptSet.from_str("You are helpful"),
+    UserMessageReceived(message=HumanMessage(content="Hi")),
+])
 
 # Async
 log = await graph.ainvoke(MessageReceived(text="hello"))
@@ -61,6 +84,10 @@ log = await graph.ainvoke(MessageReceived(text="hello"))
 # Stream produced events
 for event in graph.stream_events(MessageReceived(text="hello")):
     print(event)
+
+# Stream with reducer snapshots
+for frame in graph.stream_events(MessageReceived(text="hello"), include_reducers=True):
+    print(frame.event, frame.reducers["messages"])
 ```
 
 See [Concepts](concepts.md) for event log queries, reducers, interruption/resume, and fan-out.

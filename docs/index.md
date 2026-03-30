@@ -2,29 +2,27 @@
 
 Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
+!!! warning "Experimental (v0.1.1)"
+    This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything you can't easily rewrite. Not published to PyPI.
+
 ## What is this?
 
-`langgraph-events` replaces manual `StateGraph` wiring with an event-driven model:
+LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. **langgraph-events** replaces that boilerplate with a reactive, event-driven model: define domain events as frozen dataclasses, subscribe handler functions with `@on(EventType)`, and let `EventGraph` derive the full graph topology automatically.
 
-- define domain events as frozen dataclasses
-- subscribe handlers with `@on(EventType)`
-- build `EventGraph` and let it derive topology automatically
-
-Core principle: the full state is an append-only, typed event log.
+The core principle: **state IS events.** The entire state of a run is an append-only log of typed, immutable events. Handlers read events in; handlers emit events out. The framework does the rest.
 
 ## Installation
 
+Not published to PyPI yet. Install directly from GitHub:
+
 ```bash
 pip install git+https://github.com/cadance-io/langgraph-events.git
-```
 
-With AG-UI adapter support:
-
-```bash
+# With AG-UI adapter support (installs ag-ui-protocol)
 pip install "langgraph-events[agui] @ git+https://github.com/cadance-io/langgraph-events.git"
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+ and `langgraph >= 0.2.0` (installed automatically). The `[agui]` extra adds `ag-ui-protocol` for the [AG-UI protocol adapter](agui.md).
 
 ## Next Steps
 
@@ -32,3 +30,11 @@ Requires Python 3.10+.
 - Learn [Core Concepts](concepts.md)
 - Browse [Patterns](patterns.md)
 - Check [API Reference](api.md)
+
+## Status
+
+This is a solo experiment, not a team-backed product. Expect:
+
+- No changelog or migration guides between versions
+- API surface may shrink or change significantly
+- Bug reports welcome, but no SLA on fixes

@@ -21,6 +21,5 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-
-not_in_nav: |
-  /superpowers/**
+  - pymdownx.highlight
+  - pymdownx.superfences
