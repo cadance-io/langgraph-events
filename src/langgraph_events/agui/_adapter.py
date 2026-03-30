@@ -343,6 +343,11 @@ class AGUIAdapter:
         events: list[BaseEvent] = [
             build_state_snapshot(_strip_dedicated_keys(item.reducers))
         ]
+
+        # Map event FIRST — registers lc_to_stream_id for mapper-emitted AI msgs
+        mapped_events = self._map_event(event, ctx)
+
+        # THEN build messages snapshot with complete ID mappings
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
         if messages is not None:
@@ -356,7 +361,7 @@ class AGUIAdapter:
                     build_messages_snapshot(messages, id_overrides=ctx.lc_id_overrides)
                 )
 
-        events.extend(self._map_event(event, ctx))
+        events.extend(mapped_events)
         return events, next_message_ids, self._is_interrupt(event)
 
     def _events_from_bare_item(

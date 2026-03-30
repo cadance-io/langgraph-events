@@ -213,6 +213,7 @@ class MessageEventMapper:
                     )
 
             if lc_msg_id:
+                ctx.record_lc_to_stream_id(lc_msg_id, msg_id)
                 ctx.mark_emitted_message(lc_msg_id)
 
         for msg in tool_messages:
