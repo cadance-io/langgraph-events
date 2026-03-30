@@ -102,6 +102,10 @@ class AGUIAdapter:
             else False
         )
 
+        self._messages_in_reducers = "messages" in graph._resolve_reducer_names(
+            include_reducers
+        )
+
         # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers()
         if mappers:
@@ -344,10 +348,11 @@ class AGUIAdapter:
             build_state_snapshot(_strip_dedicated_keys(item.reducers))
         ]
 
-        # Map event FIRST — registers lc_to_stream_id for mapper-emitted AI msgs
+        # Map event first. In snapshot_mode MessageEventMapper is a no-op;
+        # LLM-streamed id_overrides are already recorded by _events_from_llm_stream_end.
         mapped_events = self._map_event(event, ctx)
 
-        # THEN build messages snapshot with complete ID mappings
+        # Build messages snapshot with any LLM-stream ID overrides
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
         if messages is not None:
@@ -492,6 +497,7 @@ class AGUIAdapter:
             run_id=run_id,
             thread_id=thread_id,
             input_data=input_data,
+            snapshot_mode=self._messages_in_reducers,
         )
 
         yield RunStartedEvent(

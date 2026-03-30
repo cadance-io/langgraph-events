@@ -25,6 +25,7 @@ from langgraph_events import (
     message_reducer,
     on,
 )
+from langgraph_events._reducer import ScalarReducer
 from langgraph_events.agui import (
     AGUIAdapter,
     MapperContext,
@@ -581,6 +582,36 @@ def describe_AGUIAdapter():
                 last_snap = msg_snapshots[-1]
                 assert isinstance(last_snap.messages, list)
                 assert len(last_snap.messages) >= 1
+
+        def when_include_reducers_has_no_messages_reducer():
+            async def it_still_emits_text_message_events():
+                """Mapper must not be suppressed without messages reducer."""
+                counter = ScalarReducer(
+                    name="counter",
+                    event_type=AgentReplied,
+                    fn=lambda e: 1,
+                    default=0,
+                )
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hello"))
+
+                graph = EventGraph([reply], reducers=[counter])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+                assert len(starts) == 1
+
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                ]
+                assert len(msg_snapshots) == 0
 
         def when_error_message_provided():
             async def it_uses_custom_error_message():
@@ -2272,11 +2303,11 @@ def describe_streaming_id_reconciliation():
 
 
 def describe_non_streamed_id_reconciliation():
-    """Snapshot IDs must match mapper-generated IDs for non-streamed AI messages."""
+    """Non-streamed AI messages are delivered only via MESSAGES_SNAPSHOT."""
 
     def when_non_streamed_ai_message():
-        async def it_reconciles_mapper_emitted_ids_in_snapshot():
-            """Non-streamed AI message ID in snapshot must match TextMessageStart ID."""
+        async def it_delivers_via_snapshot_only():
+            """No TextMessageStart for non-streamed AI; snapshot keeps LC ID."""
             ai = AIMessage(content="from history", id="lc-ai-1")
 
             @on(UserAsked)
@@ -2292,18 +2323,17 @@ def describe_non_streamed_id_reconciliation():
             events = await _collect(adapter, _make_input())
 
             starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-            assert len(starts) == 1
-            text_msg_id = starts[0].message_id
+            assert len(starts) == 0
 
             snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
             assert len(snapshots) >= 1
             last_snap = snapshots[-1]
             ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
             assert len(ai_msgs) == 1
-            assert ai_msgs[0].id == text_msg_id
+            assert ai_msgs[0].id == "lc-ai-1"
 
     def when_multiple_non_streamed_ai_messages():
-        async def it_reconciles_all_mapper_emitted_ids():
+        async def it_delivers_all_via_snapshot_using_original_ids():
             ai1 = AIMessage(content="first", id="lc-ai-1")
             ai2 = AIMessage(content="second", id="lc-ai-2")
 
@@ -2324,14 +2354,13 @@ def describe_non_streamed_id_reconciliation():
             events = await _collect(adapter, _make_input())
 
             starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-            assert len(starts) == 2
-            text_ids = {s.message_id for s in starts}
+            assert len(starts) == 0
 
             snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
             last_snap = snapshots[-1]
             ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
             snapshot_ids = {m.id for m in ai_msgs}
-            assert snapshot_ids == text_ids
+            assert snapshot_ids == {"lc-ai-1", "lc-ai-2"}
 
     def when_ai_message_has_no_content_or_tool_calls():
         async def it_does_not_create_orphan_id_override():

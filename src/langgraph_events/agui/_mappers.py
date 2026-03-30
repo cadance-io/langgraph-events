@@ -141,9 +141,11 @@ class InterruptedMapper:
 class MessageEventMapper:
     """Map MessageEvent with AIMessage content to AG-UI text/tool events."""
 
-    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:  # noqa: PLR0912
         if not isinstance(event, MessageEvent):
             return None
+        if ctx.snapshot_mode:
+            return []  # MESSAGES_SNAPSHOT handles message delivery
         messages = event.as_messages()
         ai_messages = [m for m in messages if m.type == "ai"]
         tool_messages = [m for m in messages if m.type == "tool"]
