@@ -323,8 +323,6 @@ class AGUIAdapter:
         closed_id = ctx.close_stream_message_id(item.run_id)
         if closed_id is None:
             return []
-        if item.message_id:
-            ctx.record_lc_to_stream_id(item.message_id, closed_id)
         return [
             TextMessageEndEvent(
                 type=EventType.TEXT_MESSAGE_END,
@@ -348,11 +346,9 @@ class AGUIAdapter:
             build_state_snapshot(_strip_dedicated_keys(item.reducers))
         ]
 
-        # Map event first. In snapshot_mode MessageEventMapper is a no-op;
-        # LLM-streamed id_overrides are already recorded by _events_from_llm_stream_end.
         mapped_events = self._map_event(event, ctx)
 
-        # Build messages snapshot with any LLM-stream ID overrides
+        # Build messages snapshot — always uses original LangChain IDs
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
         if messages is not None:
@@ -362,9 +358,7 @@ class AGUIAdapter:
             )
             if changed:
                 next_message_ids = tuple(getattr(m, "id", id(m)) for m in messages)
-                events.append(
-                    build_messages_snapshot(messages, id_overrides=ctx.lc_id_overrides)
-                )
+                events.append(build_messages_snapshot(messages))
 
         events.extend(mapped_events)
         return events, next_message_ids, self._is_interrupt(event)
