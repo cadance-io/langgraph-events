@@ -514,8 +514,39 @@ def describe_AGUIAdapter():
 
                 snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
                 assert len(snapshots) >= 1
-                # Snapshot should contain messages key
-                assert "messages" in snapshots[-1].snapshot
+                # Snapshot should not duplicate dedicated messages channel
+                assert "messages" not in snapshots[-1].snapshot
+
+            async def it_excludes_messages_from_state_snapshot():
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hello"))
+
+                graph = EventGraph(
+                    [reply],
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                state_snapshots = [
+                    e for e in events if e.type == EventType.STATE_SNAPSHOT
+                ]
+                message_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                ]
+
+                assert len(state_snapshots) >= 1
+                assert all(
+                    "messages" not in snapshot.snapshot for snapshot in state_snapshots
+                )
+                assert len(message_snapshots) >= 1
+                assert isinstance(message_snapshots[-1].messages, list)
+                assert len(message_snapshots[-1].messages) >= 1
 
         def when_messages_reducer_present():
             async def it_emits_messages_snapshot():

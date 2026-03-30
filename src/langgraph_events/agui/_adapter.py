@@ -39,6 +39,13 @@ from ._mappers import (
 
 logger = logging.getLogger(__name__)
 
+_DEDICATED_EVENT_KEYS: frozenset[str] = frozenset({"messages"})
+
+
+def _strip_dedicated_keys(reducers: dict[str, Any]) -> dict[str, Any]:
+    """Return *reducers* without keys that have dedicated AG-UI events."""
+    return {k: v for k, v in reducers.items() if k not in _DEDICATED_EVENT_KEYS}
+
 
 class CheckpointState(TypedDict):
     """Checkpoint-derived state passed to seed/resume factories."""
@@ -228,7 +235,7 @@ class AGUIAdapter:
             return
 
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
-        yield build_state_snapshot(reducers)
+        yield build_state_snapshot(_strip_dedicated_keys(reducers))
         yield build_messages_snapshot(reducers.get("messages") or [])
 
         for interrupted in self._interrupts_from_snapshot(snapshot):
@@ -332,7 +339,9 @@ class AGUIAdapter:
         if is_resume and self._is_interrupt(event):
             return [], prev_message_ids, False
 
-        events: list[BaseEvent] = [build_state_snapshot(item.reducers)]
+        events: list[BaseEvent] = [
+            build_state_snapshot(_strip_dedicated_keys(item.reducers))
+        ]
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
         if messages is not None:
@@ -389,7 +398,7 @@ class AGUIAdapter:
         # Interrupt gate: re-emit state without executing when interrupted
         if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
             state = cast("CheckpointState", checkpoint_state)
-            yield build_state_snapshot(state["reducers"])
+            yield build_state_snapshot(_strip_dedicated_keys(state["reducers"]))
             messages = state["messages"]
             if messages is not None:
                 yield build_messages_snapshot(messages)
