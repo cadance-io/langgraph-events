@@ -28,12 +28,13 @@ from langgraph_events._graph import (
     StreamFrame,
 )
 from langgraph_events._handler import on
-from langgraph_events._reducer import Reducer, ScalarReducer, message_reducer
+from langgraph_events._reducer import SKIP, Reducer, ScalarReducer, message_reducer
 from langgraph_events._types import (
     HandlerReturn,  # noqa: F401 (importable but not promoted)
 )
 
 __all__ = [
+    "SKIP",
     "STATE_SNAPSHOT_EVENT_NAME",
     "Auditable",
     "CustomEventFrame",
