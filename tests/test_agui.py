@@ -2198,6 +2198,47 @@ def describe_snapshot_uses_langchain_ids():
         # AI message uses LangChain ID, not streaming ID
         assert not ai_msgs[-1].id.startswith("msg-")
 
+    async def it_uses_langchain_ids_across_multiple_llm_calls():
+        """Both AI messages keep LangChain IDs after two LLM streams."""
+        llm = FakeListChatModel(responses=["first reply", "second reply"], sleep=0)
+
+        @on(UserAsked)
+        async def first_reply(
+            event: UserAsked,
+            messages: list[Any],
+        ) -> AgentReplied:
+            response = await llm.ainvoke(
+                [*messages, HumanMessage(content=event.question)]
+            )
+            return AgentReplied(message=response)
+
+        @on(AgentReplied)
+        async def second_reply(
+            event: AgentReplied,
+            messages: list[Any],
+        ) -> FollowUpReply:
+            response = await llm.ainvoke([*messages, HumanMessage(content="follow up")])
+            return FollowUpReply(message=response)
+
+        graph = EventGraph([first_reply, second_reply], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input())
+
+        starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+        assert len(starts) == 2
+
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+        last_snap = msg_snapshots[-1]
+        ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+        assert len(ai_msgs) == 2
+        for m in ai_msgs:
+            assert m.id.startswith("lc_run--"), f"Expected LangChain ID, got {m.id}"
+            assert not m.id.startswith("msg-")
+
 
 def describe_non_streamed_id_reconciliation():
     """Non-streamed AI messages are delivered only via MESSAGES_SNAPSHOT."""
