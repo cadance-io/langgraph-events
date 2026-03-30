@@ -3,6 +3,8 @@ name: Docs
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -23,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv sync --group docs
+      - run: uv sync --group docs --frozen
       - run: uv run mkdocs build --strict
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
