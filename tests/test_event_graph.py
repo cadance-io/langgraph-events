@@ -1486,22 +1486,40 @@ def describe_EventGraph():
                 log = graph.invoke(Triggered())
                 assert log.latest(ResultProduced) == ResultProduced(got="None")
 
-            def it_returns_unset():
+            def it_returns_skip():
                 class StepCompleted(Event):
                     pass
 
                 class OtherReceived(Event):
                     pass
 
-                from langgraph_events._reducer import _UNSET
+                from langgraph_events import SKIP
 
                 sr = ScalarReducer(
                     name="val", event_type=OtherReceived, fn=lambda e: "x"
                 )
                 assert (
                     sr.collect([StepCompleted(), StepCompleted(), StepCompleted()])
-                    is _UNSET
+                    is SKIP
                 )
+
+            def it_treats_skip_from_fn_as_no_contribution():
+                class Triggered(Event):
+                    pass
+
+                from langgraph_events import SKIP
+
+                sr = ScalarReducer(
+                    name="mode",
+                    event_type=Triggered,
+                    fn=lambda e: SKIP,
+                    default="fallback",
+                )
+
+                result = sr.collect([Triggered()])
+                assert result is SKIP
+                assert sr.has_contributions(result) is False
+                assert sr.seed([Triggered()]) == "fallback"
 
             def it_uses_custom_default():
                 class Triggered(Event):

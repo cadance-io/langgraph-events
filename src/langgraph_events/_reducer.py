@@ -15,7 +15,23 @@ if TYPE_CHECKING:
     from langgraph_events._event import Event
     from langgraph_events._types import ReducerFn
 
-_UNSET = object()
+
+class _SkipType:
+    """Sentinel returned from ``ScalarReducer.fn`` to signal no contribution."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "SKIP"
+
+
+SKIP = _SkipType()
+"""Return from a ``ScalarReducer.fn`` to signal no contribution.
+
+When ``fn`` returns ``SKIP``, the reducer behaves as if no matching
+event was found: the state channel keeps its current value.
+Use this to distinguish "set to None" from "don't update".
+"""
 
 
 def _last_write_wins(existing: Any, new: Any) -> Any:
@@ -134,7 +150,8 @@ class ScalarReducer(BaseReducer):
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
     last matching event.  The return value — including ``None`` — is injected
-    directly into the handler.
+    directly into the handler.  Return ``SKIP`` from ``fn`` to signal no
+    contribution and keep the channel at its current value.
 
     Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
     multiple event types structurally.
@@ -165,14 +182,14 @@ class ScalarReducer(BaseReducer):
         return self.default
 
     def collect(self, events: list[Event]) -> Any:
-        last: Any = _UNSET
+        last: Any = SKIP
         for event in events:
             if isinstance(event, self.event_type):
                 last = event
-        return self.fn(last) if last is not _UNSET else _UNSET
+        return self.fn(last) if last is not SKIP else SKIP
 
     def has_contributions(self, result: Any) -> bool:
-        return result is not _UNSET
+        return result is not SKIP
 
     def output_type(self) -> Any:
         return Any
