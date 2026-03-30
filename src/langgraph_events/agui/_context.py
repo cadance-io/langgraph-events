@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ag_ui.core import RunAgentInput
 
 
@@ -80,9 +83,9 @@ class MapperContext:
         self._lc_to_stream_id[lc_message_id] = stream_id
 
     @property
-    def lc_id_overrides(self) -> dict[str, str]:
-        """LangChain message ID -> AG-UI streaming ID overrides."""
-        return self._lc_to_stream_id
+    def lc_id_overrides(self) -> Mapping[str, str]:
+        """LangChain message ID -> AG-UI streaming ID overrides (read-only)."""
+        return MappingProxyType(self._lc_to_stream_id)
 
     def mark_streamed_ai_message(self, message_id: str) -> None:
         """Remember a LangChain AI message id that was token-streamed."""

@@ -62,6 +62,9 @@ class AgentAndToolMessages(MessageEvent):
 class UserSent(MessageEvent):
     message: HumanMessage = None  # type: ignore[assignment]
 
+    def agui_dict(self) -> dict[str, Any]:
+        return {"content": self.message.content if self.message else ""}
+
 
 class FollowUpReply(MessageEvent):
     message: AIMessage = None  # type: ignore[assignment]
@@ -2063,3 +2066,47 @@ def describe_streaming_id_reconciliation():
         assert len(ai_msgs) == 2
         assert ai_msgs[0].id == stream_id_1
         assert ai_msgs[1].id == stream_id_2
+
+    async def it_records_mapping_before_snapshot_containing_ai_message():
+        """LLMStreamEnd must precede the StreamFrame that carries the AI message.
+
+        This guarantees the LC->stream ID mapping is recorded before the
+        snapshot is built.  If this ordering invariant ever breaks, the
+        snapshot would carry a stale LangChain ID.
+        """
+        llm = FakeListChatModel(responses=["ordering check"], sleep=0)
+
+        @on(UserAsked)
+        async def stream_reply(
+            event: UserAsked,
+            messages: list[Any],
+        ) -> AgentReplied:
+            response = await llm.ainvoke(
+                [*messages, HumanMessage(content=event.question)]
+            )
+            return AgentReplied(message=response)
+
+        graph = EventGraph([stream_reply], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+            include_reducers=True,
+        )
+        events = await _collect(adapter, _make_input())
+
+        # Find positions: TEXT_MESSAGE_END (emitted from LLMStreamEnd) must
+        # appear before the first MESSAGES_SNAPSHOT that contains an assistant.
+        end_idx = next(
+            i for i, e in enumerate(events) if e.type == EventType.TEXT_MESSAGE_END
+        )
+        snap_indices = [
+            i
+            for i, e in enumerate(events)
+            if e.type == EventType.MESSAGES_SNAPSHOT
+            and any(m.role == "assistant" for m in e.messages)
+        ]
+        assert snap_indices, "Expected at least one snapshot with an assistant message"
+        assert end_idx < snap_indices[0], (
+            "TextMessageEnd (from LLMStreamEnd) must precede the first "
+            "MessagesSnapshot containing the AI message"
+        )

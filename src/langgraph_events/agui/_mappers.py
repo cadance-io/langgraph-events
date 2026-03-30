@@ -32,6 +32,8 @@ from langgraph_events._event import (
 from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ag_ui.core import Message
 
     from ._context import MapperContext
@@ -54,7 +56,7 @@ def _warn_missing_agui_dict(cls: type) -> None:
 def _langchain_to_agui_messages(
     messages: list[Any],
     *,
-    id_overrides: dict[str, str] | None = None,
+    id_overrides: Mapping[str, str] | None = None,
 ) -> list[Message]:
     """Convert LangChain BaseMessage list to AG-UI Message format."""
     from ag_ui.core import (  # noqa: PLC0415
@@ -263,7 +265,7 @@ def build_state_snapshot(reducers: dict[str, Any]) -> StateSnapshotEvent:
 def build_messages_snapshot(
     messages: list[Any],
     *,
-    id_overrides: dict[str, str] | None = None,
+    id_overrides: Mapping[str, str] | None = None,
 ) -> MessagesSnapshotEvent:
     """Build a MessagesSnapshotEvent from a LangChain message list."""
     return MessagesSnapshotEvent(
