@@ -153,14 +153,19 @@ class MessageEventMapper:
         result: list[BaseEvent] = []
         for msg in ai_messages:
             lc_msg_id = getattr(msg, "id", None)
-            if ctx.was_streamed_ai_message(lc_msg_id):
+            if ctx.was_streamed_ai_message(lc_msg_id) or ctx.was_emitted_message(
+                lc_msg_id
+            ):
                 continue
-            if ctx.was_emitted_message(lc_msg_id):
+
+            content = msg.content if isinstance(msg.content, str) else ""
+            tool_calls = getattr(msg, "tool_calls", None)
+            if not content and not tool_calls:
                 continue
+
             msg_id = ctx.next_message_id()
 
             # Text content
-            content = msg.content if isinstance(msg.content, str) else ""
             if content:
                 result.append(
                     TextMessageStartEvent(
@@ -184,7 +189,6 @@ class MessageEventMapper:
                 )
 
             # Tool calls
-            tool_calls = getattr(msg, "tool_calls", None)
             if tool_calls:
                 for tc in tool_calls:
                     tc_id = tc.get("id", "") if isinstance(tc, dict) else tc.id
@@ -213,6 +217,7 @@ class MessageEventMapper:
                     )
 
             if lc_msg_id:
+                ctx.record_lc_to_stream_id(lc_msg_id, msg_id)
                 ctx.mark_emitted_message(lc_msg_id)
 
         for msg in tool_messages:

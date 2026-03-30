@@ -2269,3 +2269,98 @@ def describe_streaming_id_reconciliation():
             "TextMessageEnd (from LLMStreamEnd) must precede the first "
             "MessagesSnapshot containing the AI message"
         )
+
+
+def describe_non_streamed_id_reconciliation():
+    """Snapshot IDs must match mapper-generated IDs for non-streamed AI messages."""
+
+    def when_non_streamed_ai_message():
+        async def it_reconciles_mapper_emitted_ids_in_snapshot():
+            """Non-streamed AI message ID in snapshot must match TextMessageStart ID."""
+            ai = AIMessage(content="from history", id="lc-ai-1")
+
+            @on(UserAsked)
+            def emit(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(ai,))
+
+            graph = EventGraph([emit], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+                include_reducers=True,
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 1
+            text_msg_id = starts[0].message_id
+
+            snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            assert len(snapshots) >= 1
+            last_snap = snapshots[-1]
+            ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+            assert len(ai_msgs) == 1
+            assert ai_msgs[0].id == text_msg_id
+
+    def when_multiple_non_streamed_ai_messages():
+        async def it_reconciles_all_mapper_emitted_ids():
+            ai1 = AIMessage(content="first", id="lc-ai-1")
+            ai2 = AIMessage(content="second", id="lc-ai-2")
+
+            @on(UserAsked)
+            def step1(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(ai1,))
+
+            @on(PhaseA)
+            def step2(event: PhaseA) -> PhaseB:
+                return PhaseB(messages=(ai2,))
+
+            graph = EventGraph([step1, step2], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+                include_reducers=True,
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 2
+            text_ids = {s.message_id for s in starts}
+
+            snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            last_snap = snapshots[-1]
+            ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+            snapshot_ids = {m.id for m in ai_msgs}
+            assert snapshot_ids == text_ids
+
+    def when_ai_message_has_no_content_or_tool_calls():
+        async def it_does_not_create_orphan_id_override():
+            """Empty AI message must not register an override."""
+            empty_ai = AIMessage(content="", id="lc-empty")
+
+            @on(UserAsked)
+            def emit(event: UserAsked) -> PhaseA:
+                return PhaseA(messages=(empty_ai,))
+
+            graph = EventGraph([emit], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+                include_reducers=True,
+            )
+            events = await _collect(adapter, _make_input())
+
+            # No TextMessageStart should have been emitted
+            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
+            assert len(starts) == 0
+
+            # Snapshot should keep the original LC ID, not rewrite to an orphan msg-*
+            snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            assert len(snapshots) >= 1
+            last_snap = snapshots[-1]
+            ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+            for m in ai_msgs:
+                assert not m.id.startswith("msg-"), (
+                    f"Orphan override: snapshot rewrote to {m.id} with no "
+                    f"corresponding TextMessageStart"
+                )
