@@ -629,7 +629,10 @@ def describe_AGUIAdapter():
                 msg_count = sum(
                     1 for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 )
-                assert state_count > msg_count
+                # With StreamFrame.changed_reducers, state snapshots are only
+                # emitted initially (or when non-dedicated reducers change).
+                assert state_count == 1
+                assert msg_count == 1
 
             async def it_detects_message_content_changes():
                 """MessagesSnapshot emits when add_messages replaces in-place."""

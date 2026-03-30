@@ -90,6 +90,13 @@ Events without `agui_dict()` are skipped with a one-time warning.
 
 `StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (when `include_reducers` is enabled).
 
+When reducer delta metadata is available (`StreamFrame.changed_reducers`, emitted by `EventGraph` v2 streaming), the adapter suppresses redundant snapshots:
+
+- `MessagesSnapshot` is emitted only when the `messages` reducer changed.
+- `StateSnapshot` is emitted once initially, then only when non-dedicated reducers changed.
+
+For compatibility with legacy/value-mode frames where delta metadata is unavailable, the adapter falls back to its prior message-change detection behavior.
+
 `StateSnapshotFrame` is handled outside the mapper chain as AG-UI `StateSnapshot`.
 
 `CustomEventFrame` passthrough is also handled outside the mapper chain as AG-UI `CustomEvent` with `name`/`value` copied through.

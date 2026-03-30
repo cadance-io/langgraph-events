@@ -335,21 +335,36 @@ class AGUIAdapter:
         *,
         is_resume: bool,
         prev_message_ids: tuple[int | str, ...],
-    ) -> tuple[list[BaseEvent], tuple[int | str, ...], bool]:
+        state_snapshot_emitted: bool,
+    ) -> tuple[list[BaseEvent], tuple[int | str, ...], bool, bool]:
         event = item.event
         if is_resume and self._is_interrupt(event):
-            return [], prev_message_ids, False
+            return [], prev_message_ids, False, state_snapshot_emitted
 
-        events: list[BaseEvent] = [
-            build_state_snapshot(_strip_dedicated_keys(item.reducers))
-        ]
+        events: list[BaseEvent] = []
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
-        if messages is not None:
-            changed = len(messages) != len(prev_message_ids) or any(
-                getattr(m, "id", id(m)) != pid
-                for m, pid in zip(messages, prev_message_ids, strict=True)
+        changed_reducers = item.changed_reducers
+        should_emit_state_snapshot = not state_snapshot_emitted
+        if changed_reducers is None:
+            should_emit_state_snapshot = True
+        else:
+            should_emit_state_snapshot = should_emit_state_snapshot or any(
+                name not in _DEDICATED_EVENT_KEYS for name in changed_reducers
             )
+
+        if should_emit_state_snapshot:
+            events.append(build_state_snapshot(_strip_dedicated_keys(item.reducers)))
+            state_snapshot_emitted = True
+
+        if messages is not None:
+            if changed_reducers is None:
+                changed = len(messages) != len(prev_message_ids) or any(
+                    getattr(m, "id", id(m)) != pid
+                    for m, pid in zip(messages, prev_message_ids, strict=True)
+                )
+            else:
+                changed = "messages" in changed_reducers
             if changed:
                 next_message_ids = tuple(getattr(m, "id", id(m)) for m in messages)
                 events.append(
@@ -357,7 +372,12 @@ class AGUIAdapter:
                 )
 
         events.extend(self._map_event(event, ctx))
-        return events, next_message_ids, self._is_interrupt(event)
+        return (
+            events,
+            next_message_ids,
+            self._is_interrupt(event),
+            state_snapshot_emitted,
+        )
 
     def _events_from_bare_item(
         self,
@@ -395,6 +415,7 @@ class AGUIAdapter:
         is_resume = resume_event is not None
         prev_message_ids: tuple[int | str, ...] = ()
         emitted_interrupt_in_stream = False
+        emitted_state_snapshot = False
 
         # Interrupt gate: re-emit state without executing when interrupted
         if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
@@ -431,13 +452,17 @@ class AGUIAdapter:
                     value=item.data,
                 )
             elif isinstance(item, StreamFrame):
-                agui_events, next_message_ids, emitted_interrupt = (
-                    self._events_from_stream_frame(
-                        item,
-                        ctx,
-                        is_resume=is_resume,
-                        prev_message_ids=prev_message_ids,
-                    )
+                (
+                    agui_events,
+                    next_message_ids,
+                    emitted_interrupt,
+                    emitted_state_snapshot,
+                ) = self._events_from_stream_frame(
+                    item,
+                    ctx,
+                    is_resume=is_resume,
+                    prev_message_ids=prev_message_ids,
+                    state_snapshot_emitted=emitted_state_snapshot,
                 )
                 prev_message_ids = next_message_ids
                 emitted_interrupt_in_stream = (
