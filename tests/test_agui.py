@@ -705,6 +705,127 @@ def describe_AGUIAdapter():
                 ]
                 # Must have at least 2: one after draft, one after revise
                 assert len(msg_snapshots) >= 2
+                # The last snapshot must contain the REVISED content
+                last_snap = msg_snapshots[-1]
+                ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+                assert len(ai_msgs) == 1
+                assert ai_msgs[0].content == "draft v2"
+
+            async def it_detects_message_tool_call_changes():
+                """MessagesSnapshot emits when AI tool_calls change in-place."""
+
+                @on(UserAsked)
+                def draft(event: UserAsked) -> AgentCalledTools:
+                    return AgentCalledTools(
+                        message=AIMessage(
+                            id="msg-ai",
+                            content="working",
+                            tool_calls=[
+                                {
+                                    "id": "tc-1",
+                                    "name": "lookup",
+                                    "args": {"query": "v1"},
+                                }
+                            ],
+                        )
+                    )
+
+                @on(AgentCalledTools)
+                def revise(event: AgentCalledTools) -> AgentReplied:
+                    # Same ID/content, different tool_calls
+                    return AgentReplied(
+                        message=AIMessage(
+                            id="msg-ai",
+                            content="working",
+                            tool_calls=[
+                                {
+                                    "id": "tc-2",
+                                    "name": "lookup",
+                                    "args": {"query": "v2"},
+                                }
+                            ],
+                        )
+                    )
+
+                graph = EventGraph(
+                    [draft, revise],
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                ]
+                # Must have at least 2: one after draft, one after revise
+                assert len(msg_snapshots) >= 2
+
+                first_ai = next(
+                    m for m in msg_snapshots[0].messages if m.role == "assistant"
+                )
+                last_ai = next(
+                    m for m in msg_snapshots[-1].messages if m.role == "assistant"
+                )
+
+                assert first_ai.tool_calls is not None
+                assert last_ai.tool_calls is not None
+                assert first_ai.tool_calls[0].id == "tc-1"
+                assert last_ai.tool_calls[0].id == "tc-2"
+                assert json.loads(last_ai.tool_calls[0].function.arguments) == {
+                    "query": "v2"
+                }
+
+        def when_multimodal_ai_message():
+            async def it_handles_list_content_in_snapshot():
+                """Multimodal AIMessage.content (list) must not crash snapshot."""
+
+                class MultimodalReply(MessageEvent):
+                    message: AIMessage = None  # type: ignore[assignment]
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> MultimodalReply:
+                    return MultimodalReply(
+                        message=AIMessage(
+                            content=[
+                                {"type": "text", "text": "hello"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "data:image/png;base64,abc"},
+                                },
+                            ],
+                            id="multi-1",
+                        )
+                    )
+
+                graph = EventGraph(
+                    [reply],
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                # Must not crash — no RUN_ERROR
+                error_events = [e for e in events if e.type == EventType.RUN_ERROR]
+                assert len(error_events) == 0
+
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                ]
+                assert len(msg_snapshots) >= 1
+
+                last_snap = msg_snapshots[-1]
+                ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+                assert len(ai_msgs) == 1
+                # List content not representable as str → None
+                assert ai_msgs[0].content is None
 
     def describe_custom_mappers():
         async def it_allows_user_mapper_to_claim_events():
@@ -2331,3 +2452,52 @@ def describe_non_streamed_id_reconciliation():
                     f"Orphan override: snapshot rewrote to {m.id} with no "
                     f"corresponding TextMessageStart"
                 )
+
+
+def describe_unclosed_stream_on_error():
+    async def it_emits_text_message_end_before_run_error(monkeypatch):
+        """TEXT_MESSAGE_END must be emitted for open streams before RUN_ERROR."""
+        from langgraph_events._graph import LLMToken
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply])
+
+        async def exploding_stream(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            del seed, include_reducers, include_llm_tokens
+            del include_custom_events, config
+            yield LLMToken(run_id="llm-run-1", content="partial ")
+            yield LLMToken(run_id="llm-run-1", content="content")
+            raise RuntimeError("mid-stream failure")
+
+        monkeypatch.setattr(graph, "astream_events", exploding_stream)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+        events = await _collect(adapter, _make_input())
+
+        types = _types(events)
+        assert EventType.RUN_STARTED in types
+        assert EventType.TEXT_MESSAGE_START in types
+        assert EventType.TEXT_MESSAGE_CONTENT in types
+        assert EventType.RUN_ERROR in types
+
+        # TEXT_MESSAGE_END must appear before RUN_ERROR
+        assert EventType.TEXT_MESSAGE_END in types
+        end_idx = types.index(EventType.TEXT_MESSAGE_END)
+        error_idx = types.index(EventType.RUN_ERROR)
+        assert end_idx < error_idx, (
+            f"TEXT_MESSAGE_END (idx={end_idx}) must come before "
+            f"RUN_ERROR (idx={error_idx})"
+        )

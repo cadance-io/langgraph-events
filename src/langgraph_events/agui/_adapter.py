@@ -47,6 +47,23 @@ def _strip_dedicated_keys(reducers: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in reducers.items() if k not in _DEDICATED_EVENT_KEYS}
 
 
+# Fingerprint type: (message_id, message_type, content_hash, extra_hash)
+_MsgFingerprint = tuple[str | int, str | None, int, int]
+
+
+def _message_fingerprint(m: Any) -> _MsgFingerprint:
+    """Return a fingerprint of mapped fields for snapshot change detection."""
+    mid = getattr(m, "id", id(m))
+    msg_type = getattr(m, "type", None)
+    content = getattr(m, "content", None)
+    extra: Any = None
+    if msg_type == "ai":
+        extra = getattr(m, "tool_calls", None)
+    elif msg_type == "tool":
+        extra = getattr(m, "tool_call_id", None)
+    return (mid, msg_type, hash(str(content)), hash(str(extra)))
+
+
 class CheckpointState(TypedDict):
     """Checkpoint-derived state passed to seed/resume factories."""
 
@@ -336,8 +353,8 @@ class AGUIAdapter:
         ctx: MapperContext,
         *,
         is_resume: bool,
-        prev_message_ids: tuple[int | str, ...],
-    ) -> tuple[list[BaseEvent], tuple[int | str, ...], bool]:
+        prev_message_ids: tuple[_MsgFingerprint, ...],
+    ) -> tuple[list[BaseEvent], tuple[_MsgFingerprint, ...], bool]:
         event = item.event
         if is_resume and self._is_interrupt(event):
             return [], prev_message_ids, False
@@ -352,12 +369,9 @@ class AGUIAdapter:
         messages = item.reducers.get("messages")
         next_message_ids = prev_message_ids
         if messages is not None:
-            changed = len(messages) != len(prev_message_ids) or any(
-                getattr(m, "id", id(m)) != pid
-                for m, pid in zip(messages, prev_message_ids, strict=True)
-            )
-            if changed:
-                next_message_ids = tuple(getattr(m, "id", id(m)) for m in messages)
+            fingerprints = tuple(_message_fingerprint(m) for m in messages)
+            if fingerprints != prev_message_ids:
+                next_message_ids = fingerprints
                 events.append(build_messages_snapshot(messages))
 
         events.extend(mapped_events)
@@ -397,7 +411,7 @@ class AGUIAdapter:
         )
         resume_event = self._call_resume_factory(input_data, checkpoint_state)
         is_resume = resume_event is not None
-        prev_message_ids: tuple[int | str, ...] = ()
+        prev_message_ids: tuple[_MsgFingerprint, ...] = ()
         emitted_interrupt_in_stream = False
 
         # Interrupt gate: re-emit state without executing when interrupted
@@ -508,6 +522,11 @@ class AGUIAdapter:
 
         except Exception as exc:
             logger.exception("EventGraph stream failed")
+            for message_id in ctx.drain_open_stream_message_ids():
+                yield TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=message_id,
+                )
             yield RunErrorEvent(
                 type=EventType.RUN_ERROR,
                 message=self._error_message or str(exc),

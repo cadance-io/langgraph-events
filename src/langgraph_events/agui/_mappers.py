@@ -88,12 +88,18 @@ def _langchain_to_agui_messages(
                 AssistantMessage(
                     id=msg_id,
                     role="assistant",
-                    content=msg.content or None,
+                    content=msg.content if isinstance(msg.content, str) else None,
                     tool_calls=tool_calls,
                 )
             )
         elif msg_type == "system":
-            result.append(SystemMessage(id=msg_id, role="system", content=msg.content))
+            result.append(
+                SystemMessage(
+                    id=msg_id,
+                    role="system",
+                    content=msg.content if isinstance(msg.content, str) else "",
+                )
+            )
         elif msg_type == "tool":
             result.append(
                 AguiToolMessage(
