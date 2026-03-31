@@ -47,15 +47,21 @@ def _strip_dedicated_keys(reducers: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in reducers.items() if k not in _DEDICATED_EVENT_KEYS}
 
 
-# Fingerprint type: (message_id, content_hash)
-_MsgFingerprint = tuple[str | int, int]
+# Fingerprint type: (message_id, message_type, content_hash, extra_hash)
+_MsgFingerprint = tuple[str | int, str | None, int, int]
 
 
 def _message_fingerprint(m: Any) -> _MsgFingerprint:
-    """Return (id, content_hash) for snapshot change detection."""
+    """Return a fingerprint of mapped fields for snapshot change detection."""
     mid = getattr(m, "id", id(m))
+    msg_type = getattr(m, "type", None)
     content = getattr(m, "content", None)
-    return (mid, hash(str(content)))
+    extra: Any = None
+    if msg_type == "ai":
+        extra = getattr(m, "tool_calls", None)
+    elif msg_type == "tool":
+        extra = getattr(m, "tool_call_id", None)
+    return (mid, msg_type, hash(str(content)), hash(str(extra)))
 
 
 class CheckpointState(TypedDict):

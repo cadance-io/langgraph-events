@@ -711,6 +711,74 @@ def describe_AGUIAdapter():
                 assert len(ai_msgs) == 1
                 assert ai_msgs[0].content == "draft v2"
 
+            async def it_detects_message_tool_call_changes():
+                """MessagesSnapshot emits when AI tool_calls change in-place."""
+
+                @on(UserAsked)
+                def draft(event: UserAsked) -> AgentCalledTools:
+                    return AgentCalledTools(
+                        message=AIMessage(
+                            id="msg-ai",
+                            content="working",
+                            tool_calls=[
+                                {
+                                    "id": "tc-1",
+                                    "name": "lookup",
+                                    "args": {"query": "v1"},
+                                }
+                            ],
+                        )
+                    )
+
+                @on(AgentCalledTools)
+                def revise(event: AgentCalledTools) -> AgentReplied:
+                    # Same ID/content, different tool_calls
+                    return AgentReplied(
+                        message=AIMessage(
+                            id="msg-ai",
+                            content="working",
+                            tool_calls=[
+                                {
+                                    "id": "tc-2",
+                                    "name": "lookup",
+                                    "args": {"query": "v2"},
+                                }
+                            ],
+                        )
+                    )
+
+                graph = EventGraph(
+                    [draft, revise],
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    include_reducers=True,
+                )
+                events = await _collect(adapter, _make_input())
+
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                ]
+                # Must have at least 2: one after draft, one after revise
+                assert len(msg_snapshots) >= 2
+
+                first_ai = next(
+                    m for m in msg_snapshots[0].messages if m.role == "assistant"
+                )
+                last_ai = next(
+                    m for m in msg_snapshots[-1].messages if m.role == "assistant"
+                )
+
+                assert first_ai.tool_calls is not None
+                assert last_ai.tool_calls is not None
+                assert first_ai.tool_calls[0].id == "tc-1"
+                assert last_ai.tool_calls[0].id == "tc-2"
+                assert json.loads(last_ai.tool_calls[0].function.arguments) == {
+                    "query": "v2"
+                }
+
         def when_multimodal_ai_message():
             async def it_handles_list_content_in_snapshot():
                 """Multimodal AIMessage.content (list) must not crash snapshot."""
