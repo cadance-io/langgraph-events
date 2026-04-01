@@ -47,23 +47,6 @@ def _strip_dedicated_keys(reducers: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in reducers.items() if k not in _DEDICATED_EVENT_KEYS}
 
 
-# Fingerprint type: (message_id, message_type, content_hash, extra_hash)
-_MsgFingerprint = tuple[str | int, str | None, int, int]
-
-
-def _message_fingerprint(m: Any) -> _MsgFingerprint:
-    """Return a fingerprint of mapped fields for snapshot change detection."""
-    mid = getattr(m, "id", id(m))
-    msg_type = getattr(m, "type", None)
-    content = getattr(m, "content", None)
-    extra: Any = None
-    if msg_type == "ai":
-        extra = getattr(m, "tool_calls", None)
-    elif msg_type == "tool":
-        extra = getattr(m, "tool_call_id", None)
-    return (mid, msg_type, hash(str(content)), hash(str(extra)))
-
-
 class CheckpointState(TypedDict):
     """Checkpoint-derived state passed to seed/resume factories."""
 
@@ -98,7 +81,7 @@ class AGUIAdapter:
         seed_factory: SeedFactory,
         resume_factory: ResumeFactory | None = None,
         mappers: list[EventMapper] | None = None,
-        include_reducers: bool | list[str] = False,
+        include_reducers: bool | list[str] = True,
         error_message: str | None = None,
         interrupt_gate: bool = True,
     ) -> None:
@@ -119,9 +102,23 @@ class AGUIAdapter:
             else False
         )
 
-        self._messages_in_reducers = "messages" in graph._resolve_reducer_names(
-            include_reducers
-        )
+        # Ensure message_reducer is present and included
+        resolved = graph._resolve_reducer_names(include_reducers)
+        if "messages" not in resolved:
+            if "messages" in graph._reducers:
+                # User excluded "messages" — force-include it
+                if isinstance(include_reducers, list):
+                    include_reducers = [*include_reducers, "messages"]
+                else:
+                    include_reducers = ["messages"]
+                self._include_reducers = include_reducers
+            else:
+                raise ValueError(
+                    "AGUIAdapter requires a message_reducer() on the "
+                    "EventGraph. "
+                    "Add reducers=[message_reducer()] when constructing "
+                    "your EventGraph."
+                )
 
         # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers()
@@ -334,9 +331,6 @@ class AGUIAdapter:
         item: LLMStreamEnd,
         ctx: MapperContext,
     ) -> list[BaseEvent]:
-        if item.message_id:
-            ctx.mark_streamed_ai_message(item.message_id)
-            ctx.mark_emitted_message(item.message_id)
         closed_id = ctx.close_stream_message_id(item.run_id)
         if closed_id is None:
             return []
@@ -353,29 +347,38 @@ class AGUIAdapter:
         ctx: MapperContext,
         *,
         is_resume: bool,
-        prev_message_ids: tuple[_MsgFingerprint, ...],
-    ) -> tuple[list[BaseEvent], tuple[_MsgFingerprint, ...], bool]:
+        state_snapshot_emitted: bool,
+    ) -> tuple[list[BaseEvent], bool, bool]:
         event = item.event
         if is_resume and self._is_interrupt(event):
-            return [], prev_message_ids, False
+            return [], False, state_snapshot_emitted
 
-        events: list[BaseEvent] = [
-            build_state_snapshot(_strip_dedicated_keys(item.reducers))
-        ]
+        events: list[BaseEvent] = []
+        changed_reducers = item.changed_reducers
+        should_emit_state_snapshot = not state_snapshot_emitted
+        if changed_reducers is not None:
+            should_emit_state_snapshot = should_emit_state_snapshot or any(
+                name not in _DEDICATED_EVENT_KEYS for name in changed_reducers
+            )
 
-        mapped_events = self._map_event(event, ctx)
+        if should_emit_state_snapshot:
+            events.append(build_state_snapshot(_strip_dedicated_keys(item.reducers)))
+            state_snapshot_emitted = True
 
-        # Build messages snapshot — always uses original LangChain IDs
         messages = item.reducers.get("messages")
-        next_message_ids = prev_message_ids
-        if messages is not None:
-            fingerprints = tuple(_message_fingerprint(m) for m in messages)
-            if fingerprints != prev_message_ids:
-                next_message_ids = fingerprints
-                events.append(build_messages_snapshot(messages))
+        if (
+            messages is not None
+            and changed_reducers is not None
+            and "messages" in changed_reducers
+        ):
+            events.append(build_messages_snapshot(messages))
 
-        events.extend(mapped_events)
-        return events, next_message_ids, self._is_interrupt(event)
+        events.extend(self._map_event(event, ctx))
+        return (
+            events,
+            self._is_interrupt(event),
+            state_snapshot_emitted,
+        )
 
     def _events_from_bare_item(
         self,
@@ -411,8 +414,8 @@ class AGUIAdapter:
         )
         resume_event = self._call_resume_factory(input_data, checkpoint_state)
         is_resume = resume_event is not None
-        prev_message_ids: tuple[_MsgFingerprint, ...] = ()
         emitted_interrupt_in_stream = False
+        emitted_state_snapshot = False
 
         # Interrupt gate: re-emit state without executing when interrupted
         if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
@@ -449,15 +452,16 @@ class AGUIAdapter:
                     value=item.data,
                 )
             elif isinstance(item, StreamFrame):
-                agui_events, next_message_ids, emitted_interrupt = (
-                    self._events_from_stream_frame(
-                        item,
-                        ctx,
-                        is_resume=is_resume,
-                        prev_message_ids=prev_message_ids,
-                    )
+                (
+                    agui_events,
+                    emitted_interrupt,
+                    emitted_state_snapshot,
+                ) = self._events_from_stream_frame(
+                    item,
+                    ctx,
+                    is_resume=is_resume,
+                    state_snapshot_emitted=emitted_state_snapshot,
                 )
-                prev_message_ids = next_message_ids
                 emitted_interrupt_in_stream = (
                     emitted_interrupt_in_stream or emitted_interrupt
                 )
@@ -505,7 +509,6 @@ class AGUIAdapter:
             run_id=run_id,
             thread_id=thread_id,
             input_data=input_data,
-            snapshot_mode=self._messages_in_reducers,
         )
 
         yield RunStartedEvent(

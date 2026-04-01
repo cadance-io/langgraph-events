@@ -25,7 +25,6 @@ from langgraph_events import (
     message_reducer,
     on,
 )
-from langgraph_events._reducer import ScalarReducer
 from langgraph_events.agui import (
     AGUIAdapter,
     MapperContext,
@@ -150,7 +149,7 @@ def describe_AGUIAdapter():
                     message=AIMessage(content=f"Answer to: {event.question}")
                 )
 
-            return EventGraph([reply])
+            return EventGraph([reply], reducers=[message_reducer()])
 
         def when_default_configuration():
             async def it_emits_run_started_and_finished(simple_graph):
@@ -166,34 +165,23 @@ def describe_AGUIAdapter():
                 assert events[-1].type == EventType.RUN_FINISHED
                 assert events[-1].thread_id == "thread-1"
 
-            async def it_maps_ai_message_to_text_events(simple_graph):
+            async def it_delivers_ai_messages_via_snapshot(simple_graph):
                 adapter = AGUIAdapter(
                     graph=simple_graph,
                     seed_factory=lambda inp: UserAsked(question="hello"),
                 )
                 events = await _collect(adapter, _make_input())
 
-                text_events = [
-                    e
-                    for e in events
-                    if e.type
-                    in (
-                        EventType.TEXT_MESSAGE_START,
-                        EventType.TEXT_MESSAGE_CONTENT,
-                        EventType.TEXT_MESSAGE_END,
-                    )
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 ]
-                assert len(text_events) == 3
-                assert text_events[0].type == EventType.TEXT_MESSAGE_START
-                assert text_events[0].role == "assistant"
-                assert text_events[1].type == EventType.TEXT_MESSAGE_CONTENT
-                assert "Answer to: hello" in text_events[1].delta
-                assert text_events[2].type == EventType.TEXT_MESSAGE_END
-                # All share the same message_id
-                msg_id = text_events[0].message_id
-                assert all(e.message_id == msg_id for e in text_events)
+                assert len(msg_snapshots) >= 1
+                last_snap = msg_snapshots[-1]
+                ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+                assert len(ai_msgs) >= 1
+                assert "Answer to: hello" in ai_msgs[-1].content
 
-            async def it_maps_tool_calls_to_tool_events():
+            async def it_delivers_tool_calls_via_snapshot():
                 @on(UserAsked)
                 def call_tool(event: UserAsked) -> AgentCalledTools:
                     return AgentCalledTools(
@@ -209,32 +197,25 @@ def describe_AGUIAdapter():
                         )
                     )
 
-                graph = EventGraph([call_tool])
+                graph = EventGraph([call_tool], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="search"),
                 )
                 events = await _collect(adapter, _make_input())
 
-                tool_events = [
-                    e
-                    for e in events
-                    if e.type
-                    in (
-                        EventType.TOOL_CALL_START,
-                        EventType.TOOL_CALL_ARGS,
-                        EventType.TOOL_CALL_END,
-                    )
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 ]
-                assert len(tool_events) == 3
-                assert tool_events[0].type == EventType.TOOL_CALL_START
-                assert tool_events[0].tool_call_id == "tc-1"
-                assert tool_events[0].tool_call_name == "search"
-                assert tool_events[1].type == EventType.TOOL_CALL_ARGS
-                assert json.loads(tool_events[1].delta) == {"query": "test"}
-                assert tool_events[2].type == EventType.TOOL_CALL_END
+                assert len(msg_snapshots) >= 1
+                last_snap = msg_snapshots[-1]
+                ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+                assert len(ai_msgs) >= 1
+                assert len(ai_msgs[-1].tool_calls) == 1
+                assert ai_msgs[-1].tool_calls[0].id == "tc-1"
+                assert ai_msgs[-1].tool_calls[0].function.name == "search"
 
-            async def it_maps_tool_results_to_tool_call_result_events():
+            async def it_delivers_tool_results_via_snapshot():
                 @on(UserAsked)
                 def run_tools(event: UserAsked) -> ToolsExecuted:
                     return ToolsExecuted(
@@ -246,21 +227,23 @@ def describe_AGUIAdapter():
                         )
                     )
 
-                graph = EventGraph([run_tools])
+                graph = EventGraph([run_tools], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="run"),
                 )
                 events = await _collect(adapter, _make_input())
 
-                result_events = [
-                    e for e in events if e.type == EventType.TOOL_CALL_RESULT
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 ]
-                assert len(result_events) == 1
-                assert result_events[0].tool_call_id == "tc-1"
-                assert result_events[0].content == "result-1"
+                assert len(msg_snapshots) >= 1
+                last_snap = msg_snapshots[-1]
+                tool_msgs = [m for m in last_snap.messages if m.role == "tool"]
+                assert len(tool_msgs) >= 1
+                assert tool_msgs[0].content == "result-1"
 
-            async def it_maps_mixed_ai_and_tool_messages():
+            async def it_delivers_mixed_messages_via_snapshot():
                 @on(UserAsked)
                 def reply_tool_result(event: UserAsked) -> AgentAndToolMessages:
                     return AgentAndToolMessages(
@@ -270,30 +253,34 @@ def describe_AGUIAdapter():
                         )
                     )
 
-                graph = EventGraph([reply_tool_result])
+                graph = EventGraph([reply_tool_result], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="mixed"),
                 )
                 events = await _collect(adapter, _make_input())
 
-                text_events = [
-                    e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 ]
-                result_events = [
-                    e for e in events if e.type == EventType.TOOL_CALL_RESULT
-                ]
-                assert any("I used a tool" in e.delta for e in text_events)
-                assert len(result_events) == 1
-                assert result_events[0].tool_call_id == "tc-mixed"
-                assert result_events[0].content == "tool output"
+                assert len(msg_snapshots) >= 1
+                last_snap = msg_snapshots[-1]
+                ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+                tool_msgs = [m for m in last_snap.messages if m.role == "tool"]
+                assert any("I used a tool" in m.content for m in ai_msgs)
+                assert len(tool_msgs) >= 1
+                assert tool_msgs[0].content == "tool output"
 
             async def it_maps_interrupted_to_custom_event():
                 @on(UserAsked)
                 def ask_approval(event: UserAsked) -> ApprovalRequested:
                     return ApprovalRequested(draft="draft text")
 
-                graph = EventGraph([ask_approval], checkpointer=MemorySaver())
+                graph = EventGraph(
+                    [ask_approval],
+                    checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
+                )
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="approve?"),
@@ -320,6 +307,7 @@ def describe_AGUIAdapter():
                 graph = EventGraph(
                     [ask_approval, handle_approval],
                     checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
                 )
 
                 # First run — triggers interrupt
@@ -351,7 +339,7 @@ def describe_AGUIAdapter():
                 def create_task(event: UserAsked) -> TaskCreated:
                     return TaskCreated(title="new task")
 
-                graph = EventGraph([create_task])
+                graph = EventGraph([create_task], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="task"),
@@ -371,7 +359,7 @@ def describe_AGUIAdapter():
                 def blow_up(event: ErrorTrigger) -> None:
                     raise RuntimeError("boom")
 
-                graph = EventGraph([blow_up])
+                graph = EventGraph([blow_up], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: ErrorTrigger(),
@@ -402,7 +390,6 @@ def describe_AGUIAdapter():
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="go"),
-                    include_reducers=True,
                 )
                 events = await _collect(adapter, _make_input())
 
@@ -434,7 +421,7 @@ def describe_AGUIAdapter():
                 def emit_plain(event: UserAsked) -> PlainEvent:
                     return PlainEvent(value="hello")
 
-                graph = EventGraph([emit_plain])
+                graph = EventGraph([emit_plain], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="go"),
@@ -457,7 +444,7 @@ def describe_AGUIAdapter():
                 def create_task(event: UserAsked) -> TaskCreated:
                     return TaskCreated(title="with dict")
 
-                graph = EventGraph([create_task])
+                graph = EventGraph([create_task], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="go"),
@@ -487,7 +474,7 @@ def describe_AGUIAdapter():
                 def step2(event: NoDict1) -> NoDict2:
                     return NoDict2(x=2)
 
-                graph = EventGraph([step1, step2])
+                graph = EventGraph([step1, step2], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="go"),
@@ -517,7 +504,6 @@ def describe_AGUIAdapter():
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="hi"),
-                    include_reducers=True,
                 )
                 events = await _collect(adapter, _make_input())
 
@@ -538,7 +524,6 @@ def describe_AGUIAdapter():
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="hi"),
-                    include_reducers=True,
                 )
                 events = await _collect(adapter, _make_input())
 
@@ -570,7 +555,6 @@ def describe_AGUIAdapter():
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="hi"),
-                    include_reducers=True,
                 )
                 events = await _collect(adapter, _make_input())
 
@@ -583,43 +567,13 @@ def describe_AGUIAdapter():
                 assert isinstance(last_snap.messages, list)
                 assert len(last_snap.messages) >= 1
 
-        def when_include_reducers_has_no_messages_reducer():
-            async def it_still_emits_text_message_events():
-                """Mapper must not be suppressed without messages reducer."""
-                counter = ScalarReducer(
-                    name="counter",
-                    event_type=AgentReplied,
-                    fn=lambda e: 1,
-                    default=0,
-                )
-
-                @on(UserAsked)
-                def reply(event: UserAsked) -> AgentReplied:
-                    return AgentReplied(message=AIMessage(content="hello"))
-
-                graph = EventGraph([reply], reducers=[counter])
-                adapter = AGUIAdapter(
-                    graph=graph,
-                    seed_factory=lambda inp: UserAsked(question="hi"),
-                    include_reducers=True,
-                )
-                events = await _collect(adapter, _make_input())
-
-                starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-                assert len(starts) == 1
-
-                msg_snapshots = [
-                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
-                ]
-                assert len(msg_snapshots) == 0
-
         def when_error_message_provided():
             async def it_uses_custom_error_message():
                 @on(ErrorTrigger)
                 def blow_up(event: ErrorTrigger) -> None:
                     raise RuntimeError("boom")
 
-                graph = EventGraph([blow_up])
+                graph = EventGraph([blow_up], reducers=[message_reducer()])
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: ErrorTrigger(),
@@ -650,7 +604,6 @@ def describe_AGUIAdapter():
                 adapter = AGUIAdapter(
                     graph=graph,
                     seed_factory=lambda inp: UserAsked(question="hi"),
-                    include_reducers=True,
                 )
                 events = await _collect(adapter, _make_input())
 
@@ -660,7 +613,10 @@ def describe_AGUIAdapter():
                 msg_count = sum(
                     1 for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 )
-                assert state_count > msg_count
+                # With StreamFrame.changed_reducers, state snapshots are only
+                # emitted initially (or when non-dedicated reducers change).
+                assert state_count == 1
+                assert msg_count == 1
 
             async def it_detects_message_content_changes():
                 """MessagesSnapshot emits when add_messages replaces in-place."""
@@ -696,7 +652,6 @@ def describe_AGUIAdapter():
                     seed_factory=lambda inp: UserSent(
                         message=HumanMessage(content="go")
                     ),
-                    include_reducers=True,
                 )
                 events = await _collect(adapter, _make_input())
 
@@ -845,7 +800,7 @@ def describe_AGUIAdapter():
             def create_task(event: UserAsked) -> TaskCreated:
                 return TaskCreated(title="my task")
 
-            graph = EventGraph([create_task])
+            graph = EventGraph([create_task], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="create"),
@@ -880,7 +835,7 @@ def describe_AGUIAdapter():
             def create_task(event: UserAsked) -> TaskCreated:
                 return TaskCreated(title="test")
 
-            graph = EventGraph([create_task])
+            graph = EventGraph([create_task], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
@@ -909,7 +864,11 @@ def describe_AGUIAdapter():
                 def approve(event: ApprovalGiven) -> AgentReplied:
                     return AgentReplied(message=AIMessage(content="Done!"))
 
-                graph = EventGraph([ask, approve], checkpointer=MemorySaver())
+                graph = EventGraph(
+                    [ask, approve],
+                    checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
+                )
 
                 # Create the interrupt
                 config = {"configurable": {"thread_id": "t-resume-factory"}}
@@ -928,11 +887,14 @@ def describe_AGUIAdapter():
                 assert events[0].type == EventType.RUN_STARTED
                 assert events[-1].type == EventType.RUN_FINISHED
 
-                # Should contain text from the approve handler
-                text_events = [
-                    e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT
+                # Should contain message from the approve handler
+                msg_snapshots = [
+                    e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                 ]
-                assert any("Done!" in e.delta for e in text_events)
+                assert len(msg_snapshots) >= 1
+                last_snap = msg_snapshots[-1]
+                ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+                assert any("Done!" in m.content for m in ai_msgs)
 
             async def it_streams_resume_events():
                 @on(UserAsked)
@@ -943,7 +905,11 @@ def describe_AGUIAdapter():
                 def approve(event: ApprovalGiven) -> TaskCreated:
                     return TaskCreated(title="approved task")
 
-                graph = EventGraph([ask, approve], checkpointer=MemorySaver())
+                graph = EventGraph(
+                    [ask, approve],
+                    checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
+                )
 
                 config = {"configurable": {"thread_id": "t-stream-resume"}}
                 await graph.ainvoke(UserAsked(question="go"), config=config)
@@ -975,7 +941,11 @@ def describe_AGUIAdapter():
                 def approve(event: ApprovalGiven) -> AgentReplied:
                     return AgentReplied(message=AIMessage(content="Approved!"))
 
-                graph = EventGraph([ask, approve], checkpointer=MemorySaver())
+                graph = EventGraph(
+                    [ask, approve],
+                    checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
+                )
 
                 # Create the interrupt
                 config = {"configurable": {"thread_id": "t-no-stale-interrupt"}}
@@ -1013,6 +983,7 @@ def describe_AGUIAdapter():
                 graph = EventGraph(
                     [ask, request_persona_review],
                     checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
                 )
 
                 # First run creates an interrupt.
@@ -1049,7 +1020,11 @@ def describe_AGUIAdapter():
                     def reply(event: UserAsked) -> AgentReplied:
                         return AgentReplied(message=AIMessage(content="ok"))
 
-                    graph = EventGraph([reply], checkpointer=MemorySaver())
+                    graph = EventGraph(
+                        [reply],
+                        checkpointer=MemorySaver(),
+                        reducers=[message_reducer()],
+                    )
                     adapter = AGUIAdapter(
                         graph=graph,
                         seed_factory=lambda inp: UserAsked(question="go"),
@@ -1149,7 +1124,9 @@ def describe_AGUIAdapter():
                 def reply(event: UserAsked) -> AgentReplied:
                     return AgentReplied(message=AIMessage(content="hi"))
 
-                graph = EventGraph([reply])  # no checkpointer
+                graph = EventGraph(
+                    [reply], reducers=[message_reducer()]
+                )  # no checkpointer
                 with pytest.raises(
                     ValueError, match="resume_factory requires a checkpointer"
                 ):
@@ -1158,6 +1135,57 @@ def describe_AGUIAdapter():
                         seed_factory=lambda inp: UserAsked(question="hi"),
                         resume_factory=lambda inp: ApprovalGiven(approved=True),
                     )
+
+        def when_graph_has_no_message_reducer():
+            async def it_raises():
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hi"))
+
+                graph = EventGraph([reply])
+                with pytest.raises(ValueError, match="message_reducer"):
+                    AGUIAdapter(
+                        graph=graph,
+                        seed_factory=lambda inp: UserAsked(question="hi"),
+                    )
+
+        def when_include_reducers_false():
+            @pytest.mark.asyncio
+            async def it_auto_includes_messages():
+                """include_reducers=False is overridden to include messages."""
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="auto-included"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    include_reducers=False,
+                )
+                events = await _collect(adapter, _make_input())
+                snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+                assert len(snapshots) >= 1
+
+        def when_include_reducers_list_excludes_messages():
+            @pytest.mark.asyncio
+            async def it_auto_adds_messages():
+                """include_reducers=['other'] auto-adds 'messages'."""
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="list-fix"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    include_reducers=["nonexistent"],
+                )
+                events = await _collect(adapter, _make_input())
+                snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+                assert len(snapshots) >= 1
 
     def describe_seed_factory():
         async def it_passes_input_to_factory():
@@ -1171,7 +1199,7 @@ def describe_AGUIAdapter():
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content=event.question))
 
-            graph = EventGraph([reply])
+            graph = EventGraph([reply], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=tracking_factory,
@@ -1182,10 +1210,11 @@ def describe_AGUIAdapter():
             assert len(received_inputs) == 1
             assert received_inputs[0].thread_id == "t-seed"
 
-            text_events = [
-                e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT
-            ]
-            assert any("from factory" in e.delta for e in text_events)
+            msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            assert len(msg_snapshots) >= 1
+            last_snap = msg_snapshots[-1]
+            ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+            assert any("from factory" in m.content for m in ai_msgs)
 
 
 def describe_transport():
@@ -1232,7 +1261,11 @@ def describe_interrupt_detection():
         def ask_approval(event: UserAsked) -> ApprovalRequested:
             return ApprovalRequested(draft="needs review")
 
-        graph = EventGraph([ask_approval], checkpointer=MemorySaver())
+        graph = EventGraph(
+            [ask_approval],
+            checkpointer=MemorySaver(),
+            reducers=[message_reducer()],
+        )
         adapter = AGUIAdapter(
             graph=graph,
             seed_factory=lambda inp: UserAsked(question="check"),
@@ -1359,7 +1392,7 @@ def describe_connect():
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
 
-            graph = EventGraph([reply])
+            graph = EventGraph([reply], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="unused"),
@@ -1430,7 +1463,7 @@ def describe_config_passthrough():
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="ok"))
 
-        graph = EventGraph([reply])
+        graph = EventGraph([reply], reducers=[message_reducer()])
         captured: list[dict[str, Any]] = []
 
         async def fake_astream_events(
@@ -1546,7 +1579,7 @@ def describe_custom_event_passthrough():
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="ok"))
 
-        graph = EventGraph([reply])
+        graph = EventGraph([reply], reducers=[message_reducer()])
         calls: list[dict[str, Any]] = []
 
         async def fake_astream_events(
@@ -1597,7 +1630,7 @@ def describe_custom_event_passthrough():
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="ok"))
 
-        graph = EventGraph([reply])
+        graph = EventGraph([reply], reducers=[message_reducer()])
 
         async def fake_astream_events(
             seed,
@@ -1643,7 +1676,7 @@ def describe_custom_event_passthrough():
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="ok"))
 
-        graph = EventGraph([reply])
+        graph = EventGraph([reply], reducers=[message_reducer()])
 
         async def fake_astream_events(
             seed,
@@ -1686,7 +1719,9 @@ def describe_async_checkpoint_reads():
         def ask(event: UserAsked) -> ApprovalRequested:
             return ApprovalRequested(draft="needs review")
 
-        graph = EventGraph([ask], checkpointer=MemorySaver())
+        graph = EventGraph(
+            [ask], checkpointer=MemorySaver(), reducers=[message_reducer()]
+        )
         adapter = AGUIAdapter(
             graph=graph,
             seed_factory=lambda inp: UserAsked(question="go"),
@@ -1721,7 +1756,9 @@ def describe_seed_factory_state():
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
 
-            graph = EventGraph([reply], checkpointer=MemorySaver())
+            graph = EventGraph(
+                [reply], checkpointer=MemorySaver(), reducers=[message_reducer()]
+            )
             # Create a thread with state
             await graph.ainvoke(
                 UserAsked(question="first"),
@@ -1753,7 +1790,7 @@ def describe_seed_factory_state():
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
 
-            graph = EventGraph([reply])
+            graph = EventGraph([reply], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="simple"),
@@ -1775,7 +1812,7 @@ def describe_seed_factory_state():
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="ok"))
 
-            graph = EventGraph([reply])  # no checkpointer
+            graph = EventGraph([reply], reducers=[message_reducer()])  # no checkpointer
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=stateful_factory,
@@ -1835,7 +1872,11 @@ def describe_interrupt_gate():
             def ask(event: UserAsked) -> ApprovalRequested:
                 return ApprovalRequested(draft="pending")
 
-            graph = EventGraph([ask], checkpointer=MemorySaver())
+            graph = EventGraph(
+                [ask],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer()],
+            )
             await graph.ainvoke(
                 UserAsked(question="go"),
                 config={"configurable": {"thread_id": "t-gate-off"}},
@@ -1864,7 +1905,11 @@ def describe_interrupt_gate():
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="done"))
 
-            graph = EventGraph([reply], checkpointer=MemorySaver())
+            graph = EventGraph(
+                [reply],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer()],
+            )
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
@@ -1874,8 +1919,11 @@ def describe_interrupt_gate():
 
             assert events[0].type == EventType.RUN_STARTED
             assert events[-1].type == EventType.RUN_FINISHED
-            text = [e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT]
-            assert any("done" in e.delta for e in text)
+            msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            assert len(msg_snapshots) >= 1
+            last_snap = msg_snapshots[-1]
+            ai_msgs = [m for m in last_snap.messages if m.role == "assistant"]
+            assert any("done" in m.content for m in ai_msgs)
 
 
 def describe_AGUICustomEvent():
@@ -1895,7 +1943,7 @@ def describe_AGUICustomEvent():
             def emit(event: UserAsked) -> NamedEvent:
                 return NamedEvent(data="hello")
 
-            graph = EventGraph([emit])
+            graph = EventGraph([emit], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
@@ -1916,7 +1964,7 @@ def describe_AGUICustomEvent():
             def emit(event: UserAsked) -> TaskCreated:
                 return TaskCreated(title="fallback")
 
-            graph = EventGraph([emit])
+            graph = EventGraph([emit], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
@@ -1982,7 +2030,7 @@ def describe_agui_event_name_edge_cases():
             def emit(event: UserAsked) -> NameOnlyEvent:
                 return NameOnlyEvent(data="test")
 
-            graph = EventGraph([emit])
+            graph = EventGraph([emit], reducers=[message_reducer()])
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
@@ -2008,7 +2056,7 @@ def describe_multi_seed_factory():
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content=f"Re: {event.question}"))
 
-        graph = EventGraph([reply])
+        graph = EventGraph([reply], reducers=[message_reducer()])
         adapter = AGUIAdapter(
             graph=graph,
             seed_factory=lambda inp: [
@@ -2021,15 +2069,19 @@ def describe_multi_seed_factory():
         assert events[0].type == EventType.RUN_STARTED
         assert events[-1].type == EventType.RUN_FINISHED
         # Both seeds should produce replies
-        text_events = [e for e in events if e.type == EventType.TEXT_MESSAGE_CONTENT]
-        deltas = [e.delta for e in text_events]
-        assert any("first" in d for d in deltas)
-        assert any("second" in d for d in deltas)
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+        assert len(msg_snapshots) >= 1
+        last_snap = msg_snapshots[-1]
+        all_content = " ".join(
+            m.content for m in last_snap.messages if m.role == "assistant"
+        )
+        assert "first" in all_content
+        assert "second" in all_content
 
 
-def describe_ai_message_dedup():
+def describe_llm_streaming_single_start():
     async def it_emits_text_message_start_exactly_once():
-        """Streamed tokens should not be doubled by MessageEventMapper."""
+        """LLM streaming emits exactly one TEXT_MESSAGE_START per call."""
         llm = FakeListChatModel(responses=["dedup me"], sleep=0)
 
         @on(UserAsked)
@@ -2046,133 +2098,12 @@ def describe_ai_message_dedup():
         adapter = AGUIAdapter(
             graph=graph,
             seed_factory=lambda inp: UserAsked(question="go"),
-            include_reducers=True,
         )
         events = await _collect(adapter, _make_input())
 
         starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-        # Exactly one start — from streaming, not doubled by mapper
+        # Exactly one start — from LLM streaming
         assert len(starts) == 1
-
-
-def describe_message_event_dedup():
-    """Multiple MessageEvents carrying the same AI message must not duplicate."""
-
-    def when_same_ai_id_across_events():
-        async def it_emits_text_message_start_once():
-            shared_ai = AIMessage(content="hello", id="ai-shared")
-
-            @on(UserAsked)
-            def step1(event: UserAsked) -> PhaseA:
-                return PhaseA(messages=(shared_ai,))
-
-            @on(PhaseA)
-            def step2(event: PhaseA) -> PhaseB:
-                return PhaseB(messages=(shared_ai,))
-
-            graph = EventGraph([step1, step2])
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="go"),
-            )
-            events = await _collect(adapter, _make_input())
-
-            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-            assert len(starts) == 1
-
-    def when_streamed_ai_reappears_via_message_event():
-        async def it_does_not_reemit():
-            llm = FakeListChatModel(responses=["streamed"], sleep=0)
-
-            @on(UserAsked)
-            async def stream_then_wrap(
-                event: UserAsked,
-                messages: list[Any],
-            ) -> PhaseA:
-                response = await llm.ainvoke(
-                    [*messages, HumanMessage(content=event.question)]
-                )
-                return PhaseA(messages=(response,))
-
-            graph = EventGraph([stream_then_wrap], reducers=[message_reducer()])
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="go"),
-                include_reducers=True,
-            )
-            events = await _collect(adapter, _make_input())
-
-            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-            assert len(starts) == 1
-
-    def without_message_ids():
-        async def it_emits_both_because_dedup_cannot_apply():
-            no_id = AIMessage(content="no id", id=None)
-
-            @on(UserAsked)
-            def step1(event: UserAsked) -> PhaseA:
-                return PhaseA(messages=(no_id,))
-
-            @on(PhaseA)
-            def step2(event: PhaseA) -> PhaseB:
-                return PhaseB(messages=(no_id,))
-
-            graph = EventGraph([step1, step2])
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="go"),
-            )
-            events = await _collect(adapter, _make_input())
-
-            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-            assert len(starts) == 2
-
-    def when_distinct_ai_ids_across_events():
-        async def it_emits_both():
-            ai1 = AIMessage(content="first", id="ai-1")
-            ai2 = AIMessage(content="second", id="ai-2")
-
-            @on(UserAsked)
-            def step1(event: UserAsked) -> PhaseA:
-                return PhaseA(messages=(ai1,))
-
-            @on(PhaseA)
-            def step2(event: PhaseA) -> PhaseB:
-                return PhaseB(messages=(ai2,))
-
-            graph = EventGraph([step1, step2])
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="go"),
-            )
-            events = await _collect(adapter, _make_input())
-
-            starts = [e for e in events if e.type == EventType.TEXT_MESSAGE_START]
-            assert len(starts) == 2
-
-    def when_same_tool_message_id_across_events():
-        async def it_emits_tool_call_result_once():
-            shared_tool = ToolMessage(
-                content="result", tool_call_id="tc-1", id="tool-shared"
-            )
-
-            @on(UserAsked)
-            def step1(event: UserAsked) -> PhaseA:
-                return PhaseA(messages=(shared_tool,))
-
-            @on(PhaseA)
-            def step2(event: PhaseA) -> PhaseB:
-                return PhaseB(messages=(shared_tool,))
-
-            graph = EventGraph([step1, step2])
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="go"),
-            )
-            events = await _collect(adapter, _make_input())
-
-            results = [e for e in events if e.type == EventType.TOOL_CALL_RESULT]
-            assert len(results) == 1
 
 
 def describe_llm_streaming_on_resume():
@@ -2362,11 +2293,11 @@ def describe_snapshot_uses_langchain_ids():
 
 
 def describe_non_streamed_id_reconciliation():
-    """Non-streamed AI messages are delivered only via MESSAGES_SNAPSHOT."""
+    """Non-streamed AI messages appear only in MESSAGES_SNAPSHOT."""
 
     def when_non_streamed_ai_message():
         async def it_delivers_via_snapshot_only():
-            """No TextMessageStart for non-streamed AI; snapshot keeps LC ID."""
+            """Snapshot delivers non-streamed AI with original LC ID."""
             ai = AIMessage(content="from history", id="lc-ai-1")
 
             @on(UserAsked)
@@ -2377,7 +2308,6 @@ def describe_non_streamed_id_reconciliation():
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
-                include_reducers=True,
             )
             events = await _collect(adapter, _make_input())
 
@@ -2408,7 +2338,6 @@ def describe_non_streamed_id_reconciliation():
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
-                include_reducers=True,
             )
             events = await _collect(adapter, _make_input())
 
@@ -2423,7 +2352,7 @@ def describe_non_streamed_id_reconciliation():
 
     def when_ai_message_has_no_content_or_tool_calls():
         async def it_does_not_create_orphan_id_override():
-            """Empty AI message must not register an override."""
+            """Empty AI message appears in snapshot with original LC ID."""
             empty_ai = AIMessage(content="", id="lc-empty")
 
             @on(UserAsked)
@@ -2434,7 +2363,6 @@ def describe_non_streamed_id_reconciliation():
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
-                include_reducers=True,
             )
             events = await _collect(adapter, _make_input())
 
@@ -2463,7 +2391,7 @@ def describe_unclosed_stream_on_error():
         def reply(event: UserAsked) -> AgentReplied:
             return AgentReplied(message=AIMessage(content="ok"))
 
-        graph = EventGraph([reply])
+        graph = EventGraph([reply], reducers=[message_reducer()])
 
         async def exploding_stream(
             seed,

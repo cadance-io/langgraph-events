@@ -2046,6 +2046,8 @@ def describe_EventGraph():
                     )
                 )
                 assert all(isinstance(f, StreamFrame) for f in frames)
+                # values-mode frames (sync API) do not track reducer deltas
+                assert all(f.changed_reducers is None for f in frames)
                 types = [type(f.event).__name__ for f in frames]
                 assert "Started" in types
                 assert "Processed" in types
@@ -2918,6 +2920,38 @@ def describe_EventGraph():
             assert len(tokens) >= 1
             # Frames should have reducer data
             assert all("messages" in f.reducers for f in frames)
+            # v2 reducer frames track which reducers changed per event
+            assert all(f.changed_reducers is not None for f in frames)
+            assert "messages" in frames[0].changed_reducers
+            assert "messages" in frames[-1].changed_reducers
+
+        @pytest.mark.asyncio
+        async def it_reports_empty_changed_reducers_for_non_matching_events():
+            reducer = _data_reducer()
+
+            @on(Started)
+            def step1(event: Started) -> Processed:
+                return Processed(data=f"mid:{event.data}")
+
+            @on(Processed)
+            def step2(event: Processed) -> Ended:
+                return Ended(result=event.data)
+
+            graph = EventGraph([step1, step2], reducers=[reducer])
+            items = [
+                item
+                async for item in graph.astream_events(
+                    Started(data="x"),
+                    include_reducers=True,
+                    include_llm_tokens=True,
+                )
+            ]
+
+            frames = [i for i in items if isinstance(i, StreamFrame)]
+            assert len(frames) >= 3
+            assert frames[0].changed_reducers == frozenset({"data_items"})
+            # Processed/Ended are not Started events, so reducer is unchanged.
+            assert all(f.changed_reducers == frozenset() for f in frames[1:])
 
         @pytest.mark.asyncio
         async def it_omits_tokens_by_default():

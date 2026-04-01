@@ -106,6 +106,7 @@ class StreamFrame(NamedTuple):
 
     event: Event
     reducers: dict[str, list[Any]]
+    changed_reducers: frozenset[str] | None = None
 
 
 class LLMToken(NamedTuple):
@@ -494,8 +495,9 @@ class EventGraph:
         state: dict[str, Any],
         event: Event,
         reducer_names: list[str],
-    ) -> None:
+    ) -> frozenset[str]:
         """Incrementally update reducer state with a single new event."""
+        changed: set[str] = set()
         for name in reducer_names:
             r = self._reducers[name]
             contribution = r.collect([event])
@@ -505,6 +507,8 @@ class EventGraph:
                     state[name] = reducer_fn(state[name], contribution)
                 else:
                     state[name] = contribution
+                changed.add(name)
+        return frozenset(changed)
 
     # --- High-level event streaming ---
 
@@ -552,7 +556,8 @@ class EventGraph:
             name: state.get(name, self._reducers[name].empty) for name in reducer_names
         }
         return len(all_events), [
-            StreamFrame(event=e, reducers=reducers) for e in new_events
+            StreamFrame(event=e, reducers=reducers, changed_reducers=None)
+            for e in new_events
         ]
 
     async def _astream_v2(  # noqa: PLR0912
@@ -576,7 +581,18 @@ class EventGraph:
         # Yield seed events
         for s in seeds:
             if reducer_names:
-                yield StreamFrame(event=s, reducers=dict(reducer_state))
+                changed = frozenset(
+                    name
+                    for name in reducer_names
+                    if self._reducers[name].has_contributions(
+                        self._reducers[name].collect([s])
+                    )
+                )
+                yield StreamFrame(
+                    event=s,
+                    reducers=dict(reducer_state),
+                    changed_reducers=changed,
+                )
             else:
                 yield s
 
@@ -630,8 +646,16 @@ class EventGraph:
             chunk = raw.get("data", {}).get("chunk")
             for event in self._events_from_chunk(chunk, seen):
                 if reducer_names:
-                    self._update_reducer_state(reducer_state, event, reducer_names)
-                    yield StreamFrame(event=event, reducers=dict(reducer_state))
+                    changed = self._update_reducer_state(
+                        reducer_state,
+                        event,
+                        reducer_names,
+                    )
+                    yield StreamFrame(
+                        event=event,
+                        reducers=dict(reducer_state),
+                        changed_reducers=changed,
+                    )
                 else:
                     yield event
 

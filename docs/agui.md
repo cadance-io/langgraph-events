@@ -10,7 +10,7 @@ RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> S
 RunAgentInput -> AGUIAdapter.connect/reconnect -> checkpoint snapshots + interrupts
 ```
 
-`AGUIAdapter` enables real-time assistant token streaming by default (it internally uses `include_llm_tokens=True`) and custom-event passthrough (it internally uses `include_custom_events=True`), emitting `TextMessageStart`/`TextMessageContent`/`TextMessageEnd` while the model is generating.
+`AGUIAdapter` enables real-time assistant token streaming by default (it internally uses `include_llm_tokens=True`) and custom-event passthrough (it internally uses `include_custom_events=True`), emitting `TextMessageStart`/`TextMessageContent`/`TextMessageEnd` while the model is generating. The adapter requires `message_reducer()` on the `EventGraph` for authoritative message delivery.
 
 ## Install
 
@@ -27,7 +27,7 @@ from fastapi import FastAPI, Request
 from ag_ui.core import RunAgentInput
 from langgraph.checkpoint.memory import MemorySaver
 
-from langgraph_events import Event, EventGraph, on, MessageEvent
+from langgraph_events import Event, EventGraph, on, MessageEvent, message_reducer
 from langgraph_events.agui import AGUIAdapter, create_starlette_response
 from langchain_core.messages import HumanMessage, AIMessage
 
@@ -45,7 +45,7 @@ async def reply(event: UserMessageReceived) -> AssistantReplied:
     return AssistantReplied(message=AIMessage(content="Hello from the agent!"))
 
 
-graph = EventGraph([reply], checkpointer=MemorySaver())
+graph = EventGraph([reply], checkpointer=MemorySaver(), reducers=[message_reducer()])
 
 
 def seed_factory(input_data: RunAgentInput) -> list[Event]:
@@ -82,13 +82,19 @@ Events flow through a priority chain of mappers. The first mapper to claim an ev
 |----------|--------|---------|-----------------------|
 | 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet` | *(suppressed — claims but emits nothing)* |
 | 2 | `InterruptedMapper` | `Interrupted` subclasses | `CustomEvent` (name=`"interrupted"`) |
-| 3 | `MessageEventMapper` | `MessageEvent` (AI + tool messages) | `TextMessage*`, `ToolCall*`, `ToolCallResult` |
-| 4 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
-| 5 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` when implemented, else class name; value=`agui_dict()`) |
+| 3 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
+| 4 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` when implemented, else class name; value=`agui_dict()`) |
 
 Events without `agui_dict()` are skipped with a one-time warning.
 
-`StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (when `include_reducers` is enabled).
+`StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (`include_reducers` defaults to `True`). The `message_reducer()` must be registered on the `EventGraph` for `MessagesSnapshot` delivery.
+
+When reducer delta metadata is available (`StreamFrame.changed_reducers`, emitted by `EventGraph` v2 streaming), the adapter suppresses redundant snapshots:
+
+- `MessagesSnapshot` is emitted only when the `messages` reducer changed.
+- `StateSnapshot` is emitted once initially, then only when non-dedicated reducers changed.
+
+Messages are delivered through two complementary mechanisms: `MessagesSnapshot` provides authoritative message state from the `message_reducer()`, while LLM tokens stream in real-time as `TextMessageStart`/`TextMessageContent`/`TextMessageEnd` for character-by-character UX. AG-UI clients reconcile the two.
 
 `StateSnapshotFrame` is handled outside the mapper chain as AG-UI `StateSnapshot`.
 
@@ -169,7 +175,7 @@ class PlanMapper:
 adapter = AGUIAdapter(graph, seed_factory=seed_factory, mappers=[PlanMapper()])
 ```
 
-User mappers run after the built-in mappers (priority 4) but before `FallbackMapper`, so they can intercept domain events that would otherwise become generic `CustomEvent`s.
+User mappers run after the built-in mappers (priority 3) but before `FallbackMapper`, so they can intercept domain events that would otherwise become generic `CustomEvent`s.
 
 ## Resume Support
 
@@ -225,10 +231,10 @@ The adapter always injects/overrides `configurable.thread_id` from `RunAgentInpu
 
 ## AG-UI Spec Coverage
 
-The adapter covers 13 of the 33 AG-UI event types automatically. The remaining types can be emitted via custom `EventMapper` implementations or are not applicable.
+The adapter covers 9 of the 33 AG-UI event types automatically. The remaining types can be emitted via custom `EventMapper` implementations or are not applicable.
 
 | Category | Count | Event Types |
 |----------|-------|-------------|
-| **Built-in** | 13 | `RunStarted`, `RunFinished`, `RunError`, `TextMessageStart/Content/End`, `ToolCallStart/Args/End`, `ToolCallResult`, `StateSnapshot`, `MessagesSnapshot`, `Custom` |
-| **User mapper** | 16 | `TextMessageChunk`, `ToolCallChunk`, `StepStarted/Finished`, `StateDelta`, `ActivitySnapshot/Delta`, `ThinkingStart/End`, `ThinkingTextMessageStart/Content/End`, `Raw`, `ReasoningStart/End` |
+| **Built-in** | 9 | `RunStarted`, `RunFinished`, `RunError`, `TextMessageStart/Content/End`, `StateSnapshot`, `MessagesSnapshot`, `Custom` |
+| **User mapper** | 20 | `TextMessageChunk`, `ToolCallStart/Args/End`, `ToolCallResult`, `ToolCallChunk`, `StepStarted/Finished`, `StateDelta`, `ActivitySnapshot/Delta`, `ThinkingStart/End`, `ThinkingTextMessageStart/Content/End`, `Raw`, `ReasoningStart/End` |
 | **N/A** | 4 | `ReasoningMessageStart/Content/End/Chunk` — extended reasoning events that require provider-specific integration |

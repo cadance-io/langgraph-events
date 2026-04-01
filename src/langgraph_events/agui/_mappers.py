@@ -12,19 +12,11 @@ from ag_ui.core import (
     EventType,
     MessagesSnapshotEvent,
     StateSnapshotEvent,
-    TextMessageContentEvent,
-    TextMessageEndEvent,
-    TextMessageStartEvent,
-    ToolCallArgsEvent,
-    ToolCallEndEvent,
-    ToolCallResultEvent,
-    ToolCallStartEvent,
 )
 
 from langgraph_events._event import (
     Event,
     Interrupted,
-    MessageEvent,
     Resumed,
     SystemPromptSet,
 )
@@ -139,108 +131,6 @@ class InterruptedMapper:
         ]
 
 
-class MessageEventMapper:
-    """Map MessageEvent with AIMessage content to AG-UI text/tool events."""
-
-    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:  # noqa: PLR0912
-        if not isinstance(event, MessageEvent):
-            return None
-        if ctx.snapshot_mode:
-            return []  # MESSAGES_SNAPSHOT handles message delivery
-        messages = event.as_messages()
-        ai_messages = [m for m in messages if m.type == "ai"]
-        tool_messages = [m for m in messages if m.type == "tool"]
-        if not ai_messages and not tool_messages:
-            return None
-
-        result: list[BaseEvent] = []
-        for msg in ai_messages:
-            lc_msg_id = getattr(msg, "id", None)
-            if ctx.was_streamed_ai_message(lc_msg_id) or ctx.was_emitted_message(
-                lc_msg_id
-            ):
-                continue
-
-            content = msg.content if isinstance(msg.content, str) else ""
-            tool_calls = getattr(msg, "tool_calls", None)
-            if not content and not tool_calls:
-                continue
-
-            msg_id = ctx.next_message_id()
-
-            # Text content
-            if content:
-                result.append(
-                    TextMessageStartEvent(
-                        type=EventType.TEXT_MESSAGE_START,
-                        message_id=msg_id,
-                        role="assistant",
-                    )
-                )
-                result.append(
-                    TextMessageContentEvent(
-                        type=EventType.TEXT_MESSAGE_CONTENT,
-                        message_id=msg_id,
-                        delta=content,
-                    )
-                )
-                result.append(
-                    TextMessageEndEvent(
-                        type=EventType.TEXT_MESSAGE_END,
-                        message_id=msg_id,
-                    )
-                )
-
-            # Tool calls
-            if tool_calls:
-                for tc in tool_calls:
-                    tc_id = tc.get("id", "") if isinstance(tc, dict) else tc.id
-                    tc_name = tc.get("name", "") if isinstance(tc, dict) else tc.name
-                    tc_args = tc.get("args", {}) if isinstance(tc, dict) else tc.args
-                    result.append(
-                        ToolCallStartEvent(
-                            type=EventType.TOOL_CALL_START,
-                            tool_call_id=tc_id,
-                            tool_call_name=tc_name,
-                            parent_message_id=msg_id,
-                        )
-                    )
-                    result.append(
-                        ToolCallArgsEvent(
-                            type=EventType.TOOL_CALL_ARGS,
-                            tool_call_id=tc_id,
-                            delta=json.dumps(tc_args),
-                        )
-                    )
-                    result.append(
-                        ToolCallEndEvent(
-                            type=EventType.TOOL_CALL_END,
-                            tool_call_id=tc_id,
-                        )
-                    )
-
-            if lc_msg_id:
-                ctx.mark_emitted_message(lc_msg_id)
-
-        for msg in tool_messages:
-            lc_msg_id = getattr(msg, "id", None)
-            if ctx.was_emitted_message(lc_msg_id):
-                continue
-            result.append(
-                ToolCallResultEvent(
-                    type=EventType.TOOL_CALL_RESULT,
-                    message_id=ctx.next_message_id(),
-                    tool_call_id=getattr(msg, "tool_call_id", ""),
-                    content=msg.content if isinstance(msg.content, str) else "",
-                    role="tool",
-                )
-            )
-            if lc_msg_id:
-                ctx.mark_emitted_message(lc_msg_id)
-
-        return result
-
-
 class FallbackMapper:
     """Map any unclaimed event to AG-UI CustomEvent."""
 
@@ -267,7 +157,6 @@ def default_mappers() -> list[Any]:
     return [
         SkipInternalMapper(),
         InterruptedMapper(),
-        MessageEventMapper(),
         # FallbackMapper is always last — added by the adapter after user mappers
     ]
 
