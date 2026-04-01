@@ -14,7 +14,7 @@ from ag_ui.core import (
     RunAgentInput,
 )
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -97,6 +97,10 @@ class PhaseA(MessageEvent):
 
 class PhaseB(MessageEvent):
     messages: tuple[Any, ...] = ()
+
+
+class SystemPromptDelivered(MessageEvent):
+    message: SystemMessage = None  # type: ignore[assignment]
 
 
 class ErrorTrigger(Event):
@@ -2429,3 +2433,150 @@ def describe_unclosed_stream_on_error():
             f"TEXT_MESSAGE_END (idx={end_idx}) must come before "
             f"RUN_ERROR (idx={error_idx})"
         )
+
+
+def describe_changed_reducers_none_fallback():
+    """Adapter handles StreamFrame.changed_reducers=None (v1/sync path)."""
+
+    async def it_emits_state_and_messages_on_first_frame(monkeypatch):
+        """When changed_reducers is None, first frame emits both snapshots."""
+        from langgraph_events._graph import StreamFrame
+
+        @on(UserAsked)
+        def reply(event: UserAsked) -> AgentReplied:
+            return AgentReplied(message=AIMessage(content="ok"))
+
+        graph = EventGraph([reply], reducers=[message_reducer()])
+
+        async def fake_astream_events(
+            seed,
+            *,
+            include_reducers,
+            include_llm_tokens,
+            include_custom_events,
+            config,
+        ):
+            del seed, include_reducers, include_llm_tokens
+            del include_custom_events, config
+            # Simulate v1 path: changed_reducers=None
+            yield StreamFrame(
+                event=UserAsked(question="go"),
+                reducers={"messages": [HumanMessage(content="go")]},
+                changed_reducers=None,
+            )
+            yield StreamFrame(
+                event=AgentReplied(message=AIMessage(content="ok")),
+                reducers={
+                    "messages": [
+                        HumanMessage(content="go"),
+                        AIMessage(content="ok"),
+                    ]
+                },
+                changed_reducers=None,
+            )
+
+        monkeypatch.setattr(graph, "astream_events", fake_astream_events)
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+        events = await _collect(adapter, _make_input())
+
+        state_snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+
+        # First frame emits state snapshot; second does not (since
+        # changed_reducers=None falls through to "already emitted" check)
+        assert len(state_snapshots) == 1
+        # Messages are present in reducers but changed_reducers is None,
+        # so MessagesSnapshot is NOT emitted (requires explicit "messages"
+        # in changed_reducers).
+        assert len(msg_snapshots) == 0
+
+
+def describe_system_message_conversion():
+    """SystemMessage in message_reducer is converted to AG-UI SystemMessage."""
+
+    async def it_includes_system_message_in_snapshot():
+        @on(UserAsked)
+        def set_system(event: UserAsked) -> SystemPromptDelivered:
+            return SystemPromptDelivered(
+                message=SystemMessage(content="You are a helpful assistant")
+            )
+
+        graph = EventGraph([set_system], reducers=[message_reducer()])
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: UserAsked(question="go"),
+        )
+        events = await _collect(adapter, _make_input())
+
+        msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+        assert len(msg_snapshots) >= 1
+        last_snap = msg_snapshots[-1]
+        sys_msgs = [m for m in last_snap.messages if m.role == "system"]
+        assert len(sys_msgs) >= 1
+        assert sys_msgs[0].content == "You are a helpful assistant"
+
+
+def describe_multiple_custom_reducers():
+    """StateSnapshot tracks changes across multiple non-message reducers."""
+
+    def when_custom_reducers_change():
+        async def it_emits_state_snapshot_for_each_change():
+            from langgraph_events._reducer import ScalarReducer
+
+            class StepA(Event):
+                value: str = ""
+
+                def agui_dict(self) -> dict[str, Any]:
+                    return {"value": self.value}
+
+            class StepB(Event):
+                value: str = ""
+
+                def agui_dict(self) -> dict[str, Any]:
+                    return {"value": self.value}
+
+            reducer_a = ScalarReducer(
+                name="counter_a",
+                event_type=StepA,
+                fn=lambda e: e.value,
+            )
+            reducer_b = ScalarReducer(
+                name="counter_b",
+                event_type=StepB,
+                fn=lambda e: e.value,
+            )
+
+            @on(StepA)
+            def handle_a(event: StepA) -> StepB:
+                return StepB(value="from_a")
+
+            graph = EventGraph(
+                [handle_a],
+                reducers=[message_reducer(), reducer_a, reducer_b],
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: StepA(value="first"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            state_snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+            msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+
+            # StateSnapshot should appear: initial + when custom reducers change
+            assert len(state_snapshots) >= 2
+            # Messages reducer never changes (no MessageEvent), so no msg snapshot
+            assert len(msg_snapshots) == 0
+            # State should contain custom reducer keys, not "messages"
+            for snap in state_snapshots:
+                assert "messages" not in snap.snapshot
+            # Final state snapshot should contain both reducer values
+            last_state = state_snapshots[-1].snapshot
+            assert "counter_a" in last_state
+            assert "counter_b" in last_state
+            assert last_state["counter_a"] == "first"
+            assert last_state["counter_b"] == "from_a"
