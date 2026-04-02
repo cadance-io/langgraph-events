@@ -9,9 +9,11 @@ from langgraph_events._custom_event import (
 )
 from langgraph_events._event import (
     Auditable,
+    Cancelled,
     Event,
     Halted,
     Interrupted,
+    MaxRoundsExceeded,
     MessageEvent,
     Resumed,
     Scatter,
@@ -24,6 +26,7 @@ from langgraph_events._graph import (
     GraphState,
     LLMStreamEnd,
     LLMToken,
+    OrphanedEventWarning,
     StateSnapshotFrame,
     StreamFrame,
 )
@@ -37,6 +40,7 @@ __all__ = [
     "SKIP",
     "STATE_SNAPSHOT_EVENT_NAME",
     "Auditable",
+    "Cancelled",
     "CustomEventFrame",
     "Event",
     "EventGraph",
@@ -46,7 +50,9 @@ __all__ = [
     "Interrupted",
     "LLMStreamEnd",
     "LLMToken",
+    "MaxRoundsExceeded",
     "MessageEvent",
+    "OrphanedEventWarning",
     "Reducer",
     "Resumed",
     "ScalarReducer",

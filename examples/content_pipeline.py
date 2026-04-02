@@ -72,6 +72,10 @@ class AnalysisProduced(PipelineStage):
         return f"analyzed:{self.word_count} words"
 
 
+class ContentBlocked(Halted):
+    category: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Reducer — polymorphic stage tracking
 # ---------------------------------------------------------------------------
@@ -103,13 +107,13 @@ def classify(event: ContentReceived) -> ContentClassified:
 
 
 @on(ContentClassified)
-def gate(event: ContentClassified, log: EventLog) -> Halted | ContentApproved:
+def gate(event: ContentClassified, log: EventLog) -> ContentBlocked | ContentApproved:
     """Safety gate — halts the pipeline for unsafe content.
 
     Uses ``log.latest(ContentReceived)`` to pass the original text forward.
     """
     if not event.safe:
-        return Halted(reason=f"blocked: {event.category} content")
+        return ContentBlocked(category=event.category)
     original = log.latest(ContentReceived)
     return ContentApproved(text=original.text, category=event.category)
 
@@ -158,8 +162,8 @@ async def main():
 
     print(f"  Halted in log?   {log.has(Halted)}")
     print(f"  Analysis done?   {log.has(AnalysisProduced)}")
-    halted = log.latest(Halted)
-    print(f"  Halted reason:   {halted.reason}")
+    blocked = log.latest(ContentBlocked)
+    print(f"  Blocked category: {blocked.category}")
 
     # --- Scenario 3: Bare event stream (sync) ---
     print("\n=== Scenario 3: stream_events (sync, no reducers) ===")

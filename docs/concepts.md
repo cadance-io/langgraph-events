@@ -66,7 +66,7 @@ graph = EventGraph(
 )
 ```
 
-`max_rounds` (default: 100) prevents infinite loops — the library auto-sets LangGraph's `recursion_limit` so this is the only knob you need. Override via `invoke(seed, recursion_limit=N)` if needed.
+`max_rounds` (default: 100) prevents infinite loops — the library auto-sets LangGraph's `recursion_limit` so this is the only knob you need. Exceeding the limit emits a `MaxRoundsExceeded` event (a `Halted` subclass) instead of raising, so checkpointed state stays clean and the graph can be retried.
 
 ### Visualizing the Event Flow
 
@@ -122,15 +122,25 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 
 ## `Halted`
 
-Return a `Halted` event from any handler to immediately stop the graph. No further handlers are dispatched.
+Return a `Halted` event (or subclass) from any handler to immediately stop the graph. No further handlers are dispatched. Subclass `Halted` with domain-specific fields instead of generic payloads:
 
 ```python
+class ContentBlocked(Halted):
+    label: str
+
 @on(Classified)
-def guard(event: Classified) -> Reply | Halted:
+def guard(event: Classified) -> Reply | ContentBlocked:
     if event.label == "blocked":
-        return Halted(reason="Content policy violation")
+        return ContentBlocked(label=event.label)
     return Reply(text="OK")
 ```
+
+**Built-in subtypes:**
+
+| Subtype | Emitted when |
+|---------|-------------|
+| `MaxRoundsExceeded` | Graph exceeds `max_rounds` (has `rounds: int` field) |
+| `Cancelled` | Async handler execution was cancelled |
 
 ## `Scatter`
 

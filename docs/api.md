@@ -24,7 +24,9 @@
 | `STATE_SNAPSHOT_EVENT_NAME` | Constant | Protocol name used for snapshot custom events (`"intermediate_state"`) |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
-| `Halted`          | Event      | Signal immediate graph termination              |
+| `Halted`          | Event      | Signal immediate graph termination; subclass for domain-specific halts |
+| `MaxRoundsExceeded` | Event    | `Halted` subtype emitted when `max_rounds` is exceeded (`rounds: int`) |
+| `Cancelled`       | Event      | `Halted` subtype emitted when async handler is cancelled |
 | `Interrupted`     | Base class | Bare marker — subclass with typed fields to pause graph |
 | `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
 | `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
@@ -40,6 +42,7 @@
 | `CustomEventFrame` | NamedTuple | `(name, data)` custom payload yielded from LangGraph `on_custom_event` with `include_custom_events=True` |
 | `StateSnapshotFrame` | NamedTuple | `(data)` typed snapshot frame yielded when `on_custom_event` uses `STATE_SNAPSHOT_EVENT_NAME` |
 | `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
+| `OrphanedEventWarning` | Warning | Issued at graph construction when return types have no subscriber |
 
 ## AG-UI Subpackage
 

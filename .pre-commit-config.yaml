@@ -45,7 +45,7 @@ repos:
       - id: pytest
         name: pytest
         language: system
-        entry: uv run pytest
+        entry: bash -c 'uv run coverage run -m pytest && uv run coverage report'
         types: [python]
         pass_filenames: false
         require_serial: true
