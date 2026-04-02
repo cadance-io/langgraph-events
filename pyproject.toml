@@ -42,7 +42,6 @@ packages = ["src/langgraph_events"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 describe_prefixes = ["describe_", "when_", "with_", "without_", "for_"]
-addopts = "--cov --cov-report=term-missing"
 filterwarnings = [
     "ignore::langgraph_events.OrphanedEventWarning",
 ]
