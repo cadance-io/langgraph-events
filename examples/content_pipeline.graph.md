@@ -6,7 +6,7 @@ graph LR
     classDef entry fill:none,stroke:none,color:none
     _e0_[ ]:::entry ==> ContentReceived
     ContentReceived -->|classify| ContentClassified
-    ContentClassified -->|gate| Halted
+    ContentClassified -->|gate| ContentBlocked
     ContentClassified -->|gate| ContentApproved
     ContentApproved -->|analyze| AnalysisProduced
 ```

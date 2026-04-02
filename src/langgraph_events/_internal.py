@@ -18,7 +18,14 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events._custom_event import _reset_custom_emitters, _set_custom_emitters
-from langgraph_events._event import Event, Halted, Resumed, Scatter
+from langgraph_events._event import (
+    Cancelled,
+    Event,
+    Halted,
+    MaxRoundsExceeded,
+    Resumed,
+    Scatter,
+)
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import BaseReducer  # noqa: TC001
@@ -107,10 +114,13 @@ def make_router_node(max_rounds: int) -> Callable[[StateDict], StateDict]:
         has_resume = any(isinstance(e, Resumed) for e in new_events)
         current_round = 1 if has_resume else state.get("_round", 0) + 1
         if current_round > max_rounds:
-            raise RuntimeError(
-                f"EventGraph exceeded max_rounds={max_rounds}. "
-                f"Possible infinite loop — check your event handlers for cycles."
-            )
+            halted = MaxRoundsExceeded(rounds=max_rounds)  # type: ignore[call-arg]
+            return {
+                "_cursor": len(state["events"]),
+                "_pending": [halted],
+                "_round": current_round,
+                "events": [halted],
+            }
         return {
             "_cursor": len(state["events"]),
             "_pending": new_events,
@@ -311,6 +321,8 @@ def make_handler_node(
                 else:
                     result = meta.fn(event, **inject)
                 _collect_result(result, new_events, lg_interrupt)
+        except asyncio.CancelledError:
+            return _finalize([Cancelled()])
         finally:
             _reset_custom_emitters(tokens)
         return _finalize(new_events)

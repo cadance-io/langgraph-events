@@ -115,9 +115,32 @@ class Auditable(Event):
 
 
 class Halted(Event):
-    """Special event that signals immediate graph termination."""
+    """Special event that signals immediate graph termination.
 
-    reason: str = ""
+    Subclass with domain-specific fields instead of generic payloads::
+
+        class ContentBlocked(Halted):
+            category: str
+
+        class BudgetExceeded(Halted):
+            spent: float
+            limit: float
+    """
+
+
+class MaxRoundsExceeded(Halted):
+    """Graph exceeded the configured ``max_rounds`` limit."""
+
+    rounds: int = 0
+
+
+class Cancelled(Halted):
+    """Handler execution was cancelled (e.g. task timeout).
+
+    When multiple handlers run in parallel, cancellation only discards
+    the cancelled handler's partial events — sibling handler results
+    that already committed to state will persist.
+    """
 
 
 class Interrupted(Event):

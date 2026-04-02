@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
-from langgraph_events._event import Event, Interrupted, Resumed, Scatter
+from langgraph_events._event import Event, Halted, Interrupted, Resumed, Scatter
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta, extract_handler_meta
 from langgraph_events._internal import (
@@ -30,6 +30,10 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
 
     from langgraph_events._reducer import BaseReducer
+
+
+class OrphanedEventWarning(UserWarning):
+    """Issued when handler return types have no matching subscriber."""
 
 
 class ReturnInfo(NamedTuple):
@@ -226,6 +230,30 @@ class EventGraph:
                     f"Handler '{meta.name}' return type includes base 'Event'. "
                     f"Use specific types (e.g., TypeA | TypeB)."
                 )
+
+        # Warn about event types that are produced but never consumed
+        subscribed: set[type[Event]] = set()
+        for meta in self._handler_metas:
+            subscribed.update(meta.event_types)
+        produced: set[type[Event]] = set()
+        for info in self._return_info.values():
+            produced.update(info.event_types)
+            produced.update(info.scatter_types)
+        orphaned = {
+            t
+            for t in produced
+            if not issubclass(t, (Halted, Interrupted))
+            and not any(issubclass(t, s) for s in subscribed)
+        }
+        if orphaned:
+            names = ", ".join(sorted(t.__name__ for t in orphaned))
+            warnings.warn(
+                f"Event type(s) {names} are returned by handlers but no handler "
+                f"subscribes to them. These events will be produced but never "
+                f"processed.",
+                category=OrphanedEventWarning,
+                stacklevel=2,
+            )
 
     @staticmethod
     def _mermaid_footer_entry(
@@ -463,7 +491,11 @@ class EventGraph:
         snapshot = compiled.get_state(config)
         all_events = snapshot.values.get("events", [])
         log = EventLog(all_events)
-        is_interrupted = bool(snapshot.next)
+        # Determine interrupt status from the snapshot.
+        # snapshot.tasks[*].interrupts distinguishes real interrupts from
+        # cancelled/crashed graphs (which also have snapshot.next set).
+        has_interrupt = any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
+        is_interrupted = bool(snapshot.next) and has_interrupt
         return GraphState(
             events=log,
             is_interrupted=is_interrupted,

@@ -1,5 +1,8 @@
 """Integration tests for EventGraph — the full event-driven graph engine."""
 
+import asyncio
+import warnings
+
 import pytest
 from conftest import Completed, Ended, MessageReceived, MessageSent, Processed, Started
 from langchain_core.messages import (
@@ -11,12 +14,15 @@ from langchain_core.messages import (
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
+    Cancelled,
     Event,
     EventGraph,
     EventLog,
     Halted,
     Interrupted,
+    MaxRoundsExceeded,
     MessageEvent,
+    OrphanedEventWarning,
     Reducer,
     Resumed,
     ScalarReducer,
@@ -560,7 +566,7 @@ def describe_EventGraph():
             async def it_stops_on_halt():
                 @on(Started)
                 async def halter(event: Started) -> Halted:
-                    return Halted(reason="stop")
+                    return Halted()
 
                 @on(Halted)
                 async def unreachable(event: Halted) -> Ended:
@@ -679,16 +685,20 @@ def describe_EventGraph():
 
     def describe_halt():
 
-        def it_stores_reason_and_is_Event_subclass():
-            h = Halted(reason="done")
-            assert h.reason == "done"
+        def it_is_Event_subclass():
+            h = Halted()
             assert isinstance(h, Event)
             assert isinstance(h, Halted)
+
+        def it_preserves_subtype_fields():
+            h = MaxRoundsExceeded(rounds=5)
+            assert isinstance(h, Halted)
+            assert h.rounds == 5
 
         def it_stops_execution_immediately():
             @on(Started)
             def step1(event: Started) -> Halted:
-                return Halted(reason="stopped early")
+                return Halted()
 
             @on(Halted)
             def should_not_run(event: Halted) -> Ended:
@@ -2430,8 +2440,8 @@ def describe_EventGraph():
                     return LoopDetected(n=event.n + 1)
 
                 graph = EventGraph([looper], max_rounds=5)
-                with pytest.raises(RuntimeError, match="max_rounds"):
-                    graph.invoke(LoopDetected(n=0))
+                log = graph.invoke(LoopDetected(n=0))
+                assert log.latest(MaxRoundsExceeded) is not None
 
             def it_resets_round_counter_on_resume():
                 from langgraph.checkpoint.memory import MemorySaver
@@ -2476,7 +2486,7 @@ def describe_EventGraph():
                 log = graph.resume(ResumeConfirmed(), config=config)
                 assert log.latest(Ended) is not None
 
-            def it_raises_max_rounds_not_recursion_error():
+            def it_halts_on_max_rounds_not_recursion_error():
                 """max_rounds fires before LangGraph's recursion_limit."""
 
                 class PingSent(Event):
@@ -2487,10 +2497,10 @@ def describe_EventGraph():
                     return PingSent(n=event.n + 1)
 
                 graph = EventGraph([pong], max_rounds=5)
-                with pytest.raises(RuntimeError, match="max_rounds"):
-                    graph.invoke(PingSent())
+                log = graph.invoke(PingSent())
+                assert log.latest(MaxRoundsExceeded) is not None
 
-            def it_raises_max_rounds_for_multiple_handlers():
+            def it_halts_on_max_rounds_for_multiple_handlers():
                 """recursion_limit accounts for multiple handlers per round."""
 
                 class Ticked(Event):
@@ -2508,8 +2518,83 @@ def describe_EventGraph():
                     return Ticked(n=event.n + 1)
 
                 graph = EventGraph([handle_tick, handle_tock], max_rounds=5)
-                with pytest.raises(RuntimeError, match="max_rounds"):
-                    graph.invoke(Ticked())
+                log = graph.invoke(Ticked())
+                assert log.latest(MaxRoundsExceeded) is not None
+
+            def it_saves_clean_checkpoint_on_max_rounds():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class LoopEvent(Event):
+                    n: int = 0
+
+                @on(LoopEvent)
+                def looper(event: LoopEvent) -> LoopEvent:
+                    return LoopEvent(n=event.n + 1)
+
+                graph = EventGraph([looper], max_rounds=3, checkpointer=MemorySaver())
+                config = {"configurable": {"thread_id": "max-rounds-ckpt"}}
+                log = graph.invoke(LoopEvent(n=0), config=config)
+                assert log.latest(MaxRoundsExceeded) is not None
+
+                state = graph.get_state(config)
+                assert state.events.latest(MaxRoundsExceeded) is not None
+                assert state.is_interrupted is False
+
+            def it_streams_halted_on_max_rounds():
+                class LoopEvent(Event):
+                    n: int = 0
+
+                @on(LoopEvent)
+                def looper(event: LoopEvent) -> LoopEvent:
+                    return LoopEvent(n=event.n + 1)
+
+                graph = EventGraph([looper], max_rounds=3)
+                events = list(graph.stream_events(LoopEvent(n=0)))
+                assert any(isinstance(e, MaxRoundsExceeded) for e in events)
+
+        def describe_cancellation():
+
+            async def it_halts_on_cancelled_error():
+                ready = asyncio.Event()
+
+                @on(Started)
+                async def slow(event: Started) -> Ended:
+                    ready.set()
+                    await asyncio.sleep(100)
+                    return Ended(result="done")
+
+                graph = EventGraph([slow])
+                task = asyncio.ensure_future(graph.ainvoke(Started(data="go")))
+                await ready.wait()
+                task.cancel()
+                log = await task
+                assert log.latest(Cancelled) is not None
+                assert not log.has(Ended)
+
+            async def it_discards_partial_events_on_cancel():
+                """Events collected before cancellation are not in the log."""
+                call_count = 0
+                ready = asyncio.Event()
+
+                @on(Started)
+                async def multi(event: Started) -> Scatter[Processed]:
+                    return Scatter([Processed(data="a"), Processed(data="b")])
+
+                @on(Processed)
+                async def slow(event: Processed) -> Ended:
+                    nonlocal call_count
+                    call_count += 1
+                    if call_count == 2:
+                        ready.set()
+                        await asyncio.sleep(100)
+                    return Ended(result=event.data)
+
+                graph = EventGraph([multi, slow])
+                task = asyncio.ensure_future(graph.ainvoke(Started(data="go")))
+                await ready.wait()
+                task.cancel()
+                log = await task
+                assert log.latest(Cancelled) is not None
 
     def describe_mermaid():
 
@@ -3138,3 +3223,100 @@ def describe_EventGraph():
             custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
             assert len(custom_frames) == 1
             assert custom_frames[0].name == "resume.progress"
+
+
+def describe_OrphanedEventWarning():
+
+    def when_orphaned():
+
+        def it_warns_about_orphaned_event_types():
+            class Orphan(Event):
+                pass
+
+            @on(Started)
+            def produce_orphan(event: Started) -> Orphan:
+                return Orphan()
+
+            with pytest.warns(OrphanedEventWarning, match="Orphan"):
+                EventGraph([produce_orphan])
+
+        def it_warns_for_orphaned_scatter_types():
+            class ScatterOrphan(Event):
+                pass
+
+            @on(Started)
+            def scatter_producer(event: Started) -> Scatter[ScatterOrphan]:
+                return Scatter([ScatterOrphan()])
+
+            with pytest.warns(OrphanedEventWarning, match="ScatterOrphan"):
+                EventGraph([scatter_producer])
+
+    def when_not_orphaned():
+
+        def it_does_not_warn_for_subscribed_via_inheritance():
+            class Base(Event):
+                pass
+
+            class Sub(Base):
+                pass
+
+            @on(Started)
+            def produce_sub(event: Started) -> Sub:
+                return Sub()
+
+            @on(Base)
+            def consume_base(event: Base):
+                pass
+
+            # Sub is consumed by @on(Base) via isinstance — no warning
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([produce_sub, consume_base])
+
+        def it_does_not_warn_for_halted_returns():
+            @on(Started)
+            def halter(event: Started) -> Halted:
+                return Halted()
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([halter])
+
+        def it_does_not_warn_for_interrupted_returns():
+            class AskApproval(Interrupted):
+                pass
+
+            @on(Started)
+            def asker(event: Started) -> AskApproval:
+                return AskApproval()
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([asker])
+
+        def it_does_not_warn_for_unannotated_handlers():
+            @on(Started)
+            def no_annotation(event: Started):
+                return Ended(result="ok")
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([no_annotation])
+
+        def it_does_not_warn_for_none_in_union():
+            """Optional[Event] return type should not warn about NoneType."""
+
+            class MaybeResult(Event):
+                pass
+
+            @on(Started)
+            def maybe(event: Started) -> MaybeResult | None:
+                return None
+
+            @on(MaybeResult)
+            def consumer(event: MaybeResult):
+                pass
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([maybe, consumer])

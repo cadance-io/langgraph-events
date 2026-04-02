@@ -1827,9 +1827,9 @@ def describe_seed_factory_state():
             assert received_states[0] is None
 
 
-def describe_interrupt_gate():
-    def when_gated():
-        async def it_reemits_interrupt():
+def describe_interrupt_replay():
+    def when_interrupted():
+        async def it_replays_interrupt_on_reconnect():
             call_count = {"n": 0}
 
             @on(UserAsked)
@@ -1852,7 +1852,6 @@ def describe_interrupt_gate():
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="retry"),
-                interrupt_gate=True,
             )
             events = await _collect(adapter, _make_input(thread_id="t-gate"))
 
@@ -1870,39 +1869,6 @@ def describe_interrupt_gate():
             assert len(interrupted) == 1
             assert interrupted[0].value["draft"] == "pending"
 
-    def when_gate_disabled():
-        async def it_executes_normally():
-            @on(UserAsked)
-            def ask(event: UserAsked) -> ApprovalRequested:
-                return ApprovalRequested(draft="pending")
-
-            graph = EventGraph(
-                [ask],
-                checkpointer=MemorySaver(),
-                reducers=[message_reducer()],
-            )
-            await graph.ainvoke(
-                UserAsked(question="go"),
-                config={"configurable": {"thread_id": "t-gate-off"}},
-            )
-
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: UserAsked(question="new seed"),
-                interrupt_gate=False,
-            )
-            events = await _collect(adapter, _make_input(thread_id="t-gate-off"))
-
-            assert events[0].type == EventType.RUN_STARTED
-            assert events[-1].type == EventType.RUN_FINISHED
-            # Should have executed — UserAsked custom event appears
-            custom = [
-                e
-                for e in events
-                if e.type == EventType.CUSTOM and e.name == "UserAsked"
-            ]
-            assert len(custom) >= 1
-
     def when_not_interrupted():
         async def it_executes_normally():
             @on(UserAsked)
@@ -1917,7 +1883,6 @@ def describe_interrupt_gate():
             adapter = AGUIAdapter(
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
-                interrupt_gate=True,  # gate on, but no interrupt
             )
             events = await _collect(adapter, _make_input(thread_id="t-gate-clean"))
 

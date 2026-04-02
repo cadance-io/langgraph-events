@@ -83,7 +83,6 @@ class AGUIAdapter:
         mappers: list[EventMapper] | None = None,
         include_reducers: bool | list[str] = True,
         error_message: str | None = None,
-        interrupt_gate: bool = True,
     ) -> None:
         if resume_factory is not None and graph._checkpointer is None:
             raise ValueError(
@@ -94,7 +93,6 @@ class AGUIAdapter:
         self._resume_factory = resume_factory
         self._include_reducers = include_reducers
         self._error_message = error_message
-        self._interrupt_gate = interrupt_gate
         self._seed_accepts_state = self._accepts_extra_positional(seed_factory)
         self._resume_accepts_state = (
             self._accepts_extra_positional(resume_factory)
@@ -158,12 +156,13 @@ class AGUIAdapter:
     def _build_checkpoint_state(snapshot: Any) -> CheckpointState:
         """Build resume-factory state payload from a checkpoint snapshot."""
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
+        pending = AGUIAdapter._interrupts_from_snapshot(snapshot)
         return {
             "reducers": reducers,
             "events": reducers.get("events"),
             "messages": reducers.get("messages"),
-            "pending_interrupts": AGUIAdapter._interrupts_from_snapshot(snapshot),
-            "is_interrupted": bool(snapshot.next),
+            "pending_interrupts": pending,
+            "is_interrupted": bool(pending),
             "snapshot": snapshot,
         }
 
@@ -270,7 +269,6 @@ class AGUIAdapter:
         """Whether interrupt gate should short-circuit to checkpoint replay."""
         return (
             resume_event is None
-            and self._interrupt_gate
             and checkpoint_state is not None
             and checkpoint_state["is_interrupted"]
         )
@@ -402,7 +400,7 @@ class AGUIAdapter:
         needs_checkpoint = (
             self._seed_accepts_state
             or self._resume_accepts_state
-            or self._interrupt_gate
+            or self._graph._checkpointer is not None
         )
         checkpoint_snapshot = (
             await self._aget_checkpoint_snapshot(config) if needs_checkpoint else None
