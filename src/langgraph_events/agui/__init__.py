@@ -5,7 +5,6 @@ from langgraph_events.agui._context import MapperContext
 from langgraph_events.agui._mappers import (
     FallbackMapper,
     InterruptedMapper,
-    MessageEventMapper,
     SkipInternalMapper,
 )
 from langgraph_events.agui._protocols import (
@@ -28,7 +27,6 @@ __all__ = [
     "FallbackMapper",
     "InterruptedMapper",
     "MapperContext",
-    "MessageEventMapper",
     "ResumeFactory",
     "SeedFactory",
     "SkipInternalMapper",
