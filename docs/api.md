@@ -13,7 +13,7 @@
 
 | Export            | Type       | Description                                     |
 |-------------------|------------|-------------------------------------------------|
-| `on`              | Decorator  | Subscribe a handler to one or more event types  |
+| `on`              | Decorator  | Subscribe a handler to one or more event types; supports `**field_matchers` kwargs for [field-level dispatch](control-flow.md#field-matchers--narrow-dispatch-by-field-type) |
 
 ## Graph & Execution
 

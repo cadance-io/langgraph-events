@@ -881,6 +881,240 @@ def describe_EventGraph():
             )
             assert log.latest(Ended) == Ended(result="done")
 
+    def describe_field_matchers():
+
+        def when_field_matches():
+
+            def it_dispatches_the_handler():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class ApprovalRequested(Interrupted):
+                    draft: str = ""
+
+                class ReviewApproved(Event):
+                    pass
+
+                captured = []
+
+                @on(Started)
+                def need_input(event: Started) -> ApprovalRequested:
+                    return ApprovalRequested(draft="hello")
+
+                @on(Resumed, interrupted=ApprovalRequested)
+                def handle_approval(event: Resumed) -> Ended:
+                    captured.append(event.interrupted)
+                    return Ended(result="approved")
+
+                graph = EventGraph(
+                    [need_input, handle_approval],
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "field-match-test"}}
+                graph.invoke(Started(data="test"), config=config)
+                log = graph.resume(ReviewApproved(), config=config)
+
+                assert log.latest(Ended) == Ended(result="approved")
+                assert len(captured) == 1
+                assert isinstance(captured[0], ApprovalRequested)
+
+        def when_field_does_not_match():
+
+            def it_skips_the_handler():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class ApprovalRequested(Interrupted):
+                    draft: str = ""
+
+                class OtherInterrupted(Interrupted):
+                    reason: str = ""
+
+                class ReviewApproved(Event):
+                    pass
+
+                captured = []
+
+                @on(Started)
+                def need_input(event: Started) -> OtherInterrupted:
+                    return OtherInterrupted(reason="different")
+
+                @on(Resumed, interrupted=ApprovalRequested)
+                def handle_approval(event: Resumed) -> Ended:
+                    captured.append("should not fire")
+                    return Ended(result="approved")
+
+                @on(ReviewApproved)
+                def fallback(event: ReviewApproved) -> Ended:
+                    return Ended(result="fallback")
+
+                graph = EventGraph(
+                    [need_input, handle_approval, fallback],
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "field-no-match-test"}}
+                graph.invoke(Started(data="test"), config=config)
+                log = graph.resume(ReviewApproved(), config=config)
+
+                assert len(captured) == 0
+                assert log.latest(Ended) == Ended(result="fallback")
+
+        def when_field_is_none():
+
+            def it_skips_the_handler():
+                """A None field value does not match a field matcher."""
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class ApprovalRequested(Interrupted):
+                    draft: str = ""
+
+                class OtherInterrupted(Interrupted):
+                    reason: str = ""
+
+                class Acknowledge(Event):
+                    pass
+
+                captured = []
+
+                @on(Started)
+                def need_input(event: Started) -> OtherInterrupted:
+                    return OtherInterrupted(reason="test")
+
+                @on(Resumed, interrupted=ApprovalRequested)
+                def approval_handler(event: Resumed) -> Ended:
+                    captured.append("should not fire")
+                    return Ended(result="approval")
+
+                @on(Acknowledge)
+                def fallback(event: Acknowledge) -> Ended:
+                    return Ended(result="fallback")
+
+                graph = EventGraph(
+                    [need_input, approval_handler, fallback],
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "field-none-test"}}
+                graph.invoke(Started(data="test"), config=config)
+                log = graph.resume(Acknowledge(), config=config)
+
+                assert len(captured) == 0
+                assert log.latest(Ended) == Ended(result="fallback")
+
+        def when_handler_requests_field_injection():
+
+            def it_injects_the_narrowed_field():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class ApprovalRequested(Interrupted):
+                    draft: str = ""
+
+                class ReviewApproved(Event):
+                    pass
+
+                injected_values = []
+
+                @on(Started)
+                def need_input(event: Started) -> ApprovalRequested:
+                    return ApprovalRequested(draft="my draft")
+
+                @on(Resumed, interrupted=ApprovalRequested)
+                def handle_approval(
+                    event: Resumed, interrupted: ApprovalRequested
+                ) -> Ended:
+                    injected_values.append(interrupted)
+                    return Ended(result=interrupted.draft)
+
+                graph = EventGraph(
+                    [need_input, handle_approval],
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "field-inject-test"}}
+                graph.invoke(Started(data="test"), config=config)
+                log = graph.resume(ReviewApproved(), config=config)
+
+                assert log.latest(Ended) == Ended(result="my draft")
+                assert len(injected_values) == 1
+                assert isinstance(injected_values[0], ApprovalRequested)
+                assert injected_values[0].draft == "my draft"
+
+        def when_multiple_field_matchers():
+
+            def it_requires_all_fields_to_match():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class ApprovalRequested(Interrupted):
+                    draft: str = ""
+
+                class ReviewApproved(Event):
+                    pass
+
+                captured = []
+
+                @on(Started)
+                def need_input(event: Started) -> ApprovalRequested:
+                    return ApprovalRequested(draft="hello")
+
+                @on(Resumed, interrupted=ApprovalRequested, value=ReviewApproved)
+                def strict_handler(
+                    event: Resumed,
+                    interrupted: ApprovalRequested,
+                    value: ReviewApproved,
+                ) -> Ended:
+                    captured.append((interrupted, value))
+                    return Ended(result="strict")
+
+                graph = EventGraph(
+                    [need_input, strict_handler],
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "multi-field-test"}}
+                graph.invoke(Started(data="test"), config=config)
+                log = graph.resume(ReviewApproved(), config=config)
+
+                assert log.latest(Ended) == Ended(result="strict")
+                assert len(captured) == 1
+                assert isinstance(captured[0][0], ApprovalRequested)
+                assert isinstance(captured[0][1], ReviewApproved)
+
+            def when_one_field_does_not_match():
+
+                def it_skips_the_handler():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    class ApprovalRequested(Interrupted):
+                        draft: str = ""
+
+                    class ReviewApproved(Event):
+                        pass
+
+                    class OtherEvent(Event):
+                        pass
+
+                    captured = []
+
+                    @on(Started)
+                    def need_input(event: Started) -> ApprovalRequested:
+                        return ApprovalRequested(draft="hello")
+
+                    # value=OtherEvent won't match ReviewApproved
+                    @on(Resumed, interrupted=ApprovalRequested, value=OtherEvent)
+                    def strict_handler(event: Resumed) -> Ended:
+                        captured.append("should not fire")
+                        return Ended(result="strict")
+
+                    @on(ReviewApproved)
+                    def fallback(event: ReviewApproved) -> Ended:
+                        return Ended(result="fallback")
+
+                    graph = EventGraph(
+                        [need_input, strict_handler, fallback],
+                        checkpointer=MemorySaver(),
+                    )
+                    config = {"configurable": {"thread_id": "multi-field-skip"}}
+                    graph.invoke(Started(data="test"), config=config)
+                    log = graph.resume(ReviewApproved(), config=config)
+
+                    assert len(captured) == 0
+                    assert log.latest(Ended) == Ended(result="fallback")
+
     def describe_scatter():
 
         class BatchReceived(Event):

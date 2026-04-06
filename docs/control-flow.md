@@ -78,4 +78,31 @@ if state.is_interrupted:
 log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 ```
 
+### Field Matchers — Narrow Dispatch by Field Type
+
+**Field matchers** narrow dispatch by requiring a field on the event to be a specific type. Pass `field_name=EventType` as a keyword argument to `@on()` — the handler only fires when that field is an instance of the given type. If the handler signature includes a parameter with the same name, the matched value is injected automatically:
+
+```python
+@on(Resumed, interrupted=OrderConfirmationRequested)
+def handle_order_confirmation(
+    event: Resumed, interrupted: OrderConfirmationRequested,
+) -> OrderConfirmed | OrderCancelled:
+    # `interrupted` is guaranteed to be OrderConfirmationRequested —
+    # the handler only fires when the field matches.
+    print(f"Order {interrupted.order_id}: ${interrupted.total}")
+    ...
+```
+
+Field matchers work on any event field typed as `Event`, not just `interrupted`. If the named field is `None` or doesn't match the given type, the handler is silently skipped. The field name is validated at graph construction — typos raise `TypeError` immediately.
+
+If the handler signature omits the field parameter, the matcher still filters dispatch but no injection occurs:
+
+```python
+@on(Resumed, interrupted=OrderConfirmationRequested)
+def handle_order_confirmation(event: Resumed) -> OrderConfirmed:
+    # Still only fires for OrderConfirmationRequested interrupts,
+    # but you'd access event.interrupted directly.
+    ...
+```
+
 See the [Human-in-the-Loop pattern](patterns.md#human-in-the-loop-approval) for a complete example, and [Checkpointer Evolution](checkpointer-evolution.md) for how graph changes affect interrupted checkpoints.

@@ -154,9 +154,7 @@ def make_dispatch(
         matched: list[str] = []
         seen: set[str] = set()
         for meta in handler_metas:
-            if meta.name not in seen and any(
-                isinstance(e, meta.event_types) for e in pending
-            ):
+            if meta.name not in seen and any(meta.matches(e) for e in pending):
                 seen.add(meta.name)
                 matched.append(meta.name)
 
@@ -218,6 +216,20 @@ def _apply_reducers(
     return updates
 
 
+def _inject_fields(
+    meta: HandlerMeta,
+    event: Event,
+    inject: dict[str, Any],
+) -> dict[str, Any]:
+    """Add field-matcher values to the injection dict for a single event."""
+    if not meta.field_inject_params:
+        return inject
+    merged = dict(inject)
+    for field_name in meta.field_inject_params:
+        merged[field_name] = getattr(event, field_name)
+    return merged
+
+
 def make_handler_node(
     meta: HandlerMeta,
     reducers: dict[str, BaseReducer] | None = None,
@@ -245,7 +257,7 @@ def make_handler_node(
     def _prepare(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[Event], dict[str, Any]]:
-        matching = [e for e in state["_pending"] if isinstance(e, meta.event_types)]
+        matching = [e for e in state["_pending"] if meta.matches(e)]
         inject = _build_inject(meta, state, reds, config)
         return matching, inject
 
@@ -272,6 +284,7 @@ def make_handler_node(
         )
         try:
             for event in matching:
+                call_inject = _inject_fields(meta, event, inject)
                 if meta.is_async:
                     try:
                         asyncio.get_running_loop()
@@ -279,7 +292,7 @@ def make_handler_node(
                         # No running loop — safe to use asyncio.run().
                         coro = cast(
                             "Coroutine[Any, Any, HandlerReturn]",
-                            meta.fn(event, **inject),
+                            meta.fn(event, **call_inject),
                         )
                         result = asyncio.run(coro)
                     else:
@@ -290,7 +303,7 @@ def make_handler_node(
                             f"Use ainvoke() instead."
                         )
                 else:
-                    result = meta.fn(event, **inject)
+                    result = meta.fn(event, **call_inject)
                 _collect_result(result, new_events, lg_interrupt)
         finally:
             _reset_custom_emitters(tokens)
@@ -313,13 +326,15 @@ def make_handler_node(
         )
         try:
             for event in matching:
+                call_inject = _inject_fields(meta, event, inject)
                 if meta.is_async:
                     coro = cast(
-                        "Coroutine[Any, Any, HandlerReturn]", meta.fn(event, **inject)
+                        "Coroutine[Any, Any, HandlerReturn]",
+                        meta.fn(event, **call_inject),
                     )
                     result = await coro
                 else:
-                    result = meta.fn(event, **inject)
+                    result = meta.fn(event, **call_inject)
                 _collect_result(result, new_events, lg_interrupt)
         except asyncio.CancelledError:
             return _finalize([Cancelled()])

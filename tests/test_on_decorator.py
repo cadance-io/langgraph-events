@@ -5,6 +5,7 @@ import warnings
 import pytest
 
 from langgraph_events import Event, EventGraph, EventLog, on
+from langgraph_events._event import Interrupted, Resumed
 from langgraph_events._handler import extract_handler_meta
 
 
@@ -18,6 +19,14 @@ class EventA(Event):
 
 class EventB(Event):
     b: str = ""
+
+
+class ApprovalRequested(Interrupted):
+    draft: str = ""
+
+
+class OtherInterrupted(Interrupted):
+    reason: str = ""
 
 
 def describe_on_decorator():
@@ -65,6 +74,40 @@ def describe_on_decorator():
 
                 @on(EventA, str)  # type: ignore
                 async def handler(event):
+                    pass
+
+    def when_field_matcher_provided():
+
+        def it_attaches_field_matchers():
+            @on(Resumed, interrupted=ApprovalRequested)
+            def handler(event: Resumed, interrupted: ApprovalRequested):
+                pass
+
+            assert handler._field_matchers == {"interrupted": ApprovalRequested}
+
+        def it_attaches_event_types_alongside():
+            @on(Resumed, interrupted=ApprovalRequested)
+            def handler(event: Resumed, interrupted: ApprovalRequested):
+                pass
+
+            assert handler._event_types == (Resumed,)
+
+    def when_field_matcher_references_nonexistent_field():
+
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match=r"no field.*bogus"):
+
+                @on(Resumed, bogus=ApprovalRequested)
+                def handler(event: Resumed):
+                    pass
+
+    def when_field_matcher_value_is_not_event_subclass():
+
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match="Event subclass"):
+
+                @on(Resumed, interrupted=str)  # type: ignore
+                def handler(event: Resumed):
                     pass
 
 
@@ -196,6 +239,46 @@ def describe_extract_handler_meta():
             meta = extract_handler_meta(handler)
             assert meta.event_types == (EventA, EventB)
             assert meta.wants_log is True
+
+    def when_field_matchers_in_meta():
+
+        def it_extracts_field_matchers():
+            @on(Resumed, interrupted=ApprovalRequested)
+            def handler(event: Resumed, interrupted: ApprovalRequested):
+                pass
+
+            meta = extract_handler_meta(handler)
+            assert meta.field_matchers == (("interrupted", ApprovalRequested),)
+
+        def it_identifies_field_inject_params_from_signature():
+            @on(Resumed, interrupted=ApprovalRequested)
+            def handler(event: Resumed, interrupted: ApprovalRequested):
+                pass
+
+            meta = extract_handler_meta(handler)
+            assert meta.field_inject_params == frozenset({"interrupted"})
+
+        def when_field_param_not_in_signature():
+
+            def it_omits_field_inject():
+                @on(Resumed, interrupted=ApprovalRequested)
+                def handler(event: Resumed):
+                    pass
+
+                meta = extract_handler_meta(handler)
+                assert meta.field_inject_params == frozenset()
+
+        def it_does_not_warn_about_field_inject_params():
+            @on(Resumed, interrupted=ApprovalRequested)
+            def handler(event: Resumed, interrupted: ApprovalRequested):
+                pass
+
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+
+            typo_warnings = [x for x in w if "Typo?" in str(x.message)]
+            assert len(typo_warnings) == 0
 
     def when_type_hints_cannot_be_resolved():
 
