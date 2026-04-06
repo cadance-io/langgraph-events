@@ -61,9 +61,10 @@ def on(*event_types: type[Event], **field_matchers: type[Event]) -> Callable[[F]
             field_name in getattr(et, "__dataclass_fields__", {}) for et in event_types
         )
         if not has_field:
+            type_names = ", ".join(t.__name__ for t in event_types)
             raise TypeError(
                 f"@on() field matcher references {field_name!r}, but "
-                f"no field {field_name!r} exists on {event_types!r}"
+                f"no field {field_name!r} exists on ({type_names})"
             )
 
     def decorator(fn: F) -> F:
@@ -89,6 +90,12 @@ class HandlerMeta:
     store_param: str | None = None
     field_matchers: tuple[tuple[str, type[Event]], ...] = ()
     field_inject_params: frozenset[str] = frozenset()
+
+    def matches(self, event: Event) -> bool:
+        """Check whether *event* satisfies this handler's type + field matchers."""
+        return isinstance(event, self.event_types) and all(
+            isinstance(getattr(event, fn, None), ft) for fn, ft in self.field_matchers
+        )
 
     @property
     def wants_log(self) -> bool:

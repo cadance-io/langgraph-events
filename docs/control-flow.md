@@ -78,9 +78,9 @@ if state.is_interrupted:
 log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 ```
 
-### Field Matchers — Type-Safe Resume Dispatch
+### Field Matchers — Narrow Dispatch by Field Type
 
-When multiple interrupt types exist, a plain `@on(Resumed)` handler must manually `isinstance`-check the `interrupted` field. **Field matchers** narrow dispatch at the decorator level and inject the matched field as a typed parameter:
+**Field matchers** narrow dispatch by requiring a field on the event to be a specific type. Pass `field_name=EventType` as a keyword argument to `@on()` — the handler only fires when that field is an instance of the given type. If the handler signature includes a parameter with the same name, the matched value is injected automatically:
 
 ```python
 @on(Resumed, interrupted=OrderConfirmationRequested)

@@ -154,14 +154,7 @@ def make_dispatch(
         matched: list[str] = []
         seen: set[str] = set()
         for meta in handler_metas:
-            if meta.name not in seen and any(
-                isinstance(e, meta.event_types)
-                and all(
-                    isinstance(getattr(e, fn, None), ft)
-                    for fn, ft in meta.field_matchers
-                )
-                for e in pending
-            ):
+            if meta.name not in seen and any(meta.matches(e) for e in pending):
                 seen.add(meta.name)
                 matched.append(meta.name)
 
@@ -264,14 +257,7 @@ def make_handler_node(
     def _prepare(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[Event], dict[str, Any]]:
-        matching = [
-            e
-            for e in state["_pending"]
-            if isinstance(e, meta.event_types)
-            and all(
-                isinstance(getattr(e, fn, None), ft) for fn, ft in meta.field_matchers
-            )
-        ]
+        matching = [e for e in state["_pending"] if meta.matches(e)]
         inject = _build_inject(meta, state, reds, config)
         return matching, inject
 

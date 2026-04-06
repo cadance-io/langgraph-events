@@ -54,7 +54,7 @@ def call_llm(event: Event, log: EventLog) -> AssistantMessage:
     ...
 ```
 
-**Field matchers** — narrow dispatch by requiring a field to be a specific type. The matched field is injected as a typed parameter:
+**Field matchers** — narrow dispatch by requiring a field to be a specific **type**. The handler only fires when the named field is an instance of the given type. If the handler signature includes a matching parameter, the value is injected automatically:
 
 ```python
 @on(Resumed, interrupted=ApprovalRequested)
@@ -62,7 +62,7 @@ def on_approval(event: Resumed, interrupted: ApprovalRequested) -> Confirmed:
     ...  # only fires when interrupted is an ApprovalRequested
 ```
 
-See [Control Flow — Field Matchers](control-flow.md#field-matchers--type-safe-resume-dispatch) for details.
+See [Control Flow — Field Matchers](control-flow.md#field-matchers--narrow-dispatch-by-field-type) for details.
 
 ## `EventGraph`
 
