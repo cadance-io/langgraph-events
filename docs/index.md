@@ -3,7 +3,7 @@
 Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
 !!! warning "Experimental (v0.2.0)"
-    This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything you can't easily rewrite. Not published to PyPI.
+    This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything you can't easily rewrite.
 
 ## What is this?
 
@@ -13,13 +13,11 @@ The core principle: **state IS events.** The entire state of a run is an append-
 
 ## Installation
 
-Not published to PyPI yet. Install directly from GitHub:
-
 ```bash
-pip install git+https://github.com/cadance-io/langgraph-events.git
+pip install langgraph-events
 
 # With AG-UI adapter support (installs ag-ui-protocol)
-pip install "langgraph-events[agui] @ git+https://github.com/cadance-io/langgraph-events.git"
+pip install "langgraph-events[agui]"
 ```
 
 Requires Python 3.10+ and `langgraph >= 0.2.0` (installed automatically). The `[agui]` extra adds `ag-ui-protocol` for the [AG-UI protocol adapter](agui.md).
@@ -41,6 +39,6 @@ Requires Python 3.10+ and `langgraph >= 0.2.0` (installed automatically). The `[
 
 This is a solo experiment, not a team-backed product. Expect:
 
-- No changelog or migration guides between versions
+- No migration guides between versions
 - API surface may shrink or change significantly
 - Bug reports welcome, but no SLA on fixes
