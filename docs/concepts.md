@@ -54,6 +54,16 @@ def call_llm(event: Event, log: EventLog) -> AssistantMessage:
     ...
 ```
 
+**Field matchers** — narrow dispatch by requiring a field to be a specific type. The matched field is injected as a typed parameter:
+
+```python
+@on(Resumed, interrupted=ApprovalRequested)
+def on_approval(event: Resumed, interrupted: ApprovalRequested) -> Confirmed:
+    ...  # only fires when interrupted is an ApprovalRequested
+```
+
+See [Control Flow — Field Matchers](control-flow.md#field-matchers--type-safe-resume-dispatch) for details.
+
 ## `EventGraph`
 
 The main entry point. Pass a list of handler functions and `EventGraph` derives the topology.
