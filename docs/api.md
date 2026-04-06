@@ -1,47 +1,79 @@
 # API Reference
 
+## Events & Base Classes
+
 | Export            | Type       | Description                                     |
 |-------------------|------------|-------------------------------------------------|
-| `Auditable`       | Base class | Marker class for auto-logged events             |
 | `Event`           | Base class | Subclass to define events (auto-frozen)         |
+| `Auditable`       | Base class | Marker class for auto-logged events             |
+| `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
+| `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
+
+## Handler Subscription
+
+| Export            | Type       | Description                                     |
+|-------------------|------------|-------------------------------------------------|
+| `on`              | Decorator  | Subscribe a handler to one or more event types  |
+
+## Graph & Execution
+
+| Export            | Type       | Description                                     |
+|-------------------|------------|-------------------------------------------------|
 | `EventGraph`      | Class      | Build and run the event-driven graph            |
 | `EventGraph.invoke()` | Method | Run graph synchronously, returns `EventLog` |
 | `EventGraph.ainvoke()` | Method | Async version of `invoke()` |
-| `EventGraph.stream_events()` | Method | Yield events as produced; optional reducer snapshots via `StreamFrame` |
-| `EventGraph.astream_events()` | Method | Async version of `stream_events()`; supports `include_llm_tokens=True` (`LLMToken`/`LLMStreamEnd`) and `include_custom_events=True` (`CustomEventFrame`/`StateSnapshotFrame`) |
-| `EventGraph.stream_resume()` | Method | Yield events during resume; streaming equivalent of `resume()` |
-| `EventGraph.astream_resume()` | Method | Async version of `stream_resume()`; supports `include_llm_tokens=True` (`LLMToken`/`LLMStreamEnd`) and `include_custom_events=True` (`CustomEventFrame`/`StateSnapshotFrame`) |
 | `EventGraph.resume()` | Method | Resume interrupted graph with a domain event (requires checkpointer) |
 | `EventGraph.aresume()` | Method | Async version of `resume()` |
 | `EventGraph.get_state()` | Method | Get `GraphState` for a checkpointed thread |
 | `EventGraph.compiled` | Property | Access underlying `CompiledStateGraph` for advanced LangGraph patterns |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
 | `EventGraph.mermaid()` | Method | Return a Mermaid flowchart of event correlations |
-| `emit_custom`    | Function   | Emit a LangGraph custom stream event from a handler |
-| `aemit_custom`   | Function   | Async variant of `emit_custom` for async handlers |
-| `emit_state_snapshot` | Function | Emit a typed state snapshot stream frame from a handler |
-| `aemit_state_snapshot` | Function | Async variant of `emit_state_snapshot` for async handlers |
-| `STATE_SNAPSHOT_EVENT_NAME` | Constant | Protocol name used for snapshot custom events (`"intermediate_state"`) |
 | `EventLog`        | Class      | Immutable query container over events           |
 | `GraphState`      | NamedTuple | `(events, is_interrupted, interrupted)` from `get_state()` |
+
+## Control Flow
+
+| Export            | Type       | Description                                     |
+|-------------------|------------|-------------------------------------------------|
 | `Halted`          | Event      | Signal immediate graph termination; subclass for domain-specific halts |
 | `MaxRoundsExceeded` | Event    | `Halted` subtype emitted when `max_rounds` is exceeded (`rounds: int`) |
 | `Cancelled`       | Event      | `Halted` subtype emitted when async handler is cancelled |
 | `Interrupted`     | Base class | Bare marker — subclass with typed fields to pause graph |
-| `MessageEvent`    | Base class | Mixin for events wrapping LangChain messages    |
-| `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
-| `on`              | Decorator  | Subscribe a handler to one or more event types  |
+| `Resumed`         | Event      | Created on resume with the dispatched event and `interrupted` backref |
+| `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
+
+## Reducers
+
+| Export            | Type       | Description                                     |
+|-------------------|------------|-------------------------------------------------|
 | `Reducer`         | Class      | Map events to a named LangGraph state channel   |
 | `ScalarReducer`   | Class      | Last-write-wins reducer for single values (None is a valid value) |
 | `SKIP`            | Sentinel   | Return from `ScalarReducer` fn to leave value unchanged |
-| `Resumed`         | Event      | Created on resume with the dispatched event and `interrupted` backref |
-| `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
-| `StreamFrame`     | NamedTuple | `(event, reducers)` yielded by `stream_events()` with `include_reducers` |
-| `LLMToken`        | NamedTuple | `(run_id, content)` token delta yielded by async streams with `include_llm_tokens=True` |
+| `message_reducer` | Function   | Built-in reducer for `MessageEvent` projection  |
+
+## Streaming & Frames
+
+| Export            | Type       | Description                                     |
+|-------------------|------------|-------------------------------------------------|
+| `EventGraph.stream_events()` | Method | Yield events as produced; optional reducer snapshots via `StreamFrame` |
+| `EventGraph.astream_events()` | Method | Async version of `stream_events()`; supports `include_llm_tokens` and `include_custom_events` |
+| `EventGraph.stream_resume()` | Method | Yield events during resume; streaming equivalent of `resume()` |
+| `EventGraph.astream_resume()` | Method | Async version of `stream_resume()`; supports `include_llm_tokens` and `include_custom_events` |
+| `StreamFrame`     | NamedTuple | `(event, reducers, changed_reducers)` yielded with `include_reducers`; `changed_reducers` is a `frozenset[str] \| None` indicating which reducers the event updated |
+| `LLMToken`        | NamedTuple | `(run_id, content)` token delta yielded with `include_llm_tokens=True` |
 | `LLMStreamEnd`    | NamedTuple | `(run_id, message_id)` marker yielded when an LLM stream completes |
-| `CustomEventFrame` | NamedTuple | `(name, data)` custom payload yielded from LangGraph `on_custom_event` with `include_custom_events=True` |
-| `StateSnapshotFrame` | NamedTuple | `(data)` typed snapshot frame yielded when `on_custom_event` uses `STATE_SNAPSHOT_EVENT_NAME` |
-| `SystemPromptSet` | Event      | Built-in `MessageEvent` for system prompts      |
+| `CustomEventFrame` | NamedTuple | `(name, data)` custom payload yielded with `include_custom_events=True` |
+| `StateSnapshotFrame` | NamedTuple | `(data)` typed snapshot frame from `emit_state_snapshot()` |
+| `emit_custom`    | Function   | Emit a LangGraph custom stream event from a handler |
+| `aemit_custom`   | Function   | Async variant of `emit_custom` |
+| `emit_state_snapshot` | Function | Emit a typed state snapshot stream frame from a handler |
+| `aemit_state_snapshot` | Function | Async variant of `emit_state_snapshot` |
+| `STATE_SNAPSHOT_EVENT_NAME` | Constant | Protocol name used for snapshot custom events (`"intermediate_state"`) |
+
+## Warnings
+
+| Export            | Type       | Description                                     |
+|-------------------|------------|-------------------------------------------------|
 | `OrphanedEventWarning` | Warning | Issued at graph construction when return types have no subscriber |
 
 ## AG-UI Subpackage

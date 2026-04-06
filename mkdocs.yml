@@ -11,6 +11,9 @@ nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Concepts: concepts.md
+  - Control Flow: control-flow.md
+  - Reducers: reducers.md
+  - Streaming: streaming.md
   - Patterns: patterns.md
   - API Reference: api.md
   - AG-UI Adapter: agui.md

@@ -66,28 +66,40 @@ seed event
 2. The **router** collects new events, then **dispatch** matches each to subscribed handlers via `isinstance`. Matched handlers run and emit new events.
 3. The loop repeats until no handler matches or a `Halted` event appears.
 
-## Useful Operations
+## Running the Graph
 
 ```python
-# Synchronous
+# Synchronous — returns the full EventLog when the graph completes
 log = graph.invoke(MessageReceived(text="hello"))
 
-# Multiple seed events
+# Multiple seed events — useful for system prompts + user input
 log = graph.invoke([
     SystemPromptSet.from_str("You are helpful"),
     UserMessageReceived(message=HumanMessage(content="Hi")),
 ])
 
-# Async
+# Async — same API, awaitable
 log = await graph.ainvoke(MessageReceived(text="hello"))
 
-# Stream produced events
+# Stream events as they're produced — for live UI updates
 for event in graph.stream_events(MessageReceived(text="hello")):
     print(event)
 
-# Stream with reducer snapshots
+# Stream with reducer snapshots — see accumulated state each round
 for frame in graph.stream_events(MessageReceived(text="hello"), include_reducers=True):
     print(frame.event, frame.reducers["messages"])
 ```
 
-See [Concepts](concepts.md) for event log queries, reducers, interruption/resume, and fan-out.
+## Common Tasks
+
+| I want to... | Reach for... | Docs |
+|---------------|-------------|------|
+| Query past events in a handler | `EventLog` (`log.filter()`, `log.latest()`) | [Concepts](concepts.md#eventlog) |
+| Accumulate message history | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
+| Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |
+| Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
+| Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#halted) |
+| Stream LLM tokens in real time | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
+| Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI Adapter](agui.md) |
+
+See [Concepts](concepts.md) for the core model, then explore the topics above as needed.

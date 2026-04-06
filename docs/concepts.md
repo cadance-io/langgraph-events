@@ -62,7 +62,7 @@ The main entry point. Pass a list of handler functions and `EventGraph` derives 
 graph = EventGraph(
     [classify, respond, audit],
     max_rounds=50,           # default: 100; prevents infinite loops
-    reducers=[my_reducer],   # optional — see Reducer section
+    reducers=[my_reducer],   # optional — see Reducers page
 )
 ```
 
@@ -142,30 +142,6 @@ def guard(event: Classified) -> Reply | ContentBlocked:
 | `MaxRoundsExceeded` | Graph exceeds `max_rounds` (has `rounds: int` field) |
 | `Cancelled` | Async handler execution was cancelled |
 
-## `Scatter`
-
-Return `Scatter([event1, event2, ...])` to fan-out into multiple events. Each becomes a separate pending event, dispatched in the next round. Use `Scatter[WorkItem]` to annotate the produced type — this renders as a dashed edge in `mermaid()` diagrams.
-
-```python
-@on(Batch)
-def split(event: Batch) -> Scatter[WorkItem]:
-    return Scatter([WorkItem(item=i) for i in event.items])
-
-
-@on(WorkItem)
-def process(event: WorkItem) -> WorkDone:
-    return WorkDone(result=f"done:{event.item}")
-
-
-@on(WorkDone)
-def gather(event: WorkDone, log: EventLog) -> BatchResult | None:
-    all_done = log.filter(WorkDone)
-    batch = log.latest(Batch)
-    if len(all_done) >= len(batch.items):
-        return BatchResult(results=tuple(e.result for e in all_done))
-    return None  # not all items done yet
-```
-
 ## `Auditable`
 
 Marker base class for events that should be auto-logged. Subclass it and subscribe a single `@on(Auditable)` handler to capture every marked event automatically. The built-in `trail()` method returns a compact summary of the event's fields.
@@ -218,149 +194,9 @@ log = graph.invoke([
 seed = SystemPromptSet(message=SystemMessage(content="You are helpful"))
 ```
 
-## Reducers
+## What's Next
 
-**When to use reducers:** Pure event-driven handlers (`log.filter()`, `log.latest()`) are the default and work for most patterns. Add a `Reducer` when you need incremental accumulation that would be expensive to recompute from the full log each round — the canonical case is `message_reducer()` for LLM conversation history. Add a `ScalarReducer` for last-write-wins configuration values injected directly into handlers. If you find yourself calling `log.filter(X)` and transforming the result the same way in multiple handlers, that's a signal a reducer would help.
-
-A `Reducer` maps events to contributions for a named LangGraph state channel. The framework maintains the channel incrementally — handlers receive the accumulated value by declaring a parameter whose name matches the reducer.
-
-```python
-from langgraph_events import Reducer, ScalarReducer, message_reducer, EventGraph, on
-
-# --- Reducer: accumulates contributions from matching events ---
-history = Reducer("history", event_type=UserMsg, fn=lambda e: [e.text], default=[])
-
-
-@on(UserMsg)
-def respond(event: UserMsg, history: list) -> Reply:
-    # history contains all projected values so far
-    ...
-
-
-graph = EventGraph([respond], reducers=[history])
-
-# --- message_reducer: built-in for LangChain message accumulation ---
-messages = message_reducer()
-graph = EventGraph([call_llm, handle_tools], reducers=[messages])
-log = graph.invoke([
-    SystemPromptSet.from_str("You are a helpful assistant."),
-    UserMessageReceived(message=HumanMessage(content="Hi")),
-])
-
-# Alternative: explicit default list
-messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
-
-# --- ScalarReducer: last-write-wins, injected as a bare value ---
-temperature = ScalarReducer(
-    "temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7
-)
-```
-
-The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically:
-
-```python
-@on(UserMessageReceived, ToolsExecuted)
-async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
-    response = await llm.ainvoke(messages)
-    ...
-```
-
-### `SKIP`
-
-When a `ScalarReducer` function returns `SKIP`, the reducer value is left unchanged. This lets handlers opt out of updating the reducer for certain events.
-
-```python
-from langgraph_events import SKIP, ScalarReducer
-
-temperature = ScalarReducer(
-    "temperature", event_type=ConfigUpdated, fn=lambda e: e.temp if e.temp is not None else SKIP, default=0.7
-)
-```
-
-## `Interrupted` / `Resumed`
-
-`Interrupted` is a bare marker class — subclass it with domain-specific fields to pause the graph and wait for human input. Resume with `graph.resume(event)` — the event is auto-dispatched (handlers subscribed to its type fire), then the framework creates a `Resumed` event alongside it. `resume()` requires an `Event` instance; passing a plain string or dict raises `TypeError`.
-
-Requires a **checkpointer** (e.g., `MemorySaver`).
-
-```python
-from langgraph.checkpoint.memory import MemorySaver
-
-
-class OrderConfirmationRequested(Interrupted):
-    order_id: str
-    total: float
-
-
-class ApprovalSubmitted(Event):
-    approved: bool
-
-
-@on(OrderPlaced)
-def confirm(event: OrderPlaced) -> OrderConfirmationRequested:
-    return OrderConfirmationRequested(order_id=event.order_id, total=event.total)
-
-
-@on(ApprovalSubmitted)
-def handle_approval(event: ApprovalSubmitted, log: EventLog) -> OrderConfirmed | OrderCancelled:
-    confirm_event = log.latest(OrderConfirmationRequested)
-    if event.approved:
-        return OrderConfirmed(order_id=confirm_event.order_id)
-    return OrderCancelled(reason="User declined")
-
-
-graph = EventGraph([confirm, handle_approval], checkpointer=MemorySaver())
-config = {"configurable": {"thread_id": "order-1"}}
-
-# First call — pauses at the interrupt
-graph.invoke(OrderPlaced(order_id="A1", total=99.99), config=config)
-
-# Check state and resume with a typed event
-state = graph.get_state(config)
-if state.is_interrupted:
-    confirm_event = state.interrupted
-    print(f"Approve order {confirm_event.order_id} for ${confirm_event.total}?")
-log = graph.resume(ApprovalSubmitted(approved=True), config=config)
-```
-
-## Streaming
-
-All `invoke`/`stream` methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`.
-
-```python
-# Async stream with real-time LLM token deltas and passthrough custom frames
-from langgraph_events import (
-    CustomEventFrame,
-    LLMStreamEnd,
-    LLMToken,
-    StateSnapshotFrame,
-    emit_state_snapshot,
-    emit_custom,
-)
-
-
-@on(SeedEvent)
-def step(event: SeedEvent) -> ReplyProduced:
-    emit_state_snapshot({"messages": [], "step": "draft"})
-    emit_custom("tool.progress", {"pct": 50})
-    return ReplyProduced(...)
-
-
-async for item in graph.astream_events(
-    SeedEvent(...),
-    include_llm_tokens=True,
-    include_custom_events=True,
-):
-    if isinstance(item, LLMToken):
-        print(item.content, end="")
-    elif isinstance(item, LLMStreamEnd):
-        print("\n[done]", item.message_id)
-    elif isinstance(item, StateSnapshotFrame):
-        print("snapshot:", item.data)
-    elif isinstance(item, CustomEventFrame):
-        print("custom:", item.name, item.data)
-    else:
-        print(item)
-```
-
-Use `include_llm_tokens=True` for LLM token frames and `include_custom_events=True` for `CustomEventFrame` passthrough. Use `emit_state_snapshot(data)` / `await aemit_state_snapshot(data)` for typed snapshot frames, and `emit_custom(name, data)` / `await aemit_custom(name, data)` for all other stream-only telemetry without importing LangGraph callback APIs directly.
+- [Control Flow](control-flow.md) — `Scatter` for fan-out, `Interrupted`/`Resumed` for human-in-the-loop
+- [Reducers](reducers.md) — incremental state accumulation with `Reducer`, `ScalarReducer`, and `message_reducer()`
+- [Streaming](streaming.md) — real-time event streams, LLM token deltas, and custom telemetry
+- [Patterns](patterns.md) — complete runnable examples
