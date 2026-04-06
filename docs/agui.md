@@ -15,7 +15,7 @@ RunAgentInput -> AGUIAdapter.connect/reconnect -> checkpoint snapshots + interru
 ## Install
 
 ```bash
-pip install "langgraph-events[agui] @ git+https://github.com/cadance-io/langgraph-events.git"
+pip install "langgraph-events[agui]"
 ```
 
 You'll also need `starlette` or `fastapi` for the HTTP layer.

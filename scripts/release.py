@@ -9,6 +9,7 @@ import subprocess
 import sys
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 REPO_URL = "https://github.com/cadance-io/langgraph-events"
@@ -17,7 +18,7 @@ VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
 BUMP_TYPES = ("major", "minor", "patch")
 
 
-def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd, capture_output=True, text=True, check=False, cwd=ROOT, **kwargs
     )
@@ -103,8 +104,8 @@ def bump_version_strings(current: str, new: str, *, dry_run: bool) -> None:
     for path, old, new_str in replacements:
         text = path.read_text()
         if old not in text:
-            print(f"Warning: '{old}' not found in {path.name}", file=sys.stderr)
-            continue
+            print(f"Error: '{old}' not found in {path.name}", file=sys.stderr)
+            sys.exit(1)
         if dry_run:
             print(f"  {path.relative_to(ROOT)}: {old!r} → {new_str!r}", file=sys.stderr)
         else:
@@ -177,7 +178,7 @@ def sync_lockfile(*, dry_run: bool) -> None:
 
 
 def commit_and_tag(new: str) -> None:
-    _run(
+    subprocess.run(
         [
             "git",
             "add",
@@ -187,13 +188,19 @@ def commit_and_tag(new: str) -> None:
             "CHANGELOG.md",
             "uv.lock",
         ],
+        check=True,
+        cwd=ROOT,
     )
     subprocess.run(
         ["git", "commit", "-m", f"release: v{new}"],
         check=True,
         cwd=ROOT,
     )
-    _run(["git", "tag", f"v{new}"])
+    subprocess.run(
+        ["git", "tag", f"v{new}"],
+        check=True,
+        cwd=ROOT,
+    )
 
 
 def main() -> None:
