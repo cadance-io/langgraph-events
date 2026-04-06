@@ -23,9 +23,7 @@ Before the first release, the repo owner must:
    - Workflow: `publish.yml`
    - Environment: `pypi`
 
-2. **Register trusted publishers on TestPyPI** — go to [test.pypi.org/manage/account/publishing](https://test.pypi.org/manage/account/publishing/) with the same details, except environment: `testpypi`
-
-3. **Create GitHub environments** — go to repo Settings → Environments and create `pypi` and `testpypi`
+2. **Create GitHub environment** — go to repo Settings → Environments and create `pypi`
 
 ### Cutting a release
 
@@ -49,7 +47,7 @@ Before the first release, the repo owner must:
    git push origin main v0.3.0
    ```
 
-   The workflow builds the package, publishes to TestPyPI first, then to PyPI.
+   The workflow builds the package and publishes to PyPI.
 
 ### What the release script does
 

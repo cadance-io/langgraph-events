@@ -30,24 +30,9 @@ jobs:
           name: dist
           path: dist/
 
-  test-publish:
-    name: Publish to TestPyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment: testpypi
-    permissions:
-      id-token: write
-    steps:
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-      - run: uv publish --trusted-publishing always --publish-url https://test.pypi.org/legacy/
-
   publish:
     name: Publish to PyPI
-    needs: test-publish
+    needs: build
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
