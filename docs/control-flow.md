@@ -55,7 +55,9 @@ def confirm(event: OrderPlaced) -> OrderConfirmationRequested:
 
 
 @on(ApprovalSubmitted)
-def handle_approval(event: ApprovalSubmitted, log: EventLog) -> OrderConfirmed | OrderCancelled:
+def handle_approval(
+    event: ApprovalSubmitted, log: EventLog,
+) -> OrderConfirmed | OrderCancelled:
     confirm_event = log.latest(OrderConfirmationRequested)
     if event.approved:
         return OrderConfirmed(order_id=confirm_event.order_id)

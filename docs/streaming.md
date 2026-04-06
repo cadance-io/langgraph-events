@@ -16,15 +16,15 @@ from langgraph_events import (
 )
 
 
-@on(SeedEvent)
-def step(event: SeedEvent) -> ReplyProduced:
+@on(QueryReceived)
+def step(event: QueryReceived) -> ReplyProduced:
     emit_state_snapshot({"messages": [], "step": "draft"})
     emit_custom("tool.progress", {"pct": 50})
     return ReplyProduced(...)
 
 
 async for item in graph.astream_events(
-    SeedEvent(...),
+    QueryReceived(...),
     include_llm_tokens=True,
     include_custom_events=True,
 ):
