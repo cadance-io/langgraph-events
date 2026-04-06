@@ -32,10 +32,13 @@ print(log.latest(ReplyProduced))
 ## Installation
 
 ```bash
-pip install git+https://github.com/cadance-io/langgraph-events.git
+pip install langgraph-events
 
 # With AG-UI adapter support
-pip install "langgraph-events[agui] @ git+https://github.com/cadance-io/langgraph-events.git"
+pip install "langgraph-events[agui]"
+
+# From source (development)
+pip install git+https://github.com/cadance-io/langgraph-events.git
 ```
 
 ## Documentation

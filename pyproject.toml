@@ -8,9 +8,28 @@ version = "0.2.0"
 description = "Opinionated event-driven abstraction for LangGraph. State IS events."
 requires-python = ">=3.10"
 license = "MIT"
+authors = [{name = "cadance-io"}]
+readme = "README.md"
+keywords = ["langgraph", "events", "event-driven", "state-machine"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Typing :: Typed",
+]
 dependencies = [
     "langgraph>=0.2.0",
 ]
+
+[project.urls]
+Homepage = "https://cadance-io.github.io/langgraph-events/"
+Repository = "https://github.com/cadance-io/langgraph-events"
+Documentation = "https://cadance-io.github.io/langgraph-events/"
+Changelog = "https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 agui = ["ag-ui-protocol>=0.1.0"]
