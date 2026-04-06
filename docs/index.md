@@ -28,8 +28,14 @@ Requires Python 3.10+ and `langgraph >= 0.2.0` (installed automatically). The `[
 
 - Start with [Getting Started](getting-started.md)
 - Learn [Core Concepts](concepts.md)
-- Browse [Patterns](patterns.md)
-- Check [API Reference](api.md)
+- Then explore as needed:
+    - [Control Flow](control-flow.md) — fan-out, human-in-the-loop
+    - [Reducers](reducers.md) — incremental state accumulation
+    - [Streaming](streaming.md) — real-time events, LLM tokens, telemetry
+- Browse [Patterns](patterns.md) for complete runnable examples
+- Check [API Reference](api.md) for the full export table
+- [AG-UI Adapter](agui.md) for frontend streaming
+- [Checkpointer Evolution](checkpointer-evolution.md) for persistence edge cases
 
 ## Status
 

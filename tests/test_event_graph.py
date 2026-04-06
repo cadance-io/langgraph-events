@@ -2595,6 +2595,9 @@ def describe_EventGraph():
                 task.cancel()
                 log = await task
                 assert log.latest(Cancelled) is not None
+                # First invocation's Ended is discarded — partial events
+                # within the same handler node are never committed.
+                assert not log.has(Ended)
 
     def describe_mermaid():
 
