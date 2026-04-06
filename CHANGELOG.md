@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.0]
+## [0.2.0] - 2026-04-06
 
 ### Added
 - Field-level dispatch for `@on` decorator
@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `connect()` yielding no events for new threads
 - Resume interrupt detection for interrupts created during resume
 
-## [0.1.0]
+## [0.1.0] - 2026-02-20
 
 ### Added
 - Core `Event`, `EventGraph`, and `@on` decorator
@@ -42,3 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Mermaid diagram generation
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
+
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cadance-io/langgraph-events/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/cadance-io/langgraph-events/releases/tag/v0.1.0

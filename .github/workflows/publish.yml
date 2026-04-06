@@ -3,15 +3,27 @@ name: Publish
 on:
   push:
     tags:
-      - v*
+      - "v[0-9]+.[0-9]+.[0-9]+*"
 
 jobs:
   build:
-    name: Build distributions
+    name: Build and validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG=$(grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v$TAG does not match pyproject.toml version $PKG"
+            exit 1
+          fi
+      - run: uv run ruff check src/ tests/
+      - run: uv run mypy src/
+      - run: uv run pytest tests/
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:
