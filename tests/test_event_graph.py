@@ -1636,38 +1636,45 @@ def describe_EventGraph():
 
             def when_pre_seeded_via_update_state():
 
-                def it_preserves_pre_seeded_list_reducer():
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    r = Reducer(
-                        "texts",
-                        event_type=MessageReceived,
-                        fn=lambda e: [e.text],
+                def _texts_reducer(**kw) -> Reducer:
+                    return Reducer(
+                        "texts", event_type=MessageReceived, fn=lambda e: [e.text], **kw
                     )
+
+                def _texts_handler(trigger: type) -> tuple:
                     captured: list[list] = []
 
-                    @on(Started)
-                    def step(event: Started, texts: list) -> Completed:
+                    @on(trigger)
+                    def _capture_texts(event: Event, texts: list) -> Completed:
                         captured.append(list(texts))
                         return Completed(result="ok")
 
-                    checkpointer = MemorySaver()
-                    graph = EventGraph([step], reducers=[r], checkpointer=checkpointer)
-                    config = {"configurable": {"thread_id": "pre-seed-list"}}
+                    return _capture_texts, captured
 
-                    graph.pre_seed(config, {"texts": ["pre-seeded"]})
+                def _pre_seed_graph(
+                    handlers: list, reducers: list, seed_values: dict, thread_id: str
+                ) -> tuple:
+                    from langgraph.checkpoint.memory import MemorySaver
 
+                    graph = EventGraph(
+                        handlers, reducers=reducers, checkpointer=MemorySaver()
+                    )
+                    config: dict = {"configurable": {"thread_id": thread_id}}
+                    graph.pre_seed(config, seed_values)
+                    return graph, config
+
+                def it_preserves_pre_seeded_list_reducer():
+                    handler, captured = _texts_handler(Started)
+                    graph, config = _pre_seed_graph(
+                        [handler],
+                        [_texts_reducer()],
+                        {"texts": ["pre-seeded"]},
+                        "pre-seed-list",
+                    )
                     graph.invoke(Started(data="go"), config=config)
                     assert captured[0] == ["pre-seeded"]
 
                 def it_preserves_pre_seeded_scalar_reducer():
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    sr = ScalarReducer(
-                        name="proposal",
-                        event_type=MessageReceived,
-                        fn=lambda e: e.text,
-                    )
                     captured: list[object] = []
 
                     @on(Started)
@@ -1675,23 +1682,19 @@ def describe_EventGraph():
                         captured.append(proposal)
                         return Completed(result="ok")
 
-                    checkpointer = MemorySaver()
-                    graph = EventGraph([step], reducers=[sr], checkpointer=checkpointer)
-                    config = {"configurable": {"thread_id": "pre-seed-scalar"}}
-
-                    graph.pre_seed(config, {"proposal": "my proposal text"})
-
+                    sr = ScalarReducer(
+                        name="proposal", event_type=MessageReceived, fn=lambda e: e.text
+                    )
+                    graph, config = _pre_seed_graph(
+                        [step],
+                        [sr],
+                        {"proposal": "my proposal text"},
+                        "pre-seed-scalar",
+                    )
                     graph.invoke(Started(data="go"), config=config)
                     assert captured[0] == "my proposal text"
 
                 def it_preserves_pre_seeded_falsy_scalar():
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    sr = ScalarReducer(
-                        name="count",
-                        event_type=MessageReceived,
-                        fn=lambda e: int(e.text),
-                    )
                     captured: list[object] = []
 
                     @on(Started)
@@ -1699,95 +1702,56 @@ def describe_EventGraph():
                         captured.append(count)
                         return Completed(result="ok")
 
-                    checkpointer = MemorySaver()
-                    graph = EventGraph([step], reducers=[sr], checkpointer=checkpointer)
-                    config = {"configurable": {"thread_id": "pre-seed-falsy"}}
-
-                    graph.pre_seed(config, {"count": 0})
-
+                    sr = ScalarReducer(
+                        name="count",
+                        event_type=MessageReceived,
+                        fn=lambda e: int(e.text),
+                    )
+                    graph, config = _pre_seed_graph(
+                        [step],
+                        [sr],
+                        {"count": 0},
+                        "pre-seed-falsy",
+                    )
                     graph.invoke(Started(data="go"), config=config)
                     assert captured[0] == 0
 
                 def when_seed_event_also_contributes():
 
                     def it_merges_contributions_into_pre_seeded_list():
-                        from langgraph.checkpoint.memory import MemorySaver
-
-                        r = Reducer(
-                            "texts",
-                            event_type=MessageReceived,
-                            fn=lambda e: [e.text],
+                        handler, captured = _texts_handler(MessageReceived)
+                        graph, config = _pre_seed_graph(
+                            [handler],
+                            [_texts_reducer()],
+                            {"texts": ["existing"]},
+                            "merge-list",
                         )
-                        captured: list[list] = []
-
-                        @on(MessageReceived)
-                        def step(event: MessageReceived, texts: list) -> Completed:
-                            captured.append(list(texts))
-                            return Completed(result="ok")
-
-                        checkpointer = MemorySaver()
-                        graph = EventGraph(
-                            [step], reducers=[r], checkpointer=checkpointer
-                        )
-                        config = {"configurable": {"thread_id": "merge-list"}}
-
-                        graph.pre_seed(config, {"texts": ["existing"]})
-
                         graph.invoke(MessageReceived(text="new"), config=config)
                         assert captured[0] == ["existing", "new"]
 
                 def when_reducer_has_non_empty_default():
 
                     def it_does_not_duplicate_default():
-                        from langgraph.checkpoint.memory import MemorySaver
-
-                        r = Reducer(
-                            "texts",
-                            event_type=MessageReceived,
-                            fn=lambda e: [e.text],
-                            default=["init"],
+                        handler, captured = _texts_handler(Started)
+                        graph, config = _pre_seed_graph(
+                            [handler],
+                            [_texts_reducer(default=["init"])],
+                            {"texts": ["custom"]},
+                            "no-dup-default",
                         )
-                        captured: list[list] = []
-
-                        @on(Started)
-                        def step(event: Started, texts: list) -> Completed:
-                            captured.append(list(texts))
-                            return Completed(result="ok")
-
-                        checkpointer = MemorySaver()
-                        graph = EventGraph(
-                            [step], reducers=[r], checkpointer=checkpointer
-                        )
-                        config = {"configurable": {"thread_id": "no-dup-default"}}
-
-                        graph.pre_seed(config, {"texts": ["custom"]})
-
                         graph.invoke(Started(data="go"), config=config)
                         # "init" default should NOT be re-applied on top
                         # of pre-seeded value.
                         assert captured[0] == ["custom"]
 
                 def it_advances_cursor_after_pre_seeded_run():
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    r = Reducer(
-                        "texts",
-                        event_type=MessageReceived,
-                        fn=lambda e: [e.text],
+                    handler, captured = _texts_handler(MessageReceived)
+                    graph, config = _pre_seed_graph(
+                        [handler],
+                        [_texts_reducer()],
+                        {"texts": ["pre"]},
+                        "cursor-advance",
                     )
-                    captured: list[list] = []
-
-                    @on(MessageReceived)
-                    def step(event: MessageReceived, texts: list) -> Completed:
-                        captured.append(list(texts))
-                        return Completed(result="ok")
-
-                    checkpointer = MemorySaver()
-                    graph = EventGraph([step], reducers=[r], checkpointer=checkpointer)
-                    config = {"configurable": {"thread_id": "cursor-advance"}}
-
-                    graph.pre_seed(config, {"texts": ["pre"]})
-
                     # Run 1 — pre-seeded
                     graph.invoke(MessageReceived(text="a"), config=config)
                     assert captured[0] == ["pre", "a"]
@@ -1797,19 +1761,6 @@ def describe_EventGraph():
                     assert captured[1] == ["pre", "a", "b"]
 
                 def it_handles_mixed_pre_seeded_and_normal_reducers():
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    r_seeded = Reducer(
-                        "seeded",
-                        event_type=MessageReceived,
-                        fn=lambda e: [e.text],
-                    )
-                    r_normal = Reducer(
-                        "normal",
-                        event_type=Started,
-                        fn=lambda e: [e.data],
-                        default=["init"],
-                    )
                     captured_seeded: list[list] = []
                     captured_normal: list[list] = []
 
@@ -1819,21 +1770,23 @@ def describe_EventGraph():
                         captured_normal.append(list(normal))
                         return Completed(result="ok")
 
-                    checkpointer = MemorySaver()
-                    graph = EventGraph(
-                        [step],
-                        reducers=[r_seeded, r_normal],
-                        checkpointer=checkpointer,
+                    r_seeded = Reducer(
+                        "seeded", event_type=MessageReceived, fn=lambda e: [e.text]
                     )
-                    config = {"configurable": {"thread_id": "mixed"}}
-
-                    # Only pre-seed one reducer
-                    graph.pre_seed(config, {"seeded": ["external"]})
-
+                    r_normal = Reducer(
+                        "normal",
+                        event_type=Started,
+                        fn=lambda e: [e.data],
+                        default=["init"],
+                    )
+                    graph, config = _pre_seed_graph(
+                        [step],
+                        [r_seeded, r_normal],
+                        {"seeded": ["external"]},
+                        "mixed",
+                    )
                     graph.invoke(Started(data="go"), config=config)
-                    # Pre-seeded reducer keeps its value
                     assert captured_seeded[0] == ["external"]
-                    # Normal reducer initializes from default + seed
                     assert captured_normal[0] == ["init", "go"]
 
     def describe_scalar_reducer():
