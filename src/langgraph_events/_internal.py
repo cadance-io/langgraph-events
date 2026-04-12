@@ -92,9 +92,19 @@ def make_seed_node(
         }
         if reds:
             if prev_cursor == 0:
-                # First run — initialize with default + seed events
                 for name, r in reds.items():
-                    result[name] = r.seed(new_events)
+                    if state.get(name):
+                        # Channel already has data (e.g., via
+                        # update_state) — only apply contributions so
+                        # the channel reducer merges them with the
+                        # existing value.
+                        collected = r.collect(new_events)
+                        if r.has_contributions(collected):
+                            result[name] = collected
+                    else:
+                        # True first run — initialize from default +
+                        # seed events.
+                        result[name] = r.seed(new_events)
             elif new_events:
                 # Subsequent run (checkpointer) — only process new events
                 for name, r in reds.items():

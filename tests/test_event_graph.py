@@ -1634,6 +1634,208 @@ def describe_EventGraph():
                     assert snapshots[0] == ["y", "z", "a"]
                     assert snapshots[1] == ["z", "a", "b"]
 
+            def when_pre_seeded_via_update_state():
+
+                def it_preserves_pre_seeded_list_reducer():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    r = Reducer(
+                        "texts",
+                        event_type=MessageReceived,
+                        fn=lambda e: [e.text],
+                    )
+                    captured: list[list] = []
+
+                    @on(Started)
+                    def step(event: Started, texts: list) -> Completed:
+                        captured.append(list(texts))
+                        return Completed(result="ok")
+
+                    checkpointer = MemorySaver()
+                    graph = EventGraph([step], reducers=[r], checkpointer=checkpointer)
+                    config = {"configurable": {"thread_id": "pre-seed-list"}}
+
+                    compiled = graph._compile()
+                    compiled.update_state(
+                        config, {"texts": ["pre-seeded"]}, as_node="__seed__"
+                    )
+
+                    graph.invoke(Started(data="go"), config=config)
+                    assert captured[0] == ["pre-seeded"]
+
+                def it_preserves_pre_seeded_scalar_reducer():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    sr = ScalarReducer(
+                        name="proposal",
+                        event_type=MessageReceived,
+                        fn=lambda e: e.text,
+                    )
+                    captured: list[object] = []
+
+                    @on(Started)
+                    def step(event: Started, proposal: object) -> Completed:
+                        captured.append(proposal)
+                        return Completed(result="ok")
+
+                    checkpointer = MemorySaver()
+                    graph = EventGraph([step], reducers=[sr], checkpointer=checkpointer)
+                    config = {"configurable": {"thread_id": "pre-seed-scalar"}}
+
+                    compiled = graph._compile()
+                    compiled.update_state(
+                        config,
+                        {"proposal": "my proposal text"},
+                        as_node="__seed__",
+                    )
+
+                    graph.invoke(Started(data="go"), config=config)
+                    assert captured[0] == "my proposal text"
+
+                def when_seed_event_also_contributes():
+
+                    def it_merges_contributions_into_pre_seeded_list():
+                        from langgraph.checkpoint.memory import MemorySaver
+
+                        r = Reducer(
+                            "texts",
+                            event_type=MessageReceived,
+                            fn=lambda e: [e.text],
+                        )
+                        captured: list[list] = []
+
+                        @on(MessageReceived)
+                        def step(event: MessageReceived, texts: list) -> Completed:
+                            captured.append(list(texts))
+                            return Completed(result="ok")
+
+                        checkpointer = MemorySaver()
+                        graph = EventGraph(
+                            [step], reducers=[r], checkpointer=checkpointer
+                        )
+                        config = {"configurable": {"thread_id": "merge-list"}}
+
+                        compiled = graph._compile()
+                        compiled.update_state(
+                            config,
+                            {"texts": ["existing"]},
+                            as_node="__seed__",
+                        )
+
+                        graph.invoke(MessageReceived(text="new"), config=config)
+                        assert captured[0] == ["existing", "new"]
+
+                def when_reducer_has_non_empty_default():
+
+                    def it_does_not_duplicate_default():
+                        from langgraph.checkpoint.memory import MemorySaver
+
+                        r = Reducer(
+                            "texts",
+                            event_type=MessageReceived,
+                            fn=lambda e: [e.text],
+                            default=["init"],
+                        )
+                        captured: list[list] = []
+
+                        @on(Started)
+                        def step(event: Started, texts: list) -> Completed:
+                            captured.append(list(texts))
+                            return Completed(result="ok")
+
+                        checkpointer = MemorySaver()
+                        graph = EventGraph(
+                            [step], reducers=[r], checkpointer=checkpointer
+                        )
+                        config = {"configurable": {"thread_id": "no-dup-default"}}
+
+                        compiled = graph._compile()
+                        compiled.update_state(
+                            config,
+                            {"texts": ["custom"]},
+                            as_node="__seed__",
+                        )
+
+                        graph.invoke(Started(data="go"), config=config)
+                        # "init" default should NOT be re-applied on top
+                        # of pre-seeded value.
+                        assert captured[0] == ["custom"]
+
+                def it_advances_cursor_after_pre_seeded_run():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    r = Reducer(
+                        "texts",
+                        event_type=MessageReceived,
+                        fn=lambda e: [e.text],
+                    )
+                    captured: list[list] = []
+
+                    @on(MessageReceived)
+                    def step(event: MessageReceived, texts: list) -> Completed:
+                        captured.append(list(texts))
+                        return Completed(result="ok")
+
+                    checkpointer = MemorySaver()
+                    graph = EventGraph([step], reducers=[r], checkpointer=checkpointer)
+                    config = {"configurable": {"thread_id": "cursor-advance"}}
+
+                    compiled = graph._compile()
+                    compiled.update_state(
+                        config, {"texts": ["pre"]}, as_node="__seed__"
+                    )
+
+                    # Run 1 — pre-seeded
+                    graph.invoke(MessageReceived(text="a"), config=config)
+                    assert captured[0] == ["pre", "a"]
+
+                    # Run 2 — re-invoke, cursor now > 0, normal resume
+                    graph.invoke(MessageReceived(text="b"), config=config)
+                    assert captured[1] == ["pre", "a", "b"]
+
+                def it_handles_mixed_pre_seeded_and_normal_reducers():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    r_seeded = Reducer(
+                        "seeded",
+                        event_type=MessageReceived,
+                        fn=lambda e: [e.text],
+                    )
+                    r_normal = Reducer(
+                        "normal",
+                        event_type=Started,
+                        fn=lambda e: [e.data],
+                        default=["init"],
+                    )
+                    captured_seeded: list[list] = []
+                    captured_normal: list[list] = []
+
+                    @on(Started)
+                    def step(event: Started, seeded: list, normal: list) -> Completed:
+                        captured_seeded.append(list(seeded))
+                        captured_normal.append(list(normal))
+                        return Completed(result="ok")
+
+                    checkpointer = MemorySaver()
+                    graph = EventGraph(
+                        [step],
+                        reducers=[r_seeded, r_normal],
+                        checkpointer=checkpointer,
+                    )
+                    config = {"configurable": {"thread_id": "mixed"}}
+
+                    compiled = graph._compile()
+                    # Only pre-seed one reducer
+                    compiled.update_state(
+                        config, {"seeded": ["external"]}, as_node="__seed__"
+                    )
+
+                    graph.invoke(Started(data="go"), config=config)
+                    # Pre-seeded reducer keeps its value
+                    assert captured_seeded[0] == ["external"]
+                    # Normal reducer initializes from default + seed
+                    assert captured_normal[0] == ["init", "go"]
+
     def describe_scalar_reducer():
 
         def when_matching_events():
@@ -2583,6 +2785,139 @@ def describe_EventGraph():
                 isinstance(v, _StepInterrupted) and v.step == 2
                 for v in interrupt_values
             )
+
+        @pytest.mark.asyncio
+        async def it_preserves_reducer_state_from_checkpoint_in_v2():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+                reducers=[r],
+            )
+            config = {"configurable": {"thread_id": "v2-resume-reducer"}}
+
+            # First run — seed with MessageReceived to populate reducer, then
+            # interrupt via Started → _StepInterrupted.
+            graph.invoke(
+                [MessageReceived(text="hello"), Started(data="go")], config=config
+            )
+
+            # Resume via _astream_v2 path (include_custom_events forces v2)
+            frames = [
+                item
+                async for item in graph.astream_resume(
+                    Completed(result="done"),
+                    include_reducers=True,
+                    include_custom_events=True,
+                    config=config,
+                )
+            ]
+
+            stream_frames = [f for f in frames if isinstance(f, StreamFrame)]
+            assert len(stream_frames) > 0
+            # Reducer must reflect checkpoint state ("hello" from first run)
+            assert "hello" in stream_frames[0].reducers["texts"]
+
+        @pytest.mark.asyncio
+        async def it_accumulates_reducer_across_v2_astream_events_runs():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
+
+            @on(MessageReceived)
+            def step(event: MessageReceived) -> Completed:
+                return Completed(result=event.text)
+
+            graph = EventGraph(
+                [step],
+                checkpointer=MemorySaver(),
+                reducers=[r],
+            )
+            config = {"configurable": {"thread_id": "v2-second-run"}}
+
+            # First run via astream_events (v2 path)
+            _ = [
+                item
+                async for item in graph.astream_events(
+                    MessageReceived(text="first"),
+                    include_reducers=True,
+                    include_custom_events=True,
+                    config=config,
+                )
+            ]
+
+            # Second run on same thread — seed contributes on top of checkpoint
+            frames = [
+                item
+                async for item in graph.astream_events(
+                    MessageReceived(text="second"),
+                    include_reducers=True,
+                    include_custom_events=True,
+                    config=config,
+                )
+            ]
+
+            stream_frames = [f for f in frames if isinstance(f, StreamFrame)]
+            assert len(stream_frames) > 0
+            texts = stream_frames[0].reducers["texts"]
+            assert "first" in texts
+            assert "second" in texts
+
+        @pytest.mark.asyncio
+        async def it_preserves_scalar_reducer_from_checkpoint_in_v2():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            sr = ScalarReducer(
+                name="proposal",
+                event_type=MessageReceived,
+                fn=lambda e: e.text,
+            )
+
+            @on(Started)
+            def need_input(event: Started) -> _StepInterrupted:
+                return _StepInterrupted(step=1)
+
+            @on(Completed)
+            def finish(event: Completed) -> Ended:
+                return Ended(result=event.result)
+
+            graph = EventGraph(
+                [need_input, finish],
+                checkpointer=MemorySaver(),
+                reducers=[sr],
+            )
+            config = {"configurable": {"thread_id": "v2-scalar-resume"}}
+
+            # First run — MessageReceived populates scalar, Started interrupts
+            graph.invoke(
+                [MessageReceived(text="chosen"), Started(data="go")], config=config
+            )
+
+            # Resume via v2 path
+            frames = [
+                item
+                async for item in graph.astream_resume(
+                    Completed(result="done"),
+                    include_reducers=True,
+                    include_custom_events=True,
+                    config=config,
+                )
+            ]
+
+            stream_frames = [f for f in frames if isinstance(f, StreamFrame)]
+            assert len(stream_frames) > 0
+            assert stream_frames[0].reducers["proposal"] == "chosen"
 
     def describe_reflection_loop():
 

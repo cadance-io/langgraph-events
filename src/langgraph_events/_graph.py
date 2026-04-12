@@ -592,7 +592,7 @@ class EventGraph:
             for e in new_events
         ]
 
-    async def _astream_v2(  # noqa: PLR0912
+    async def _astream_v2(  # noqa: PLR0912, PLR0915
         self,
         inp: Any,
         seeds: list[Event],
@@ -605,10 +605,33 @@ class EventGraph:
         """Stream events using LangGraph's v2 event API with LLM token support."""
         compiled = self._compile()
 
-        # Initialize incremental reducer state from seeds
+        # Initialize incremental reducer state.  When a checkpoint exists
+        # (subsequent run / resume), start from the checkpointed values so
+        # the shadow state matches what the compiled graph already restored.
+        # Fall back to r.seed() only on the true first run.
         reducer_state: dict[str, Any] = {}
+        checkpoint_values: dict[str, Any] | None = None
+        if reducer_names and self._checkpointer is not None:
+            config = kwargs.get("config")
+            if config is not None:
+                snapshot = await compiled.aget_state(config)
+                if snapshot.values:
+                    checkpoint_values = snapshot.values
+
         for name in reducer_names:
-            reducer_state[name] = self._reducers[name].seed(seeds)
+            if checkpoint_values is not None:
+                reducer_state[name] = checkpoint_values.get(
+                    name, self._reducers[name].empty
+                )
+            else:
+                reducer_state[name] = self._reducers[name].seed(seeds)
+
+        # When resuming from a checkpoint, merge any seed contributions on
+        # top (no-op on resume since seeds=[], needed for astream_events
+        # second-run where seeds carry new events).
+        if checkpoint_values is not None:
+            for s in seeds:
+                self._update_reducer_state(reducer_state, s, reducer_names)
 
         # Yield seed events
         for s in seeds:
