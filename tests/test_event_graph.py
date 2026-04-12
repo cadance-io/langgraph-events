@@ -1655,10 +1655,7 @@ def describe_EventGraph():
                     graph = EventGraph([step], reducers=[r], checkpointer=checkpointer)
                     config = {"configurable": {"thread_id": "pre-seed-list"}}
 
-                    compiled = graph._compile()
-                    compiled.update_state(
-                        config, {"texts": ["pre-seeded"]}, as_node="__seed__"
-                    )
+                    graph.pre_seed(config, {"texts": ["pre-seeded"]})
 
                     graph.invoke(Started(data="go"), config=config)
                     assert captured[0] == ["pre-seeded"]
@@ -1682,15 +1679,34 @@ def describe_EventGraph():
                     graph = EventGraph([step], reducers=[sr], checkpointer=checkpointer)
                     config = {"configurable": {"thread_id": "pre-seed-scalar"}}
 
-                    compiled = graph._compile()
-                    compiled.update_state(
-                        config,
-                        {"proposal": "my proposal text"},
-                        as_node="__seed__",
-                    )
+                    graph.pre_seed(config, {"proposal": "my proposal text"})
 
                     graph.invoke(Started(data="go"), config=config)
                     assert captured[0] == "my proposal text"
+
+                def it_preserves_pre_seeded_falsy_scalar():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    sr = ScalarReducer(
+                        name="count",
+                        event_type=MessageReceived,
+                        fn=lambda e: int(e.text),
+                    )
+                    captured: list[object] = []
+
+                    @on(Started)
+                    def step(event: Started, count: object) -> Completed:
+                        captured.append(count)
+                        return Completed(result="ok")
+
+                    checkpointer = MemorySaver()
+                    graph = EventGraph([step], reducers=[sr], checkpointer=checkpointer)
+                    config = {"configurable": {"thread_id": "pre-seed-falsy"}}
+
+                    graph.pre_seed(config, {"count": 0})
+
+                    graph.invoke(Started(data="go"), config=config)
+                    assert captured[0] == 0
 
                 def when_seed_event_also_contributes():
 
@@ -1715,12 +1731,7 @@ def describe_EventGraph():
                         )
                         config = {"configurable": {"thread_id": "merge-list"}}
 
-                        compiled = graph._compile()
-                        compiled.update_state(
-                            config,
-                            {"texts": ["existing"]},
-                            as_node="__seed__",
-                        )
+                        graph.pre_seed(config, {"texts": ["existing"]})
 
                         graph.invoke(MessageReceived(text="new"), config=config)
                         assert captured[0] == ["existing", "new"]
@@ -1749,12 +1760,7 @@ def describe_EventGraph():
                         )
                         config = {"configurable": {"thread_id": "no-dup-default"}}
 
-                        compiled = graph._compile()
-                        compiled.update_state(
-                            config,
-                            {"texts": ["custom"]},
-                            as_node="__seed__",
-                        )
+                        graph.pre_seed(config, {"texts": ["custom"]})
 
                         graph.invoke(Started(data="go"), config=config)
                         # "init" default should NOT be re-applied on top
@@ -1780,10 +1786,7 @@ def describe_EventGraph():
                     graph = EventGraph([step], reducers=[r], checkpointer=checkpointer)
                     config = {"configurable": {"thread_id": "cursor-advance"}}
 
-                    compiled = graph._compile()
-                    compiled.update_state(
-                        config, {"texts": ["pre"]}, as_node="__seed__"
-                    )
+                    graph.pre_seed(config, {"texts": ["pre"]})
 
                     # Run 1 — pre-seeded
                     graph.invoke(MessageReceived(text="a"), config=config)
@@ -1824,11 +1827,8 @@ def describe_EventGraph():
                     )
                     config = {"configurable": {"thread_id": "mixed"}}
 
-                    compiled = graph._compile()
                     # Only pre-seed one reducer
-                    compiled.update_state(
-                        config, {"seeded": ["external"]}, as_node="__seed__"
-                    )
+                    graph.pre_seed(config, {"seeded": ["external"]})
 
                     graph.invoke(Started(data="go"), config=config)
                     # Pre-seeded reducer keeps its value
