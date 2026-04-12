@@ -26,6 +26,7 @@ from langgraph_events._internal import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
 
+    from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
 
@@ -462,6 +463,22 @@ class EventGraph:
         """Run the graph asynchronously with one or more seed events."""
         return await self._arun(self._prepare_input(seed), **kwargs)
 
+    def pre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
+        """Inject external state into reducer channels before the first run.
+
+        Use this to hydrate reducers from an external source (e.g. a database
+        migration or test fixture) when modelling the data as seed events isn't
+        practical.  Call it once before ``invoke``/``ainvoke``::
+
+            graph.pre_seed(config, {"my_reducer": existing_value})
+            graph.invoke(StartEvent(), config=config)
+
+        Requires a checkpointer.
+        """
+        self._require_checkpointer("pre_seed")
+        compiled = self._compile()
+        compiled.update_state(config, values, as_node="__seed__")
+
     def resume(self, value: Event, **kwargs: Any) -> EventLog:
         """Resume an interrupted graph with a domain event.
 
@@ -592,7 +609,7 @@ class EventGraph:
             for e in new_events
         ]
 
-    async def _astream_v2(  # noqa: PLR0912
+    async def _astream_v2(  # noqa: PLR0912, PLR0915
         self,
         inp: Any,
         seeds: list[Event],
@@ -605,10 +622,36 @@ class EventGraph:
         """Stream events using LangGraph's v2 event API with LLM token support."""
         compiled = self._compile()
 
-        # Initialize incremental reducer state from seeds
+        # Initialize incremental reducer state.  When a checkpoint exists
+        # (subsequent run / resume), start from the checkpointed values so
+        # the shadow state matches what the compiled graph already restored.
+        # Fall back to r.seed() only on the true first run.
+        # NOTE: this issues an extra aget_state round-trip when reducers are
+        # present and a checkpointer is configured.
         reducer_state: dict[str, Any] = {}
+        checkpoint_values: dict[str, Any] | None = None
+        if reducer_names and self._checkpointer is not None:
+            config = kwargs.get("config")
+            if config is not None:
+                snapshot = await compiled.aget_state(config)
+                if snapshot.values:
+                    checkpoint_values = snapshot.values
+
         for name in reducer_names:
-            reducer_state[name] = self._reducers[name].seed(seeds)
+            if checkpoint_values is not None:
+                reducer_state[name] = checkpoint_values.get(
+                    name, self._reducers[name].empty
+                )
+            else:
+                reducer_state[name] = self._reducers[name].seed(seeds)
+
+        # Merge seed contributions on top of checkpointed state.
+        # - On astream_resume: seeds=[] so this is a no-op.
+        # - On astream_events second-run: seeds carry new events that
+        #   should layer on top of the restored checkpoint.
+        if checkpoint_values is not None:
+            for s in seeds:
+                self._update_reducer_state(reducer_state, s, reducer_names)
 
         # Yield seed events
         for s in seeds:

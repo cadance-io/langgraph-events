@@ -72,3 +72,26 @@ temperature = ScalarReducer(
     "temperature", event_type=ConfigUpdated, fn=lambda e: e.temp if e.temp is not None else SKIP, default=0.7
 )
 ```
+
+## Pre-seeding reducer state
+
+The event-driven approach is always preferred: model initial state as seed events so the event log stays the single source of truth.
+
+```python
+# Preferred — state comes from events
+graph.invoke([ProposalDrafted(text="..."), ReviewRequested()])
+```
+
+For cases where external state must be injected outside the event system (e.g., migrating from a checkpoint, or test setup that can't go through the normal invoke path), use ``pre_seed``:
+
+```python
+graph.pre_seed(config, {"my_reducer": value})
+graph.invoke(SeedEvent(), config=config)
+```
+
+The seed node detects pre-existing channel data and preserves it rather than re-initializing from defaults. Seed events that contribute to the same reducer are merged on top of the pre-seeded value.
+
+**Caveats:**
+
+- Pre-seeded values bypass the event log. `log.filter()` won't reflect them; only the reducer state will.
+- Prefer seed events for anything that should be auditable or replayable.
