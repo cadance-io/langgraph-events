@@ -87,6 +87,10 @@ For cases where external state must be injected outside the event system (e.g., 
 ```python
 graph.pre_seed(config, {"my_reducer": value})
 graph.invoke(SeedEvent(), config=config)
+
+# Or async
+await graph.apre_seed(config, {"my_reducer": value})
+await graph.ainvoke(SeedEvent(), config=config)
 ```
 
 The seed node detects pre-existing channel data and preserves it rather than re-initializing from defaults. Seed events that contribute to the same reducer are merged on top of the pre-seeded value.
