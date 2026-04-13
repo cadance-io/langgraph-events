@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-13
+
 ### Added
 - `EventGraph.apre_seed()` — async counterpart to `pre_seed()`
 
@@ -51,7 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/cadance-io/langgraph-events/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/cadance-io/langgraph-events/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cadance-io/langgraph-events/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cadance-io/langgraph-events/releases/tag/v0.1.0
