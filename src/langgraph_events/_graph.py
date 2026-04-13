@@ -479,6 +479,12 @@ class EventGraph:
         compiled = self._compile()
         compiled.update_state(config, values, as_node="__seed__")
 
+    async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
+        """Async version of :meth:`pre_seed`."""
+        self._require_checkpointer("apre_seed")
+        compiled = self._compile()
+        await compiled.aupdate_state(config, values, as_node="__seed__")
+
     def resume(self, value: Event, **kwargs: Any) -> EventLog:
         """Resume an interrupted graph with a domain event.
 

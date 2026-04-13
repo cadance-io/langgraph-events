@@ -1789,6 +1789,21 @@ def describe_EventGraph():
                     assert captured_seeded[0] == ["external"]
                     assert captured_normal[0] == ["init", "go"]
 
+                @pytest.mark.asyncio
+                async def it_supports_async_apre_seed():
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    handler, captured = _texts_handler(Started)
+                    graph = EventGraph(
+                        [handler],
+                        reducers=[_texts_reducer()],
+                        checkpointer=MemorySaver(),
+                    )
+                    config: dict = {"configurable": {"thread_id": "pre-seed-async"}}
+                    await graph.apre_seed(config, {"texts": ["pre-seeded"]})
+                    await graph.ainvoke(Started(data="go"), config=config)
+                    assert captured[0] == ["pre-seeded"]
+
     def describe_scalar_reducer():
 
         def when_matching_events():
