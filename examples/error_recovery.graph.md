@@ -5,11 +5,11 @@
 graph LR
     classDef entry fill:none,stroke:none,color:none
     _e0_[ ]:::entry ==> QuestionAsked
-    QuestionAsked -->|call_llm| AnswerReceived
     QuestionAsked -.->|call_llm (raises)| HandlerRaised
-    RetryScheduled -->|call_llm| AnswerReceived
     RetryScheduled -.->|call_llm (raises)| HandlerRaised
-    HandlerRaised -->|backoff_and_retry| RetryScheduled
+    QuestionAsked -->|call_llm| AnswerReceived
+    RetryScheduled -->|call_llm| AnswerReceived
     HandlerRaised -.->|backoff_and_retry (raises)| HandlerRaised
+    HandlerRaised -->|backoff_and_retry| RetryScheduled
     HandlerRaised -->|give_up| GaveUp
 ```

@@ -100,7 +100,7 @@ def backoff_and_retry(
     exception: RateLimitError,
 ) -> RetryScheduled:
     """Catches rate-limit failures and schedules a retry of the original question."""
-    original = event.event
+    original = event.source_event
     assert isinstance(original, (QuestionAsked, RetryScheduled))
     prev_attempt = original.attempt if isinstance(original, RetryScheduled) else 1
     next_attempt = prev_attempt + 1

@@ -244,25 +244,51 @@ def _inject_fields(
     return merged
 
 
+def _make_handler_raised(
+    meta: HandlerMeta, event: Event, exc: Exception
+) -> HandlerRaised:
+    """Build a ``HandlerRaised`` event for a caught declared exception."""
+    return HandlerRaised(  # type: ignore[call-arg]
+        handler=meta.name,
+        source_event=event,
+        exception=exc,
+    )
+
+
+def _check_sync_invocation_of_async(meta: HandlerMeta) -> None:
+    """Raise if an async handler is invoked from within a running event loop.
+
+    This check is framework-level (not a domain error) and must run *outside*
+    the ``try/except meta.raises`` boundary, otherwise a user who declares
+    ``raises=RuntimeError`` would silently swallow the diagnostic.
+    """
+    if not meta.is_async:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(
+        f"Handler {meta.name!r} is async but invoke() was called "
+        "from within a running event loop (e.g. Jupyter, FastAPI). "
+        "Use ainvoke() instead."
+    )
+
+
 def _invoke_sync_path(
     meta: HandlerMeta, event: Event, call_inject: dict[str, Any]
 ) -> HandlerReturn:
-    """Invoke a handler from the sync dispatch path."""
+    """Invoke a handler from the sync dispatch path.
+
+    The async-in-loop precondition is checked by
+    :func:`_check_sync_invocation_of_async` at the top of the handler node.
+    """
     if meta.is_async:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            coro = cast(
-                "Coroutine[Any, Any, HandlerReturn]",
-                meta.fn(event, **call_inject),
-            )
-            return asyncio.run(coro)
-        else:
-            raise RuntimeError(
-                f"Handler {meta.name!r} is async but invoke() was called "
-                "from within a running event loop (e.g. Jupyter, FastAPI). "
-                "Use ainvoke() instead."
-            )
+        coro = cast(
+            "Coroutine[Any, Any, HandlerReturn]",
+            meta.fn(event, **call_inject),
+        )
+        return asyncio.run(coro)
     return meta.fn(event, **call_inject)
 
 
@@ -317,6 +343,9 @@ def make_handler_node(
         return output
 
     def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
+        # Precondition check — outside the raises= catch boundary so a user
+        # with raises=RuntimeError can't swallow this framework diagnostic.
+        _check_sync_invocation_of_async(meta)
         matching, inject = _prepare(state, config)
         new_events: list[Event] = []
         tokens = _set_custom_emitters(
@@ -334,20 +363,11 @@ def make_handler_node(
         try:
             for event in matching:
                 call_inject = _inject_fields(meta, event, inject)
-                if meta.raises:
-                    try:
-                        result = _invoke_sync_path(meta, event, call_inject)
-                    except meta.raises as exc:
-                        new_events.append(
-                            HandlerRaised(  # type: ignore[call-arg]
-                                handler=meta.name,
-                                event=event,
-                                exception=exc,
-                            )
-                        )
-                        continue
-                else:
+                try:
                     result = _invoke_sync_path(meta, event, call_inject)
+                except meta.raises as exc:
+                    new_events.append(_make_handler_raised(meta, event, exc))
+                    continue
                 _collect_result(result, new_events, lg_interrupt)
         finally:
             _reset_custom_emitters(tokens)
@@ -371,20 +391,11 @@ def make_handler_node(
         try:
             for event in matching:
                 call_inject = _inject_fields(meta, event, inject)
-                if meta.raises:
-                    try:
-                        result = await _invoke_async_path(meta, event, call_inject)
-                    except meta.raises as exc:
-                        new_events.append(
-                            HandlerRaised(  # type: ignore[call-arg]
-                                handler=meta.name,
-                                event=event,
-                                exception=exc,
-                            )
-                        )
-                        continue
-                else:
+                try:
                     result = await _invoke_async_path(meta, event, call_inject)
+                except meta.raises as exc:
+                    new_events.append(_make_handler_raised(meta, event, exc))
+                    continue
                 _collect_result(result, new_events, lg_interrupt)
         except asyncio.CancelledError:
             return _finalize([Cancelled()])

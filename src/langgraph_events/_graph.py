@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import typing
 import warnings
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
@@ -223,18 +224,13 @@ class EventGraph:
         seen_names: dict[str, int] = {}
         for fn in handlers:
             meta = extract_handler_meta(fn, reducer_names=reducer_names)
-            # Deduplicate node names
+            # Deduplicate node names — preserve all other meta fields
+            # (raises, field_matchers, field_inject_params, ...) so the second
+            # copy behaves identically to the first.
             if meta.name in seen_names:
                 seen_names[meta.name] += 1
-                meta = HandlerMeta(
-                    name=f"{meta.name}_{seen_names[meta.name]}",
-                    fn=meta.fn,
-                    event_types=meta.event_types,
-                    log_param=meta.log_param,
-                    is_async=meta.is_async,
-                    reducer_params=meta.reducer_params,
-                    config_param=meta.config_param,
-                    store_param=meta.store_param,
+                meta = dataclasses.replace(
+                    meta, name=f"{meta.name}_{seen_names[meta.name]}"
                 )
             else:
                 seen_names[meta.name] = 1
@@ -320,6 +316,17 @@ class EventGraph:
             if not info.has_annotation:
                 solid_targets.append("?")
 
+            # Emit raises edges first so side-effect / scatter-only handlers
+            # that otherwise land in the footer still contribute a real edge.
+            if meta.raises:
+                for src_type in meta.event_types:
+                    src = src_type.__name__
+                    all_sources.add(src)
+                    all_targets.add(HandlerRaised.__name__)
+                    edge_lines.append(
+                        f"    {src} -.->|{label} (raises)| {HandlerRaised.__name__}"
+                    )
+
             footer = self._mermaid_footer_entry(
                 meta, info.has_scatter, solid_targets, dashed_targets
             )
@@ -338,11 +345,6 @@ class EventGraph:
                 for target in dashed_targets:
                     all_targets.add(target)
                     edge_lines.append(f"    {src} -.->|{label}| {target}")
-                if meta.raises:
-                    all_targets.add(HandlerRaised.__name__)
-                    edge_lines.append(
-                        f"    {src} -.->|{label} (raises)| {HandlerRaised.__name__}"
-                    )
 
         if any_produces_interrupted and any_subscribes_resumed:
             edge_lines.append("    Interrupted -.-> Resumed")
@@ -457,9 +459,15 @@ class EventGraph:
         """Ensure every declared ``raises=`` entry has a matching catcher.
 
         A catcher is a handler subscribed to ``HandlerRaised``. Its coverage:
-        - no ``exception=`` field matcher → covers any raise
-        - ``exception=X`` field matcher → covers any ``exc_type`` with
-          ``issubclass(exc_type, X)``
+        - no field matchers at all → covers any raise
+        - ``exception=X`` as the only field matcher → covers any ``exc_type``
+          with ``issubclass(exc_type, X)``
+
+        Catchers with any non-``exception`` field matcher (e.g.
+        ``source_event=SomeType``) are conservatively ignored for coverage,
+        because such a matcher can silently exclude legitimate raises at
+        runtime. The user must either drop the extra filter or add a broader
+        catcher.
 
         Raises ``TypeError`` at compile time (first ``invoke()`` / ``compile()``)
         if any declared exception is uncovered.
@@ -467,6 +475,12 @@ class EventGraph:
         catchers: list[tuple[HandlerMeta, type[Exception] | None]] = []
         for meta in self._handler_metas:
             if HandlerRaised not in meta.event_types:
+                continue
+            other_matchers = [fn for fn, _ in meta.field_matchers if fn != "exception"]
+            if other_matchers:
+                # Conservative: an extra field filter (e.g. event=OtherStart)
+                # means this catcher only fires for a subset of raises.
+                # Do not count it toward coverage.
                 continue
             exc_filter: type[Exception] | None = None
             for fname, ftype in meta.field_matchers:
@@ -478,13 +492,16 @@ class EventGraph:
         for meta in self._handler_metas:
             for exc_type in meta.raises:
                 if not _any_catcher_covers(catchers, exc_type):
+                    declared = ", ".join(t.__name__ for t in meta.raises)
                     raise TypeError(
-                        f"Handler {meta.name!r} declares "
-                        f"raises={exc_type.__name__}, but no handler subscribes "
-                        f"to catch it. Add a handler decorated with "
+                        f"Handler {meta.name!r} declares raises=({declared}), "
+                        f"but no handler subscribes to catch {exc_type.__name__}. "
+                        f"Add a handler decorated with "
                         f"@on(HandlerRaised, exception={exc_type.__name__}) "
                         f"(or @on(HandlerRaised) to catch all), or remove the "
-                        f"type from raises=."
+                        f"type from raises=. Note: catchers with non-exception "
+                        f"field matchers (e.g. source_event=SomeType) do not "
+                        f"count toward coverage."
                     )
 
     def _require_checkpointer(self, method: str) -> None:

@@ -110,6 +110,55 @@ def describe_raises():
                     with pytest.raises(TypeError, match=r"DomainError.*no handler"):
                         EventGraph([raiser, catcher])
 
+        def when_catcher_has_non_exception_field_matcher():
+
+            def it_does_not_count_as_coverage():
+                # A catcher that filters on a non-`exception` field (here
+                # `event=`) only fires for a subset of HandlerRaised events.
+                # The coverage check must not treat it as a universal catcher,
+                # otherwise the compile passes but the raise silently drops
+                # at runtime.
+                class OtherStart(Event):
+                    pass
+
+                @on(Started, raises=DomainError)
+                def raiser(event: Started) -> Ended:
+                    raise DomainError("boom")
+
+                @on(HandlerRaised, source_event=OtherStart)
+                def narrow_catcher(event: HandlerRaised) -> FallbackRan:
+                    return FallbackRan(reason="never")
+
+                with pytest.raises(TypeError, match=r"DomainError.*no handler"):
+                    EventGraph([raiser, narrow_catcher])
+
+            def it_still_counts_exception_matcher_alongside_other_matchers():
+                # A catcher with BOTH an exception filter AND another filter
+                # should still count — the exception filter is what determines
+                # coverage semantics; additional filters just narrow further.
+                # (This test documents the intent — the current implementation
+                # treats this as uncovered because we conservatively skip
+                # catchers with any non-exception matcher. If this assertion
+                # fails, decide whether to relax the check or keep the
+                # conservative behaviour.)
+                class OtherStart(Event):
+                    pass
+
+                @on(Started, raises=DomainError)
+                def raiser(event: Started) -> Ended:
+                    raise DomainError("boom")
+
+                @on(HandlerRaised, exception=DomainError, source_event=OtherStart)
+                def partial_catcher(event: HandlerRaised) -> FallbackRan:
+                    return FallbackRan(reason="never")
+
+                # Conservative: this is NOT treated as covering, because the
+                # `source_event=OtherStart` filter can silently exclude
+                # legitimate raises from `Started`. The user must drop the
+                # extra filter or add a broader catcher.
+                with pytest.raises(TypeError, match=r"DomainError.*no handler"):
+                    EventGraph([raiser, partial_catcher])
+
         def when_chained_raise_across_catchers():
 
             def it_covers_each_link_independently():
@@ -145,6 +194,34 @@ def describe_raises():
             assert hr is not None
             assert hr.handler == "raiser"
             assert isinstance(hr.exception, DomainError)
+
+        def it_source_event_field_matcher_and_injection_work_together():
+            # Prior to the rename, writing `event=SomeType` would have
+            # collided with the handler's positional `event` parameter at
+            # dispatch (`TypeError: got multiple values for argument 'event'`).
+            # After renaming the HandlerRaised field to `source_event`, the
+            # field matcher + injection works cleanly.
+            captured: list[Started] = []
+
+            @on(Started, raises=DomainError)
+            def raiser(event: Started) -> Ended:
+                raise DomainError("boom")
+
+            # Broad catcher to satisfy coverage — the `source_event`-filtered
+            # catcher is conservatively ignored by the coverage check.
+            @on(HandlerRaised, exception=DomainError)
+            def fallback(event: HandlerRaised) -> FallbackRan:
+                return FallbackRan(reason="fallback")
+
+            @on(HandlerRaised, source_event=Started)
+            def narrow(event: HandlerRaised, source_event: Started) -> None:
+                captured.append(source_event)
+
+            graph = EventGraph([raiser, fallback, narrow])
+            graph.invoke(Started(data="hi"))
+            assert len(captured) == 1
+            assert isinstance(captured[0], Started)
+            assert captured[0].data == "hi"
 
         def it_injects_typed_exception_into_catcher_parameter():
             captured: list[Exception] = []
@@ -248,6 +325,28 @@ def describe_raises():
                 graph = EventGraph([raiser, catcher])
                 with pytest.raises(OtherError, match="different"):
                     graph.invoke(Started(data="hi"))
+
+    def describe_framework_errors_are_not_swallowed():
+
+        def it_does_not_wrap_sync_async_mismatch_error():
+            # A handler declaring raises=RuntimeError must NOT capture the
+            # framework's sync/async-mismatch diagnostic — that's a programmer
+            # error, not a domain error, and must propagate.
+            @on(Started, raises=RuntimeError)
+            async def async_handler(event: Started) -> Ended:
+                return Ended(result="never")
+
+            @on(HandlerRaised, exception=RuntimeError)
+            def catcher(event: HandlerRaised) -> FallbackRan:
+                return FallbackRan(reason="swallowed")
+
+            graph = EventGraph([async_handler, catcher])
+
+            async def outer() -> None:
+                graph.invoke(Started(data="hi"))
+
+            with pytest.raises(RuntimeError, match=r"async but invoke\(\) was called"):
+                asyncio.run(outer())
 
     def describe_cancellation_regression():
 

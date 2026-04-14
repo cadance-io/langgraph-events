@@ -40,7 +40,7 @@
 | `Cancelled`       | Event      | `Halted` subtype emitted when async handler is cancelled |
 | `Interrupted`     | Base class | Bare marker — subclass with typed fields to pause graph |
 | `Resumed`         | Event      | Created on resume with the dispatched event and `interrupted` backref |
-| `HandlerRaised`   | Event      | Emitted when a handler raises an exception declared in its `raises=` clause; carries `handler: str`, `event: Event`, `exception: Exception` — see [Handler Exceptions](control-flow.md#handler-exceptions) |
+| `HandlerRaised`   | Event      | Emitted when a handler raises an exception declared in its `raises=` clause; carries `handler: str`, `source_event: Event`, `exception: Exception` — see [Handler Exceptions](control-flow.md#handler-exceptions) |
 | `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 
 ## Reducers

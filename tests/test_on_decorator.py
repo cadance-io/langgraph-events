@@ -128,6 +128,36 @@ def describe_on_decorator():
 
             assert handler._field_matchers == {"exception": _DomainError}
 
+    def when_field_matcher_value_is_baseexception():
+
+        def it_rejects_baseexception():
+            with pytest.raises(TypeError, match="Event or Exception"):
+
+                @on(HandlerRaised, exception=BaseException)  # type: ignore
+                def handler(event: HandlerRaised):
+                    pass
+
+        def it_rejects_keyboard_interrupt():
+            with pytest.raises(TypeError, match="Event or Exception"):
+
+                @on(HandlerRaised, exception=KeyboardInterrupt)  # type: ignore
+                def handler(event: HandlerRaised):
+                    pass
+
+        def it_rejects_system_exit():
+            with pytest.raises(TypeError, match="Event or Exception"):
+
+                @on(HandlerRaised, exception=SystemExit)  # type: ignore
+                def handler(event: HandlerRaised):
+                    pass
+
+        def it_rejects_cancelled_error():
+            with pytest.raises(TypeError, match="Event or Exception"):
+
+                @on(HandlerRaised, exception=asyncio.CancelledError)  # type: ignore
+                def handler(event: HandlerRaised):
+                    pass
+
     def when_raises_single_exception_class():
 
         def it_accepts_and_normalises_to_tuple():

@@ -3215,6 +3215,28 @@ def describe_EventGraph():
             # HandlerRaised must not appear as a seed entry
             assert "==> HandlerRaised" not in output
 
+        def it_dashes_raises_edge_for_side_effect_handler():
+            from langgraph_events import HandlerRaised
+
+            class _DemoError(Exception):
+                pass
+
+            @on(Started, raises=_DemoError)
+            def side_effect(event: Started) -> None:
+                raise _DemoError
+
+            @on(HandlerRaised, exception=_DemoError)
+            def recover(event: HandlerRaised) -> None:
+                return None
+
+            graph = EventGraph([side_effect, recover])
+            output = graph.mermaid()
+            # Even though side_effect has no positive return type, the raises
+            # edge must still be drawn so HandlerRaised is a real target and
+            # the diagram reflects runtime behaviour.
+            assert "Started -.->|side_effect (raises)| HandlerRaised" in output
+            assert "==> HandlerRaised" not in output
+
         def it_dashes_interrupted_to_resumed_edge():
             @on(Started)
             def request_approval(event: Started) -> Interrupted:
@@ -3309,6 +3331,53 @@ def describe_EventGraph():
                 output = graph.mermaid()
                 assert "-->|handler|" in output
                 assert "-->|handler_2|" in output
+
+            def it_preserves_raises_on_deduped_copies():
+                from langgraph_events import HandlerRaised
+
+                class _DedupError(Exception):
+                    pass
+
+                @on(Started, raises=_DedupError)
+                def raiser(event: Started) -> Ended:
+                    raise _DedupError("boom")
+
+                @on(HandlerRaised, exception=_DedupError)
+                def catcher(event: HandlerRaised) -> Ended:
+                    return Ended(result="caught")
+
+                graph = EventGraph([raiser, raiser, catcher])
+                raisers = [
+                    m for m in graph._handler_metas if m.name.startswith("raiser")
+                ]
+                assert len(raisers) == 2
+                # Without the fix, the second copy's raises= is silently dropped
+                for m in raisers:
+                    assert m.raises == (_DedupError,)
+
+            def it_preserves_field_matchers_on_deduped_copies():
+                from langgraph_events import HandlerRaised
+
+                class _DedupError(Exception):
+                    pass
+
+                @on(Started, raises=_DedupError)
+                def raiser(event: Started) -> Ended:
+                    raise _DedupError("boom")
+
+                @on(HandlerRaised, exception=_DedupError)
+                def catcher(event: HandlerRaised) -> Ended:
+                    return Ended(result="caught")
+
+                graph = EventGraph([raiser, catcher, catcher])
+                catchers = [
+                    m for m in graph._handler_metas if m.name.startswith("catcher")
+                ]
+                assert len(catchers) == 2
+                # Without the fix, the second copy becomes a universal catcher
+                for m in catchers:
+                    matcher_names = [fn for fn, _ in m.field_matchers]
+                    assert "exception" in matcher_names
 
         def when_base_event_return_type():
 

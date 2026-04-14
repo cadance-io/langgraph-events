@@ -77,11 +77,15 @@ def on(
                 f"allowed — they are runtime/exit signals, not domain errors."
             )
 
-    # Validate field matchers: Event OR Exception subclass
+    # Validate field matchers: Event OR Exception subclass.
+    # Non-Exception BaseException subclasses (KeyboardInterrupt, SystemExit,
+    # GeneratorExit, asyncio.CancelledError) are rejected for symmetry with
+    # raises= — the framework treats them as runtime/exit signals, not
+    # domain errors to subscribe to.
     for field_name, field_type in field_matchers.items():
         if not (
             isinstance(field_type, type)
-            and (issubclass(field_type, Event) or issubclass(field_type, BaseException))
+            and (issubclass(field_type, Event) or issubclass(field_type, Exception))
         ):
             raise TypeError(
                 f"@on() field matcher values must be Event or Exception "
@@ -121,7 +125,7 @@ class HandlerMeta:
     reducer_params: tuple[str, ...] = ()
     config_param: str | None = None
     store_param: str | None = None
-    field_matchers: tuple[tuple[str, type[Event] | type[BaseException]], ...] = ()
+    field_matchers: tuple[tuple[str, type[Event] | type[Exception]], ...] = ()
     field_inject_params: frozenset[str] = frozenset()
     raises: tuple[type[Exception], ...] = ()
 
@@ -182,7 +186,7 @@ def extract_handler_meta(
     reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
 
     # Extract field matchers
-    raw_field_matchers: dict[str, type[Event] | type[BaseException]] = getattr(
+    raw_field_matchers: dict[str, type[Event] | type[Exception]] = getattr(
         fn, "_field_matchers", {}
     )
     field_matchers = tuple(raw_field_matchers.items())

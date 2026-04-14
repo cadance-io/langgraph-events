@@ -197,11 +197,26 @@ class HandlerRaised(Event):
 
     ``@on(HandlerRaised)`` (no ``exception=`` matcher) catches every
     declared raise.
+
+    Fields:
+
+    - ``handler``: name of the handler that raised.
+    - ``source_event``: the event the raising handler was processing. Named
+      ``source_event`` (not ``event``) to avoid colliding with the handler's
+      own positional ``event`` parameter when used as a field matcher —
+      ``@on(HandlerRaised, source_event=SomeType)`` is legal and injects
+      ``source_event`` as a typed kwarg.
+    - ``exception``: the caught exception instance.
+
+    Framework guarantee: when the framework emits ``HandlerRaised``, all
+    three fields are populated with real values. The ``Optional`` on the
+    annotations is a concession to dataclass defaults so tests and
+    type-checkers can construct the event without positional args.
     """
 
     handler: str = ""
-    event: Event | None = None
-    exception: Exception = None  # type: ignore[assignment]
+    source_event: Event | None = None
+    exception: Exception | None = None
 
 
 class SystemPromptSet(MessageEvent):

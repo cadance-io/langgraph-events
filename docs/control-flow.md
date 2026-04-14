@@ -130,16 +130,16 @@ def backoff_and_retry(
     event: HandlerRaised, exception: RateLimitError,
 ) -> RetryScheduled:
     # `exception` is injected and typed via field matcher
-    return RetryScheduled(question=event.event.question)
+    return RetryScheduled(question=event.source_event.question)
 ```
 
 Rules:
 
-- `raises=` accepts a single class or tuple. Entries must be `Exception` subclasses — `BaseException`, `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and `asyncio.CancelledError` are rejected at decoration time.
+- `raises=` accepts a single class or tuple. Entries must be `Exception` subclasses — `BaseException`, `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and `asyncio.CancelledError` are rejected at decoration time. The same restriction applies to `exception=` field matchers on `@on(HandlerRaised, ...)`.
 - Unhandled raises (exception types *not* in `raises=`) still propagate and crash the run. The mechanism is opt-in per-handler — no ambient catch-all.
-- **Compile-time check:** every type in `raises=` must be covered by at least one catcher. A catcher covers `X` if it's subscribed to `HandlerRaised` with no `exception=` matcher (catches any) *or* with `exception=X` or a superclass. Missing coverage raises `TypeError` at `EventGraph(...)` construction with a message pointing at the uncovered class.
+- **Compile-time check:** every type in `raises=` must be covered by at least one catcher. A catcher covers `X` if it's subscribed to `HandlerRaised` with no field matchers (catches any) *or* with only an `exception=X`-or-superclass matcher. Catchers that also add a non-`exception` field matcher (e.g. `source_event=SomeType`) are conservatively **not** counted toward coverage — such a narrowing filter can silently exclude legitimate raises at runtime, so you must pair it with a broader catcher. Missing coverage raises `TypeError` at `EventGraph(...)` construction with a message pointing at the uncovered class and the handler's full `raises=` tuple.
 - Catchers can themselves declare `raises=` to **escalate** — e.g., `backoff_and_retry` above can raise `QuotaExhaustedError` when the retry budget is spent, surfaced as another `HandlerRaised` for a dedicated handler.
 - `asyncio.CancelledError` is still surfaced as a `Cancelled` (a `Halted` subtype), not `HandlerRaised` — cancellation is a framework concern, not a domain error.
-- The original event being processed is preserved as `HandlerRaised.event`, so catchers can inspect what triggered the failure.
+- The original event being processed is preserved as `HandlerRaised.source_event`, so catchers can inspect what triggered the failure. Named `source_event` (not `event`) so `@on(HandlerRaised, source_event=SomeType)` can safely inject it alongside the handler's own `event` parameter.
 
 See the [Error Recovery pattern](patterns.md#error-recovery) for a complete runnable example with retry and escalation.
