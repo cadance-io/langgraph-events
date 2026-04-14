@@ -9,8 +9,21 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: '^(\.secrets\.baseline|\.worktrees/|\.claude/)'
+
   - repo: local
     hooks:
+      - id: pip-audit
+        name: pip-audit
+        language: system
+        entry: bash -c 'uv export --no-hashes --no-dev --format requirements-txt | uv run --with pip-audit pip-audit -r /dev/stdin'
+        pass_filenames: false
+        files: ^(pyproject\.toml|uv\.lock)$
       - id: validate-tests
         name: validate tests
         entry: bash -c "uv run python scripts/validate_tests.py"

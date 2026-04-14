@@ -1,0 +1,37 @@
+name: Security Audit
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Audit dependencies
+        run: |
+          uv export --no-hashes --no-dev --format requirements-txt -o requirements-audit.txt
+          uv run --with pip-audit pip-audit -r requirements-audit.txt
+
+  detect-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Scan for secrets
+        run: |
+          uv run --with detect-secrets detect-secrets scan --baseline .secrets.baseline
+          diff <(jq -S '.results' .secrets.baseline) \
+               <(git show HEAD:.secrets.baseline | jq -S '.results') \
+            || { echo "::error::New secrets detected — update .secrets.baseline"; exit 1; }
