@@ -99,6 +99,7 @@ for frame in graph.stream_events(MessageReceived(text="hello"), include_reducers
 | Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
 | Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#halted) |
+| Catch handler exceptions | `@on(..., raises=MyError)` + `@on(HandlerRaised, exception=MyError)` | [Control Flow](control-flow.md#handler-exceptions) |
 | Stream LLM tokens in real time | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
 | Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI Adapter](agui.md) |
 

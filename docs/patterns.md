@@ -43,3 +43,10 @@ Safety gates with early termination and live event streaming. Demonstrates **[`H
 
 - Code: [examples/content_pipeline.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.py)
 - Flow: [examples/content_pipeline.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.graph.md)
+
+## Error Recovery
+
+Declared handler exceptions with retry and escalation. Demonstrates **[`raises=`](control-flow.md#handler-exceptions)** on `@on`, the built-in `HandlerRaised` event, field-injected exception parameters (`exception: RateLimitError`), and chained error handling — the recovery handler itself declares `raises=QuotaExhaustedError` to escalate after `MAX_ATTEMPTS`, caught by a dedicated handler that emits `GaveUp` (a `Halted` subtype).
+
+- Code: [examples/error_recovery.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.py)
+- Flow: [examples/error_recovery.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.graph.md)

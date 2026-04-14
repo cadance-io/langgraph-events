@@ -64,6 +64,8 @@ def on_approval(event: Resumed, interrupted: ApprovalRequested) -> Confirmed:
 
 See [Control Flow — Field Matchers](control-flow.md#field-matchers--narrow-dispatch-by-field-type) for details.
 
+**Declared exceptions** — pass `raises=(MyError, ...)` to `@on` and the framework catches those exceptions from the handler, surfacing them as `HandlerRaised` events. Subscribe with `@on(HandlerRaised, exception=MyError)` to recover without try/except boilerplate. See [Control Flow — Handler Exceptions](control-flow.md#handler-exceptions).
+
 ## `EventGraph`
 
 The main entry point. Pass a list of handler functions and `EventGraph` derives the topology.
