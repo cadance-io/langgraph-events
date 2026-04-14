@@ -13,7 +13,7 @@
 
 | Export            | Type       | Description                                     |
 |-------------------|------------|-------------------------------------------------|
-| `on`              | Decorator  | Subscribe a handler to one or more event types; supports `**field_matchers` kwargs for [field-level dispatch](control-flow.md#field-matchers--narrow-dispatch-by-field-type) |
+| `on`              | Decorator  | Subscribe a handler to one or more event types; supports `**field_matchers` kwargs for [field-level dispatch](control-flow.md#field-matchers--narrow-dispatch-by-field-type) and `raises=(...)` for [declared handler exceptions](control-flow.md#handler-exceptions) |
 
 ## Graph & Execution
 
@@ -40,6 +40,7 @@
 | `Cancelled`       | Event      | `Halted` subtype emitted when async handler is cancelled |
 | `Interrupted`     | Base class | Bare marker — subclass with typed fields to pause graph |
 | `Resumed`         | Event      | Created on resume with the dispatched event and `interrupted` backref |
+| `HandlerRaised`   | Event      | Emitted when a handler raises an exception declared in its `raises=` clause; carries `handler: str`, `source_event: Event`, `exception: Exception` — see [Handler Exceptions](control-flow.md#handler-exceptions) |
 | `Scatter`         | Class      | Fan-out into multiple events; generic `Scatter[T]` annotates the produced type |
 
 ## Reducers
