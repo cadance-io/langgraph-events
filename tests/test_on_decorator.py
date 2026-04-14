@@ -1,12 +1,21 @@
 """Tests for the @on decorator and handler metadata extraction."""
 
+import asyncio
 import warnings
 
 import pytest
 
-from langgraph_events import Event, EventGraph, EventLog, on
+from langgraph_events import Event, EventGraph, EventLog, HandlerRaised, on
 from langgraph_events._event import Interrupted, Resumed
 from langgraph_events._handler import extract_handler_meta
+
+
+class _DomainError(Exception):
+    pass
+
+
+class _OtherError(Exception):
+    pass
 
 
 class SampleEvent(Event):
@@ -104,9 +113,121 @@ def describe_on_decorator():
     def when_field_matcher_value_is_not_event_subclass():
 
         def it_raises_type_error():
-            with pytest.raises(TypeError, match="Event subclass"):
+            with pytest.raises(TypeError, match="Event or Exception"):
 
                 @on(Resumed, interrupted=str)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+    def when_field_matcher_value_is_exception_subclass():
+
+        def it_accepts_it():
+            @on(HandlerRaised, exception=_DomainError)
+            def handler(event: HandlerRaised):
+                pass
+
+            assert handler._field_matchers == {"exception": _DomainError}
+
+    def when_raises_single_exception_class():
+
+        def it_accepts_and_normalises_to_tuple():
+            @on(Resumed, raises=_DomainError)
+            def handler(event: Resumed):
+                raise _DomainError
+
+            assert handler._raises == (_DomainError,)
+
+    def when_raises_tuple():
+
+        def it_accepts_multiple_exceptions():
+            @on(Resumed, raises=(_DomainError, _OtherError))
+            def handler(event: Resumed):
+                pass
+
+            assert handler._raises == (_DomainError, _OtherError)
+
+    def when_raises_empty_tuple():
+
+        def it_accepts_and_stores_empty_tuple():
+            @on(Resumed, raises=())
+            def handler(event: Resumed):
+                pass
+
+            assert getattr(handler, "_raises", ()) == ()
+
+    def when_raises_omitted():
+
+        def it_defaults_to_empty_tuple():
+            @on(Resumed)
+            def handler(event: Resumed):
+                pass
+
+            assert getattr(handler, "_raises", ()) == ()
+
+    def when_raises_is_not_a_type():
+
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=42)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+    def when_raises_is_baseexception():
+
+        def it_rejects_baseexception():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=BaseException)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+        def it_rejects_keyboard_interrupt():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=KeyboardInterrupt)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+        def it_rejects_system_exit():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=SystemExit)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+        def it_rejects_cancelled_error():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=asyncio.CancelledError)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+        def it_rejects_generator_exit():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=GeneratorExit)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+    def when_raises_is_plain_non_exception_class():
+
+        def it_raises_type_error():
+            class Plain:
+                pass
+
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=Plain)  # type: ignore
+                def handler(event: Resumed):
+                    pass
+
+    def when_raises_is_event_subclass_but_not_exception():
+
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match="Exception"):
+
+                @on(Resumed, raises=EventA)  # type: ignore
                 def handler(event: Resumed):
                     pass
 
@@ -279,6 +400,34 @@ def describe_extract_handler_meta():
 
             typo_warnings = [x for x in w if "Typo?" in str(x.message)]
             assert len(typo_warnings) == 0
+
+    def when_raises_declared():
+
+        def it_extracts_raises_tuple():
+            @on(SampleEvent, raises=(_DomainError, _OtherError))
+            def handler(event: SampleEvent):
+                pass
+
+            meta = extract_handler_meta(handler)
+            assert meta.raises == (_DomainError, _OtherError)
+
+        def it_extracts_single_as_tuple():
+            @on(SampleEvent, raises=_DomainError)
+            def handler(event: SampleEvent):
+                pass
+
+            meta = extract_handler_meta(handler)
+            assert meta.raises == (_DomainError,)
+
+    def when_raises_omitted_from_decorator():
+
+        def it_defaults_raises_to_empty_tuple():
+            @on(SampleEvent)
+            def handler(event: SampleEvent):
+                pass
+
+            meta = extract_handler_meta(handler)
+            assert meta.raises == ()
 
     def when_type_hints_cannot_be_resolved():
 

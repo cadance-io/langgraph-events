@@ -3194,6 +3194,27 @@ def describe_EventGraph():
             assert "-->|split| Scatter" not in output
             assert "%% Scatter handlers: split (Started)" in output
 
+        def it_dashes_raises_edge_to_handler_raised():
+            from langgraph_events import HandlerRaised
+
+            class _DemoError(Exception):
+                pass
+
+            @on(Started, raises=_DemoError)
+            def flaky(event: Started) -> Ended:
+                raise _DemoError
+
+            @on(HandlerRaised, exception=_DemoError)
+            def recover(event: HandlerRaised) -> Ended:
+                return Ended(result="recovered")
+
+            graph = EventGraph([flaky, recover])
+            output = graph.mermaid()
+            assert "Started -.->|flaky (raises)| HandlerRaised" in output
+            assert "HandlerRaised -->|recover| Ended" in output
+            # HandlerRaised must not appear as a seed entry
+            assert "==> HandlerRaised" not in output
+
         def it_dashes_interrupted_to_resumed_edge():
             @on(Started)
             def request_approval(event: Started) -> Interrupted:

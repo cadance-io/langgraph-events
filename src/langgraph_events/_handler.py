@@ -20,7 +20,11 @@ if TYPE_CHECKING:
     from langgraph_events._types import F, HandlerReturn
 
 
-def on(*event_types: type[Event], **field_matchers: type[Event]) -> Callable[[F], F]:
+def on(
+    *event_types: type[Event],
+    raises: type[Exception] | tuple[type[Exception], ...] = (),
+    **field_matchers: type[Event] | type[Exception],
+) -> Callable[[F], F]:
     """Decorator that subscribes a handler to one or more event types.
 
     Multi-subscription: the handler fires when ANY of the listed types arrive.
@@ -31,6 +35,17 @@ def on(*event_types: type[Event], **field_matchers: type[Event]) -> Callable[[F]
         @on(Resumed, interrupted=ApprovalRequested)
         def handle(event: Resumed, interrupted: ApprovalRequested):
             interrupted.draft  # type-safe, framework-guaranteed
+
+    ``raises=`` declares exception classes the framework should catch from this
+    handler.  A caught exception is surfaced as a ``HandlerRaised`` event.  The
+    graph must include a handler that subscribes to ``HandlerRaised`` for the
+    declared type, or compilation fails::
+
+        @on(UserMessageReceived, raises=RateLimitError)
+        async def call_llm(event): raise RateLimitError(...)
+
+        @on(HandlerRaised, exception=RateLimitError)
+        def backoff(event): ...
 
     Examples::
 
@@ -49,12 +64,28 @@ def on(*event_types: type[Event], **field_matchers: type[Event]) -> Callable[[F]
         if not (isinstance(et, type) and issubclass(et, Event)):
             raise TypeError(f"@on() requires Event subclasses, got {et!r}")
 
-    # Validate field matchers
-    for field_name, field_type in field_matchers.items():
-        if not (isinstance(field_type, type) and issubclass(field_type, Event)):
+    # Normalise and validate raises
+    raises_tuple: tuple[type[Exception], ...] = (
+        raises if isinstance(raises, tuple) else (raises,)
+    )
+    for rt in raises_tuple:
+        if not (isinstance(rt, type) and issubclass(rt, Exception)):
             raise TypeError(
-                f"@on() field matcher values must be Event subclasses, "
-                f"got {field_type!r} for field {field_name!r}"
+                f"@on() raises= entries must be Exception subclasses, got {rt!r}. "
+                f"Non-Exception BaseException subclasses (KeyboardInterrupt, "
+                f"SystemExit, GeneratorExit, asyncio.CancelledError) are not "
+                f"allowed — they are runtime/exit signals, not domain errors."
+            )
+
+    # Validate field matchers: Event OR Exception subclass
+    for field_name, field_type in field_matchers.items():
+        if not (
+            isinstance(field_type, type)
+            and (issubclass(field_type, Event) or issubclass(field_type, BaseException))
+        ):
+            raise TypeError(
+                f"@on() field matcher values must be Event or Exception "
+                f"subclasses, got {field_type!r} for field {field_name!r}"
             )
         # Check that at least one event type declares this field
         has_field = any(
@@ -71,6 +102,8 @@ def on(*event_types: type[Event], **field_matchers: type[Event]) -> Callable[[F]
         fn._event_types = event_types  # type: ignore[attr-defined]
         if field_matchers:
             fn._field_matchers = dict(field_matchers)  # type: ignore[attr-defined]
+        if raises_tuple:
+            fn._raises = raises_tuple  # type: ignore[attr-defined]
         return fn
 
     return decorator
@@ -88,8 +121,9 @@ class HandlerMeta:
     reducer_params: tuple[str, ...] = ()
     config_param: str | None = None
     store_param: str | None = None
-    field_matchers: tuple[tuple[str, type[Event]], ...] = ()
+    field_matchers: tuple[tuple[str, type[Event] | type[BaseException]], ...] = ()
     field_inject_params: frozenset[str] = frozenset()
+    raises: tuple[type[Exception], ...] = ()
 
     def matches(self, event: Event) -> bool:
         """Check whether *event* satisfies this handler's type + field matchers."""
@@ -148,11 +182,16 @@ def extract_handler_meta(
     reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
 
     # Extract field matchers
-    raw_field_matchers: dict[str, type[Event]] = getattr(fn, "_field_matchers", {})
+    raw_field_matchers: dict[str, type[Event] | type[BaseException]] = getattr(
+        fn, "_field_matchers", {}
+    )
     field_matchers = tuple(raw_field_matchers.items())
     field_inject_params = frozenset(
         name for name in sig.parameters if name in raw_field_matchers
     )
+
+    # Extract declared raises
+    raises: tuple[type[Exception], ...] = getattr(fn, "_raises", ())
 
     # Warn about handler params that don't match any known injection source
     if reducer_names:
@@ -190,4 +229,5 @@ def extract_handler_meta(
         store_param=store_param,
         field_matchers=field_matchers,
         field_inject_params=field_inject_params,
+        raises=raises,
     )

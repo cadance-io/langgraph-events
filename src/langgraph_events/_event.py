@@ -184,6 +184,26 @@ class Resumed(Event):
     interrupted: Interrupted | None = None
 
 
+class HandlerRaised(Event):
+    """Emitted when a handler raises an exception declared in its ``raises=`` clause.
+
+    The raising handler's ``@on(..., raises=(MyError, ...))`` declares which
+    exceptions the framework should catch.  Subscribe via the existing
+    field-matcher mechanism::
+
+        @on(HandlerRaised, exception=RateLimitError)
+        def backoff(event: HandlerRaised, exception: RateLimitError):
+            exception.retry_after  # typed via field injection
+
+    ``@on(HandlerRaised)`` (no ``exception=`` matcher) catches every
+    declared raise.
+    """
+
+    handler: str = ""
+    event: Event | None = None
+    exception: Exception = None  # type: ignore[assignment]
+
+
 class SystemPromptSet(MessageEvent):
     """Built-in event for setting the system prompt as a first-class citizen.
 

@@ -9,7 +9,14 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
-from langgraph_events._event import Event, Halted, Interrupted, Resumed, Scatter
+from langgraph_events._event import (
+    Event,
+    Halted,
+    HandlerRaised,
+    Interrupted,
+    Resumed,
+    Scatter,
+)
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta, extract_handler_meta
 from langgraph_events._internal import (
@@ -35,6 +42,17 @@ if TYPE_CHECKING:
 
 class OrphanedEventWarning(UserWarning):
     """Issued when handler return types have no matching subscriber."""
+
+
+def _any_catcher_covers(
+    catchers: list[tuple[HandlerMeta, type[Exception] | None]],
+    exc_type: type[Exception],
+) -> bool:
+    """Return True if any catcher would handle *exc_type*."""
+    for _meta, exc_filter in catchers:
+        if exc_filter is None or issubclass(exc_type, exc_filter):
+            return True
+    return False
 
 
 class ReturnInfo(NamedTuple):
@@ -256,6 +274,8 @@ class EventGraph:
                 stacklevel=2,
             )
 
+        self._verify_raises_coverage()
+
     @staticmethod
     def _mermaid_footer_entry(
         meta: HandlerMeta, has_scatter: bool, solid: list[str], dashed: list[str]
@@ -318,6 +338,11 @@ class EventGraph:
                 for target in dashed_targets:
                     all_targets.add(target)
                     edge_lines.append(f"    {src} -.->|{label}| {target}")
+                if meta.raises:
+                    all_targets.add(HandlerRaised.__name__)
+                    edge_lines.append(
+                        f"    {src} -.->|{label} (raises)| {HandlerRaised.__name__}"
+                    )
 
         if any_produces_interrupted and any_subscribes_resumed:
             edge_lines.append("    Interrupted -.-> Resumed")
@@ -427,6 +452,40 @@ class EventGraph:
         }
 
         return self._compiled_graph
+
+    def _verify_raises_coverage(self) -> None:
+        """Ensure every declared ``raises=`` entry has a matching catcher.
+
+        A catcher is a handler subscribed to ``HandlerRaised``. Its coverage:
+        - no ``exception=`` field matcher → covers any raise
+        - ``exception=X`` field matcher → covers any ``exc_type`` with
+          ``issubclass(exc_type, X)``
+
+        Raises ``TypeError`` at compile time (first ``invoke()`` / ``compile()``)
+        if any declared exception is uncovered.
+        """
+        catchers: list[tuple[HandlerMeta, type[Exception] | None]] = []
+        for meta in self._handler_metas:
+            if HandlerRaised not in meta.event_types:
+                continue
+            exc_filter: type[Exception] | None = None
+            for fname, ftype in meta.field_matchers:
+                if fname == "exception":
+                    exc_filter = cast("type[Exception]", ftype)
+                    break
+            catchers.append((meta, exc_filter))
+
+        for meta in self._handler_metas:
+            for exc_type in meta.raises:
+                if not _any_catcher_covers(catchers, exc_type):
+                    raise TypeError(
+                        f"Handler {meta.name!r} declares "
+                        f"raises={exc_type.__name__}, but no handler subscribes "
+                        f"to catch it. Add a handler decorated with "
+                        f"@on(HandlerRaised, exception={exc_type.__name__}) "
+                        f"(or @on(HandlerRaised) to catch all), or remove the "
+                        f"type from raises=."
+                    )
 
     def _require_checkpointer(self, method: str) -> None:
         if self._checkpointer is None:

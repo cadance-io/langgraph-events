@@ -22,6 +22,7 @@ from langgraph_events._event import (
     Cancelled,
     Event,
     Halted,
+    HandlerRaised,
     MaxRoundsExceeded,
     Resumed,
     Scatter,
@@ -243,6 +244,41 @@ def _inject_fields(
     return merged
 
 
+def _invoke_sync_path(
+    meta: HandlerMeta, event: Event, call_inject: dict[str, Any]
+) -> HandlerReturn:
+    """Invoke a handler from the sync dispatch path."""
+    if meta.is_async:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            coro = cast(
+                "Coroutine[Any, Any, HandlerReturn]",
+                meta.fn(event, **call_inject),
+            )
+            return asyncio.run(coro)
+        else:
+            raise RuntimeError(
+                f"Handler {meta.name!r} is async but invoke() was called "
+                "from within a running event loop (e.g. Jupyter, FastAPI). "
+                "Use ainvoke() instead."
+            )
+    return meta.fn(event, **call_inject)
+
+
+async def _invoke_async_path(
+    meta: HandlerMeta, event: Event, call_inject: dict[str, Any]
+) -> HandlerReturn:
+    """Invoke a handler from the async dispatch path."""
+    if meta.is_async:
+        coro = cast(
+            "Coroutine[Any, Any, HandlerReturn]",
+            meta.fn(event, **call_inject),
+        )
+        return await coro
+    return meta.fn(event, **call_inject)
+
+
 def make_handler_node(
     meta: HandlerMeta,
     reducers: dict[str, BaseReducer] | None = None,
@@ -298,25 +334,20 @@ def make_handler_node(
         try:
             for event in matching:
                 call_inject = _inject_fields(meta, event, inject)
-                if meta.is_async:
+                if meta.raises:
                     try:
-                        asyncio.get_running_loop()
-                    except RuntimeError:
-                        # No running loop — safe to use asyncio.run().
-                        coro = cast(
-                            "Coroutine[Any, Any, HandlerReturn]",
-                            meta.fn(event, **call_inject),
+                        result = _invoke_sync_path(meta, event, call_inject)
+                    except meta.raises as exc:
+                        new_events.append(
+                            HandlerRaised(  # type: ignore[call-arg]
+                                handler=meta.name,
+                                event=event,
+                                exception=exc,
+                            )
                         )
-                        result = asyncio.run(coro)
-                    else:
-                        raise RuntimeError(
-                            f"Handler {meta.name!r} is async but invoke() was called "
-                            "from within a running event loop (e.g. Jupyter, "
-                            "FastAPI). "
-                            f"Use ainvoke() instead."
-                        )
+                        continue
                 else:
-                    result = meta.fn(event, **call_inject)
+                    result = _invoke_sync_path(meta, event, call_inject)
                 _collect_result(result, new_events, lg_interrupt)
         finally:
             _reset_custom_emitters(tokens)
@@ -340,14 +371,20 @@ def make_handler_node(
         try:
             for event in matching:
                 call_inject = _inject_fields(meta, event, inject)
-                if meta.is_async:
-                    coro = cast(
-                        "Coroutine[Any, Any, HandlerReturn]",
-                        meta.fn(event, **call_inject),
-                    )
-                    result = await coro
+                if meta.raises:
+                    try:
+                        result = await _invoke_async_path(meta, event, call_inject)
+                    except meta.raises as exc:
+                        new_events.append(
+                            HandlerRaised(  # type: ignore[call-arg]
+                                handler=meta.name,
+                                event=event,
+                                exception=exc,
+                            )
+                        )
+                        continue
                 else:
-                    result = meta.fn(event, **call_inject)
+                    result = await _invoke_async_path(meta, event, call_inject)
                 _collect_result(result, new_events, lg_interrupt)
         except asyncio.CancelledError:
             return _finalize([Cancelled()])
