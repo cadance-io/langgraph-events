@@ -20,6 +20,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph_events import (
     Event,
     EventGraph,
+    FrontendToolCallRequested,
     Interrupted,
     MessageEvent,
     message_reducer,
@@ -28,6 +29,8 @@ from langgraph_events import (
 from langgraph_events.agui import (
     AGUIAdapter,
     MapperContext,
+    build_langchain_tools,
+    detect_new_tool_results,
 )
 from langgraph_events.agui._mappers import _warned_classes
 
@@ -2545,3 +2548,444 @@ def describe_multiple_custom_reducers():
             assert "counter_b" in last_state
             assert last_state["counter_a"] == "first"
             assert last_state["counter_b"] == "from_a"
+
+
+# ---------------------------------------------------------------------------
+# Tool-call streaming — LLM-initiated outbound path
+# ---------------------------------------------------------------------------
+
+
+def _tool_call_chunk_event(
+    run_id: str,
+    *chunks: dict[str, Any],
+    content: str = "",
+) -> dict[str, Any]:
+    from langchain_core.messages import AIMessageChunk
+
+    return {
+        "event": "on_chat_model_stream",
+        "run_id": run_id,
+        "data": {
+            "chunk": AIMessageChunk(
+                content=content,
+                tool_call_chunks=[{**c, "type": "tool_call_chunk"} for c in chunks],
+            ),
+        },
+    }
+
+
+def describe_tool_call_streaming():
+
+    def when_single_tool_call():
+        async def it_emits_start_args_end_in_order(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-a",
+                    {"name": "search", "args": "", "id": "tc-1", "index": 0},
+                )
+                yield _tool_call_chunk_event(
+                    "run-a",
+                    {"name": "", "args": '{"q":"hi"}', "id": "", "index": 0},
+                )
+                yield {
+                    "event": "on_chat_model_end",
+                    "run_id": "run-a",
+                    "data": {"output": AIMessage(id="msg-x", content="ok")},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            tc_types = [
+                e.type
+                for e in events
+                if e.type
+                in (
+                    EventType.TOOL_CALL_START,
+                    EventType.TOOL_CALL_ARGS,
+                    EventType.TOOL_CALL_END,
+                )
+            ]
+            assert tc_types == [
+                EventType.TOOL_CALL_START,
+                EventType.TOOL_CALL_ARGS,
+                EventType.TOOL_CALL_END,
+            ]
+            start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
+            args_ev = next(e for e in events if e.type == EventType.TOOL_CALL_ARGS)
+            end = next(e for e in events if e.type == EventType.TOOL_CALL_END)
+            assert start.tool_call_id == "tc-1"
+            assert start.tool_call_name == "search"
+            assert args_ev.tool_call_id == "tc-1"
+            assert args_ev.delta == '{"q":"hi"}'
+            assert end.tool_call_id == "tc-1"
+
+    def when_parallel_tool_calls():
+        async def it_gives_each_index_its_own_triple(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-p",
+                    {"name": "search", "args": "", "id": "tc-1", "index": 0},
+                    {"name": "lookup", "args": "", "id": "tc-2", "index": 1},
+                )
+                yield _tool_call_chunk_event(
+                    "run-p",
+                    {"name": "", "args": '{"q":"a"}', "id": "", "index": 0},
+                    {"name": "", "args": '{"k":"b"}', "id": "", "index": 1},
+                )
+                yield {
+                    "event": "on_chat_model_end",
+                    "run_id": "run-p",
+                    "data": {"output": AIMessage(id="msg-y", content="ok")},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            starts = [e for e in events if e.type == EventType.TOOL_CALL_START]
+            args_evs = [e for e in events if e.type == EventType.TOOL_CALL_ARGS]
+            ends = [e for e in events if e.type == EventType.TOOL_CALL_END]
+            assert {s.tool_call_id for s in starts} == {"tc-1", "tc-2"}
+            assert len(args_evs) == 2
+            assert {e.tool_call_id for e in ends} == {"tc-1", "tc-2"}
+
+    def when_chunk_carries_text_and_tool_call():
+        async def it_emits_text_message_and_uses_its_id_as_parent(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-m",
+                    {"name": "search", "args": "", "id": "tc-9", "index": 0},
+                    content="thinking…",
+                )
+                yield {
+                    "event": "on_chat_model_end",
+                    "run_id": "run-m",
+                    "data": {"output": AIMessage(id="msg-z", content="thinking…")},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            text_start = next(
+                e for e in events if e.type == EventType.TEXT_MESSAGE_START
+            )
+            tc_start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
+            assert tc_start.parent_message_id == text_start.message_id
+
+    def when_no_text_message_in_stream():
+        async def it_emits_none_parent_message_id(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-n",
+                    {"name": "search", "args": "", "id": "tc-n", "index": 0},
+                )
+                yield {
+                    "event": "on_chat_model_end",
+                    "run_id": "run-n",
+                    "data": {"output": AIMessage(id="msg-n", content="")},
+                }
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            tc_start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
+            assert tc_start.parent_message_id is None
+
+    def when_stream_errors_mid_call():
+        async def it_drains_tool_call_end_before_run_error(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-e",
+                    {"name": "search", "args": "", "id": "tc-err", "index": 0},
+                )
+                raise RuntimeError("LLM blew up")
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            tc_end = next(
+                (e for e in events if e.type == EventType.TOOL_CALL_END), None
+            )
+            run_err = next((e for e in events if e.type == EventType.RUN_ERROR), None)
+            assert tc_end is not None
+            assert tc_end.tool_call_id == "tc-err"
+            assert run_err is not None
+            # End before RunError
+            assert events.index(tc_end) < events.index(run_err)
+
+
+# ---------------------------------------------------------------------------
+# FrontendToolCallRequested — handler-initiated outbound path
+# ---------------------------------------------------------------------------
+
+
+class AskConfirm(Event):
+    prompt: str = ""
+
+
+def describe_FrontendToolCallRequested_mapping():
+
+    def when_handler_returns_event():
+        async def it_emits_tool_call_triple_and_no_custom_interrupted():
+            @on(AskConfirm)
+            def request(event: AskConfirm) -> FrontendToolCallRequested:
+                return FrontendToolCallRequested(
+                    name="confirm",
+                    args={"prompt": event.prompt},
+                    tool_call_id="tc-c1",
+                )
+
+            graph = EventGraph(
+                [request],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: AskConfirm(prompt="Ship?"),
+            )
+            events = await _collect(adapter, _make_input(thread_id="t-fe-1"))
+
+            triple = [
+                e.type
+                for e in events
+                if e.type
+                in (
+                    EventType.TOOL_CALL_START,
+                    EventType.TOOL_CALL_ARGS,
+                    EventType.TOOL_CALL_END,
+                )
+            ]
+            assert triple == [
+                EventType.TOOL_CALL_START,
+                EventType.TOOL_CALL_ARGS,
+                EventType.TOOL_CALL_END,
+            ]
+
+            start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
+            args_ev = next(e for e in events if e.type == EventType.TOOL_CALL_ARGS)
+            assert start.tool_call_name == "confirm"
+            assert start.tool_call_id == "tc-c1"
+            assert json.loads(args_ev.delta) == {"prompt": "Ship?"}
+
+            # No generic CustomEvent("interrupted", …) — the mapper preempted it
+            custom_names = [e.name for e in events if e.type == EventType.CUSTOM]
+            assert "interrupted" not in custom_names
+
+    def when_args_empty():
+        async def it_serializes_empty_object():
+            @on(AskConfirm)
+            def request(event: AskConfirm) -> FrontendToolCallRequested:
+                return FrontendToolCallRequested(name="ping", tool_call_id="tc-ping")
+
+            graph = EventGraph(
+                [request],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: AskConfirm(prompt=""),
+            )
+            events = await _collect(adapter, _make_input(thread_id="t-fe-2"))
+            args_ev = next(e for e in events if e.type == EventType.TOOL_CALL_ARGS)
+            assert args_ev.delta == "{}"
+
+
+# Regression coverage: the existing `describe_AGUIAdapter.describe_stream
+# .it_delivers_tool_calls_via_snapshot` test (above) validates that the
+# MessagesSnapshot path still carries AIMessage.tool_calls unchanged when a
+# handler emits an AIMessage with tool_calls. Streaming ToolCall* events and
+# the post-stream MessagesSnapshot coexist: the frontend reconciles by
+# tool_call_id (CopilotKit's useFrontendTool is idempotent), so the SDK does
+# not deduplicate between the two paths.
+
+
+# ---------------------------------------------------------------------------
+# Tool-def bridging — build_langchain_tools
+# ---------------------------------------------------------------------------
+
+
+def describe_build_langchain_tools():
+
+    def when_tools_present():
+        def it_builds_openai_function_shape():
+            from ag_ui.core import Tool
+
+            tools = [
+                Tool(
+                    name="confirm",
+                    description="Ask the user to confirm",
+                    parameters={"type": "object", "properties": {}},
+                ),
+            ]
+            out = build_langchain_tools(tools)
+            assert out == [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "confirm",
+                        "description": "Ask the user to confirm",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ]
+
+    def when_empty_or_none():
+        def it_returns_empty_list_for_empty():
+            assert build_langchain_tools([]) == []
+
+        def it_returns_empty_list_for_none():
+            assert build_langchain_tools(None) == []
+
+
+# ---------------------------------------------------------------------------
+# Inbound routing — detect_new_tool_results
+# ---------------------------------------------------------------------------
+
+
+def describe_detect_new_tool_results():
+
+    def when_fresh_run():
+        def it_returns_empty():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                    ),
+                ],
+            )
+            assert detect_new_tool_results(inp, None) == []
+
+    def when_all_tool_ids_known():
+        def it_returns_empty():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                    ),
+                ],
+            )
+            checkpoint = {
+                "messages": [
+                    ToolMessage(content="42", tool_call_id="tc-1"),
+                ],
+            }
+            assert detect_new_tool_results(inp, checkpoint) == []
+
+    def when_some_new():
+        def it_returns_only_unknown_ids():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="old",
+                        tool_call_id="tc-old",
+                    ),
+                    AguiToolMessage(
+                        id="m-2",
+                        role="tool",
+                        content="new",
+                        tool_call_id="tc-new",
+                    ),
+                ],
+            )
+            checkpoint = {
+                "messages": [ToolMessage(content="old", tool_call_id="tc-old")],
+            }
+            out = detect_new_tool_results(inp, checkpoint)
+            assert len(out) == 1
+            assert out[0].tool_call_id == "tc-new"
+            assert out[0].content == "new"
+
+    def when_checkpoint_messages_none():
+        def it_treats_as_no_history():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="hello",
+                        tool_call_id="tc-1",
+                    ),
+                ],
+            )
+            checkpoint = {"messages": None}
+            out = detect_new_tool_results(inp, checkpoint)
+            assert len(out) == 1
+            assert out[0].tool_call_id == "tc-1"

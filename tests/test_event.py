@@ -5,7 +5,13 @@ import dataclasses
 import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from langgraph_events import Auditable, Event, MessageEvent
+from langgraph_events import (
+    Auditable,
+    Event,
+    FrontendToolCallRequested,
+    Interrupted,
+    MessageEvent,
+)
 
 
 def describe_Event():
@@ -235,3 +241,51 @@ def describe_MessageEvent():
             assert e.as_messages() == [msg]
             with pytest.raises(AttributeError):
                 e.content = "nope"  # type: ignore
+
+
+def describe_FrontendToolCallRequested():
+
+    def when_only_name_provided():
+
+        def it_is_an_interrupted_subclass():
+            e = FrontendToolCallRequested(name="confirm")
+            assert isinstance(e, Interrupted)
+            assert isinstance(e, Event)
+
+        def it_defaults_args_to_empty_dict():
+            e = FrontendToolCallRequested(name="confirm")
+            assert e.args == {}
+
+        def it_auto_generates_tool_call_id():
+            a = FrontendToolCallRequested(name="confirm")
+            b = FrontendToolCallRequested(name="confirm")
+            assert a.tool_call_id
+            assert b.tool_call_id
+            assert a.tool_call_id != b.tool_call_id
+
+    def when_explicit_fields():
+
+        def it_preserves_all_fields():
+            e = FrontendToolCallRequested(
+                name="run_scenario",
+                args={"scenario_id": "s-1"},
+                tool_call_id="tc-fixed",
+            )
+            assert e.name == "run_scenario"
+            assert e.args == {"scenario_id": "s-1"}
+            assert e.tool_call_id == "tc-fixed"
+
+    def when_agui_dict_called():
+
+        def it_returns_name_args_and_id():
+            e = FrontendToolCallRequested(
+                name="confirm",
+                args={"message": "Ship?"},
+                tool_call_id="tc-1",
+            )
+            d = e.agui_dict()
+            assert d == {
+                "name": "confirm",
+                "args": {"message": "Ship?"},
+                "tool_call_id": "tc-1",
+            }

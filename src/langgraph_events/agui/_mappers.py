@@ -12,10 +12,14 @@ from ag_ui.core import (
     EventType,
     MessagesSnapshotEvent,
     StateSnapshotEvent,
+    ToolCallArgsEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
 )
 
 from langgraph_events._event import (
     Event,
+    FrontendToolCallRequested,
     Interrupted,
     Resumed,
     SystemPromptSet,
@@ -113,6 +117,37 @@ class SkipInternalMapper:
         return None
 
 
+class FrontendToolCallRequestedMapper:
+    """Emit ToolCallStart/Args/End for a FrontendToolCallRequested event.
+
+    Runs before ``InterruptedMapper`` so the generic interrupt mapping never
+    sees a FrontendToolCallRequested — the frontend receives the tool-call
+    streaming triple and then the graph pauses via the existing Interrupted
+    machinery.
+    """
+
+    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+        if not isinstance(event, FrontendToolCallRequested):
+            return None
+        args_delta = json.dumps(event.args)
+        return [
+            ToolCallStartEvent(
+                type=EventType.TOOL_CALL_START,
+                tool_call_id=event.tool_call_id,
+                tool_call_name=event.name,
+            ),
+            ToolCallArgsEvent(
+                type=EventType.TOOL_CALL_ARGS,
+                tool_call_id=event.tool_call_id,
+                delta=args_delta,
+            ),
+            ToolCallEndEvent(
+                type=EventType.TOOL_CALL_END,
+                tool_call_id=event.tool_call_id,
+            ),
+        ]
+
+
 class InterruptedMapper:
     """Map Interrupted events to AG-UI CustomEvent."""
 
@@ -156,6 +191,7 @@ def default_mappers() -> list[Any]:
     """Return the default mapper chain in priority order."""
     return [
         SkipInternalMapper(),
+        FrontendToolCallRequestedMapper(),
         InterruptedMapper(),
         # FallbackMapper is always last — added by the adapter after user mappers
     ]
