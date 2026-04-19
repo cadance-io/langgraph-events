@@ -51,6 +51,8 @@ def detect_new_tool_results(
     existing: set[str] = set()
     checkpointed = checkpoint_state.get("messages") or []
     for msg in checkpointed:
+        # checkpoint messages are LangChain BaseMessage (use .type); input
+        # messages below are AG-UI messages (use .role).
         if getattr(msg, "type", None) == "tool":
             tc_id = getattr(msg, "tool_call_id", None)
             if tc_id:
@@ -74,6 +76,7 @@ def detect_new_tool_results(
             LCToolMessage(
                 content=getattr(msg, "content", "") or "",
                 tool_call_id=tc_id,
+                # Normalize falsy ("") id to None so LangChain generates a fresh one.
                 id=getattr(msg, "id", None) or None,
             )
         )

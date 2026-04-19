@@ -1952,6 +1952,61 @@ def describe_AGUICustomEvent():
             assert len(custom) == 1
 
 
+def describe_connect_frontend_tool_interrupt():
+    async def it_replays_tool_call_triple():
+        @on(AskConfirm)
+        def request(event: AskConfirm) -> FrontendToolCallRequested:
+            return FrontendToolCallRequested(
+                name="confirm",
+                args={"prompt": event.prompt},
+                tool_call_id="tc-connect-1",
+            )
+
+        graph = EventGraph(
+            [request],
+            reducers=[message_reducer()],
+            checkpointer=MemorySaver(),
+        )
+        await graph.ainvoke(
+            AskConfirm(prompt="Ship v1?"),
+            config={"configurable": {"thread_id": "t-connect-fe"}},
+        )
+
+        adapter = AGUIAdapter(
+            graph=graph,
+            seed_factory=lambda inp: AskConfirm(prompt="unused"),
+        )
+        events = [
+            e async for e in adapter.connect(_make_input(thread_id="t-connect-fe"))
+        ]
+
+        triple = [
+            e.type
+            for e in events
+            if e.type
+            in (
+                EventType.TOOL_CALL_START,
+                EventType.TOOL_CALL_ARGS,
+                EventType.TOOL_CALL_END,
+            )
+        ]
+        assert triple == [
+            EventType.TOOL_CALL_START,
+            EventType.TOOL_CALL_ARGS,
+            EventType.TOOL_CALL_END,
+        ]
+        start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
+        args_ev = next(e for e in events if e.type == EventType.TOOL_CALL_ARGS)
+        assert start.tool_call_id == "tc-connect-1"
+        assert start.tool_call_name == "confirm"
+        assert json.loads(args_ev.delta) == {"prompt": "Ship v1?"}
+
+        # No generic "interrupted" CustomEvent — the frontend-tool mapper preempted it
+        assert not any(
+            e.type == EventType.CUSTOM and e.name == "interrupted" for e in events
+        )
+
+
 def describe_connect_completed_thread():
     async def it_emits_state_and_messages():
         @on(UserAsked)
@@ -2840,6 +2895,18 @@ class AskConfirm(Event):
     prompt: str = ""
 
 
+class AskShip(Event):
+    release: str = ""
+
+
+class Shipped(Event):
+    release: str = ""
+    approved: bool = False
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"release": self.release, "approved": self.approved}
+
+
 def describe_FrontendToolCallRequested_mapping():
 
     def when_handler_returns_event():
@@ -2907,6 +2974,111 @@ def describe_FrontendToolCallRequested_mapping():
             events = await _collect(adapter, _make_input(thread_id="t-fe-2"))
             args_ev = next(e for e in events if e.type == EventType.TOOL_CALL_ARGS)
             assert args_ev.delta == "{}"
+
+    def when_tool_result_received():
+        async def it_continues_graph_after_resume():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            @on(AskShip)
+            def request(event: AskShip) -> FrontendToolCallRequested:
+                return FrontendToolCallRequested(
+                    name="confirm",
+                    args={"release": event.release},
+                    tool_call_id="tc-ship-1",
+                )
+
+            @on(ToolsExecuted)
+            def ship(event: ToolsExecuted) -> Shipped:
+                approved = False
+                for m in event.messages:
+                    approved = bool(json.loads(m.content or "{}").get("approved"))
+                return Shipped(release="v1", approved=approved)
+
+            graph = EventGraph(
+                [request, ship],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+
+            def resume_factory(input_data, checkpoint_state=None):
+                results = detect_new_tool_results(input_data, checkpoint_state)
+                return ToolsExecuted(messages=tuple(results)) if results else None
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: AskShip(release="v1"),
+                resume_factory=resume_factory,
+            )
+
+            # Step 1 — initial run pauses on FrontendToolCallRequested
+            first = await _collect(adapter, _make_input(thread_id="t-roundtrip"))
+            triple = [
+                e.type
+                for e in first
+                if e.type
+                in (
+                    EventType.TOOL_CALL_START,
+                    EventType.TOOL_CALL_ARGS,
+                    EventType.TOOL_CALL_END,
+                )
+            ]
+            assert triple == [
+                EventType.TOOL_CALL_START,
+                EventType.TOOL_CALL_ARGS,
+                EventType.TOOL_CALL_END,
+            ]
+            # ship handler has not run yet
+            assert not any(
+                e.type == EventType.CUSTOM and e.name == "Shipped" for e in first
+            )
+
+            # Step 2 — frontend echoes tool message back; graph resumes, ship runs
+            second_input = _make_input(
+                thread_id="t-roundtrip",
+                messages=[
+                    AguiToolMessage(
+                        id="fe-reply-1",
+                        role="tool",
+                        content='{"approved": true}',
+                        tool_call_id="tc-ship-1",
+                    ),
+                ],
+            )
+            second = await _collect(adapter, second_input)
+
+            shipped = [
+                e for e in second if e.type == EventType.CUSTOM and e.name == "Shipped"
+            ]
+            assert len(shipped) == 1
+            assert shipped[0].value == {"release": "v1", "approved": True}
+            assert second[-1].type == EventType.RUN_FINISHED
+
+    def when_args_not_json_serializable():
+        async def it_surfaces_typeerror_as_run_error():
+            from datetime import UTC, datetime
+
+            @on(AskConfirm)
+            def request(event: AskConfirm) -> FrontendToolCallRequested:
+                return FrontendToolCallRequested(
+                    name="confirm",
+                    args={"when": datetime(2026, 4, 19, tzinfo=UTC)},
+                    tool_call_id="tc-bad-args",
+                )
+
+            graph = EventGraph(
+                [request],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: AskConfirm(prompt="x"),
+            )
+            events = await _collect(adapter, _make_input(thread_id="t-fe-bad-args"))
+
+            run_err = next((e for e in events if e.type == EventType.RUN_ERROR), None)
+            assert run_err is not None
+            assert not any(e.type == EventType.TOOL_CALL_ARGS for e in events)
 
 
 # Regression coverage: the existing `describe_AGUIAdapter.describe_stream

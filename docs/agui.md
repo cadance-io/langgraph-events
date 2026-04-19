@@ -265,9 +265,12 @@ Runnable examples:
 
 **`parent_message_id` caveat.** For LLM-initiated tool calls, `ToolCallStartEvent.parent_message_id` references the currently-open text message id (or `None` when the assistant emits tool calls without prose). LangChain does not expose the final `AIMessage.id` until the stream ends, so this id is not guaranteed to match the id later carried in `MessagesSnapshot`.
 
+**Reconnect replay.** If a page refresh hits `connect()` while the graph is paused on `FrontendToolCallRequested`, the adapter replays the `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd` triple using the stored `tool_call_id`. CopilotKit's `useFrontendTool` is idempotent by `tool_call_id`, so replay is safe.
+
 **Strict contract — no silent fallbacks.** The adapter rejects malformed tool-call traffic on the spot rather than coercing missing fields:
 
 - `FrontendToolCallRequested(name="")` (or whitespace-only) raises `ValueError` at construction.
+- `FrontendToolCallRequested.args` is serialized with `json.dumps()` at emit time; non-JSON-serializable values (e.g. `datetime`) raise `TypeError`, which the adapter surfaces as a `RUN_ERROR`. Keep `args` JSON-compatible — the same constraint the frontend `useFrontendTool` schema imposes.
 - An LLM `tool_call_chunk` lacking `index` raises `ValueError` from `astream_events`.
 - The first chunk of a streaming call must carry both `id` and `name`; a missing value raises `ValueError`. Continuation chunks may omit them.
 - An inbound `role: "tool"` message reaching `detect_new_tool_results` must carry a non-empty `tool_call_id`; missing/empty raises `ValueError`.
