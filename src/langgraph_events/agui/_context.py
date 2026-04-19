@@ -75,6 +75,7 @@ class MapperContext:
         run_id: str,
         index: int,
         tool_call_id: str,
+        name: str,
     ) -> tuple[str, bool]:
         """Track a streaming tool-call chunk and report whether it is new.
 
@@ -82,11 +83,29 @@ class MapperContext:
         given ``(run_id, index)`` records the id; later chunks look it up
         instead of overwriting with the empty string that continuation
         chunks typically carry.
+
+        Raises ``ValueError`` if the first chunk for an ``(run_id, index)``
+        carries an empty ``tool_call_id`` or ``name`` — the OpenAI streaming
+        contract requires both on the first chunk of each call.
         """
         per_run = self._open_tool_calls.setdefault(run_id, {})
         existing = per_run.get(index)
         if existing is not None:
             return existing, False
+        if not tool_call_id:
+            raise ValueError(
+                f"First tool_call_chunk for (run_id={run_id!r}, "
+                f"index={index}) carries no 'id'. The OpenAI streaming "
+                "contract requires the id in the first chunk of each "
+                "tool call."
+            )
+        if not name:
+            raise ValueError(
+                f"First tool_call_chunk for (run_id={run_id!r}, "
+                f"index={index}, id={tool_call_id!r}) carries no 'name'. "
+                "Required on the first chunk per the OpenAI streaming "
+                "contract."
+            )
         per_run[index] = tool_call_id
         return tool_call_id, True
 

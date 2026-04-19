@@ -34,6 +34,7 @@ will POST to; the frontend tools registered on the page arrive as
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_openai import ChatOpenAI
@@ -62,7 +63,7 @@ from langgraph_events.agui import (
 class ToolsRegistered(Event):
     """Seed event carrying the frontend-declared tool definitions."""
 
-    tools: tuple = ()
+    tools: tuple[Any, ...] = ()
 
 
 class UserMessageReceived(MessageEvent, Auditable):

@@ -60,7 +60,14 @@ def detect_new_tool_results(
     for msg in input_data.messages or []:
         if getattr(msg, "role", None) != "tool":
             continue
-        tc_id = getattr(msg, "tool_call_id", None) or ""
+        tc_id = getattr(msg, "tool_call_id", None)
+        if not tc_id:
+            raise ValueError(
+                f"Inbound tool message (id={getattr(msg, 'id', None)!r}) has "
+                "no tool_call_id. Frontend tools must echo the tool_call_id "
+                "from the matching ToolCallStart event so the backend can "
+                "route the result."
+            )
         if tc_id in existing:
             continue
         results.append(

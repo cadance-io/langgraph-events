@@ -196,6 +196,14 @@ class FrontendToolCallRequested(Interrupted):
     args: dict[str, Any] = field(default_factory=dict)
     tool_call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError(
+                "FrontendToolCallRequested.name must be a non-empty tool name; "
+                "got empty/whitespace. Pass the same `name` your "
+                "useFrontendTool({ name: ... }) registration declares."
+            )
+
     def agui_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,

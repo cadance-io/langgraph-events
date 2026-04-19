@@ -265,6 +265,15 @@ Runnable examples:
 
 **`parent_message_id` caveat.** For LLM-initiated tool calls, `ToolCallStartEvent.parent_message_id` references the currently-open text message id (or `None` when the assistant emits tool calls without prose). LangChain does not expose the final `AIMessage.id` until the stream ends, so this id is not guaranteed to match the id later carried in `MessagesSnapshot`.
 
+**Strict contract — no silent fallbacks.** The adapter rejects malformed tool-call traffic on the spot rather than coercing missing fields:
+
+- `FrontendToolCallRequested(name="")` (or whitespace-only) raises `ValueError` at construction.
+- An LLM `tool_call_chunk` lacking `index` raises `ValueError` from `astream_events`.
+- The first chunk of a streaming call must carry both `id` and `name`; a missing value raises `ValueError`. Continuation chunks may omit them.
+- An inbound `role: "tool"` message reaching `detect_new_tool_results` must carry a non-empty `tool_call_id`; missing/empty raises `ValueError`.
+
+Streaming-path errors propagate through the adapter's top-level handler and surface to the frontend as a `RUN_ERROR` event with the diagnostic message. Conformant CopilotKit clients and LangChain chat models satisfy these invariants by default.
+
 ## LangGraph Config Passthrough
 
 `AGUIAdapter.stream()` and `AGUIAdapter.connect()` accept LangGraph config via `RunAgentInput.forwarded_props`.

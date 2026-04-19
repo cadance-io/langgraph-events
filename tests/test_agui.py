@@ -2739,6 +2739,63 @@ def describe_tool_call_streaming():
             tc_start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
             assert tc_start.parent_message_id is None
 
+    def when_first_chunk_has_no_id():
+        async def it_emits_run_error(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-no-id",
+                    {"name": "search", "args": "", "id": "", "index": 0},
+                )
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            run_err = next((e for e in events if e.type == EventType.RUN_ERROR), None)
+            assert run_err is not None
+            assert "no 'id'" in run_err.message
+            # No TOOL_CALL_START should have been emitted
+            assert not any(e.type == EventType.TOOL_CALL_START for e in events)
+
+    def when_first_chunk_has_no_name():
+        async def it_emits_run_error(monkeypatch):
+            @on(UserAsked)
+            def ask(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([ask], reducers=[message_reducer()])
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-no-name",
+                    {"name": "", "args": "", "id": "tc-x", "index": 0},
+                )
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="q"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            run_err = next((e for e in events if e.type == EventType.RUN_ERROR), None)
+            assert run_err is not None
+            assert "no 'name'" in run_err.message
+            assert not any(e.type == EventType.TOOL_CALL_START for e in events)
+
     def when_stream_errors_mid_call():
         async def it_drains_tool_call_end_before_run_error(monkeypatch):
             @on(UserAsked)
@@ -2989,3 +3046,29 @@ def describe_detect_new_tool_results():
             out = detect_new_tool_results(inp, checkpoint)
             assert len(out) == 1
             assert out[0].tool_call_id == "tc-1"
+
+    def when_tool_message_lacks_id():
+        def it_raises():
+            from types import SimpleNamespace
+
+            # ag_ui's ToolMessage validates tool_call_id at construction,
+            # so simulate a non-conformant inbound message via a duck type.
+            bad_msg = SimpleNamespace(
+                id="m-1", role="tool", content="42", tool_call_id=""
+            )
+            inp = _make_input(messages=[])
+            inp.messages = [bad_msg]  # type: ignore[assignment]
+
+            with pytest.raises(ValueError, match=r"tool_call_id"):
+                detect_new_tool_results(inp, {"messages": []})
+
+    def when_tool_message_id_field_absent():
+        def it_raises():
+            from types import SimpleNamespace
+
+            bad_msg = SimpleNamespace(id="m-1", role="tool", content="42")
+            inp = _make_input(messages=[])
+            inp.messages = [bad_msg]  # type: ignore[assignment]
+
+            with pytest.raises(ValueError, match=r"tool_call_id"):
+                detect_new_tool_results(inp, {"messages": []})

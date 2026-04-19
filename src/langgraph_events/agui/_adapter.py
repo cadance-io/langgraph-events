@@ -357,7 +357,7 @@ class AGUIAdapter:
         ctx: MapperContext,
     ) -> list[BaseEvent]:
         resolved_id, is_new = ctx.ensure_tool_call_id(
-            item.run_id, item.call_index, item.tool_call_id
+            item.run_id, item.call_index, item.tool_call_id, item.name
         )
         events: list[BaseEvent] = []
         if is_new:

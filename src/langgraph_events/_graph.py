@@ -792,9 +792,18 @@ class EventGraph:
                 if delta:
                     yield LLMToken(run_id=run_id, content=delta)
                 for tc_chunk in getattr(chunk, "tool_call_chunks", None) or ():
+                    index = tc_chunk.get("index")
+                    if index is None:
+                        raise ValueError(
+                            f"LLM tool_call_chunk missing 'index' "
+                            f"(run_id={run_id!r}, chunk={tc_chunk!r}). "
+                            "LangChain normalizes this — a missing index "
+                            "indicates a non-conformant provider or a bug "
+                            "upstream."
+                        )
                     yield LLMToolCallChunk(
                         run_id=run_id,
-                        call_index=tc_chunk.get("index", 0) or 0,
+                        call_index=index,
                         tool_call_id=tc_chunk.get("id") or "",
                         name=tc_chunk.get("name") or "",
                         args_delta=tc_chunk.get("args") or "",

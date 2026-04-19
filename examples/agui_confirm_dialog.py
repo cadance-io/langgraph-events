@@ -31,7 +31,6 @@ Frontend (React + CopilotKit v2) — register a matching tool::
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 from typing import TYPE_CHECKING
 
@@ -93,11 +92,12 @@ def request_confirmation(event: ShipCommandReceived) -> FrontendToolCallRequeste
 @on(UserConfirmed)
 def ship(event: UserConfirmed) -> ShippedRelease:
     # The resume event carries the tool message; parse approval from its
-    # content (JSON string returned by the frontend handler).
+    # content (JSON string returned by the frontend handler).  Malformed
+    # JSON propagates — silently approving-as-False would hide a frontend
+    # contract bug.
     approved = False
     for msg in event.messages:
-        with contextlib.suppress(json.JSONDecodeError):
-            approved = bool(json.loads(msg.content or "{}").get("approved"))
+        approved = bool(json.loads(msg.content or "{}").get("approved"))
     return ShippedRelease(release="v2026-04-19", approved=approved)
 
 

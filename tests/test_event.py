@@ -289,3 +289,15 @@ def describe_FrontendToolCallRequested():
                 "args": {"message": "Ship?"},
                 "tool_call_id": "tc-1",
             }
+
+    def when_name_is_empty():
+
+        def it_raises_on_construction():
+            with pytest.raises(ValueError, match=r"non-empty tool name"):
+                FrontendToolCallRequested(name="")
+
+    def when_name_is_whitespace():
+
+        def it_raises_on_construction():
+            with pytest.raises(ValueError, match=r"non-empty tool name"):
+                FrontendToolCallRequested(name="   ")
