@@ -8,5 +8,6 @@ build/
 .venv/
 .coverage
 .claude/
+.superpowers/
 .worktrees/
 site/
