@@ -14,6 +14,11 @@ Event-driven abstraction for LangGraph. State IS events.
 - `src/langgraph_events/` — library source
 - `tests/` — BDD-style with pytest-describe (`describe_`/`when_`/`it_`)
 - `examples/` — usage examples
+- `scripts/release.py` — release automation (see below)
+
+## Release
+
+Use `uv run scripts/release.py {major|minor|patch|X.Y.Z}` — do not hand-edit version strings. The script bumps `pyproject.toml`/`README.md`/`docs/index.md`, stamps `[Unreleased]` in `CHANGELOG.md` with today's date, runs `uv lock`, commits as `release: vX.Y.Z`, and tags. Preflight requires a clean working tree on `main` and a non-empty `[Unreleased]` section. Add `--dry-run` to preview. After it runs: `git push origin main vX.Y.Z` triggers the TestPyPI → PyPI publish workflow.
 
 ## Conventions
 
