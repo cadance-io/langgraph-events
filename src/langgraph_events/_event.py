@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import dataclasses
 import types
+import uuid
+from dataclasses import field
 from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any
 
@@ -171,6 +173,43 @@ class Interrupted(Event):
             raise TypeError(f"resume() requires an Event instance, got {got}")
         new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
+
+
+class FrontendToolCallRequested(Interrupted):
+    """Request a frontend-executed tool call and pause the graph.
+
+    Event-native counterpart to LLM-initiated tool calls: a handler returns
+    this event, the AG-UI adapter emits ``ToolCallStart``/``ToolCallArgs``/
+    ``ToolCallEnd`` for a frontend ``useFrontendTool`` handler to pick up,
+    and the graph pauses via the existing ``Interrupted`` machinery.  Resume
+    with a domain event (typically ``ToolsExecuted(messages=...)`` built via
+    ``detect_new_tool_results`` from the frontend's tool-result message).
+
+    Mirrors the ``ApprovalRequested(Interrupted)`` pattern — tool calls
+    become "HITL with typed fields," exactly as the AG-UI spec positions
+    them.  Fields are ordered so dataclass defaults follow non-defaults::
+
+        FrontendToolCallRequested(name="confirm", args={"message": "Ship?"})
+    """
+
+    name: str = ""
+    args: dict[str, Any] = field(default_factory=dict)
+    tool_call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.strip():
+            raise ValueError(
+                "FrontendToolCallRequested.name must be a non-empty tool name; "
+                "got empty/whitespace. Pass the same `name` your "
+                "useFrontendTool({ name: ... }) registration declares."
+            )
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "args": self.args,
+            "tool_call_id": self.tool_call_id,
+        }
 
 
 class Resumed(Event):

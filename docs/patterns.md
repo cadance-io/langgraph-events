@@ -30,6 +30,18 @@ Parallel document summarization with batch splitting and completion detection. D
 - Code: [examples/map_reduce.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.py)
 - Flow: [examples/map_reduce.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.graph.md)
 
+## AG-UI Frontend Tools
+
+Wire CopilotKit's `useFrontendTool` (v2) to an `EventGraph`. Covers the LLM-initiated streaming path — `AIMessageChunk.tool_call_chunks` auto-translate to `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd` — plus the inbound tool-result round-trip via `detect_new_tool_results` and `build_langchain_tools`.
+
+- Code: [examples/agui_frontend_tools.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_frontend_tools.py)
+
+## AG-UI Confirm Dialog
+
+Handler-initiated frontend tools via [`FrontendToolCallRequested(Interrupted)`](agui.md#frontend-tools) — the graph pauses on a typed event, the frontend renders and runs the tool, and the returned tool message resumes the graph. Tool calls become "HITL with typed fields."
+
+- Code: [examples/agui_confirm_dialog.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_confirm_dialog.py)
+
 ## Human-in-the-Loop Approval
 
 Pause execution for human approval and resume with typed events. Demonstrates **[`Interrupted`](control-flow.md#interrupted-resumed)** for pausing the graph, `graph.resume()` with domain events, and revision cycles driven by human feedback. Requires a checkpointer (`MemorySaver`).

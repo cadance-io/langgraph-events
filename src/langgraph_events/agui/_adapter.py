@@ -17,6 +17,9 @@ from ag_ui.core import (
     TextMessageContentEvent,
     TextMessageEndEvent,
     TextMessageStartEvent,
+    ToolCallArgsEvent,
+    ToolCallEndEvent,
+    ToolCallStartEvent,
 )
 
 from langgraph_events._event import Interrupted
@@ -24,6 +27,7 @@ from langgraph_events._graph import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,
+    LLMToolCallChunk,
     StateSnapshotFrame,
     StreamFrame,
     StreamItem,
@@ -329,15 +333,51 @@ class AGUIAdapter:
         item: LLMStreamEnd,
         ctx: MapperContext,
     ) -> list[BaseEvent]:
+        events: list[BaseEvent] = []
         closed_id = ctx.close_stream_message_id(item.run_id)
-        if closed_id is None:
-            return []
-        return [
-            TextMessageEndEvent(
-                type=EventType.TEXT_MESSAGE_END,
-                message_id=closed_id,
+        if closed_id is not None:
+            events.append(
+                TextMessageEndEvent(
+                    type=EventType.TEXT_MESSAGE_END,
+                    message_id=closed_id,
+                )
             )
-        ]
+        for tc_id in ctx.close_tool_calls_for_run(item.run_id):
+            events.append(
+                ToolCallEndEvent(
+                    type=EventType.TOOL_CALL_END,
+                    tool_call_id=tc_id,
+                )
+            )
+        return events
+
+    def _events_from_llm_tool_call_chunk(
+        self,
+        item: LLMToolCallChunk,
+        ctx: MapperContext,
+    ) -> list[BaseEvent]:
+        resolved_id, is_new = ctx.ensure_tool_call_id(
+            item.run_id, item.call_index, item.tool_call_id, item.name
+        )
+        events: list[BaseEvent] = []
+        if is_new:
+            events.append(
+                ToolCallStartEvent(
+                    type=EventType.TOOL_CALL_START,
+                    tool_call_id=resolved_id,
+                    tool_call_name=item.name,
+                    parent_message_id=ctx.current_stream_message_id(item.run_id),
+                )
+            )
+        if item.args_delta:
+            events.append(
+                ToolCallArgsEvent(
+                    type=EventType.TOOL_CALL_ARGS,
+                    tool_call_id=resolved_id,
+                    delta=item.args_delta,
+                )
+            )
+        return events
 
     def _events_from_stream_frame(
         self,
@@ -438,6 +478,9 @@ class AGUIAdapter:
             if isinstance(item, LLMToken):
                 for agui_event in self._events_from_llm_token(item, ctx):
                     yield agui_event
+            elif isinstance(item, LLMToolCallChunk):
+                for agui_event in self._events_from_llm_tool_call_chunk(item, ctx):
+                    yield agui_event
             elif isinstance(item, LLMStreamEnd):
                 for agui_event in self._events_from_llm_stream_end(item, ctx):
                     yield agui_event
@@ -481,6 +524,11 @@ class AGUIAdapter:
             yield TextMessageEndEvent(
                 type=EventType.TEXT_MESSAGE_END,
                 message_id=message_id,
+            )
+        for tc_id in ctx.drain_open_tool_call_ids():
+            yield ToolCallEndEvent(
+                type=EventType.TOOL_CALL_END,
+                tool_call_id=tc_id,
             )
 
         # Detect interrupts from checkpoint state
@@ -527,6 +575,11 @@ class AGUIAdapter:
                 yield TextMessageEndEvent(
                     type=EventType.TEXT_MESSAGE_END,
                     message_id=message_id,
+                )
+            for tc_id in ctx.drain_open_tool_call_ids():
+                yield ToolCallEndEvent(
+                    type=EventType.TOOL_CALL_END,
+                    tool_call_id=tc_id,
                 )
             yield RunErrorEvent(
                 type=EventType.RUN_ERROR,

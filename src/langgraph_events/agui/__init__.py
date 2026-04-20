@@ -4,6 +4,7 @@ from langgraph_events.agui._adapter import AGUIAdapter
 from langgraph_events.agui._context import MapperContext
 from langgraph_events.agui._mappers import (
     FallbackMapper,
+    FrontendToolCallRequestedMapper,
     InterruptedMapper,
     SkipInternalMapper,
 )
@@ -13,6 +14,10 @@ from langgraph_events.agui._protocols import (
     EventMapper,
     ResumeFactory,
     SeedFactory,
+)
+from langgraph_events.agui._tools import (
+    build_langchain_tools,
+    detect_new_tool_results,
 )
 from langgraph_events.agui._transport import (
     create_starlette_response,
@@ -25,11 +30,14 @@ __all__ = [
     "AGUISerializable",
     "EventMapper",
     "FallbackMapper",
+    "FrontendToolCallRequestedMapper",
     "InterruptedMapper",
     "MapperContext",
     "ResumeFactory",
     "SeedFactory",
     "SkipInternalMapper",
+    "build_langchain_tools",
     "create_starlette_response",
+    "detect_new_tool_results",
     "encode_sse_stream",
 ]

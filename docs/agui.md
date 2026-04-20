@@ -217,6 +217,66 @@ When `resume_factory` returns an `Event`, the adapter uses `graph.astream_resume
 
 The second `checkpoint_state` argument is optional; one-argument factories continue to work.
 
+## Frontend Tools
+
+The AG-UI spec positions tool calls as "inherently frontend-executed" and as the mechanism for HITL. The adapter wires all three halves of that contract to an `EventGraph`:
+
+1. **Tool definitions in** — a page's `useFrontendTool` registrations arrive on each request as `RunAgentInput.tools`. The `build_langchain_tools(...)` helper converts them to OpenAI-format dicts suitable for `llm.bind_tools(...)`.
+2. **Tool calls out** — two paths, both mapping to `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`:
+    - **LLM-initiated** — when the bound LLM streams `tool_call_chunks`, they auto-translate to the streaming triple (transport-level, emitted progressively).
+    - **Handler-initiated** — a handler returns the built-in `FrontendToolCallRequested(Interrupted)` event. The adapter emits the full triple and the graph pauses, exactly like `ApprovalRequested(Interrupted)` in [`examples/human_in_the_loop.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/human_in_the_loop.py). Tool calls become "HITL with typed fields."
+3. **Tool results back** — the frontend's handler return value is sent back as a `role: "tool"` message. `detect_new_tool_results(input_data, checkpoint_state)` returns the new `ToolMessage`s; wrap them in a `MessageEvent` (typically `ToolsExecuted(messages=...)`) and return from `resume_factory` to continue the graph.
+
+```python
+from langgraph_events import FrontendToolCallRequested, on
+from langgraph_events.agui import (
+    AGUIAdapter,
+    build_langchain_tools,
+    detect_new_tool_results,
+)
+
+
+def seed_factory(input_data, checkpoint_state=None):
+    return [
+        ToolsRegistered(tools=tuple(input_data.tools or [])),
+        UserMessageReceived(message=HumanMessage(content=input_data.messages[-1].content)),
+    ]
+
+
+def resume_factory(input_data, checkpoint_state=None):
+    results = detect_new_tool_results(input_data, checkpoint_state)
+    return ToolsExecuted(messages=tuple(results)) if results else None
+
+
+@on(UserMessageReceived, ToolsExecuted)
+async def call_llm(event, messages, log):
+    registered = log.latest(ToolsRegistered)
+    tools = build_langchain_tools(list(registered.tools)) if registered else []
+    llm = ChatOpenAI(model="gpt-4o-mini").bind_tools(tools) if tools else ChatOpenAI(model="gpt-4o-mini")
+    return LLMResponded(message=await llm.ainvoke(messages))
+```
+
+Runnable examples:
+
+- [`examples/agui_frontend_tools.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_frontend_tools.py) — LLM-initiated path with a ReAct-style loop.
+- [`examples/agui_confirm_dialog.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_confirm_dialog.py) — handler-initiated path (deterministic HITL).
+
+**`useCopilotAction` (v1) vs `useFrontendTool` (v2).** The v1 hook consumes tool calls from `MessagesSnapshot` — the existing `MessagesSnapshot` path already covers it unchanged. The v2 hook needs the streaming `ToolCallStart/Args/End` events that this section describes. Both paths coexist: CopilotKit reconciles by `tool_call_id`.
+
+**`parent_message_id` caveat.** For LLM-initiated tool calls, `ToolCallStartEvent.parent_message_id` references the currently-open text message id (or `None` when the assistant emits tool calls without prose). LangChain does not expose the final `AIMessage.id` until the stream ends, so this id is not guaranteed to match the id later carried in `MessagesSnapshot`.
+
+**Reconnect replay.** If a page refresh hits `connect()` while the graph is paused on `FrontendToolCallRequested`, the adapter replays the `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd` triple using the stored `tool_call_id`. CopilotKit's `useFrontendTool` is idempotent by `tool_call_id`, so replay is safe.
+
+**Strict contract — no silent fallbacks.** The adapter rejects malformed tool-call traffic on the spot rather than coercing missing fields:
+
+- `FrontendToolCallRequested(name="")` (or whitespace-only) raises `ValueError` at construction.
+- `FrontendToolCallRequested.args` is serialized with `json.dumps()` at emit time; non-JSON-serializable values (e.g. `datetime`) raise `TypeError`, which the adapter surfaces as a `RUN_ERROR`. Keep `args` JSON-compatible — the same constraint the frontend `useFrontendTool` schema imposes.
+- An LLM `tool_call_chunk` lacking `index` raises `ValueError` from `astream_events`.
+- The first chunk of a streaming call must carry both `id` and `name`; a missing value raises `ValueError`. Continuation chunks may omit them.
+- An inbound `role: "tool"` message reaching `detect_new_tool_results` must carry a non-empty `tool_call_id`; missing/empty raises `ValueError`.
+
+Streaming-path errors propagate through the adapter's top-level handler and surface to the frontend as a `RUN_ERROR` event with the diagnostic message. Conformant CopilotKit clients and LangChain chat models satisfy these invariants by default.
+
 ## LangGraph Config Passthrough
 
 `AGUIAdapter.stream()` and `AGUIAdapter.connect()` accept LangGraph config via `RunAgentInput.forwarded_props`.
@@ -235,6 +295,6 @@ The adapter covers 9 of the 33 AG-UI event types automatically. The remaining ty
 
 | Category | Count | Event Types |
 |----------|-------|-------------|
-| **Built-in** | 9 | `RunStarted`, `RunFinished`, `RunError`, `TextMessageStart/Content/End`, `StateSnapshot`, `MessagesSnapshot`, `Custom` |
-| **User mapper** | 20 | `TextMessageChunk`, `ToolCallStart/Args/End`, `ToolCallResult`, `ToolCallChunk`, `StepStarted/Finished`, `StateDelta`, `ActivitySnapshot/Delta`, `ThinkingStart/End`, `ThinkingTextMessageStart/Content/End`, `Raw`, `ReasoningStart/End` |
+| **Built-in** | 12 | `RunStarted`, `RunFinished`, `RunError`, `TextMessageStart/Content/End`, `ToolCallStart/Args/End`, `StateSnapshot`, `MessagesSnapshot`, `Custom` |
+| **User mapper** | 17 | `TextMessageChunk`, `ToolCallResult`, `ToolCallChunk`, `StepStarted/Finished`, `StateDelta`, `ActivitySnapshot/Delta`, `ThinkingStart/End`, `ThinkingTextMessageStart/Content/End`, `Raw`, `ReasoningStart/End` |
 | **N/A** | 4 | `ReasoningMessageStart/Content/End/Chunk` — extended reasoning events that require provider-specific integration |

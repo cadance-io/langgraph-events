@@ -147,6 +147,23 @@ class LLMStreamEnd(NamedTuple):
     message_id: str | None  # LangChain AIMessage.id for dedup
 
 
+class LLMToolCallChunk(NamedTuple):
+    """A tool-call chunk from an LLM stream.
+
+    First chunk for a given ``call_index`` carries ``tool_call_id`` and
+    ``name``; subsequent chunks may have those as empty strings and only
+    carry ``args_delta`` (a partial JSON string). ``call_index`` is
+    LangChain's ``tool_call_chunks[i].index`` — it groups chunks that
+    belong to the same call when the LLM emits multiple in parallel.
+    """
+
+    run_id: str
+    call_index: int
+    tool_call_id: str
+    name: str
+    args_delta: str
+
+
 class CustomEventFrame(NamedTuple):
     """A custom event frame emitted from LangGraph's v2 stream API."""
 
@@ -165,6 +182,7 @@ StreamItem = (
     | StreamFrame
     | LLMToken
     | LLMStreamEnd
+    | LLMToolCallChunk
     | CustomEventFrame
     | StateSnapshotFrame
 )
@@ -768,9 +786,28 @@ class EventGraph:
                     continue
                 run_id = raw.get("run_id", "")
                 chunk = raw.get("data", {}).get("chunk")
+                if chunk is None or not run_id:
+                    continue
                 delta = self._extract_text_content(chunk)
-                if run_id and delta:
+                if delta:
                     yield LLMToken(run_id=run_id, content=delta)
+                for tc_chunk in getattr(chunk, "tool_call_chunks", None) or ():
+                    index = tc_chunk.get("index")
+                    if index is None:
+                        raise ValueError(
+                            f"LLM tool_call_chunk missing 'index' "
+                            f"(run_id={run_id!r}, chunk={tc_chunk!r}). "
+                            "LangChain normalizes this — a missing index "
+                            "indicates a non-conformant provider or a bug "
+                            "upstream."
+                        )
+                    yield LLMToolCallChunk(
+                        run_id=run_id,
+                        call_index=index,
+                        tool_call_id=tc_chunk.get("id") or "",
+                        name=tc_chunk.get("name") or "",
+                        args_delta=tc_chunk.get("args") or "",
+                    )
                 continue
 
             if raw_event == "on_chat_model_end":

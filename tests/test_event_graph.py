@@ -3854,6 +3854,225 @@ def describe_EventGraph():
             assert len(custom_frames) == 1
             assert custom_frames[0].name == "resume.progress"
 
+        def describe_llm_tool_call_chunks():
+
+            def when_tokens_enabled():
+
+                @pytest.mark.asyncio
+                async def it_yields_frames_per_tool_call_chunk(monkeypatch):
+                    from langchain_core.messages import AIMessageChunk
+
+                    from langgraph_events._graph import LLMToolCallChunk
+
+                    @on(Started)
+                    def step(event: Started) -> Ended:
+                        return Ended(result=event.data)
+
+                    graph = EventGraph([step])
+
+                    async def fake_astream_events(*args, **kwargs):
+                        del args, kwargs
+                        yield {
+                            "event": "on_chat_model_stream",
+                            "run_id": "run-x",
+                            "data": {
+                                "chunk": AIMessageChunk(
+                                    content="",
+                                    tool_call_chunks=[
+                                        {
+                                            "name": "search",
+                                            "args": "",
+                                            "id": "tc-1",
+                                            "index": 0,
+                                            "type": "tool_call_chunk",
+                                        },
+                                    ],
+                                ),
+                            },
+                        }
+                        yield {
+                            "event": "on_chat_model_stream",
+                            "run_id": "run-x",
+                            "data": {
+                                "chunk": AIMessageChunk(
+                                    content="",
+                                    tool_call_chunks=[
+                                        {
+                                            "name": "",
+                                            "args": '{"q":"hi"}',
+                                            "id": "",
+                                            "index": 0,
+                                            "type": "tool_call_chunk",
+                                        },
+                                    ],
+                                ),
+                            },
+                        }
+
+                    monkeypatch.setattr(
+                        graph.compiled, "astream_events", fake_astream_events
+                    )
+
+                    items = [
+                        item
+                        async for item in graph.astream_events(
+                            Started(data="hi"),
+                            include_llm_tokens=True,
+                        )
+                    ]
+
+                    chunks = [i for i in items if isinstance(i, LLMToolCallChunk)]
+                    assert len(chunks) == 2
+                    assert chunks[0].run_id == "run-x"
+                    assert chunks[0].call_index == 0
+                    assert chunks[0].tool_call_id == "tc-1"
+                    assert chunks[0].name == "search"
+                    assert chunks[0].args_delta == ""
+                    assert chunks[1].args_delta == '{"q":"hi"}'
+
+                @pytest.mark.asyncio
+                async def it_yields_both_text_and_tool_call_from_one_chunk(monkeypatch):
+                    from langchain_core.messages import AIMessageChunk
+
+                    from langgraph_events._graph import LLMToken, LLMToolCallChunk
+
+                    @on(Started)
+                    def step(event: Started) -> Ended:
+                        return Ended(result=event.data)
+
+                    graph = EventGraph([step])
+
+                    async def fake_astream_events(*args, **kwargs):
+                        del args, kwargs
+                        yield {
+                            "event": "on_chat_model_stream",
+                            "run_id": "run-x",
+                            "data": {
+                                "chunk": AIMessageChunk(
+                                    content="thinking…",
+                                    tool_call_chunks=[
+                                        {
+                                            "name": "search",
+                                            "args": "",
+                                            "id": "tc-1",
+                                            "index": 0,
+                                            "type": "tool_call_chunk",
+                                        },
+                                    ],
+                                ),
+                            },
+                        }
+
+                    monkeypatch.setattr(
+                        graph.compiled, "astream_events", fake_astream_events
+                    )
+
+                    items = [
+                        item
+                        async for item in graph.astream_events(
+                            Started(data="hi"),
+                            include_llm_tokens=True,
+                        )
+                    ]
+
+                    tokens = [i for i in items if isinstance(i, LLMToken)]
+                    chunks = [i for i in items if isinstance(i, LLMToolCallChunk)]
+                    assert len(tokens) == 1
+                    assert tokens[0].content == "thinking…"
+                    assert len(chunks) == 1
+                    assert chunks[0].tool_call_id == "tc-1"
+
+            def when_tokens_disabled():
+
+                @pytest.mark.asyncio
+                async def it_suppresses_chunks(monkeypatch):
+                    from langchain_core.messages import AIMessageChunk
+
+                    from langgraph_events._graph import LLMToolCallChunk
+
+                    @on(Started)
+                    def step(event: Started) -> Ended:
+                        return Ended(result=event.data)
+
+                    graph = EventGraph([step])
+
+                    async def fake_astream_events(*args, **kwargs):
+                        del args, kwargs
+                        yield {
+                            "event": "on_chat_model_stream",
+                            "run_id": "run-x",
+                            "data": {
+                                "chunk": AIMessageChunk(
+                                    content="",
+                                    tool_call_chunks=[
+                                        {
+                                            "name": "search",
+                                            "args": "",
+                                            "id": "tc-1",
+                                            "index": 0,
+                                            "type": "tool_call_chunk",
+                                        },
+                                    ],
+                                ),
+                            },
+                        }
+
+                    monkeypatch.setattr(
+                        graph.compiled, "astream_events", fake_astream_events
+                    )
+
+                    items = [
+                        item
+                        async for item in graph.astream_events(
+                            Started(data="hi"),
+                            include_custom_events=True,
+                        )
+                    ]
+                    assert not any(isinstance(i, LLMToolCallChunk) for i in items)
+
+            def when_chunk_missing_index():
+
+                @pytest.mark.asyncio
+                async def it_raises(monkeypatch):
+                    from langchain_core.messages import AIMessageChunk
+
+                    @on(Started)
+                    def step(event: Started) -> Ended:
+                        return Ended(result=event.data)
+
+                    graph = EventGraph([step])
+
+                    async def fake_astream_events(*args, **kwargs):
+                        del args, kwargs
+                        yield {
+                            "event": "on_chat_model_stream",
+                            "run_id": "run-x",
+                            "data": {
+                                "chunk": AIMessageChunk(
+                                    content="",
+                                    tool_call_chunks=[
+                                        {
+                                            "name": "search",
+                                            "args": "",
+                                            "id": "tc-1",
+                                            "type": "tool_call_chunk",
+                                        },
+                                    ],
+                                ),
+                            },
+                        }
+
+                    monkeypatch.setattr(
+                        graph.compiled, "astream_events", fake_astream_events
+                    )
+
+                    with pytest.raises(ValueError, match=r"missing 'index'"):
+                        async for _ in graph.astream_events(
+                            Started(data="hi"),
+                            include_llm_tokens=True,
+                        ):
+                            pass
+
 
 def describe_OrphanedEventWarning():
 
