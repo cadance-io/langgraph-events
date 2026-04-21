@@ -228,7 +228,7 @@ def _compute_return_contract(
     3. No contract (legacy shape-only check in ``_collect_result``).
     """
     if info.has_annotation:
-        union_desc = " | ".join(t.__name__ for t in info.event_types) or "(no types)"
+        union_desc = " | ".join(t.__name__ for t in info.event_types) or "None"
         return ReturnContract(
             types=tuple(info.event_types),
             scatter_types=tuple(info.scatter_types) if info.scatter_types else None,

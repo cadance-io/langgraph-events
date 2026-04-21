@@ -334,16 +334,29 @@ def describe_Aggregate():
     def when_subclassed():
 
         def it_stamps_aggregate_name_from_class_name():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 pass
 
-            assert Order.__aggregate_name__ == "Order"
+            assert Widget.__aggregate_name__ == "Widget"
 
         def it_is_not_an_event():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 pass
 
-            assert not issubclass(Order, Event)
+            assert not issubclass(Widget, Event)
+
+    def when_redefined():
+
+        def with_colliding_name():
+
+            def it_raises():
+                class Widget(Aggregate):
+                    pass
+
+                with pytest.raises(TypeError, match=r"already defined"):
+
+                    class Widget(Aggregate):
+                        pass
 
 
 def describe_Command():
@@ -359,11 +372,11 @@ def describe_Command():
     def when_nested_in_aggregate():
 
         def it_accepts_and_stamps_aggregate():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Place(Command):
                     customer_id: str = ""
 
-            assert Order.Place.__aggregate__ == "Order"
+            assert Widget.Place.__aggregate__ == "Widget"
 
     def when_nested_in_non_aggregate_class():
 
@@ -383,7 +396,7 @@ def describe_Command():
         def it_rejects():
             with pytest.raises(RuntimeError) as exc_info:
 
-                class Order(Aggregate):
+                class Widget(Aggregate):
                     class Place(Command):
                         class Inner(Command):
                             pass
@@ -408,31 +421,31 @@ def describe_DomainEvent():
     def when_nested_in_aggregate():
 
         def it_accepts_and_stamps_aggregate():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Shipped(DomainEvent):
                     tracking: str = ""
 
-            assert Order.Shipped.__aggregate__ == "Order"
+            assert Widget.Shipped.__aggregate__ == "Widget"
 
         def it_leaves_command_attr_unset():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Shipped(DomainEvent):
                     tracking: str = ""
 
-            assert Order.Shipped.__command__ is None
+            assert Widget.Shipped.__command__ is None
 
     def when_nested_in_command():
 
         def it_accepts_and_stamps_aggregate_and_command():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Place(Command):
                     customer_id: str = ""
 
                     class Placed(DomainEvent):
                         order_id: str = ""
 
-            assert Order.Place.Placed.__aggregate__ == "Order"
-            assert Order.Place.Placed.__command__ is Order.Place
+            assert Widget.Place.Placed.__aggregate__ == "Widget"
+            assert Widget.Place.Placed.__command__ is Widget.Place
 
     def when_nested_in_non_aggregate_class():
 
@@ -449,16 +462,16 @@ def describe_DomainEvent():
     def when_subclass_of_validated_event():
 
         def it_inherits_aggregate_and_command_attrs():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Place(Command):
                     class Placed(DomainEvent):
                         order_id: str = ""
 
-            class FastPlaced(Order.Place.Placed):
+            class FastPlaced(Widget.Place.Placed):
                 priority: int = 0
 
-            assert FastPlaced.__aggregate__ == "Order"
-            assert FastPlaced.__command__ is Order.Place
+            assert FastPlaced.__aggregate__ == "Widget"
+            assert FastPlaced.__command__ is Widget.Place
 
     def when_multiple_commands_and_outcomes_in_one_aggregate():
         # Invariant-pinning test for the two-pass `__aggregate__` stamping in
@@ -468,7 +481,7 @@ def describe_DomainEvent():
         # this test ensures every nested DomainEvent ends up stamped.
 
         def it_stamps_every_nested_outcome():
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Place(Command):
                     class Placed(DomainEvent):
                         order_id: str = ""
@@ -481,11 +494,11 @@ def describe_DomainEvent():
                         tracking: str = ""
 
             for outcome, parent_cmd in [
-                (Order.Place.Placed, Order.Place),
-                (Order.Place.Rejected, Order.Place),
-                (Order.Ship.Shipped, Order.Ship),
+                (Widget.Place.Placed, Widget.Place),
+                (Widget.Place.Rejected, Widget.Place),
+                (Widget.Ship.Shipped, Widget.Ship),
             ]:
-                assert outcome.__aggregate__ == "Order"
+                assert outcome.__aggregate__ == "Widget"
                 assert outcome.__command__ is parent_cmd
 
 

@@ -4180,16 +4180,16 @@ def describe_OrphanedEventWarning():
         def it_does_not_warn_for_terminal_domain_event_outcomes():
             # DomainEvents nested inside a Command are terminal outcomes —
             # having no subscriber is idiomatic DDD, not an orphan.
-            class Order(Aggregate):
+            class Widget(Aggregate):
                 class Place(Command):
                     customer_id: str = ""
 
                     class Placed(DomainEvent):
                         order_id: str = ""
 
-                    def handle(self) -> "Order.Place.Placed":
-                        return Order.Place.Placed(order_id="o1")
+                    def handle(self) -> "Widget.Place.Placed":
+                        return Widget.Place.Placed(order_id="o1")
 
             with warnings.catch_warnings():
                 warnings.simplefilter("error", OrphanedEventWarning)
-                EventGraph([Order.Place])
+                EventGraph([Widget.Place])

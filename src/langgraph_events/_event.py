@@ -80,6 +80,13 @@ class Aggregate:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        existing = _AGGREGATE_REGISTRY.get(cls.__name__)
+        if existing is not None and existing is not cls:
+            raise TypeError(
+                f"Aggregate {cls.__name__!r} is already defined at "
+                f"{existing.__module__}.{existing.__qualname__}. Aggregate "
+                f"class names must be unique within a process."
+            )
         cls.__aggregate_name__ = cls.__name__
         cls.__reducers__ = _collect_aggregate_reducers(cls)
         _AGGREGATE_REGISTRY[cls.__aggregate_name__] = cls

@@ -92,3 +92,20 @@ def linear_chain():
         return Ended(result=f"done:{event.data}")
 
     return EventGraph([step1, step2])
+
+
+@pytest.fixture(autouse=True)
+def _reset_aggregate_registry():
+    """Restore ``_AGGREGATE_REGISTRY`` after each test.
+
+    Aggregate names are enforced unique process-wide. Tests that define their
+    own ``class X(Aggregate)`` would otherwise leak into the registry and
+    collide with later tests using the same short name. conftest-scoped
+    aggregates (e.g. ``Order``) are captured in the snapshot and survive.
+    """
+    from langgraph_events import _event as _e
+
+    snapshot = dict(_e._AGGREGATE_REGISTRY)
+    yield
+    _e._AGGREGATE_REGISTRY.clear()
+    _e._AGGREGATE_REGISTRY.update(snapshot)

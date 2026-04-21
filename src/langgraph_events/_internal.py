@@ -525,7 +525,11 @@ def _assert_return_matches(
 
     allowed = contract.types
     if not allowed:
-        return
+        raise TypeError(
+            f"{handler_desc} returned {type(result).__name__} but "
+            f"{contract.source} permits only None. Remove the annotation or "
+            f"widen it to include the event type(s) this handler returns."
+        )
     if not isinstance(result, allowed):
         allowed_names = " | ".join(t.__name__ for t in allowed)
         raise TypeError(

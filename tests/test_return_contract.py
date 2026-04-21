@@ -90,6 +90,17 @@ def describe_return_contract():
                 # No violation — None is always allowed.
                 graph.invoke(Order.Place(customer_id="c1"))
 
+        def when_handler_annotated_none_returns_event():
+
+            def it_raises():
+                @on(Order.Place)
+                def cheat(event: Order.Place) -> None:
+                    return Alien.Do.Stuff()  # type: ignore[return-value]
+
+                graph = EventGraph([cheat])
+                with pytest.raises(TypeError, match=r"permits only None"):
+                    graph.invoke(Order.Place(customer_id="c1"))
+
     def describe_annotated_non_command_handler():
 
         def when_return_matches_annotation():
