@@ -486,12 +486,12 @@ class FrontendToolCallRequested(Interrupted):
 
     Mirrors the ``ApprovalRequested(Interrupted)`` pattern — tool calls
     become "HITL with typed fields," exactly as the AG-UI spec positions
-    them.  Fields are ordered so dataclass defaults follow non-defaults::
+    them::
 
         FrontendToolCallRequested(name="confirm", args={"message": "Ship?"})
     """
 
-    name: str = ""
+    name: str
     args: dict[str, Any] = field(default_factory=dict)
     tool_call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 

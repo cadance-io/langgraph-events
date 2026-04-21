@@ -328,6 +328,12 @@ def describe_FrontendToolCallRequested():
             with pytest.raises(ValueError, match=r"non-empty tool name"):
                 FrontendToolCallRequested(name="   ")
 
+    def when_no_args():
+
+        def it_raises_missing_name():
+            with pytest.raises(TypeError, match=r"missing.*name"):
+                FrontendToolCallRequested()  # type: ignore[call-arg]
+
 
 def describe_Aggregate():
 

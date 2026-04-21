@@ -362,6 +362,14 @@ def _expand_command_handlers(
                     f"Either define `handle` inside the command class or "
                     f"register a handler via @on({h.__qualname__})."
                 )
+            existing = getattr(fn, "_inline_command", None)
+            if existing is not None and existing is not h:
+                raise TypeError(
+                    f"Command {h.__qualname__}'s `handle` is already bound "
+                    f"to {existing.__qualname__}. This happens if you alias "
+                    f"`handle` across Command classes — define each "
+                    f"Command's `handle` in its own class body."
+                )
             on(h)(fn)  # sets fn._event_types = (h,); idempotent
             fn._inline_command = h
             expanded.append(fn)

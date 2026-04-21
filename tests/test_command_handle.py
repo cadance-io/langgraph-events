@@ -374,3 +374,28 @@ def describe_Command_handle():
 
             def it_accepts_if_all_outcomes_present():
                 EventGraph([Shop10.Buy])
+
+
+def describe_handle_aliased_across_commands():
+
+    def when_second_command_reuses_first_handle():
+
+        def it_raises():
+            class LeftAgg(Aggregate):
+                class Do(Command):
+                    class Done(DomainEvent):
+                        pass
+
+                    def handle(self) -> LeftAgg.Do.Done:
+                        return LeftAgg.Do.Done()
+
+            class RightAgg(Aggregate):
+                class Do(Command):
+                    class Done(DomainEvent):
+                        pass
+
+            RightAgg.Do.__command_handler__ = LeftAgg.Do.__command_handler__
+
+            EventGraph([LeftAgg.Do])
+            with pytest.raises(TypeError, match=r"already bound"):
+                EventGraph([RightAgg.Do])
