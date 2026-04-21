@@ -8,6 +8,7 @@ import warnings
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command as LGCommand
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._domain import DomainModel
@@ -25,7 +26,12 @@ from langgraph_events._event import (
     Scatter,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import HandlerMeta, extract_handler_meta, on
+from langgraph_events._handler import (
+    HandlerMeta,
+    _resolve_type_hints,
+    extract_handler_meta,
+    on,
+)
 from langgraph_events._internal import (
     _BASE_FIELDS,
     _InputState,
@@ -92,7 +98,7 @@ class ReturnContract(NamedTuple):
 def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     """Parse handler return annotation into a ``ReturnInfo``."""
     try:
-        hints = typing.get_type_hints(fn)
+        hints = _resolve_type_hints(fn)
     except Exception as exc:
         warnings.warn(
             f"Failed to resolve return type hints for handler {fn.__qualname__!r}; "
@@ -769,9 +775,7 @@ class EventGraph:
         then a ``Resumed`` event is created alongside it.
         """
         self._require_checkpointer("resume")
-        from langgraph.types import Command  # noqa: PLC0415
-
-        return self._run(Command(resume=value), **kwargs)
+        return self._run(LGCommand(resume=value), **kwargs)
 
     async def aresume(self, value: Event, **kwargs: Any) -> EventLog:
         """Async version of resume().
@@ -780,9 +784,7 @@ class EventGraph:
         then a ``Resumed`` event is created alongside it.
         """
         self._require_checkpointer("aresume")
-        from langgraph.types import Command  # noqa: PLC0415
-
-        return await self._arun(Command(resume=value), **kwargs)
+        return await self._arun(LGCommand(resume=value), **kwargs)
 
     def get_state(self, config: Any) -> GraphState:
         """Get event-level state of a checkpointed thread."""
@@ -1135,11 +1137,11 @@ class EventGraph:
                 a list of reducer names for selective inclusion.
         """
         self._require_checkpointer("stream_resume")
-        from langgraph.types import Command  # noqa: PLC0415
-
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
-        yield from self._stream_sync(Command(resume=value), [], reducer_names, **kwargs)
+        yield from self._stream_sync(
+            LGCommand(resume=value), [], reducer_names, **kwargs
+        )
 
     async def _astream_entry(
         self,
@@ -1195,10 +1197,8 @@ class EventGraph:
                 from LangGraph.
         """
         self._require_checkpointer("astream_resume")
-        from langgraph.types import Command  # noqa: PLC0415
-
         async for item in self._astream_entry(
-            Command(resume=value),
+            LGCommand(resume=value),
             [],
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,

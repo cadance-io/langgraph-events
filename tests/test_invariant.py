@@ -297,3 +297,18 @@ def describe_invariants():
                     graph = EventGraph([place, react])
                     log = graph.invoke(Order.Place(customer_id="c1"))
                     assert log.has(InvariantViolated)
+
+    def describe_decoration_time_validation():
+
+        def when_invariant_subclass_requires_fields():
+
+            def it_raises():
+                class NeedsReason(Invariant):
+                    def __init__(self, reason: str) -> None:
+                        self.reason = reason
+
+                with pytest.raises(TypeError, match=r"zero-arg instantiable"):
+
+                    @on(Order.Place, invariants={NeedsReason: lambda log: False})
+                    def place(event: Order.Place) -> Order.Place.Placed:
+                        return Order.Place.Placed(order_id="o1")

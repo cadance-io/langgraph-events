@@ -53,6 +53,16 @@ def _validate_invariants(
                 f"@on() invariants= predicate for {inv_cls.__name__!r} must "
                 f"be sync, got async function {pred.__qualname__!r}"
             )
+        try:
+            inv_cls()
+        except TypeError as exc:
+            raise TypeError(
+                f"@on() invariants= Invariant subclass {inv_cls.__name__!r} "
+                f"must be zero-arg instantiable; the framework calls "
+                f"{inv_cls.__name__}() at violation time purely for "
+                f"isinstance matching. Remove required fields from the "
+                f"subclass body. Got: {exc}"
+            ) from exc
         validated.append((inv_cls, pred))
     return tuple(validated)
 
