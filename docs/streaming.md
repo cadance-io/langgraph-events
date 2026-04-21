@@ -6,13 +6,12 @@ All `invoke`/`stream` methods have async counterparts: `ainvoke()`, `astream_eve
 
 ```python
 # Async stream with real-time LLM token deltas and passthrough custom frames
-from langgraph_events import (
+from langgraph_events import emit_custom, emit_state_snapshot
+from langgraph_events.stream import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,
     StateSnapshotFrame,
-    emit_state_snapshot,
-    emit_custom,
 )
 
 

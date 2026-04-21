@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
     from langchain_core.messages import BaseMessage
 
-    from langgraph_events._event import Event
+    from langgraph_events._event import Aggregate, Event
     from langgraph_events._types import ReducerFn
 
 
@@ -39,16 +39,40 @@ def _last_write_wins(existing: Any, new: Any) -> Any:
     return new
 
 
+def _matches_aggregate(event: Any, agg: type[Aggregate] | None) -> bool:
+    """Return True if *event* belongs to *agg* (or *agg* is None = no filter)."""
+    if agg is None:
+        return True
+    return getattr(type(event), "__aggregate__", None) == agg.__aggregate_name__
+
+
 class BaseReducer(ABC):
     """Abstract base for all reducer types.
 
     Subclasses declare ``event_type`` so the framework can filter events
     before calling ``fn``.  Use a ``@runtime_checkable Protocol`` for
     structural multi-type matching.
+
+    When declared as a class attribute on an ``Aggregate`` subclass, the
+    reducer's ``name`` auto-fills from the attribute name and ``aggregate``
+    auto-fills to the enclosing class — both via ``__set_name__``.
     """
 
     name: str
     event_type: type
+    aggregate: type[Aggregate] | None
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        # __set_name__ runs before Aggregate.__init_subclass__ stamps
+        # __aggregate_name__, so duck-typing via hasattr won't work here.
+        # Runtime import avoids module-level circular dependency.
+        from langgraph_events._event import Aggregate  # noqa: PLC0415
+
+        if isinstance(owner, type) and issubclass(owner, Aggregate):
+            if not self.name:
+                self.name = name
+            if self.aggregate is None:
+                self.aggregate = owner
 
     @abstractmethod
     def state_annotation(self) -> Any:
@@ -105,11 +129,12 @@ class Reducer(BaseReducer):
             ...
     """
 
-    name: str
-    event_type: type
-    fn: Callable[[Any], list[Any]]
-    reducer: ReducerFn = field(default=operator.add)
-    default: list[Any] = field(default_factory=list)
+    name: str = ""
+    event_type: type = field(kw_only=True)
+    fn: Callable[[Any], list[Any]] = field(kw_only=True)
+    reducer: ReducerFn = field(kw_only=True, default=operator.add)
+    default: list[Any] = field(kw_only=True, default_factory=list)
+    aggregate: type[Aggregate] | None = field(kw_only=True, default=None)
 
     def state_annotation(self) -> Any:
         return Annotated[list, self.reducer]
@@ -121,15 +146,18 @@ class Reducer(BaseReducer):
     def collect(self, events: list[Event]) -> Any:
         contributions: list[Any] = []
         for event in events:
-            if isinstance(event, self.event_type):
-                contrib = self.fn(event)
-                if contrib:
-                    if not isinstance(contrib, list):
-                        raise TypeError(
-                            f"Reducer {self.name!r} fn must return a list, "
-                            f"got {type(contrib).__name__}"
-                        )
-                    contributions.extend(contrib)
+            if not isinstance(event, self.event_type):
+                continue
+            if not _matches_aggregate(event, self.aggregate):
+                continue
+            contrib = self.fn(event)
+            if contrib:
+                if not isinstance(contrib, list):
+                    raise TypeError(
+                        f"Reducer {self.name!r} fn must return a list, "
+                        f"got {type(contrib).__name__}"
+                    )
+                contributions.extend(contrib)
         return contributions
 
     def has_contributions(self, result: Any) -> bool:
@@ -169,10 +197,11 @@ class ScalarReducer(BaseReducer):
             ...
     """
 
-    name: str
-    event_type: type
-    fn: Callable[[Any], Any]
-    default: Any = None
+    name: str = ""
+    event_type: type = field(kw_only=True)
+    fn: Callable[[Any], Any] = field(kw_only=True)
+    default: Any = field(kw_only=True, default=None)
+    aggregate: type[Aggregate] | None = field(kw_only=True, default=None)
 
     def state_annotation(self) -> Any:
         return Annotated[Any, _last_write_wins]
@@ -184,8 +213,11 @@ class ScalarReducer(BaseReducer):
     def collect(self, events: list[Event]) -> Any:
         last: Any = SKIP
         for event in events:
-            if isinstance(event, self.event_type):
-                last = event
+            if not isinstance(event, self.event_type):
+                continue
+            if not _matches_aggregate(event, self.aggregate):
+                continue
+            last = event
         return self.fn(last) if last is not SKIP else SKIP
 
     def has_contributions(self, result: Any) -> bool:

@@ -1,9 +1,10 @@
 """Multi-Agent Supervisor — langgraph-events demo.
 
 Demonstrates a supervisor/coordinator pattern where typed events route tasks
-to specialist agents automatically. The supervisor emits `ResearchDispatched`
-or `CodeDispatched` events and specialist handlers are wired implicitly via
-`@on` — no routing functions, no subgraph state adapters.
+to specialist agents automatically. The supervisor handler subscribes to the
+``Task.Run`` command and to each specialist's completion event, and emits
+sub-commands (``Task.Research``, ``Task.Code``) or the final ``Finalized``
+fact — no routing functions, no subgraph state adapters.
 
 The **Auditable trait** auto-logs every event as it flows, replacing manual
 isinstance printing with a single side-effect handler.
@@ -22,10 +23,19 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-from langgraph_events import Auditable, Event, EventGraph, EventLog, Reducer, on
+from langgraph_events import (
+    Aggregate,
+    Auditable,
+    Command,
+    DomainEvent,
+    EventGraph,
+    EventLog,
+    Reducer,
+    on,
+)
 
 # ---------------------------------------------------------------------------
-# Events (past-participle: "what just happened")
+# Aggregate: Task
 # ---------------------------------------------------------------------------
 
 
@@ -36,38 +46,44 @@ class Contextualizable(Protocol):
     def context_part(self) -> str: ...
 
 
-class TaskReceived(Auditable):
-    task: str = ""
+class Task(Aggregate, Auditable):
+    """A coordinated multi-step task.
 
-    def context_part(self) -> str:
-        return f"[User Task] {self.task}"
+    ``Run`` is the user intent — the entry command. The supervisor handler
+    picks it up (and each specialist completion) and dispatches either a
+    ``Research`` or ``Code`` sub-command, or emits the ``Finalized`` fact
+    when enough context has been gathered.
+    """
 
+    class Run(Command, Auditable):
+        description: str = ""
 
-class ResearchDispatched(Auditable):
-    query: str = ""
+        def context_part(self) -> str:
+            return f"[User Task] {self.description}"
 
+    class Research(Command, Auditable):
+        query: str = ""
 
-class CodeDispatched(Auditable):
-    spec: str = ""
-    context: str = ""
+        class Completed(DomainEvent, Auditable):
+            findings: str = ""
 
+            def context_part(self) -> str:
+                return f"[Research Result] {self.findings}"
 
-class ResearchCompleted(Auditable):
-    findings: str = ""
+    class Code(Command, Auditable):
+        spec: str = ""
+        context: str = ""
 
-    def context_part(self) -> str:
-        return f"[Research Result] {self.findings}"
+        class Produced(DomainEvent, Auditable):
+            code: str = ""
 
+            def context_part(self) -> str:
+                return f"[Code Result]\n{self.code}"
 
-class CodeProduced(Auditable):
-    code: str = ""
+    class Finalized(DomainEvent, Auditable):
+        """Final synthesized answer — terminal domain fact."""
 
-    def context_part(self) -> str:
-        return f"[Code Result]\n{self.code}"
-
-
-class ResultFinalized(Auditable):
-    answer: str = ""
+        answer: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -129,16 +145,18 @@ def audit_trail(event: Auditable) -> None:
     print(f"  {event.trail()}")
 
 
-@on(TaskReceived, ResearchCompleted, CodeProduced)
+@on(Task.Run, Task.Research.Completed, Task.Code.Produced)
 async def supervisor(
-    event: Event, log: EventLog, context_parts: list
-) -> ResearchDispatched | CodeDispatched | ResultFinalized:
+    event: Task.Run | Task.Research.Completed | Task.Code.Produced,
+    log: EventLog,
+    context_parts: list,
+) -> Task.Research | Task.Code | Task.Finalized:
     """Supervisor hub — decides next step based on accumulated results.
 
-    Fires on the initial TaskReceived, and again whenever a specialist reports
-    back. Uses tool-calling to make structured routing decisions.
-    The ``context_parts`` reducer is maintained incrementally by the
-    framework — no rebuild needed.
+    Fires on the initial ``Task.Run``, and again whenever a specialist reports
+    back (``Task.Research.Completed`` / ``Task.Code.Produced``). Uses
+    tool-calling to make structured routing decisions. The ``context_parts``
+    reducer is maintained incrementally by the framework — no rebuild needed.
     """
     context = "\n\n".join(context_parts)
     messages = [
@@ -161,17 +179,17 @@ async def supervisor(
     tc = response.tool_calls[0]
 
     if tc["name"] == "delegate_research":
-        return ResearchDispatched(query=tc["args"]["query"])
+        return Task.Research(query=tc["args"]["query"])
     elif tc["name"] == "delegate_code":
-        research = log.latest(ResearchCompleted)
+        research = log.latest(Task.Research.Completed)
         context_str = research.findings if research else ""
-        return CodeDispatched(spec=tc["args"]["spec"], context=context_str)
+        return Task.Code(spec=tc["args"]["spec"], context=context_str)
     else:
-        return ResultFinalized(answer=tc["args"]["answer"])
+        return Task.Finalized(answer=tc["args"]["answer"])
 
 
-@on(ResearchDispatched)
-async def researcher(event: ResearchDispatched) -> ResearchCompleted:
+@on(Task.Research)
+async def researcher(event: Task.Research) -> Task.Research.Completed:
     """Research specialist — answers research queries."""
     messages = [
         SystemMessage(
@@ -183,11 +201,11 @@ async def researcher(event: ResearchDispatched) -> ResearchCompleted:
         HumanMessage(content=event.query),
     ]
     response = await researcher_llm.ainvoke(messages)
-    return ResearchCompleted(findings=response.content)
+    return Task.Research.Completed(findings=response.content)
 
 
-@on(CodeDispatched)
-async def coder(event: CodeDispatched) -> CodeProduced:
+@on(Task.Code)
+async def coder(event: Task.Code) -> Task.Code.Produced:
     """Coding specialist — writes code based on specs."""
     prompt = event.spec
     if event.context:
@@ -204,7 +222,7 @@ async def coder(event: CodeDispatched) -> CodeProduced:
         HumanMessage(content=prompt),
     ]
     response = await coder_llm.ainvoke(messages)
-    return CodeProduced(code=response.content)
+    return Task.Code.Produced(code=response.content)
 
 
 # ---------------------------------------------------------------------------
@@ -218,28 +236,28 @@ graph = EventGraph(
 )
 
 
-async def main():
+async def main() -> None:
     task = "Research what FastAPI is, then write a simple hello world API endpoint."
     print(f"Task: {task}\n")
     print("--- Event Flow ---")
 
-    log = await graph.ainvoke(TaskReceived(task=task))
+    log = await graph.ainvoke(Task.Run(description=task))
 
     # Show the specialist outputs
     print()
-    research = log.latest(ResearchCompleted)
+    research = log.latest(Task.Research.Completed)
     if research:
         print("=== Research Findings ===")
         print(research.findings)
         print()
 
-    code = log.latest(CodeProduced)
+    code = log.latest(Task.Code.Produced)
     if code:
         print("=== Generated Code ===")
         print(code.code)
         print()
 
-    result = log.latest(ResultFinalized)
+    result = log.latest(Task.Finalized)
     print("=== Final Result ===")
     print(result.answer)
 

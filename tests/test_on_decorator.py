@@ -5,7 +5,15 @@ import warnings
 
 import pytest
 
-from langgraph_events import Event, EventGraph, EventLog, HandlerRaised, on
+from langgraph_events import (
+    Event,
+    EventGraph,
+    EventLog,
+    HandlerRaised,
+    IntegrationEvent,
+    Invariant,
+    on,
+)
 from langgraph_events._event import Interrupted, Resumed
 from langgraph_events._handler import extract_handler_meta
 
@@ -18,15 +26,31 @@ class _OtherError(Exception):
     pass
 
 
-class SampleEvent(Event):
+class SampleEvent(IntegrationEvent):
     x: int = 0
 
 
-class EventA(Event):
+class MustBeTrue(Invariant):
+    pass
+
+
+class RuleOne(Invariant):
+    pass
+
+
+class RuleTwo(Invariant):
+    pass
+
+
+class Rule(Invariant):
+    pass
+
+
+class EventA(IntegrationEvent):
     a: str = ""
 
 
-class EventB(Event):
+class EventB(IntegrationEvent):
     b: str = ""
 
 
@@ -58,13 +82,13 @@ def describe_on_decorator():
 
             assert handler._event_types == (EventA, EventB)
 
-    def when_no_arguments():
+    def when_no_arguments_and_handler_lacks_annotation():
 
         def it_raises_type_error():
-            with pytest.raises(TypeError, match="at least one"):
+            with pytest.raises(TypeError, match="no annotation"):
 
                 @on()
-                async def handler(event):
+                async def handler(event):  # type: ignore[no-untyped-def]
                     pass
 
     def when_non_event_class():
@@ -113,7 +137,7 @@ def describe_on_decorator():
     def when_field_matcher_value_is_not_event_subclass():
 
         def it_raises_type_error():
-            with pytest.raises(TypeError, match="Event or Exception"):
+            with pytest.raises(TypeError, match="Event, Exception, or Invariant"):
 
                 @on(Resumed, interrupted=str)  # type: ignore
                 def handler(event: Resumed):
@@ -131,28 +155,28 @@ def describe_on_decorator():
     def when_field_matcher_value_is_baseexception():
 
         def it_rejects_baseexception():
-            with pytest.raises(TypeError, match="Event or Exception"):
+            with pytest.raises(TypeError, match="Event, Exception, or Invariant"):
 
                 @on(HandlerRaised, exception=BaseException)  # type: ignore
                 def handler(event: HandlerRaised):
                     pass
 
         def it_rejects_keyboard_interrupt():
-            with pytest.raises(TypeError, match="Event or Exception"):
+            with pytest.raises(TypeError, match="Event, Exception, or Invariant"):
 
                 @on(HandlerRaised, exception=KeyboardInterrupt)  # type: ignore
                 def handler(event: HandlerRaised):
                     pass
 
         def it_rejects_system_exit():
-            with pytest.raises(TypeError, match="Event or Exception"):
+            with pytest.raises(TypeError, match="Event, Exception, or Invariant"):
 
                 @on(HandlerRaised, exception=SystemExit)  # type: ignore
                 def handler(event: HandlerRaised):
                     pass
 
         def it_rejects_cancelled_error():
-            with pytest.raises(TypeError, match="Event or Exception"):
+            with pytest.raises(TypeError, match="Event, Exception, or Invariant"):
 
                 @on(HandlerRaised, exception=asyncio.CancelledError)  # type: ignore
                 def handler(event: HandlerRaised):
@@ -260,6 +284,193 @@ def describe_on_decorator():
                 @on(Resumed, raises=EventA)  # type: ignore
                 def handler(event: Resumed):
                     pass
+
+    def when_invariants_single_entry_in_dict():
+
+        def it_accepts_and_stores_pair():
+            @on(SampleEvent, invariants={MustBeTrue: lambda log: True})
+            def handler(event: SampleEvent):
+                pass
+
+            assert len(handler._invariants) == 1
+            inv_cls, pred = handler._invariants[0]
+            assert inv_cls is MustBeTrue
+            assert callable(pred)
+
+    def when_invariants_multiple_entries_in_dict():
+
+        def it_accepts_all_in_insertion_order():
+            @on(
+                SampleEvent,
+                invariants={
+                    RuleOne: lambda log: True,
+                    RuleTwo: lambda log: False,
+                },
+            )
+            def handler(event: SampleEvent):
+                pass
+
+            assert len(handler._invariants) == 2
+            assert handler._invariants[0][0] is RuleOne
+            assert handler._invariants[1][0] is RuleTwo
+
+    def when_invariants_empty_dict():
+
+        def it_accepts_and_stores_empty():
+            @on(SampleEvent, invariants={})
+            def handler(event: SampleEvent):
+                pass
+
+            assert getattr(handler, "_invariants", ()) == ()
+
+    def when_invariants_omitted():
+
+        def it_defaults_to_empty():
+            @on(SampleEvent)
+            def handler(event: SampleEvent):
+                pass
+
+            assert getattr(handler, "_invariants", ()) == ()
+
+    def when_invariants_not_a_dict():
+
+        def it_rejects():
+            with pytest.raises(TypeError, match="dict"):
+
+                @on(SampleEvent, invariants=[(MustBeTrue, lambda log: True)])  # type: ignore
+                def handler(event: SampleEvent):
+                    pass
+
+    def when_invariants_key_is_str():
+
+        def it_rejects():
+            with pytest.raises(TypeError, match="Invariant subclass"):
+
+                @on(SampleEvent, invariants={"must be true": lambda log: True})  # type: ignore
+                def handler(event: SampleEvent):
+                    pass
+
+    def when_invariants_key_is_not_a_class():
+
+        def it_rejects():
+            with pytest.raises(TypeError, match="Invariant subclass"):
+
+                @on(SampleEvent, invariants={42: lambda log: True})  # type: ignore
+                def handler(event: SampleEvent):
+                    pass
+
+    def when_invariants_predicate_not_callable():
+
+        def it_rejects():
+            with pytest.raises(TypeError, match="callable"):
+
+                @on(SampleEvent, invariants={Rule: "not callable"})  # type: ignore
+                def handler(event: SampleEvent):
+                    pass
+
+    def when_invariants_predicate_is_async():
+
+        def it_rejects():
+            async def async_pred(log):
+                return True
+
+            with pytest.raises(TypeError, match="sync"):
+
+                @on(SampleEvent, invariants={Rule: async_pred})
+                def handler(event: SampleEvent):
+                    pass
+
+
+def describe_on_annotation_inference():
+
+    def describe_bare_form():
+
+        def when_first_parameter_annotated():
+
+            def it_infers_event_type_from_annotation():
+                @on
+                def handler(event: SampleEvent) -> None:
+                    return None
+
+                assert handler._event_types == (SampleEvent,)
+
+            def it_runs_end_to_end():
+                @on
+                def handler(event: SampleEvent) -> EventA:
+                    return EventA(a=f"x={event.x}")
+
+                graph = EventGraph([handler])
+                log = graph.invoke(SampleEvent(x=1))
+                assert log.latest(EventA).a == "x=1"
+
+            def it_supports_async_functions():
+                @on
+                async def handler(event: SampleEvent) -> EventA:
+                    await asyncio.sleep(0)
+                    return EventA(a="ok")
+
+                assert handler._event_types == (SampleEvent,)
+
+        def when_first_parameter_unannotated():
+
+            def it_rejects():
+                with pytest.raises(TypeError, match="no annotation"):
+
+                    @on
+                    def handler(event) -> None:  # type: ignore[no-untyped-def]
+                        return None
+
+        def when_annotation_not_event_subclass():
+
+            def it_rejects():
+                with pytest.raises(TypeError, match="Event subclass"):
+
+                    @on
+                    def handler(event: int) -> None:  # type: ignore[misc]
+                        return None
+
+        def when_annotation_is_a_union():
+
+            def it_rejects_and_points_to_explicit_form():
+                with pytest.raises(TypeError, match="multi-event"):
+
+                    @on
+                    def handler(event: EventA | EventB) -> None:  # type: ignore[misc]
+                        return None
+
+    def describe_modifiers_only_form():
+        # "Modifiers only" means no positional event type — @on(kwargs=...).
+        # The event type is inferred from the handler's first-param annotation.
+
+        def when_invariants_kwarg():
+
+            def it_is_applied_to_inferred_event_type():
+                @on(invariants={MustBeTrue: lambda log: True})
+                def handler(event: SampleEvent) -> None:
+                    return None
+
+                assert handler._event_types == (SampleEvent,)
+                assert handler._invariants[0][0] is MustBeTrue
+
+        def when_raises_kwarg():
+
+            def it_is_applied_to_inferred_event_type():
+                @on(raises=_DomainError)
+                def handler(event: SampleEvent) -> None:
+                    return None
+
+                assert handler._event_types == (SampleEvent,)
+                assert handler._raises == (_DomainError,)
+
+        def when_field_matcher_kwarg():
+
+            def it_is_applied_to_inferred_event_type():
+                @on(interrupted=ApprovalRequested)
+                def handler(event: Resumed) -> None:
+                    return None
+
+                assert handler._event_types == (Resumed,)
+                assert handler._field_matchers == {"interrupted": ApprovalRequested}
 
 
 def describe_extract_handler_meta():
@@ -399,7 +610,7 @@ def describe_extract_handler_meta():
                 pass
 
             meta = extract_handler_meta(handler)
-            assert meta.field_matchers == (("interrupted", ApprovalRequested),)
+            assert meta.field_matchers == (("interrupted", ApprovalRequested, True),)
 
         def it_identifies_field_inject_params_from_signature():
             @on(Resumed, interrupted=ApprovalRequested)
@@ -500,4 +711,4 @@ def describe_return_hint_parsing():
                     "Failed to resolve return type hints" in msg for msg in messages
                 )
                 assert all(item.filename == __file__ for item in w)
-                assert "-->|handler| ?" in graph.mermaid()
+                assert "-->|handler| ?" in graph.domain().mermaid()

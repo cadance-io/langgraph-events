@@ -1,6 +1,6 @@
 # AG-UI Protocol Adapter
 
-[AG-UI](https://docs.ag-ui.com) is an open protocol (by CopilotKit) for streaming agent events to frontends. The `langgraph_events.agui` subpackage maps EventGraph streams to AG-UI SSE events, so any AG-UI-compatible frontend (CopilotKit, custom UIs) can consume your event-driven agents without custom wiring.
+[AG-UI](https://docs.ag-ui.com) is an open protocol (by CopilotKit) for streaming agent events to frontends. The `langgraph_events.agui` subpackage maps EventGraph streams to AG-UI SSE events.
 
 ```
 RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> SSE
@@ -10,7 +10,7 @@ RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> S
 RunAgentInput -> AGUIAdapter.connect/reconnect -> checkpoint snapshots + interrupts
 ```
 
-`AGUIAdapter` enables real-time assistant token streaming by default (it internally uses `include_llm_tokens=True`) and custom-event passthrough (it internally uses `include_custom_events=True`), emitting `TextMessageStart`/`TextMessageContent`/`TextMessageEnd` while the model is generating. The adapter requires `message_reducer()` on the `EventGraph` for authoritative message delivery.
+`AGUIAdapter` streams LLM tokens and passthrough custom events by default, emitting `TextMessageStart` / `Content` / `End` during generation. Requires `message_reducer()` on the `EventGraph` for authoritative message delivery.
 
 ## Install
 
@@ -87,20 +87,13 @@ Events flow through a priority chain of mappers. The first mapper to claim an ev
 
 Events without `agui_dict()` are skipped with a one-time warning.
 
-`StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (`include_reducers` defaults to `True`). The `message_reducer()` must be registered on the `EventGraph` for `MessagesSnapshot` delivery.
+Outside the mapper chain, the adapter also emits:
 
-When reducer delta metadata is available (`StreamFrame.changed_reducers`, emitted by `EventGraph` v2 streaming), the adapter suppresses redundant snapshots:
+- `StateSnapshot` / `MessagesSnapshot` from `StreamFrame` reducer data (`include_reducers` defaults to `True`; `MessagesSnapshot` requires `message_reducer()`). When `changed_reducers` is available, redundant snapshots are skipped.
+- `StateSnapshot` for `StateSnapshotFrame`; `CustomEvent` for `CustomEventFrame` (name/value passthrough).
+- Lifecycle: `RunStarted`, `RunFinished`, or `RunError` on exception.
 
-- `MessagesSnapshot` is emitted only when the `messages` reducer changed.
-- `StateSnapshot` is emitted once initially, then only when non-dedicated reducers changed.
-
-Messages are delivered through two complementary mechanisms: `MessagesSnapshot` provides authoritative message state from the `message_reducer()`, while LLM tokens stream in real-time as `TextMessageStart`/`TextMessageContent`/`TextMessageEnd` for character-by-character UX. AG-UI clients reconcile the two.
-
-`StateSnapshotFrame` is handled outside the mapper chain as AG-UI `StateSnapshot`.
-
-`CustomEventFrame` passthrough is also handled outside the mapper chain as AG-UI `CustomEvent` with `name`/`value` copied through.
-
-The adapter also emits lifecycle events automatically: `RunStarted` at the beginning, `RunFinished` at the end (or `RunError` on exception).
+Messages are delivered via two channels — authoritative `MessagesSnapshot` from the reducer, plus real-time `TextMessageStart` / `Content` / `End` tokens. AG-UI clients reconcile them.
 
 ## Connect / Reconnect
 
@@ -110,19 +103,11 @@ For page refreshes and reconnects, use `connect()` to emit checkpoint-backed sta
 events = [event async for event in adapter.connect(input_data)]
 ```
 
-`connect()` emits:
-
-- `StateSnapshot` from checkpoint reducers (empty `{}` for new threads)
-- `MessagesSnapshot` from the `messages` reducer (empty `[]` for new threads or when no messages reducer is present)
-- pending `Interrupted` events (mapped via the normal mapper chain)
-
-`reconnect()` is an alias for `connect()`.
-
-This is the general HITL rehydration path; it restores UI state and pending interrupts without advancing the graph.
+`connect()` emits `StateSnapshot` + `MessagesSnapshot` from the checkpoint (empty for new threads) and any pending `Interrupted` events. `reconnect()` is an alias. Restores UI state without advancing the graph.
 
 ## Endpoint Pattern (Run + Connect)
 
-AG-UI does not require fixed endpoint names. A practical pattern is to expose separate execution and rehydration endpoints:
+AG-UI doesn't mandate endpoint names. A practical split:
 
 ```python
 from fastapi import FastAPI, Request
@@ -144,10 +129,7 @@ async def connect(request: Request):
     return create_starlette_response(adapter.connect(input_data))
 ```
 
-Recommended client behavior:
-
-- call `connect` on page load/refresh to rehydrate state and pending interrupts
-- call `stream` only when starting or resuming execution
+Client: call `connect` on page load/refresh; call `stream` only to start or resume execution.
 
 ## Custom Mappers
 
@@ -159,7 +141,7 @@ from langgraph_events.agui import EventMapper, MapperContext
 from langgraph_events import Event
 
 
-class PlanningStarted(Event):
+class PlanningStarted(IntegrationEvent):
     goal: str
 
 
@@ -186,7 +168,7 @@ from ag_ui.core import RunAgentInput
 from langgraph_events.agui import ResumeFactory
 
 
-class ApprovalSubmitted(Event):
+class ApprovalSubmitted(IntegrationEvent):
     approved: bool
 
 
@@ -194,12 +176,8 @@ def resume_factory(
     input_data: RunAgentInput,
     checkpoint_state: dict[str, Any] | None,
 ) -> Event | None:
-    # checkpoint_state includes:
-    # - reducers: full reducer snapshot dict
-    # - events: reducer-projected event list (if present)
-    # - messages: reducer-projected messages (if present)
-    # - pending_interrupts: pending Interrupted payloads
-    # - is_interrupted: bool
+    # checkpoint_state: CheckpointState TypedDict with reducers, events,
+    # messages, pending_interrupts, is_interrupted, snapshot.
     state = input_data.state or {}
     if "approved" in state:
         return ApprovalSubmitted(approved=state["approved"])
@@ -213,9 +191,7 @@ adapter = AGUIAdapter(
 )
 ```
 
-When `resume_factory` returns an `Event`, the adapter uses `graph.astream_resume()` internally instead of `graph.astream_events()`. When it returns `None`, a fresh run is started with the `seed_factory`.
-
-The second `checkpoint_state` argument is optional; one-argument factories continue to work.
+Returning an `Event` triggers `graph.astream_resume()`; `None` starts a fresh run via `seed_factory`. The `checkpoint_state` argument is optional — one-argument factories still work.
 
 ## Frontend Tools
 
@@ -256,10 +232,37 @@ async def call_llm(event, messages, log):
     return LLMResponded(message=await llm.ainvoke(messages))
 ```
 
-Runnable examples:
+Runnable example: [`examples/ddd_conversation.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_conversation.py) wires AG-UI frontend tools end-to-end (LLM-initiated streaming path) inside a DDD aggregate with content moderation.
 
-- [`examples/agui_frontend_tools.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_frontend_tools.py) — LLM-initiated path with a ReAct-style loop.
-- [`examples/agui_confirm_dialog.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_confirm_dialog.py) — handler-initiated path (deterministic HITL).
+### Handler-initiated frontend tools
+
+When the backend — not the LLM — wants to ask the frontend for something (confirm dialogs, file pickers, deterministic prompts), return a typed `FrontendToolCallRequested(Interrupted)` from a handler. The graph pauses; the AG-UI adapter streams the matching `ToolCallStart` / `ToolCallArgs` / `ToolCallEnd` triple; when the frontend's `useFrontendTool` handler returns, the resume factory surfaces the returning tool message as a typed event and the graph continues. Tool calls become "HITL with typed fields" — same machinery as `ApprovalRequested(Interrupted)`, just for frontend interactions.
+
+```python
+from langgraph_events import FrontendToolCallRequested, on
+from langgraph_events.agui import detect_new_tool_results
+
+
+@on(ShipCommandReceived)
+def request_confirmation(event: ShipCommandReceived) -> FrontendToolCallRequested:
+    return FrontendToolCallRequested(
+        name="confirm",  # must match a useFrontendTool({ name: "confirm", ... }) registration
+        args={"prompt": f"Ship release {event.release}?"},
+    )
+
+
+def resume_factory(input_data, checkpoint_state=None):
+    results = detect_new_tool_results(input_data, checkpoint_state)
+    if not results:
+        return None
+    return UserConfirmed(messages=tuple(results))
+
+
+@on(UserConfirmed)
+def ship(event: UserConfirmed) -> ShippedRelease:
+    approved = bool(json.loads(event.messages[0].content).get("approved"))
+    return ShippedRelease(release="v1", approved=approved)
+```
 
 **`useCopilotAction` (v1) vs `useFrontendTool` (v2).** The v1 hook consumes tool calls from `MessagesSnapshot` — the existing `MessagesSnapshot` path already covers it unchanged. The v2 hook needs the streaming `ToolCallStart/Args/End` events that this section describes. Both paths coexist: CopilotKit reconciles by `tool_call_id`.
 
@@ -279,19 +282,11 @@ Streaming-path errors propagate through the adapter's top-level handler and surf
 
 ## LangGraph Config Passthrough
 
-`AGUIAdapter.stream()` and `AGUIAdapter.connect()` accept LangGraph config via `RunAgentInput.forwarded_props`.
-
-Supported shapes:
-
-- `forwarded_props["langgraph_config"] = {...}`
-- `forwarded_props["config"] = {...}`
-- `forwarded_props = {...}` when it already looks like a LangGraph config
-
-The adapter always injects/overrides `configurable.thread_id` from `RunAgentInput.thread_id`, while preserving any other keys (for example `recursion_limit` or tenant/user routing keys in `configurable`).
+`stream()` and `connect()` accept LangGraph config via `RunAgentInput.forwarded_props` — keys `langgraph_config`, `config`, or the whole dict when it already looks like a LangGraph config. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`; other keys (e.g. `recursion_limit`, tenant routing) pass through.
 
 ## AG-UI Spec Coverage
 
-The adapter covers 9 of the 33 AG-UI event types automatically. The remaining types can be emitted via custom `EventMapper` implementations or are not applicable.
+Built-in for 9 of 33 event types; the rest via custom mappers or not applicable.
 
 | Category | Count | Event Types |
 |----------|-------|-------------|

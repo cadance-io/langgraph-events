@@ -16,13 +16,25 @@ nav:
   - Streaming: streaming.md
   - Patterns: patterns.md
   - API Reference: api.md
+  - Migrating from 0.3.0: migrating.md
   - AG-UI Adapter: agui.md
   - Checkpointer & Graph Evolution: checkpointer-evolution.md
 
 markdown_extensions:
+  - md_in_html
   - admonition
+  - attr_list
   - tables
   - toc:
       permalink: true
   - pymdownx.highlight
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_javascript:
+  - https://unpkg.com/mermaid@11/dist/mermaid.min.js

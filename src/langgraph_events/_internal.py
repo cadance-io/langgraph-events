@@ -23,6 +23,7 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerRaised,
+    InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
     Scatter,
@@ -255,6 +256,27 @@ def _make_handler_raised(
     )
 
 
+def _check_invariants(
+    meta: HandlerMeta, event: Event, state: StateDict
+) -> InvariantViolated | None:
+    """Evaluate handler invariants. Returns the first violation, or None.
+
+    Predicates are sync-only (validated at decoration). Predicate exceptions
+    propagate (do not become violations).
+    """
+    if not meta.invariants:
+        return None
+    log = EventLog(state["events"])
+    for inv_cls, predicate in meta.invariants:
+        if not predicate(log):
+            return InvariantViolated(  # type: ignore[call-arg]
+                invariant=inv_cls(),
+                handler=meta.name,
+                source_event=event,
+            )
+    return None
+
+
 def _check_sync_invocation_of_async(meta: HandlerMeta) -> None:
     """Raise if an async handler is invoked from within a running event loop.
 
@@ -305,9 +327,58 @@ async def _invoke_async_path(
     return meta.fn(event, **call_inject)
 
 
+def _process_events_sync(
+    meta: HandlerMeta,
+    matching: list[Event],
+    state: StateDict,
+    inject: dict[str, Any],
+    new_events: list[Event],
+    lg_interrupt: Any,
+    return_contract: Any = None,
+) -> None:
+    """Per-event invocation loop for the sync dispatch path."""
+    for event in matching:
+        violation = _check_invariants(meta, event, state)
+        if violation is not None:
+            new_events.append(violation)
+            continue
+        call_inject = _inject_fields(meta, event, inject)
+        try:
+            result = _invoke_sync_path(meta, event, call_inject)
+        except meta.raises as exc:
+            new_events.append(_make_handler_raised(meta, event, exc))
+            continue
+        _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+
+
+async def _process_events_async(
+    meta: HandlerMeta,
+    matching: list[Event],
+    state: StateDict,
+    inject: dict[str, Any],
+    new_events: list[Event],
+    lg_interrupt: Any,
+    return_contract: Any = None,
+) -> None:
+    """Per-event invocation loop for the async dispatch path."""
+    for event in matching:
+        violation = _check_invariants(meta, event, state)
+        if violation is not None:
+            new_events.append(violation)
+            continue
+        call_inject = _inject_fields(meta, event, inject)
+        try:
+            result = await _invoke_async_path(meta, event, call_inject)
+        except meta.raises as exc:
+            new_events.append(_make_handler_raised(meta, event, exc))
+            continue
+        _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+
+
 def make_handler_node(
     meta: HandlerMeta,
     reducers: dict[str, BaseReducer] | None = None,
+    return_contract: Any = None,
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
@@ -361,14 +432,15 @@ def make_handler_node(
             ),
         )
         try:
-            for event in matching:
-                call_inject = _inject_fields(meta, event, inject)
-                try:
-                    result = _invoke_sync_path(meta, event, call_inject)
-                except meta.raises as exc:
-                    new_events.append(_make_handler_raised(meta, event, exc))
-                    continue
-                _collect_result(result, new_events, lg_interrupt)
+            _process_events_sync(
+                meta,
+                matching,
+                state,
+                inject,
+                new_events,
+                lg_interrupt,
+                return_contract,
+            )
         finally:
             _reset_custom_emitters(tokens)
         return _finalize(new_events)
@@ -389,14 +461,15 @@ def make_handler_node(
             ),
         )
         try:
-            for event in matching:
-                call_inject = _inject_fields(meta, event, inject)
-                try:
-                    result = await _invoke_async_path(meta, event, call_inject)
-                except meta.raises as exc:
-                    new_events.append(_make_handler_raised(meta, event, exc))
-                    continue
-                _collect_result(result, new_events, lg_interrupt)
+            await _process_events_async(
+                meta,
+                matching,
+                state,
+                inject,
+                new_events,
+                lg_interrupt,
+                return_contract,
+            )
         except asyncio.CancelledError:
             return _finalize([Cancelled()])
         finally:
@@ -414,6 +487,8 @@ def _collect_result(
     result: HandlerReturn,
     new_events: list[Event],
     lg_interrupt: Callable[[Any], Any],
+    meta: HandlerMeta | None = None,
+    return_contract: Any = None,
 ) -> None:
     """Normalise handler return and handle Interrupted / Scatter."""
     if result is None:
@@ -425,4 +500,35 @@ def _collect_result(
             f"Handlers return a single event, None, or Scatter — never a list."
         )
 
+    if return_contract is not None:
+        _assert_return_matches(result, meta, return_contract)
+
     result._collect_into(new_events, lg_interrupt)
+
+
+def _assert_return_matches(
+    result: Event | Scatter, meta: HandlerMeta | None, contract: Any
+) -> None:
+    """Enforce that *result* satisfies the handler's ``ReturnContract``."""
+    handler_desc = f"Handler {meta.name!r}" if meta is not None else "Handler"
+    if isinstance(result, Scatter):
+        if contract.scatter_types:
+            allowed = contract.scatter_types
+            for ev in result.events:
+                if not isinstance(ev, allowed):
+                    allowed_names = " | ".join(t.__name__ for t in allowed)
+                    raise TypeError(
+                        f"{handler_desc} scattered a {type(ev).__name__}, "
+                        f"but {contract.source} only permits {allowed_names}"
+                    )
+        return
+
+    allowed = contract.types
+    if not allowed:
+        return
+    if not isinstance(result, allowed):
+        allowed_names = " | ".join(t.__name__ for t in allowed)
+        raise TypeError(
+            f"{handler_desc} must return one of {allowed_names} "
+            f"({contract.source}), got {type(result).__name__}"
+        )

@@ -7,9 +7,9 @@ from conftest import Ended, Started
 
 from langgraph_events import (
     Cancelled,
-    Event,
     EventGraph,
     HandlerRaised,
+    IntegrationEvent,
     emit_custom,
     on,
 )
@@ -29,11 +29,11 @@ class OtherError(Exception):
     """A second unrelated exception used for multi-raise tests."""
 
 
-class RecoveryRequested(Event):
+class RecoveryRequested(IntegrationEvent):
     handler: str = ""
 
 
-class FallbackRan(Event):
+class FallbackRan(IntegrationEvent):
     reason: str = ""
 
 
@@ -118,7 +118,7 @@ def describe_raises():
                 # The coverage check must not treat it as a universal catcher,
                 # otherwise the compile passes but the raise silently drops
                 # at runtime.
-                class OtherStart(Event):
+                class OtherStart(IntegrationEvent):
                     pass
 
                 @on(Started, raises=DomainError)
@@ -141,7 +141,7 @@ def describe_raises():
                 # catchers with any non-exception matcher. If this assertion
                 # fails, decide whether to relax the check or keep the
                 # conservative behaviour.)
-                class OtherStart(Event):
+                class OtherStart(IntegrationEvent):
                     pass
 
                 @on(Started, raises=DomainError)
@@ -371,7 +371,7 @@ def describe_raises():
         def when_handler_raises():
 
             async def it_still_delivers_custom_event():
-                from langgraph_events import CustomEventFrame
+                from langgraph_events.stream import CustomEventFrame
 
                 @on(Started, raises=DomainError)
                 def raiser(event: Started) -> Ended:

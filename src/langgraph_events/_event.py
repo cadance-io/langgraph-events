@@ -3,46 +3,41 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
+import operator
 import types
+import typing
 import uuid
 from dataclasses import field
 from dataclasses import fields as dc_fields
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage, SystemMessage
 
 
 class Event:
-    """Base class for all events.
+    """Internal base class for all events.
 
-    Subclasses are automatically made into frozen dataclasses, so you can
-    simply write::
+    Not intended for direct subclassing — use ``DomainEvent``,
+    ``IntegrationEvent``, ``Command``, or compose with ``Auditable`` /
+    ``MessageEvent``.  Direct subclassing raises ``TypeError``.
 
-        class DocumentReceived(Event):
-            doc_id: str
-            content: str
-
-    The ``@dataclass(frozen=True)`` decorator is no longer needed — it is
-    applied automatically by ``__init_subclass__``.
+    Valid as a type annotation (``event: Event``) and as a reducer
+    filter (``event_type=Event`` catches all events).
     """
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, *, _event_base: bool = False, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        # Auto-apply @dataclass(frozen=True) to every Event subclass.
-        # Check cls.__dict__ (not hasattr) because inherited
-        # __dataclass_fields__ from parent dataclasses would give a false
-        # positive with dataclasses.is_dataclass().
         if "__dataclass_fields__" not in cls.__dict__:
             dataclasses.dataclass(frozen=True)(cls)
-
-    def as_messages(self) -> list[BaseMessage]:
-        """Return LangChain messages represented by this event.
-
-        Default returns an empty list.  Override in ``MessageEvent``
-        subclasses to project events into the message stream.
-        """
-        return []
+        if Event in cls.__bases__ and not _event_base:
+            raise TypeError(
+                f"{cls.__name__!r} subclasses Event directly. Use one of: "
+                f"DomainEvent (inside Aggregate/Command), IntegrationEvent "
+                f"(cross-boundary facts), Command (inside Aggregate), or "
+                f"compose with Auditable / MessageEvent."
+            )
 
     def _collect_into(
         self,
@@ -56,8 +51,304 @@ class Event:
         new_events.append(self)
 
 
-class MessageEvent(Event):
+_AGGREGATE_REGISTRY: dict[str, type[Aggregate]] = {}
+"""Maps ``__aggregate_name__`` -> Aggregate class. Populated in
+``Aggregate.__init_subclass__``. Used by ``EventGraph`` to auto-discover
+declarative reducers via a handler's subscribed event types."""
+
+
+class Aggregate:
+    """Marker for an aggregate root in the DDD sense.
+
+    Subclasses act as namespaces for nested ``Command`` and ``DomainEvent``
+    classes. The class name becomes the aggregate's identifier, used by
+    catalog introspection and for stamping ``__aggregate__`` on nested
+    commands and events.
+
+    Example::
+
+        class Order(Aggregate):
+            class Place(Command):
+                customer_id: str
+
+                class Placed(DomainEvent):
+                    order_id: str
+    """
+
+    __aggregate_name__: ClassVar[str]
+    __reducers__: ClassVar[tuple[Any, ...]]
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.__aggregate_name__ = cls.__name__
+        cls.__reducers__ = _collect_aggregate_reducers(cls)
+        _AGGREGATE_REGISTRY[cls.__aggregate_name__] = cls
+        # Second-pass stamp: DomainEvents nested inside a Command have their
+        # __aggregate__ left as None by the metaclass (Command.__aggregate__
+        # isn't known at that point). Fill them in now.
+        _stamp_nested_aggregate(cls, cls.__name__)
+        _attach_command_outcomes(cls)
+
+
+def _collect_aggregate_reducers(cls: type) -> tuple[Any, ...]:
+    """Walk the MRO and collect declarative reducers from class bodies.
+
+    Child aggregates inherit parent aggregate's reducers; dedup by name.
+    Runtime import of ``BaseReducer`` to avoid module-level circular
+    dependency with ``_reducer``.
+    """
+    from langgraph_events._reducer import BaseReducer  # noqa: PLC0415
+
+    collected: list[Any] = []
+    seen_names: set[str] = set()
+    for klass in cls.__mro__[:-1]:
+        for attr in klass.__dict__.values():
+            if isinstance(attr, BaseReducer) and attr.name not in seen_names:
+                collected.append(attr)
+                seen_names.add(attr.name)
+    return tuple(collected)
+
+
+def _attach_command_outcomes(aggregate_cls: type) -> None:
+    """For each nested ``Command``, expose ``cmd.Outcomes`` — the union of
+    its nested ``DomainEvent`` classes.
+
+    - Zero outcomes: no attribute added.
+    - One outcome: ``Outcomes`` is that class.
+    - Multiple outcomes: ``Outcomes`` is a ``types.UnionType`` (``A | B | ...``).
+    - User already declared ``Outcomes`` in the class body: validated for drift
+      against the nested outcomes; left in place if consistent.
+    """
+    for cmd in aggregate_cls.__dict__.values():
+        if not (isinstance(cmd, type) and issubclass(cmd, Command)):
+            continue
+        outcomes = [
+            x
+            for x in cmd.__dict__.values()
+            if isinstance(x, type) and issubclass(x, DomainEvent)
+        ]
+        if not outcomes:
+            continue
+
+        declared = cmd.__dict__.get("Outcomes")
+        if declared is not None:
+            declared_set = set(typing.get_args(declared)) or {declared}
+            if declared_set != set(outcomes):
+                raise TypeError(
+                    f"Command {cmd.__qualname__!r}: declared Outcomes "
+                    f"{sorted(t.__name__ for t in declared_set)} does not match "
+                    f"nested DomainEvents "
+                    f"{sorted(t.__name__ for t in outcomes)}. Keep them in sync."
+                )
+            # User-declared matches; leave as-is (mypy-visible).
+            continue
+
+        cmd.Outcomes = (  # type: ignore[attr-defined]
+            outcomes[0]
+            if len(outcomes) == 1
+            else functools.reduce(operator.or_, outcomes)
+        )
+
+
+def _stamp_nested_aggregate(container: type, agg_name: str) -> None:
+    """Walk ``container`` and set ``__aggregate__`` on any nested ``Event``
+    subclass that doesn't have one yet.
+
+    Covers DomainEvents nested inside a Command (their metaclass runs before
+    the Command's ``__aggregate__`` is known), and non-DomainEvent events
+    nested in an Aggregate for locality (e.g. ``class Blocked(Halted)`` under
+    ``class Content(Aggregate)``) — the metaclass only fires for Command /
+    DomainEvent, so those would otherwise never be stamped.
+    """
+    for attr in container.__dict__.values():
+        if not isinstance(attr, type):
+            continue
+        if not issubclass(attr, Event):
+            continue
+        if getattr(attr, "__aggregate__", None) is None:
+            attr.__aggregate__ = agg_name  # type: ignore[attr-defined]
+        if issubclass(attr, Command):
+            _stamp_nested_aggregate(attr, agg_name)
+
+
+def _is_nested_in_class(cls: type) -> bool:
+    """Return True if *cls* appears to be defined inside another class.
+
+    Detects nesting via ``__qualname__``.  Function-local classes use
+    ``<locals>`` markers; we count segments after the last ``<locals>`` (or
+    from the start of the qualname when none is present).  Two or more
+    segments means the class is nested inside another class.
+    """
+    parts = cls.__qualname__.split(".")
+    try:
+        last_locals = len(parts) - 1 - parts[::-1].index("<locals>")
+        relevant = parts[last_locals + 1 :]
+    except ValueError:
+        relevant = parts
+    return len(relevant) >= 2
+
+
+class _NestedEventMeta(type):
+    """Metaclass that validates aggregate-nesting when a nested class is
+    assigned to its enclosing class.
+
+    ``Command`` and ``DomainEvent`` are referenced by name below; at class
+    definition time for these base classes themselves, ``__set_name__`` is
+    never called (module-level classes aren't assigned as attributes). By
+    the time user code triggers ``__set_name__``, both names resolve via
+    module globals.
+    """
+
+    def __set_name__(cls, owner: type, name: str) -> None:
+        if issubclass(cls, Command):
+            if not (isinstance(owner, type) and issubclass(owner, Aggregate)):
+                raise TypeError(
+                    f"Command {cls.__name__!r} must be nested inside an "
+                    f"Aggregate subclass, got owner {owner.__name__!r}"
+                )
+            cls.__aggregate__ = owner.__name__
+        elif issubclass(cls, DomainEvent):
+            if isinstance(owner, type) and issubclass(owner, Aggregate):
+                cls.__aggregate__ = owner.__name__
+                cls.__command__ = None
+            elif isinstance(owner, type) and issubclass(owner, Command):
+                cls.__command__ = owner
+                # __aggregate__ filled in by Aggregate.__init_subclass__ — at
+                # this point Command.__aggregate__ isn't known yet.
+            else:
+                raise TypeError(
+                    f"DomainEvent {cls.__name__!r} must be nested inside an "
+                    f"Aggregate or Command, got owner {owner.__name__!r}"
+                )
+
+
+def _inherits_aggregate(cls: type) -> bool:
+    """True if any base of *cls* (other than itself) already has a stamped
+    ``__aggregate__`` — meaning it inherits from an already-validated event."""
+    return any(
+        getattr(base, "__aggregate__", None) is not None for base in cls.__mro__[1:]
+    )
+
+
+def _validate_handle_signature(cls: type, handle: Any) -> None:
+    """Check that an inline ``handle`` takes ``self`` as its first parameter.
+
+    Reducer / log / config / store params are validated later at graph
+    construction, where the reducer names are known.
+    """
+    import inspect  # noqa: PLC0415
+
+    if isinstance(handle, (staticmethod, classmethod)):
+        raise TypeError(
+            f"Command {cls.__name__!r}: `handle` must be a regular method "
+            f"(no @staticmethod / @classmethod)."
+        )
+    try:
+        sig = inspect.signature(handle)
+    except (TypeError, ValueError):
+        return  # built-ins / C-implemented — skip silently
+    params = list(sig.parameters.values())
+    if not params or params[0].name != "self":
+        raise TypeError(
+            f"Command {cls.__name__!r}: `handle` must take `self` as its "
+            f"first parameter."
+        )
+
+
+class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
+    """Imperative intent. Must be nested inside an ``Aggregate`` subclass.
+
+    Use imperative naming (``Place``, ``Ship``, ``Cancel``).  Outcomes of
+    a command are typically nested ``DomainEvent`` subclasses.
+
+    Example::
+
+        class Order(Aggregate):
+            class Place(Command):
+                customer_id: str
+
+                class Placed(DomainEvent):
+                    order_id: str
+
+                class Rejected(DomainEvent):
+                    reason: str
+    """
+
+    __aggregate__: ClassVar[str | None] = None
+    __command_handler__: ClassVar[Any] = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if _inherits_aggregate(cls):
+            return
+        if not _is_nested_in_class(cls):
+            raise TypeError(
+                f"Command {cls.__name__!r} must be nested inside an Aggregate "
+                f"subclass, e.g. "
+                f"class Order(Aggregate): class {cls.__name__}(Command): ..."
+            )
+        # Detect an inline ``handle`` method; auto-registered when the command
+        # class is passed to ``EventGraph`` (see _graph.py:_expand_command_handlers).
+        handle = cls.__dict__.get("handle")
+        if callable(handle):
+            _validate_handle_signature(cls, handle)
+            cls.__command_handler__ = handle
+
+
+class DomainEvent(Event, _event_base=True, metaclass=_NestedEventMeta):
+    """Fact within the bounded context. Past-participle naming.
+
+    Must be nested inside an ``Aggregate`` (a free-standing event under
+    the aggregate) or a ``Command`` (an outcome of that command).
+
+    Example::
+
+        class Order(Aggregate):
+            class Shipped(DomainEvent):
+                tracking: str
+    """
+
+    __aggregate__: ClassVar[str | None] = None
+    __command__: ClassVar[type | None] = None
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if _inherits_aggregate(cls):
+            return
+        if not _is_nested_in_class(cls):
+            raise TypeError(
+                f"DomainEvent {cls.__name__!r} must be nested inside an "
+                f"Aggregate or Command"
+            )
+
+
+class IntegrationEvent(Event, _event_base=True):
+    """Fact that crosses a context or system boundary. Past-participle.
+
+    Lives at module level (no nesting requirement), typically serializable,
+    intended to be published to or consumed from external systems.
+
+    Example::
+
+        class PaymentConfirmed(IntegrationEvent):
+            transaction_id: str
+    """
+
+
+class SystemEvent(Event, _event_base=True):
+    """Framework-emitted fact. Past-participle.
+
+    Reserved for events generated by the graph runtime itself
+    (``Halted``, ``Interrupted``, ``HandlerRaised`` etc.).  Lives at
+    module level.
+    """
+
+
+class MessageEvent:
     """Mixin for events that wrap LangChain messages.
+
+    Compose with an Event branch (``DomainEvent``, ``IntegrationEvent``,
+    etc.) — this class is a behavioural mixin, not an ``Event`` subclass.
 
     Convention:
     - ``message`` field (single BaseMessage) → ``[self.message]``
@@ -66,12 +357,11 @@ class MessageEvent(Event):
 
     Example::
 
-        class UserMessageReceived(MessageEvent, Auditable):
+        class UserMessageReceived(IntegrationEvent, MessageEvent, Auditable):
             message: HumanMessage
-
-        class ToolsExecuted(MessageEvent, Auditable):
-            messages: tuple[ToolMessage, ...]
     """
+
+    _event_mixin: ClassVar[bool] = True
 
     def as_messages(self) -> list[BaseMessage]:
         msg = getattr(self, "message", None)
@@ -86,18 +376,20 @@ class MessageEvent(Event):
         )
 
 
-class Auditable(Event):
-    """Marker class for events that should be auto-logged.
+class Auditable:
+    """Mixin for events that should be auto-logged.
 
-    Inherit from this class to make events auditable. Use the ``trail()``
-    method (or the ``@on(Auditable)`` subscription pattern) to log events
-    as they flow through the graph.
+    Compose with an Event branch — this class is a behavioural mixin,
+    not an ``Event`` subclass.  Use ``@on(Auditable)`` to subscribe to
+    every auditable event.
 
     Example::
 
-        class UserMessageReceived(Auditable):
-            content: str = ""
+        class OrderPlaced(DomainEvent, Auditable):
+            order_id: str = ""
     """
+
+    _event_mixin: ClassVar[bool] = True
 
     def trail(self) -> str:
         """Return a compact, human-readable summary of this event."""
@@ -116,7 +408,7 @@ class Auditable(Event):
         return f"[{name}] {', '.join(parts)}"
 
 
-class Halted(Event):
+class Halted(SystemEvent):
     """Special event that signals immediate graph termination.
 
     Subclass with domain-specific fields instead of generic payloads::
@@ -145,7 +437,7 @@ class Cancelled(Halted):
     """
 
 
-class Interrupted(Event):
+class Interrupted(SystemEvent):
     """Special event that pauses the graph for human input.
 
     Subclass with domain-specific fields instead of generic payloads::
@@ -212,7 +504,7 @@ class FrontendToolCallRequested(Interrupted):
         }
 
 
-class Resumed(Event):
+class Resumed(SystemEvent):
     """Created by the framework when a graph resumes from an interrupt.
 
     Contains the resume event and a reference to the original
@@ -223,34 +515,26 @@ class Resumed(Event):
     interrupted: Interrupted | None = None
 
 
-class HandlerRaised(Event):
+class HandlerRaised(SystemEvent):
     """Emitted when a handler raises an exception declared in its ``raises=`` clause.
 
-    The raising handler's ``@on(..., raises=(MyError, ...))`` declares which
-    exceptions the framework should catch.  Subscribe via the existing
-    field-matcher mechanism::
+    Subscribe via ``@on(HandlerRaised, exception=SomeError)`` for a specific
+    exception type, or ``@on(HandlerRaised)`` to catch any declared raise::
 
         @on(HandlerRaised, exception=RateLimitError)
         def backoff(event: HandlerRaised, exception: RateLimitError):
             exception.retry_after  # typed via field injection
 
-    ``@on(HandlerRaised)`` (no ``exception=`` matcher) catches every
-    declared raise.
-
-    Fields:
+    Fields (framework-populated at emit time):
 
     - ``handler``: name of the handler that raised.
-    - ``source_event``: the event the raising handler was processing. Named
-      ``source_event`` (not ``event``) to avoid colliding with the handler's
-      own positional ``event`` parameter when used as a field matcher —
-      ``@on(HandlerRaised, source_event=SomeType)`` is legal and injects
-      ``source_event`` as a typed kwarg.
+    - ``source_event``: the event the raising handler was processing.
     - ``exception``: the caught exception instance.
 
-    Framework guarantee: when the framework emits ``HandlerRaised``, all
-    three fields are populated with real values. The ``Optional`` on the
-    annotations is a concession to dataclass defaults so tests and
-    type-checkers can construct the event without positional args.
+    ``source_event`` is named as such (rather than ``event``) to keep the
+    handler's own ``event`` parameter free when this field is used as a
+    field matcher — ``@on(HandlerRaised, source_event=SomeType)`` injects
+    ``source_event`` as a typed kwarg.
     """
 
     handler: str = ""
@@ -258,12 +542,64 @@ class HandlerRaised(Event):
     exception: Exception | None = None
 
 
-class SystemPromptSet(MessageEvent):
+class Invariant:
+    """Marker base for typed invariants.
+
+    Subclass to declare one. An instance is emitted inside
+    ``InvariantViolated.invariant`` when the predicate returns False;
+    the subclass identity (not its instance state) is what matchers compare.
+
+    Subclasses must be zero-arg instantiable — the framework calls ``Cls()``
+    at emission time purely to satisfy ``isinstance`` matching.
+
+    Example::
+
+        class CustomerNotBanned(Invariant):
+            '''Customer must not be banned.'''
+
+        @on(Order.Place, invariants={CustomerNotBanned: lambda log: ...})
+        def place(event: Order.Place) -> Order.Place.Placed: ...
+
+        @on(InvariantViolated, invariant=CustomerNotBanned)
+        def explain(event: InvariantViolated) -> ...: ...
+
+    Nesting under an ``Aggregate`` / ``Command`` is encouraged as DDD-idiomatic
+    but not enforced.
+    """
+
+
+class InvariantViolated(SystemEvent):
+    """Emitted when an invariant predicate declared on a handler returns False.
+
+    The framework evaluates each handler's ``invariants=`` predicates before
+    invoking it. If any predicate returns false, the handler is skipped and
+    one ``InvariantViolated`` event is emitted for the failing invariant.
+    Predicate exceptions propagate — they are NOT turned into violations.
+
+    Subscribe via ``@on(InvariantViolated)`` for all violations, or pin to a
+    specific invariant via the ``invariant=`` field matcher::
+
+        @on(InvariantViolated, invariant=CustomerNotBanned)
+        def handle_banned(event: InvariantViolated) -> ...: ...
+
+    See ``HandlerRaised`` for the ``source_event`` naming rationale.
+    """
+
+    invariant: Invariant | None = None
+    handler: str = ""
+    source_event: Event | None = None
+
+
+class SystemPromptSet(IntegrationEvent, MessageEvent):
     """Built-in event for setting the system prompt as a first-class citizen.
 
     Wraps a ``SystemMessage`` so that the system prompt appears in the event
     log, is queryable via ``EventLog``, and participates in the ``Auditable``
     trail when mixed in.
+
+    Categorized as ``IntegrationEvent`` — it crosses the user↔graph boundary
+    (user code constructs it, the graph ingests it); ``SystemEvent`` is
+    reserved for framework-emitted facts like ``Halted`` or ``Interrupted``.
 
     Pairs naturally with ``message_reducer()`` — the system message is
     automatically included in the accumulated message history via

@@ -1,44 +1,81 @@
 # langgraph-events
 
-Opinionated event-driven abstraction for LangGraph. **State IS events.**
+Opinionated event-driven abstraction for LangGraph with a **DDD-aligned event taxonomy**. State IS events.
 
 !!! warning "Experimental (v0.4.0)"
     This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything you can't easily rewrite.
 
 ## What is this?
 
-LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. **langgraph-events** replaces that boilerplate with a reactive, event-driven model: define domain events as frozen dataclasses, subscribe handler functions with `@on(EventType)`, and let `EventGraph` derive the full graph topology automatically.
+LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. `langgraph-events` replaces that boilerplate with a reactive model: model your domain as **aggregates with commands and outcomes**, colocate the handler on the command, and let `EventGraph` derive the topology.
 
-The core principle: **state IS events.** The entire state of a run is an append-only log of typed, immutable events. Handlers read events in; handlers emit events out. The framework does the rest.
+```python
+class Order(Aggregate):
+    class Place(Command):
+        customer_id: str
 
-## Installation
+        class Placed(DomainEvent):
+            order_id: str
 
-```bash
-pip install langgraph-events
+        def handle(self) -> Placed:
+            return Order.Place.Placed(order_id=f"o-{self.customer_id}")
 
-# With AG-UI adapter support (installs ag-ui-protocol)
-pip install "langgraph-events[agui]"
+
+graph = EventGraph([Order.Place])
+log = graph.invoke(Order.Place(customer_id="alice"))
 ```
 
-Requires Python 3.10+ and `langgraph >= 0.2.0` (installed automatically). The `[agui]` extra adds `ag-ui-protocol` for the [AG-UI protocol adapter](agui.md).
+### What the graph looks like
 
-## Next Steps
+`graph.domain().mermaid()` on the canonical [`ddd_order`](patterns.md#ddd-order) example:
 
-- Start with [Getting Started](getting-started.md)
-- Learn [Core Concepts](concepts.md)
-- Then explore as needed:
-    - [Control Flow](control-flow.md) — fan-out, human-in-the-loop
-    - [Reducers](reducers.md) — incremental state accumulation
-    - [Streaming](streaming.md) — real-time events, LLM tokens, telemetry
-- Browse [Patterns](patterns.md) for complete runnable examples
-- Check [API Reference](api.md) for the full export table
-- [AG-UI Adapter](agui.md) for frontend streaming
-- [Checkpointer Evolution](checkpointer-evolution.md) for persistence edge cases
+<!-- autogen:start:hero -->
+```mermaid
+graph LR
+    classDef entry fill:none,stroke:none,color:none
+    classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+    classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+    classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+    classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    subgraph Order["Order aggregate"]
+        direction LR
+        Place{{Place}}:::cmd
+        Placed(Placed):::devt
+        Rejected(Rejected):::devt
+        Ship{{Ship}}:::cmd
+        Shipped(Shipped):::devt
+        CustomerNotBanned{CustomerNotBanned}:::inv
+    end
+    InvariantViolated([InvariantViolated]):::syst
+    _e0_[ ]:::entry ==> InvariantViolated
+    _e1_[ ]:::entry ==> Place
+    _e2_[ ]:::entry ==> Ship
+    Ship -->|handle| Shipped
+    Place -->|place| Placed
+    InvariantViolated -->|explain_rejection| Rejected
+    Place -.- Rejected
+    Place -.->|invariant| CustomerNotBanned
+    linkStyle 6 stroke:#9ca3af,stroke-dasharray:3 3
+    linkStyle 7 stroke:#c2410c,stroke-dasharray:4 2
+```
+<!-- autogen:end -->
 
-## Status
+## Install
 
-This is a solo experiment, not a team-backed product. Expect:
+```bash
+pip install langgraph-events           # core
+pip install "langgraph-events[agui]"   # + AG-UI adapter
+```
 
-- No migration guides between versions
-- API surface may shrink or change significantly
-- Bug reports welcome, but no SLA on fixes
+Requires Python 3.10+.
+
+## Navigate
+
+- **Start:** [Getting Started](getting-started.md) → [Core Concepts](concepts.md)
+- **Dispatch patterns:** [Control Flow](control-flow.md) — fan-out, HITL, exceptions, invariants
+- **State:** [Reducers](reducers.md) — aggregate-scoped or graph-wide
+- **Streams:** [Streaming](streaming.md), [AG-UI Adapter](agui.md)
+- **Reference:** [API](api.md), [Patterns](patterns.md)
+- **Edge cases:** [Checkpointer Evolution](checkpointer-evolution.md)

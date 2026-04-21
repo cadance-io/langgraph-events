@@ -1,8 +1,8 @@
 """Map-Reduce Pipeline — langgraph-events demo.
 
-Demonstrates fan-out/fan-in using `Scatter` and `EventLog.filter()`.
-Replaces LangGraph's verbose `Send` API and worker subgraph patterns
-with a simple split -> process -> gather flow.
+Demonstrates fan-out/fan-in using ``Scatter`` and ``EventLog.filter()`` inside
+a DDD ``Batch`` aggregate. Replaces LangGraph's verbose ``Send`` API and
+worker subgraph patterns with a simple command-plus-scatter flow.
 
 The **Auditable trait** auto-logs every event as it flows, replacing manual
 isinstance printing with a single side-effect handler.
@@ -19,31 +19,54 @@ import asyncio
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from langgraph_events import Auditable, EventGraph, EventLog, Scatter, on
+from langgraph_events import (
+    Aggregate,
+    Auditable,
+    Command,
+    DomainEvent,
+    EventGraph,
+    EventLog,
+    Scatter,
+    on,
+)
 
 # ---------------------------------------------------------------------------
-# Events (past-participle: "what just happened")
+# Aggregate: Batch
 # ---------------------------------------------------------------------------
 
 
-class BatchReceived(Auditable):
-    documents: tuple = ()  # tuple of (title, content) pairs
+class Batch(Aggregate):
+    """A batch of documents to summarize via map-reduce.
 
+    ``Summarize`` is the entry command. A fan-out handler returns
+    ``Scatter[Batch.DocDispatched]``; per-doc handlers emit ``DocSummarized``;
+    a gather handler collects them and produces ``Summarize.Summarized`` when
+    all documents have been processed.
+    """
 
-class DocDispatched(Auditable):
-    title: str = ""
-    content: str = ""
-    batch_size: int = 0
+    class Summarize(Command, Auditable):
+        """Summarize this batch of documents."""
 
+        documents: tuple = ()  # tuple of (title, content) pairs
 
-class DocSummarized(Auditable):
-    title: str = ""
-    summary: str = ""
+        class Summarized(DomainEvent, Auditable):
+            """Final outcome — combined summary of the whole batch."""
 
+            combined: str = ""
+            individual: tuple = ()  # tuple of (title, summary) pairs
 
-class BatchSummarized(Auditable):
-    combined: str = ""
-    individual: tuple = ()  # tuple of (title, summary) pairs
+    class DocDispatched(DomainEvent, Auditable):
+        """Scatter target — one document dispatched for summarization."""
+
+        title: str = ""
+        content: str = ""
+        batch_size: int = 0
+
+    class DocSummarized(DomainEvent, Auditable):
+        """Per-document summary — gathered into the final outcome."""
+
+        title: str = ""
+        summary: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -104,46 +127,51 @@ def audit_trail(event: Auditable) -> None:
     print(f"  {event.trail()}")
 
 
-@on(BatchReceived)
-def split_batch(event: BatchReceived) -> Scatter[DocDispatched]:
+@on(Batch.Summarize)
+def split_batch(event: Batch.Summarize) -> Scatter[Batch.DocDispatched]:
     """Fan out: split the batch into individual summarization tasks."""
     return Scatter(
         [
-            DocDispatched(title=title, content=content, batch_size=len(event.documents))
+            Batch.DocDispatched(
+                title=title, content=content, batch_size=len(event.documents)
+            )
             for title, content in event.documents
         ]
     )
 
 
-@on(DocDispatched)
-async def summarize_one(event: DocDispatched) -> DocSummarized:
+@on(Batch.DocDispatched)
+async def summarize_one(event: Batch.DocDispatched) -> Batch.DocSummarized:
     """Map: summarize a single document using the LLM."""
     messages = [
         SystemMessage(content="Summarize the following text in 2-3 sentences."),
         HumanMessage(content=f"Title: {event.title}\n\n{event.content}"),
     ]
     response = await llm.ainvoke(messages)
-    return DocSummarized(title=event.title, summary=response.content)
+    return Batch.DocSummarized(title=event.title, summary=response.content)
 
 
-@on(DocSummarized)
-def gather_summaries(event: DocSummarized, log: EventLog) -> BatchSummarized | None:
+@on(Batch.DocSummarized)
+def gather_summaries(
+    event: Batch.DocSummarized, log: EventLog
+) -> Batch.Summarize.Summarized | None:
     """Reduce: collect all summaries once all documents are processed.
 
-    This handler fires once per DocSummarized in the pending batch. Since all
-    DocSummarized events arrive in the same dispatch round, the handler runs
-    N times. We check completion via EventLog.filter() and produce the
-    combined result — duplicates are harmless, log.latest() picks the final one.
+    This handler fires once per ``DocSummarized`` in the pending batch. Since
+    all ``DocSummarized`` events arrive in the same dispatch round, the
+    handler runs N times. We check completion via ``EventLog.filter()`` and
+    produce the combined result — duplicates are harmless, ``log.latest()``
+    picks the final one.
     """
-    all_summaries = log.filter(DocSummarized)
-    batch = log.latest(BatchReceived)
+    all_summaries = log.filter(Batch.DocSummarized)
+    batch = log.latest(Batch.Summarize)
 
     if len(all_summaries) < len(batch.documents):
         return None
 
     individual = tuple((s.title, s.summary) for s in all_summaries)
     combined = "\n\n".join(f"**{title}**: {summary}" for title, summary in individual)
-    return BatchSummarized(combined=combined, individual=individual)
+    return Batch.Summarize.Summarized(combined=combined, individual=individual)
 
 
 # ---------------------------------------------------------------------------
@@ -154,17 +182,17 @@ def gather_summaries(event: DocSummarized, log: EventLog) -> BatchSummarized | N
 graph = EventGraph([split_batch, summarize_one, gather_summaries, audit_trail])
 
 
-async def main():
+async def main() -> None:
     print(f"Summarizing {len(DOCUMENTS)} documents...\n")
     for title, _ in DOCUMENTS:
         print(f"  - {title}")
     print()
     print("--- Event Flow ---")
 
-    log = await graph.ainvoke(BatchReceived(documents=DOCUMENTS))
+    log = await graph.ainvoke(Batch.Summarize(documents=DOCUMENTS))
 
     print("\n--- Combined Summary ---")
-    result = log.latest(BatchSummarized)
+    result = log.latest(Batch.Summarize.Summarized)
     print(result.combined)
 
 

@@ -23,7 +23,7 @@ from ag_ui.core import (
 )
 
 from langgraph_events._event import Interrupted
-from langgraph_events._graph import (
+from langgraph_events.stream import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,

@@ -14,11 +14,15 @@ from langchain_core.messages import (
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
+    Aggregate,
     Cancelled,
+    Command,
+    DomainEvent,
     Event,
     EventGraph,
     EventLog,
     Halted,
+    IntegrationEvent,
     Interrupted,
     MaxRoundsExceeded,
     MessageEvent,
@@ -27,8 +31,6 @@ from langgraph_events import (
     Resumed,
     ScalarReducer,
     Scatter,
-    StateSnapshotFrame,
-    StreamFrame,
     SystemPromptSet,
     aemit_custom,
     aemit_state_snapshot,
@@ -36,6 +38,13 @@ from langgraph_events import (
     emit_state_snapshot,
     message_reducer,
     on,
+)
+from langgraph_events.stream import (
+    CustomEventFrame,
+    LLMStreamEnd,
+    LLMToken,
+    StateSnapshotFrame,
+    StreamFrame,
 )
 
 # ---------------------------------------------------------------------------
@@ -100,17 +109,17 @@ def describe_EventGraph():
 
         def describe_branching():
 
-            class InputReceived(Event):
+            class InputReceived(IntegrationEvent):
                 kind: str = ""
                 data: str = ""
 
-            class FastPathChosen(Event):
+            class FastPathChosen(IntegrationEvent):
                 data: str = ""
 
-            class SlowPathChosen(Event):
+            class SlowPathChosen(IntegrationEvent):
                 data: str = ""
 
-            class OutputProduced(Event):
+            class OutputProduced(IntegrationEvent):
                 result: str = ""
 
             @pytest.fixture
@@ -155,20 +164,20 @@ def describe_EventGraph():
 
         def describe_fan_out_via_inheritance():
 
-            class Tracked(Event):
+            class Tracked(IntegrationEvent):
                 action: str = ""
 
-            class ProcessCompleted(Event):
+            class ProcessCompleted(IntegrationEvent):
                 item: str = ""
 
             class TrackedItem(Tracked, ProcessCompleted):
                 action: str = ""
                 item: str = ""
 
-            class AuditDone(Event):
+            class AuditDone(IntegrationEvent):
                 msg: str = ""
 
-            class ProcessDone(Event):
+            class ProcessDone(IntegrationEvent):
                 msg: str = ""
 
             def it_triggers_both_parent_handlers():
@@ -188,13 +197,13 @@ def describe_EventGraph():
                 assert log.latest(ProcessDone) == ProcessDone(msg="processed:doc1")
 
             def it_fires_parent_handler_for_child_event():
-                class BaseReceived(Event):
+                class BaseReceived(IntegrationEvent):
                     x: str = ""
 
                 class ChildReceived(BaseReceived):
                     y: str = ""
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     v: str = ""
 
                 @on(BaseReceived)
@@ -289,16 +298,16 @@ def describe_EventGraph():
                 assert injected == []
 
             def it_provides_independent_snapshots_to_parallel_handlers():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     value: str = ""
 
-                class ResultAProduced(Event):
+                class ResultAProduced(IntegrationEvent):
                     saw_events: int = 0
 
-                class ResultBProduced(Event):
+                class ResultBProduced(IntegrationEvent):
                     saw_events: int = 0
 
-                class Collected(Event):
+                class Collected(IntegrationEvent):
                     a_saw: int = 0
                     b_saw: int = 0
 
@@ -330,13 +339,13 @@ def describe_EventGraph():
 
         def describe_multi_subscription():
 
-            class PingSent(Event):
+            class PingSent(IntegrationEvent):
                 value: str = ""
 
-            class PongReceived(Event):
+            class PongReceived(IntegrationEvent):
                 value: str = ""
 
-            class Replied(Event):
+            class Replied(IntegrationEvent):
                 value: str = ""
 
             def when_single_type_pending():
@@ -359,13 +368,13 @@ def describe_EventGraph():
                     assert log.latest(Completed) == Completed(result="pong:world")
 
                 def it_provides_log_to_multi_sub_handler():
-                    class MsgAReceived(Event):
+                    class MsgAReceived(IntegrationEvent):
                         text: str = ""
 
-                    class MsgBReceived(Event):
+                    class MsgBReceived(IntegrationEvent):
                         text: str = ""
 
-                    class Summarized(Event):
+                    class Summarized(IntegrationEvent):
                         count: int = 0
 
                     @on(MsgAReceived, MsgBReceived)
@@ -378,17 +387,17 @@ def describe_EventGraph():
                     assert log.latest(Summarized) == Summarized(count=1)
 
                 def it_supports_react_loop_pattern():
-                    class UserMsgReceived(Event):
+                    class UserMsgReceived(IntegrationEvent):
                         content: str = ""
 
-                    class AssistantMsgSent(Event):
+                    class AssistantMsgSent(IntegrationEvent):
                         content: str = ""
                         needs_tool: bool = False
 
-                    class ToolResultReturned(Event):
+                    class ToolResultReturned(IntegrationEvent):
                         result: str = ""
 
-                    class FinalAnswerProduced(Event):
+                    class FinalAnswerProduced(IntegrationEvent):
                         answer: str = ""
 
                     call_count = 0
@@ -461,7 +470,7 @@ def describe_EventGraph():
                 assert log.latest(Ended) == Ended(result="hello")
 
             def it_includes_all_seed_events_in_log():
-                class ConfigSet(Event):
+                class ConfigSet(IntegrationEvent):
                     setting: str = ""
 
                 @on(Started)
@@ -519,10 +528,10 @@ def describe_EventGraph():
                     assert log.latest(Ended) == Ended(result="has_prompt=True")
 
                 def it_contributes_to_message_reducer():
-                    class UserMsgReceived(MessageEvent):
+                    class UserMsgReceived(IntegrationEvent, MessageEvent):
                         message: HumanMessage = None  # type: ignore[assignment]
 
-                    class Finished(Event):
+                    class Finished(IntegrationEvent):
                         answer: str = ""
 
                     r = message_reducer()
@@ -722,7 +731,7 @@ def describe_EventGraph():
             assert isinstance(c, Interrupted)
 
         def it_stores_value_and_interrupted_reference():
-            class Confirmed(Event):
+            class Confirmed(IntegrationEvent):
                 pass
 
             i = Interrupted()
@@ -738,7 +747,7 @@ def describe_EventGraph():
             class ConfirmationRequested(Interrupted):
                 data: str
 
-            class Confirmed(Event):
+            class Confirmed(IntegrationEvent):
                 pass
 
             @on(Started)
@@ -763,7 +772,7 @@ def describe_EventGraph():
             assert log.latest(Ended) == Ended(result="confirmed")
 
         def it_raises_on_resume_missing_checkpointer():
-            class Confirmed(Event):
+            class Confirmed(IntegrationEvent):
                 pass
 
             @on(Started)
@@ -798,7 +807,7 @@ def describe_EventGraph():
         def it_auto_dispatches_event_resume_value():
             from langgraph.checkpoint.memory import MemorySaver
 
-            class ApprovalSubmitted(Event):
+            class ApprovalSubmitted(IntegrationEvent):
                 approved: bool = False
 
             handler_fired = []
@@ -849,7 +858,7 @@ def describe_EventGraph():
         def it_processes_event_through_reducer():
             from langgraph.checkpoint.memory import MemorySaver
 
-            class UserMsgReceived(MessageEvent):
+            class UserMsgReceived(IntegrationEvent, MessageEvent):
                 message: HumanMessage
 
             @on(Started)
@@ -891,7 +900,7 @@ def describe_EventGraph():
                 class ApprovalRequested(Interrupted):
                     draft: str = ""
 
-                class ReviewApproved(Event):
+                class ReviewApproved(IntegrationEvent):
                     pass
 
                 captured = []
@@ -928,7 +937,7 @@ def describe_EventGraph():
                 class OtherInterrupted(Interrupted):
                     reason: str = ""
 
-                class ReviewApproved(Event):
+                class ReviewApproved(IntegrationEvent):
                     pass
 
                 captured = []
@@ -969,7 +978,7 @@ def describe_EventGraph():
                 class OtherInterrupted(Interrupted):
                     reason: str = ""
 
-                class Acknowledge(Event):
+                class Acknowledge(IntegrationEvent):
                     pass
 
                 captured = []
@@ -1006,7 +1015,7 @@ def describe_EventGraph():
                 class ApprovalRequested(Interrupted):
                     draft: str = ""
 
-                class ReviewApproved(Event):
+                class ReviewApproved(IntegrationEvent):
                     pass
 
                 injected_values = []
@@ -1043,7 +1052,7 @@ def describe_EventGraph():
                 class ApprovalRequested(Interrupted):
                     draft: str = ""
 
-                class ReviewApproved(Event):
+                class ReviewApproved(IntegrationEvent):
                     pass
 
                 captured = []
@@ -1082,10 +1091,10 @@ def describe_EventGraph():
                     class ApprovalRequested(Interrupted):
                         draft: str = ""
 
-                    class ReviewApproved(Event):
+                    class ReviewApproved(IntegrationEvent):
                         pass
 
-                    class OtherEvent(Event):
+                    class OtherEvent(IntegrationEvent):
                         pass
 
                     captured = []
@@ -1117,18 +1126,18 @@ def describe_EventGraph():
 
     def describe_scatter():
 
-        class BatchReceived(Event):
+        class BatchReceived(IntegrationEvent):
             items: tuple = ()
 
-        class WorkItemDispatched(Event):
+        class WorkItemDispatched(IntegrationEvent):
             item: str = ""
             batch_size: int = 0
 
-        class WorkDone(Event):
+        class WorkDone(IntegrationEvent):
             item: str = ""
             result: str = ""
 
-        class BatchResultCollected(Event):
+        class BatchResultCollected(IntegrationEvent):
             results: tuple = ()
 
         def describe_construction():
@@ -1136,7 +1145,7 @@ def describe_EventGraph():
             def when_valid_events():
 
                 def it_wraps_a_list_of_events():
-                    class ItemDispatched(Event):
+                    class ItemDispatched(IntegrationEvent):
                         v: int = 0
 
                     s = Scatter(
@@ -1301,7 +1310,7 @@ def describe_EventGraph():
             def when_events_contribute():
 
                 def it_grows_across_multiple_rounds():
-                    class ToolResultReturned(Event):
+                    class ToolResultReturned(IntegrationEvent):
                         result: str = ""
 
                     def project_all(event: Event) -> list:
@@ -1399,16 +1408,16 @@ def describe_EventGraph():
         def describe_parallel_handlers():
 
             def it_accepts_contributions_from_both():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     value: str = ""
 
-                class ResultAProduced(Event):
+                class ResultAProduced(IntegrationEvent):
                     value: str = ""
 
-                class ResultBProduced(Event):
+                class ResultBProduced(IntegrationEvent):
                     value: str = ""
 
-                class Collected(Event):
+                class Collected(IntegrationEvent):
                     items: tuple = ()
 
                 def project(event: Event) -> list:
@@ -1449,17 +1458,17 @@ def describe_EventGraph():
         def describe_react_loop():
 
             def it_accumulates_system_user_assistant_tool_messages():
-                class UserMsgReceived(Event):
+                class UserMsgReceived(IntegrationEvent):
                     content: str = ""
 
-                class AssistantMsgSent(Event):
+                class AssistantMsgSent(IntegrationEvent):
                     content: str = ""
                     needs_tool: bool = False
 
-                class ToolResultReturned(Event):
+                class ToolResultReturned(IntegrationEvent):
                     result: str = ""
 
-                class FinalAnswerProduced(Event):
+                class FinalAnswerProduced(IntegrationEvent):
                     answer: str = ""
 
                 def to_messages(event: Event) -> list:
@@ -1599,7 +1608,7 @@ def describe_EventGraph():
                         combined = left + right
                         return combined[-3:]
 
-                    class Continued(Event):
+                    class Continued(IntegrationEvent):
                         text: str = ""
 
                     def project_all(event: Event) -> list:
@@ -1809,10 +1818,10 @@ def describe_EventGraph():
         def when_matching_events():
 
             def it_injects_last_value():
-                class StrategyChosen(Event):
+                class StrategyChosen(IntegrationEvent):
                     strategy: str = ""
 
-                class TaskDone(Event):
+                class TaskDone(IntegrationEvent):
                     result: str = ""
 
                 sr = ScalarReducer(
@@ -1830,10 +1839,10 @@ def describe_EventGraph():
                 assert log.latest(TaskDone) == TaskDone(result="used:aggressive")
 
             def it_takes_last_matching_value():
-                class StepCompleted(Event):
+                class StepCompleted(IntegrationEvent):
                     value: str = ""
 
-                class Finalized(Event):
+                class Finalized(IntegrationEvent):
                     result: str = ""
 
                 sr = ScalarReducer(
@@ -1858,7 +1867,7 @@ def describe_EventGraph():
                 assert log.latest(Finalized) == Finalized(result="chosen=b")
 
             def it_collects_from_last_matching_event():
-                class StepCompleted(Event):
+                class StepCompleted(IntegrationEvent):
                     tag: str = ""
 
                 sr = ScalarReducer(
@@ -1877,13 +1886,13 @@ def describe_EventGraph():
         def when_no_matching_events():
 
             def it_defaults_to_none():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     pass
 
-                class Unmatched(Event):
+                class Unmatched(IntegrationEvent):
                     pass
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     got: str = ""
 
                 sr = ScalarReducer(
@@ -1901,10 +1910,10 @@ def describe_EventGraph():
                 assert log.latest(ResultProduced) == ResultProduced(got="None")
 
             def it_returns_skip():
-                class StepCompleted(Event):
+                class StepCompleted(IntegrationEvent):
                     pass
 
-                class OtherReceived(Event):
+                class OtherReceived(IntegrationEvent):
                     pass
 
                 from langgraph_events import SKIP
@@ -1918,7 +1927,7 @@ def describe_EventGraph():
                 )
 
             def it_treats_skip_from_fn_as_no_contribution():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     pass
 
                 from langgraph_events import SKIP
@@ -1936,13 +1945,13 @@ def describe_EventGraph():
                 assert sr.seed([Triggered()]) == "fallback"
 
             def it_uses_custom_default():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     pass
 
-                class Unmatched(Event):
+                class Unmatched(IntegrationEvent):
                     pass
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     got: str = ""
 
                 sr = ScalarReducer(
@@ -1963,10 +1972,10 @@ def describe_EventGraph():
         def when_mixed_list_reducers():
 
             def it_works_alongside_list_reducers():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     tag: str = ""
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     summary: str = ""
 
                 list_r = Reducer(
@@ -1997,13 +2006,13 @@ def describe_EventGraph():
         def when_parallel_handlers():
 
             def it_handles_parallel_handler_contributions():
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     value: str = ""
 
-                class ResultAProduced(Event):
+                class ResultAProduced(IntegrationEvent):
                     data: str = ""
 
-                class ResultBProduced(Event):
+                class ResultBProduced(IntegrationEvent):
                     data: str = ""
 
                 sr = ScalarReducer(
@@ -2037,13 +2046,13 @@ def describe_EventGraph():
         def when_subsequent_round_has_no_contribution():
 
             def it_persists_value():
-                class ValueSet(Event):
+                class ValueSet(IntegrationEvent):
                     value: str = ""
 
-                class UnrelatedReceived(Event):
+                class UnrelatedReceived(IntegrationEvent):
                     pass
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     got: str = ""
 
                 sr = ScalarReducer(
@@ -2069,10 +2078,10 @@ def describe_EventGraph():
         def when_fn_returns_none():
 
             def it_stores_none_as_valid_contribution():
-                class ClearSignaled(Event):
+                class ClearSignaled(IntegrationEvent):
                     pass
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     got: str = ""
 
                 sr = ScalarReducer(
@@ -2100,13 +2109,13 @@ def describe_EventGraph():
                 class HasScore(Protocol):
                     score: int
 
-                class ScoreARecorded(Event):
+                class ScoreARecorded(IntegrationEvent):
                     score: int = 0
 
-                class ScoreBRecorded(Event):
+                class ScoreBRecorded(IntegrationEvent):
                     score: int = 0
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     got: str = ""
 
                 sr = ScalarReducer(
@@ -2133,10 +2142,10 @@ def describe_EventGraph():
             def it_does_not_lose_scalar_on_re_invoke():
                 from langgraph.checkpoint.memory import MemorySaver
 
-                class Triggered(Event):
+                class Triggered(IntegrationEvent):
                     value: str = ""
 
-                class ResultProduced(Event):
+                class ResultProduced(IntegrationEvent):
                     got: str = ""
 
                 sr = ScalarReducer(
@@ -2165,10 +2174,10 @@ def describe_EventGraph():
         def when_defaults_provided():
 
             def it_projects_message_events():
-                class UserMsgReceived(MessageEvent):
+                class UserMsgReceived(IntegrationEvent, MessageEvent):
                     message: HumanMessage = None  # type: ignore[assignment]
 
-                class Replied(Event):
+                class Replied(IntegrationEvent):
                     text: str = ""
 
                 r = message_reducer([SystemMessage(content="You are helpful")])
@@ -2177,7 +2186,7 @@ def describe_EventGraph():
                 assert result == [msg]
 
             def it_skips_non_message_events_at_collect_level():
-                class Replied(Event):
+                class Replied(IntegrationEvent):
                     text: str = ""
 
                 r = message_reducer([SystemMessage(content="You are helpful")])
@@ -2206,13 +2215,13 @@ def describe_EventGraph():
             def when_default_system_message():
 
                 def it_accumulates_system_and_user_messages():
-                    class UserMsgReceived(MessageEvent):
+                    class UserMsgReceived(IntegrationEvent, MessageEvent):
                         message: HumanMessage = None  # type: ignore[assignment]
 
-                    class BotReplied(MessageEvent):
+                    class BotReplied(IntegrationEvent, MessageEvent):
                         message: AIMessage = None  # type: ignore[assignment]
 
-                    class Finished(Event):
+                    class Finished(IntegrationEvent):
                         answer: str = ""
 
                     r = message_reducer([SystemMessage(content="You are a test bot")])
@@ -2245,10 +2254,10 @@ def describe_EventGraph():
             def when_system_prompt_set_seed():
 
                 def it_contributes_to_message_history():
-                    class UserMsgReceived(MessageEvent):
+                    class UserMsgReceived(IntegrationEvent, MessageEvent):
                         message: HumanMessage = None  # type: ignore[assignment]
 
-                    class Finished(Event):
+                    class Finished(IntegrationEvent):
                         answer: str = ""
 
                     r = message_reducer()
@@ -2277,10 +2286,10 @@ def describe_EventGraph():
                     assert msgs[1].content == "hello"
 
                 def it_is_queryable_in_event_log():
-                    class UserMsgReceived(MessageEvent):
+                    class UserMsgReceived(IntegrationEvent, MessageEvent):
                         message: HumanMessage = None  # type: ignore[assignment]
 
-                    class Finished(Event):
+                    class Finished(IntegrationEvent):
                         prompt_content: str = ""
 
                     r = message_reducer()
@@ -2889,20 +2898,20 @@ def describe_EventGraph():
 
     def describe_reflection_loop():
 
-        class WriteRequested(Event):
+        class WriteRequested(IntegrationEvent):
             topic: str = ""
             max_revisions: int = 3
 
-        class DraftProduced(Event):
+        class DraftProduced(IntegrationEvent):
             content: str = ""
             revision: int = 0
 
-        class CritiqueReceived(Event):
+        class CritiqueReceived(IntegrationEvent):
             draft: str = ""
             feedback: str = ""
             revision: int = 0
 
-        class FinalDraftProduced(Event):
+        class FinalDraftProduced(IntegrationEvent):
             content: str = ""
 
         def it_terminates_at_max_revisions():
@@ -2969,7 +2978,7 @@ def describe_EventGraph():
         def describe_max_rounds():
 
             def it_detects_infinite_loop():
-                class LoopDetected(Event):
+                class LoopDetected(IntegrationEvent):
                     n: int = 0
 
                 @on(LoopDetected)
@@ -2983,7 +2992,7 @@ def describe_EventGraph():
             def it_resets_round_counter_on_resume():
                 from langgraph.checkpoint.memory import MemorySaver
 
-                class ResumeConfirmed(Event):
+                class ResumeConfirmed(IntegrationEvent):
                     pass
 
                 @on(Started)
@@ -3026,7 +3035,7 @@ def describe_EventGraph():
             def it_halts_on_max_rounds_not_recursion_error():
                 """max_rounds fires before LangGraph's recursion_limit."""
 
-                class PingSent(Event):
+                class PingSent(IntegrationEvent):
                     n: int = 0
 
                 @on(PingSent)
@@ -3040,10 +3049,10 @@ def describe_EventGraph():
             def it_halts_on_max_rounds_for_multiple_handlers():
                 """recursion_limit accounts for multiple handlers per round."""
 
-                class Ticked(Event):
+                class Ticked(IntegrationEvent):
                     n: int = 0
 
-                class Tocked(Event):
+                class Tocked(IntegrationEvent):
                     n: int = 0
 
                 @on(Ticked)
@@ -3058,10 +3067,23 @@ def describe_EventGraph():
                 log = graph.invoke(Ticked())
                 assert log.latest(MaxRoundsExceeded) is not None
 
+            def it_respects_explicit_recursion_limit_kwarg():
+                """Explicit recursion_limit kwarg wins over auto-computed."""
+
+                class Tick(IntegrationEvent):
+                    pass
+
+                @on(Tick)
+                def noop(event: Tick) -> None:
+                    return None
+
+                graph = EventGraph([noop], max_rounds=10, recursion_limit=12345)
+                assert graph.compiled.config["recursion_limit"] == 12345
+
             def it_saves_clean_checkpoint_on_max_rounds():
                 from langgraph.checkpoint.memory import MemorySaver
 
-                class LoopEvent(Event):
+                class LoopEvent(IntegrationEvent):
                     n: int = 0
 
                 @on(LoopEvent)
@@ -3078,7 +3100,7 @@ def describe_EventGraph():
                 assert state.is_interrupted is False
 
             def it_streams_halted_on_max_rounds():
-                class LoopEvent(Event):
+                class LoopEvent(IntegrationEvent):
                     n: int = 0
 
                 @on(LoopEvent)
@@ -3148,16 +3170,16 @@ def describe_EventGraph():
                 return Ended(result=event.data)
 
             graph = EventGraph([step1, step2])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "graph LR" in output
             assert "Started -->|step1| Processed" in output
             assert "Processed -->|step2| Ended" in output
 
         def it_shows_branching_return_types():
-            class Accepted(Event):
+            class Accepted(IntegrationEvent):
                 pass
 
-            class Rejected(Event):
+            class Rejected(IntegrationEvent):
                 pass
 
             @on(Started)
@@ -3165,7 +3187,7 @@ def describe_EventGraph():
                 return Accepted()
 
             graph = EventGraph([classify])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "Started -->|classify| Accepted" in output
             assert "Started -->|classify| Rejected" in output
 
@@ -3179,7 +3201,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([side_effect, producer])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "%% Side-effect handlers: side_effect (Started)" in output
             assert "Started -->|producer| Ended" in output
 
@@ -3189,7 +3211,7 @@ def describe_EventGraph():
                 return Scatter([Processed(data="a")])
 
             graph = EventGraph([split])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             # No edge to a Scatter node
             assert "-->|split| Scatter" not in output
             assert "%% Scatter handlers: split (Started)" in output
@@ -3209,8 +3231,8 @@ def describe_EventGraph():
                 return Ended(result="recovered")
 
             graph = EventGraph([flaky, recover])
-            output = graph.mermaid()
-            assert "Started -.->|flaky (raises)| HandlerRaised" in output
+            output = graph.domain().mermaid()
+            assert 'Started -.->|"flaky (raises)"| HandlerRaised' in output
             assert "HandlerRaised -->|recover| Ended" in output
             # HandlerRaised must not appear as a seed entry
             assert "==> HandlerRaised" not in output
@@ -3230,11 +3252,11 @@ def describe_EventGraph():
                 return None
 
             graph = EventGraph([side_effect, recover])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             # Even though side_effect has no positive return type, the raises
             # edge must still be drawn so HandlerRaised is a real target and
             # the diagram reflects runtime behaviour.
-            assert "Started -.->|side_effect (raises)| HandlerRaised" in output
+            assert 'Started -.->|"side_effect (raises)"| HandlerRaised' in output
             assert "==> HandlerRaised" not in output
 
         def it_dashes_interrupted_to_resumed_edge():
@@ -3247,7 +3269,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([request_approval, handle_review])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "Interrupted -.-> Resumed" in output
             assert "Resumed -->|handle_review| Ended" in output
 
@@ -3257,7 +3279,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([mystery])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "Started -->|mystery| ?" in output
 
         def it_shows_multi_subscription_edges():
@@ -3266,7 +3288,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([handle_both])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "Started -->|handle_both| Ended" in output
             assert "Processed -->|handle_both| Ended" in output
 
@@ -3280,7 +3302,7 @@ def describe_EventGraph():
                 return Ended(result=event.data)
 
             graph = EventGraph([step1, step2])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "classDef entry fill:none,stroke:none,color:none" in output
             assert "_e0_[ ]:::entry ==> Started" in output
             # Processed is a target, not a seed
@@ -3296,7 +3318,7 @@ def describe_EventGraph():
                 return Ended(result=event.data)
 
             graph = EventGraph([split, step2])
-            output = graph.mermaid()
+            output = graph.domain().mermaid()
             assert "Started -.->|split| Processed" in output
             assert "%% Scatter handlers" not in output
 
@@ -3328,7 +3350,7 @@ def describe_EventGraph():
                     return Processed(data=event.data)
 
                 graph = EventGraph([handler, handler])
-                output = graph.mermaid()
+                output = graph.domain().mermaid()
                 assert "-->|handler|" in output
                 assert "-->|handler_2|" in output
 
@@ -3376,7 +3398,7 @@ def describe_EventGraph():
                 assert len(catchers) == 2
                 # Without the fix, the second copy becomes a universal catcher
                 for m in catchers:
-                    matcher_names = [fn for fn, _ in m.field_matchers]
+                    matcher_names = [fn for fn, *_ in m.field_matchers]
                     assert "exception" in matcher_names
 
         def when_base_event_return_type():
@@ -3398,7 +3420,7 @@ def describe_EventGraph():
                     EventGraph([handler])
 
             def it_allows_event_subclass_return_type():
-                class Audited(Event):
+                class Audited(IntegrationEvent):
                     data: str = ""
 
                 @on(Started)
@@ -3414,7 +3436,6 @@ def describe_EventGraph():
 
             @pytest.mark.asyncio
             async def it_emits_custom_frames_from_sync_handler():
-                from langgraph_events import CustomEventFrame
 
                 @on(Started)
                 def step(event: Started) -> Ended:
@@ -3437,7 +3458,6 @@ def describe_EventGraph():
 
             @pytest.mark.asyncio
             async def it_emits_custom_frames_from_async_handler():
-                from langgraph_events import CustomEventFrame
 
                 @on(Started)
                 async def step(event: Started) -> Ended:
@@ -3524,14 +3544,12 @@ def describe_EventGraph():
                 FakeListChatModel,
             )
 
-            from langgraph_events._graph import LLMStreamEnd, LLMToken
-
             llm = FakeListChatModel(responses=["hello world"], sleep=0)
 
-            class UserSent(MessageEvent):
+            class UserSent(IntegrationEvent, MessageEvent):
                 message: HumanMessage = None  # type: ignore[assignment]
 
-            class AgentReplied(MessageEvent):
+            class AgentReplied(IntegrationEvent, MessageEvent):
                 message: AIMessage = None  # type: ignore[assignment]
 
             @on(UserSent)
@@ -3567,14 +3585,12 @@ def describe_EventGraph():
                 FakeListChatModel,
             )
 
-            from langgraph_events._graph import LLMToken
-
             llm = FakeListChatModel(responses=["reply"], sleep=0)
 
-            class UserSent(MessageEvent):
+            class UserSent(IntegrationEvent, MessageEvent):
                 message: HumanMessage = None  # type: ignore[assignment]
 
-            class AgentReplied(MessageEvent):
+            class AgentReplied(IntegrationEvent, MessageEvent):
                 message: AIMessage = None  # type: ignore[assignment]
 
             @on(UserSent)
@@ -3604,14 +3620,12 @@ def describe_EventGraph():
                 FakeListChatModel,
             )
 
-            from langgraph_events._graph import LLMToken
-
             llm = FakeListChatModel(responses=["hi back"], sleep=0)
 
-            class UserSent(MessageEvent):
+            class UserSent(IntegrationEvent, MessageEvent):
                 message: HumanMessage = None  # type: ignore[assignment]
 
-            class AgentReplied(MessageEvent):
+            class AgentReplied(IntegrationEvent, MessageEvent):
                 message: AIMessage = None  # type: ignore[assignment]
 
             @on(UserSent)
@@ -3671,7 +3685,6 @@ def describe_EventGraph():
         @pytest.mark.asyncio
         async def it_omits_tokens_by_default():
             """Without include_llm_tokens, no LLMToken/LLMStreamEnd are yielded."""
-            from langgraph_events._graph import LLMStreamEnd, LLMToken
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -3684,7 +3697,6 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_yields_custom_event_frames_from_v2_custom_events(monkeypatch):
-            from langgraph_events._graph import CustomEventFrame, StateSnapshotFrame
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -3727,7 +3739,6 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_does_not_yield_custom_event_frames_by_default(monkeypatch):
-            from langgraph_events._graph import CustomEventFrame
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -3757,7 +3768,6 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_filters_custom_events_in_v2_path(monkeypatch):
-            from langgraph_events._graph import CustomEventFrame
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -3790,7 +3800,6 @@ def describe_EventGraph():
         async def it_yields_custom_event_frames_on_opt_in(
             monkeypatch,
         ):
-            from langgraph_events._graph import CustomEventFrame
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -3823,8 +3832,6 @@ def describe_EventGraph():
             monkeypatch,
         ):
             from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events._graph import CustomEventFrame
 
             @on(Started)
             def step(event: Started) -> Ended:
@@ -4079,7 +4086,7 @@ def describe_OrphanedEventWarning():
     def when_orphaned():
 
         def it_warns_about_orphaned_event_types():
-            class Orphan(Event):
+            class Orphan(IntegrationEvent):
                 pass
 
             @on(Started)
@@ -4090,7 +4097,7 @@ def describe_OrphanedEventWarning():
                 EventGraph([produce_orphan])
 
         def it_warns_for_orphaned_scatter_types():
-            class ScatterOrphan(Event):
+            class ScatterOrphan(IntegrationEvent):
                 pass
 
             @on(Started)
@@ -4103,7 +4110,7 @@ def describe_OrphanedEventWarning():
     def when_not_orphaned():
 
         def it_does_not_warn_for_subscribed_via_inheritance():
-            class Base(Event):
+            class Base(IntegrationEvent):
                 pass
 
             class Sub(Base):
@@ -4155,7 +4162,7 @@ def describe_OrphanedEventWarning():
         def it_does_not_warn_for_none_in_union():
             """Optional[Event] return type should not warn about NoneType."""
 
-            class MaybeResult(Event):
+            class MaybeResult(IntegrationEvent):
                 pass
 
             @on(Started)
@@ -4169,3 +4176,20 @@ def describe_OrphanedEventWarning():
             with warnings.catch_warnings():
                 warnings.simplefilter("error", OrphanedEventWarning)
                 EventGraph([maybe, consumer])
+
+        def it_does_not_warn_for_terminal_domain_event_outcomes():
+            # DomainEvents nested inside a Command are terminal outcomes —
+            # having no subscriber is idiomatic DDD, not an orphan.
+            class Order(Aggregate):
+                class Place(Command):
+                    customer_id: str = ""
+
+                    class Placed(DomainEvent):
+                        order_id: str = ""
+
+                    def handle(self) -> "Order.Place.Placed":
+                        return Order.Place.Placed(order_id="o1")
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([Order.Place])

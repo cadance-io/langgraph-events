@@ -1,106 +1,90 @@
 # Getting Started
 
-## Minimal Example
+## Model your domain
+
+Events are **facts** about what happened. Commands are **intents** for what should happen. Group both under an aggregate — and, for simple cases, put the handler right there too:
 
 ```python
-from langgraph_events import Event, EventGraph, on
+from langgraph_events import Aggregate, Command, DomainEvent, EventGraph
 
 
-class MessageReceived(Event):
-    text: str
+class Order(Aggregate):
+    class Place(Command):
+        customer_id: str
+        items: tuple[str, ...]
+
+        class Placed(DomainEvent):
+            order_id: str
+
+        class Rejected(DomainEvent):
+            reason: str
+
+        def handle(self) -> Placed | Rejected:
+            if not self.items:
+                return Order.Place.Rejected(reason="empty order")
+            return Order.Place.Placed(order_id=f"o-{self.customer_id}")
+
+    class Shipped(DomainEvent):
+        tracking: str
 
 
-class MessageClassified(Event):
-    label: str
-
-
-class ReplyProduced(Event):
-    text: str
-
-
-@on(MessageReceived)
-def classify(event: MessageReceived) -> MessageClassified:
-    if "help" in event.text.lower():
-        return MessageClassified(label="support")
-    return MessageClassified(label="general")
-
-
-@on(MessageClassified)
-def respond(event: MessageClassified) -> ReplyProduced:
-    if event.label == "support":
-        return ReplyProduced(text="Routing you to support...")
-    return ReplyProduced(text="Thanks for your message!")
-
-
-graph = EventGraph([classify, respond])
-log = graph.invoke(MessageReceived(text="I need help with my order"))
-
-print(log.latest(ReplyProduced))
-# ReplyProduced(text='Routing you to support...')
+graph = EventGraph([Order.Place])
+log = graph.invoke(Order.Place(customer_id="alice", items=("book",)))
+print(log.latest(Order.Place.Placed))
 ```
 
-## How It Works
+- `Order` is the aggregate (namespace). `Place` is a command. `Placed` / `Rejected` are its outcomes. `Shipped` is a free event.
+- Commands use **imperative** names; events use **past-participle**.
+- `Order.Place.Outcomes` is auto-generated as `Placed | Rejected` — used in `isinstance` and enforced as the handler's return contract.
+- `handle(self)` is the command's inline handler; `self` is the event.
 
-`EventGraph` compiles your handlers into a LangGraph `StateGraph` with a hub-and-spoke reactive loop:
+Need `invariants=`, `raises=`, or a handler across multiple event types? Use the external `@on(...)` form — see [Concepts](concepts.md#on-decorator).
 
-```
-seed event
-    |
-    v
-[seed] --> [dispatch] --> handler_a --+
-                ^          handler_b --+
-                |                      |
-             [router] <----------------+
-                |
-                v
-             [dispatch] --> handler_c --+
-                ^                       |
-                |                       |
-             [router] <-----------------+
-                |
-                v
-             [dispatch] --> END (no pending events)
-```
-
-1. A **seed event** enters the graph.
-2. The **router** collects new events, then **dispatch** matches each to subscribed handlers via `isinstance`. Matched handlers run and emit new events.
-3. The loop repeats until no handler matches or a `Halted` event appears.
-
-## Running the Graph
+## Run the graph
 
 ```python
-# Synchronous — returns the full EventLog when the graph completes
-log = graph.invoke(MessageReceived(text="hello"))
+log = graph.invoke(seed)                    # sync; returns EventLog
+log = await graph.ainvoke(seed)             # async
+for event in graph.stream_events(seed): ... # stream as produced
+```
 
-# Multiple seed events — useful for system prompts + user input
-log = graph.invoke([
-    SystemPromptSet.from_str("You are helpful"),
-    UserMessageReceived(message=HumanMessage(content="Hi")),
-])
+## Inspect
 
-# Async — same API, awaitable
-log = await graph.ainvoke(MessageReceived(text="hello"))
+```python
+print(graph.domain().text())             # human-readable tree (choreography)
+print(graph.domain().mermaid())          # Mermaid diagram
+graph.domain().aggregates                # structured DomainModel access
+log.filter(Order.Place.Placed)
+log.latest(Order.Place.Rejected)
+log.has(Order.Shipped)
+```
 
-# Stream events as they're produced — for live UI updates
-for event in graph.stream_events(MessageReceived(text="hello")):
-    print(event)
+## Cross-cutting events
 
-# Stream with reducer snapshots — see accumulated state each round
-for frame in graph.stream_events(MessageReceived(text="hello"), include_reducers=True):
-    print(frame.event, frame.reducers["messages"])
+Events that don't belong to any aggregate — external facts, shared signals — use `IntegrationEvent`:
+
+```python
+from langgraph_events import Auditable, IntegrationEvent
+
+class MessageReceived(IntegrationEvent):
+    text: str
+
+class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-logging
+    name: str
 ```
 
 ## Common Tasks
 
 | I want to... | Reach for... | Docs |
-|---------------|-------------|------|
+|---|---|---|
 | Query past events in a handler | `EventLog` (`log.filter()`, `log.latest()`) | [Concepts](concepts.md#eventlog) |
-| Accumulate message history | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
+| Enforce a precondition before a handler runs | `invariants=` on `@on()` | [Control Flow](control-flow.md#invariants) |
+| Register every inline handler on an aggregate | `EventGraph.from_aggregates(Order)` | [Concepts](concepts.md#inline-command-handlers) |
+| Accumulate state across events | `ScalarReducer` on the aggregate class | [Reducers](reducers.md) |
+| Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
 | Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
-| Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#halted) |
-| Catch handler exceptions | `@on(..., raises=MyError)` + `@on(HandlerRaised, exception=MyError)` | [Control Flow](control-flow.md#handler-exceptions) |
-| Stream LLM tokens in real time | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
-| Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI Adapter](agui.md) |
-
-See [Concepts](concepts.md) for the core model, then explore the topics above as needed.
+| Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#system-events) |
+| Catch handler exceptions | `raises=` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |
+| Stream LLM tokens | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
+| Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI](agui.md) |

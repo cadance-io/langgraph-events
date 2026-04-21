@@ -2,14 +2,14 @@
 
 import pytest
 
-from langgraph_events import Event, EventLog
+from langgraph_events import Event, EventLog, IntegrationEvent
 
 
-class Alpha(Event):
+class Alpha(IntegrationEvent):
     v: int = 0
 
 
-class Beta(Event):
+class Beta(IntegrationEvent):
     v: int = 0
 
 
@@ -91,7 +91,7 @@ def describe_EventLog():
             assert log.count(Beta) == 1
 
         def it_returns_zero_for_absent_type(log):
-            class Gamma(Event):
+            class Gamma(IntegrationEvent):
                 pass
 
             assert log.count(Gamma) == 0
@@ -111,7 +111,7 @@ def describe_EventLog():
         def when_type_absent():
 
             def it_returns_empty_log(log):
-                class Gamma(Event):
+                class Gamma(IntegrationEvent):
                     pass
 
                 result = log.after(Gamma)
@@ -129,7 +129,7 @@ def describe_EventLog():
         def when_type_absent():
 
             def it_returns_empty_log(log):
-                class Gamma(Event):
+                class Gamma(IntegrationEvent):
                     pass
 
                 result = log.before(Gamma)

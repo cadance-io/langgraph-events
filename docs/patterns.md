@@ -1,64 +1,454 @@
 # Patterns
 
-Complete runnable examples in `examples/`. Each demonstrates a different combination of core concepts.
+Runnable examples in `examples/`. Diagrams are auto-generated from each example's `graph.domain()` via `scripts/generate_mermaid.py` — always in sync with the code.
 
-## Reflection Loop
+| If you need…                          | See                                       | Related docs                                                          |
+| ------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------- |
+| Invariants + pinned reactions         | [Order](#ddd-order)                       | [control-flow](control-flow.md#invariants)                            |
+| Human-in-the-loop approval            | [Expense](#expense-hitl)                  | [control-flow](control-flow.md#interrupted-resumed)                   |
+| Tool-calling agent + AG-UI streaming  | [Conversation](#conversation-agui)        | [agui](agui.md), [reducers](reducers.md#message_reducer)              |
+| Supervisor loop / fan-in              | [Task](#supervisor)                       | [reducers](reducers.md#reducer)                                       |
+| Scatter fan-out / map-reduce          | [Batch](#scatter-fan-out)                 | [control-flow](control-flow.md#scatter)                               |
+| Safety gates + live streaming         | [Content](#content-pipeline)              | [streaming](streaming.md), [concepts](concepts.md#system-events)      |
+| Retries + escalation via `raises=`    | [Question](#error-recovery)               | [control-flow](control-flow.md#handler-exceptions)                    |
 
-Generate, critique, and revise in a loop with automatic revision caps. Demonstrates **multi-subscription** (`@on(WriteRequested, CritiqueReceived)`) for revision cycles, union return types for branching, and the `Auditable` trait for automatic logging.
+<!-- autogen:start:legend -->
+<details markdown="1">
+<summary>🗝️ Diagram vocabulary</summary>
 
-- Code: [examples/reflection_loop.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/reflection_loop.py)
-- Flow: [examples/reflection_loop.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/reflection_loop.graph.md)
+```mermaid
+graph LR
+    classDef entry fill:none,stroke:none,color:none
+    classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+    classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+    classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+    classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+    classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+    classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    subgraph Example["Aggregate"]
+      direction LR
+      Command{{Command}}:::cmd
+      DomainEvent(DomainEvent):::devt
+      Halted([Halted]):::halt
+      Invariant{Invariant}:::inv
+    end
+    IntegrationEvent[/IntegrationEvent/]:::intg
+    SystemEvent([SystemEvent]):::syst
+    _seed_[ ]:::entry ==> Command
+    Command -->|handler| DomainEvent
+    Command -.->|"handler (raises)"| SystemEvent
+    Command -.->|scatter| IntegrationEvent
+    Command -.- Halted
+    Command -.->|invariant| Invariant
+    linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
+    linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
+    linkStyle 5 stroke:#c2410c,stroke-dasharray:4 2
+```
 
-## ReAct Agent with Message Reducer
+</details>
+<!-- autogen:end -->
 
-Tool-calling agent with incremental message history. Demonstrates **[`message_reducer()`](reducers.md#message_reducer)** for automatic LangChain message accumulation, `MessageEvent` for typed message wrapping, and a multi-subscription loop (`@on(UserMessageReceived, ToolsExecuted)`) that drives the ReAct cycle.
+## Invariants & reactions (Order aggregate) { #ddd-order }
 
-- Code: [examples/react_agent.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/react_agent.py)
-- Flow: [examples/react_agent.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/react_agent.graph.md)
+`Order` aggregate, `Place` command, `Placed` / `Rejected` outcomes, a typed `CustomerNotBanned(Invariant)` that blocks banned customers, a pinned `@on(InvariantViolated, invariant=…)` reaction turning violations into domain rejections, and a declarative `ScalarReducer` as aggregate attribute tracking `current_status`.
 
-## Multi-Agent Supervisor
+<!-- autogen:start:ddd_order -->
+=== "Diagram"
 
-Supervisor routes tasks to specialist agents and aggregates context. Demonstrates a **custom [`Reducer`](reducers.md#reducer)** for cross-agent context accumulation, tool-calling for structured routing decisions, and typed events for supervisor-to-specialist communication — no manual subgraph wiring.
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Order["Order aggregate"]
+            direction LR
+            Place{{Place}}:::cmd
+            Placed(Placed):::devt
+            Rejected(Rejected):::devt
+            Ship{{Ship}}:::cmd
+            Shipped(Shipped):::devt
+            CustomerNotBanned{CustomerNotBanned}:::inv
+        end
+        InvariantViolated([InvariantViolated]):::syst
+        _e0_[ ]:::entry ==> InvariantViolated
+        _e1_[ ]:::entry ==> Place
+        _e2_[ ]:::entry ==> Ship
+        Ship -->|handle| Shipped
+        Place -->|place| Placed
+        InvariantViolated -->|explain_rejection| Rejected
+        Place -.- Rejected
+        Place -.->|invariant| CustomerNotBanned
+        linkStyle 6 stroke:#9ca3af,stroke-dasharray:3 3
+        linkStyle 7 stroke:#c2410c,stroke-dasharray:4 2
+    ```
 
-- Code: [examples/supervisor.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.py)
-- Flow: [examples/supervisor.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.graph.md)
+=== "Flow (text)"
 
-## Fan-Out / Fan-In (Map-Reduce)
+    ```text
+    Aggregates:
+      Order
+        Command: Ship  (handlers: handle)
+          → Shipped
+        Command: Place  (handlers: place; invariant: CustomerNotBanned)
+          → Placed
+          → Rejected
+    System events:
+      InvariantViolated
+    Invariants:
+      CustomerNotBanned  (on Place; reacted by: explain_rejection)
+    Policies:
+      explain_rejection  (InvariantViolated → Rejected)
+    Seed events:
+      InvariantViolated
+      Place
+      Ship
+    ```
 
-Parallel document summarization with batch splitting and completion detection. Demonstrates **[`Scatter`](control-flow.md#scatter)** for fan-out to multiple work items and `EventLog.filter()` for gather/completion detection with a duplicate-harmless pattern.
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_order.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_order.graph.md)
+<!-- autogen:end -->
 
-- Code: [examples/map_reduce.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.py)
-- Flow: [examples/map_reduce.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.graph.md)
+## Human-in-the-loop approval (Expense aggregate) { #expense-hitl }
 
-## AG-UI Frontend Tools
+DDD aggregate combined with human-in-the-loop approval. LLM extracts expense data; policy checker auto-approves small expenses or pauses the graph with [`Interrupted`](control-flow.md#interrupted-resumed) for manager review. Resume with an `Approve` or `Reject` command.
 
-Wire CopilotKit's `useFrontendTool` (v2) to an `EventGraph`. Covers the LLM-initiated streaming path — `AIMessageChunk.tool_call_chunks` auto-translate to `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd` — plus the inbound tool-result round-trip via `detect_new_tool_results` and `build_langchain_tools`.
+<!-- autogen:start:ddd_expense_approval -->
+=== "Diagram"
 
-- Code: [examples/agui_frontend_tools.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_frontend_tools.py)
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Expense["Expense aggregate"]
+            direction LR
+            Approve{{Approve}}:::cmd
+            Approved(Approved):::devt
+            Invalidated(Invalidated):::devt
+            Reject{{Reject}}:::cmd
+            Rejected(Rejected):::devt
+            Submit{{Submit}}:::cmd
+            Submitted(Submitted):::devt
+        end
+        ApprovalRequired([ApprovalRequired]):::syst
+        _e0_[ ]:::entry ==> Reject
+        _e1_[ ]:::entry ==> Submit
+        Submit -->|handle| Submitted
+        Submit -->|handle| Invalidated
+        Approve -->|handle_2| Approved
+        Reject -->|handle_3| Rejected
+        Submitted -->|check_policy| Approve
+        Submitted -->|check_policy| ApprovalRequired
+    ```
 
-## AG-UI Confirm Dialog
+=== "Flow (text)"
 
-Handler-initiated frontend tools via [`FrontendToolCallRequested(Interrupted)`](agui.md#frontend-tools) — the graph pauses on a typed event, the frontend renders and runs the tool, and the returned tool message resumes the graph. Tool calls become "HITL with typed fields."
+    ```text
+    Aggregates:
+      Expense
+        Command: Submit  (handlers: handle)
+          → Submitted
+          → Invalidated
+        Command: Approve  (handlers: handle_2)
+          → Approved
+        Command: Reject  (handlers: handle_3)
+          → Rejected
+    System events:
+      ApprovalRequired
+    Policies:
+      check_policy  (Submitted → Approve, ApprovalRequired)
+    Seed events:
+      Reject
+      Submit
+    ```
 
-- Code: [examples/agui_confirm_dialog.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/agui_confirm_dialog.py)
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_expense_approval.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_expense_approval.graph.md)
+<!-- autogen:end -->
 
-## Human-in-the-Loop Approval
+## Tool-calling + AG-UI (Conversation aggregate) { #conversation-agui }
 
-Pause execution for human approval and resume with typed events. Demonstrates **[`Interrupted`](control-flow.md#interrupted-resumed)** for pausing the graph, `graph.resume()` with domain events, and revision cycles driven by human feedback. Requires a checkpointer (`MemorySaver`).
+DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI frontend tools** (CopilotKit `useFrontendTool`). `Conversation.Send` enforces content moderation before the LLM sees the message; tools declared by the frontend are bound to the LLM via `build_langchain_tools`; tool calls stream to the client as `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`; results return via `detect_new_tool_results` → `ToolsExecuted`, closing the ReAct loop. Combines `DomainEvent + MessageEvent` mixin with [`message_reducer()`](reducers.md#message_reducer). For the handler-initiated `FrontendToolCallRequested` pattern, see [AG-UI docs](agui.md#handler-initiated-frontend-tools).
 
-- Code: [examples/human_in_the_loop.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/human_in_the_loop.py)
-- Flow: [examples/human_in_the_loop.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/human_in_the_loop.graph.md)
+<!-- autogen:start:ddd_conversation -->
+=== "Diagram"
 
-## Content Pipeline
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Conversation["Conversation aggregate"]
+            direction LR
+            Blocked(Blocked):::devt
+            Send{{Send}}:::cmd
+            Sent(Sent):::devt
+        end
+        AnswerProduced[/AnswerProduced/]:::intg
+        LLMResponded[/LLMResponded/]:::intg
+        ToolsExecuted[/ToolsExecuted/]:::intg
+        _e0_[ ]:::entry ==> Send
+        _e1_[ ]:::entry ==> ToolsExecuted
+        Send -->|handle| Sent
+        Send -->|handle| Blocked
+        Sent -->|call_llm| LLMResponded
+        ToolsExecuted -->|call_llm| LLMResponded
+        LLMResponded -->|finalize_answer| AnswerProduced
+    %% Side-effect handlers: audit_trail (Auditable)
+    ```
 
-Safety gates with early termination and live event streaming. Demonstrates **[`Halted`](concepts.md#halted)** for safety-based graph termination, async **[streaming](streaming.md)** with `astream_events()`, `EventLog.has()` for existence checks, and keyword-based classification (no LLM required).
+=== "Flow (text)"
 
-- Code: [examples/content_pipeline.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.py)
-- Flow: [examples/content_pipeline.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.graph.md)
+    ```text
+    Aggregates:
+      Conversation
+        Command: Send  (handlers: handle)
+          → Sent
+          → Blocked
+    Integration events:
+      ToolsExecuted
+      LLMResponded
+      AnswerProduced
+    Policies:
+      call_llm  (Sent, ToolsExecuted → LLMResponded)
+      finalize_answer  (LLMResponded → AnswerProduced)
+      audit_trail  (Auditable)  [side-effect]
+    Seed events:
+      Send
+      ToolsExecuted
+    ```
 
-## Error Recovery
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_conversation.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_conversation.graph.md)
+<!-- autogen:end -->
 
-Declared handler exceptions with retry and escalation. Demonstrates **[`raises=`](control-flow.md#handler-exceptions)** on `@on`, the built-in `HandlerRaised` event, field-injected exception parameters (`exception: RateLimitError`), and chained error handling — the recovery handler itself declares `raises=QuotaExhaustedError` to escalate after `MAX_ATTEMPTS`, caught by a dedicated handler that emits `GaveUp` (a `Halted` subtype).
+## Supervisor fan-in (Task aggregate) { #supervisor }
 
-- Code: [examples/error_recovery.py](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.py)
-- Flow: [examples/error_recovery.graph.md](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.graph.md)
+`Task.Run` kicks off the supervisor loop; the supervisor handler dispatches sub-commands `Task.Research` / `Task.Code` or emits the terminal `Task.Finalized` fact. A custom [`Reducer`](reducers.md#reducer) accumulates context across specialist completions. Typed events replace manual subgraph wiring.
+
+<!-- autogen:start:supervisor -->
+=== "Diagram"
+
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Task["Task aggregate"]
+            direction LR
+            Code{{Code}}:::cmd
+            Completed(Completed):::devt
+            Finalized(Finalized):::devt
+            Produced(Produced):::devt
+            Research{{Research}}:::cmd
+            Run{{Run}}:::cmd
+        end
+        _e0_[ ]:::entry ==> Run
+        Run -->|supervisor| Research
+        Run -->|supervisor| Code
+        Run -->|supervisor| Finalized
+        Completed -->|supervisor| Research
+        Completed -->|supervisor| Code
+        Completed -->|supervisor| Finalized
+        Produced -->|supervisor| Research
+        Produced -->|supervisor| Code
+        Produced -->|supervisor| Finalized
+        Research -->|researcher| Completed
+        Code -->|coder| Produced
+    %% Side-effect handlers: audit_trail (Auditable)
+    ```
+
+=== "Flow (text)"
+
+    ```text
+    Aggregates:
+      Task
+        Command: Run  (handlers: supervisor)
+        Command: Research  (handlers: researcher)
+          → Completed
+        Command: Code  (handlers: coder)
+          → Produced
+        Event: Finalized
+    Policies:
+      audit_trail  (Auditable)  [side-effect]
+    Seed events:
+      Run
+    ```
+
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.graph.md)
+<!-- autogen:end -->
+
+## Scatter fan-out (Batch aggregate) { #scatter-fan-out }
+
+`Batch.Summarize` fans out to per-document work via [`Scatter`](control-flow.md#scatter); a gather handler uses `EventLog.filter()` to complete when all `Batch.DocSummarized` facts arrive and emit `Batch.Summarize.Summarized`.
+
+<!-- autogen:start:map_reduce -->
+=== "Diagram"
+
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Batch["Batch aggregate"]
+            direction LR
+            DocDispatched(DocDispatched):::devt
+            DocSummarized(DocSummarized):::devt
+            Summarize{{Summarize}}:::cmd
+            Summarized(Summarized):::devt
+        end
+        _e0_[ ]:::entry ==> Summarize
+        Summarize -.->|split_batch| DocDispatched
+        DocDispatched -->|summarize_one| DocSummarized
+        DocSummarized -->|gather_summaries| Summarized
+        Summarize -.- Summarized
+    %% Side-effect handlers: audit_trail (Auditable)
+        linkStyle 1 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
+        linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
+    ```
+
+=== "Flow (text)"
+
+    ```text
+    Aggregates:
+      Batch
+        Command: Summarize  (handlers: split_batch; scatters Scatter[DocDispatched])
+          → Summarized
+        Event: DocDispatched
+        Event: DocSummarized
+    Policies:
+      summarize_one  (DocDispatched → DocSummarized)
+      gather_summaries  (DocSummarized → Summarized)
+      audit_trail  (Auditable)  [side-effect]
+    Seed events:
+      Summarize
+    ```
+
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.graph.md)
+<!-- autogen:end -->
+
+## Safety gates + streaming (Content aggregate) { #content-pipeline }
+
+`Content.Process` with an inline `handle` classifies text; external reactions gate approval (emitting `Content.Blocked` — a `Halted` subtype — or `Content.Approved`) and analyze. Safety gates via [`Halted`](concepts.md#system-events) and live streaming via `astream_events()`. Keyword classification — no LLM required.
+
+<!-- autogen:start:content_pipeline -->
+=== "Diagram"
+
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Content["Content aggregate"]
+            direction LR
+            Analyzed(Analyzed):::devt
+            Approved(Approved):::devt
+            Blocked([Blocked]):::halt
+            Classified(Classified):::devt
+            Process{{Process}}:::cmd
+        end
+        _e0_[ ]:::entry ==> Process
+        Process -->|handle| Classified
+        Classified -->|gate| Blocked
+        Classified -->|gate| Approved
+        Approved -->|analyze| Analyzed
+    ```
+
+=== "Flow (text)"
+
+    ```text
+    Aggregates:
+      Content
+        Command: Process  (handlers: handle)
+          → Classified
+        Event: Blocked  [Halted]
+        Event: Approved
+        Event: Analyzed
+    Policies:
+      gate  (Classified → Blocked, Approved)
+      analyze  (Approved → Analyzed)
+    Seed events:
+      Process
+    ```
+
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.graph.md)
+<!-- autogen:end -->
+
+## Retries & escalation (Question aggregate) { #error-recovery }
+
+Declared handler exceptions with retry + escalation via [`raises=`](control-flow.md#handler-exceptions) and `HandlerRaised`. `Question.Ask` is the entry command; a rate-limit catcher emits `Question.RetryScheduled`; chained catchers escalate to `Question.GaveUp` (a `Halted` subtype) after `MAX_ATTEMPTS`.
+
+<!-- autogen:start:error_recovery -->
+=== "Diagram"
+
+    ```mermaid
+    graph LR
+        classDef entry fill:none,stroke:none,color:none
+        classDef cmd fill:#dbeafe,stroke:#1d4ed8,color:#1e3a8a
+        classDef devt fill:#dcfce7,stroke:#15803d,color:#14532d
+        classDef intg fill:#ede9fe,stroke:#6d28d9,color:#4c1d95
+        classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
+        classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
+        classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+        subgraph Question["Question aggregate"]
+            direction LR
+            Answered(Answered):::devt
+            Ask{{Ask}}:::cmd
+            GaveUp([GaveUp]):::halt
+            RetryScheduled(RetryScheduled):::devt
+        end
+        HandlerRaised([HandlerRaised]):::syst
+        _e0_[ ]:::entry ==> Ask
+        Ask -.->|"call_llm (raises)"| HandlerRaised
+        RetryScheduled -.->|"call_llm (raises)"| HandlerRaised
+        Ask -->|call_llm| Answered
+        RetryScheduled -->|call_llm| Answered
+        HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
+        HandlerRaised -->|backoff_and_retry| RetryScheduled
+        HandlerRaised -->|give_up| GaveUp
+        linkStyle 1,2,5 stroke:#6b7280,stroke-dasharray:3 3
+    ```
+
+=== "Flow (text)"
+
+    ```text
+    Aggregates:
+      Question
+        Command: Ask  (handlers: call_llm; raises RateLimitError)
+          → Answered
+        Event: RetryScheduled
+        Event: GaveUp  [Halted]
+    System events:
+      HandlerRaised
+    Policies:
+      backoff_and_retry  (HandlerRaised → RetryScheduled)  [raises QuotaExhaustedError]
+      give_up  (HandlerRaised → GaveUp)
+    Seed events:
+      Ask
+    ```
+
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.graph.md)
+<!-- autogen:end -->
+

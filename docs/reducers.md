@@ -1,101 +1,116 @@
 # Reducers
 
-Incremental state accumulation for values that are expensive to recompute from the event log each round.
+Incremental state accumulation. `EventLog.filter()` covers most cases — reach for a reducer when recomputing from the full log every round would be expensive (e.g. LangChain message history) or when you want a last-write-wins value injected by name.
 
-**When to reach for a reducer:** Pure event-driven handlers (`log.filter()`, `log.latest()`) are the default and work for most patterns. Add a `Reducer` when you need incremental accumulation that would be expensive to recompute from the full log each round — the canonical case is `message_reducer()` for LLM conversation history. Add a `ScalarReducer` for last-write-wins configuration values injected directly into handlers. If you find yourself calling `log.filter(X)` and transforming the result the same way in multiple handlers, that's a signal a reducer would help.
+## On an aggregate
 
-## `Reducer`
-
-A `Reducer` maps events to contributions for a named LangGraph state channel. The framework maintains the channel incrementally — handlers receive the accumulated value by declaring a parameter whose name matches the reducer.
+Declare a reducer as a class attribute inside an `Aggregate`. The channel name auto-fills from the attribute name (you don't pass `name=`), the aggregate scope auto-fills to the enclosing class, and `EventGraph` auto-registers it when any handler subscribes to an aggregate event:
 
 ```python
-from langgraph_events import Reducer, ScalarReducer, message_reducer, EventGraph, on
-
-# --- Reducer: accumulates contributions from matching events ---
-history = Reducer("history", event_type=UserMsg, fn=lambda e: [e.text], default=[])
+from langgraph_events import Aggregate, Command, DomainEvent, Event, ScalarReducer
 
 
-@on(UserMsg)
-def respond(event: UserMsg, history: list) -> Reply:
-    # history contains all projected values so far
-    ...
+class Order(Aggregate):
+    current_status = ScalarReducer(
+        event_type=Event,
+        fn=lambda e: (
+            "shipped" if isinstance(e, Order.Shipped)
+            else "placed" if isinstance(e, Order.Place.Placed)
+            else None
+        ),
+    )
+
+    class Place(Command):
+        customer_id: str
+
+        class Placed(DomainEvent):
+            order_id: str
+
+        def handle(self, current_status: str | None) -> Placed:
+            # `current_status` is injected by parameter name.
+            return Order.Place.Placed(order_id=f"o-{self.customer_id}")
+
+    class Shipped(DomainEvent):
+        tracking: str
 
 
-graph = EventGraph([respond], reducers=[history])
+graph = EventGraph([Order.Place])   # reducer auto-discovered from Order
 ```
 
-## `message_reducer`
+- Only sees events whose `__aggregate__` matches. Child aggregates inherit parent reducers (dedup by name).
+- Cross-aggregate name collisions raise `TypeError` at graph construction.
+- Explicit `reducers=[...]` wins on name conflict with an auto-discovered reducer.
 
-Built-in reducer for LangChain message accumulation. Projects `MessageEvent.as_messages()` into a `messages` state channel with smart deduplication via LangGraph's `add_messages`.
+## Graph-wide reducers
+
+For reducers that span aggregates or aren't aggregate-scoped, pass them explicitly via `reducers=[...]`. This is the form used by `message_reducer()`:
 
 ```python
 messages = message_reducer()
 graph = EventGraph([call_llm, handle_tools], reducers=[messages])
+
 log = graph.invoke([
-    SystemPromptSet.from_str("You are a helpful assistant."),
+    SystemPromptSet.from_str("You are helpful."),
     UserMessageReceived(message=HumanMessage(content="Hi")),
 ])
-
-# Alternative: explicit default list
-messages = message_reducer([SystemMessage(content="You are a helpful assistant.")])
 ```
 
-The parameter name `messages` matches the reducer name, so the framework injects the accumulated message list automatically:
+## `Reducer`
+
+Maps matching events to list contributions, merged by a binary operator (default `operator.add` for list concatenation). Any LangGraph-compatible reducer function works — e.g. `add_messages` for smart message deduplication.
 
 ```python
-@on(UserMessageReceived, ToolsExecuted)
-async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded:
-    response = await llm.ainvoke(messages)
-    ...
+history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], default=[])
 ```
-
-See the [ReAct Agent pattern](patterns.md#react-agent-with-message-reducer) for `message_reducer()` in action, and the [Supervisor pattern](patterns.md#multi-agent-supervisor) for a custom `Reducer`.
 
 ## `ScalarReducer`
 
-Last-write-wins reducer for single values. Unlike `Reducer` (which accumulates lists), `ScalarReducer` injects a bare value — the most recent non-`SKIP` contribution wins.
+Last-write-wins for single values. Unlike `Reducer` (list), `ScalarReducer` injects the bare value — the most recent non-`SKIP` contribution. `None` is a valid value.
 
 ```python
+temperature = ScalarReducer(name="temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7)
+```
+
+Return `SKIP` from `fn` to leave the current value unchanged — distinguishes "set to `None`" from "don't update":
+
+```python
+from langgraph_events import SKIP
+
 temperature = ScalarReducer(
-    "temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7
+    name="temperature",
+    event_type=ConfigUpdated,
+    fn=lambda e: e.temp if e.temp is not None else SKIP,
+    default=0.7,
 )
 ```
 
-### `SKIP`
+## `message_reducer`
 
-When a `ScalarReducer` function returns `SKIP`, the reducer value is left unchanged. This distinguishes "set to `None`" from "don't update."
-
-```python
-from langgraph_events import SKIP, ScalarReducer
-
-temperature = ScalarReducer(
-    "temperature", event_type=ConfigUpdated, fn=lambda e: e.temp if e.temp is not None else SKIP, default=0.7
-)
-```
-
-## Pre-seeding reducer state
-
-The event-driven approach is always preferred: model initial state as seed events so the event log stays the single source of truth.
+Built-in reducer for LangChain message accumulation. Projects `MessageEvent.as_messages()` into the `messages` channel using `add_messages` for deduplication:
 
 ```python
-# Preferred — state comes from events
-graph.invoke([ProposalDrafted(text="..."), ReviewRequested()])
+messages = message_reducer()
+# or with a default prompt
+messages = message_reducer([SystemMessage(content="You are helpful.")])
 ```
 
-For cases where external state must be injected outside the event system (e.g., migrating from a checkpoint, or test setup that can't go through the normal invoke path), use ``pre_seed``:
+Handler parameter `messages` matches the channel name:
+
+```python
+@on(UserMessageReceived, ToolsExecuted)
+async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded: ...
+```
+
+See the [Conversation Agent pattern](patterns.md#conversation-agui) and [Supervisor](patterns.md#supervisor).
+
+## Pre-seeding
+
+Prefer seeding state as events — the log stays the single source of truth. When external state must be injected outside the event path (migration, test fixture), use `pre_seed`:
 
 ```python
 graph.pre_seed(config, {"my_reducer": value})
 graph.invoke(SeedEvent(), config=config)
-
-# Or async
-await graph.apre_seed(config, {"my_reducer": value})
-await graph.ainvoke(SeedEvent(), config=config)
+# or: await graph.apre_seed(...)
 ```
 
-The seed node detects pre-existing channel data and preserves it rather than re-initializing from defaults. Seed events that contribute to the same reducer are merged on top of the pre-seeded value.
-
-**Caveats:**
-
-- Pre-seeded values bypass the event log. `log.filter()` won't reflect them; only the reducer state will.
-- Prefer seed events for anything that should be auditable or replayable.
+Pre-seeded values bypass the event log — `log.filter()` won't reflect them.

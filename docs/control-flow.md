@@ -1,12 +1,10 @@
 # Control Flow
 
-Fan-out, human-in-the-loop pauses, and other advanced dispatch patterns. Reach for these when basic event → handler → event chains aren't enough.
-
-For core graph execution and immediate halting, see [Core Concepts](concepts.md#halted).
+Fan-out, invariants, human-in-the-loop pauses, field matchers, and handler exceptions.
 
 ## `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan-out into multiple events. Each becomes a separate pending event, dispatched in the next round. Use `Scatter[WorkItem]` to annotate the produced type — this renders as a dashed edge in `mermaid()` diagrams.
+Return `Scatter([event1, event2, ...])` to fan out into multiple events. Each dispatches separately in the next round. Use `Scatter[WorkItem]` to annotate the produced type — renders as a dashed edge in `graph.domain().mermaid()`.
 
 ```python
 @on(Batch)
@@ -25,16 +23,60 @@ def gather(event: WorkDone, log: EventLog) -> BatchResult | None:
     batch = log.latest(Batch)
     if len(all_done) >= len(batch.items):
         return BatchResult(results=tuple(e.result for e in all_done))
-    return None  # not all items done yet
+    return None
 ```
 
-See the [Map-Reduce pattern](patterns.md#fan-out-fan-in-map-reduce) for a complete runnable example.
+See the [Map-Reduce pattern](patterns.md#scatter-fan-out).
+
+## Invariants
+
+`invariants={InvariantClass: predicate, ...}` on `@on()` blocks the handler before it runs if any predicate returns `False`. A blocked invariant emits `InvariantViolated` (a `SystemEvent`) carrying an `invariant` instance (of the declared class), the `handler` name, and the triggering `source_event`. (A blocked handler never runs, so no return-type contract applies to it.)
+
+Invariants are **typed markers** — subclass `Invariant` once per rule, then reference the class on both the declaration side and the reactor side. Typos fail at graph-construction time, not silently at runtime.
+
+Invariants are declared via the external `@on(...)` form — inline `handle` methods ([Concepts](concepts.md#on-decorator)) don't take modifiers.
+
+```python
+class CustomerNotBanned(Invariant):
+    """Customer must not be on the banned list."""
+
+
+@on(
+    Order.Place,
+    invariants={
+        CustomerNotBanned: lambda log: not log.has(CustomerBanned),
+    },
+)
+def place(event: Order.Place) -> Order.Place.Placed:
+    return Order.Place.Placed(order_id=f"o-{event.customer_id}")
+
+
+@on(InvariantViolated, invariant=CustomerNotBanned)
+def reject(event: InvariantViolated) -> Order.Place.Rejected:
+    return Order.Place.Rejected(reason=type(event.invariant).__name__)
+```
+
+Catch every violation with `@on(InvariantViolated)`, or pin a handler to a specific invariant class with the `invariant=` field matcher as shown. At graph construction time the framework verifies that every `invariant=` matcher references a class some handler actually declares — otherwise it raises `TypeError` ("would never fire").
+
+Semantics:
+
+- Predicates receive the current `EventLog` and must be **sync** (async is rejected at decoration).
+- Multiple invariants short-circuit on the first failure; one `InvariantViolated` is emitted.
+- Predicate exceptions propagate — they are not converted to violations.
+- Invariants run before `raises=`; a blocked handler's declared exceptions are not triggered.
+- `Invariant` subclasses should be zero-arg instantiable — the framework calls `Cls()` at emission time for `isinstance` matching. Nesting under an `Aggregate` / `Command` is encouraged (DDD-idiomatic) but not enforced.
+
+### Modeling errors — when to use what
+
+| Situation | Vehicle |
+|---|---|
+| Expected domain outcome (including failure) | `DomainEvent` (`Order.Place.Rejected`) |
+| Rule that must hold before a handler runs | `invariants=` → `InvariantViolated` |
+| Infrastructure failure (rate limit, timeout, parse error) | `Exception` + `raises=` → `HandlerRaised` |
 
 ## `Interrupted` / `Resumed`
 
-`Interrupted` is a bare marker class — subclass it with domain-specific fields to pause the graph and wait for human input. Resume with `graph.resume(event)` — the event is auto-dispatched (handlers subscribed to its type fire), then the framework creates a `Resumed` event alongside it. `resume()` requires an `Event` instance; passing a plain string or dict raises `TypeError`.
-
-Requires a **checkpointer** (e.g., `MemorySaver`).
+`Interrupted` is a bare marker — subclass with typed fields to pause for human input. Resume with `graph.resume(event)`; the event dispatches and a `Resumed` event is emitted alongside. Requires a **checkpointer** (`MemorySaver`, etc.).
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
@@ -45,7 +87,7 @@ class OrderConfirmationRequested(Interrupted):
     total: float
 
 
-class ApprovalSubmitted(Event):
+class ApprovalSubmitted(IntegrationEvent):
     approved: bool
 
 
@@ -55,61 +97,42 @@ def confirm(event: OrderPlaced) -> OrderConfirmationRequested:
 
 
 @on(ApprovalSubmitted)
-def handle_approval(
-    event: ApprovalSubmitted, log: EventLog,
-) -> OrderConfirmed | OrderCancelled:
-    confirm_event = log.latest(OrderConfirmationRequested)
+def handle_approval(event: ApprovalSubmitted, log: EventLog) -> OrderConfirmed | OrderCancelled:
+    request = log.latest(OrderConfirmationRequested)
     if event.approved:
-        return OrderConfirmed(order_id=confirm_event.order_id)
+        return OrderConfirmed(order_id=request.order_id)
     return OrderCancelled(reason="User declined")
 
 
 graph = EventGraph([confirm, handle_approval], checkpointer=MemorySaver())
 config = {"configurable": {"thread_id": "order-1"}}
 
-# First call — pauses at the interrupt
 graph.invoke(OrderPlaced(order_id="A1", total=99.99), config=config)
 
-# Check state and resume with a typed event
 state = graph.get_state(config)
 if state.is_interrupted:
-    confirm_event = state.interrupted
-    print(f"Approve order {confirm_event.order_id} for ${confirm_event.total}?")
+    print(f"Approve {state.interrupted.order_id} for ${state.interrupted.total}?")
 log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 ```
 
-### Field Matchers — Narrow Dispatch by Field Type
+See the [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
 
-**Field matchers** narrow dispatch by requiring a field on the event to be a specific type. Pass `field_name=EventType` as a keyword argument to `@on()` — the handler only fires when that field is an instance of the given type. If the handler signature includes a parameter with the same name, the matched value is injected automatically:
+## Field Matchers
 
-```python
-@on(Resumed, interrupted=OrderConfirmationRequested)
-def handle_order_confirmation(
-    event: Resumed, interrupted: OrderConfirmationRequested,
-) -> OrderConfirmed | OrderCancelled:
-    # `interrupted` is guaranteed to be OrderConfirmationRequested —
-    # the handler only fires when the field matches.
-    print(f"Order {interrupted.order_id}: ${interrupted.total}")
-    ...
-```
-
-Field matchers work on any event field typed as `Event`, not just `interrupted`. If the named field is `None` or doesn't match the given type, the handler is silently skipped. The field name is validated at graph construction — typos raise `TypeError` immediately.
-
-If the handler signature omits the field parameter, the matcher still filters dispatch but no injection occurs:
+Narrow dispatch by requiring a field to be a specific type. The handler only fires when the named field is an `isinstance` match; if the handler signature includes a matching parameter, the value is injected:
 
 ```python
 @on(Resumed, interrupted=OrderConfirmationRequested)
-def handle_order_confirmation(event: Resumed) -> OrderConfirmed:
-    # Still only fires for OrderConfirmationRequested interrupts,
-    # but you'd access event.interrupted directly.
+def handle(event: Resumed, interrupted: OrderConfirmationRequested) -> OrderConfirmed:
+    # `interrupted` is guaranteed to be OrderConfirmationRequested.
     ...
 ```
 
-See the [Human-in-the-Loop pattern](patterns.md#human-in-the-loop-approval) for a complete example, and [Checkpointer Evolution](checkpointer-evolution.md) for how graph changes affect interrupted checkpoints.
+Works on any field typed as `Event` or `Exception`. Field names are validated at graph construction — typos raise `TypeError`. Omitting the parameter still filters dispatch without injection.
 
 ## Handler Exceptions
 
-Declare exceptions the framework should catch from a handler with `raises=`. Caught exceptions surface as a built-in `HandlerRaised` event; subscribe with a field matcher on `exception` to react — retry, back off, escalate, or halt — without try/except boilerplate at the raise site.
+`raises=` declares exceptions the framework catches from a handler; caught exceptions surface as `HandlerRaised` events with the exception, the handler name, and the originating event. Subscribe with a field matcher on `exception` to react:
 
 ```python
 class RateLimitError(Exception):
@@ -118,28 +141,23 @@ class RateLimitError(Exception):
         self.retry_after = retry_after
 
 
-@on(QuestionAsked, raises=RateLimitError)
-def call_llm(event: QuestionAsked) -> AnswerReceived:
+@on(Question.Ask, raises=RateLimitError)
+def call_llm(event: Question.Ask) -> Question.Ask.Answered:
     if upstream_rate_limited():
         raise RateLimitError(retry_after=0.2)
-    return AnswerReceived(answer=...)
+    return Question.Ask.Answered(answer=...)
 
 
 @on(HandlerRaised, exception=RateLimitError)
-def backoff_and_retry(
-    event: HandlerRaised, exception: RateLimitError,
-) -> RetryScheduled:
-    # `exception` is injected and typed via field matcher
-    return RetryScheduled(question=event.source_event.question)
+def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.RetryScheduled:
+    return Question.RetryScheduled(question=event.source_event.question)
 ```
 
-Rules:
+Key rules:
 
-- `raises=` accepts a single class or tuple. Entries must be `Exception` subclasses — `BaseException`, `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, and `asyncio.CancelledError` are rejected at decoration time. The same restriction applies to `exception=` field matchers on `@on(HandlerRaised, ...)`.
-- Unhandled raises (exception types *not* in `raises=`) still propagate and crash the run. The mechanism is opt-in per-handler — no ambient catch-all.
-- **Compile-time check:** every type in `raises=` must be covered by at least one catcher. A catcher covers `X` if it's subscribed to `HandlerRaised` with no field matchers (catches any) *or* with only an `exception=X`-or-superclass matcher. Catchers that also add a non-`exception` field matcher (e.g. `source_event=SomeType`) are conservatively **not** counted toward coverage — such a narrowing filter can silently exclude legitimate raises at runtime, so you must pair it with a broader catcher. Missing coverage raises `TypeError` at `EventGraph(...)` construction with a message pointing at the uncovered class and the handler's full `raises=` tuple.
-- Catchers can themselves declare `raises=` to **escalate** — e.g., `backoff_and_retry` above can raise `QuotaExhaustedError` when the retry budget is spent, surfaced as another `HandlerRaised` for a dedicated handler.
-- `asyncio.CancelledError` is still surfaced as a `Cancelled` (a `Halted` subtype), not `HandlerRaised` — cancellation is a framework concern, not a domain error.
-- The original event being processed is preserved as `HandlerRaised.source_event`, so catchers can inspect what triggered the failure. Named `source_event` (not `event`) so `@on(HandlerRaised, source_event=SomeType)` can safely inject it alongside the handler's own `event` parameter.
+- Every type in `raises=` must be covered by at least one catcher, or graph construction fails with `TypeError`. A catcher covers `X` if it has no field matchers, or only `exception=X`-or-superclass. Non-`exception` matchers don't count.
+- Only `Exception` subclasses are allowed — `BaseException` / `KeyboardInterrupt` / `SystemExit` / `GeneratorExit` / `asyncio.CancelledError` are rejected. `CancelledError` surfaces as `Cancelled` (a `Halted` subtype).
+- Unhandled raises propagate and crash the run. Catchers can themselves declare `raises=` to escalate.
+- `HandlerRaised.source_event` (not `event`) holds the triggering event — avoids kwarg collision.
 
-See the [Error Recovery pattern](patterns.md#error-recovery) for a complete runnable example with retry and escalation.
+See the [Error Recovery pattern](patterns.md#error-recovery) for retry-and-escalate.

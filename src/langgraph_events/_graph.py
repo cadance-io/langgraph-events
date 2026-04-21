@@ -10,16 +10,22 @@ from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
+from langgraph_events._domain import DomainModel
 from langgraph_events._event import (
+    _AGGREGATE_REGISTRY,
+    Aggregate,
+    Command,
+    DomainEvent,
     Event,
     Halted,
     HandlerRaised,
     Interrupted,
-    Resumed,
+    Invariant,
+    InvariantViolated,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import HandlerMeta, extract_handler_meta
+from langgraph_events._handler import HandlerMeta, extract_handler_meta, on
 from langgraph_events._internal import (
     _BASE_FIELDS,
     _InputState,
@@ -64,6 +70,23 @@ class ReturnInfo(NamedTuple):
     has_scatter: bool
     has_interrupted: bool
     has_annotation: bool
+
+
+class ReturnContract(NamedTuple):
+    """Runtime contract for what a handler may legally return.
+
+    Computed at ``EventGraph`` construction; enforced in ``_collect_result``.
+    ``None`` → no enforcement (legacy shape-only check).
+    """
+
+    types: tuple[type, ...]
+    """Allowed concrete event types for non-Scatter returns."""
+
+    scatter_types: tuple[type, ...] | None
+    """Allowed element types for Scatter returns. None = no check."""
+
+    source: str
+    """Human-readable origin of the contract, used in error messages."""
 
 
 def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
@@ -194,6 +217,153 @@ def _coerce_snapshot_data(data: Any) -> dict[str, Any]:
     return {}
 
 
+def _compute_return_contract(
+    meta: HandlerMeta, info: ReturnInfo
+) -> ReturnContract | None:
+    """Derive the runtime return-contract for a handler.
+
+    Priority:
+    1. Explicit return annotation — authoritative.
+    2. ``Command.Outcomes`` inferred from subscribed event types.
+    3. No contract (legacy shape-only check in ``_collect_result``).
+    """
+    if info.has_annotation:
+        union_desc = " | ".join(t.__name__ for t in info.event_types) or "(no types)"
+        return ReturnContract(
+            types=tuple(info.event_types),
+            scatter_types=tuple(info.scatter_types) if info.scatter_types else None,
+            source=f"declared return type `{union_desc}`",
+        )
+
+    outcomes: list[type] = []
+    command_names: list[str] = []
+    for et in meta.event_types:
+        if not (isinstance(et, type) and issubclass(et, Command)):
+            continue
+        outs = getattr(et, "Outcomes", None)
+        if outs is None:
+            continue
+        args = typing.get_args(outs) or (outs,)
+        for t in args:
+            if isinstance(t, type) and t not in outcomes:
+                outcomes.append(t)
+        command_names.append(et.__qualname__)
+
+    if not outcomes:
+        return None
+
+    sources = ", ".join(command_names)
+    return ReturnContract(
+        types=tuple(outcomes),
+        scatter_types=None,
+        source=f"outcomes of {sources}",
+    )
+
+
+def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None:
+    """For inline ``handle`` handlers with an explicit return annotation,
+    require the annotation to cover every nested ``DomainEvent`` of the
+    owning ``Command``.
+
+    External ``@on(Cmd)`` handlers are intentionally exempt: outcome
+    production can be distributed across multiple handlers (e.g. one
+    handler returns ``Placed``, another reacts to ``InvariantViolated``
+    and produces ``Rejected``). Inline ``handle`` is the "I own this
+    command end-to-end" form, so dropping an outcome there is almost
+    always a mistake.
+
+    No annotation → skipped; the contract falls back to ``Command.Outcomes``.
+    """
+    cmd = getattr(meta.fn, "_inline_command", None)
+    if cmd is None or not info.has_annotation:
+        return
+    nested_outcomes = [
+        t
+        for t in cmd.__dict__.values()
+        if isinstance(t, type) and issubclass(t, Event) and issubclass(t, DomainEvent)
+    ]
+    if not nested_outcomes:
+        return
+    covered = tuple(info.event_types) + tuple(info.scatter_types)
+    missing = [o for o in nested_outcomes if not any(issubclass(c, o) for c in covered)]
+    if not missing:
+        return
+    declared = " | ".join(t.__name__ for t in covered) or "(no types)"
+    missing_names = ", ".join(o.__name__ for o in missing)
+    raise TypeError(
+        f"Inline `handle` on {cmd.__qualname__} declares return type "
+        f"`{declared}` but does not cover outcome(s): {missing_names}. "
+        f"Add them to the annotation (e.g. `-> "
+        f"{' | '.join(o.__name__ for o in nested_outcomes)}`) or drop "
+        f"the annotation to let Outcomes drive the contract."
+    )
+
+
+def _discover_aggregate_reducers(
+    handlers: list[Callable[..., Any]],
+    explicit_reducers: dict[str, BaseReducer],
+) -> None:
+    """Auto-register reducers declared on aggregates referenced by handlers.
+
+    Walks each handler's ``_event_types`` (set by ``@on(...)``), finds the
+    owning aggregate via ``__aggregate__`` + ``_AGGREGATE_REGISTRY``, and
+    unions that aggregate's ``__reducers__`` into *explicit_reducers*.
+
+    Collisions:
+    - Two different discovered reducers with the same name → ``TypeError``.
+    - Explicit reducer (already in the dict) shares a name with a discovered
+      one → explicit wins; discovered one is skipped silently.
+    """
+    discovered: dict[str, BaseReducer] = {}
+    for fn in handlers:
+        for et in getattr(fn, "_event_types", ()):
+            agg_name = getattr(et, "__aggregate__", None)
+            if not agg_name:
+                continue
+            agg_cls = _AGGREGATE_REGISTRY.get(agg_name)
+            if agg_cls is None:
+                continue
+            for r in agg_cls.__reducers__:
+                existing = discovered.get(r.name)
+                if existing is None:
+                    discovered[r.name] = r
+                elif existing is not r:
+                    raise TypeError(
+                        f"Reducer name {r.name!r} collides between aggregates: "
+                        f"{existing!r} and {r!r}"
+                    )
+    # Merge into explicit; explicit wins on name conflict.
+    for name, r in discovered.items():
+        explicit_reducers.setdefault(name, r)
+
+
+def _expand_command_handlers(
+    handlers: list[Any],
+) -> list[Callable[..., Any]]:
+    """Replace ``Command`` subclasses with their inline ``handle`` functions.
+
+    Each substituted function is stamped via ``on(cls)(fn)`` so that
+    ``extract_handler_meta`` sees it like any other ``@on``-subscribed
+    handler. Raises ``TypeError`` if a Command subclass has no ``handle``.
+    """
+    expanded: list[Callable[..., Any]] = []
+    for h in handlers:
+        if isinstance(h, type) and issubclass(h, Command):
+            fn = getattr(h, "__command_handler__", None)
+            if fn is None:
+                raise TypeError(
+                    f"Command {h.__qualname__} has no `handle` method. "
+                    f"Either define `handle` inside the command class or "
+                    f"register a handler via @on({h.__qualname__})."
+                )
+            on(h)(fn)  # sets fn._event_types = (h,); idempotent
+            fn._inline_command = h
+            expanded.append(fn)
+        else:
+            expanded.append(h)
+    return expanded
+
+
 class EventGraph:
     """Build and run an event-driven graph from ``@on`` handlers.
 
@@ -222,14 +392,19 @@ class EventGraph:
         reducers: list[BaseReducer] | None = None,
         checkpointer: Any = None,
         store: BaseStore | None = None,
+        recursion_limit: int | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
 
+        handlers = _expand_command_handlers(handlers)
+
         self._max_rounds = max_rounds
+        self._recursion_limit = recursion_limit
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
+        _discover_aggregate_reducers(handlers, self._reducers)
         conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
         if conflicts:
             raise ValueError(
@@ -255,6 +430,7 @@ class EventGraph:
             self._handler_metas.append(meta)
 
         self._return_info: dict[str, ReturnInfo] = {}
+        self._return_contracts: dict[str, ReturnContract | None] = {}
         for meta in self._handler_metas:
             info = _parse_return_types(meta.fn)
             self._return_info[meta.name] = info
@@ -263,6 +439,8 @@ class EventGraph:
                     f"Handler '{meta.name}' return type includes base 'Event'. "
                     f"Use specific types (e.g., TypeA | TypeB)."
                 )
+            self._return_contracts[meta.name] = _compute_return_contract(meta, info)
+            _verify_inline_outcome_coverage(meta, info)
 
         # Warn about event types that are produced but never consumed
         subscribed: set[type[Event]] = set()
@@ -276,6 +454,12 @@ class EventGraph:
             t
             for t in produced
             if not issubclass(t, (Halted, Interrupted))
+            # A DomainEvent nested inside a Command is a terminal outcome —
+            # having no subscriber is idiomatic, not an orphan.
+            and not (
+                issubclass(t, DomainEvent)
+                and getattr(t, "__command__", None) is not None
+            )
             and not any(issubclass(t, s) for s in subscribed)
         }
         if orphaned:
@@ -289,102 +473,18 @@ class EventGraph:
             )
 
         self._verify_raises_coverage()
+        self._verify_invariants_coverage()
 
-    @staticmethod
-    def _mermaid_footer_entry(
-        meta: HandlerMeta, has_scatter: bool, solid: list[str], dashed: list[str]
-    ) -> tuple[str, str] | None:
-        """Return ``(kind, entry)`` if handler belongs in footer, else None."""
-        if not solid and not dashed:
-            subscribed = ", ".join(t.__name__ for t in meta.event_types)
-            kind = "scatter" if has_scatter else "side_effect"
-            return kind, f"{meta.name} ({subscribed})"
-        return None
+    def domain(self) -> DomainModel:
+        """Return a :class:`DomainModel` — the code-derived DDD snapshot.
 
-    def mermaid(self) -> str:  # noqa: PLR0912
-        """Return a Mermaid flowchart showing event correlation.
-
-        Events are nodes, handlers are edge labels.
-        Seed events (no incoming edges) get a thick entry edge.
-        Typed ``Scatter[X]`` produces dashed edges; bare ``Scatter`` goes to a
-        comment footer.  Side-effect handlers (-> None) are listed in a footer.
-        If any handler produces ``Interrupted`` and any subscribes to
-        ``Resumed``, a dashed framework edge connects them.
+        One artifact covers the full picture: aggregates, commands, outcomes,
+        command handlers, policies, event-to-event edges, and seed events.
+        Render it via :meth:`DomainModel.text`, :meth:`DomainModel.mermaid`
+        (with ``view="structure"`` or ``view="choreography"``),
+        :meth:`DomainModel.json`, or read the data attributes directly.
         """
-        lines = ["graph LR"]
-        edge_lines: list[str] = []
-        side_effects: list[str] = []
-        scatter_handlers: list[str] = []
-        any_produces_interrupted = False
-        any_subscribes_resumed = False
-        all_sources: set[str] = set()
-        all_targets: set[str] = set()
-
-        for meta in self._handler_metas:
-            info = self._return_info[meta.name]
-            label = meta.name
-
-            if info.has_interrupted:
-                any_produces_interrupted = True
-            if any(issubclass(t, Resumed) for t in meta.event_types):
-                any_subscribes_resumed = True
-
-            solid_targets = [t.__name__ for t in info.event_types]
-            dashed_targets = [t.__name__ for t in info.scatter_types]
-            if not info.has_annotation:
-                solid_targets.append("?")
-
-            # Emit raises edges first so side-effect / scatter-only handlers
-            # that otherwise land in the footer still contribute a real edge.
-            if meta.raises:
-                for src_type in meta.event_types:
-                    src = src_type.__name__
-                    all_sources.add(src)
-                    all_targets.add(HandlerRaised.__name__)
-                    edge_lines.append(
-                        f"    {src} -.->|{label} (raises)| {HandlerRaised.__name__}"
-                    )
-
-            footer = self._mermaid_footer_entry(
-                meta, info.has_scatter, solid_targets, dashed_targets
-            )
-            if footer is not None:
-                (scatter_handlers if footer[0] == "scatter" else side_effects).append(
-                    footer[1]
-                )
-                continue
-
-            for src_type in meta.event_types:
-                src = src_type.__name__
-                all_sources.add(src)
-                for target in solid_targets:
-                    all_targets.add(target)
-                    edge_lines.append(f"    {src} -->|{label}| {target}")
-                for target in dashed_targets:
-                    all_targets.add(target)
-                    edge_lines.append(f"    {src} -.->|{label}| {target}")
-
-        if any_produces_interrupted and any_subscribes_resumed:
-            edge_lines.append("    Interrupted -.-> Resumed")
-            all_sources.add("Interrupted")
-            all_targets.add("Interrupted")
-            all_targets.add("Resumed")
-
-        # Seed events: sources that never appear as targets
-        seed_events = sorted(all_sources - all_targets)
-        if seed_events:
-            lines.append("    classDef entry fill:none,stroke:none,color:none")
-            for i, seed in enumerate(seed_events):
-                lines.append(f"    _e{i}_[ ]:::entry ==> {seed}")
-
-        lines.extend(edge_lines)
-
-        if scatter_handlers:
-            lines.append(f"%% Scatter handlers: {', '.join(scatter_handlers)}")
-        if side_effects:
-            lines.append(f"%% Side-effect handlers: {', '.join(side_effects)}")
-
-        return "\n".join(lines)
+        return DomainModel._build(self._handler_metas, self._return_info)
 
     @property
     def reducer_names(self) -> frozenset[str]:
@@ -437,7 +537,11 @@ class EventGraph:
 
         handler_names: list[str] = []
         for meta in self._handler_metas:
-            handler_node = make_handler_node(meta, reducers=self._reducers)
+            handler_node = make_handler_node(
+                meta,
+                reducers=self._reducers,
+                return_contract=self._return_contracts.get(meta.name),
+            )
             graph.add_node(meta.name, cast("Any", handler_node))
             handler_names.append(meta.name)
 
@@ -460,15 +564,19 @@ class EventGraph:
             compile_kwargs["store"] = self._store
         self._compiled_graph = graph.compile(**compile_kwargs)
 
-        # EventGraph controls termination via max_rounds. Set recursion_limit
-        # high enough that it never fires before max_rounds does.
+        # Resolve recursion_limit: explicit kwarg wins; otherwise auto-size
+        # so LangGraph's limit never trips before our max_rounds does.
         # Each round is at most 1 router + all handlers.
-        n_handlers = len(self._handler_metas)
-        needed = self._max_rounds * (n_handlers + 1) + 1
-        existing = (self._compiled_graph.config or {}).get("recursion_limit", 25)
+        if self._recursion_limit is not None:
+            limit = self._recursion_limit
+        else:
+            n_handlers = len(self._handler_metas)
+            needed = self._max_rounds * (n_handlers + 1) + 1
+            existing = (self._compiled_graph.config or {}).get("recursion_limit", 25)
+            limit = max(needed, existing)
         self._compiled_graph.config = {
             **(self._compiled_graph.config or {}),
-            "recursion_limit": max(needed, existing),
+            "recursion_limit": limit,
         }
 
         return self._compiled_graph
@@ -494,18 +602,19 @@ class EventGraph:
         for meta in self._handler_metas:
             if HandlerRaised not in meta.event_types:
                 continue
-            other_matchers = [fn for fn, _ in meta.field_matchers if fn != "exception"]
-            if other_matchers:
-                # Conservative: an extra field filter (e.g. event=OtherStart)
-                # means this catcher only fires for a subset of raises.
-                # Do not count it toward coverage.
+            # A catcher counts only if its sole field matcher is
+            # exception=<ExceptionType>. Any other field matcher, or a
+            # non-type (str) matcher on exception=, is conservatively ignored.
+            type_exception_match = None
+            has_other = False
+            for fname, matcher, is_type in meta.field_matchers:
+                if fname == "exception" and is_type:
+                    type_exception_match = cast("type[Exception]", matcher)
+                else:
+                    has_other = True
+            if has_other:
                 continue
-            exc_filter: type[Exception] | None = None
-            for fname, ftype in meta.field_matchers:
-                if fname == "exception":
-                    exc_filter = cast("type[Exception]", ftype)
-                    break
-            catchers.append((meta, exc_filter))
+            catchers.append((meta, type_exception_match))
 
         for meta in self._handler_metas:
             for exc_type in meta.raises:
@@ -520,6 +629,40 @@ class EventGraph:
                         f"type from raises=. Note: catchers with non-exception "
                         f"field matchers (e.g. source_event=SomeType) do not "
                         f"count toward coverage."
+                    )
+
+    def _verify_invariants_coverage(self) -> None:
+        """Ensure every ``@on(InvariantViolated, invariant=X)`` matcher
+        references an ``X`` declared by some handler's ``invariants=``.
+
+        Unlike ``raises=``, a missing reactor is fine — unhandled violations
+        just land in the log. The failure mode this check prevents is the
+        reverse: a reactor pinned to an invariant class that no one declares
+        is dead code (same silent no-op the old string API had).
+
+        Raises ``TypeError`` at compile time if any pinned reactor references
+        an undeclared invariant class.
+        """
+        declared: set[type[Invariant]] = set()
+        for meta in self._handler_metas:
+            for inv_cls, _pred in meta.invariants:
+                declared.add(inv_cls)
+
+        for meta in self._handler_metas:
+            if InvariantViolated not in meta.event_types:
+                continue
+            for fname, matcher, is_type in meta.field_matchers:
+                if fname != "invariant" or not is_type:
+                    continue
+                inv_cls = cast("type[Invariant]", matcher)
+                if inv_cls not in declared:
+                    raise TypeError(
+                        f"Handler {meta.name!r} subscribes to "
+                        f"@on(InvariantViolated, invariant={inv_cls.__name__}), "
+                        f"but no handler declares {inv_cls.__name__} in "
+                        f"invariants=. The reactor would never fire — add the "
+                        f"invariant to some handler's invariants= dict, or "
+                        f"remove the matcher."
                     )
 
     def _require_checkpointer(self, method: str) -> None:
@@ -542,6 +685,46 @@ class EventGraph:
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_owned(result["events"])
+
+    @classmethod
+    def from_aggregates(
+        cls,
+        *aggregates: type[Aggregate],
+        handlers: list[Callable[..., Any]] | None = None,
+        **kwargs: Any,
+    ) -> EventGraph:
+        """Build an ``EventGraph`` from aggregates' inline command handlers.
+
+        Walks each aggregate's class namespace and registers every ``Command``
+        that defines a ``handle`` method. Commands without ``handle`` are
+        silently skipped — register those via the ``handlers=`` kwarg or
+        ``EventGraph([...])`` directly, which errors on missing ``handle``.
+
+        The ``handlers=`` kwarg is appended as-is — useful for reaction
+        handlers subscribed to ``DomainEvent``s, ``HandlerRaised``,
+        ``InvariantViolated``, etc.
+
+        Example::
+
+            graph = EventGraph.from_aggregates(Order, Customer,
+                                               handlers=[react])
+        """
+        collected: list[Any] = []
+        for agg in aggregates:
+            if not (isinstance(agg, type) and issubclass(agg, Aggregate)):
+                raise TypeError(
+                    f"from_aggregates expects Aggregate subclasses, got {agg!r}"
+                )
+            for attr in agg.__dict__.values():
+                if (
+                    isinstance(attr, type)
+                    and issubclass(attr, Command)
+                    and getattr(attr, "__command_handler__", None) is not None
+                ):
+                    collected.append(attr)
+        if handlers:
+            collected.extend(handlers)
+        return cls(collected, **kwargs)
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph synchronously with one or more seed events.
@@ -958,6 +1141,34 @@ class EventGraph:
         reducer_names = self._resolve_reducer_names(include_reducers)
         yield from self._stream_sync(Command(resume=value), [], reducer_names, **kwargs)
 
+    async def _astream_entry(
+        self,
+        inp: Any,
+        seeds: list[Event],
+        *,
+        include_reducers: bool | list[str],
+        include_llm_tokens: bool,
+        include_custom_events: bool,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamItem]:
+        """Shared async-stream dispatcher — picks v2 vs core based on flags."""
+        kwargs.pop("stream_mode", None)
+        reducer_names = self._resolve_reducer_names(include_reducers)
+        delegate = (
+            self._astream_v2(
+                inp,
+                seeds,
+                reducer_names=reducer_names,
+                include_llm_tokens=include_llm_tokens,
+                include_custom_events=include_custom_events,
+                **kwargs,
+            )
+            if include_llm_tokens or include_custom_events
+            else self._astream_core(inp, seeds, reducer_names, **kwargs)
+        )
+        async for item in delegate:
+            yield item
+
     async def astream_resume(
         self,
         value: Event,
@@ -986,23 +1197,14 @@ class EventGraph:
         self._require_checkpointer("astream_resume")
         from langgraph.types import Command  # noqa: PLC0415
 
-        inp: Any = Command(resume=value)
-        kwargs.pop("stream_mode", None)
-        reducer_names = self._resolve_reducer_names(include_reducers)
-
-        delegate = (
-            self._astream_v2(
-                inp,
-                [],
-                reducer_names=reducer_names,
-                include_llm_tokens=include_llm_tokens,
-                include_custom_events=include_custom_events,
-                **kwargs,
-            )
-            if include_llm_tokens or include_custom_events
-            else self._astream_core(inp, [], reducer_names, **kwargs)
-        )
-        async for item in delegate:
+        async for item in self._astream_entry(
+            Command(resume=value),
+            [],
+            include_reducers=include_reducers,
+            include_llm_tokens=include_llm_tokens,
+            include_custom_events=include_custom_events,
+            **kwargs,
+        ):
             yield item
 
     async def astream_events(
@@ -1028,21 +1230,12 @@ class EventGraph:
                 from LangGraph.
         """
         inp = self._prepare_input(seed)
-        seeds = inp["events"]
-        kwargs.pop("stream_mode", None)
-        reducer_names = self._resolve_reducer_names(include_reducers)
-
-        delegate = (
-            self._astream_v2(
-                inp,
-                seeds,
-                reducer_names=reducer_names,
-                include_llm_tokens=include_llm_tokens,
-                include_custom_events=include_custom_events,
-                **kwargs,
-            )
-            if include_llm_tokens or include_custom_events
-            else self._astream_core(inp, seeds, reducer_names, **kwargs)
-        )
-        async for item in delegate:
+        async for item in self._astream_entry(
+            inp,
+            inp["events"],
+            include_reducers=include_reducers,
+            include_llm_tokens=include_llm_tokens,
+            include_custom_events=include_custom_events,
+            **kwargs,
+        ):
             yield item

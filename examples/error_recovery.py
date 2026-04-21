@@ -1,7 +1,7 @@
 """Error Recovery — langgraph-events demo.
 
 Demonstrates declared handler exceptions via ``raises=`` + the built-in
-``HandlerRaised`` event.
+``HandlerRaised`` event, organized around a DDD ``Question`` aggregate.
 
 A handler declares which exceptions the framework should catch; when one of
 those exceptions fires, the framework surfaces it as a ``HandlerRaised`` event
@@ -23,7 +23,10 @@ from __future__ import annotations
 import warnings
 
 from langgraph_events import (
+    Aggregate,
     Auditable,
+    Command,
+    DomainEvent,
     EventGraph,
     EventLog,
     Halted,
@@ -52,29 +55,41 @@ class QuotaExhaustedError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Events (past-participle: "what just happened")
+# Aggregate: Question
 # ---------------------------------------------------------------------------
 
 
-class QuestionAsked(Auditable):
-    """Seed event — the user's question enters the graph here."""
+class Question(Aggregate):
+    """A user question answered via a rate-limit-tolerant LLM call.
 
-    question: str = ""
+    ``Ask`` is the entry command. The answering handler declares
+    ``raises=RateLimitError``; a catcher schedules retries via
+    ``RetryScheduled``, re-entering the answering handler. After
+    ``MAX_ATTEMPTS``, the catcher escalates to ``QuotaExhaustedError`` which
+    a second catcher turns into the terminal ``GaveUp`` ``Halted`` signal.
+    """
 
+    class Ask(Command, Auditable):
+        """Entry command — asks a question, may take several tries to answer."""
 
-class RetryScheduled(Auditable):
-    """Internal retry event — emitted by the recovery handler."""
+        question: str = ""
+        attempt: int = 1
 
-    question: str = ""
-    attempt: int = 2
+        class Answered(DomainEvent, Auditable):
+            """Question answered — terminal outcome of Ask."""
 
+            answer: str = ""
 
-class AnswerReceived(Auditable):
-    answer: str = ""
+    class RetryScheduled(DomainEvent, Auditable):
+        """Internal retry fact — emitted by the backoff policy."""
 
+        question: str = ""
+        attempt: int = 2
 
-class GaveUp(Halted):
-    reason: str = ""
+    class GaveUp(Halted):
+        """Terminal halt — retry budget exhausted."""
+
+        reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -85,24 +100,26 @@ MAX_ATTEMPTS = 3
 _scenario = {"succeed_after": 3}  # attempt # at which the call starts succeeding
 
 
-@on(QuestionAsked, RetryScheduled, raises=RateLimitError)
-def call_llm(event: QuestionAsked | RetryScheduled) -> AnswerReceived:
+@on(Question.Ask, Question.RetryScheduled, raises=RateLimitError)
+def call_llm(
+    event: Question.Ask | Question.RetryScheduled,
+) -> Question.Ask.Answered:
     """Simulated LLM call — rate-limits until the scenario's success threshold."""
-    attempt = event.attempt if isinstance(event, RetryScheduled) else 1
+    attempt = event.attempt
     if attempt < _scenario["succeed_after"]:
         raise RateLimitError(retry_after=0.1 * attempt)
-    return AnswerReceived(answer=f"Answer to: {event.question!r}")
+    return Question.Ask.Answered(answer=f"Answer to: {event.question!r}")
 
 
 @on(HandlerRaised, exception=RateLimitError, raises=QuotaExhaustedError)
 def backoff_and_retry(
     event: HandlerRaised,
     exception: RateLimitError,
-) -> RetryScheduled:
+) -> Question.RetryScheduled:
     """Catches rate-limit failures and schedules a retry of the original question."""
     original = event.source_event
-    assert isinstance(original, (QuestionAsked, RetryScheduled))
-    prev_attempt = original.attempt if isinstance(original, RetryScheduled) else 1
+    assert isinstance(original, (Question.Ask, Question.RetryScheduled))
+    prev_attempt = original.attempt
     next_attempt = prev_attempt + 1
     if next_attempt > MAX_ATTEMPTS:
         raise QuotaExhaustedError(f"Exceeded {MAX_ATTEMPTS} attempts")
@@ -110,13 +127,13 @@ def backoff_and_retry(
         f"  [backoff] attempt {prev_attempt} hit rate limit "
         f"(retry_after={exception.retry_after}s); retrying as attempt {next_attempt}"
     )
-    return RetryScheduled(question=original.question, attempt=next_attempt)
+    return Question.RetryScheduled(question=original.question, attempt=next_attempt)
 
 
 @on(HandlerRaised, exception=QuotaExhaustedError)
-def give_up(event: HandlerRaised) -> GaveUp:
+def give_up(event: HandlerRaised) -> Question.GaveUp:
     """Escalation catcher — the retry loop itself surrendered."""
-    return GaveUp(reason=str(event.exception))
+    return Question.GaveUp(reason=str(event.exception))
 
 
 # ---------------------------------------------------------------------------
@@ -135,16 +152,16 @@ graph = EventGraph([call_llm, backoff_and_retry, give_up])
 def main() -> None:
     print("== Successful recovery after transient rate limits ==")
     _scenario["succeed_after"] = 3
-    log = graph.invoke(QuestionAsked(question="What is langgraph-events?"))
+    log = graph.invoke(Question.Ask(question="What is langgraph-events?"))
     _print_trail(log)
-    answer = log.latest(AnswerReceived)
+    answer = log.latest(Question.Ask.Answered)
     print(f"  [result] {answer}\n")
 
     print("== Escalation when retries are exhausted ==")
     _scenario["succeed_after"] = 999  # unreachable — always rate-limits
-    log = graph.invoke(QuestionAsked(question="Will this ever succeed?"))
+    log = graph.invoke(Question.Ask(question="Will this ever succeed?"))
     _print_trail(log)
-    halted = log.latest(GaveUp)
+    halted = log.latest(Question.GaveUp)
     print(f"  [result] {halted}")
 
 

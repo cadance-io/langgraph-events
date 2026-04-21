@@ -1,4 +1,4 @@
-"""@on decorator and handler metadata extraction."""
+"""The ``@on`` decorator and handler metadata extraction."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from langgraph_events._event import Event
+from langgraph_events._event import Event, Invariant
 from langgraph_events._event_log import (
     EventLog,
 )
@@ -20,49 +20,122 @@ if TYPE_CHECKING:
     from langgraph_events._types import F, HandlerReturn
 
 
-def on(
-    *event_types: type[Event],
-    raises: type[Exception] | tuple[type[Exception], ...] = (),
-    **field_matchers: type[Event] | type[Exception],
-) -> Callable[[F], F]:
-    """Decorator that subscribes a handler to one or more event types.
+def _validate_invariants(
+    invariants: dict[type[Invariant], Callable[..., bool]] | None,
+) -> tuple[tuple[type[Invariant], Callable[..., bool]], ...]:
+    """Validate and normalise the @on(invariants=) argument.
 
-    Multi-subscription: the handler fires when ANY of the listed types arrive.
-
-    Field matchers narrow dispatch further — the handler only fires when the
-    named field is an instance of the given type::
-
-        @on(Resumed, interrupted=ApprovalRequested)
-        def handle(event: Resumed, interrupted: ApprovalRequested):
-            interrupted.draft  # type-safe, framework-guaranteed
-
-    ``raises=`` declares exception classes the framework should catch from this
-    handler.  A caught exception is surfaced as a ``HandlerRaised`` event.  The
-    graph must include a handler that subscribes to ``HandlerRaised`` for the
-    declared type, or compilation fails::
-
-        @on(UserMessageReceived, raises=RateLimitError)
-        async def call_llm(event): raise RateLimitError(...)
-
-        @on(HandlerRaised, exception=RateLimitError)
-        def backoff(event): ...
-
-    Examples::
-
-        @on(DocumentReceived)
-        async def classify(event: DocumentReceived) -> DocumentClassified:
-            return DocumentClassified(...)
-
-        @on(UserMessage, ToolResults)
-        async def call_llm(event: Event, log: EventLog) -> AssistantMessage:
-            ...
+    Accepts a dict mapping an ``Invariant`` subclass (used as the dispatch key
+    via ``InvariantViolated.invariant``) to a sync predicate that takes an
+    ``EventLog`` and returns bool. Predicate exceptions propagate at dispatch
+    — they are not turned into violations.
     """
-    if not event_types:
-        raise TypeError("@on() requires at least one Event subclass")
+    if not invariants:
+        return ()
+    if not isinstance(invariants, dict):
+        raise TypeError(
+            f"@on() invariants= must be a dict[type[Invariant], Callable], "
+            f"got {type(invariants).__name__}"
+        )
+    validated: list[tuple[type[Invariant], Callable[..., bool]]] = []
+    for inv_cls, pred in invariants.items():
+        if not (isinstance(inv_cls, type) and issubclass(inv_cls, Invariant)):
+            raise TypeError(
+                f"@on() invariants= keys must be Invariant subclasses, got {inv_cls!r}"
+            )
+        if not callable(pred):
+            raise TypeError(
+                f"@on() invariants= predicate for {inv_cls.__name__!r} must "
+                f"be callable, got {pred!r}"
+            )
+        if asyncio.iscoroutinefunction(pred):
+            raise TypeError(
+                f"@on() invariants= predicate for {inv_cls.__name__!r} must "
+                f"be sync, got async function {pred.__qualname__!r}"
+            )
+        validated.append((inv_cls, pred))
+    return tuple(validated)
 
+
+def _resolve_type_hints(fn: Any) -> dict[str, Any]:
+    """Return ``fn``'s resolved type hints, cached on the function object.
+
+    Both ``_infer_event_type`` (at decoration) and ``extract_handler_meta``
+    (at graph construction) need the same hints — resolving twice is wasteful
+    and doubles the chance of forward-ref surprises. Cache on ``fn`` itself.
+    """
+    cached = getattr(fn, "_resolved_hints", None)
+    if cached is not None:
+        return cached
+    hints = typing.get_type_hints(fn)
+    fn._resolved_hints = hints
+    return hints
+
+
+def _infer_event_type(fn: Any) -> type[Event]:
+    """Read an ``Event`` subclass off ``fn``'s first parameter annotation.
+
+    Used by ``@on`` when positional event types are omitted. Raises
+    ``TypeError`` with an actionable message for the full range of failure
+    modes (missing parameter, missing annotation, non-``Event`` type, Union).
+    """
+    try:
+        hints = _resolve_type_hints(fn)
+    except Exception as exc:
+        raise TypeError(
+            f"@on could not resolve type hints for {fn.__qualname__!r}: "
+            f"{exc}. Annotate the first parameter with a resolvable Event "
+            f"subclass, or pass the event type explicitly: @on(EventType)."
+        ) from exc
+
+    sig = inspect.signature(fn)
+    params = [p for p in sig.parameters if p != "self"]
+    if not params:
+        raise TypeError(
+            f"@on requires {fn.__qualname__!r} to declare a typed first "
+            f"parameter (the event), but it has none."
+        )
+    first = params[0]
+    event_type = hints.get(first)
+    if event_type is None:
+        raise TypeError(
+            f"@on requires {fn.__qualname__!r}'s first parameter {first!r} "
+            f"to be annotated with an Event subclass (got no annotation), "
+            f"or pass the event type explicitly: @on(EventType)."
+        )
+    if not isinstance(event_type, type):
+        # Catches X | Y unions and other non-class annotations.
+        raise TypeError(
+            f"@on requires {fn.__qualname__!r}'s first parameter {first!r} "
+            f"to be annotated with a single Event subclass, got "
+            f"{event_type!r}. For multi-event subscription pass the types "
+            f"explicitly: @on(A, B, ...)."
+        )
+    is_event_type = issubclass(event_type, Event) or getattr(
+        event_type, "_event_mixin", False
+    )
+    if not is_event_type:
+        raise TypeError(
+            f"@on requires {fn.__qualname__!r}'s first parameter {first!r} "
+            f"to be annotated with an Event subclass or mixin, got "
+            f"{event_type.__name__}."
+        )
+    return event_type
+
+
+def _build_on_decorator(
+    event_types: tuple[type[Event], ...],
+    raises: type[Exception] | tuple[type[Exception], ...],
+    invariants: dict[type[Invariant], Callable[..., bool]] | None,
+    field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str],
+) -> Callable[[F], F]:
+    """Validate arguments and return the decorator that stamps attributes."""
     for et in event_types:
-        if not (isinstance(et, type) and issubclass(et, Event)):
-            raise TypeError(f"@on() requires Event subclasses, got {et!r}")
+        if not (
+            isinstance(et, type)
+            and (issubclass(et, Event) or getattr(et, "_event_mixin", False))
+        ):
+            raise TypeError(f"@on() requires Event subclasses or mixins, got {et!r}")
 
     # Normalise and validate raises
     raises_tuple: tuple[type[Exception], ...] = (
@@ -77,19 +150,25 @@ def on(
                 f"allowed — they are runtime/exit signals, not domain errors."
             )
 
-    # Validate field matchers: Event OR Exception subclass.
-    # Non-Exception BaseException subclasses (KeyboardInterrupt, SystemExit,
-    # GeneratorExit, asyncio.CancelledError) are rejected for symmetry with
-    # raises= — the framework treats them as runtime/exit signals, not
-    # domain errors to subscribe to.
-    for field_name, field_type in field_matchers.items():
-        if not (
-            isinstance(field_type, type)
-            and (issubclass(field_type, Event) or issubclass(field_type, Exception))
-        ):
+    invariants_tuple = _validate_invariants(invariants)
+
+    # Validate field matchers: Event/Exception subclass for type-based isinstance
+    # match, or a bare str for equality match on string fields. Non-Exception
+    # BaseException subclasses (KeyboardInterrupt, SystemExit, GeneratorExit,
+    # asyncio.CancelledError) are rejected for symmetry with raises= — the
+    # framework treats them as runtime/exit signals, not domain errors.
+    for field_name, field_match in field_matchers.items():
+        is_type = isinstance(field_match, type) and (
+            issubclass(field_match, Event)
+            or issubclass(field_match, Exception)
+            or issubclass(field_match, Invariant)
+        )
+        is_str = isinstance(field_match, str)
+        if not (is_type or is_str):
             raise TypeError(
-                f"@on() field matcher values must be Event or Exception "
-                f"subclasses, got {field_type!r} for field {field_name!r}"
+                f"@on() field matcher values must be an Event, Exception, or "
+                f"Invariant subclass, or a str (for equality match), got "
+                f"{field_match!r} for field {field_name!r}"
             )
         # Check that at least one event type declares this field
         has_field = any(
@@ -108,9 +187,70 @@ def on(
             fn._field_matchers = dict(field_matchers)  # type: ignore[attr-defined]
         if raises_tuple:
             fn._raises = raises_tuple  # type: ignore[attr-defined]
+        if invariants_tuple:
+            fn._invariants = invariants_tuple  # type: ignore[attr-defined]
         return fn
 
     return decorator
+
+
+def on(
+    *event_types: Any,
+    raises: type[Exception] | tuple[type[Exception], ...] = (),
+    invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
+    **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
+) -> Any:
+    """Subscribe a handler to one or more event types.
+
+    Three shapes, escalating by what's needed:
+
+    1. **Bare** — ``@on`` (no parens). Infers the event type from the
+       handler's first parameter annotation::
+
+           @on
+           def place(event: Order.Place) -> Order.Place.Placed:
+               return Order.Place.Placed(order_id="o1")
+
+    2. **Modifiers only** — ``@on(raises=..., invariants=..., field=...)``.
+       Infers the event type from the annotation and applies modifiers::
+
+           @on(invariants={CustomerNotBanned: lambda log: ...})
+           def place(event: Order.Place) -> Order.Place.Placed: ...
+
+    3. **Explicit types** — ``@on(EventA, EventB, ...)``. Required for
+       multi-event subscription or when you prefer not to rely on the
+       annotation::
+
+           @on(UserMessage, ToolResults)
+           async def call_llm(event: Event) -> AssistantMessage: ...
+
+    ``raises=`` declares exception classes the framework should catch from
+    this handler; a matching ``@on(HandlerRaised, exception=...)`` catcher
+    must exist at compile time.
+
+    Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
+    for ``isinstance`` match (works for Event, Exception, or Invariant
+    subclasses); string values do equality match (e.g. a string event field).
+    """
+    no_modifiers = raises == () and invariants is None and not field_matchers
+    sole_arg_is_function = len(event_types) == 1 and (
+        inspect.isfunction(event_types[0]) or inspect.ismethod(event_types[0])
+    )
+
+    if sole_arg_is_function and no_modifiers:
+        fn = event_types[0]
+        return _build_on_decorator((_infer_event_type(fn),), (), None, {})(fn)
+
+    if not event_types:
+
+        def inferring(fn: F) -> F:
+            return _build_on_decorator(
+                (_infer_event_type(fn),), raises, invariants, dict(field_matchers)
+            )(fn)
+
+        return inferring
+
+    return _build_on_decorator(event_types, raises, invariants, dict(field_matchers))
 
 
 @dataclass(frozen=True)
@@ -125,15 +265,32 @@ class HandlerMeta:
     reducer_params: tuple[str, ...] = ()
     config_param: str | None = None
     store_param: str | None = None
-    field_matchers: tuple[tuple[str, type[Event] | type[Exception]], ...] = ()
+    # Each entry is (field_name, matcher, is_type_matcher). The bool is
+    # precomputed at extract time so the hot-path ``matches`` loop avoids
+    # an ``isinstance(matcher, type)`` probe per dispatch.
+    field_matchers: tuple[
+        tuple[str, type[Event] | type[Exception] | type[Invariant] | str, bool],
+        ...,
+    ] = ()
     field_inject_params: frozenset[str] = frozenset()
     raises: tuple[type[Exception], ...] = ()
+    invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
 
     def matches(self, event: Event) -> bool:
-        """Check whether *event* satisfies this handler's type + field matchers."""
-        return isinstance(event, self.event_types) and all(
-            isinstance(getattr(event, fn, None), ft) for fn, ft in self.field_matchers
-        )
+        """Check whether *event* satisfies this handler's type + field matchers.
+
+        Type-valued matchers use isinstance; str-valued matchers use equality.
+        """
+        if not isinstance(event, self.event_types):
+            return False
+        for fname, matcher, is_type in self.field_matchers:
+            value = getattr(event, fname, None)
+            if is_type:
+                if not isinstance(value, matcher):  # type: ignore[arg-type]
+                    return False
+            elif value != matcher:
+                return False
+        return True
 
     @property
     def wants_log(self) -> bool:
@@ -153,7 +310,7 @@ def extract_handler_meta(
         )
 
     try:
-        hints = typing.get_type_hints(fn)
+        hints = _resolve_type_hints(fn)
     except Exception as exc:
         warnings.warn(
             f"Failed to resolve type hints for handler {fn.__qualname__!r}; "
@@ -185,17 +342,25 @@ def extract_handler_meta(
     sig = inspect.signature(fn)
     reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
 
-    # Extract field matchers
-    raw_field_matchers: dict[str, type[Event] | type[Exception]] = getattr(
-        fn, "_field_matchers", {}
+    # Extract field matchers; classify each now so dispatch avoids isinstance.
+    raw_field_matchers: dict[
+        str, type[Event] | type[Exception] | type[Invariant] | str
+    ] = getattr(fn, "_field_matchers", {})
+    field_matchers = tuple(
+        (name, matcher, isinstance(matcher, type))
+        for name, matcher in raw_field_matchers.items()
     )
-    field_matchers = tuple(raw_field_matchers.items())
     field_inject_params = frozenset(
         name for name in sig.parameters if name in raw_field_matchers
     )
 
     # Extract declared raises
     raises: tuple[type[Exception], ...] = getattr(fn, "_raises", ())
+
+    # Extract declared invariants
+    invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = getattr(
+        fn, "_invariants", ()
+    )
 
     # Warn about handler params that don't match any known injection source
     if reducer_names:
@@ -234,4 +399,5 @@ def extract_handler_meta(
         field_matchers=field_matchers,
         field_inject_params=field_inject_params,
         raises=raises,
+        invariants=invariants,
     )

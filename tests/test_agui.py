@@ -21,6 +21,7 @@ from langgraph_events import (
     Event,
     EventGraph,
     FrontendToolCallRequested,
+    IntegrationEvent,
     Interrupted,
     MessageEvent,
     message_reducer,
@@ -39,41 +40,41 @@ from langgraph_events.agui._mappers import _warned_classes
 # ---------------------------------------------------------------------------
 
 
-class UserAsked(Event):
+class UserAsked(IntegrationEvent):
     question: str = ""
 
     def agui_dict(self) -> dict[str, Any]:
         return {"question": self.question}
 
 
-class AgentReplied(MessageEvent):
+class AgentReplied(IntegrationEvent, MessageEvent):
     message: AIMessage = None  # type: ignore[assignment]
 
 
-class AgentCalledTools(MessageEvent):
+class AgentCalledTools(IntegrationEvent, MessageEvent):
     message: AIMessage = None  # type: ignore[assignment]
 
 
-class ToolsExecuted(MessageEvent):
+class ToolsExecuted(IntegrationEvent, MessageEvent):
     messages: tuple[ToolMessage, ...] = ()
 
 
-class AgentAndToolMessages(MessageEvent):
+class AgentAndToolMessages(IntegrationEvent, MessageEvent):
     messages: tuple[Any, ...] = ()
 
 
-class UserSent(MessageEvent):
+class UserSent(IntegrationEvent, MessageEvent):
     message: HumanMessage = None  # type: ignore[assignment]
 
     def agui_dict(self) -> dict[str, Any]:
         return {"content": self.message.content if self.message else ""}
 
 
-class FollowUpReply(MessageEvent):
+class FollowUpReply(IntegrationEvent, MessageEvent):
     message: AIMessage = None  # type: ignore[assignment]
 
 
-class TaskCreated(Event):
+class TaskCreated(IntegrationEvent):
     title: str = ""
 
     def agui_dict(self) -> dict[str, Any]:
@@ -87,26 +88,26 @@ class ApprovalRequested(Interrupted):
         return {"draft": self.draft}
 
 
-class ApprovalGiven(Event):
+class ApprovalGiven(IntegrationEvent):
     approved: bool = True
 
     def agui_dict(self) -> dict[str, Any]:
         return {"approved": self.approved}
 
 
-class PhaseA(MessageEvent):
+class PhaseA(IntegrationEvent, MessageEvent):
     messages: tuple[Any, ...] = ()
 
 
-class PhaseB(MessageEvent):
+class PhaseB(IntegrationEvent, MessageEvent):
     messages: tuple[Any, ...] = ()
 
 
-class SystemPromptDelivered(MessageEvent):
+class SystemPromptDelivered(IntegrationEvent, MessageEvent):
     message: SystemMessage = None  # type: ignore[assignment]
 
 
-class ErrorTrigger(Event):
+class ErrorTrigger(IntegrationEvent):
     def agui_dict(self) -> dict[str, Any]:
         return {}
 
@@ -421,7 +422,7 @@ def describe_AGUIAdapter():
                 assert text_events[-1].type == EventType.TEXT_MESSAGE_END
 
             async def it_skips_events_lacking_agui_dict():
-                class PlainEvent(Event):
+                class PlainEvent(IntegrationEvent):
                     value: str = "no-dict"
 
                 @on(UserAsked)
@@ -467,10 +468,10 @@ def describe_AGUIAdapter():
                 assert custom_events[0].value == {"title": "with dict"}
 
             async def it_warns_once_per_class():
-                class NoDict1(Event):
+                class NoDict1(IntegrationEvent):
                     x: int = 0
 
-                class NoDict2(Event):
+                class NoDict2(IntegrationEvent):
                     x: int = 0
 
                 @on(UserAsked)
@@ -628,13 +629,13 @@ def describe_AGUIAdapter():
             async def it_detects_message_content_changes():
                 """MessagesSnapshot emits when add_messages replaces in-place."""
 
-                class UserSent(MessageEvent):
+                class UserSent(IntegrationEvent, MessageEvent):
                     message: HumanMessage = None  # type: ignore[assignment]
 
-                class AgentDrafted(MessageEvent):
+                class AgentDrafted(IntegrationEvent, MessageEvent):
                     message: AIMessage = None  # type: ignore[assignment]
 
-                class AgentRevised(MessageEvent):
+                class AgentRevised(IntegrationEvent, MessageEvent):
                     message: AIMessage = None  # type: ignore[assignment]
 
                 @on(UserSent)
@@ -745,7 +746,7 @@ def describe_AGUIAdapter():
             async def it_handles_list_content_in_snapshot():
                 """Multimodal AIMessage.content (list) must not crash snapshot."""
 
-                class MultimodalReply(MessageEvent):
+                class MultimodalReply(IntegrationEvent, MessageEvent):
                     message: AIMessage = None  # type: ignore[assignment]
 
                 @on(UserAsked)
@@ -1580,7 +1581,7 @@ def describe_config_passthrough():
 
 def describe_custom_event_passthrough():
     async def it_maps_state_snapshot_frame_to_state_snapshot(monkeypatch):
-        from langgraph_events._graph import StateSnapshotFrame
+        from langgraph_events.stream import StateSnapshotFrame
 
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
@@ -1631,7 +1632,7 @@ def describe_custom_event_passthrough():
 
     async def it_passes_intermediate_state_custom_event_frame_through(monkeypatch):
         from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
-        from langgraph_events._graph import CustomEventFrame
+        from langgraph_events.stream import CustomEventFrame
 
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
@@ -1677,7 +1678,7 @@ def describe_custom_event_passthrough():
         assert custom_events[0].value == {"messages": [], "step": "draft"}
 
     async def it_maps_custom_event_frame_to_custom_event(monkeypatch):
-        from langgraph_events._graph import CustomEventFrame
+        from langgraph_events.stream import CustomEventFrame
 
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
@@ -1901,7 +1902,7 @@ def describe_interrupt_replay():
 def describe_AGUICustomEvent():
     def when_agui_event_name_implemented():
         async def it_uses_agui_event_name():
-            class NamedEvent(Event):
+            class NamedEvent(IntegrationEvent):
                 data: str = ""
 
                 @property
@@ -2044,7 +2045,7 @@ def describe_agui_event_name_edge_cases():
     def when_event_has_name_but_no_agui_dict():
 
         async def it_warns_and_suppresses():
-            class NameOnlyEvent(Event):
+            class NameOnlyEvent(IntegrationEvent):
                 data: str = ""
 
                 @property
@@ -2412,7 +2413,7 @@ def describe_non_streamed_id_reconciliation():
 def describe_unclosed_stream_on_error():
     async def it_emits_text_message_end_before_run_error(monkeypatch):
         """TEXT_MESSAGE_END must be emitted for open streams before RUN_ERROR."""
-        from langgraph_events._graph import LLMToken
+        from langgraph_events.stream import LLMToken
 
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
@@ -2463,7 +2464,7 @@ def describe_changed_reducers_none_fallback():
 
     async def it_emits_state_and_messages_on_first_frame(monkeypatch):
         """When changed_reducers is None, first frame emits both snapshots."""
-        from langgraph_events._graph import StreamFrame
+        from langgraph_events.stream import StreamFrame
 
         @on(UserAsked)
         def reply(event: UserAsked) -> AgentReplied:
@@ -2550,13 +2551,13 @@ def describe_multiple_custom_reducers():
         async def it_emits_state_snapshot_for_each_change():
             from langgraph_events._reducer import ScalarReducer
 
-            class StepA(Event):
+            class StepA(IntegrationEvent):
                 value: str = ""
 
                 def agui_dict(self) -> dict[str, Any]:
                     return {"value": self.value}
 
-            class StepB(Event):
+            class StepB(IntegrationEvent):
                 value: str = ""
 
                 def agui_dict(self) -> dict[str, Any]:
@@ -2891,15 +2892,15 @@ def describe_tool_call_streaming():
 # ---------------------------------------------------------------------------
 
 
-class AskConfirm(Event):
+class AskConfirm(IntegrationEvent):
     prompt: str = ""
 
 
-class AskShip(Event):
+class AskShip(IntegrationEvent):
     release: str = ""
 
 
-class Shipped(Event):
+class Shipped(IntegrationEvent):
     release: str = ""
     approved: bool = False
 
