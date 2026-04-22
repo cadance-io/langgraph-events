@@ -32,6 +32,19 @@ if TYPE_CHECKING:
 
 View = Literal["structure", "choreography"]
 
+# Framework-emitted classes: users don't seed these — the framework writes
+# them into the log in response to handler outcomes (exceptions, interrupts,
+# invariant violations). They can appear as ``sources`` of flow edges (when a
+# reactor subscribes to them and produces something), but they should never
+# be classified as seeds.
+_FRAMEWORK_EMITTED: tuple[type[Event], ...] = (
+    Halted,
+    Interrupted,
+    Resumed,
+    HandlerRaised,
+    InvariantViolated,
+)
+
 
 def _event_label(cls: type) -> str:
     """Short display name for event types in text and choreography diagrams.
@@ -494,10 +507,16 @@ def _build_domain_model(  # noqa: PLR0912
             events=tuple(raw["events"]),
         )
 
-    # Seed events: sources that never appear as targets.
+    # Seed events: sources that never appear as targets, excluding
+    # framework-emitted classes (users don't seed InvariantViolated etc.).
     sources = {e.source for e in edges}
     targets = {e.target for e in edges}
-    seeds = tuple(sorted(sources - targets, key=_event_label))
+    seeds = tuple(
+        sorted(
+            (s for s in sources - targets if not issubclass(s, _FRAMEWORK_EMITTED)),
+            key=_event_label,
+        )
+    )
 
     invariants_rolled = _rollup_invariants(command_handlers, policies)
 

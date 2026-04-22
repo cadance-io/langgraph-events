@@ -361,6 +361,15 @@ def describe_seeds():
             d = EventGraph([place]).domain()
             assert Order.Place.Placed not in d.seeds
 
+    def when_event_is_framework_emitted():
+        def it_excludes_invariant_violated_from_seeds():
+            # A pinned reactor subscribes to InvariantViolated, which makes
+            # it a source in the flow graph. But no user handler emits it —
+            # the framework does — so it must not show up as a seed.
+
+            d = EventGraph([inv_place, inv_explain]).domain()
+            assert InvariantViolated not in d.seeds
+
 
 def describe_reaction_flags():
     def when_handler_returns_none_annotated():

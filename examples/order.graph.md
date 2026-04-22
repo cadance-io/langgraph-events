@@ -90,7 +90,6 @@ Policies:
   explain_banned  (InvariantViolated → Rejected)
   explain_over_limit  (InvariantViolated → Rejected)
 Seed events:
-  InvariantViolated
   Place
   Ship
 ```
