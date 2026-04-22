@@ -5,7 +5,7 @@ from __future__ import annotations
 import json as _json
 import typing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from langgraph_events._event import (
     Command as CommandBase,
@@ -208,9 +208,6 @@ class NamespaceModel:
         declared_by: tuple[str, ...]
         reactors: tuple[str, ...]
 
-    # Runtime union — type(NamespaceModel.Reaction) is types.UnionType.
-    Reaction = CommandHandler | Policy
-
     # ---- fields ----
 
     namespaces: dict[str, NamespaceModel.Namespace]
@@ -225,12 +222,8 @@ class NamespaceModel:
     # ---- derived accessors ----
 
     @property
-    def reactions(self) -> tuple[Any, ...]:
-        """``command_handlers`` + ``policies``, in registration order.
-
-        Return type is ``tuple[NamespaceModel.Reaction, ...]``; typed as
-        ``tuple[Any, ...]`` at runtime to keep frozen-dataclass machinery happy.
-        """
+    def reactions(self) -> tuple[Reaction, ...]:
+        """``command_handlers`` + ``policies``, in registration order."""
         return (*self.command_handlers, *self.policies)
 
     # ---- builder (internal) ----
@@ -287,6 +280,11 @@ class NamespaceModel:
     def json(self, *, indent: int | None = 2) -> str:
         """Return a JSON string of the model."""
         return _json.dumps(self.to_dict(), indent=indent)
+
+
+Reaction: TypeAlias = NamespaceModel.CommandHandler | NamespaceModel.Policy
+"""A ``CommandHandler`` or ``Policy`` — the two shapes returned by
+``NamespaceModel.reactions``."""
 
 
 # ---------------------------------------------------------------------------
