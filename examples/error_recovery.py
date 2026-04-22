@@ -25,12 +25,12 @@ import warnings
 from langgraph_events import (
     Auditable,
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
     Halted,
     HandlerRaised,
+    Namespace,
     OrphanedEventWarning,
     on,
 )
@@ -55,11 +55,11 @@ class QuotaExhaustedError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Domain: Question
+# Namespace: Question
 # ---------------------------------------------------------------------------
 
 
-class Question(Domain):
+class Question(Namespace):
     """A user question answered via a rate-limit-tolerant LLM call.
 
     ``Ask`` is the entry command. The answering handler declares

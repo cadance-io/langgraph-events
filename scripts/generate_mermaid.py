@@ -67,7 +67,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
 {_HALT_CLASSDEF}
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Example["Domain"]
+    subgraph Example["Namespace"]
       direction LR
       Command{{{{Command}}}}:::cmd
       DomainEvent(DomainEvent):::devt
@@ -192,7 +192,7 @@ def _build_example_renders(
     """
     out: dict[str, dict[str, str]] = {}
     for py_path, graph in examples:
-        model = graph.domain()
+        model = graph.namespaces()
         out[py_path.stem] = {
             "mermaid_choreography": model.mermaid(),
             "text_choreography": model.text(view="choreography"),

@@ -4,11 +4,11 @@ import pytest
 
 from langgraph_events import (
     Command,
-    Domain,
     DomainEvent,
     Event,
     EventGraph,
     IntegrationEvent,
+    Namespace,
     ScalarReducer,
     on,
 )
@@ -47,7 +47,7 @@ class Completed(IntegrationEvent):
 # declarative domain-reducer form — auto-named "current_status", auto-scoped
 # to Order, auto-discovered by any EventGraph that has a handler subscribed
 # to an Order event.
-class Order(Domain):
+class Order(Namespace):
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: (
@@ -96,16 +96,16 @@ def linear_chain():
 
 @pytest.fixture(autouse=True)
 def _reset_domain_registry():
-    """Restore ``_DOMAIN_REGISTRY`` after each test.
+    """Restore ``_NAMESPACE_REGISTRY`` after each test.
 
-    Domain names are enforced unique process-wide. Tests that define their
-    own ``class X(Domain)`` would otherwise leak into the registry and
+    Namespace names are enforced unique process-wide. Tests that define their
+    own ``class X(Namespace)`` would otherwise leak into the registry and
     collide with later tests using the same short name. conftest-scoped
     domains (e.g. ``Order``) are captured in the snapshot and survive.
     """
     from langgraph_events import _event as _e
 
-    snapshot = dict(_e._DOMAIN_REGISTRY)
+    snapshot = dict(_e._NAMESPACE_REGISTRY)
     yield
-    _e._DOMAIN_REGISTRY.clear()
-    _e._DOMAIN_REGISTRY.update(snapshot)
+    _e._NAMESPACE_REGISTRY.clear()
+    _e._NAMESPACE_REGISTRY.update(snapshot)

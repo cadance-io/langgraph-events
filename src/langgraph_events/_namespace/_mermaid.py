@@ -1,16 +1,16 @@
-"""Mermaid diagram rendering of a :class:`DomainModel`."""
+"""Mermaid diagram rendering of a :class:`NamespaceModel`."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from langgraph_events._domain._model import (
-    DomainModel,
+from langgraph_events._mermaid import MermaidFlowchart, Shape
+from langgraph_events._namespace._model import (
+    NamespaceModel,
     _event_label,
     _node_class,
 )
-from langgraph_events._mermaid import MermaidFlowchart, Shape
 
 if TYPE_CHECKING:
     from langgraph_events._event import Event
@@ -81,12 +81,12 @@ class _FlowEdge:
 
 def _reaction_subscribes(r: Any) -> tuple[type[Event], ...]:
     """Return the subscribed events for a CommandHandler or Policy."""
-    if isinstance(r, DomainModel.CommandHandler):
+    if isinstance(r, NamespaceModel.CommandHandler):
         return r.commands
     return r.subscribes  # Policy
 
 
-def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR0915
+def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR0915
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
     Visual vocabulary:
@@ -96,7 +96,7 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
     - SystemEvents (Interrupted/Resumed/HandlerRaised) render as stadium
       ``([…])``, amber
     - Halted subtypes render as stadium, amber, with a dashed thick outline
-    - Domain-owned nodes sit inside a ``subgraph`` titled "<Name> domain"
+    - Namespace-owned nodes sit inside a ``subgraph`` titled "<Name> namespace"
     - Solid ``-->`` arrows carry declared returns; ``raises=`` edges are
       thin dashed grey; ``Scatter[X]`` edges are thick dashed purple
     - Invariants render as diamond ``:::inv`` gate nodes.  When a pinned
@@ -119,7 +119,7 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
         *((r.name, r) for r in d.policies),
     ]
 
-    edges_by_reaction: dict[str, list[DomainModel.Edge]] = {}
+    edges_by_reaction: dict[str, list[NamespaceModel.Edge]] = {}
     for e in d.edges:
         if e.kind == "framework":
             continue
@@ -240,7 +240,7 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
     flow_pairs: set[tuple[type[Event], type[Event]]] = {
         (e.source, e.target) for e in d.edges if e.kind in ("solid", "scatter")
     } | reached_via_invariant
-    for dom in d.domains.values():
+    for dom in d.namespaces.values():
         for cmd in dom.commands.values():
             for outcome in cmd.outcomes:
                 if (cmd.cls, outcome) in flow_pairs:
@@ -257,9 +257,9 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
     domain_members: dict[str, list[type[Event]]] = {}
     loose_nodes: list[type[Event]] = []
     for cls in referenced:
-        domain_name = getattr(cls, "__domain__", None)
-        if domain_name is not None:
-            domain_members.setdefault(domain_name, []).append(cls)
+        namespace_name = getattr(cls, "__namespace__", None)
+        if namespace_name is not None:
+            domain_members.setdefault(namespace_name, []).append(cls)
         else:
             loose_nodes.append(cls)
     for members in domain_members.values():
@@ -268,14 +268,15 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
 
     # Place invariant gate nodes under the domain(s) of their commands.
     # If an invariant spans multiple domains, it stays loose (top-level).
-    domain_invariants: dict[str, list[type[InvariantBase]]] = {}
+    namespace_invariants: dict[str, list[type[InvariantBase]]] = {}
     loose_invariants: list[type[InvariantBase]] = []
     invariant_edges: list[_FlowEdge] = []
     for inv in d.invariants:
-        owning_domains = {getattr(c, "__domain__", None) for c in inv.commands}
+        owning_domains = {getattr(c, "__namespace__", None) for c in inv.commands}
         owning_domains.discard(None)
         if len(owning_domains) == 1:
-            domain_invariants.setdefault(next(iter(owning_domains)), []).append(inv.cls)  # type: ignore[arg-type]
+            ns = next(iter(owning_domains))
+            namespace_invariants.setdefault(ns, []).append(inv.cls)  # type: ignore[arg-type]
         else:
             loose_invariants.append(inv.cls)
         for cmd_cls in inv.commands:
@@ -288,19 +289,20 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
                     "invariant",
                 )
             )
-    for group in domain_invariants.values():
+    for group in namespace_invariants.values():
         group.sort(key=lambda c: c.__name__)
     loose_invariants.sort(key=lambda c: c.__name__)
 
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
 
-    all_domain_names = sorted(set(domain_members) | set(domain_invariants))
-    for domain_name in all_domain_names:
-        with flow.subgraph(domain_name, title=f"{domain_name} domain", direction="LR"):
-            for member in domain_members.get(domain_name, []):
+    all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
+    for namespace_name in all_domain_names:
+        title = f"{namespace_name} namespace"
+        with flow.subgraph(namespace_name, title=title, direction="LR"):
+            for member in domain_members.get(namespace_name, []):
                 _add_node(flow, member)
-            for inv_cls in domain_invariants.get(domain_name, []):
+            for inv_cls in namespace_invariants.get(namespace_name, []):
                 _add_invariant_node(flow, inv_cls)
 
     for node in loose_nodes:

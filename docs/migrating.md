@@ -2,7 +2,7 @@
 
 ## v0.4.0 → v0.5.0
 
-0.5.0 is a large release — event taxonomy (`Domain`, `Command`, `DomainEvent`), declarative domain-scoped reducers, `invariants=`, strict return-type enforcement, introspection APIs. Most of it is additive vocabulary you can adopt at your own pace. **Six existing behaviours become stricter** and need attention.
+0.5.0 is a large release — event taxonomy (`Namespace`, `Command`, `DomainEvent`), declarative domain-scoped reducers, `invariants=`, strict return-type enforcement, introspection APIs. Most of it is additive vocabulary you can adopt at your own pace. **Six existing behaviours become stricter** and need attention.
 
 New to the taxonomy? See [Getting Started](getting-started.md) and [`examples/order.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py). Feature list lives in the [CHANGELOG](https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.md).
 
@@ -18,7 +18,7 @@ Reducer(name="history", event_type=Event, fn=project_fn)
 Reducer("history", event_type=Event, fn=project_fn)
 ```
 
-Enables declaring reducers as class attributes on a `Domain` with `name` auto-filled.
+Enables declaring reducers as class attributes on a `Namespace` with `name` auto-filled.
 
 ### 2. Handler return types are enforced at dispatch
 
@@ -39,7 +39,7 @@ Fix: match the declared return type, widen the annotation, or drop it (for non-`
 
 ### 3. Bare `Event` subclassing raises `TypeError`
 
-`class Foo(Event)` is no longer allowed. Use `DomainEvent` (inside a `Domain`), `IntegrationEvent` (cross-boundary facts), `Command` (inside a `Domain`), or compose with `Auditable` / `MessageEvent`.
+`class Foo(Event)` is no longer allowed. Use `DomainEvent` (inside a `Namespace`), `IntegrationEvent` (cross-boundary facts), `Command` (inside a `Namespace`), or compose with `Auditable` / `MessageEvent`.
 
 ```python
 # Before (0.4.0)
@@ -65,7 +65,7 @@ class TaskStarted(IntegrationEvent, Auditable): ...
 
 ### 5. Introspection API consolidated
 
-`EventGraph.catalog()` / `.describe()` / `.mermaid()` replaced by a single `EventGraph.domain()` returning a `DomainModel`:
+`EventGraph.catalog()` / `.describe()` / `.mermaid()` replaced by a single `EventGraph.namespaces()` returning a `NamespaceModel`:
 
 ```python
 # Before
@@ -74,15 +74,15 @@ print(graph.describe())
 print(graph.mermaid())
 
 # After
-d = graph.domain()
+d = graph.namespaces()
 print(d.text())                      # default view = choreography
 print(d.text(view="structure"))      # taxonomy only — no handlers
 print(d.mermaid())                   # graph LR choreography
 d.json()                             # JSON snapshot
-d.domains, d.command_handlers, d.policies, d.edges, d.seeds
+d.namespaces, d.command_handlers, d.policies, d.edges, d.seeds
 ```
 
-The `Catalog` / `AggregateEntry` / `CommandEntry` TypedDicts are replaced by nested frozen dataclasses `DomainModel.Domain`, `DomainModel.Command`, `DomainModel.CommandHandler`, `DomainModel.Policy`, `DomainModel.Edge`.
+The `Catalog` / `AggregateEntry` / `CommandEntry` TypedDicts are replaced by nested frozen dataclasses `NamespaceModel.Namespace`, `NamespaceModel.Command`, `NamespaceModel.CommandHandler`, `NamespaceModel.Policy`, `NamespaceModel.Edge`.
 
 ### 6. `SystemPromptSet` is now an `IntegrationEvent`
 
@@ -96,11 +96,11 @@ Fix required only if you did one of:
 - `@on(SystemEvent)` catch-all that used to pick up system-prompt seeds → now matches only framework events.
 - `isinstance(evt, SystemEvent)` branches that treated system prompts as framework signals.
 
-`graph.domain().integration_events` now lists `SystemPromptSet`; `.system_events` does not.
+`graph.namespaces().integration_events` now lists `SystemPromptSet`; `.system_events` does not.
 
 ## Example portfolio reshaped
 
-All examples now use the `Domain` taxonomy.
+All examples now use the `Namespace` taxonomy.
 
 - **`examples/react_agent.py` removed.** Redundant with `examples/conversation.py` (same `Conversation.Send` → `Sent`/`Blocked` shape, same downstream LLM+tool loop). Direct imports fail — point references at `conversation.py`.
 - **`examples/reflection_loop.py` removed.** Multi-subscription loop pattern covered by `examples/conversation.py`.
@@ -152,7 +152,7 @@ The AG-UI frontend-tool examples `agui_frontend_tools.py` and `agui_confirm_dial
 ## Non-breaking changes
 
 - `Halted`, `Interrupted`, `Resumed`, `HandlerRaised`, `Cancelled`, `MaxRoundsExceeded` now inherit `SystemEvent`. Existing `@on(Halted)` / `isinstance` checks still match.
-- `Domain` class names must be unique within a process.
+- `Namespace` class names must be unique within a process.
 - `invariants=` predicates are now evaluated twice per matching event: **pre-check** (before the handler runs, against the current log) and **post-check** (after the handler returns, against `log + emitted events`). Predicates must be pure functions of `log` — idempotent and deterministic. `InvariantViolated` gains a `would_emit: tuple[Event, ...]` field, defaulted to `()`; pre-check failures leave it empty, post-check failures populate it with the rolled-back events. Pinned reactors (`@on(InvariantViolated, invariant=Foo)`) fire for both phases without distinguishing.
 
 ## FAQ
@@ -167,4 +167,4 @@ Yes. Those classes now inherit `SystemEvent` (which inherits `Event`). `isinstan
 Only if you hit one of the six breaking changes above.
 
 **Can I mix external `@on(...)` handlers and inline `handle` methods in the same graph?**
-Yes — pass both to `EventGraph([...])`, or call `EventGraph.from_domains(Order, handlers=[external_fn])`.
+Yes — pass both to `EventGraph([...])`, or call `EventGraph.from_namespaces(Order, handlers=[external_fn])`.

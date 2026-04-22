@@ -1,12 +1,12 @@
-"""Human-readable text rendering of a :class:`DomainModel`."""
+"""Human-readable text rendering of a :class:`NamespaceModel`."""
 
 from __future__ import annotations
 
-from langgraph_events._domain._model import DomainModel, _event_label, _node_class
+from langgraph_events._namespace._model import NamespaceModel, _event_label, _node_class
 
 
 def _command_annotations(
-    d: DomainModel, cmd_cls: type
+    d: NamespaceModel, cmd_cls: type
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Collect dedup'd raises + invariant names + scatter targets from every
     command handler subscribed to *cmd_cls*."""
@@ -32,7 +32,7 @@ def _command_annotations(
     return tuple(raises), tuple(invariants), tuple(scatters)
 
 
-def _policy_targets(p: DomainModel.Policy) -> str:
+def _policy_targets(p: NamespaceModel.Policy) -> str:
     """Comma-joined produces + scatter annotations, or empty string."""
     parts = [_event_label(t) for t in p.produces]
     for tgt in p.scatters:
@@ -43,7 +43,7 @@ def _policy_targets(p: DomainModel.Policy) -> str:
 
 
 def _render_taxonomy_lines(  # noqa: PLR0912
-    d: DomainModel, *, include_handlers: bool
+    d: NamespaceModel, *, include_handlers: bool
 ) -> list[str]:
     """Shared domain/integration/system block used by both text views.
 
@@ -53,10 +53,10 @@ def _render_taxonomy_lines(  # noqa: PLR0912
     ``Halted`` events with a ``[Halted]`` tag.
     """
     lines: list[str] = []
-    if d.domains:
-        lines.append("Domains:")
-        for domain_name, dom in d.domains.items():
-            lines.append(f"  {domain_name}")
+    if d.namespaces:
+        lines.append("Namespaces:")
+        for namespace_name, dom in d.namespaces.items():
+            lines.append(f"  {namespace_name}")
             for cmd_name, cmd in dom.commands.items():
                 suffix_parts: list[str] = []
                 if include_handlers:
@@ -96,11 +96,11 @@ def _render_taxonomy_lines(  # noqa: PLR0912
     return lines
 
 
-def render_text_structure(d: DomainModel) -> str:
+def render_text_structure(d: NamespaceModel) -> str:
     return "\n".join(_render_taxonomy_lines(d, include_handlers=False))
 
 
-def render_text_choreography(d: DomainModel) -> str:
+def render_text_choreography(d: NamespaceModel) -> str:
     lines = _render_taxonomy_lines(d, include_handlers=True)
     if d.policies:
         lines.append("Policies:")

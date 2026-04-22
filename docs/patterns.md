@@ -1,6 +1,6 @@
 # Patterns
 
-Runnable examples in `examples/`. Diagrams are auto-generated from each example's `graph.domain()` via `scripts/generate_mermaid.py` — always in sync with the code.
+Runnable examples in `examples/`. Diagrams are auto-generated from each example's `graph.namespaces()` via `scripts/generate_mermaid.py` — always in sync with the code.
 
 | If you need…                          | See                                       | Related docs                                                          |
 | ------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------- |
@@ -25,7 +25,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Example["Domain"]
+    subgraph Example["Namespace"]
       direction LR
       Command{{Command}}:::cmd
       DomainEvent(DomainEvent):::devt
@@ -50,9 +50,9 @@ graph LR
 </details>
 <!-- autogen:end -->
 
-## Invariants & reactions (Order domain) { #order }
+## Invariants & reactions (Order namespace) { #order }
 
-`Order` domain, `Place` command, `Placed` / `Rejected` outcomes, a typed `CustomerNotBanned(Invariant)` that blocks banned customers, a pinned `@on(InvariantViolated, invariant=…)` reaction turning violations into domain rejections, and a declarative `ScalarReducer` as domain attribute tracking `current_status`.
+`Order` namespace, `Place` command, `Placed` / `Rejected` outcomes, a typed `CustomerNotBanned(Invariant)` that blocks banned customers, a pinned `@on(InvariantViolated, invariant=…)` reaction turning violations into domain rejections, and a declarative `ScalarReducer` as domain attribute tracking `current_status`.
 
 <!-- autogen:start:order -->
 === "Diagram"
@@ -66,7 +66,7 @@ graph LR
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Order["Order domain"]
+        subgraph Order["Order namespace"]
             direction LR
             Place{{Place}}:::cmd
             Placed(Placed):::devt
@@ -90,7 +90,7 @@ graph LR
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Order
         Command: Ship  (handlers: handle)
           → Shipped
@@ -113,7 +113,7 @@ graph LR
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.graph.md)
 <!-- autogen:end -->
 
-## Human-in-the-loop approval (Expense domain) { #expense-hitl }
+## Human-in-the-loop approval (Expense namespace) { #expense-hitl }
 
 DDD domain combined with human-in-the-loop approval. LLM extracts expense data; policy checker auto-approves small expenses or pauses the graph with [`Interrupted`](control-flow.md#interrupted-resumed) for manager review. Resume with an `Approve` or `Reject` command.
 
@@ -129,7 +129,7 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Expense["Expense domain"]
+        subgraph Expense["Expense namespace"]
             direction LR
             Approve{{Approve}}:::cmd
             Approved(Approved):::devt
@@ -153,7 +153,7 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Expense
         Command: Submit  (handlers: handle)
           → Submitted
@@ -174,7 +174,7 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/expense_approval.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/expense_approval.graph.md)
 <!-- autogen:end -->
 
-## Tool-calling + AG-UI (Conversation domain) { #conversation-agui }
+## Tool-calling + AG-UI (Conversation namespace) { #conversation-agui }
 
 DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI frontend tools** (CopilotKit `useFrontendTool`). `Conversation.Send` enforces content moderation before the LLM sees the message; tools declared by the frontend are bound to the LLM via `build_langchain_tools`; tool calls stream to the client as `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`; results return via `detect_new_tool_results` → `ToolsExecuted`, closing the ReAct loop. Combines `DomainEvent + MessageEvent` mixin with [`message_reducer()`](reducers.md#message_reducer). For the handler-initiated `FrontendToolCallRequested` pattern, see [AG-UI docs](agui.md#handler-initiated-frontend-tools).
 
@@ -190,7 +190,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Conversation["Conversation domain"]
+        subgraph Conversation["Conversation namespace"]
             direction LR
             Blocked(Blocked):::devt
             Send{{Send}}:::cmd
@@ -212,7 +212,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Conversation
         Command: Send  (handlers: handle)
           → Sent
@@ -233,7 +233,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.graph.md)
 <!-- autogen:end -->
 
-## Supervisor fan-in (Task domain) { #supervisor }
+## Supervisor fan-in (Task namespace) { #supervisor }
 
 `Task.Run` kicks off the supervisor loop; the supervisor handler dispatches sub-commands `Task.Research` / `Task.Code` or emits the terminal `Task.Finalized` fact. A custom [`Reducer`](reducers.md#reducer) accumulates context across specialist completions. Typed events replace manual subgraph wiring.
 
@@ -249,7 +249,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Task["Task domain"]
+        subgraph Task["Task namespace"]
             direction LR
             Code{{Code}}:::cmd
             Completed(Completed):::devt
@@ -276,7 +276,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Task
         Command: Run  (handlers: supervisor)
         Command: Research  (handlers: researcher)
@@ -293,7 +293,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.graph.md)
 <!-- autogen:end -->
 
-## Scatter fan-out (Batch domain) { #scatter-fan-out }
+## Scatter fan-out (Batch namespace) { #scatter-fan-out }
 
 `Batch.Summarize` fans out to per-document work via [`Scatter`](control-flow.md#scatter); a gather handler uses `EventLog.filter()` to complete when all `Batch.DocSummarized` facts arrive and emit `Batch.Summarize.Summarized`.
 
@@ -309,7 +309,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Batch["Batch domain"]
+        subgraph Batch["Batch namespace"]
             direction LR
             DocDispatched(DocDispatched):::devt
             DocSummarized(DocSummarized):::devt
@@ -329,7 +329,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Batch
         Command: Summarize  (handlers: split_batch; scatters Scatter[DocDispatched])
           → Summarized
@@ -346,7 +346,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.graph.md)
 <!-- autogen:end -->
 
-## Safety gates + streaming (Content domain) { #content-pipeline }
+## Safety gates + streaming (Content namespace) { #content-pipeline }
 
 `Content.Process` with an inline `handle` classifies text; external reactions gate approval (emitting `Content.Blocked` — a `Halted` subtype — or `Content.Approved`) and analyze. Safety gates via [`Halted`](concepts.md#system-events) and live streaming via `astream_events()`. Keyword classification — no LLM required.
 
@@ -362,7 +362,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Content["Content domain"]
+        subgraph Content["Content namespace"]
             direction LR
             Analyzed(Analyzed):::devt
             Approved(Approved):::devt
@@ -380,7 +380,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Content
         Command: Process  (handlers: handle)
           → Classified
@@ -397,7 +397,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.graph.md)
 <!-- autogen:end -->
 
-## Retries & escalation (Question domain) { #error-recovery }
+## Retries & escalation (Question namespace) { #error-recovery }
 
 Declared handler exceptions with retry + escalation via [`raises=`](control-flow.md#handler-exceptions) and `HandlerRaised`. `Question.Ask` is the entry command; a rate-limit catcher emits `Question.RetryScheduled`; chained catchers escalate to `Question.GaveUp` (a `Halted` subtype) after `MAX_ATTEMPTS`.
 
@@ -413,7 +413,7 @@ Declared handler exceptions with retry + escalation via [`raises=`](control-flow
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Question["Question domain"]
+        subgraph Question["Question namespace"]
             direction LR
             Answered(Answered):::devt
             Ask{{Ask}}:::cmd
@@ -435,7 +435,7 @@ Declared handler exceptions with retry + escalation via [`raises=`](control-flow
 === "Flow (text)"
 
     ```text
-    Domains:
+    Namespaces:
       Question
         Command: Ask  (handlers: call_llm; raises RateLimitError)
           → Answered

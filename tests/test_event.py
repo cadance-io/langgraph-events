@@ -9,7 +9,6 @@ from langgraph_events import (
     Auditable,
     Cancelled,
     Command,
-    Domain,
     DomainEvent,
     Event,
     FrontendToolCallRequested,
@@ -19,6 +18,7 @@ from langgraph_events import (
     Interrupted,
     MaxRoundsExceeded,
     MessageEvent,
+    Namespace,
     Resumed,
     SystemEvent,
 )
@@ -340,13 +340,13 @@ def describe_Domain():
     def when_subclassed():
 
         def it_stamps_domain_name_from_class_name():
-            class Widget(Domain):
+            class Widget(Namespace):
                 pass
 
-            assert Widget.__domain_name__ == "Widget"
+            assert Widget.__namespace_name__ == "Widget"
 
         def it_is_not_an_event():
-            class Widget(Domain):
+            class Widget(Namespace):
                 pass
 
             assert not issubclass(Widget, Event)
@@ -356,12 +356,12 @@ def describe_Domain():
         def with_colliding_name():
 
             def it_raises():
-                class Widget(Domain):
+                class Widget(Namespace):
                     pass
 
                 with pytest.raises(TypeError, match=r"already defined"):
 
-                    class Widget(Domain):
+                    class Widget(Namespace):
                         pass
 
 
@@ -370,7 +370,7 @@ def describe_Command():
     def when_top_level():
 
         def it_rejects():
-            with pytest.raises(TypeError, match=r"Command.*must be nested.*Domain"):
+            with pytest.raises(TypeError, match=r"Command.*must be nested.*Namespace"):
 
                 class Place(Command):
                     pass
@@ -378,11 +378,11 @@ def describe_Command():
     def when_nested_in_domain():
 
         def it_accepts_and_stamps_domain():
-            class Widget(Domain):
+            class Widget(Namespace):
                 class Place(Command):
                     customer_id: str = ""
 
-            assert Widget.Place.__domain__ == "Widget"
+            assert Widget.Place.__namespace__ == "Widget"
 
     def when_nested_in_non_domain_class():
 
@@ -395,21 +395,21 @@ def describe_Command():
 
             assert isinstance(exc_info.value.__cause__, TypeError)
             assert "must be nested" in str(exc_info.value.__cause__)
-            assert "Domain" in str(exc_info.value.__cause__)
+            assert "Namespace" in str(exc_info.value.__cause__)
 
     def when_nested_in_command():
 
         def it_rejects():
             with pytest.raises(RuntimeError) as exc_info:
 
-                class Widget(Domain):
+                class Widget(Namespace):
                     class Place(Command):
                         class Inner(Command):
                             pass
 
             assert isinstance(exc_info.value.__cause__, TypeError)
             assert "must be nested" in str(exc_info.value.__cause__)
-            assert "Domain" in str(exc_info.value.__cause__)
+            assert "Namespace" in str(exc_info.value.__cause__)
 
 
 def describe_DomainEvent():
@@ -417,7 +417,8 @@ def describe_DomainEvent():
     def when_top_level():
 
         def it_rejects():
-            with pytest.raises(TypeError, match=r"DomainEvent.*must be nested.*Domain"):
+            msg = r"DomainEvent.*must be nested.*Namespace"
+            with pytest.raises(TypeError, match=msg):
 
                 class Placed(DomainEvent):
                     pass
@@ -425,14 +426,14 @@ def describe_DomainEvent():
     def when_nested_in_domain():
 
         def it_accepts_and_stamps_domain():
-            class Widget(Domain):
+            class Widget(Namespace):
                 class Shipped(DomainEvent):
                     tracking: str = ""
 
-            assert Widget.Shipped.__domain__ == "Widget"
+            assert Widget.Shipped.__namespace__ == "Widget"
 
         def it_leaves_command_attr_unset():
-            class Widget(Domain):
+            class Widget(Namespace):
                 class Shipped(DomainEvent):
                     tracking: str = ""
 
@@ -441,14 +442,14 @@ def describe_DomainEvent():
     def when_nested_in_command():
 
         def it_accepts_and_stamps_domain_and_command():
-            class Widget(Domain):
+            class Widget(Namespace):
                 class Place(Command):
                     customer_id: str = ""
 
                     class Placed(DomainEvent):
                         order_id: str = ""
 
-            assert Widget.Place.Placed.__domain__ == "Widget"
+            assert Widget.Place.Placed.__namespace__ == "Widget"
             assert Widget.Place.Placed.__command__ is Widget.Place
 
     def when_nested_in_non_domain_class():
@@ -466,7 +467,7 @@ def describe_DomainEvent():
     def when_subclass_of_validated_event():
 
         def it_inherits_domain_and_command_attrs():
-            class Widget(Domain):
+            class Widget(Namespace):
                 class Place(Command):
                     class Placed(DomainEvent):
                         order_id: str = ""
@@ -474,18 +475,18 @@ def describe_DomainEvent():
             class FastPlaced(Widget.Place.Placed):
                 priority: int = 0
 
-            assert FastPlaced.__domain__ == "Widget"
+            assert FastPlaced.__namespace__ == "Widget"
             assert FastPlaced.__command__ is Widget.Place
 
     def when_multiple_commands_and_outcomes_in_one_domain():
-        # Invariant-pinning test for the two-pass `__domain__` stamping in
+        # Invariant-pinning test for the two-pass `__namespace__` stamping in
         # _event.py. When a Command's own DomainEvents are processed by the
-        # metaclass, the enclosing Command doesn't yet have `__domain__`
-        # set. `Domain.__init_subclass__` fills it in via a second pass —
+        # metaclass, the enclosing Command doesn't yet have `__namespace__`
+        # set. `Namespace.__init_subclass__` fills it in via a second pass —
         # this test ensures every nested DomainEvent ends up stamped.
 
         def it_stamps_every_nested_outcome():
-            class Widget(Domain):
+            class Widget(Namespace):
                 class Place(Command):
                     class Placed(DomainEvent):
                         order_id: str = ""
@@ -502,7 +503,7 @@ def describe_DomainEvent():
                 (Widget.Place.Rejected, Widget.Place),
                 (Widget.Ship.Shipped, Widget.Ship),
             ]:
-                assert outcome.__domain__ == "Widget"
+                assert outcome.__namespace__ == "Widget"
                 assert outcome.__command__ is parent_cmd
 
 
@@ -511,7 +512,7 @@ def describe_Command_Outcomes():
     def when_command_has_single_outcome():
 
         def it_exposes_the_single_class_as_Outcomes():
-            class AggA(Domain):
+            class AggA(Namespace):
                 class Cmd(Command):
                     class Done(DomainEvent):
                         pass
@@ -523,7 +524,7 @@ def describe_Command_Outcomes():
         def it_exposes_a_union_of_all_outcomes():
             import typing
 
-            class AggB(Domain):
+            class AggB(Namespace):
                 class Cmd(Command):
                     class Ok(DomainEvent):
                         pass
@@ -537,7 +538,7 @@ def describe_Command_Outcomes():
     def when_command_has_no_outcomes():
 
         def it_does_not_define_Outcomes():
-            class AggC(Domain):
+            class AggC(Namespace):
                 class Cmd(Command):
                     pass
 
@@ -546,7 +547,7 @@ def describe_Command_Outcomes():
     def when_Outcomes_used_in_isinstance():
 
         def it_matches_any_nested_outcome():
-            class AggD(Domain):
+            class AggD(Namespace):
                 class Cmd(Command):
                     class A(DomainEvent):
                         pass
@@ -560,7 +561,7 @@ def describe_Command_Outcomes():
     def when_user_declares_Outcomes_matching_nested():
 
         def it_preserves_user_declaration():
-            class AggE(Domain):
+            class AggE(Namespace):
                 class Cmd(Command):
                     class A(DomainEvent):
                         pass
@@ -578,7 +579,7 @@ def describe_Command_Outcomes():
         def it_rejects_as_drift():
             with pytest.raises(TypeError, match=r"Outcomes.*does not match"):
 
-                class AggF(Domain):
+                class AggF(Namespace):
                     class Cmd(Command):
                         class A(DomainEvent):
                             pass
@@ -591,14 +592,14 @@ def describe_Command_Outcomes():
     def when_user_declares_Outcomes_including_foreign_type():
 
         def it_rejects_as_drift():
-            class Holder(Domain):
+            class Holder(Namespace):
                 class Inner(Command):
                     class Unrelated(DomainEvent):
                         pass
 
             with pytest.raises(TypeError, match=r"Outcomes.*does not match"):
 
-                class AggG(Domain):
+                class AggG(Namespace):
                     class Cmd(Command):
                         class A(DomainEvent):
                             pass

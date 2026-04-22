@@ -6,16 +6,16 @@ import pytest
 
 from langgraph_events import (
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
+    Namespace,
     on,
 )
 
 
 # Module-level domain for inline-handler dispatch tests.
-class Shop(Domain):
+class Shop(Namespace):
     class Buy(Command):
         item: str = ""
 
@@ -32,13 +32,13 @@ class Shop(Domain):
             return Shop.Buy.Bought(item=self.item, price=9.99)
 
 
-class Shop2(Domain):
+class Shop2(Namespace):
     class NoHandler(Command):
         class Outcome(DomainEvent):
             pass
 
 
-class Shop3(Domain):
+class Shop3(Namespace):
     class CmdA(Command):
         class DoneA(DomainEvent):
             pass
@@ -58,7 +58,7 @@ class Shop3(Domain):
             pass
 
 
-class Shop4(Domain):
+class Shop4(Namespace):
     class Slow(Command):
         item: str = ""
 
@@ -69,7 +69,7 @@ class Shop4(Domain):
             return Shop4.Slow.Done(item=self.item)
 
 
-class Shop5(Domain):
+class Shop5(Namespace):
     class Tell(Command):
         class Told(DomainEvent):
             pass
@@ -78,13 +78,13 @@ class Shop5(Domain):
             pass
 
 
-class Foreign(Domain):
+class Foreign(Namespace):
     class Do(Command):
         class Stuff(DomainEvent):
             pass
 
 
-class WithLog(Domain):
+class WithLog(Namespace):
     class Cmd(Command):
         class Done(DomainEvent):
             observed_count: int = 0
@@ -96,7 +96,7 @@ class WithLog(Domain):
 # Module-level domains for inline-outcome-coverage tests. These can't live
 # inside describe_/when_ blocks because Python can't resolve forward refs on
 # handle's return annotation from a nested function scope.
-class Shop6(Domain):
+class Shop6(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -108,7 +108,7 @@ class Shop6(Domain):
             return Shop6.Buy.Bought()
 
 
-class Shop7(Domain):
+class Shop7(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -120,7 +120,7 @@ class Shop7(Domain):
             return Shop7.Buy.Bought()
 
 
-class Shop8(Domain):
+class Shop8(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -132,7 +132,7 @@ class Shop8(Domain):
             return Shop8.Buy.Bought()
 
 
-class Shop9(Domain):
+class Shop9(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -146,7 +146,7 @@ def shop9_partial(event: Shop9.Buy) -> Shop9.Buy.Bought:
     return Shop9.Buy.Bought()
 
 
-class Shop10(Domain):
+class Shop10(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -159,7 +159,7 @@ class Shop10(Domain):
 
 
 # Module-level fixtures for describe_handle_aliased_across_commands.
-class LeftAgg(Domain):
+class LeftAgg(Namespace):
     class Do(Command):
         class Done(DomainEvent):
             pass
@@ -168,7 +168,7 @@ class LeftAgg(Domain):
             return LeftAgg.Do.Done()
 
 
-class RightAgg(Domain):
+class RightAgg(Namespace):
     class Do(Command):
         class Done(DomainEvent):
             pass
@@ -191,7 +191,7 @@ def describe_Command_handle():
         def when_handle_is_not_callable():
 
             def it_leaves___command_handler___as_None():
-                class Odd(Domain):
+                class Odd(Namespace):
                     class Cmd(Command):
                         handle = "not a function"
 
@@ -270,7 +270,7 @@ def describe_Command_handle():
         def when_handle_returns_foreign_outcome():
 
             def it_raises_TypeError_via_Outcomes_contract():
-                class RogueAgg(Domain):
+                class RogueAgg(Namespace):
                     class Cmd(Command):
                         class Good(DomainEvent):
                             pass
@@ -289,7 +289,7 @@ def describe_Command_handle():
         def when_all_commands_define_handle():
 
             def it_registers_each_of_them():
-                graph = EventGraph.from_domains(Shop3)
+                graph = EventGraph.from_namespaces(Shop3)
                 log = graph.invoke(Shop3.CmdA())
                 assert log.has(Shop3.CmdA.DoneA)
                 log2 = graph.invoke(Shop3.CmdB())
@@ -298,9 +298,9 @@ def describe_Command_handle():
         def when_some_commands_omit_handle():
 
             def it_skips_them_silently():
-                # Shop3.CmdNoHandle has no handle — from_domains must not
+                # Shop3.CmdNoHandle has no handle — from_namespaces must not
                 # raise. The resulting graph simply doesn't dispatch it.
-                graph = EventGraph.from_domains(Shop3)
+                graph = EventGraph.from_namespaces(Shop3)
                 log = graph.invoke(Shop3.CmdA())
                 assert log.has(Shop3.CmdA.DoneA)
 
@@ -313,7 +313,7 @@ def describe_Command_handle():
                 def react(event: Shop3.CmdA.DoneA) -> None:
                     observed.append("reacted")
 
-                graph = EventGraph.from_domains(Shop3, handlers=[react])
+                graph = EventGraph.from_namespaces(Shop3, handlers=[react])
                 graph.invoke(Shop3.CmdA())
                 assert observed == ["reacted"]
 
@@ -323,8 +323,8 @@ def describe_Command_handle():
                 class NotAnDomain:
                     pass
 
-                with pytest.raises(TypeError, match=r"Domain"):
-                    EventGraph.from_domains(NotAnDomain)  # type: ignore[arg-type]
+                with pytest.raises(TypeError, match=r"Namespace"):
+                    EventGraph.from_namespaces(NotAnDomain)  # type: ignore[arg-type]
 
     def describe_handle_signature_validation():
 
@@ -333,7 +333,7 @@ def describe_Command_handle():
             def it_rejects_at_class_creation():
                 with pytest.raises(TypeError, match="staticmethod"):
 
-                    class BadAgg(Domain):
+                    class BadAgg(Namespace):
                         class Cmd(Command):
                             class Done(DomainEvent):
                                 pass
@@ -347,7 +347,7 @@ def describe_Command_handle():
             def it_rejects_at_class_creation():
                 with pytest.raises(TypeError, match="self"):
 
-                    class BadAgg2(Domain):
+                    class BadAgg2(Namespace):
                         class Cmd(Command):
                             class Done(DomainEvent):
                                 pass

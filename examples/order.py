@@ -2,7 +2,7 @@
 
 Demonstrates the DDD-aligned taxonomy end-to-end:
 
-- ``Domain`` — the ``Order`` namespace
+- ``Namespace`` — the ``Order`` namespace
 - ``Command`` — ``Order.Place`` (with invariants) and ``Order.Ship`` (inline)
 - ``DomainEvent`` — nested outcomes auto-unioned as ``Command.Outcomes``
 - Handler forms — pick the shortest that fits:
@@ -24,7 +24,7 @@ Demonstrates the DDD-aligned taxonomy end-to-end:
   matchers that reference undeclared invariant classes.
 - ``ScalarReducer`` as an domain class attribute — auto-named,
   auto-scoped to the domain's events, surfaced via ``log.reduced_state``.
-- ``EventGraph.from_domains`` — auto-registers inline handlers and mixes
+- ``EventGraph.from_namespaces`` — auto-registers inline handlers and mixes
   them with extra external handlers.
 
 Usage:
@@ -36,23 +36,23 @@ from __future__ import annotations
 from langgraph_events import (
     SKIP,
     Command,
-    Domain,
     DomainEvent,
     Event,
     EventGraph,
     IntegrationEvent,
     Invariant,
     InvariantViolated,
+    Namespace,
     ScalarReducer,
     on,
 )
 
 # ---------------------------------------------------------------------------
-# Domain: Order
+# Namespace: Order
 # ---------------------------------------------------------------------------
 
 
-class Order(Domain):
+class Order(Namespace):
     """The Order domain."""
 
     # ScalarReducer as a declarative class attribute. Auto-named
@@ -194,15 +194,15 @@ def explain_over_limit(event: InvariantViolated) -> Order.Place.Rejected:
 # ---------------------------------------------------------------------------
 
 
-graph = EventGraph.from_domains(
+graph = EventGraph.from_namespaces(
     Order,
     handlers=[place, explain_banned, explain_over_limit],
 )
 
 
 def main() -> None:
-    print("=== Domain ===")
-    print(graph.domain().text())
+    print("=== Namespace ===")
+    print(graph.namespaces().text())
     print()
 
     print("=== Happy path (external handler + inline handler) ===")

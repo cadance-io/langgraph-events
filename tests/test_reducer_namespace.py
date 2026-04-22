@@ -1,4 +1,4 @@
-"""Tests for declarative reducers on Domain classes."""
+"""Tests for declarative reducers on Namespace classes."""
 
 from __future__ import annotations
 
@@ -6,18 +6,18 @@ import pytest
 
 from langgraph_events import (
     Command,
-    Domain,
     DomainEvent,
     Event,
     EventGraph,
     IntegrationEvent,
+    Namespace,
     ScalarReducer,
     on,
 )
 
 
 # Module-level domains so handler type hints resolve at runtime.
-class Alpha(Domain):
+class Alpha(Namespace):
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: type(e).__name__,
@@ -28,7 +28,7 @@ class Alpha(Domain):
             marker: str = ""
 
 
-class Beta(Domain):
+class Beta(Namespace):
     class Trigger(Command):
         class Triggered(DomainEvent):
             marker: str = ""
@@ -59,7 +59,7 @@ def describe_BaseReducer():
         def when_name_is_explicitly_set():
 
             def it_preserves_explicit_name():
-                class HasExplicitName(Domain):
+                class HasExplicitName(Namespace):
                     r = ScalarReducer(
                         name="custom",
                         event_type=Event,
@@ -76,7 +76,7 @@ def describe_Domain():
         def when_class_body_has_reducer_attributes():
 
             def it_collects_them_into_tuple():
-                class WithReducers(Domain):
+                class WithReducers(Namespace):
                     r1 = ScalarReducer(event_type=Event, fn=lambda e: None)
                     r2 = ScalarReducer(event_type=Event, fn=lambda e: None)
 
@@ -86,7 +86,7 @@ def describe_Domain():
         def when_no_reducer_attributes():
 
             def it_is_empty_tuple():
-                class Empty(Domain):
+                class Empty(Namespace):
                     pass
 
                 assert Empty.__reducers__ == ()
@@ -94,7 +94,7 @@ def describe_Domain():
         def when_subclass_domain_adds_more():
 
             def it_inherits_parent_reducers_and_adds_child():
-                class Parent(Domain):
+                class Parent(Namespace):
                     shared = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 class Child(Parent):
@@ -165,13 +165,13 @@ def describe_EventGraph_auto_discovery():
     def when_reducer_names_collide_across_domains():
 
         def it_raises_TypeError_at_init():
-            class Gamma(Domain):
+            class Gamma(Namespace):
                 shared_name = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 class Go(Command):
                     pass
 
-            class Delta(Domain):
+            class Delta(Namespace):
                 shared_name = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 class Go(Command):

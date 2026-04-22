@@ -2,13 +2,13 @@
 
 ## Model your domain
 
-Events are **facts** about what happened. Commands are **intents** for what should happen. Group both under a `Domain` — and, for simple cases, put the handler right there too:
+Events are **facts** about what happened. Commands are **intents** for what should happen. Group both under a `Namespace` — and, for simple cases, put the handler right there too:
 
 ```python
 from langgraph_events import Domain, Command, DomainEvent, EventGraph
 
 
-class Order(Domain):
+class Order(Namespace):
     class Place(Command):
         customer_id: str
         items: tuple[str, ...]
@@ -51,9 +51,9 @@ for event in graph.stream_events(seed): ... # stream as produced
 ## Inspect
 
 ```python
-print(graph.domain().text())             # human-readable tree (choreography)
-print(graph.domain().mermaid())          # Mermaid diagram
-graph.domain().domains                # structured DomainModel access
+print(graph.namespaces().text())             # human-readable tree (choreography)
+print(graph.namespaces().mermaid())          # Mermaid diagram
+graph.namespaces().namespaces                # structured NamespaceModel access
 log.filter(Order.Place.Placed)
 log.latest(Order.Place.Rejected)
 log.has(Order.Shipped)
@@ -79,7 +79,7 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 |---|---|---|
 | Query past events in a handler | `EventLog` (`log.filter()`, `log.latest()`) | [Concepts](concepts.md#eventlog) |
 | Enforce a precondition before a handler runs | `invariants=` on `@on()` | [Control Flow](control-flow.md#invariants) |
-| Register every inline handler on a domain | `EventGraph.from_domains(Order)` | [Concepts](concepts.md#inline-command-handlers) |
+| Register every inline handler on a domain | `EventGraph.from_namespaces(Order)` | [Concepts](concepts.md#inline-command-handlers) |
 | Accumulate state across events | `ScalarReducer` on the domain class | [Reducers](reducers.md) |
 | Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
 | Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |

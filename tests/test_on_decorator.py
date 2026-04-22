@@ -711,4 +711,4 @@ def describe_return_hint_parsing():
                     "Failed to resolve return type hints" in msg for msg in messages
                 )
                 assert all(item.filename == __file__ for item in w)
-                assert "-->|handler| ?" in graph.domain().mermaid()
+                assert "-->|handler| ?" in graph.namespaces().mermaid()

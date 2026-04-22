@@ -1,10 +1,10 @@
-"""JSON serialization of a :class:`DomainModel`."""
+"""JSON serialization of a :class:`NamespaceModel`."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from langgraph_events._domain._model import DomainModel
+from langgraph_events._namespace._model import NamespaceModel
 
 
 def _qn(cls: type) -> str:
@@ -23,7 +23,7 @@ def _encode_reaction(r: Any) -> dict[str, Any]:
         "has_annotation": r.has_annotation,
         "has_untyped_scatter": r.has_untyped_scatter,
     }
-    if isinstance(r, DomainModel.CommandHandler):
+    if isinstance(r, NamespaceModel.CommandHandler):
         base["kind"] = "command_handler"
         base["commands"] = [_qn(t) for t in r.commands]
         base["inline"] = r.inline
@@ -33,10 +33,10 @@ def _encode_reaction(r: Any) -> dict[str, Any]:
     return base
 
 
-def encode_model(d: DomainModel) -> dict[str, Any]:
-    domains: dict[str, Any] = {}
-    for domain_name, dom in d.domains.items():
-        domains[domain_name] = {
+def encode_model(d: NamespaceModel) -> dict[str, Any]:
+    namespaces: dict[str, Any] = {}
+    for namespace_name, dom in d.namespaces.items():
+        namespaces[namespace_name] = {
             "name": dom.name,
             "commands": {
                 cmd_name: {
@@ -49,7 +49,7 @@ def encode_model(d: DomainModel) -> dict[str, Any]:
             "events": [_qn(t) for t in dom.events],
         }
     return {
-        "domains": domains,
+        "namespaces": namespaces,
         "integration_events": [_qn(t) for t in d.integration_events],
         "system_events": [_qn(t) for t in d.system_events],
         "command_handlers": [_encode_reaction(r) for r in d.command_handlers],

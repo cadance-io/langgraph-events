@@ -11,11 +11,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
-from langgraph_events._domain import DomainModel
 from langgraph_events._event import (
-    _DOMAIN_REGISTRY,
+    _NAMESPACE_REGISTRY,
     Command,
-    Domain,
     DomainEvent,
     Event,
     Halted,
@@ -23,6 +21,7 @@ from langgraph_events._event import (
     Interrupted,
     Invariant,
     InvariantViolated,
+    Namespace,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
@@ -42,6 +41,7 @@ from langgraph_events._internal import (
     make_router_node,
     make_seed_node,
 )
+from langgraph_events._namespace import NamespaceModel
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator
@@ -305,14 +305,14 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     )
 
 
-def _discover_domain_reducers(
+def _discover_namespace_reducers(
     handlers: list[Callable[..., Any]],
     explicit_reducers: dict[str, BaseReducer],
 ) -> None:
     """Auto-register reducers declared on domains referenced by handlers.
 
     Walks each handler's ``_event_types`` (set by ``@on(...)``), finds the
-    owning domain via ``__domain__`` + ``_DOMAIN_REGISTRY``, and unions that
+    owning domain via ``__namespace__`` + ``_NAMESPACE_REGISTRY``, and unions that
     domain's ``__reducers__`` into *explicit_reducers*.
 
     Collisions:
@@ -323,13 +323,13 @@ def _discover_domain_reducers(
     discovered: dict[str, BaseReducer] = {}
     for fn in handlers:
         for et in getattr(fn, "_event_types", ()):
-            domain_name = getattr(et, "__domain__", None)
-            if not domain_name:
+            namespace_name = getattr(et, "__namespace__", None)
+            if not namespace_name:
                 continue
-            domain_cls = _DOMAIN_REGISTRY.get(domain_name)
-            if domain_cls is None:
+            namespace_cls = _NAMESPACE_REGISTRY.get(namespace_name)
+            if namespace_cls is None:
                 continue
-            for r in domain_cls.__reducers__:
+            for r in namespace_cls.__reducers__:
                 existing = discovered.get(r.name)
                 if existing is None:
                     discovered[r.name] = r
@@ -418,7 +418,7 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
-        _discover_domain_reducers(handlers, self._reducers)
+        _discover_namespace_reducers(handlers, self._reducers)
         conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
         if conflicts:
             raise ValueError(
@@ -468,15 +468,15 @@ class EventGraph:
             t
             for t in produced
             if not issubclass(t, (Halted, Interrupted))
-            # A DomainEvent owned by a Domain or Command — as an outcome
+            # A DomainEvent owned by a Namespace or Command — as an outcome
             # (__command__ set) or as a free-standing domain fact
-            # (__domain__ set) — is a terminal by design; having no
+            # (__namespace__ set) — is a terminal by design; having no
             # subscriber is idiomatic, not an orphan.
             and not (
                 issubclass(t, DomainEvent)
                 and (
                     getattr(t, "__command__", None) is not None
-                    or getattr(t, "__domain__", None) is not None
+                    or getattr(t, "__namespace__", None) is not None
                 )
             )
             and not any(issubclass(t, s) for s in subscribed)
@@ -494,16 +494,16 @@ class EventGraph:
         self._verify_raises_coverage()
         self._verify_invariants_coverage()
 
-    def domain(self) -> DomainModel:
-        """Return a :class:`DomainModel` — the code-derived snapshot.
+    def namespaces(self) -> NamespaceModel:
+        """Return a :class:`NamespaceModel` — the code-derived snapshot.
 
         One artifact covers the full picture: domains, commands, outcomes,
         command handlers, policies, event-to-event edges, and seed events.
-        Render it via :meth:`DomainModel.text`, :meth:`DomainModel.mermaid`
+        Render it via :meth:`NamespaceModel.text`, :meth:`NamespaceModel.mermaid`
         (with ``view="structure"`` or ``view="choreography"``),
-        :meth:`DomainModel.json`, or read the data attributes directly.
+        :meth:`NamespaceModel.json`, or read the data attributes directly.
         """
-        return DomainModel._build(self._handler_metas, self._return_info)
+        return NamespaceModel._build(self._handler_metas, self._return_info)
 
     @property
     def reducer_names(self) -> frozenset[str]:
@@ -706,9 +706,9 @@ class EventGraph:
         return EventLog._from_owned(result["events"])
 
     @classmethod
-    def from_domains(
+    def from_namespaces(
         cls,
-        *domains: type[Domain],
+        *domains: type[Namespace],
         handlers: list[Callable[..., Any]] | None = None,
         **kwargs: Any,
     ) -> EventGraph:
@@ -725,13 +725,15 @@ class EventGraph:
 
         Example::
 
-            graph = EventGraph.from_domains(Order, Customer,
+            graph = EventGraph.from_namespaces(Order, Customer,
                                             handlers=[react])
         """
         collected: list[Any] = []
         for dom in domains:
-            if not (isinstance(dom, type) and issubclass(dom, Domain)):
-                raise TypeError(f"from_domains expects Domain subclasses, got {dom!r}")
+            if not (isinstance(dom, type) and issubclass(dom, Namespace)):
+                raise TypeError(
+                    f"from_namespaces expects Namespace subclasses, got {dom!r}"
+                )
             for attr in dom.__dict__.values():
                 if (
                     isinstance(attr, type)

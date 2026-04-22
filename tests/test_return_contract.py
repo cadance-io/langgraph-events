@@ -16,16 +16,16 @@ from conftest import Order
 
 from langgraph_events import (
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     IntegrationEvent,
+    Namespace,
     Scatter,
     on,
 )
 
 
-class Alien(Domain):
+class Alien(Namespace):
     class Do(Command):
         class Stuff(DomainEvent):
             pass

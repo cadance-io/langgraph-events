@@ -4,7 +4,7 @@ Fan-out, invariants, human-in-the-loop pauses, field matchers, and handler excep
 
 ## `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan out into multiple events. Each dispatches separately in the next round. Use `Scatter[WorkItem]` to annotate the produced type — renders as a dashed edge in `graph.domain().mermaid()`.
+Return `Scatter([event1, event2, ...])` to fan out into multiple events. Each dispatches separately in the next round. Use `Scatter[WorkItem]` to annotate the produced type — renders as a dashed edge in `graph.namespaces().mermaid()`.
 
 ```python
 @on(Batch)
@@ -81,7 +81,7 @@ Semantics:
 - Predicate exceptions propagate — they are not converted to violations.
 - Invariants run around `raises=`: pre-check gates the body entirely, post-check runs only if the handler completed normally (a caught exception skips post-check and emits `HandlerRaised` instead).
 - Post-check is a no-op when the handler returned `None` (empty buffer) or declares no invariants.
-- `Invariant` subclasses must be zero-arg instantiable — the framework calls `Cls()` at emission time for `isinstance` matching. Nesting under a `Domain` / `Command` is encouraged for locality but not enforced.
+- `Invariant` subclasses must be zero-arg instantiable — the framework calls `Cls()` at emission time for `isinstance` matching. Nesting under a `Namespace` / `Command` is encouraged for locality but not enforced.
 
 ### Modeling errors — when to use what
 

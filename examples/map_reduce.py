@@ -22,20 +22,20 @@ from langchain_openai import ChatOpenAI
 from langgraph_events import (
     Auditable,
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
+    Namespace,
     Scatter,
     on,
 )
 
 # ---------------------------------------------------------------------------
-# Domain: Batch
+# Namespace: Batch
 # ---------------------------------------------------------------------------
 
 
-class Batch(Domain):
+class Batch(Namespace):
     """A batch of documents to summarize via map-reduce.
 
     ``Summarize`` is the entry command. A fan-out handler returns

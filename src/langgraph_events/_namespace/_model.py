@@ -1,4 +1,4 @@
-"""`DomainModel` dataclasses, builder, and shared rendering helpers."""
+"""`NamespaceModel` dataclasses, builder, and shared rendering helpers."""
 
 from __future__ import annotations
 
@@ -91,12 +91,12 @@ def _node_class(cls: type) -> str:
 
 
 @dataclass(frozen=True)
-class DomainModel:
-    """Code-derived snapshot of an ``EventGraph``'s domain model.
+class NamespaceModel:
+    """Code-derived snapshot of an ``EventGraph``'s namespace model.
 
     Two lenses:
 
-    - ``view="structure"`` — the **taxonomy** (domains → commands → outcomes,
+    - ``view="structure"`` — the **taxonomy** (namespaces → commands → outcomes,
       free-standing DomainEvents, integration and system events). No handlers,
       no edges.
     - ``view="choreography"`` — the **full picture**: taxonomy + command
@@ -107,7 +107,7 @@ class DomainModel:
 
     Rendering::
 
-        d = graph.domain()
+        d = graph.namespaces()
         d.text()                      # human-readable tree
         d.text(view="structure")      # taxonomy only — no handlers
         d.mermaid()                   # graph LR choreography
@@ -115,11 +115,11 @@ class DomainModel:
 
     Data access::
 
-        d.domains              # dict[str, DomainModel.Domain]
-        d.command_handlers     # tuple[DomainModel.CommandHandler, ...]
-        d.policies             # tuple[DomainModel.Policy, ...]
+        d.namespaces              # dict[str, NamespaceModel.Namespace]
+        d.command_handlers     # tuple[NamespaceModel.CommandHandler, ...]
+        d.policies             # tuple[NamespaceModel.Policy, ...]
         d.reactions            # command_handlers + policies
-        d.edges                # tuple[DomainModel.Edge, ...]
+        d.edges                # tuple[NamespaceModel.Edge, ...]
         d.seeds                # tuple[type[Event], ...]
         d.integration_events   # tuple[type[IntegrationEvent], ...]
         d.system_events        # tuple[type[SystemEvent], ...]
@@ -128,7 +128,7 @@ class DomainModel:
     # ---- nested types (class-level, not fields) ----
 
     @dataclass(frozen=True)
-    class Domain:
+    class Namespace:
         """A domain — the grouping for its nested commands and events.
 
         ``events`` holds any ``Event`` nested in the domain that is not an
@@ -137,7 +137,7 @@ class DomainModel:
         """
 
         name: str
-        commands: dict[str, DomainModel.Command]
+        commands: dict[str, NamespaceModel.Command]
         events: tuple[type[Event], ...]
 
     @dataclass(frozen=True)
@@ -208,19 +208,19 @@ class DomainModel:
         declared_by: tuple[str, ...]
         reactors: tuple[str, ...]
 
-    # Runtime union — type(DomainModel.Reaction) is types.UnionType.
+    # Runtime union — type(NamespaceModel.Reaction) is types.UnionType.
     Reaction = CommandHandler | Policy
 
     # ---- fields ----
 
-    domains: dict[str, DomainModel.Domain]
+    namespaces: dict[str, NamespaceModel.Namespace]
     integration_events: tuple[type[IntegrationEvent], ...]
     system_events: tuple[type[SystemEvent], ...]
-    command_handlers: tuple[DomainModel.CommandHandler, ...]
-    policies: tuple[DomainModel.Policy, ...]
-    edges: tuple[DomainModel.Edge, ...]
+    command_handlers: tuple[NamespaceModel.CommandHandler, ...]
+    policies: tuple[NamespaceModel.Policy, ...]
+    edges: tuple[NamespaceModel.Edge, ...]
     seeds: tuple[type[Event], ...]
-    invariants: tuple[DomainModel.Invariant, ...]
+    invariants: tuple[NamespaceModel.Invariant, ...]
 
     # ---- derived accessors ----
 
@@ -228,7 +228,7 @@ class DomainModel:
     def reactions(self) -> tuple[Any, ...]:
         """``command_handlers`` + ``policies``, in registration order.
 
-        Return type is ``tuple[DomainModel.Reaction, ...]``; typed as
+        Return type is ``tuple[NamespaceModel.Reaction, ...]``; typed as
         ``tuple[Any, ...]`` at runtime to keep frozen-dataclass machinery happy.
         """
         return (*self.command_handlers, *self.policies)
@@ -240,14 +240,14 @@ class DomainModel:
         cls,
         handler_metas: list[HandlerMeta],
         return_info: dict[str, ReturnInfo],
-    ) -> DomainModel:
+    ) -> NamespaceModel:
         return _build_domain_model(handler_metas, return_info)
 
     # ---- renderers ----
 
     def text(self, view: View = "choreography") -> str:
         """Render a human-readable tree."""
-        from langgraph_events._domain._text import (  # noqa: PLC0415
+        from langgraph_events._namespace._text import (  # noqa: PLC0415
             render_text_choreography,
             render_text_structure,
         )
@@ -269,7 +269,7 @@ class DomainModel:
         when produced indirectly via a policy reacting to an intermediate
         event.
         """
-        from langgraph_events._domain._mermaid import (  # noqa: PLC0415
+        from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
         )
 
@@ -280,7 +280,7 @@ class DomainModel:
 
         Event/Exception/Command classes are encoded as their qualnames.
         """
-        from langgraph_events._domain._json import encode_model  # noqa: PLC0415
+        from langgraph_events._namespace._json import encode_model  # noqa: PLC0415
 
         return encode_model(self)
 
@@ -296,19 +296,19 @@ class DomainModel:
 
 def _classify_event_bucket(  # noqa: PLR0911, PLR0912
     event_type: type[Event],
-    domains: dict[str, dict[str, Any]],
+    namespaces: dict[str, dict[str, Any]],
     integration: list[type[IntegrationEvent]],
     system: list[type[SystemEvent]],
     seen: set[type[Event]],
 ) -> None:
     """Sort *event_type* into domain / integration / system buckets.
 
-    Rule: if ``__domain__`` is set, domain membership wins regardless of
+    Rule: if ``__namespace__`` is set, namespace membership wins regardless of
     whether the event inherits ``DomainEvent``, ``Halted``, or any other
     branch. This lets users nest e.g. ``class Blocked(Halted)`` inside a
-    domain for locality without having it drift into the system bucket.
+    namespace for locality without having it drift into the system bucket.
 
-    ``domains`` is a mutable intermediate dict keyed by domain name; each
+    ``namespaces`` is a mutable intermediate dict keyed by namespace name; each
     value is ``{"commands": {cmd_name: {"type": cls, "outcomes": [...]}},
     "events": [Event, ...]}``.
     """
@@ -319,10 +319,10 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
         return
 
     if issubclass(event_type, CommandBase):
-        domain_name = getattr(event_type, "__domain__", None)
-        if domain_name is None:
+        namespace_name = getattr(event_type, "__namespace__", None)
+        if namespace_name is None:
             return
-        entry = domains.setdefault(domain_name, {"commands": {}, "events": []})
+        entry = namespaces.setdefault(namespace_name, {"commands": {}, "events": []})
         cmd_entry = entry["commands"].setdefault(
             event_type.__name__, {"type": event_type, "outcomes": []}
         )
@@ -340,10 +340,10 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
         return
 
     if issubclass(event_type, DomainEvent):
-        domain_name = getattr(event_type, "__domain__", None)
-        if domain_name is None:
+        namespace_name = getattr(event_type, "__namespace__", None)
+        if namespace_name is None:
             return
-        entry = domains.setdefault(domain_name, {"commands": {}, "events": []})
+        entry = namespaces.setdefault(namespace_name, {"commands": {}, "events": []})
         cmd = getattr(event_type, "__command__", None)
         if cmd is not None:
             cmd_entry = entry["commands"].setdefault(
@@ -355,11 +355,11 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
             entry["events"].append(event_type)
         return
 
-    # Non-DomainEvent event nested in a Domain (e.g. Halted subtype): domain
+    # Non-DomainEvent event nested in a Namespace (e.g. Halted subtype): domain
     # membership beats IntegrationEvent/SystemEvent classification.
-    domain_name = getattr(event_type, "__domain__", None)
-    if domain_name is not None:
-        entry = domains.setdefault(domain_name, {"commands": {}, "events": []})
+    namespace_name = getattr(event_type, "__namespace__", None)
+    if namespace_name is not None:
+        entry = namespaces.setdefault(namespace_name, {"commands": {}, "events": []})
         if event_type not in entry["events"]:
             entry["events"].append(event_type)
         return
@@ -377,15 +377,15 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
 def _build_domain_model(  # noqa: PLR0912
     handler_metas: list[HandlerMeta],
     return_info: dict[str, ReturnInfo],
-) -> DomainModel:
-    domain_raw: dict[str, dict[str, Any]] = {}
+) -> NamespaceModel:
+    namespace_raw: dict[str, dict[str, Any]] = {}
     integration: list[type[IntegrationEvent]] = []
     system: list[type[SystemEvent]] = []
     seen: set[type[Event]] = set()
 
-    command_handlers: list[DomainModel.CommandHandler] = []
-    policies: list[DomainModel.Policy] = []
-    edges: list[DomainModel.Edge] = []
+    command_handlers: list[NamespaceModel.CommandHandler] = []
+    policies: list[NamespaceModel.Policy] = []
+    edges: list[NamespaceModel.Edge] = []
 
     command_to_handler_names: dict[type[CommandBase], list[str]] = {}
 
@@ -397,11 +397,11 @@ def _build_domain_model(  # noqa: PLR0912
 
         # Classify all subscribed events into taxonomy buckets.
         for et in meta.event_types:
-            _classify_event_bucket(et, domain_raw, integration, system, seen)
+            _classify_event_bucket(et, namespace_raw, integration, system, seen)
         for et in info.event_types:
-            _classify_event_bucket(et, domain_raw, integration, system, seen)
+            _classify_event_bucket(et, namespace_raw, integration, system, seen)
         for et in info.scatter_types:
-            _classify_event_bucket(et, domain_raw, integration, system, seen)
+            _classify_event_bucket(et, namespace_raw, integration, system, seen)
 
         if info.has_interrupted:
             any_produces_interrupted = True
@@ -426,7 +426,7 @@ def _build_domain_model(  # noqa: PLR0912
                 for t in meta.event_types
                 if isinstance(t, type) and issubclass(t, CommandBase)
             )
-            ch = DomainModel.CommandHandler(
+            ch = NamespaceModel.CommandHandler(
                 name=meta.name,
                 commands=cmds,
                 produces=tuple(info.event_types),
@@ -443,7 +443,7 @@ def _build_domain_model(  # noqa: PLR0912
             for cmd in cmds:
                 command_to_handler_names.setdefault(cmd, []).append(meta.name)
         else:
-            policy = DomainModel.Policy(
+            policy = NamespaceModel.Policy(
                 name=meta.name,
                 subscribes=tuple(meta.event_types),
                 produces=tuple(info.event_types),
@@ -462,19 +462,19 @@ def _build_domain_model(  # noqa: PLR0912
         for src_type in meta.event_types:
             for tgt in info.event_types:
                 edges.append(
-                    DomainModel.Edge(
+                    NamespaceModel.Edge(
                         source=src_type, via=meta.name, target=tgt, kind="solid"
                     )
                 )
             for tgt in info.scatter_types:
                 edges.append(
-                    DomainModel.Edge(
+                    NamespaceModel.Edge(
                         source=src_type, via=meta.name, target=tgt, kind="scatter"
                     )
                 )
             for _exc in meta.raises:
                 edges.append(
-                    DomainModel.Edge(
+                    NamespaceModel.Edge(
                         source=src_type,
                         via=meta.name,
                         target=HandlerRaised,
@@ -485,24 +485,24 @@ def _build_domain_model(  # noqa: PLR0912
     # Framework Interrupted → Resumed edge (exists iff both halves appear).
     if any_produces_interrupted and any_subscribes_resumed:
         edges.append(
-            DomainModel.Edge(
+            NamespaceModel.Edge(
                 source=Interrupted, via="framework", target=Resumed, kind="framework"
             )
         )
 
     # Freeze domains into nested dataclass form, attaching handler names.
-    domains: dict[str, DomainModel.Domain] = {}
-    for domain_name, raw in domain_raw.items():
-        commands: dict[str, DomainModel.Command] = {}
+    namespaces: dict[str, NamespaceModel.Namespace] = {}
+    for namespace_name, raw in namespace_raw.items():
+        commands: dict[str, NamespaceModel.Command] = {}
         for cmd_name, cmd_raw in raw["commands"].items():
             cmd_type = cmd_raw["type"]
-            commands[cmd_name] = DomainModel.Command(
+            commands[cmd_name] = NamespaceModel.Command(
                 cls=cmd_type,
                 outcomes=tuple(cmd_raw["outcomes"]),
                 handlers=tuple(command_to_handler_names.get(cmd_type, [])),
             )
-        domains[domain_name] = DomainModel.Domain(
-            name=domain_name,
+        namespaces[namespace_name] = NamespaceModel.Namespace(
+            name=namespace_name,
             commands=commands,
             events=tuple(raw["events"]),
         )
@@ -520,8 +520,8 @@ def _build_domain_model(  # noqa: PLR0912
 
     invariants_rolled = _rollup_invariants(command_handlers, policies)
 
-    return DomainModel(
-        domains=domains,
+    return NamespaceModel(
+        namespaces=namespaces,
         integration_events=tuple(integration),
         system_events=tuple(system),
         command_handlers=tuple(command_handlers),
@@ -533,9 +533,9 @@ def _build_domain_model(  # noqa: PLR0912
 
 
 def _rollup_invariants(
-    command_handlers: list[DomainModel.CommandHandler],
-    policies: list[DomainModel.Policy],
-) -> tuple[DomainModel.Invariant, ...]:
+    command_handlers: list[NamespaceModel.CommandHandler],
+    policies: list[NamespaceModel.Policy],
+) -> tuple[NamespaceModel.Invariant, ...]:
     """Roll per-handler invariant declarations into first-class nodes.
 
     One entry per unique ``Invariant`` subclass. Declaration order follows
@@ -572,7 +572,7 @@ def _rollup_invariants(
                 reactors_by_name.setdefault(repr_, []).append(p.name)
 
     return tuple(
-        DomainModel.Invariant(
+        NamespaceModel.Invariant(
             cls=inv_cls,
             commands=tuple(commands_by_cls[inv_cls]),
             declared_by=tuple(declared_by_cls[inv_cls]),

@@ -16,7 +16,6 @@ from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
     Cancelled,
     Command,
-    Domain,
     DomainEvent,
     Event,
     EventGraph,
@@ -26,6 +25,7 @@ from langgraph_events import (
     Interrupted,
     MaxRoundsExceeded,
     MessageEvent,
+    Namespace,
     OrphanedEventWarning,
     Reducer,
     Resumed,
@@ -62,8 +62,8 @@ class _StepInterrupted(Interrupted):
     step: int = 0
 
 
-class _OrphanSuite(Domain):
-    """Domain with a free-standing DomainEvent — terminal by design."""
+class _OrphanSuite(Namespace):
+    """Namespace with a free-standing DomainEvent — terminal by design."""
 
     class Analyze(Command):
         text: str = ""
@@ -72,7 +72,7 @@ class _OrphanSuite(Domain):
         label: str = ""
 
 
-class _WidgetSuite(Domain):
+class _WidgetSuite(Namespace):
     """Command with a nested DomainEvent outcome — no subscriber."""
 
     class Place(Command):
@@ -3193,7 +3193,7 @@ def describe_EventGraph():
                 return Ended(result=event.data)
 
             graph = EventGraph([step1, step2])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "graph LR" in output
             assert "Started -->|step1| Processed" in output
             assert "Processed -->|step2| Ended" in output
@@ -3210,7 +3210,7 @@ def describe_EventGraph():
                 return Accepted()
 
             graph = EventGraph([classify])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "Started -->|classify| Accepted" in output
             assert "Started -->|classify| Rejected" in output
 
@@ -3224,7 +3224,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([side_effect, producer])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "%% Side-effect handlers: side_effect (Started)" in output
             assert "Started -->|producer| Ended" in output
 
@@ -3234,7 +3234,7 @@ def describe_EventGraph():
                 return Scatter([Processed(data="a")])
 
             graph = EventGraph([split])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             # No edge to a Scatter node
             assert "-->|split| Scatter" not in output
             assert "%% Scatter handlers: split (Started)" in output
@@ -3254,7 +3254,7 @@ def describe_EventGraph():
                 return Ended(result="recovered")
 
             graph = EventGraph([flaky, recover])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert 'Started -.->|"flaky (raises)"| HandlerRaised' in output
             assert "HandlerRaised -->|recover| Ended" in output
             # HandlerRaised must not appear as a seed entry
@@ -3275,7 +3275,7 @@ def describe_EventGraph():
                 return None
 
             graph = EventGraph([side_effect, recover])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             # Even though side_effect has no positive return type, the raises
             # edge must still be drawn so HandlerRaised is a real target and
             # the diagram reflects runtime behaviour.
@@ -3292,7 +3292,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([request_approval, handle_review])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "Interrupted -.-> Resumed" in output
             assert "Resumed -->|handle_review| Ended" in output
 
@@ -3302,7 +3302,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([mystery])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "Started -->|mystery| ?" in output
 
         def it_shows_multi_subscription_edges():
@@ -3311,7 +3311,7 @@ def describe_EventGraph():
                 return Ended(result="ok")
 
             graph = EventGraph([handle_both])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "Started -->|handle_both| Ended" in output
             assert "Processed -->|handle_both| Ended" in output
 
@@ -3325,7 +3325,7 @@ def describe_EventGraph():
                 return Ended(result=event.data)
 
             graph = EventGraph([step1, step2])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "classDef entry fill:none,stroke:none,color:none" in output
             assert "_e0_[ ]:::entry ==> Started" in output
             # Processed is a target, not a seed
@@ -3341,7 +3341,7 @@ def describe_EventGraph():
                 return Ended(result=event.data)
 
             graph = EventGraph([split, step2])
-            output = graph.domain().mermaid()
+            output = graph.namespaces().mermaid()
             assert "Started -.->|split| Processed" in output
             assert "%% Scatter handlers" not in output
 
@@ -3373,7 +3373,7 @@ def describe_EventGraph():
                     return Processed(data=event.data)
 
                 graph = EventGraph([handler, handler])
-                output = graph.domain().mermaid()
+                output = graph.namespaces().mermaid()
                 assert "-->|handler|" in output
                 assert "-->|handler_2|" in output
 
@@ -4208,7 +4208,7 @@ def describe_OrphanedEventWarning():
                 EventGraph([_WidgetSuite.Place])
 
         def it_does_not_warn_for_free_standing_domain_events():
-            # A DomainEvent nested directly under a Domain (not inside a
+            # A DomainEvent nested directly under a Namespace (not inside a
             # Command) — like a "fact" emitted by a policy — is terminal
             # by design too. Having no subscriber must not warn.
 

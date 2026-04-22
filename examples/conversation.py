@@ -55,13 +55,13 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph_events import (
     Auditable,
     Command,
-    Domain,
     DomainEvent,
     Event,
     EventGraph,
     EventLog,
     IntegrationEvent,
     MessageEvent,
+    Namespace,
     SystemPromptSet,
     message_reducer,
     on,
@@ -81,11 +81,11 @@ BLOCKED_WORDS = ["hack", "bomb", "exploit"]
 
 
 # ---------------------------------------------------------------------------
-# Domain: Conversation
+# Namespace: Conversation
 # ---------------------------------------------------------------------------
 
 
-class Conversation(Domain):
+class Conversation(Namespace):
     """A moderated conversation with an LLM agent.
 
     ``Send`` is the domain's only entry point; it enforces content
@@ -218,7 +218,7 @@ def finalize_answer(event: LLMResponded) -> AnswerProduced | None:
 # Graph
 # ---------------------------------------------------------------------------
 
-graph = EventGraph.from_domains(
+graph = EventGraph.from_namespaces(
     Conversation,
     handlers=[call_llm, finalize_answer, audit_trail],
     reducers=[messages],

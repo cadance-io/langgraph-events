@@ -7,13 +7,13 @@ from conftest import Order
 
 from langgraph_events import (
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     HandlerRaised,
     IntegrationEvent,
     Invariant,
     InvariantViolated,
+    Namespace,
     Scatter,
     on,
 )
@@ -326,7 +326,7 @@ def describe_invariants():
 # ---------------------------------------------------------------------------
 
 
-class Ledger(Domain):
+class Ledger(Namespace):
     class Deposit(Command):
         amount: int = 0
 

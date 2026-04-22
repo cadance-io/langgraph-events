@@ -7,13 +7,13 @@ Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
 ## Quick Start
 
-Group related commands and events into a `Domain`; colocate the handler on the command.
+Group related commands and events into a `Namespace`; colocate the handler on the command.
 
 ```python
 from langgraph_events import Command, Domain, DomainEvent, EventGraph
 
 
-class Order(Domain):
+class Order(Namespace):
     class Place(Command):
         customer_id: str
 

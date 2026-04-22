@@ -7,12 +7,10 @@ from langgraph_events._custom_event import (
     emit_custom,
     emit_state_snapshot,
 )
-from langgraph_events._domain import DomainModel
 from langgraph_events._event import (
     Auditable,
     Cancelled,
     Command,
-    Domain,
     DomainEvent,
     Event,  # noqa: F401 (importable for reducer event_type=Event catch-all)
     FrontendToolCallRequested,
@@ -24,6 +22,7 @@ from langgraph_events._event import (
     InvariantViolated,
     MaxRoundsExceeded,
     MessageEvent,
+    Namespace,
     Resumed,
     Scatter,
     SystemEvent,
@@ -39,6 +38,7 @@ from langgraph_events._graph import (
     OrphanedEventWarning,
 )
 from langgraph_events._handler import on
+from langgraph_events._namespace import NamespaceModel
 from langgraph_events._reducer import SKIP, Reducer, ScalarReducer, message_reducer
 from langgraph_events._types import (
     HandlerReturn,  # noqa: F401 (importable but not promoted)
@@ -50,9 +50,7 @@ __all__ = [
     "Auditable",
     "Cancelled",
     "Command",
-    "Domain",
     "DomainEvent",
-    "DomainModel",
     "EventGraph",
     "EventLog",
     "FrontendToolCallRequested",
@@ -68,6 +66,8 @@ __all__ = [
     "LLMToolCallChunk",
     "MaxRoundsExceeded",
     "MessageEvent",
+    "Namespace",
+    "NamespaceModel",
     "OrphanedEventWarning",
     "Reducer",
     "Resumed",

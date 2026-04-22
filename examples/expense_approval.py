@@ -2,7 +2,7 @@
 
 Demonstrates DDD domains combined with human-in-the-loop approval:
 
-- ``Domain`` with ``ScalarReducer`` — the ``Expense`` namespace tracks
+- ``Namespace`` with ``ScalarReducer`` — the ``Expense`` namespace tracks
   status through the approval lifecycle.
 - Inline ``handle`` with LLM — ``Submit.handle`` calls an LLM to extract
   structured expense data from a natural-language description.
@@ -25,10 +25,10 @@ from pydantic import BaseModel, Field
 
 from langgraph_events import (
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     Interrupted,
+    Namespace,
     ScalarReducer,
     on,
 )
@@ -62,7 +62,7 @@ expense_llm = llm.with_structured_output(ExpenseData)
 
 
 # ---------------------------------------------------------------------------
-# Domain: Expense
+# Namespace: Expense
 # ---------------------------------------------------------------------------
 
 _STATUS_MAP = {
@@ -73,7 +73,7 @@ _STATUS_MAP = {
 }
 
 
-class Expense(Domain):
+class Expense(Namespace):
     """Expense report lifecycle.
 
     The ``status`` reducer tracks the current state. Only ``DomainEvent``
@@ -187,7 +187,7 @@ def check_policy(
 # Graph
 # ---------------------------------------------------------------------------
 
-graph = EventGraph.from_domains(
+graph = EventGraph.from_namespaces(
     Expense,
     handlers=[check_policy],
     checkpointer=MemorySaver(),
@@ -200,8 +200,8 @@ graph = EventGraph.from_domains(
 
 
 def main() -> None:
-    print("=== Domain ===")
-    print(graph.domain().text())
+    print("=== Namespace ===")
+    print(graph.namespaces().text())
     print()
 
     # Scenario 1 — auto-approved (under threshold)

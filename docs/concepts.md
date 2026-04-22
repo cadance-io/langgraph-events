@@ -6,27 +6,27 @@ A run is an append-only log of frozen, typed events. Handlers read events in, em
 
 ## The taxonomy
 
-Four event base classes plus a `Domain` namespace. Pick the right one and the naming discipline follows:
+Four event base classes plus a `Namespace` namespace. Pick the right one and the naming discipline follows:
 
 | Class | Role | Naming | Where it lives |
 |---|---|---|---|
-| `Domain` | Namespace for related commands and events | Noun (`Order`) | Top-level class |
-| `Command` | Intent / request | **Imperative** (`Place`, `Ship`) | Nested inside a `Domain` |
-| `DomainEvent` | Fact inside the domain | Past-participle (`Placed`, `Shipped`) | Nested under a `Domain` or `Command` |
+| `Namespace` | Namespace for related commands and events | Noun (`Order`) | Top-level class |
+| `Command` | Intent / request | **Imperative** (`Place`, `Ship`) | Nested inside a `Namespace` |
+| `DomainEvent` | Fact inside the domain | Past-participle (`Placed`, `Shipped`) | Nested under a `Namespace` or `Command` |
 | `IntegrationEvent` | Fact crossing a system boundary | Past-participle | Top-level |
 | `SystemEvent` | Framework-emitted fact | Past-participle | Top-level (`Halted`, `HandlerRaised`, ...) |
 | `Invariant` | Named rule gating a handler | Noun phrase (`CustomerNotBanned`) | Anywhere — nesting under a `Command` is encouraged |
 
-`Auditable` and `MessageEvent` are behavioural **mixins** — compose them with any event branch (e.g. `class Foo(DomainEvent, Auditable)`). `Invariant` is a **marker class**, not an `Event` subclass — see [control-flow](control-flow.md#invariants). Declared invariants surface as first-class nodes in `graph.domain()`: `.invariants` lists every subclass with its owning commands, declaring handlers, and pinned reactors; mermaid diagrams render each as a diamond gate inside its owning domain.
+`Auditable` and `MessageEvent` are behavioural **mixins** — compose them with any event branch (e.g. `class Foo(DomainEvent, Auditable)`). `Invariant` is a **marker class**, not an `Event` subclass — see [control-flow](control-flow.md#invariants). Declared invariants surface as first-class nodes in `graph.namespaces()`: `.invariants` lists every subclass with its owning commands, declaring handlers, and pinned reactors; mermaid diagrams render each as a diamond gate inside its owning domain.
 
-!!! note "On `Domain`"
+!!! note "On `Namespace`"
 
-    `Domain` is a namespace — for grouping related commands and events, plus the target for declarative reducers and the `invariants=` kwarg. A richer construct — with identity and size discipline — may layer on top in a future release.
+    `Namespace` is a namespace — for grouping related commands and events, plus the target for declarative reducers and the `invariants=` kwarg. A richer construct — with identity and size discipline — may layer on top in a future release.
 
-Nesting is enforced at class-creation time — `Command` / `DomainEvent` defined outside a `Domain` raise `TypeError`. Direct `Event` subclassing also raises `TypeError` — use one of the four bases above.
+Nesting is enforced at class-creation time — `Command` / `DomainEvent` defined outside a `Namespace` raise `TypeError`. Direct `Event` subclassing also raises `TypeError` — use one of the four bases above.
 
 ```python
-class Order(Domain):
+class Order(Namespace):
     class Place(Command):
         customer_id: str
 
@@ -56,7 +56,7 @@ Declare `Outcomes` yourself if you want `mypy` to see it — the framework drift
 ```python
 from typing import TypeAlias
 
-class Order(Domain):
+class Order(Namespace):
     class Place(Command):
         class Placed(DomainEvent): ...
         class Rejected(DomainEvent): ...
@@ -72,7 +72,7 @@ Two styles: inline `handle` on a command, or the `@on` decorator.
 The command owns its handler. `self` is the command instance. Pass the command class to `EventGraph` — no decorator.
 
 ```python
-class Order(Domain):
+class Order(Namespace):
     class Ship(Command):
         order_id: str
 
@@ -85,7 +85,7 @@ class Order(Domain):
 
 graph = EventGraph([Order.Ship])
 # or register every inline handler on a domain in one call:
-graph = EventGraph.from_domains(Order, handlers=[react])
+graph = EventGraph.from_namespaces(Order, handlers=[react])
 ```
 
 When an inline `handle` has an explicit return annotation, it must cover every nested `DomainEvent` — dropping an outcome there is almost always a mistake. External `@on(Cmd)` handlers are exempt (distributed outcome production is a valid pattern).
@@ -140,10 +140,10 @@ Topology is derived from handler subscriptions — no manual node/edge wiring. `
 
 ### Domain introspection & visualization
 
-One entry point — `graph.domain()` — returns a `DomainModel`: a code-derived snapshot of the structure *and* the event-driven flow (choreography). Render it to text, Mermaid, or JSON:
+One entry point — `graph.namespaces()` — returns a `NamespaceModel`: a code-derived snapshot of the structure *and* the event-driven flow (choreography). Render it to text, Mermaid, or JSON:
 
 ```python
-d = graph.domain()
+d = graph.namespaces()
 
 print(d.text())                     # human-readable tree (choreography)
 print(d.text(view="structure"))     # taxonomy only — no handlers
@@ -153,10 +153,10 @@ print(d.mermaid())                  # graph LR flowchart (choreography)
 d.json()                            # JSON snapshot (event classes as qualnames)
 
 # Data access — everything is a frozen dataclass tuple/dict:
-d.domains                 # dict[str, DomainModel.Domain]
-d.command_handlers        # tuple[DomainModel.CommandHandler, ...]
-d.policies                # tuple[DomainModel.Policy, ...]
-d.edges                   # tuple[DomainModel.Edge, ...]  — source, via, target, kind
+d.namespaces                 # dict[str, NamespaceModel.Namespace]
+d.command_handlers        # tuple[NamespaceModel.CommandHandler, ...]
+d.policies                # tuple[NamespaceModel.Policy, ...]
+d.edges                   # tuple[NamespaceModel.Edge, ...]  — source, via, target, kind
 d.seeds                   # tuple[type[Event], ...]       — events with no incoming edges
 d.integration_events      # tuple[type[IntegrationEvent], ...]
 d.system_events           # tuple[type[SystemEvent], ...]
@@ -192,16 +192,16 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 
 ## Domain as a feature hub
 
-A `Domain` is a namespace, and also where related features attach: declarative reducers as class attributes (auto-scoped to the domain's events), `invariants=` on `@on(Domain.Cmd, ...)`, and domain grouping in `graph.domain()`. See [Reducers](reducers.md#on-a-domain) and [Control Flow](control-flow.md#invariants).
+A `Namespace` is a namespace, and also where related features attach: declarative reducers as class attributes (auto-scoped to the domain's events), `invariants=` on `@on(Namespace.Cmd, ...)`, and domain grouping in `graph.namespaces()`. See [Reducers](reducers.md#on-a-namespace) and [Control Flow](control-flow.md#invariants).
 
 ## System events
 
 Framework-emitted events for runtime control — all `SystemEvent` subclasses. Subscribe via `@on(SomeSystemEvent)` like any other event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed` (HITL), `HandlerRaised` (`raises=`), and `InvariantViolated`. Full table in [API](api.md#system-events).
 
-Custom halts subclass `Halted` with domain-specific fields. Nest them inside their domain for locality; `graph.domain()` groups them with the rest of the domain's events rather than with framework system events:
+Custom halts subclass `Halted` with domain-specific fields. Nest them inside their domain for locality; `graph.namespaces()` groups them with the rest of the domain's events rather than with framework system events:
 
 ```python
-class Content(Domain):
+class Content(Namespace):
     class Classified(DomainEvent):
         label: str
 

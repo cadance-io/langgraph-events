@@ -24,18 +24,18 @@ from typing import Protocol, runtime_checkable
 from langgraph_events import (
     Auditable,
     Command,
-    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
     Halted,
+    Namespace,
     Reducer,
     on,
 )
 from langgraph_events.stream import StreamFrame
 
 # ---------------------------------------------------------------------------
-# Domain: Content
+# Namespace: Content
 # ---------------------------------------------------------------------------
 
 UNSAFE_KEYWORDS = {"hack", "exploit", "attack", "malware", "phishing"}
@@ -48,7 +48,7 @@ class StageLabelled(Protocol):
     def stage_label(self) -> str: ...
 
 
-class Content(Domain):
+class Content(Namespace):
     """Content flowing through safety classification and analysis.
 
     ``Process`` is the entry command. Its inline ``handle`` classifies the
@@ -153,7 +153,7 @@ def analyze(event: Content.Approved) -> Content.Analyzed:
 # ---------------------------------------------------------------------------
 
 
-graph = EventGraph.from_domains(
+graph = EventGraph.from_namespaces(
     Content,
     handlers=[gate, analyze],
     reducers=[stages],

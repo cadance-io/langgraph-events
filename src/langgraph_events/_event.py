@@ -34,8 +34,8 @@ class Event:
         if Event in cls.__bases__ and not _event_base:
             raise TypeError(
                 f"{cls.__name__!r} subclasses Event directly. Use one of: "
-                f"DomainEvent (inside Domain/Command), IntegrationEvent "
-                f"(cross-boundary facts), Command (inside Domain), or "
+                f"DomainEvent (inside Namespace/Command), IntegrationEvent "
+                f"(cross-boundary facts), Command (inside Namespace), or "
                 f"compose with Auditable / MessageEvent."
             )
 
@@ -51,23 +51,23 @@ class Event:
         new_events.append(self)
 
 
-_DOMAIN_REGISTRY: dict[str, type[Domain]] = {}
-"""Maps ``__domain_name__`` -> Domain class. Populated in
-``Domain.__init_subclass__``. Used by ``EventGraph`` to auto-discover
+_NAMESPACE_REGISTRY: dict[str, type[Namespace]] = {}
+"""Maps ``__namespace_name__`` -> Namespace class. Populated in
+``Namespace.__init_subclass__``. Used by ``EventGraph`` to auto-discover
 declarative reducers via a handler's subscribed event types."""
 
 
-class Domain:
+class Namespace:
     """Namespace for a group of related commands and events.
 
     Subclasses act as namespaces for nested ``Command`` and ``DomainEvent``
     classes. The class name becomes the domain's identifier, used by
-    introspection and for stamping ``__domain__`` on nested commands and
+    introspection and for stamping ``__namespace__`` on nested commands and
     events.
 
     Example::
 
-        class Order(Domain):
+        class Order(Namespace):
             class Place(Command):
                 customer_id: str
 
@@ -75,29 +75,29 @@ class Domain:
                     order_id: str
     """
 
-    __domain_name__: ClassVar[str]
+    __namespace_name__: ClassVar[str]
     __reducers__: ClassVar[tuple[Any, ...]]
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        existing = _DOMAIN_REGISTRY.get(cls.__name__)
+        existing = _NAMESPACE_REGISTRY.get(cls.__name__)
         if existing is not None and existing is not cls:
             raise TypeError(
-                f"Domain {cls.__name__!r} is already defined at "
-                f"{existing.__module__}.{existing.__qualname__}. Domain "
+                f"Namespace {cls.__name__!r} is already defined at "
+                f"{existing.__module__}.{existing.__qualname__}. Namespace "
                 f"class names must be unique within a process."
             )
-        cls.__domain_name__ = cls.__name__
-        cls.__reducers__ = _collect_domain_reducers(cls)
-        _DOMAIN_REGISTRY[cls.__domain_name__] = cls
+        cls.__namespace_name__ = cls.__name__
+        cls.__reducers__ = _collect_namespace_reducers(cls)
+        _NAMESPACE_REGISTRY[cls.__namespace_name__] = cls
         # Second-pass stamp: DomainEvents nested inside a Command have their
-        # __domain__ left as None by the metaclass (Command.__domain__ isn't
+        # __namespace__ left as None by the metaclass (Command.__namespace__ isn't
         # known at that point). Fill them in now.
-        _stamp_nested_domain(cls, cls.__name__)
+        _stamp_nested_namespace(cls, cls.__name__)
         _attach_command_outcomes(cls)
 
 
-def _collect_domain_reducers(cls: type) -> tuple[Any, ...]:
+def _collect_namespace_reducers(cls: type) -> tuple[Any, ...]:
     """Walk the MRO and collect declarative reducers from class bodies.
 
     Child domains inherit parent domain's reducers; dedup by name.
@@ -116,7 +116,7 @@ def _collect_domain_reducers(cls: type) -> tuple[Any, ...]:
     return tuple(collected)
 
 
-def _attach_command_outcomes(domain_cls: type) -> None:
+def _attach_command_outcomes(namespace_cls: type) -> None:
     """For each nested ``Command``, expose ``cmd.Outcomes`` — the union of
     its nested ``DomainEvent`` classes.
 
@@ -126,7 +126,7 @@ def _attach_command_outcomes(domain_cls: type) -> None:
     - User already declared ``Outcomes`` in the class body: validated for drift
       against the nested outcomes; left in place if consistent.
     """
-    for cmd in domain_cls.__dict__.values():
+    for cmd in namespace_cls.__dict__.values():
         if not (isinstance(cmd, type) and issubclass(cmd, Command)):
             continue
         outcomes = [
@@ -157,14 +157,14 @@ def _attach_command_outcomes(domain_cls: type) -> None:
         )
 
 
-def _stamp_nested_domain(container: type, domain_name: str) -> None:
-    """Walk ``container`` and set ``__domain__`` on any nested ``Event``
+def _stamp_nested_namespace(container: type, namespace_name: str) -> None:
+    """Walk ``container`` and set ``__namespace__`` on any nested ``Event``
     subclass that doesn't have one yet.
 
     Covers DomainEvents nested inside a Command (their metaclass runs before
-    the Command's ``__domain__`` is known), and non-DomainEvent events
-    nested in a Domain for locality (e.g. ``class Blocked(Halted)`` under
-    ``class Content(Domain)``) — the metaclass only fires for Command /
+    the Command's ``__namespace__`` is known), and non-DomainEvent events
+    nested in a Namespace for locality (e.g. ``class Blocked(Halted)`` under
+    ``class Content(Namespace)``) — the metaclass only fires for Command /
     DomainEvent, so those would otherwise never be stamped.
     """
     for attr in container.__dict__.values():
@@ -172,10 +172,10 @@ def _stamp_nested_domain(container: type, domain_name: str) -> None:
             continue
         if not issubclass(attr, Event):
             continue
-        if getattr(attr, "__domain__", None) is None:
-            attr.__domain__ = domain_name  # type: ignore[attr-defined]
+        if getattr(attr, "__namespace__", None) is None:
+            attr.__namespace__ = namespace_name  # type: ignore[attr-defined]
         if issubclass(attr, Command):
-            _stamp_nested_domain(attr, domain_name)
+            _stamp_nested_namespace(attr, namespace_name)
 
 
 def _is_nested_in_class(cls: type) -> bool:
@@ -208,32 +208,32 @@ class _NestedEventMeta(type):
 
     def __set_name__(cls, owner: type, name: str) -> None:
         if issubclass(cls, Command):
-            if not (isinstance(owner, type) and issubclass(owner, Domain)):
+            if not (isinstance(owner, type) and issubclass(owner, Namespace)):
                 raise TypeError(
                     f"Command {cls.__name__!r} must be nested inside a "
-                    f"Domain subclass, got owner {owner.__name__!r}"
+                    f"Namespace subclass, got owner {owner.__name__!r}"
                 )
-            cls.__domain__ = owner.__name__
+            cls.__namespace__ = owner.__name__
         elif issubclass(cls, DomainEvent):
-            if isinstance(owner, type) and issubclass(owner, Domain):
-                cls.__domain__ = owner.__name__
+            if isinstance(owner, type) and issubclass(owner, Namespace):
+                cls.__namespace__ = owner.__name__
                 cls.__command__ = None
             elif isinstance(owner, type) and issubclass(owner, Command):
                 cls.__command__ = owner
-                # __domain__ filled in by Domain.__init_subclass__ — at this
-                # point Command.__domain__ isn't known yet.
+                # __namespace__ filled in by Namespace.__init_subclass__ — at this
+                # point Command.__namespace__ isn't known yet.
             else:
                 raise TypeError(
                     f"DomainEvent {cls.__name__!r} must be nested inside a "
-                    f"Domain or Command, got owner {owner.__name__!r}"
+                    f"Namespace or Command, got owner {owner.__name__!r}"
                 )
 
 
-def _inherits_domain(cls: type) -> bool:
+def _inherits_namespace(cls: type) -> bool:
     """True if any base of *cls* (other than itself) already has a stamped
-    ``__domain__`` — meaning it inherits from an already-validated event."""
+    ``__namespace__`` — meaning it inherits from an already-validated event."""
     return any(
-        getattr(base, "__domain__", None) is not None for base in cls.__mro__[1:]
+        getattr(base, "__namespace__", None) is not None for base in cls.__mro__[1:]
     )
 
 
@@ -263,14 +263,14 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
 
 
 class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
-    """Imperative intent. Must be nested inside a ``Domain`` subclass.
+    """Imperative intent. Must be nested inside a ``Namespace`` subclass.
 
     Use imperative naming (``Place``, ``Ship``, ``Cancel``).  Outcomes of
     a command are typically nested ``DomainEvent`` subclasses.
 
     Example::
 
-        class Order(Domain):
+        class Order(Namespace):
             class Place(Command):
                 customer_id: str
 
@@ -281,18 +281,18 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                     reason: str
     """
 
-    __domain__: ClassVar[str | None] = None
+    __namespace__: ClassVar[str | None] = None
     __command_handler__: ClassVar[Any] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if _inherits_domain(cls):
+        if _inherits_namespace(cls):
             return
         if not _is_nested_in_class(cls):
             raise TypeError(
-                f"Command {cls.__name__!r} must be nested inside a Domain "
+                f"Command {cls.__name__!r} must be nested inside a Namespace "
                 f"subclass, e.g. "
-                f"class Order(Domain): class {cls.__name__}(Command): ..."
+                f"class Order(Namespace): class {cls.__name__}(Command): ..."
             )
         # Detect an inline ``handle`` method; auto-registered when the command
         # class is passed to ``EventGraph`` (see _graph.py:_expand_command_handlers).
@@ -305,27 +305,27 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
 class DomainEvent(Event, _event_base=True, metaclass=_NestedEventMeta):
     """Fact within the bounded context. Past-participle naming.
 
-    Must be nested inside a ``Domain`` (a free-standing event under the
+    Must be nested inside a ``Namespace`` (a free-standing event under the
     domain) or a ``Command`` (an outcome of that command).
 
     Example::
 
-        class Order(Domain):
+        class Order(Namespace):
             class Shipped(DomainEvent):
                 tracking: str
     """
 
-    __domain__: ClassVar[str | None] = None
+    __namespace__: ClassVar[str | None] = None
     __command__: ClassVar[type | None] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if _inherits_domain(cls):
+        if _inherits_namespace(cls):
             return
         if not _is_nested_in_class(cls):
             raise TypeError(
                 f"DomainEvent {cls.__name__!r} must be nested inside a "
-                f"Domain or Command"
+                f"Namespace or Command"
             )
 
 
@@ -570,7 +570,7 @@ class Invariant:
         @on(InvariantViolated, invariant=CustomerNotBanned)
         def explain(event: InvariantViolated) -> ...: ...
 
-    Nesting under a ``Domain`` / ``Command`` is encouraged for locality but
+    Nesting under a ``Namespace`` / ``Command`` is encouraged for locality but
     not enforced.
     """
 

@@ -13,7 +13,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Example["Domain"]
+    subgraph Example["Namespace"]
       direction LR
       Command{{Command}}:::cmd
       DomainEvent(DomainEvent):::devt
@@ -50,7 +50,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Task["Task domain"]
+    subgraph Task["Task namespace"]
         direction LR
         Code{{Code}}:::cmd
         Completed(Completed):::devt
@@ -77,7 +77,7 @@ graph LR
 ## Choreography (text)
 
 ```text
-Domains:
+Namespaces:
   Task
     Command: Run  (handlers: supervisor)
     Command: Research  (handlers: researcher)

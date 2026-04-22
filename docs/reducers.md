@@ -2,15 +2,15 @@
 
 Incremental state accumulation. `EventLog.filter()` covers most cases — reach for a reducer when recomputing from the full log every round would be expensive (e.g. LangChain message history) or when you want a last-write-wins value injected by name.
 
-## On a Domain { #on-a-domain }
+## On a Namespace { #on-a-namespace }
 
-Declare a reducer as a class attribute inside a `Domain`. The channel name auto-fills from the attribute name (you don't pass `name=`), the domain scope auto-fills to the enclosing class, and `EventGraph` auto-registers it when any handler subscribes to one of the domain's events:
+Declare a reducer as a class attribute inside a `Namespace`. The channel name auto-fills from the attribute name (you don't pass `name=`), the namespace scope auto-fills to the enclosing class, and `EventGraph` auto-registers it when any handler subscribes to one of the namespace's events:
 
 ```python
-from langgraph_events import Domain, Command, DomainEvent, Event, ScalarReducer
+from langgraph_events import Namespace, Command, DomainEvent, Event, ScalarReducer
 
 
-class Order(Domain):
+class Order(Namespace):
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: (
