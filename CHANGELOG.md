@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-04-22
+
 ### Added
 - Event taxonomy: `Namespace`, `Command`, `DomainEvent`, `IntegrationEvent`, `SystemEvent`. `Namespace` subclasses act as namespaces for nested commands and outcomes, encoding the `Domain.Command.Outcomes` pattern (`Order.Place.Placed`) directly in Python's class structure. Class-creation enforcement: `Command` subclasses must be nested in a `Namespace`, `DomainEvent` subclasses must be nested in a `Namespace` or `Command`. Existing framework events (`Halted`, `Interrupted`, `Resumed`, `HandlerRaised`, `Cancelled`, `MaxRoundsExceeded`) gain `SystemEvent` as a parent — backwards-compatible since they still inherit `Event` transitively. See `examples/order.py`.
 - `Command.Outcomes` — auto-generated union of a command's nested `DomainEvent` classes. Used for `isinstance` checks, introspection (`typing.get_args(Command.Outcomes)`), and as the fallback runtime contract for handlers subscribed to a command. Users may declare `Outcomes` explicitly for `mypy` visibility; the framework validates drift against the nested events at class creation.
@@ -92,7 +94,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cadance-io/langgraph-events/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cadance-io/langgraph-events/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cadance-io/langgraph-events/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/cadance-io/langgraph-events/compare/v0.2.0...v0.2.1
