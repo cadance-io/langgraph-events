@@ -692,6 +692,10 @@ def describe_mermaid_renderer():
 
 
 def describe_json_and_to_dict():
+    def it_stamps_schema_version():
+        payload = EventGraph([place]).namespaces().to_dict()
+        assert payload["schema_version"] == "1"
+
     def it_returns_json_serializable_dict():
 
         d = EventGraph([place]).namespaces()

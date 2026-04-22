@@ -6,6 +6,13 @@ from typing import Any
 
 from langgraph_events._namespace._model import NamespaceModel
 
+SCHEMA_VERSION = "1"
+"""Top-level ``schema_version`` string stamped on ``to_dict()`` output.
+
+Bumped when fields are removed, renamed, or change meaning. Additions
+don't bump. Consumers should treat an unexpected major as opaque data.
+"""
+
 
 def _qn(cls: type) -> str:
     return cls.__qualname__
@@ -49,6 +56,7 @@ def encode_model(d: NamespaceModel) -> dict[str, Any]:
             "events": [_qn(t) for t in dom.events],
         }
     return {
+        "schema_version": SCHEMA_VERSION,
         "namespaces": namespaces,
         "integration_events": [_qn(t) for t in d.integration_events],
         "system_events": [_qn(t) for t in d.system_events],

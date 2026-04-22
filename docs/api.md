@@ -48,7 +48,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `EventGraph.namespaces()` | Method | Code-derived snapshot — domains, commands, outcomes, handlers, policies, edges, seeds. Returns a `NamespaceModel` |
 | `NamespaceModel.text(view=...)` | Method | Human-readable tree; `view="structure"` or `"choreography"` (default) |
 | `NamespaceModel.mermaid()` | Method | Mermaid `graph LR` choreography diagram (handlers, policies, invariants, edges). For a structure-only view use `text(view="structure")`. |
-| `NamespaceModel.json()` / `.to_dict()` | Method | JSON-serializable snapshot (event classes encoded as qualnames) |
+| `NamespaceModel.json()` / `.to_dict()` | Method | JSON-serializable snapshot (event classes encoded as qualnames). Top-level `schema_version` is bumped on field removal, rename, or semantic change; additions don't bump. |
 | `NamespaceModel.{Domain, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |
 | `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch |
