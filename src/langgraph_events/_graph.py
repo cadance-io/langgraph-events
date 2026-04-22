@@ -468,11 +468,16 @@ class EventGraph:
             t
             for t in produced
             if not issubclass(t, (Halted, Interrupted))
-            # A DomainEvent nested inside a Command is a terminal outcome —
-            # having no subscriber is idiomatic, not an orphan.
+            # A DomainEvent owned by a Domain or Command — as an outcome
+            # (__command__ set) or as a free-standing domain fact
+            # (__domain__ set) — is a terminal by design; having no
+            # subscriber is idiomatic, not an orphan.
             and not (
                 issubclass(t, DomainEvent)
-                and getattr(t, "__command__", None) is not None
+                and (
+                    getattr(t, "__command__", None) is not None
+                    or getattr(t, "__domain__", None) is not None
+                )
             )
             and not any(issubclass(t, s) for s in subscribed)
         }

@@ -62,6 +62,16 @@ class _StepInterrupted(Interrupted):
     step: int = 0
 
 
+class _OrphanSuite(Domain):
+    """Domain with a free-standing DomainEvent — terminal by design."""
+
+    class Analyze(Command):
+        text: str = ""
+
+    class Analyzed(DomainEvent):
+        label: str = ""
+
+
 def _data_reducer() -> Reducer:
     """Simple reducer that accumulates Started.data values."""
     return Reducer(name="data_items", event_type=Started, fn=lambda e: [e.data])
@@ -4193,3 +4203,16 @@ def describe_OrphanedEventWarning():
             with warnings.catch_warnings():
                 warnings.simplefilter("error", OrphanedEventWarning)
                 EventGraph([Widget.Place])
+
+        def it_does_not_warn_for_free_standing_domain_events():
+            # A DomainEvent nested directly under a Domain (not inside a
+            # Command) — like a "fact" emitted by a policy — is terminal
+            # by design too. Having no subscriber must not warn.
+
+            @on(_OrphanSuite.Analyze)
+            def analyze(event: _OrphanSuite.Analyze) -> _OrphanSuite.Analyzed:
+                return _OrphanSuite.Analyzed(label="ok")
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", OrphanedEventWarning)
+                EventGraph([analyze])
