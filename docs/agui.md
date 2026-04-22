@@ -232,7 +232,7 @@ async def call_llm(event, messages, log):
     return LLMResponded(message=await llm.ainvoke(messages))
 ```
 
-Runnable example: [`examples/ddd_conversation.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_conversation.py) wires AG-UI frontend tools end-to-end (LLM-initiated streaming path) inside a DDD aggregate with content moderation.
+Runnable example: [`examples/conversation.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.py) wires AG-UI frontend tools end-to-end (LLM-initiated streaming path) inside a domain with content moderation.
 
 ### Handler-initiated frontend tools
 

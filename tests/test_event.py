@@ -6,10 +6,10 @@ import pytest
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from langgraph_events import (
-    Aggregate,
     Auditable,
     Cancelled,
     Command,
+    Domain,
     DomainEvent,
     Event,
     FrontendToolCallRequested,
@@ -335,18 +335,18 @@ def describe_FrontendToolCallRequested():
                 FrontendToolCallRequested()  # type: ignore[call-arg]
 
 
-def describe_Aggregate():
+def describe_Domain():
 
     def when_subclassed():
 
-        def it_stamps_aggregate_name_from_class_name():
-            class Widget(Aggregate):
+        def it_stamps_domain_name_from_class_name():
+            class Widget(Domain):
                 pass
 
-            assert Widget.__aggregate_name__ == "Widget"
+            assert Widget.__domain_name__ == "Widget"
 
         def it_is_not_an_event():
-            class Widget(Aggregate):
+            class Widget(Domain):
                 pass
 
             assert not issubclass(Widget, Event)
@@ -356,12 +356,12 @@ def describe_Aggregate():
         def with_colliding_name():
 
             def it_raises():
-                class Widget(Aggregate):
+                class Widget(Domain):
                     pass
 
                 with pytest.raises(TypeError, match=r"already defined"):
 
-                    class Widget(Aggregate):
+                    class Widget(Domain):
                         pass
 
 
@@ -370,46 +370,46 @@ def describe_Command():
     def when_top_level():
 
         def it_rejects():
-            with pytest.raises(TypeError, match=r"Command.*must be nested.*Aggregate"):
+            with pytest.raises(TypeError, match=r"Command.*must be nested.*Domain"):
 
                 class Place(Command):
                     pass
 
-    def when_nested_in_aggregate():
+    def when_nested_in_domain():
 
-        def it_accepts_and_stamps_aggregate():
-            class Widget(Aggregate):
+        def it_accepts_and_stamps_domain():
+            class Widget(Domain):
                 class Place(Command):
                     customer_id: str = ""
 
-            assert Widget.Place.__aggregate__ == "Widget"
+            assert Widget.Place.__domain__ == "Widget"
 
-    def when_nested_in_non_aggregate_class():
+    def when_nested_in_non_domain_class():
 
         def it_rejects():
             with pytest.raises(RuntimeError) as exc_info:
 
-                class NotAggregate:
+                class NotDomain:
                     class Place(Command):
                         pass
 
             assert isinstance(exc_info.value.__cause__, TypeError)
             assert "must be nested" in str(exc_info.value.__cause__)
-            assert "Aggregate" in str(exc_info.value.__cause__)
+            assert "Domain" in str(exc_info.value.__cause__)
 
     def when_nested_in_command():
 
         def it_rejects():
             with pytest.raises(RuntimeError) as exc_info:
 
-                class Widget(Aggregate):
+                class Widget(Domain):
                     class Place(Command):
                         class Inner(Command):
                             pass
 
             assert isinstance(exc_info.value.__cause__, TypeError)
             assert "must be nested" in str(exc_info.value.__cause__)
-            assert "Aggregate" in str(exc_info.value.__cause__)
+            assert "Domain" in str(exc_info.value.__cause__)
 
 
 def describe_DomainEvent():
@@ -417,24 +417,22 @@ def describe_DomainEvent():
     def when_top_level():
 
         def it_rejects():
-            with pytest.raises(
-                TypeError, match=r"DomainEvent.*must be nested.*Aggregate"
-            ):
+            with pytest.raises(TypeError, match=r"DomainEvent.*must be nested.*Domain"):
 
                 class Placed(DomainEvent):
                     pass
 
-    def when_nested_in_aggregate():
+    def when_nested_in_domain():
 
-        def it_accepts_and_stamps_aggregate():
-            class Widget(Aggregate):
+        def it_accepts_and_stamps_domain():
+            class Widget(Domain):
                 class Shipped(DomainEvent):
                     tracking: str = ""
 
-            assert Widget.Shipped.__aggregate__ == "Widget"
+            assert Widget.Shipped.__domain__ == "Widget"
 
         def it_leaves_command_attr_unset():
-            class Widget(Aggregate):
+            class Widget(Domain):
                 class Shipped(DomainEvent):
                     tracking: str = ""
 
@@ -442,23 +440,23 @@ def describe_DomainEvent():
 
     def when_nested_in_command():
 
-        def it_accepts_and_stamps_aggregate_and_command():
-            class Widget(Aggregate):
+        def it_accepts_and_stamps_domain_and_command():
+            class Widget(Domain):
                 class Place(Command):
                     customer_id: str = ""
 
                     class Placed(DomainEvent):
                         order_id: str = ""
 
-            assert Widget.Place.Placed.__aggregate__ == "Widget"
+            assert Widget.Place.Placed.__domain__ == "Widget"
             assert Widget.Place.Placed.__command__ is Widget.Place
 
-    def when_nested_in_non_aggregate_class():
+    def when_nested_in_non_domain_class():
 
         def it_rejects():
             with pytest.raises(RuntimeError) as exc_info:
 
-                class NotAggregate:
+                class NotDomain:
                     class Placed(DomainEvent):
                         pass
 
@@ -467,8 +465,8 @@ def describe_DomainEvent():
 
     def when_subclass_of_validated_event():
 
-        def it_inherits_aggregate_and_command_attrs():
-            class Widget(Aggregate):
+        def it_inherits_domain_and_command_attrs():
+            class Widget(Domain):
                 class Place(Command):
                     class Placed(DomainEvent):
                         order_id: str = ""
@@ -476,18 +474,18 @@ def describe_DomainEvent():
             class FastPlaced(Widget.Place.Placed):
                 priority: int = 0
 
-            assert FastPlaced.__aggregate__ == "Widget"
+            assert FastPlaced.__domain__ == "Widget"
             assert FastPlaced.__command__ is Widget.Place
 
-    def when_multiple_commands_and_outcomes_in_one_aggregate():
-        # Invariant-pinning test for the two-pass `__aggregate__` stamping in
+    def when_multiple_commands_and_outcomes_in_one_domain():
+        # Invariant-pinning test for the two-pass `__domain__` stamping in
         # _event.py. When a Command's own DomainEvents are processed by the
-        # metaclass, the enclosing Command doesn't yet have `__aggregate__`
-        # set. `Aggregate.__init_subclass__` fills it in via a second pass —
+        # metaclass, the enclosing Command doesn't yet have `__domain__`
+        # set. `Domain.__init_subclass__` fills it in via a second pass —
         # this test ensures every nested DomainEvent ends up stamped.
 
         def it_stamps_every_nested_outcome():
-            class Widget(Aggregate):
+            class Widget(Domain):
                 class Place(Command):
                     class Placed(DomainEvent):
                         order_id: str = ""
@@ -504,7 +502,7 @@ def describe_DomainEvent():
                 (Widget.Place.Rejected, Widget.Place),
                 (Widget.Ship.Shipped, Widget.Ship),
             ]:
-                assert outcome.__aggregate__ == "Widget"
+                assert outcome.__domain__ == "Widget"
                 assert outcome.__command__ is parent_cmd
 
 
@@ -513,7 +511,7 @@ def describe_Command_Outcomes():
     def when_command_has_single_outcome():
 
         def it_exposes_the_single_class_as_Outcomes():
-            class AggA(Aggregate):
+            class AggA(Domain):
                 class Cmd(Command):
                     class Done(DomainEvent):
                         pass
@@ -525,7 +523,7 @@ def describe_Command_Outcomes():
         def it_exposes_a_union_of_all_outcomes():
             import typing
 
-            class AggB(Aggregate):
+            class AggB(Domain):
                 class Cmd(Command):
                     class Ok(DomainEvent):
                         pass
@@ -539,7 +537,7 @@ def describe_Command_Outcomes():
     def when_command_has_no_outcomes():
 
         def it_does_not_define_Outcomes():
-            class AggC(Aggregate):
+            class AggC(Domain):
                 class Cmd(Command):
                     pass
 
@@ -548,7 +546,7 @@ def describe_Command_Outcomes():
     def when_Outcomes_used_in_isinstance():
 
         def it_matches_any_nested_outcome():
-            class AggD(Aggregate):
+            class AggD(Domain):
                 class Cmd(Command):
                     class A(DomainEvent):
                         pass
@@ -562,7 +560,7 @@ def describe_Command_Outcomes():
     def when_user_declares_Outcomes_matching_nested():
 
         def it_preserves_user_declaration():
-            class AggE(Aggregate):
+            class AggE(Domain):
                 class Cmd(Command):
                     class A(DomainEvent):
                         pass
@@ -580,7 +578,7 @@ def describe_Command_Outcomes():
         def it_rejects_as_drift():
             with pytest.raises(TypeError, match=r"Outcomes.*does not match"):
 
-                class AggF(Aggregate):
+                class AggF(Domain):
                     class Cmd(Command):
                         class A(DomainEvent):
                             pass
@@ -593,14 +591,14 @@ def describe_Command_Outcomes():
     def when_user_declares_Outcomes_including_foreign_type():
 
         def it_rejects_as_drift():
-            class Holder(Aggregate):
+            class Holder(Domain):
                 class Inner(Command):
                     class Unrelated(DomainEvent):
                         pass
 
             with pytest.raises(TypeError, match=r"Outcomes.*does not match"):
 
-                class AggG(Aggregate):
+                class AggG(Domain):
                     class Cmd(Command):
                         class A(DomainEvent):
                             pass

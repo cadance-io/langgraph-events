@@ -14,9 +14,9 @@ from langchain_core.messages import (
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
-    Aggregate,
     Cancelled,
     Command,
+    Domain,
     DomainEvent,
     Event,
     EventGraph,
@@ -4180,7 +4180,7 @@ def describe_OrphanedEventWarning():
         def it_does_not_warn_for_terminal_domain_event_outcomes():
             # DomainEvents nested inside a Command are terminal outcomes —
             # having no subscriber is idiomatic DDD, not an orphan.
-            class Widget(Aggregate):
+            class Widget(Domain):
                 class Place(Command):
                     customer_id: str = ""
 

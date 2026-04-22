@@ -7,7 +7,7 @@ Produces:
   ``<!-- autogen:end -->`` are rewritten per example (hand-authored blurbs
   outside the markers are preserved).
 - ``docs/index.md`` — block between ``<!-- autogen:start:hero -->`` and
-  ``<!-- autogen:end -->`` gets the ``ddd_order`` unified diagram.
+  ``<!-- autogen:end -->`` gets the ``order`` unified diagram.
 
 Auto-detects ``@on``-decorated handlers by scanning example modules for any
 module-level ``EventGraph`` instance.
@@ -39,7 +39,7 @@ GITHUB_EXAMPLES_URL = (
     "https://github.com/cadance-io/langgraph-events/blob/main/examples"
 )
 
-HERO_EXAMPLE = "ddd_order"
+HERO_EXAMPLE = "order"
 
 # Legend rendered as a live mermaid "vocabulary diagram" — every shape
 # and edge kind in use on the real per-example diagrams.  Works on
@@ -67,12 +67,13 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
 {_HALT_CLASSDEF}
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Example["Aggregate"]
+    subgraph Example["Domain"]
       direction LR
       Command{{{{Command}}}}:::cmd
       DomainEvent(DomainEvent):::devt
       Halted([Halted]):::halt
       Invariant{{Invariant}}:::inv
+      Rejected(Rejected):::devt
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
@@ -81,11 +82,11 @@ graph LR
     Command -.->|"handler (raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
-    Command -.->|invariant| Invariant
+    Command -.->|invariant| Invariant -.->|reactor| Rejected
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
-    linkStyle 5 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
 ```
 
 </details>"""

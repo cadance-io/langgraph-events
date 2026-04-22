@@ -45,7 +45,7 @@ def _policy_targets(p: DomainModel.Policy) -> str:
 def _render_taxonomy_lines(  # noqa: PLR0912
     d: DomainModel, *, include_handlers: bool
 ) -> list[str]:
-    """Shared aggregate/integration/system block used by both text views.
+    """Shared domain/integration/system block used by both text views.
 
     ``include_handlers`` adds ``  (handlers: ...)`` suffixes + ``raises`` +
     ``[invariant: …]`` annotations on commands in the choreography view;
@@ -53,11 +53,11 @@ def _render_taxonomy_lines(  # noqa: PLR0912
     ``Halted`` events with a ``[Halted]`` tag.
     """
     lines: list[str] = []
-    if d.aggregates:
-        lines.append("Aggregates:")
-        for agg_name, agg in d.aggregates.items():
-            lines.append(f"  {agg_name}")
-            for cmd_name, cmd in agg.commands.items():
+    if d.domains:
+        lines.append("Domains:")
+        for domain_name, dom in d.domains.items():
+            lines.append(f"  {domain_name}")
+            for cmd_name, cmd in dom.commands.items():
                 suffix_parts: list[str] = []
                 if include_handlers:
                     if cmd.handlers:
@@ -73,7 +73,7 @@ def _render_taxonomy_lines(  # noqa: PLR0912
                 lines.append(f"    Command: {cmd_name}{suffix}")
                 for outcome in cmd.outcomes:
                     lines.append(f"      → {_event_label(outcome)}")
-            for event in agg.events:
+            for event in dom.events:
                 halt_tag = "  [Halted]" if _node_class(event) == "halt" else ""
                 lines.append(f"    Event: {_event_label(event)}{halt_tag}")
     if d.integration_events:

@@ -1,7 +1,7 @@
 """Content Pipeline — langgraph-events demo.
 
 Demonstrates event streaming, halt-based early termination, and post-run
-inspection in a DDD ``Content`` aggregate.
+inspection in a DDD ``Content`` domain.
 
 Covers APIs not shown in other examples:
   - ``Halted`` — immediate graph termination (unsafe content stops the pipeline)
@@ -22,9 +22,9 @@ import asyncio
 from typing import Protocol, runtime_checkable
 
 from langgraph_events import (
-    Aggregate,
     Auditable,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
@@ -35,7 +35,7 @@ from langgraph_events import (
 from langgraph_events.stream import StreamFrame
 
 # ---------------------------------------------------------------------------
-# Aggregate: Content
+# Domain: Content
 # ---------------------------------------------------------------------------
 
 UNSAFE_KEYWORDS = {"hack", "exploit", "attack", "malware", "phishing"}
@@ -48,12 +48,12 @@ class StageLabelled(Protocol):
     def stage_label(self) -> str: ...
 
 
-class Content(Aggregate):
+class Content(Domain):
     """Content flowing through safety classification and analysis.
 
     ``Process`` is the entry command. Its inline ``handle`` classifies the
     text (``Classified`` outcome). Downstream reactions approve or block,
-    then analyze — those facts are free-standing under the aggregate.
+    then analyze — those facts are free-standing under the domain.
     """
 
     class Process(Command, Auditable):
@@ -101,7 +101,7 @@ class Content(Aggregate):
         """Halted: content failed the safety gate.
 
         ``Halted`` subclass stays a ``SystemEvent`` (framework termination);
-        nested inside the aggregate class for locality only.
+        nested inside the domain class for locality only.
         """
 
         category: str = ""
@@ -153,7 +153,7 @@ def analyze(event: Content.Approved) -> Content.Analyzed:
 # ---------------------------------------------------------------------------
 
 
-graph = EventGraph.from_aggregates(
+graph = EventGraph.from_domains(
     Content,
     handlers=[gate, analyze],
     reducers=[stages],

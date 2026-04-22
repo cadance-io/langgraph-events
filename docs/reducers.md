@@ -2,15 +2,15 @@
 
 Incremental state accumulation. `EventLog.filter()` covers most cases — reach for a reducer when recomputing from the full log every round would be expensive (e.g. LangChain message history) or when you want a last-write-wins value injected by name.
 
-## On an aggregate
+## On a Domain { #on-a-domain }
 
-Declare a reducer as a class attribute inside an `Aggregate`. The channel name auto-fills from the attribute name (you don't pass `name=`), the aggregate scope auto-fills to the enclosing class, and `EventGraph` auto-registers it when any handler subscribes to an aggregate event:
+Declare a reducer as a class attribute inside a `Domain`. The channel name auto-fills from the attribute name (you don't pass `name=`), the domain scope auto-fills to the enclosing class, and `EventGraph` auto-registers it when any handler subscribes to one of the domain's events:
 
 ```python
-from langgraph_events import Aggregate, Command, DomainEvent, Event, ScalarReducer
+from langgraph_events import Domain, Command, DomainEvent, Event, ScalarReducer
 
 
-class Order(Aggregate):
+class Order(Domain):
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: (
@@ -37,13 +37,13 @@ class Order(Aggregate):
 graph = EventGraph([Order.Place])   # reducer auto-discovered from Order
 ```
 
-- Only sees events whose `__aggregate__` matches. Child aggregates inherit parent reducers (dedup by name).
-- Cross-aggregate name collisions raise `TypeError` at graph construction.
+- Only sees events whose `__domain__` matches. Child domains inherit parent reducers (dedup by name).
+- Cross-domain name collisions raise `TypeError` at graph construction.
 - Explicit `reducers=[...]` wins on name conflict with an auto-discovered reducer.
 
 ## Graph-wide reducers
 
-For reducers that span aggregates or aren't aggregate-scoped, pass them explicitly via `reducers=[...]`. This is the form used by `message_reducer()`:
+For reducers that span domains or aren't domain-scoped, pass them explicitly via `reducers=[...]`. This is the form used by `message_reducer()`:
 
 ```python
 messages = message_reducer()

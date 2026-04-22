@@ -1,12 +1,12 @@
 # API Reference
 
-## DDD Taxonomy
+## Event Taxonomy
 
 | Export | Type | Description |
 |---|---|---|
-| `Aggregate` | Base class | Namespace for nested commands and outcomes; exposes `__aggregate_name__`, `__reducers__` |
-| `Command` | Base class | Imperative intent; must be nested inside an `Aggregate`. Auto-exposes `.Outcomes` — union of nested `DomainEvent`s. A `handle` method on the class registers as the command's inline handler when passed to `EventGraph` |
-| `DomainEvent` | Base class | Fact inside the domain; must be nested inside an `Aggregate` or `Command` |
+| `Domain` | Base class | Namespace for nested commands and outcomes; exposes `__domain_name__`, `__reducers__` |
+| `Command` | Base class | Imperative intent; must be nested inside a `Domain`. Auto-exposes `.Outcomes` — union of nested `DomainEvent`s. A `handle` method on the class registers as the command's inline handler when passed to `EventGraph` |
+| `DomainEvent` | Base class | Fact inside the domain; must be nested inside a `Domain` or `Command` |
 | `IntegrationEvent` | Base class | Cross-boundary fact; top-level |
 | `SystemEvent` | Base class | Framework-emitted fact; top-level |
 | `InvariantViolated` | Event | Emitted when an `invariants=` predicate returns false |
@@ -41,15 +41,15 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | Export | Type | Description |
 |---|---|---|
 | `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle` |
-| `EventGraph.from_aggregates()` | Classmethod | Build a graph from aggregates' inline command handlers; `handlers=` appends external handlers |
+| `EventGraph.from_domains()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers |
 | `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog` |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
 | `EventGraph.get_state()` | Method | `GraphState` for a checkpointed thread |
-| `EventGraph.domain()` | Method | Code-derived DDD snapshot — aggregates, commands, outcomes, handlers, policies, edges, seeds. Returns a `DomainModel` |
+| `EventGraph.domain()` | Method | Code-derived snapshot — domains, commands, outcomes, handlers, policies, edges, seeds. Returns a `DomainModel` |
 | `DomainModel.text(view=...)` | Method | Human-readable tree; `view="structure"` or `"choreography"` (default) |
 | `DomainModel.mermaid(view=...)` | Method | Mermaid diagram; `"structure"` → `classDiagram`, `"choreography"` → `graph LR` (default) |
 | `DomainModel.json()` / `.to_dict()` | Method | JSON-serializable snapshot (event classes encoded as qualnames) |
-| `DomainModel.{Aggregate, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
+| `DomainModel.{Domain, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
 | `DomainModel.invariants` | Field | Tuple of `DomainModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |
 | `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
@@ -74,7 +74,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 
 | Export | Type | Description |
 |---|---|---|
-| `Reducer` | Class | List accumulator; declare as `Aggregate` class attribute or pass via `reducers=` |
+| `Reducer` | Class | List accumulator; declare as `Domain` class attribute or pass via `reducers=` |
 | `ScalarReducer` | Class | Last-write-wins for a single value; `None` is valid |
 | `SKIP` | Sentinel | Return from `ScalarReducer.fn` to leave the value unchanged |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |

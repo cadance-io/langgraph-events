@@ -34,8 +34,8 @@ class Event:
         if Event in cls.__bases__ and not _event_base:
             raise TypeError(
                 f"{cls.__name__!r} subclasses Event directly. Use one of: "
-                f"DomainEvent (inside Aggregate/Command), IntegrationEvent "
-                f"(cross-boundary facts), Command (inside Aggregate), or "
+                f"DomainEvent (inside Domain/Command), IntegrationEvent "
+                f"(cross-boundary facts), Command (inside Domain), or "
                 f"compose with Auditable / MessageEvent."
             )
 
@@ -51,23 +51,23 @@ class Event:
         new_events.append(self)
 
 
-_AGGREGATE_REGISTRY: dict[str, type[Aggregate]] = {}
-"""Maps ``__aggregate_name__`` -> Aggregate class. Populated in
-``Aggregate.__init_subclass__``. Used by ``EventGraph`` to auto-discover
+_DOMAIN_REGISTRY: dict[str, type[Domain]] = {}
+"""Maps ``__domain_name__`` -> Domain class. Populated in
+``Domain.__init_subclass__``. Used by ``EventGraph`` to auto-discover
 declarative reducers via a handler's subscribed event types."""
 
 
-class Aggregate:
-    """Marker for an aggregate root in the DDD sense.
+class Domain:
+    """Namespace for a group of related commands and events.
 
     Subclasses act as namespaces for nested ``Command`` and ``DomainEvent``
-    classes. The class name becomes the aggregate's identifier, used by
-    catalog introspection and for stamping ``__aggregate__`` on nested
-    commands and events.
+    classes. The class name becomes the domain's identifier, used by
+    introspection and for stamping ``__domain__`` on nested commands and
+    events.
 
     Example::
 
-        class Order(Aggregate):
+        class Order(Domain):
             class Place(Command):
                 customer_id: str
 
@@ -75,32 +75,32 @@ class Aggregate:
                     order_id: str
     """
 
-    __aggregate_name__: ClassVar[str]
+    __domain_name__: ClassVar[str]
     __reducers__: ClassVar[tuple[Any, ...]]
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        existing = _AGGREGATE_REGISTRY.get(cls.__name__)
+        existing = _DOMAIN_REGISTRY.get(cls.__name__)
         if existing is not None and existing is not cls:
             raise TypeError(
-                f"Aggregate {cls.__name__!r} is already defined at "
-                f"{existing.__module__}.{existing.__qualname__}. Aggregate "
+                f"Domain {cls.__name__!r} is already defined at "
+                f"{existing.__module__}.{existing.__qualname__}. Domain "
                 f"class names must be unique within a process."
             )
-        cls.__aggregate_name__ = cls.__name__
-        cls.__reducers__ = _collect_aggregate_reducers(cls)
-        _AGGREGATE_REGISTRY[cls.__aggregate_name__] = cls
+        cls.__domain_name__ = cls.__name__
+        cls.__reducers__ = _collect_domain_reducers(cls)
+        _DOMAIN_REGISTRY[cls.__domain_name__] = cls
         # Second-pass stamp: DomainEvents nested inside a Command have their
-        # __aggregate__ left as None by the metaclass (Command.__aggregate__
-        # isn't known at that point). Fill them in now.
-        _stamp_nested_aggregate(cls, cls.__name__)
+        # __domain__ left as None by the metaclass (Command.__domain__ isn't
+        # known at that point). Fill them in now.
+        _stamp_nested_domain(cls, cls.__name__)
         _attach_command_outcomes(cls)
 
 
-def _collect_aggregate_reducers(cls: type) -> tuple[Any, ...]:
+def _collect_domain_reducers(cls: type) -> tuple[Any, ...]:
     """Walk the MRO and collect declarative reducers from class bodies.
 
-    Child aggregates inherit parent aggregate's reducers; dedup by name.
+    Child domains inherit parent domain's reducers; dedup by name.
     Runtime import of ``BaseReducer`` to avoid module-level circular
     dependency with ``_reducer``.
     """
@@ -116,7 +116,7 @@ def _collect_aggregate_reducers(cls: type) -> tuple[Any, ...]:
     return tuple(collected)
 
 
-def _attach_command_outcomes(aggregate_cls: type) -> None:
+def _attach_command_outcomes(domain_cls: type) -> None:
     """For each nested ``Command``, expose ``cmd.Outcomes`` — the union of
     its nested ``DomainEvent`` classes.
 
@@ -126,7 +126,7 @@ def _attach_command_outcomes(aggregate_cls: type) -> None:
     - User already declared ``Outcomes`` in the class body: validated for drift
       against the nested outcomes; left in place if consistent.
     """
-    for cmd in aggregate_cls.__dict__.values():
+    for cmd in domain_cls.__dict__.values():
         if not (isinstance(cmd, type) and issubclass(cmd, Command)):
             continue
         outcomes = [
@@ -157,14 +157,14 @@ def _attach_command_outcomes(aggregate_cls: type) -> None:
         )
 
 
-def _stamp_nested_aggregate(container: type, agg_name: str) -> None:
-    """Walk ``container`` and set ``__aggregate__`` on any nested ``Event``
+def _stamp_nested_domain(container: type, domain_name: str) -> None:
+    """Walk ``container`` and set ``__domain__`` on any nested ``Event``
     subclass that doesn't have one yet.
 
     Covers DomainEvents nested inside a Command (their metaclass runs before
-    the Command's ``__aggregate__`` is known), and non-DomainEvent events
-    nested in an Aggregate for locality (e.g. ``class Blocked(Halted)`` under
-    ``class Content(Aggregate)``) — the metaclass only fires for Command /
+    the Command's ``__domain__`` is known), and non-DomainEvent events
+    nested in a Domain for locality (e.g. ``class Blocked(Halted)`` under
+    ``class Content(Domain)``) — the metaclass only fires for Command /
     DomainEvent, so those would otherwise never be stamped.
     """
     for attr in container.__dict__.values():
@@ -172,10 +172,10 @@ def _stamp_nested_aggregate(container: type, agg_name: str) -> None:
             continue
         if not issubclass(attr, Event):
             continue
-        if getattr(attr, "__aggregate__", None) is None:
-            attr.__aggregate__ = agg_name  # type: ignore[attr-defined]
+        if getattr(attr, "__domain__", None) is None:
+            attr.__domain__ = domain_name  # type: ignore[attr-defined]
         if issubclass(attr, Command):
-            _stamp_nested_aggregate(attr, agg_name)
+            _stamp_nested_domain(attr, domain_name)
 
 
 def _is_nested_in_class(cls: type) -> bool:
@@ -196,7 +196,7 @@ def _is_nested_in_class(cls: type) -> bool:
 
 
 class _NestedEventMeta(type):
-    """Metaclass that validates aggregate-nesting when a nested class is
+    """Metaclass that validates domain-nesting when a nested class is
     assigned to its enclosing class.
 
     ``Command`` and ``DomainEvent`` are referenced by name below; at class
@@ -208,32 +208,32 @@ class _NestedEventMeta(type):
 
     def __set_name__(cls, owner: type, name: str) -> None:
         if issubclass(cls, Command):
-            if not (isinstance(owner, type) and issubclass(owner, Aggregate)):
+            if not (isinstance(owner, type) and issubclass(owner, Domain)):
                 raise TypeError(
-                    f"Command {cls.__name__!r} must be nested inside an "
-                    f"Aggregate subclass, got owner {owner.__name__!r}"
+                    f"Command {cls.__name__!r} must be nested inside a "
+                    f"Domain subclass, got owner {owner.__name__!r}"
                 )
-            cls.__aggregate__ = owner.__name__
+            cls.__domain__ = owner.__name__
         elif issubclass(cls, DomainEvent):
-            if isinstance(owner, type) and issubclass(owner, Aggregate):
-                cls.__aggregate__ = owner.__name__
+            if isinstance(owner, type) and issubclass(owner, Domain):
+                cls.__domain__ = owner.__name__
                 cls.__command__ = None
             elif isinstance(owner, type) and issubclass(owner, Command):
                 cls.__command__ = owner
-                # __aggregate__ filled in by Aggregate.__init_subclass__ — at
-                # this point Command.__aggregate__ isn't known yet.
+                # __domain__ filled in by Domain.__init_subclass__ — at this
+                # point Command.__domain__ isn't known yet.
             else:
                 raise TypeError(
-                    f"DomainEvent {cls.__name__!r} must be nested inside an "
-                    f"Aggregate or Command, got owner {owner.__name__!r}"
+                    f"DomainEvent {cls.__name__!r} must be nested inside a "
+                    f"Domain or Command, got owner {owner.__name__!r}"
                 )
 
 
-def _inherits_aggregate(cls: type) -> bool:
+def _inherits_domain(cls: type) -> bool:
     """True if any base of *cls* (other than itself) already has a stamped
-    ``__aggregate__`` — meaning it inherits from an already-validated event."""
+    ``__domain__`` — meaning it inherits from an already-validated event."""
     return any(
-        getattr(base, "__aggregate__", None) is not None for base in cls.__mro__[1:]
+        getattr(base, "__domain__", None) is not None for base in cls.__mro__[1:]
     )
 
 
@@ -263,14 +263,14 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
 
 
 class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
-    """Imperative intent. Must be nested inside an ``Aggregate`` subclass.
+    """Imperative intent. Must be nested inside a ``Domain`` subclass.
 
     Use imperative naming (``Place``, ``Ship``, ``Cancel``).  Outcomes of
     a command are typically nested ``DomainEvent`` subclasses.
 
     Example::
 
-        class Order(Aggregate):
+        class Order(Domain):
             class Place(Command):
                 customer_id: str
 
@@ -281,18 +281,18 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                     reason: str
     """
 
-    __aggregate__: ClassVar[str | None] = None
+    __domain__: ClassVar[str | None] = None
     __command_handler__: ClassVar[Any] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if _inherits_aggregate(cls):
+        if _inherits_domain(cls):
             return
         if not _is_nested_in_class(cls):
             raise TypeError(
-                f"Command {cls.__name__!r} must be nested inside an Aggregate "
+                f"Command {cls.__name__!r} must be nested inside a Domain "
                 f"subclass, e.g. "
-                f"class Order(Aggregate): class {cls.__name__}(Command): ..."
+                f"class Order(Domain): class {cls.__name__}(Command): ..."
             )
         # Detect an inline ``handle`` method; auto-registered when the command
         # class is passed to ``EventGraph`` (see _graph.py:_expand_command_handlers).
@@ -305,27 +305,27 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
 class DomainEvent(Event, _event_base=True, metaclass=_NestedEventMeta):
     """Fact within the bounded context. Past-participle naming.
 
-    Must be nested inside an ``Aggregate`` (a free-standing event under
-    the aggregate) or a ``Command`` (an outcome of that command).
+    Must be nested inside a ``Domain`` (a free-standing event under the
+    domain) or a ``Command`` (an outcome of that command).
 
     Example::
 
-        class Order(Aggregate):
+        class Order(Domain):
             class Shipped(DomainEvent):
                 tracking: str
     """
 
-    __aggregate__: ClassVar[str | None] = None
+    __domain__: ClassVar[str | None] = None
     __command__: ClassVar[type | None] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if _inherits_aggregate(cls):
+        if _inherits_domain(cls):
             return
         if not _is_nested_in_class(cls):
             raise TypeError(
-                f"DomainEvent {cls.__name__!r} must be nested inside an "
-                f"Aggregate or Command"
+                f"DomainEvent {cls.__name__!r} must be nested inside a "
+                f"Domain or Command"
             )
 
 
@@ -570,18 +570,28 @@ class Invariant:
         @on(InvariantViolated, invariant=CustomerNotBanned)
         def explain(event: InvariantViolated) -> ...: ...
 
-    Nesting under an ``Aggregate`` / ``Command`` is encouraged as DDD-idiomatic
-    but not enforced.
+    Nesting under a ``Domain`` / ``Command`` is encouraged for locality but
+    not enforced.
     """
 
 
 class InvariantViolated(SystemEvent):
     """Emitted when an invariant predicate declared on a handler returns False.
 
-    The framework evaluates each handler's ``invariants=`` predicates before
-    invoking it. If any predicate returns false, the handler is skipped and
-    one ``InvariantViolated`` event is emitted for the failing invariant.
-    Predicate exceptions propagate — they are NOT turned into violations.
+    Two phases. The framework evaluates each handler's ``invariants=`` predicates:
+
+    - **Pre-check** — before the handler body runs, against the current log. On
+      false, the handler is skipped and ``InvariantViolated`` is emitted. The
+      ``would_emit`` field is empty (the handler never ran).
+    - **Post-check** — after the handler returns, against ``log + emitted events``.
+      On false, the emitted events are dropped and ``InvariantViolated`` is
+      committed in their place. The ``would_emit`` field carries the rolled-back
+      events for diagnostics.
+
+    Either phase short-circuits on the first failing invariant.  Predicate
+    exceptions propagate — they are NOT turned into violations.  Predicates
+    should be pure functions of ``log`` since the same predicate runs in both
+    phases.
 
     Subscribe via ``@on(InvariantViolated)`` for all violations, or pin to a
     specific invariant via the ``invariant=`` field matcher::
@@ -595,6 +605,7 @@ class InvariantViolated(SystemEvent):
     invariant: Invariant | None = None
     handler: str = ""
     source_event: Event | None = None
+    would_emit: tuple[Event, ...] = ()
 
 
 class SystemPromptSet(IntegrationEvent, MessageEvent):

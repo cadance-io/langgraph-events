@@ -7,10 +7,10 @@ Opinionated event-driven abstraction for LangGraph with a **DDD-aligned event ta
 
 ## What is this?
 
-LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. `langgraph-events` replaces that boilerplate with a reactive model: model your domain as **aggregates with commands and outcomes**, colocate the handler on the command, and let `EventGraph` derive the topology.
+LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. `langgraph-events` replaces that boilerplate with a reactive model: model your domain as **domains with commands and outcomes**, colocate the handler on the command, and let `EventGraph` derive the topology.
 
 ```python
-class Order(Aggregate):
+class Order(Domain):
     class Place(Command):
         customer_id: str
 
@@ -27,7 +27,7 @@ log = graph.invoke(Order.Place(customer_id="alice"))
 
 ### What the graph looks like
 
-`graph.domain().mermaid()` on the canonical [`ddd_order`](patterns.md#ddd-order) example:
+`graph.domain().mermaid()` on the canonical [`order`](patterns.md#order) example:
 
 <!-- autogen:start:hero -->
 ```mermaid
@@ -39,7 +39,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Order["Order aggregate"]
+    subgraph Order["Order domain"]
         direction LR
         Place{{Place}}:::cmd
         Placed(Placed):::devt
@@ -47,18 +47,17 @@ graph LR
         Ship{{Ship}}:::cmd
         Shipped(Shipped):::devt
         CustomerNotBanned{CustomerNotBanned}:::inv
+        OrderTotalWithinLimit{OrderTotalWithinLimit}:::inv
     end
-    InvariantViolated([InvariantViolated]):::syst
-    _e0_[ ]:::entry ==> InvariantViolated
-    _e1_[ ]:::entry ==> Place
-    _e2_[ ]:::entry ==> Ship
+    _e0_[ ]:::entry ==> Place
+    _e1_[ ]:::entry ==> Ship
     Ship -->|handle| Shipped
     Place -->|place| Placed
-    InvariantViolated -->|explain_rejection| Rejected
-    Place -.- Rejected
+    CustomerNotBanned -.->|explain_banned| Rejected
+    OrderTotalWithinLimit -.->|explain_over_limit| Rejected
     Place -.->|invariant| CustomerNotBanned
-    linkStyle 6 stroke:#9ca3af,stroke-dasharray:3 3
-    linkStyle 7 stroke:#c2410c,stroke-dasharray:4 2
+    Place -.->|invariant| OrderTotalWithinLimit
+    linkStyle 4,5,6,7 stroke:#c2410c,stroke-dasharray:4 2
 ```
 <!-- autogen:end -->
 
@@ -75,7 +74,7 @@ Requires Python 3.10+.
 
 - **Start:** [Getting Started](getting-started.md) → [Core Concepts](concepts.md)
 - **Dispatch patterns:** [Control Flow](control-flow.md) — fan-out, HITL, exceptions, invariants
-- **State:** [Reducers](reducers.md) — aggregate-scoped or graph-wide
+- **State:** [Reducers](reducers.md) — domain-scoped or graph-wide
 - **Streams:** [Streaming](streaming.md), [AG-UI Adapter](agui.md)
 - **Reference:** [API](api.md), [Patterns](patterns.md)
 - **Edge cases:** [Checkpointer Evolution](checkpointer-evolution.md)

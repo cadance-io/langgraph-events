@@ -7,13 +7,13 @@ Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
 ## Quick Start
 
-Model your domain as aggregates with commands and outcomes; colocate the handler on the command.
+Group related commands and events into a `Domain`; colocate the handler on the command.
 
 ```python
-from langgraph_events import Aggregate, Command, DomainEvent, EventGraph
+from langgraph_events import Command, Domain, DomainEvent, EventGraph
 
 
-class Order(Aggregate):
+class Order(Domain):
     class Place(Command):
         customer_id: str
 
@@ -30,7 +30,7 @@ print(log.latest(Order.Place.Placed))
 ```
 
 External `@on(...)` handlers compose in the same graph — use them for
-invariants, declared exceptions, or reactions across aggregates. See
+invariants, declared exceptions, or reactions across domains. See
 [Concepts](docs/concepts.md) and [Control Flow](docs/control-flow.md).
 
 ## Installation

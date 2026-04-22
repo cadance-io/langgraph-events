@@ -13,9 +13,9 @@ from langgraph.types import Command as LGCommand
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._domain import DomainModel
 from langgraph_events._event import (
-    _AGGREGATE_REGISTRY,
-    Aggregate,
+    _DOMAIN_REGISTRY,
     Command,
+    Domain,
     DomainEvent,
     Event,
     Halted,
@@ -305,15 +305,15 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     )
 
 
-def _discover_aggregate_reducers(
+def _discover_domain_reducers(
     handlers: list[Callable[..., Any]],
     explicit_reducers: dict[str, BaseReducer],
 ) -> None:
-    """Auto-register reducers declared on aggregates referenced by handlers.
+    """Auto-register reducers declared on domains referenced by handlers.
 
     Walks each handler's ``_event_types`` (set by ``@on(...)``), finds the
-    owning aggregate via ``__aggregate__`` + ``_AGGREGATE_REGISTRY``, and
-    unions that aggregate's ``__reducers__`` into *explicit_reducers*.
+    owning domain via ``__domain__`` + ``_DOMAIN_REGISTRY``, and unions that
+    domain's ``__reducers__`` into *explicit_reducers*.
 
     Collisions:
     - Two different discovered reducers with the same name → ``TypeError``.
@@ -323,19 +323,19 @@ def _discover_aggregate_reducers(
     discovered: dict[str, BaseReducer] = {}
     for fn in handlers:
         for et in getattr(fn, "_event_types", ()):
-            agg_name = getattr(et, "__aggregate__", None)
-            if not agg_name:
+            domain_name = getattr(et, "__domain__", None)
+            if not domain_name:
                 continue
-            agg_cls = _AGGREGATE_REGISTRY.get(agg_name)
-            if agg_cls is None:
+            domain_cls = _DOMAIN_REGISTRY.get(domain_name)
+            if domain_cls is None:
                 continue
-            for r in agg_cls.__reducers__:
+            for r in domain_cls.__reducers__:
                 existing = discovered.get(r.name)
                 if existing is None:
                     discovered[r.name] = r
                 elif existing is not r:
                     raise TypeError(
-                        f"Reducer name {r.name!r} collides between aggregates: "
+                        f"Reducer name {r.name!r} collides between domains: "
                         f"{existing!r} and {r!r}"
                     )
     # Merge into explicit; explicit wins on name conflict.
@@ -418,7 +418,7 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
-        _discover_aggregate_reducers(handlers, self._reducers)
+        _discover_domain_reducers(handlers, self._reducers)
         conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
         if conflicts:
             raise ValueError(
@@ -490,9 +490,9 @@ class EventGraph:
         self._verify_invariants_coverage()
 
     def domain(self) -> DomainModel:
-        """Return a :class:`DomainModel` — the code-derived DDD snapshot.
+        """Return a :class:`DomainModel` — the code-derived snapshot.
 
-        One artifact covers the full picture: aggregates, commands, outcomes,
+        One artifact covers the full picture: domains, commands, outcomes,
         command handlers, policies, event-to-event edges, and seed events.
         Render it via :meth:`DomainModel.text`, :meth:`DomainModel.mermaid`
         (with ``view="structure"`` or ``view="choreography"``),
@@ -701,15 +701,15 @@ class EventGraph:
         return EventLog._from_owned(result["events"])
 
     @classmethod
-    def from_aggregates(
+    def from_domains(
         cls,
-        *aggregates: type[Aggregate],
+        *domains: type[Domain],
         handlers: list[Callable[..., Any]] | None = None,
         **kwargs: Any,
     ) -> EventGraph:
-        """Build an ``EventGraph`` from aggregates' inline command handlers.
+        """Build an ``EventGraph`` from domains' inline command handlers.
 
-        Walks each aggregate's class namespace and registers every ``Command``
+        Walks each domain's class namespace and registers every ``Command``
         that defines a ``handle`` method. Commands without ``handle`` are
         silently skipped — register those via the ``handlers=`` kwarg or
         ``EventGraph([...])`` directly, which errors on missing ``handle``.
@@ -720,16 +720,14 @@ class EventGraph:
 
         Example::
 
-            graph = EventGraph.from_aggregates(Order, Customer,
-                                               handlers=[react])
+            graph = EventGraph.from_domains(Order, Customer,
+                                            handlers=[react])
         """
         collected: list[Any] = []
-        for agg in aggregates:
-            if not (isinstance(agg, type) and issubclass(agg, Aggregate)):
-                raise TypeError(
-                    f"from_aggregates expects Aggregate subclasses, got {agg!r}"
-                )
-            for attr in agg.__dict__.values():
+        for dom in domains:
+            if not (isinstance(dom, type) and issubclass(dom, Domain)):
+                raise TypeError(f"from_domains expects Domain subclasses, got {dom!r}")
+            for attr in dom.__dict__.values():
                 if (
                     isinstance(attr, type)
                     and issubclass(attr, Command)

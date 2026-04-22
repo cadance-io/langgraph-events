@@ -3,7 +3,7 @@
 These are *frames* wrapping raw stream output — not domain events. Import
 them from here rather than the top-level package so the main front door
 stays focused on event-authoring vocabulary (``Event``, ``@on``,
-``EventGraph``, ``Aggregate`` / ``Command`` / ``DomainEvent`` ...)::
+``EventGraph``, ``Domain`` / ``Command`` / ``DomainEvent`` ...)::
 
     from langgraph_events.stream import LLMToken, StreamFrame
 """

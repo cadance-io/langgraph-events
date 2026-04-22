@@ -15,8 +15,8 @@ import pytest
 from conftest import Order
 
 from langgraph_events import (
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     IntegrationEvent,
@@ -25,7 +25,7 @@ from langgraph_events import (
 )
 
 
-class Alien(Aggregate):
+class Alien(Domain):
     class Do(Command):
         class Stuff(DomainEvent):
             pass

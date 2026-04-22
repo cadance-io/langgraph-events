@@ -4,7 +4,7 @@ Runnable examples in `examples/`. Diagrams are auto-generated from each example'
 
 | If you need…                          | See                                       | Related docs                                                          |
 | ------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------- |
-| Invariants + pinned reactions         | [Order](#ddd-order)                       | [control-flow](control-flow.md#invariants)                            |
+| Invariants + pinned reactions         | [Order](#order)                       | [control-flow](control-flow.md#invariants)                            |
 | Human-in-the-loop approval            | [Expense](#expense-hitl)                  | [control-flow](control-flow.md#interrupted-resumed)                   |
 | Tool-calling agent + AG-UI streaming  | [Conversation](#conversation-agui)        | [agui](agui.md), [reducers](reducers.md#message_reducer)              |
 | Supervisor loop / fan-in              | [Task](#supervisor)                       | [reducers](reducers.md#reducer)                                       |
@@ -25,12 +25,13 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Example["Aggregate"]
+    subgraph Example["Domain"]
       direction LR
       Command{{Command}}:::cmd
       DomainEvent(DomainEvent):::devt
       Halted([Halted]):::halt
       Invariant{Invariant}:::inv
+      Rejected(Rejected):::devt
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
@@ -39,21 +40,21 @@ graph LR
     Command -.->|"handler (raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
-    Command -.->|invariant| Invariant
+    Command -.->|invariant| Invariant -.->|reactor| Rejected
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
-    linkStyle 5 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
 ```
 
 </details>
 <!-- autogen:end -->
 
-## Invariants & reactions (Order aggregate) { #ddd-order }
+## Invariants & reactions (Order domain) { #order }
 
-`Order` aggregate, `Place` command, `Placed` / `Rejected` outcomes, a typed `CustomerNotBanned(Invariant)` that blocks banned customers, a pinned `@on(InvariantViolated, invariant=…)` reaction turning violations into domain rejections, and a declarative `ScalarReducer` as aggregate attribute tracking `current_status`.
+`Order` domain, `Place` command, `Placed` / `Rejected` outcomes, a typed `CustomerNotBanned(Invariant)` that blocks banned customers, a pinned `@on(InvariantViolated, invariant=…)` reaction turning violations into domain rejections, and a declarative `ScalarReducer` as domain attribute tracking `current_status`.
 
-<!-- autogen:start:ddd_order -->
+<!-- autogen:start:order -->
 === "Diagram"
 
     ```mermaid
@@ -65,7 +66,7 @@ graph LR
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Order["Order aggregate"]
+        subgraph Order["Order domain"]
             direction LR
             Place{{Place}}:::cmd
             Placed(Placed):::devt
@@ -73,50 +74,51 @@ graph LR
             Ship{{Ship}}:::cmd
             Shipped(Shipped):::devt
             CustomerNotBanned{CustomerNotBanned}:::inv
+            OrderTotalWithinLimit{OrderTotalWithinLimit}:::inv
         end
-        InvariantViolated([InvariantViolated]):::syst
-        _e0_[ ]:::entry ==> InvariantViolated
-        _e1_[ ]:::entry ==> Place
-        _e2_[ ]:::entry ==> Ship
+        _e0_[ ]:::entry ==> Place
+        _e1_[ ]:::entry ==> Ship
         Ship -->|handle| Shipped
         Place -->|place| Placed
-        InvariantViolated -->|explain_rejection| Rejected
-        Place -.- Rejected
+        CustomerNotBanned -.->|explain_banned| Rejected
+        OrderTotalWithinLimit -.->|explain_over_limit| Rejected
         Place -.->|invariant| CustomerNotBanned
-        linkStyle 6 stroke:#9ca3af,stroke-dasharray:3 3
-        linkStyle 7 stroke:#c2410c,stroke-dasharray:4 2
+        Place -.->|invariant| OrderTotalWithinLimit
+        linkStyle 4,5,6,7 stroke:#c2410c,stroke-dasharray:4 2
     ```
 
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Order
         Command: Ship  (handlers: handle)
           → Shipped
-        Command: Place  (handlers: place; invariant: CustomerNotBanned)
+        Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
           → Placed
           → Rejected
     System events:
       InvariantViolated
     Invariants:
-      CustomerNotBanned  (on Place; reacted by: explain_rejection)
+      CustomerNotBanned  (on Place; reacted by: explain_banned)
+      OrderTotalWithinLimit  (on Place; reacted by: explain_over_limit)
     Policies:
-      explain_rejection  (InvariantViolated → Rejected)
+      explain_banned  (InvariantViolated → Rejected)
+      explain_over_limit  (InvariantViolated → Rejected)
     Seed events:
       InvariantViolated
       Place
       Ship
     ```
 
-[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_order.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_order.graph.md)
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.graph.md)
 <!-- autogen:end -->
 
-## Human-in-the-loop approval (Expense aggregate) { #expense-hitl }
+## Human-in-the-loop approval (Expense domain) { #expense-hitl }
 
-DDD aggregate combined with human-in-the-loop approval. LLM extracts expense data; policy checker auto-approves small expenses or pauses the graph with [`Interrupted`](control-flow.md#interrupted-resumed) for manager review. Resume with an `Approve` or `Reject` command.
+DDD domain combined with human-in-the-loop approval. LLM extracts expense data; policy checker auto-approves small expenses or pauses the graph with [`Interrupted`](control-flow.md#interrupted-resumed) for manager review. Resume with an `Approve` or `Reject` command.
 
-<!-- autogen:start:ddd_expense_approval -->
+<!-- autogen:start:expense_approval -->
 === "Diagram"
 
     ```mermaid
@@ -128,7 +130,7 @@ DDD aggregate combined with human-in-the-loop approval. LLM extracts expense dat
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Expense["Expense aggregate"]
+        subgraph Expense["Expense domain"]
             direction LR
             Approve{{Approve}}:::cmd
             Approved(Approved):::devt
@@ -152,7 +154,7 @@ DDD aggregate combined with human-in-the-loop approval. LLM extracts expense dat
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Expense
         Command: Submit  (handlers: handle)
           → Submitted
@@ -170,14 +172,14 @@ DDD aggregate combined with human-in-the-loop approval. LLM extracts expense dat
       Submit
     ```
 
-[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_expense_approval.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_expense_approval.graph.md)
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/expense_approval.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/expense_approval.graph.md)
 <!-- autogen:end -->
 
-## Tool-calling + AG-UI (Conversation aggregate) { #conversation-agui }
+## Tool-calling + AG-UI (Conversation domain) { #conversation-agui }
 
-DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI frontend tools** (CopilotKit `useFrontendTool`). `Conversation.Send` enforces content moderation before the LLM sees the message; tools declared by the frontend are bound to the LLM via `build_langchain_tools`; tool calls stream to the client as `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`; results return via `detect_new_tool_results` → `ToolsExecuted`, closing the ReAct loop. Combines `DomainEvent + MessageEvent` mixin with [`message_reducer()`](reducers.md#message_reducer). For the handler-initiated `FrontendToolCallRequested` pattern, see [AG-UI docs](agui.md#handler-initiated-frontend-tools).
+DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI frontend tools** (CopilotKit `useFrontendTool`). `Conversation.Send` enforces content moderation before the LLM sees the message; tools declared by the frontend are bound to the LLM via `build_langchain_tools`; tool calls stream to the client as `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`; results return via `detect_new_tool_results` → `ToolsExecuted`, closing the ReAct loop. Combines `DomainEvent + MessageEvent` mixin with [`message_reducer()`](reducers.md#message_reducer). For the handler-initiated `FrontendToolCallRequested` pattern, see [AG-UI docs](agui.md#handler-initiated-frontend-tools).
 
-<!-- autogen:start:ddd_conversation -->
+<!-- autogen:start:conversation -->
 === "Diagram"
 
     ```mermaid
@@ -189,7 +191,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Conversation["Conversation aggregate"]
+        subgraph Conversation["Conversation domain"]
             direction LR
             Blocked(Blocked):::devt
             Send{{Send}}:::cmd
@@ -211,7 +213,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Conversation
         Command: Send  (handlers: handle)
           → Sent
@@ -229,10 +231,10 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
       ToolsExecuted
     ```
 
-[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_conversation.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_conversation.graph.md)
+[Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.graph.md)
 <!-- autogen:end -->
 
-## Supervisor fan-in (Task aggregate) { #supervisor }
+## Supervisor fan-in (Task domain) { #supervisor }
 
 `Task.Run` kicks off the supervisor loop; the supervisor handler dispatches sub-commands `Task.Research` / `Task.Code` or emits the terminal `Task.Finalized` fact. A custom [`Reducer`](reducers.md#reducer) accumulates context across specialist completions. Typed events replace manual subgraph wiring.
 
@@ -248,7 +250,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Task["Task aggregate"]
+        subgraph Task["Task domain"]
             direction LR
             Code{{Code}}:::cmd
             Completed(Completed):::devt
@@ -275,7 +277,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Task
         Command: Run  (handlers: supervisor)
         Command: Research  (handlers: researcher)
@@ -292,7 +294,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/supervisor.graph.md)
 <!-- autogen:end -->
 
-## Scatter fan-out (Batch aggregate) { #scatter-fan-out }
+## Scatter fan-out (Batch domain) { #scatter-fan-out }
 
 `Batch.Summarize` fans out to per-document work via [`Scatter`](control-flow.md#scatter); a gather handler uses `EventLog.filter()` to complete when all `Batch.DocSummarized` facts arrive and emit `Batch.Summarize.Summarized`.
 
@@ -308,7 +310,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Batch["Batch aggregate"]
+        subgraph Batch["Batch domain"]
             direction LR
             DocDispatched(DocDispatched):::devt
             DocSummarized(DocSummarized):::devt
@@ -328,7 +330,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Batch
         Command: Summarize  (handlers: split_batch; scatters Scatter[DocDispatched])
           → Summarized
@@ -345,7 +347,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/map_reduce.graph.md)
 <!-- autogen:end -->
 
-## Safety gates + streaming (Content aggregate) { #content-pipeline }
+## Safety gates + streaming (Content domain) { #content-pipeline }
 
 `Content.Process` with an inline `handle` classifies text; external reactions gate approval (emitting `Content.Blocked` — a `Halted` subtype — or `Content.Approved`) and analyze. Safety gates via [`Halted`](concepts.md#system-events) and live streaming via `astream_events()`. Keyword classification — no LLM required.
 
@@ -361,7 +363,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Content["Content aggregate"]
+        subgraph Content["Content domain"]
             direction LR
             Analyzed(Analyzed):::devt
             Approved(Approved):::devt
@@ -379,7 +381,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Content
         Command: Process  (handlers: handle)
           → Classified
@@ -396,7 +398,7 @@ DDD aggregate wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI f
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/content_pipeline.graph.md)
 <!-- autogen:end -->
 
-## Retries & escalation (Question aggregate) { #error-recovery }
+## Retries & escalation (Question domain) { #error-recovery }
 
 Declared handler exceptions with retry + escalation via [`raises=`](control-flow.md#handler-exceptions) and `HandlerRaised`. `Question.Ask` is the entry command; a rate-limit catcher emits `Question.RetryScheduled`; chained catchers escalate to `Question.GaveUp` (a `Halted` subtype) after `MAX_ATTEMPTS`.
 
@@ -412,7 +414,7 @@ Declared handler exceptions with retry + escalation via [`raises=`](control-flow
         classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
         classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
         classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-        subgraph Question["Question aggregate"]
+        subgraph Question["Question domain"]
             direction LR
             Answered(Answered):::devt
             Ask{{Ask}}:::cmd
@@ -434,7 +436,7 @@ Declared handler exceptions with retry + escalation via [`raises=`](control-flow
 === "Flow (text)"
 
     ```text
-    Aggregates:
+    Domains:
       Question
         Command: Ask  (handlers: call_llm; raises RateLimitError)
           → Answered

@@ -1,6 +1,6 @@
 """DDD Conversation Agent — langgraph-events demo.
 
-A DDD aggregate wrapping a ReAct tool-calling agent with **AG-UI frontend
+A DDD domain wrapping a ReAct tool-calling agent with **AG-UI frontend
 tools** (CopilotKit v2 `useFrontendTool`). Illustrates:
 
 - ``DomainEvent + MessageEvent`` mixin — ``Conversation.Send.Sent`` is
@@ -39,8 +39,8 @@ Frontend (React + CopilotKit v2) — wire the page to the AG-UI adapter::
 
 Usage (stand-alone, no HTTP; module-import only requires no key)::
 
-    export OPENAI_API_KEY="sk-..."
-    python examples/ddd_conversation.py
+    export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
+    python examples/conversation.py
 """
 
 from __future__ import annotations
@@ -53,9 +53,9 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
-    Aggregate,
     Auditable,
     Command,
+    Domain,
     DomainEvent,
     Event,
     EventGraph,
@@ -81,17 +81,17 @@ BLOCKED_WORDS = ["hack", "bomb", "exploit"]
 
 
 # ---------------------------------------------------------------------------
-# Aggregate: Conversation
+# Domain: Conversation
 # ---------------------------------------------------------------------------
 
 
-class Conversation(Aggregate):
+class Conversation(Domain):
     """A moderated conversation with an LLM agent.
 
-    ``Send`` is the aggregate's only entry point; it enforces content
+    ``Send`` is the domain's only entry point; it enforces content
     policy before the user's message reaches the LLM. Everything
     downstream (LLM call, frontend tool results) lives outside the
-    aggregate as ``IntegrationEvent`` handlers — the LLM and frontend
+    domain as ``IntegrationEvent`` handlers — the LLM and frontend
     tools are external services, not owned by the conversation.
     """
 
@@ -218,7 +218,7 @@ def finalize_answer(event: LLMResponded) -> AnswerProduced | None:
 # Graph
 # ---------------------------------------------------------------------------
 
-graph = EventGraph.from_aggregates(
+graph = EventGraph.from_domains(
     Conversation,
     handlers=[call_llm, finalize_answer, audit_trail],
     reducers=[messages],

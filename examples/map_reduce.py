@@ -1,7 +1,7 @@
 """Map-Reduce Pipeline — langgraph-events demo.
 
 Demonstrates fan-out/fan-in using ``Scatter`` and ``EventLog.filter()`` inside
-a DDD ``Batch`` aggregate. Replaces LangGraph's verbose ``Send`` API and
+a DDD ``Batch`` domain. Replaces LangGraph's verbose ``Send`` API and
 worker subgraph patterns with a simple command-plus-scatter flow.
 
 The **Auditable trait** auto-logs every event as it flows, replacing manual
@@ -20,9 +20,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from langgraph_events import (
-    Aggregate,
     Auditable,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
@@ -31,11 +31,11 @@ from langgraph_events import (
 )
 
 # ---------------------------------------------------------------------------
-# Aggregate: Batch
+# Domain: Batch
 # ---------------------------------------------------------------------------
 
 
-class Batch(Aggregate):
+class Batch(Domain):
     """A batch of documents to summarize via map-reduce.
 
     ``Summarize`` is the entry command. A fan-out handler returns

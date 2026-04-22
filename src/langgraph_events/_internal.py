@@ -256,25 +256,72 @@ def _make_handler_raised(
     )
 
 
-def _check_invariants(
-    meta: HandlerMeta, event: Event, state: StateDict
-) -> InvariantViolated | None:
-    """Evaluate handler invariants. Returns the first violation, or None.
+def _find_failing_invariant(meta: HandlerMeta, log: EventLog) -> type | None:
+    """Return the first invariant whose predicate fails against *log*, else None.
 
     Predicates are sync-only (validated at decoration). Predicate exceptions
     propagate (do not become violations).
     """
-    if not meta.invariants:
-        return None
-    log = EventLog(state["events"])
     for inv_cls, predicate in meta.invariants:
         if not predicate(log):
-            return InvariantViolated(  # type: ignore[call-arg]
-                invariant=inv_cls(),
-                handler=meta.name,
-                source_event=event,
-            )
+            return inv_cls
     return None
+
+
+def _check_invariants(
+    meta: HandlerMeta, event: Event, state: StateDict
+) -> InvariantViolated | None:
+    """Pre-check — evaluate invariants against the current log.
+
+    Returns the first violation, or None.  On false predicate, the handler
+    is skipped and the returned ``InvariantViolated`` is committed in its
+    place.  ``would_emit`` is empty because the handler never ran.
+    """
+    if not meta.invariants:
+        return None
+    inv_cls = _find_failing_invariant(meta, EventLog(state["events"]))
+    if inv_cls is None:
+        return None
+    return InvariantViolated(  # type: ignore[call-arg]
+        invariant=inv_cls(),
+        handler=meta.name,
+        source_event=event,
+    )
+
+
+def _check_invariants_post(
+    meta: HandlerMeta,
+    event: Event,
+    state: StateDict,
+    new_events: list[Event],
+    emitted: list[Event],
+) -> InvariantViolated | None:
+    """Post-check — evaluate invariants against the simulated log.
+
+    Simulated log = ``state["events"]`` (pre-node committed state) plus
+    everything the current node has buffered so far in *new_events* — which
+    includes emissions from prior handler-loop iterations AND this call's
+    *emitted* slice.  This gives per-command atomicity within a round:
+    each handler call's invariant check sees the cumulative effect of
+    earlier commands dispatched in the same node.
+
+    Returns a violation if any predicate fails on the simulated state, else
+    None.  On failure, the caller drops *emitted* and commits the returned
+    ``InvariantViolated`` instead, with ``would_emit`` carrying the
+    rolled-back events.
+    """
+    if not meta.invariants or not emitted:
+        return None
+    simulated = EventLog([*state["events"], *new_events])
+    inv_cls = _find_failing_invariant(meta, simulated)
+    if inv_cls is None:
+        return None
+    return InvariantViolated(  # type: ignore[call-arg]
+        invariant=inv_cls(),
+        handler=meta.name,
+        source_event=event,
+        would_emit=tuple(emitted),
+    )
 
 
 def _check_sync_invocation_of_async(meta: HandlerMeta) -> None:
@@ -348,7 +395,9 @@ def _process_events_sync(
         except meta.raises as exc:
             new_events.append(_make_handler_raised(meta, event, exc))
             continue
-        _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+        _collect_and_check(
+            result, new_events, lg_interrupt, meta, state, event, return_contract
+        )
 
 
 async def _process_events_async(
@@ -372,7 +421,9 @@ async def _process_events_async(
         except meta.raises as exc:
             new_events.append(_make_handler_raised(meta, event, exc))
             continue
-        _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+        _collect_and_check(
+            result, new_events, lg_interrupt, meta, state, event, return_contract
+        )
 
 
 def make_handler_node(
@@ -504,6 +555,31 @@ def _collect_result(
         _assert_return_matches(result, meta, return_contract)
 
     result._collect_into(new_events, lg_interrupt)
+
+
+def _collect_and_check(
+    result: HandlerReturn,
+    new_events: list[Event],
+    lg_interrupt: Callable[[Any], Any],
+    meta: HandlerMeta,
+    state: StateDict,
+    event: Event,
+    return_contract: Any = None,
+) -> None:
+    """Collect handler result then run the post-command invariant check.
+
+    Snapshots the buffer length before ``_collect_result`` so the emitted
+    delta can be isolated. If any invariant fails against ``log + emitted``,
+    rolls back by truncating *new_events* back to the snapshot and appending
+    a single ``InvariantViolated`` carrying ``would_emit``.
+    """
+    pre_len = len(new_events)
+    _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+    emitted = new_events[pre_len:]
+    violation = _check_invariants_post(meta, event, state, new_events, emitted)
+    if violation is not None:
+        del new_events[pre_len:]
+        new_events.append(violation)
 
 
 def _assert_return_matches(

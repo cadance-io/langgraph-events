@@ -13,12 +13,13 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Example["Aggregate"]
+    subgraph Example["Domain"]
       direction LR
       Command{{Command}}:::cmd
       DomainEvent(DomainEvent):::devt
       Halted([Halted]):::halt
       Invariant{Invariant}:::inv
+      Rejected(Rejected):::devt
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
@@ -27,11 +28,11 @@ graph LR
     Command -.->|"handler (raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
-    Command -.->|invariant| Invariant
+    Command -.->|invariant| Invariant -.->|reactor| Rejected
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
-    linkStyle 5 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
 ```
 
 </details>
@@ -49,7 +50,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
-    subgraph Batch["Batch aggregate"]
+    subgraph Batch["Batch domain"]
         direction LR
         DocDispatched(DocDispatched):::devt
         DocSummarized(DocSummarized):::devt
@@ -69,7 +70,7 @@ graph LR
 ## Choreography (text)
 
 ```text
-Aggregates:
+Domains:
   Batch
     Command: Summarize  (handlers: split_batch; scatters Scatter[DocDispatched])
       → Summarized

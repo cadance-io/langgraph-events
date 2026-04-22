@@ -6,11 +6,15 @@ import pytest
 from conftest import Order
 
 from langgraph_events import (
+    Command,
+    Domain,
+    DomainEvent,
     EventGraph,
     HandlerRaised,
     IntegrationEvent,
     Invariant,
     InvariantViolated,
+    Scatter,
     on,
 )
 
@@ -312,3 +316,289 @@ def describe_invariants():
                     @on(Order.Place, invariants={NeedsReason: lambda log: False})
                     def place(event: Order.Place) -> Order.Place.Placed:
                         return Order.Place.Placed(order_id="o1")
+
+
+# ---------------------------------------------------------------------------
+# Post-command invariant check — scenarios exercise the post-handler gate
+# that runs against log + emitted events.  A Ledger domain with numeric
+# amounts gives us an invariant whose result actually depends on what the
+# handler emits (a pure "log.has()" predicate can't distinguish pre vs post).
+# ---------------------------------------------------------------------------
+
+
+class Ledger(Domain):
+    class Deposit(Command):
+        amount: int = 0
+
+        class Deposited(DomainEvent):
+            amount: int = 0
+
+
+class OverBudget(Invariant):
+    pass
+
+
+class PostBoom(Invariant):
+    pass
+
+
+class AlwaysHolds(Invariant):
+    pass
+
+
+def _deposit_with(invariants, *, async_handler=False):
+    """Build a Ledger.Deposit handler with the given invariants= dict."""
+    if async_handler:
+
+        @on(Ledger.Deposit, invariants=invariants)
+        async def deposit(event: Ledger.Deposit) -> Ledger.Deposit.Deposited:
+            return Ledger.Deposit.Deposited(amount=event.amount)
+
+        return deposit
+
+    @on(Ledger.Deposit, invariants=invariants)
+    def deposit(event: Ledger.Deposit) -> Ledger.Deposit.Deposited:
+        return Ledger.Deposit.Deposited(amount=event.amount)
+
+    return deposit
+
+
+def _total_under(limit):
+    return lambda log: (
+        sum(e.amount for e in log.filter(Ledger.Deposit.Deposited)) < limit
+    )
+
+
+def describe_post_command_invariant_check():
+    """After the handler returns, re-check invariants against log + emitted.
+
+    On failure, the emitted events are dropped and a single
+    ``InvariantViolated`` is committed in their place with ``would_emit``.
+    """
+
+    def when_handler_emits_violating_event():
+
+        def it_emits_InvariantViolated_in_place_of_the_event():
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+            graph = EventGraph([deposit])
+            log = graph.invoke([Ledger.Deposit(amount=60), Ledger.Deposit(amount=60)])
+            # First deposit commits (total 60 < 100). Second would push total to
+            # 120; post-check catches it and rolls back.
+            assert log.count(Ledger.Deposit.Deposited) == 1
+            assert log.count(InvariantViolated) == 1
+
+        def it_populates_would_emit():
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+            graph = EventGraph([deposit])
+            log = graph.invoke([Ledger.Deposit(amount=60), Ledger.Deposit(amount=60)])
+            v = log.latest(InvariantViolated)
+            assert v is not None
+            assert isinstance(v.invariant, OverBudget)
+            assert len(v.would_emit) == 1
+            assert isinstance(v.would_emit[0], Ledger.Deposit.Deposited)
+            assert v.would_emit[0].amount == 60
+
+        def it_does_not_commit_the_violating_event_to_the_log():
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+            graph = EventGraph([deposit])
+            log = graph.invoke([Ledger.Deposit(amount=60), Ledger.Deposit(amount=60)])
+            deposits = log.filter(Ledger.Deposit.Deposited)
+            assert len(deposits) == 1
+            assert deposits[0].amount == 60
+
+    def when_handler_emits_non_violating_event():
+
+        def it_commits_the_event_normally():
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+            graph = EventGraph([deposit])
+            log = graph.invoke(Ledger.Deposit(amount=10))
+            assert log.count(Ledger.Deposit.Deposited) == 1
+
+        def it_does_not_emit_violation():
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+            graph = EventGraph([deposit])
+            log = graph.invoke(Ledger.Deposit(amount=10))
+            assert not log.has(InvariantViolated)
+
+    def when_handler_scatters_violating_buffer():
+
+        def _build_graph():
+            @on(
+                Ledger.Deposit,
+                invariants={OverBudget: _total_under(100)},
+            )
+            def bulk_deposit(event: Ledger.Deposit) -> Scatter:
+                # One Deposit command fans out into three Deposited events;
+                # combined total 120 exceeds the limit.
+                return Scatter(
+                    [
+                        Ledger.Deposit.Deposited(amount=40),
+                        Ledger.Deposit.Deposited(amount=40),
+                        Ledger.Deposit.Deposited(amount=40),
+                    ]
+                )
+
+            return EventGraph([bulk_deposit])
+
+        def it_drops_the_full_scatter_expansion():
+            log = _build_graph().invoke(Ledger.Deposit(amount=0))
+            assert log.count(Ledger.Deposit.Deposited) == 0
+            assert log.count(InvariantViolated) == 1
+
+        def it_lists_all_scatter_events_in_would_emit():
+            log = _build_graph().invoke(Ledger.Deposit(amount=0))
+            v = log.latest(InvariantViolated)
+            assert v is not None
+            assert len(v.would_emit) == 3
+            assert all(isinstance(e, Ledger.Deposit.Deposited) for e in v.would_emit)
+
+    def when_handler_returns_None():
+
+        def it_skips_post_check():
+            calls: list[str] = []
+
+            def predicate(log):
+                calls.append("called")
+                return True
+
+            @on(Ledger.Deposit, invariants={AlwaysHolds: predicate})
+            def noop(event: Ledger.Deposit) -> None:
+                return None
+
+            graph = EventGraph([noop])
+            graph.invoke(Ledger.Deposit(amount=10))
+            # Only the pre-check ran (1 call).  Post-check bypassed because
+            # the emitted buffer was empty.
+            assert calls == ["called"]
+
+    def when_no_invariants_declared():
+
+        def it_bypasses_post_check_entirely():
+            # Plain handler with no invariants — post-check must be a no-op.
+            # Verified indirectly: handler runs and commits normally with no
+            # violation events ever emitted.
+            @on(Ledger.Deposit)
+            def deposit(event: Ledger.Deposit) -> Ledger.Deposit.Deposited:
+                return Ledger.Deposit.Deposited(amount=event.amount)
+
+            graph = EventGraph([deposit])
+            log = graph.invoke(Ledger.Deposit(amount=999))
+            assert log.count(Ledger.Deposit.Deposited) == 1
+            assert not log.has(InvariantViolated)
+
+    def when_handler_is_async():
+
+        def it_applies_post_check_on_the_async_path():
+            deposit = _deposit_with({OverBudget: _total_under(100)}, async_handler=True)
+            graph = EventGraph([deposit])
+            log = graph.invoke([Ledger.Deposit(amount=60), Ledger.Deposit(amount=60)])
+            assert log.count(Ledger.Deposit.Deposited) == 1
+            assert log.count(InvariantViolated) == 1
+            v = log.latest(InvariantViolated)
+            assert isinstance(v.invariant, OverBudget)
+            assert len(v.would_emit) == 1
+
+    def when_multiple_events_match_in_one_node_call():
+
+        def it_rolls_back_only_the_violating_handler_call():
+            # Two Deposit events in the same node call.  First (60) commits;
+            # second (60) pushes total to 120 and gets rolled back.  This
+            # proves per-handler-call isolation within the loop.
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+            graph = EventGraph([deposit])
+            log = graph.invoke([Ledger.Deposit(amount=60), Ledger.Deposit(amount=60)])
+            # Exactly one committed, exactly one rolled back.
+            assert log.count(Ledger.Deposit.Deposited) == 1
+            assert log.count(InvariantViolated) == 1
+            v = log.latest(InvariantViolated)
+            # would_emit contains only the second call's event, not both.
+            assert len(v.would_emit) == 1
+
+    def when_pre_check_already_failed():
+
+        def it_does_not_run_post_check():
+            # Pre-check fails → handler skipped → post-check sees empty
+            # emitted buffer → returns None trivially.  Only one violation
+            # emitted (from pre-check), not two.
+            deposit = _deposit_with({OverBudget: lambda log: False})
+            graph = EventGraph([deposit])
+            log = graph.invoke(Ledger.Deposit(amount=10))
+            assert log.count(InvariantViolated) == 1
+            assert log.count(Ledger.Deposit.Deposited) == 0
+            v = log.latest(InvariantViolated)
+            # Pre-check failure has empty would_emit (handler never ran).
+            assert v.would_emit == ()
+
+    def when_later_invariant_fails_post_check():
+
+        def it_short_circuits_and_emits_one_violation():
+            calls: list[str] = []
+
+            def always_true(log):
+                calls.append("first")
+                return True
+
+            def fails_after_emit(log):
+                calls.append("second")
+                # Fails only when a Deposited is in the (simulated) log.
+                return not log.has(Ledger.Deposit.Deposited)
+
+            deposit = _deposit_with(
+                {AlwaysHolds: always_true, PostBoom: fails_after_emit}
+            )
+            graph = EventGraph([deposit])
+            log = graph.invoke(Ledger.Deposit(amount=10))
+            violations = log.filter(InvariantViolated)
+            assert len(violations) == 1
+            assert isinstance(violations[0].invariant, PostBoom)
+
+        def it_names_the_first_failing_invariant_class():
+            # Two post-check-failing invariants: order determines which fires.
+            deposit = _deposit_with(
+                {
+                    OverBudget: lambda log: False,
+                    PostBoom: lambda log: False,
+                }
+            )
+            graph = EventGraph([deposit])
+            log = graph.invoke(Ledger.Deposit(amount=10))
+            # Pre-check actually catches OverBudget first (both already fail
+            # against empty log), so the scenario degrades to pre-check
+            # semantics.  Assert the first-declared invariant class is the
+            # one that fires — consistent with pre-check ordering.
+            v = log.latest(InvariantViolated)
+            assert isinstance(v.invariant, OverBudget)
+
+    def when_predicate_raises_in_post_check():
+
+        def it_propagates_the_exception():
+            # Predicate passes on empty log (pre-check), raises when it sees
+            # a Deposited in the simulated log (post-check).
+            def post_only_boom(log):
+                if log.has(Ledger.Deposit.Deposited):
+                    raise _PredicateError("post-check bug")
+                return True
+
+            deposit = _deposit_with({PostBoom: post_only_boom})
+            graph = EventGraph([deposit])
+            with pytest.raises(_PredicateError, match="post-check bug"):
+                graph.invoke(Ledger.Deposit(amount=10))
+
+    def when_reactor_is_pinned_to_invariant_class():
+
+        def it_fires_on_post_check_violations_too():
+            # @on(InvariantViolated, invariant=OverBudget) must catch BOTH
+            # pre and post failures without distinguishing between them.
+            deposit = _deposit_with({OverBudget: _total_under(100)})
+
+            seen: list[tuple[int, tuple[int, ...]]] = []
+
+            @on(InvariantViolated, invariant=OverBudget)
+            def react(event: InvariantViolated) -> None:
+                amounts = tuple(e.amount for e in event.would_emit)
+                seen.append((len(event.would_emit), amounts))
+
+            graph = EventGraph([deposit, react])
+            graph.invoke([Ledger.Deposit(amount=60), Ledger.Deposit(amount=60)])
+            # One post-check violation, reactor saw the rolled-back event.
+            assert seen == [(1, (60,))]

@@ -34,22 +34,22 @@ def _encode_reaction(r: Any) -> dict[str, Any]:
 
 
 def encode_model(d: DomainModel) -> dict[str, Any]:
-    aggregates: dict[str, Any] = {}
-    for agg_name, agg in d.aggregates.items():
-        aggregates[agg_name] = {
-            "name": agg.name,
+    domains: dict[str, Any] = {}
+    for domain_name, dom in d.domains.items():
+        domains[domain_name] = {
+            "name": dom.name,
             "commands": {
                 cmd_name: {
                     "type": _qn(cmd.cls),
                     "outcomes": [_qn(t) for t in cmd.outcomes],
                     "handlers": list(cmd.handlers),
                 }
-                for cmd_name, cmd in agg.commands.items()
+                for cmd_name, cmd in dom.commands.items()
             },
-            "events": [_qn(t) for t in agg.events],
+            "events": [_qn(t) for t in dom.events],
         }
     return {
-        "aggregates": aggregates,
+        "domains": domains,
         "integration_events": [_qn(t) for t in d.integration_events],
         "system_events": [_qn(t) for t in d.system_events],
         "command_handlers": [_encode_reaction(r) for r in d.command_handlers],

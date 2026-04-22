@@ -9,10 +9,10 @@ from langgraph_events._custom_event import (
 )
 from langgraph_events._domain import DomainModel
 from langgraph_events._event import (
-    Aggregate,
     Auditable,
     Cancelled,
     Command,
+    Domain,
     DomainEvent,
     Event,  # noqa: F401 (importable for reducer event_type=Event catch-all)
     FrontendToolCallRequested,
@@ -47,10 +47,10 @@ from langgraph_events._types import (
 __all__ = [
     "SKIP",
     "STATE_SNAPSHOT_EVENT_NAME",
-    "Aggregate",
     "Auditable",
     "Cancelled",
     "Command",
+    "Domain",
     "DomainEvent",
     "DomainModel",
     "EventGraph",

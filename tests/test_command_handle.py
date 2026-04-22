@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from langgraph_events import (
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
@@ -14,8 +14,8 @@ from langgraph_events import (
 )
 
 
-# Module-level aggregate for inline-handler dispatch tests.
-class Shop(Aggregate):
+# Module-level domain for inline-handler dispatch tests.
+class Shop(Domain):
     class Buy(Command):
         item: str = ""
 
@@ -32,13 +32,13 @@ class Shop(Aggregate):
             return Shop.Buy.Bought(item=self.item, price=9.99)
 
 
-class Shop2(Aggregate):
+class Shop2(Domain):
     class NoHandler(Command):
         class Outcome(DomainEvent):
             pass
 
 
-class Shop3(Aggregate):
+class Shop3(Domain):
     class CmdA(Command):
         class DoneA(DomainEvent):
             pass
@@ -58,7 +58,7 @@ class Shop3(Aggregate):
             pass
 
 
-class Shop4(Aggregate):
+class Shop4(Domain):
     class Slow(Command):
         item: str = ""
 
@@ -69,7 +69,7 @@ class Shop4(Aggregate):
             return Shop4.Slow.Done(item=self.item)
 
 
-class Shop5(Aggregate):
+class Shop5(Domain):
     class Tell(Command):
         class Told(DomainEvent):
             pass
@@ -78,13 +78,13 @@ class Shop5(Aggregate):
             pass
 
 
-class Foreign(Aggregate):
+class Foreign(Domain):
     class Do(Command):
         class Stuff(DomainEvent):
             pass
 
 
-class WithLog(Aggregate):
+class WithLog(Domain):
     class Cmd(Command):
         class Done(DomainEvent):
             observed_count: int = 0
@@ -93,10 +93,10 @@ class WithLog(Aggregate):
             return WithLog.Cmd.Done(observed_count=len(log))
 
 
-# Module-level aggregates for inline-outcome-coverage tests. These can't live
+# Module-level domains for inline-outcome-coverage tests. These can't live
 # inside describe_/when_ blocks because Python can't resolve forward refs on
 # handle's return annotation from a nested function scope.
-class Shop6(Aggregate):
+class Shop6(Domain):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -108,7 +108,7 @@ class Shop6(Aggregate):
             return Shop6.Buy.Bought()
 
 
-class Shop7(Aggregate):
+class Shop7(Domain):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -120,7 +120,7 @@ class Shop7(Aggregate):
             return Shop7.Buy.Bought()
 
 
-class Shop8(Aggregate):
+class Shop8(Domain):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -132,7 +132,7 @@ class Shop8(Aggregate):
             return Shop8.Buy.Bought()
 
 
-class Shop9(Aggregate):
+class Shop9(Domain):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -146,7 +146,7 @@ def shop9_partial(event: Shop9.Buy) -> Shop9.Buy.Bought:
     return Shop9.Buy.Bought()
 
 
-class Shop10(Aggregate):
+class Shop10(Domain):
     class Buy(Command):
         class Bought(DomainEvent):
             pass
@@ -175,7 +175,7 @@ def describe_Command_handle():
         def when_handle_is_not_callable():
 
             def it_leaves___command_handler___as_None():
-                class Odd(Aggregate):
+                class Odd(Domain):
                     class Cmd(Command):
                         handle = "not a function"
 
@@ -254,7 +254,7 @@ def describe_Command_handle():
         def when_handle_returns_foreign_outcome():
 
             def it_raises_TypeError_via_Outcomes_contract():
-                class RogueAgg(Aggregate):
+                class RogueAgg(Domain):
                     class Cmd(Command):
                         class Good(DomainEvent):
                             pass
@@ -268,12 +268,12 @@ def describe_Command_handle():
                 with pytest.raises(TypeError, match=r"must return|outcomes of"):
                     graph.invoke(RogueAgg.Cmd())
 
-    def describe_from_aggregates():
+    def describe_from_domains():
 
         def when_all_commands_define_handle():
 
             def it_registers_each_of_them():
-                graph = EventGraph.from_aggregates(Shop3)
+                graph = EventGraph.from_domains(Shop3)
                 log = graph.invoke(Shop3.CmdA())
                 assert log.has(Shop3.CmdA.DoneA)
                 log2 = graph.invoke(Shop3.CmdB())
@@ -282,9 +282,9 @@ def describe_Command_handle():
         def when_some_commands_omit_handle():
 
             def it_skips_them_silently():
-                # Shop3.CmdNoHandle has no handle — from_aggregates must not
+                # Shop3.CmdNoHandle has no handle — from_domains must not
                 # raise. The resulting graph simply doesn't dispatch it.
-                graph = EventGraph.from_aggregates(Shop3)
+                graph = EventGraph.from_domains(Shop3)
                 log = graph.invoke(Shop3.CmdA())
                 assert log.has(Shop3.CmdA.DoneA)
 
@@ -297,18 +297,18 @@ def describe_Command_handle():
                 def react(event: Shop3.CmdA.DoneA) -> None:
                     observed.append("reacted")
 
-                graph = EventGraph.from_aggregates(Shop3, handlers=[react])
+                graph = EventGraph.from_domains(Shop3, handlers=[react])
                 graph.invoke(Shop3.CmdA())
                 assert observed == ["reacted"]
 
-        def when_non_aggregate_argument_passed():
+        def when_non_domain_argument_passed():
 
             def it_raises_TypeError():
-                class NotAnAggregate:
+                class NotAnDomain:
                     pass
 
-                with pytest.raises(TypeError, match=r"Aggregate"):
-                    EventGraph.from_aggregates(NotAnAggregate)  # type: ignore[arg-type]
+                with pytest.raises(TypeError, match=r"Domain"):
+                    EventGraph.from_domains(NotAnDomain)  # type: ignore[arg-type]
 
     def describe_handle_signature_validation():
 
@@ -317,7 +317,7 @@ def describe_Command_handle():
             def it_rejects_at_class_creation():
                 with pytest.raises(TypeError, match="staticmethod"):
 
-                    class BadAgg(Aggregate):
+                    class BadAgg(Domain):
                         class Cmd(Command):
                             class Done(DomainEvent):
                                 pass
@@ -331,7 +331,7 @@ def describe_Command_handle():
             def it_rejects_at_class_creation():
                 with pytest.raises(TypeError, match="self"):
 
-                    class BadAgg2(Aggregate):
+                    class BadAgg2(Domain):
                         class Cmd(Command):
                             class Done(DomainEvent):
                                 pass
@@ -381,7 +381,7 @@ def describe_handle_aliased_across_commands():
     def when_second_command_reuses_first_handle():
 
         def it_raises():
-            class LeftAgg(Aggregate):
+            class LeftAgg(Domain):
                 class Do(Command):
                     class Done(DomainEvent):
                         pass
@@ -389,7 +389,7 @@ def describe_handle_aliased_across_commands():
                     def handle(self) -> LeftAgg.Do.Done:
                         return LeftAgg.Do.Done()
 
-            class RightAgg(Aggregate):
+            class RightAgg(Domain):
                 class Do(Command):
                     class Done(DomainEvent):
                         pass

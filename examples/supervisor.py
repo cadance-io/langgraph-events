@@ -24,9 +24,9 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 from langgraph_events import (
-    Aggregate,
     Auditable,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
@@ -35,7 +35,7 @@ from langgraph_events import (
 )
 
 # ---------------------------------------------------------------------------
-# Aggregate: Task
+# Domain: Task
 # ---------------------------------------------------------------------------
 
 
@@ -46,7 +46,7 @@ class Contextualizable(Protocol):
     def context_part(self) -> str: ...
 
 
-class Task(Aggregate, Auditable):
+class Task(Domain, Auditable):
     """A coordinated multi-step task.
 
     ``Run`` is the user intent — the entry command. The supervisor handler

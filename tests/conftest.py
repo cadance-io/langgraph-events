@@ -3,8 +3,8 @@
 import pytest
 
 from langgraph_events import (
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     Event,
     EventGraph,
@@ -42,12 +42,12 @@ class Completed(IntegrationEvent):
     result: str = ""
 
 
-# Canonical DDD aggregate used by test_invariant.py / test_domain.py /
-# test_reducer_aggregate.py. The ``current_status`` reducer demonstrates the
-# declarative aggregate-reducer form — auto-named "current_status", auto-scoped
-# to Order, auto-discovered by any EventGraph that has a handler subscribed to
-# an Order event.
-class Order(Aggregate):
+# Canonical domain used by test_invariant.py / test_domain.py /
+# test_reducer_domain.py. The ``current_status`` reducer demonstrates the
+# declarative domain-reducer form — auto-named "current_status", auto-scoped
+# to Order, auto-discovered by any EventGraph that has a handler subscribed
+# to an Order event.
+class Order(Domain):
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: (
@@ -95,17 +95,17 @@ def linear_chain():
 
 
 @pytest.fixture(autouse=True)
-def _reset_aggregate_registry():
-    """Restore ``_AGGREGATE_REGISTRY`` after each test.
+def _reset_domain_registry():
+    """Restore ``_DOMAIN_REGISTRY`` after each test.
 
-    Aggregate names are enforced unique process-wide. Tests that define their
-    own ``class X(Aggregate)`` would otherwise leak into the registry and
+    Domain names are enforced unique process-wide. Tests that define their
+    own ``class X(Domain)`` would otherwise leak into the registry and
     collide with later tests using the same short name. conftest-scoped
-    aggregates (e.g. ``Order``) are captured in the snapshot and survive.
+    domains (e.g. ``Order``) are captured in the snapshot and survive.
     """
     from langgraph_events import _event as _e
 
-    snapshot = dict(_e._AGGREGATE_REGISTRY)
+    snapshot = dict(_e._DOMAIN_REGISTRY)
     yield
-    _e._AGGREGATE_REGISTRY.clear()
-    _e._AGGREGATE_REGISTRY.update(snapshot)
+    _e._DOMAIN_REGISTRY.clear()
+    _e._DOMAIN_REGISTRY.update(snapshot)

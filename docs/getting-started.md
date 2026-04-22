@@ -2,13 +2,13 @@
 
 ## Model your domain
 
-Events are **facts** about what happened. Commands are **intents** for what should happen. Group both under an aggregate — and, for simple cases, put the handler right there too:
+Events are **facts** about what happened. Commands are **intents** for what should happen. Group both under a `Domain` — and, for simple cases, put the handler right there too:
 
 ```python
-from langgraph_events import Aggregate, Command, DomainEvent, EventGraph
+from langgraph_events import Domain, Command, DomainEvent, EventGraph
 
 
-class Order(Aggregate):
+class Order(Domain):
     class Place(Command):
         customer_id: str
         items: tuple[str, ...]
@@ -33,7 +33,7 @@ log = graph.invoke(Order.Place(customer_id="alice", items=("book",)))
 print(log.latest(Order.Place.Placed))
 ```
 
-- `Order` is the aggregate (namespace). `Place` is a command. `Placed` / `Rejected` are its outcomes. `Shipped` is a free event.
+- `Order` is the domain (namespace). `Place` is a command. `Placed` / `Rejected` are its outcomes. `Shipped` is a free event.
 - Commands use **imperative** names; events use **past-participle**.
 - `Order.Place.Outcomes` is auto-generated as `Placed | Rejected` — used in `isinstance` and enforced as the handler's return contract.
 - `handle(self)` is the command's inline handler; `self` is the event.
@@ -53,7 +53,7 @@ for event in graph.stream_events(seed): ... # stream as produced
 ```python
 print(graph.domain().text())             # human-readable tree (choreography)
 print(graph.domain().mermaid())          # Mermaid diagram
-graph.domain().aggregates                # structured DomainModel access
+graph.domain().domains                # structured DomainModel access
 log.filter(Order.Place.Placed)
 log.latest(Order.Place.Rejected)
 log.has(Order.Shipped)
@@ -61,7 +61,7 @@ log.has(Order.Shipped)
 
 ## Cross-cutting events
 
-Events that don't belong to any aggregate — external facts, shared signals — use `IntegrationEvent`:
+Events that don't belong to any domain — external facts, shared signals — use `IntegrationEvent`:
 
 ```python
 from langgraph_events import Auditable, IntegrationEvent
@@ -79,8 +79,8 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 |---|---|---|
 | Query past events in a handler | `EventLog` (`log.filter()`, `log.latest()`) | [Concepts](concepts.md#eventlog) |
 | Enforce a precondition before a handler runs | `invariants=` on `@on()` | [Control Flow](control-flow.md#invariants) |
-| Register every inline handler on an aggregate | `EventGraph.from_aggregates(Order)` | [Concepts](concepts.md#inline-command-handlers) |
-| Accumulate state across events | `ScalarReducer` on the aggregate class | [Reducers](reducers.md) |
+| Register every inline handler on a domain | `EventGraph.from_domains(Order)` | [Concepts](concepts.md#inline-command-handlers) |
+| Accumulate state across events | `ScalarReducer` on the domain class | [Reducers](reducers.md) |
 | Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
 | Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |

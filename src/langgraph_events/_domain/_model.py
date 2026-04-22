@@ -46,7 +46,7 @@ def _event_label(cls: type) -> str:
 def _event_node_id(cls: type) -> str:
     """Mermaid-safe node identifier — qualname-based for structure diagrams
     so nested events like ``Order.Place.Placed`` don't collide with a sibling
-    aggregate's similarly-named class.
+    domain's similarly-named class.
     """
     return cls.__qualname__.replace("<locals>.", "").replace(".", "_")
 
@@ -58,8 +58,8 @@ def _matcher_repr(matcher: Any, is_type: bool) -> str:
 
 
 # Short classDef key for the choreography flowchart. Drives both the node
-# shape and the fill/stroke palette. Halted nested under an aggregate gets
-# the same amber fill as SystemEvent but a dashed double-outline stroke so
+# shape and the fill/stroke palette. Halted nested under a domain gets the
+# same amber fill as SystemEvent but a dashed double-outline stroke so
 # terminals are visually distinct without stealing red from error flow.
 _NODE_CLASS_BASES: tuple[tuple[type, str], ...] = (
     (CommandBase, "cmd"),
@@ -79,18 +79,18 @@ def _node_class(cls: type) -> str:
 
 @dataclass(frozen=True)
 class DomainModel:
-    """Code-derived snapshot of an ``EventGraph``'s domain.
+    """Code-derived snapshot of an ``EventGraph``'s domain model.
 
     Two lenses:
 
-    - ``view="structure"`` — the **taxonomy** (aggregates → commands → outcomes,
+    - ``view="structure"`` — the **taxonomy** (domains → commands → outcomes,
       free-standing DomainEvents, integration and system events). No handlers,
       no edges.
     - ``view="choreography"`` — the **full picture**: taxonomy + command
       handlers + policies + event-to-event edges + seed events. Default.
 
-    "Choreography" is the DDD/event-storming term for event-driven flow
-    without a central orchestrator — exactly what this library models.
+    "Choreography" is the event-storming term for event-driven flow without
+    a central orchestrator — exactly what this library models.
 
     Rendering::
 
@@ -102,7 +102,7 @@ class DomainModel:
 
     Data access::
 
-        d.aggregates           # dict[str, DomainModel.Aggregate]
+        d.domains              # dict[str, DomainModel.Domain]
         d.command_handlers     # tuple[DomainModel.CommandHandler, ...]
         d.policies             # tuple[DomainModel.Policy, ...]
         d.reactions            # command_handlers + policies
@@ -115,12 +115,12 @@ class DomainModel:
     # ---- nested types (class-level, not fields) ----
 
     @dataclass(frozen=True)
-    class Aggregate:
-        """An aggregate root — the grouping for its nested commands and events.
+    class Domain:
+        """A domain — the grouping for its nested commands and events.
 
-        ``events`` holds any ``Event`` nested in the aggregate that is not an
+        ``events`` holds any ``Event`` nested in the domain that is not an
         outcome of one of its commands — typically free-standing DomainEvents,
-        but also ``Halted`` subtypes nested in the aggregate for locality.
+        but also ``Halted`` subtypes nested in the domain for locality.
         """
 
         name: str
@@ -184,7 +184,7 @@ class DomainModel:
     class Invariant:
         """An invariant declared by at least one handler.
 
-        Aggregated across the graph: ``commands`` lists every command whose
+        Rolled up across the graph: ``commands`` lists every command whose
         handler declares this invariant; ``declared_by`` and ``reactors`` are
         handler names. A reactor is a handler subscribed to
         ``InvariantViolated`` with a pinned ``invariant=`` field matcher.
@@ -200,7 +200,7 @@ class DomainModel:
 
     # ---- fields ----
 
-    aggregates: dict[str, DomainModel.Aggregate]
+    domains: dict[str, DomainModel.Domain]
     integration_events: tuple[type[IntegrationEvent], ...]
     system_events: tuple[type[SystemEvent], ...]
     command_handlers: tuple[DomainModel.CommandHandler, ...]
@@ -283,20 +283,20 @@ class DomainModel:
 
 def _classify_event_bucket(  # noqa: PLR0911, PLR0912
     event_type: type[Event],
-    aggregates: dict[str, dict[str, Any]],
+    domains: dict[str, dict[str, Any]],
     integration: list[type[IntegrationEvent]],
     system: list[type[SystemEvent]],
     seen: set[type[Event]],
 ) -> None:
-    """Sort *event_type* into aggregate / integration / system buckets.
+    """Sort *event_type* into domain / integration / system buckets.
 
-    Rule: if ``__aggregate__`` is set, aggregate membership wins regardless
-    of whether the event inherits ``DomainEvent``, ``Halted``, or any other
-    branch. This lets users nest e.g. ``class Blocked(Halted)`` inside an
-    aggregate for locality without having it drift into the system bucket.
+    Rule: if ``__domain__`` is set, domain membership wins regardless of
+    whether the event inherits ``DomainEvent``, ``Halted``, or any other
+    branch. This lets users nest e.g. ``class Blocked(Halted)`` inside a
+    domain for locality without having it drift into the system bucket.
 
-    ``aggregates`` is a mutable intermediate dict keyed by aggregate name;
-    each value is ``{"commands": {cmd_name: {"type": cls, "outcomes": [...]}},
+    ``domains`` is a mutable intermediate dict keyed by domain name; each
+    value is ``{"commands": {cmd_name: {"type": cls, "outcomes": [...]}},
     "events": [Event, ...]}``.
     """
     if event_type in seen:
@@ -306,10 +306,10 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
         return
 
     if issubclass(event_type, CommandBase):
-        agg_name = getattr(event_type, "__aggregate__", None)
-        if agg_name is None:
+        domain_name = getattr(event_type, "__domain__", None)
+        if domain_name is None:
             return
-        entry = aggregates.setdefault(agg_name, {"commands": {}, "events": []})
+        entry = domains.setdefault(domain_name, {"commands": {}, "events": []})
         cmd_entry = entry["commands"].setdefault(
             event_type.__name__, {"type": event_type, "outcomes": []}
         )
@@ -327,10 +327,10 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
         return
 
     if issubclass(event_type, DomainEvent):
-        agg_name = getattr(event_type, "__aggregate__", None)
-        if agg_name is None:
+        domain_name = getattr(event_type, "__domain__", None)
+        if domain_name is None:
             return
-        entry = aggregates.setdefault(agg_name, {"commands": {}, "events": []})
+        entry = domains.setdefault(domain_name, {"commands": {}, "events": []})
         cmd = getattr(event_type, "__command__", None)
         if cmd is not None:
             cmd_entry = entry["commands"].setdefault(
@@ -342,11 +342,11 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
             entry["events"].append(event_type)
         return
 
-    # Non-DomainEvent event nested in an Aggregate (e.g. Halted subtype):
-    # aggregate membership beats IntegrationEvent/SystemEvent classification.
-    agg_name = getattr(event_type, "__aggregate__", None)
-    if agg_name is not None:
-        entry = aggregates.setdefault(agg_name, {"commands": {}, "events": []})
+    # Non-DomainEvent event nested in a Domain (e.g. Halted subtype): domain
+    # membership beats IntegrationEvent/SystemEvent classification.
+    domain_name = getattr(event_type, "__domain__", None)
+    if domain_name is not None:
+        entry = domains.setdefault(domain_name, {"commands": {}, "events": []})
         if event_type not in entry["events"]:
             entry["events"].append(event_type)
         return
@@ -365,7 +365,7 @@ def _build_domain_model(  # noqa: PLR0912
     handler_metas: list[HandlerMeta],
     return_info: dict[str, ReturnInfo],
 ) -> DomainModel:
-    agg_raw: dict[str, dict[str, Any]] = {}
+    domain_raw: dict[str, dict[str, Any]] = {}
     integration: list[type[IntegrationEvent]] = []
     system: list[type[SystemEvent]] = []
     seen: set[type[Event]] = set()
@@ -384,11 +384,11 @@ def _build_domain_model(  # noqa: PLR0912
 
         # Classify all subscribed events into taxonomy buckets.
         for et in meta.event_types:
-            _classify_event_bucket(et, agg_raw, integration, system, seen)
+            _classify_event_bucket(et, domain_raw, integration, system, seen)
         for et in info.event_types:
-            _classify_event_bucket(et, agg_raw, integration, system, seen)
+            _classify_event_bucket(et, domain_raw, integration, system, seen)
         for et in info.scatter_types:
-            _classify_event_bucket(et, agg_raw, integration, system, seen)
+            _classify_event_bucket(et, domain_raw, integration, system, seen)
 
         if info.has_interrupted:
             any_produces_interrupted = True
@@ -477,9 +477,9 @@ def _build_domain_model(  # noqa: PLR0912
             )
         )
 
-    # Freeze aggregates into nested dataclass form, attaching handler names.
-    aggregates: dict[str, DomainModel.Aggregate] = {}
-    for agg_name, raw in agg_raw.items():
+    # Freeze domains into nested dataclass form, attaching handler names.
+    domains: dict[str, DomainModel.Domain] = {}
+    for domain_name, raw in domain_raw.items():
         commands: dict[str, DomainModel.Command] = {}
         for cmd_name, cmd_raw in raw["commands"].items():
             cmd_type = cmd_raw["type"]
@@ -488,8 +488,8 @@ def _build_domain_model(  # noqa: PLR0912
                 outcomes=tuple(cmd_raw["outcomes"]),
                 handlers=tuple(command_to_handler_names.get(cmd_type, [])),
             )
-        aggregates[agg_name] = DomainModel.Aggregate(
-            name=agg_name,
+        domains[domain_name] = DomainModel.Domain(
+            name=domain_name,
             commands=commands,
             events=tuple(raw["events"]),
         )
@@ -499,25 +499,25 @@ def _build_domain_model(  # noqa: PLR0912
     targets = {e.target for e in edges}
     seeds = tuple(sorted(sources - targets, key=_event_label))
 
-    invariants_agg = _aggregate_invariants(command_handlers, policies)
+    invariants_rolled = _rollup_invariants(command_handlers, policies)
 
     return DomainModel(
-        aggregates=aggregates,
+        domains=domains,
         integration_events=tuple(integration),
         system_events=tuple(system),
         command_handlers=tuple(command_handlers),
         policies=tuple(policies),
         edges=tuple(edges),
         seeds=seeds,
-        invariants=invariants_agg,
+        invariants=invariants_rolled,
     )
 
 
-def _aggregate_invariants(
+def _rollup_invariants(
     command_handlers: list[DomainModel.CommandHandler],
     policies: list[DomainModel.Policy],
 ) -> tuple[DomainModel.Invariant, ...]:
-    """Roll per-handler invariant declarations into first-class domain nodes.
+    """Roll per-handler invariant declarations into first-class nodes.
 
     One entry per unique ``Invariant`` subclass. Declaration order follows
     the first handler that declared each class. Reactors are policies

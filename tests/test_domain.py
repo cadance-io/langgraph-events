@@ -7,8 +7,8 @@ import json
 from conftest import Order
 
 from langgraph_events import (
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     Halted,
@@ -27,7 +27,7 @@ class CustomerExists(Invariant):
     pass
 
 
-class Customer(Aggregate):
+class Customer(Domain):
     class Register(Command):
         email: str = ""
 
@@ -39,7 +39,7 @@ class PaymentConfirmed(IntegrationEvent):
     transaction_id: str = ""
 
 
-# Module-level events/aggregates used by test cases whose handlers need
+# Module-level events/domains used by test cases whose handlers need
 # `get_type_hints()` to resolve class names — classes defined inside
 # describe_/when_/it_ blocks are unreachable at hint-resolution time.
 class _Batch(IntegrationEvent):
@@ -50,7 +50,7 @@ class _Item(IntegrationEvent):
     pass
 
 
-class _AggIR(Aggregate):
+class _AggIR(Domain):
     class Ask(Command):
         class Requested(Interrupted):
             pass
@@ -103,9 +103,9 @@ def explain_rejection_fixture(event: HandlerRaised) -> Order.Place.Rejected:
     return Order.Place.Rejected(reason="test")
 
 
-# Module-level aggregates with nested Halted subtypes — keeps forward-reference
+# Module-level domains with nested Halted subtypes — keeps forward-reference
 # resolution happy for handler return-type introspection.
-class _Content(Aggregate):
+class _Content(Domain):
     class Classify(Command):
         class Classified(DomainEvent):
             label: str = ""
@@ -114,7 +114,7 @@ class _Content(Aggregate):
         reason: str = ""
 
 
-class _Review(Aggregate):
+class _Review(Domain):
     class Open(Command):
         class Opened(DomainEvent):
             pass
@@ -124,14 +124,14 @@ class _Review(Aggregate):
 
 
 def describe_domain_model_shape():
-    def when_graph_has_aggregate():
+    def when_graph_has_domain():
         def with_command_handler():
-            def it_groups_under_aggregate_then_command_then_outcomes():
+            def it_groups_under_domain_then_command_then_outcomes():
 
                 d = EventGraph([place]).domain()
 
-                assert "Order" in d.aggregates
-                order = d.aggregates["Order"]
+                assert "Order" in d.domains
+                order = d.domains["Order"]
                 assert "Place" in order.commands
                 outcomes = order.commands["Place"].outcomes
                 assert Order.Place.Placed in outcomes
@@ -144,19 +144,19 @@ def describe_domain_model_shape():
                     return Order.Place.Placed(order_id="o1")
 
                 d = EventGraph([run]).domain()
-                outcomes = d.aggregates["Order"].commands["Place"].outcomes
+                outcomes = d.domains["Order"].commands["Place"].outcomes
                 # Place has two outcomes; each appears exactly once.
                 assert list(outcomes).count(Order.Place.Placed) == 1
                 assert list(outcomes).count(Order.Place.Rejected) == 1
 
         def with_event_unrelated_to_any_command():
-            def it_lists_under_aggregate_events():
+            def it_lists_under_domain_events():
                 @on(Order.Shipped)
                 def react(event: Order.Shipped) -> None:
                     return None
 
                 d = EventGraph([react]).domain()
-                assert Order.Shipped in d.aggregates["Order"].events
+                assert Order.Shipped in d.domains["Order"].events
 
     def when_graph_has_integration_event():
         def it_lists_under_integration_events():
@@ -176,8 +176,8 @@ def describe_domain_model_shape():
             d = EventGraph([react]).domain()
             assert Halted in d.system_events
 
-    def when_halted_subtype_is_nested_in_aggregate():
-        def it_lists_under_aggregate_events_not_system_events():
+    def when_halted_subtype_is_nested_in_domain():
+        def it_lists_under_domain_events_not_system_events():
             @on(_Content.Classify)
             def classify(
                 event: _Content.Classify,
@@ -185,7 +185,7 @@ def describe_domain_model_shape():
                 return _Content.Blocked(reason="test")
 
             d = EventGraph([classify]).domain()
-            assert _Content.Blocked in d.aggregates["_Content"].events
+            assert _Content.Blocked in d.domains["_Content"].events
             assert _Content.Blocked not in d.system_events
 
         def with_mermaid_render():
@@ -198,25 +198,25 @@ def describe_domain_model_shape():
 
                 output = EventGraph([react]).domain().mermaid()
                 assert "Abandoned([Abandoned]):::halt" in output
-                assert 'subgraph _Review["_Review aggregate"]' in output
+                assert 'subgraph _Review["_Review domain"]' in output
 
-    def when_graph_has_no_aggregate_events():
-        def it_returns_empty_aggregates_dict():
+    def when_graph_has_no_domain_events():
+        def it_returns_empty_domains_dict():
             @on(PaymentConfirmed)
             def react(event: PaymentConfirmed) -> None:
                 return None
 
             d = EventGraph([react]).domain()
-            assert d.aggregates == {}
+            assert d.domains == {}
 
-    def when_graph_has_multiple_aggregates():
+    def when_graph_has_multiple_domains():
         def it_lists_each_independently():
             @on(Customer.Register)
             def register(event: Customer.Register) -> Customer.Register.Registered:
                 return Customer.Register.Registered(customer_id="c1")
 
             d = EventGraph([place, register]).domain()
-            assert set(d.aggregates.keys()) == {"Order", "Customer"}
+            assert set(d.domains.keys()) == {"Order", "Customer"}
 
 
 def describe_reactions_classification():
@@ -237,7 +237,7 @@ def describe_reactions_classification():
 
     def when_handler_is_inline_command_handle():
         def it_flags_inline_true():
-            class AggInline(Aggregate):
+            class AggInline(Domain):
                 class Ping(Command):
                     class Pinged(DomainEvent):
                         pass
@@ -252,7 +252,7 @@ def describe_reactions_classification():
 
     def when_handler_subscribes_to_multiple_commands():
         def it_lists_all_commands_on_handler():
-            class AggMulti(Aggregate):
+            class AggMulti(Domain):
                 class A(Command):
                     class Done(DomainEvent):
                         pass
@@ -270,7 +270,7 @@ def describe_reactions_classification():
             assert len(chs) == 1
             assert set(chs[0].commands) == {AggMulti.A, AggMulti.B}
 
-    def when_reactions_aggregates_both_kinds():
+    def when_reactions_domains_both_kinds():
         def it_preserves_registration_order():
 
             d = EventGraph([place, notify]).domain()
@@ -283,7 +283,7 @@ def describe_command_handler_back_reference():
     def it_lists_handler_names_on_each_command():
 
         d = EventGraph([place]).domain()
-        assert d.aggregates["Order"].commands["Place"].handlers == ("place",)
+        assert d.domains["Order"].commands["Place"].handlers == ("place",)
 
 
 def describe_edges():
@@ -432,7 +432,7 @@ def describe_invariants():
             assert "inv_catch_all" not in inv.reactors
 
     def when_multiple_handlers_declare_same_invariant():
-        def it_aggregates_into_one_entry():
+        def it_domains_into_one_entry():
             d = EventGraph([inv_place, inv_register]).domain()
             matches = [i for i in d.invariants if i.cls is CustomerExists]
             assert len(matches) == 1
@@ -442,7 +442,7 @@ def describe_invariants():
 
 
 def _full_taxonomy_graph() -> EventGraph:
-    """A graph exercising every taxonomy bucket: aggregate commands + events,
+    """A graph exercising every taxonomy bucket: domain commands + events,
     integration events, system events. Used by renderer/encoder tests."""
 
     @on(PaymentConfirmed)
@@ -458,7 +458,7 @@ def _full_taxonomy_graph() -> EventGraph:
 
 def describe_text_renderer():
     def when_view_structure():
-        def it_renders_aggregate_command_outcome_tree():
+        def it_renders_domain_command_outcome_tree():
 
             text = EventGraph([place]).domain().text(view="structure")
 
@@ -473,7 +473,7 @@ def describe_text_renderer():
             assert "handlers" not in text
             assert "Policies" not in text
 
-        def it_lists_aggregate_events_integration_events_and_system_events():
+        def it_lists_domain_events_integration_events_and_system_events():
             text = _full_taxonomy_graph().domain().text(view="structure")
             assert "Event: Shipped" in text
             assert "Integration events:" in text
@@ -493,7 +493,7 @@ def describe_text_renderer():
             assert "Policies:" in text
             assert "notify" in text
 
-        def it_lists_aggregate_events_integration_events_and_system_events():
+        def it_lists_domain_events_integration_events_and_system_events():
             text = _full_taxonomy_graph().domain().text()
             assert "Event: Shipped" in text
             assert "Integration events:" in text
@@ -552,6 +552,67 @@ def describe_mermaid_renderer():
             assert "Place -.- Placed" not in output
             assert "stroke:#9ca3af" in output
 
+    def when_invariant_has_pinned_reactor():
+        # inv_place declares CustomerExists, inv_explain is pinned
+        # (@on(InvariantViolated, invariant=CustomerExists)).
+
+        def it_routes_reactor_edge_through_the_invariant():
+            # The reactor's output edge leaves the Invariant diamond,
+            # not InvariantViolated: Place -> Invariant -> (reactor target).
+            @on(InvariantViolated, invariant=CustomerExists)
+            def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
+                return Order.Place.Rejected(reason="banned")
+
+            output = EventGraph([inv_place, reject_pinned]).domain().mermaid()
+            assert "CustomerExists -.->|reject_pinned| Rejected" in output
+            # No direct InvariantViolated -> Rejected edge.
+            assert "InvariantViolated -->|reject_pinned|" not in output
+            assert "InvariantViolated -.->|reject_pinned|" not in output
+
+        def when_no_catchall_exists():
+
+            def it_hides_the_InvariantViolated_node():
+                @on(InvariantViolated, invariant=CustomerExists)
+                def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
+                    return Order.Place.Rejected(reason="banned")
+
+                output = EventGraph([inv_place, reject_pinned]).domain().mermaid()
+                # InvariantViolated system-event node drops out entirely.
+                assert "InvariantViolated([InvariantViolated]):::syst" not in output
+
+            def it_drops_the_ownership_arrow_for_invariant_reached_outcomes():
+                # Without the chain, Place -.- Rejected would appear
+                # (ownership gap).  With the chain, the gap is covered.
+                @on(InvariantViolated, invariant=CustomerExists)
+                def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
+                    return Order.Place.Rejected(reason="banned")
+
+                output = EventGraph([inv_place, reject_pinned]).domain().mermaid()
+                assert "Place -.- Rejected" not in output
+
+    def when_catchall_reactor_coexists():
+
+        def it_keeps_the_InvariantViolated_node_for_the_catchall():
+            # Catch-all reactor (@on(InvariantViolated) with no invariant=
+            # pin) still routes through the InvariantViolated node; pinned
+            # reactor routes through the Invariant diamond.
+            @on(InvariantViolated, invariant=CustomerExists)
+            def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
+                return Order.Place.Rejected(reason="pinned")
+
+            @on(InvariantViolated)
+            def audit_all(event: InvariantViolated) -> None:
+                return None
+
+            output = (
+                EventGraph([inv_place, reject_pinned, audit_all]).domain().mermaid()
+            )
+            # Pinned reactor rerouted through Invariant.
+            assert "CustomerExists -.->|reject_pinned| Rejected" in output
+            # Catch-all keeps InvariantViolated visible (as side-effect
+            # handler comment, since audit_all returns None).
+            assert "InvariantViolated" in output
+
     def when_view_choreography_semantic_vocabulary():
         def it_declares_classdef_entries_for_each_taxonomy_class():
             output = _full_taxonomy_graph().domain().mermaid()
@@ -566,13 +627,13 @@ def describe_mermaid_renderer():
             assert "Place{{Place}}:::cmd" in output
             assert "Placed(Placed):::devt" in output
 
-        def it_wraps_aggregate_members_in_a_subgraph():
+        def it_wraps_domain_members_in_a_subgraph():
             output = _full_taxonomy_graph().domain().mermaid()
-            assert 'subgraph Order["Order aggregate"]' in output
+            assert 'subgraph Order["Order domain"]' in output
             assert "end" in output
 
-        def when_halted_subtype_is_nested_in_aggregate():
-            def it_places_it_inside_the_aggregate_subgraph():
+        def when_halted_subtype_is_nested_in_domain():
+            def it_places_it_inside_the_domain_subgraph():
                 @on(_Content.Classify)
                 def classify(
                     event: _Content.Classify,
@@ -580,7 +641,7 @@ def describe_mermaid_renderer():
                     return _Content.Blocked(reason="test")
 
                 output = EventGraph([classify]).domain().mermaid()
-                subgraph_start = output.index('subgraph _Content["_Content aggregate"]')
+                subgraph_start = output.index('subgraph _Content["_Content domain"]')
                 subgraph_end = output.index("end", subgraph_start)
                 block = output[subgraph_start:subgraph_end]
                 assert "Blocked([Blocked]):::halt" in block
@@ -623,8 +684,8 @@ def describe_json_and_to_dict():
         payload = d.to_dict()
         # Round-trip through JSON.
         reparsed = json.loads(json.dumps(payload))
-        assert "Order" in reparsed["aggregates"]
-        assert reparsed["aggregates"]["Order"]["commands"]["Place"]["type"].endswith(
+        assert "Order" in reparsed["domains"]
+        assert reparsed["domains"]["Order"]["commands"]["Place"]["type"].endswith(
             "Place"
         )
         assert any(ch["name"] == "place" for ch in reparsed["command_handlers"])
@@ -633,7 +694,7 @@ def describe_json_and_to_dict():
 
         d = EventGraph([place]).domain()
         payload = d.to_dict()
-        place_cmd = payload["aggregates"]["Order"]["commands"]["Place"]
+        place_cmd = payload["domains"]["Order"]["commands"]["Place"]
         assert place_cmd["type"] == Order.Place.__qualname__
 
     def it_encodes_policies_distinctly_from_command_handlers():
@@ -648,7 +709,7 @@ def describe_json_and_to_dict():
         d = EventGraph([place]).domain()
         js = d.json()
         assert isinstance(js, str)
-        assert "aggregates" in js
+        assert "domains" in js
 
     def it_encodes_invariants_block():
         payload = EventGraph([inv_place, inv_explain]).domain().to_dict()

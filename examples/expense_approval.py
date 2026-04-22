@@ -1,20 +1,20 @@
 """DDD Expense Approval Agent — langgraph-events demo.
 
-Demonstrates DDD aggregates combined with human-in-the-loop approval:
+Demonstrates DDD domains combined with human-in-the-loop approval:
 
-- ``Aggregate`` with ``ScalarReducer`` — the ``Expense`` namespace tracks
+- ``Domain`` with ``ScalarReducer`` — the ``Expense`` namespace tracks
   status through the approval lifecycle.
 - Inline ``handle`` with LLM — ``Submit.handle`` calls an LLM to extract
   structured expense data from a natural-language description.
 - ``Interrupted`` inside a DDD flow — when the expense exceeds the policy
   threshold, the graph pauses for manager review.
 - ``resume()`` with a ``Command`` as seed — the manager resumes the graph
-  by sending an ``Approve`` or ``Reject`` command, which the aggregate
+  by sending an ``Approve`` or ``Reject`` command, which the domain
   processes through its inline handler.
 
 Usage:
-    export OPENAI_API_KEY="sk-..."
-    python examples/ddd_expense_approval.py
+    export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
+    python examples/expense_approval.py
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field
 
 from langgraph_events import (
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     Interrupted,
@@ -62,7 +62,7 @@ expense_llm = llm.with_structured_output(ExpenseData)
 
 
 # ---------------------------------------------------------------------------
-# Aggregate: Expense
+# Domain: Expense
 # ---------------------------------------------------------------------------
 
 _STATUS_MAP = {
@@ -73,7 +73,7 @@ _STATUS_MAP = {
 }
 
 
-class Expense(Aggregate):
+class Expense(Domain):
     """Expense report lifecycle.
 
     The ``status`` reducer tracks the current state. Only ``DomainEvent``
@@ -187,7 +187,7 @@ def check_policy(
 # Graph
 # ---------------------------------------------------------------------------
 
-graph = EventGraph.from_aggregates(
+graph = EventGraph.from_domains(
     Expense,
     handlers=[check_policy],
     checkpointer=MemorySaver(),

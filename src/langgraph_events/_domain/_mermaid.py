@@ -43,7 +43,7 @@ _STEREOTYPE_BASES: tuple[tuple[type, str], ...] = (
 def _event_stereotype(cls: type) -> str:
     """Short stereotype label for the structure ``classDiagram``.
 
-    Aggregate membership doesn't affect the label — the stereotype reflects
+    Domain membership doesn't affect the label — the stereotype reflects
     the event's category in the taxonomy (``DomainEvent``, ``Halted``, …),
     which matters for readers scanning the diagram.
     """
@@ -131,9 +131,15 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
     - SystemEvents (Interrupted/Resumed/HandlerRaised) render as stadium
       ``([…])``, amber
     - Halted subtypes render as stadium, amber, with a dashed thick outline
-    - Aggregate-owned nodes sit inside a ``subgraph`` titled "<Name> aggregate"
+    - Domain-owned nodes sit inside a ``subgraph`` titled "<Name> domain"
     - Solid ``-->`` arrows carry declared returns; ``raises=`` edges are
       thin dashed grey; ``Scatter[X]`` edges are thick dashed purple
+    - Invariants render as diamond ``:::inv`` gate nodes.  When a pinned
+      reactor (``@on(InvariantViolated, invariant=Cls)``) exists, its
+      output is routed *through* the Invariant diamond:
+      ``Command -.->|invariant| Invariant -.->|reactor| Target``.  The
+      ``InvariantViolated`` system-event node is hidden when every
+      reactor is pinned (no catch-all ``@on(InvariantViolated)``).
     - Seed events (no incoming edges) keep the thick ``==>`` entry arrow
     """
     edges: list[_FlowEdge] = []
@@ -154,6 +160,15 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
             continue
         edges_by_reaction.setdefault(e.via, []).append(e)
 
+    # Pinned-reactor routing: a reactor with @on(InvariantViolated,
+    # invariant=Cls) has its output edge rerouted from InvariantViolated
+    # → Target to Invariant(Cls) → Target.  The InvariantViolated node
+    # then disappears from the diagram when every reactor is pinned.
+    pinned_reactor_invariant: dict[str, type[InvariantBase]] = {}
+    for inv in d.invariants:
+        for reactor_name in inv.reactors:
+            pinned_reactor_invariant[reactor_name] = inv.cls
+
     def _record(src_type: type[Event], tgt_type: type[Event] | None) -> tuple[str, str]:
         src_label = _event_label(src_type)
         referenced.add(src_type)
@@ -165,6 +180,16 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
         all_sources.add(src_label)
         all_targets.add(tgt_label)
         return src_label, tgt_label
+
+    # Edges routed via an Invariant gate instead of InvariantViolated.
+    # Keyed by reactor name; appended to `edges` after the main reaction
+    # loop so they group visually with the other invariant-tagged edges.
+    rerouted_pinned_edges: list[_FlowEdge] = []
+
+    # Outcomes reached via an Invariant → reactor chain.  Used by the
+    # ownership-gap fill to suppress redundant `Command -.- Outcome`
+    # arrows when the invariant chain already connects them.
+    reached_via_invariant: set[tuple[type[Event], type[Event]]] = set()
 
     for name, r in reactions:
         subs = _reaction_subscribes(r)
@@ -199,10 +224,39 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
                     edges.append(_FlowEdge(src, "?", "-->", name, "solid"))
                 continue
 
+        inv_cls = pinned_reactor_invariant.get(name)
+
         for e in solid_edges:
+            if inv_cls is not None:
+                # Reroute: drop the InvariantViolated → target edge; emit
+                # Invariant → target instead.  Record the (command, target)
+                # pair so ownership-gap fill doesn't draw a redundant arrow.
+                referenced.add(e.target)
+                tgt_label = _event_label(e.target)
+                all_targets.add(tgt_label)
+                rerouted_pinned_edges.append(
+                    _FlowEdge(inv_cls.__name__, tgt_label, "-.->", name, "invariant")
+                )
+                for inv in d.invariants:
+                    if inv.cls is inv_cls:
+                        for cmd_cls in inv.commands:
+                            reached_via_invariant.add((cmd_cls, e.target))
+                continue
             src, tgt = _record(e.source, e.target)
             edges.append(_FlowEdge(src, tgt, "-->", name, "solid"))
         for e in scatter_edges:
+            if inv_cls is not None:
+                referenced.add(e.target)
+                tgt_label = _event_label(e.target)
+                all_targets.add(tgt_label)
+                rerouted_pinned_edges.append(
+                    _FlowEdge(inv_cls.__name__, tgt_label, "-.->", name, "invariant")
+                )
+                for inv in d.invariants:
+                    if inv.cls is inv_cls:
+                        for cmd_cls in inv.commands:
+                            reached_via_invariant.add((cmd_cls, e.target))
+                continue
             src, tgt = _record(e.source, e.target)
             edges.append(_FlowEdge(src, tgt, "-.->", name, "scatter"))
 
@@ -215,43 +269,48 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
 
     # Ownership-gap fill: for every (command → declared outcome) pair
     # without a direct flow edge, emit a dashed "owns" arrow. Makes
-    # declared outcomes always visibly connected to their command — even
-    # when produced indirectly via a policy (e.g. Place owns Rejected,
-    # which is only reached via InvariantViolated → explain_rejection).
+    # declared outcomes always visibly connected to their command.
+    # Skip pairs already reached via an invariant chain — the pinned
+    # reactor edge Command -> Invariant -> outcome covers it.
     flow_pairs: set[tuple[type[Event], type[Event]]] = {
         (e.source, e.target) for e in d.edges if e.kind in ("solid", "scatter")
-    }
-    for agg in d.aggregates.values():
-        for cmd in agg.commands.values():
+    } | reached_via_invariant
+    for dom in d.domains.values():
+        for cmd in dom.commands.values():
             for outcome in cmd.outcomes:
                 if (cmd.cls, outcome) in flow_pairs:
                     continue
                 src, tgt = _record(cmd.cls, outcome)
                 edges.append(_FlowEdge(src, tgt, "-.-", None, "ownership"))
 
-    # Group referenced nodes by aggregate for subgraph wrapping.
-    agg_members: dict[str, list[type[Event]]] = {}
+    # Append rerouted pinned-reactor edges to the flow edge list.  These
+    # use the "invariant" tag so they get the same dashed-orange style as
+    # the Command -> Invariant gate edges.
+    edges.extend(rerouted_pinned_edges)
+
+    # Group referenced nodes by domain for subgraph wrapping.
+    domain_members: dict[str, list[type[Event]]] = {}
     loose_nodes: list[type[Event]] = []
     for cls in referenced:
-        agg_name = getattr(cls, "__aggregate__", None)
-        if agg_name is not None:
-            agg_members.setdefault(agg_name, []).append(cls)
+        domain_name = getattr(cls, "__domain__", None)
+        if domain_name is not None:
+            domain_members.setdefault(domain_name, []).append(cls)
         else:
             loose_nodes.append(cls)
-    for members in agg_members.values():
+    for members in domain_members.values():
         members.sort(key=_event_label)
     loose_nodes.sort(key=_event_label)
 
-    # Place invariant gate nodes under the aggregate(s) of their commands.
-    # If an invariant spans multiple aggregates, it stays loose (top-level).
-    agg_invariants: dict[str, list[type[InvariantBase]]] = {}
+    # Place invariant gate nodes under the domain(s) of their commands.
+    # If an invariant spans multiple domains, it stays loose (top-level).
+    domain_invariants: dict[str, list[type[InvariantBase]]] = {}
     loose_invariants: list[type[InvariantBase]] = []
     invariant_edges: list[_FlowEdge] = []
     for inv in d.invariants:
-        owning_aggs = {getattr(c, "__aggregate__", None) for c in inv.commands}
-        owning_aggs.discard(None)
-        if len(owning_aggs) == 1:
-            agg_invariants.setdefault(next(iter(owning_aggs)), []).append(inv.cls)  # type: ignore[arg-type]
+        owning_domains = {getattr(c, "__domain__", None) for c in inv.commands}
+        owning_domains.discard(None)
+        if len(owning_domains) == 1:
+            domain_invariants.setdefault(next(iter(owning_domains)), []).append(inv.cls)  # type: ignore[arg-type]
         else:
             loose_invariants.append(inv.cls)
         for cmd_cls in inv.commands:
@@ -264,19 +323,19 @@ def render_mermaid_choreography(d: DomainModel) -> str:  # noqa: PLR0912, PLR091
                     "invariant",
                 )
             )
-    for group in agg_invariants.values():
+    for group in domain_invariants.values():
         group.sort(key=lambda c: c.__name__)
     loose_invariants.sort(key=lambda c: c.__name__)
 
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
 
-    all_agg_names = sorted(set(agg_members) | set(agg_invariants))
-    for agg_name in all_agg_names:
-        with flow.subgraph(agg_name, title=f"{agg_name} aggregate", direction="LR"):
-            for member in agg_members.get(agg_name, []):
+    all_domain_names = sorted(set(domain_members) | set(domain_invariants))
+    for domain_name in all_domain_names:
+        with flow.subgraph(domain_name, title=f"{domain_name} domain", direction="LR"):
+            for member in domain_members.get(domain_name, []):
                 _add_node(flow, member)
-            for inv_cls in agg_invariants.get(agg_name, []):
+            for inv_cls in domain_invariants.get(domain_name, []):
                 _add_invariant_node(flow, inv_cls)
 
     for node in loose_nodes:

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
     from langchain_core.messages import BaseMessage
 
-    from langgraph_events._event import Aggregate, Event
+    from langgraph_events._event import Domain, Event
     from langgraph_events._types import ReducerFn
 
 
@@ -39,11 +39,11 @@ def _last_write_wins(existing: Any, new: Any) -> Any:
     return new
 
 
-def _matches_aggregate(event: Any, agg: type[Aggregate] | None) -> bool:
-    """Return True if *event* belongs to *agg* (or *agg* is None = no filter)."""
-    if agg is None:
+def _matches_domain(event: Any, dom: type[Domain] | None) -> bool:
+    """Return True if *event* belongs to *dom* (or *dom* is None = no filter)."""
+    if dom is None:
         return True
-    return getattr(type(event), "__aggregate__", None) == agg.__aggregate_name__
+    return getattr(type(event), "__domain__", None) == dom.__domain_name__
 
 
 class BaseReducer(ABC):
@@ -53,26 +53,26 @@ class BaseReducer(ABC):
     before calling ``fn``.  Use a ``@runtime_checkable Protocol`` for
     structural multi-type matching.
 
-    When declared as a class attribute on an ``Aggregate`` subclass, the
-    reducer's ``name`` auto-fills from the attribute name and ``aggregate``
+    When declared as a class attribute on a ``Domain`` subclass, the
+    reducer's ``name`` auto-fills from the attribute name and ``domain``
     auto-fills to the enclosing class — both via ``__set_name__``.
     """
 
     name: str
     event_type: type
-    aggregate: type[Aggregate] | None
+    domain: type[Domain] | None
 
     def __set_name__(self, owner: type, name: str) -> None:
-        # __set_name__ runs before Aggregate.__init_subclass__ stamps
-        # __aggregate_name__, so duck-typing via hasattr won't work here.
+        # __set_name__ runs before Domain.__init_subclass__ stamps
+        # __domain_name__, so duck-typing via hasattr won't work here.
         # Runtime import avoids module-level circular dependency.
-        from langgraph_events._event import Aggregate  # noqa: PLC0415
+        from langgraph_events._event import Domain  # noqa: PLC0415
 
-        if isinstance(owner, type) and issubclass(owner, Aggregate):
+        if isinstance(owner, type) and issubclass(owner, Domain):
             if not self.name:
                 self.name = name
-            if self.aggregate is None:
-                self.aggregate = owner
+            if self.domain is None:
+                self.domain = owner
 
     @abstractmethod
     def state_annotation(self) -> Any:
@@ -134,7 +134,7 @@ class Reducer(BaseReducer):
     fn: Callable[[Any], list[Any]] = field(kw_only=True)
     reducer: ReducerFn = field(kw_only=True, default=operator.add)
     default: list[Any] = field(kw_only=True, default_factory=list)
-    aggregate: type[Aggregate] | None = field(kw_only=True, default=None)
+    domain: type[Domain] | None = field(kw_only=True, default=None)
 
     def state_annotation(self) -> Any:
         return Annotated[list, self.reducer]
@@ -148,7 +148,7 @@ class Reducer(BaseReducer):
         for event in events:
             if not isinstance(event, self.event_type):
                 continue
-            if not _matches_aggregate(event, self.aggregate):
+            if not _matches_domain(event, self.domain):
                 continue
             contrib = self.fn(event)
             if contrib:
@@ -201,7 +201,7 @@ class ScalarReducer(BaseReducer):
     event_type: type = field(kw_only=True)
     fn: Callable[[Any], Any] = field(kw_only=True)
     default: Any = field(kw_only=True, default=None)
-    aggregate: type[Aggregate] | None = field(kw_only=True, default=None)
+    domain: type[Domain] | None = field(kw_only=True, default=None)
 
     def state_annotation(self) -> Any:
         return Annotated[Any, _last_write_wins]
@@ -215,7 +215,7 @@ class ScalarReducer(BaseReducer):
         for event in events:
             if not isinstance(event, self.event_type):
                 continue
-            if not _matches_aggregate(event, self.aggregate):
+            if not _matches_domain(event, self.domain):
                 continue
             last = event
         return self.fn(last) if last is not SKIP else SKIP

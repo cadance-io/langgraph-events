@@ -2,7 +2,7 @@
 
 Demonstrates the DDD-aligned taxonomy end-to-end:
 
-- ``Aggregate`` — the ``Order`` namespace
+- ``Domain`` — the ``Order`` namespace
 - ``Command`` — ``Order.Place`` (with invariants) and ``Order.Ship`` (inline)
 - ``DomainEvent`` — nested outcomes auto-unioned as ``Command.Outcomes``
 - Handler forms — pick the shortest that fits:
@@ -22,21 +22,21 @@ Demonstrates the DDD-aligned taxonomy end-to-end:
   ``@on(InvariantViolated, invariant=Cls)`` fires only for that specific
   invariant class's failures. A graph-construction-time drift check catches
   matchers that reference undeclared invariant classes.
-- ``ScalarReducer`` as an aggregate class attribute — auto-named,
-  auto-scoped to the aggregate's events, surfaced via ``log.reduced_state``.
-- ``EventGraph.from_aggregates`` — auto-registers inline handlers and mixes
+- ``ScalarReducer`` as an domain class attribute — auto-named,
+  auto-scoped to the domain's events, surfaced via ``log.reduced_state``.
+- ``EventGraph.from_domains`` — auto-registers inline handlers and mixes
   them with extra external handlers.
 
 Usage:
-    python examples/ddd_order.py
+    python examples/order.py
 """
 
 from __future__ import annotations
 
 from langgraph_events import (
     SKIP,
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     Event,
     EventGraph,
@@ -48,15 +48,15 @@ from langgraph_events import (
 )
 
 # ---------------------------------------------------------------------------
-# Aggregate: Order
+# Domain: Order
 # ---------------------------------------------------------------------------
 
 
-class Order(Aggregate):
-    """The Order aggregate."""
+class Order(Domain):
+    """The Order domain."""
 
     # ScalarReducer as a declarative class attribute. Auto-named
-    # ``current_status``, auto-scoped to the aggregate's events. Picks a
+    # ``current_status``, auto-scoped to the domain's events. Picks a
     # status label from each event's class name; ``SKIP`` for events that
     # don't change status. Surfaced via ``log.reduced_state["current_status"]``.
     current_status = ScalarReducer(
@@ -77,14 +77,33 @@ class Order(Aggregate):
         """
 
         customer_id: str = ""
+        amount: int = 0
 
         class CustomerNotBanned(Invariant):
-            """The placing customer must not be on the banned list."""
+            """The placing customer must not be on the banned list.
+
+            Pure **pre-check** invariant — the predicate reads
+            ``CustomerBanned`` events that have *already* been committed;
+            its truth value doesn't depend on what this handler emits.
+            """
+
+        class OrderTotalWithinLimit(Invariant):
+            """Cumulative placed amount must stay under the daily limit.
+
+            Pure **post-check** invariant — the predicate sums committed
+            ``Placed`` events. The *current* handler's about-to-be-emitted
+            ``Placed`` is what pushes the total over the limit, so only the
+            post-command check (against log + emitted buffer) can catch it.
+            Pre-check passes; post-check rolls back and emits
+            ``InvariantViolated`` carrying the dropped event in
+            ``would_emit``.
+            """
 
         class Placed(DomainEvent):
             """Order accepted."""
 
             order_id: str = ""
+            amount: int = 0
 
         class Rejected(DomainEvent):
             """Order rejected (e.g. by an invariant)."""
@@ -119,33 +138,55 @@ class CustomerBanned(IntegrationEvent):
 # ---------------------------------------------------------------------------
 
 
+_ORDER_LIMIT = 100
+
+
 @on(
     invariants={
         Order.Place.CustomerNotBanned: lambda log: not log.has(CustomerBanned),
+        Order.Place.OrderTotalWithinLimit: lambda log: (
+            sum(e.amount for e in log.filter(Order.Place.Placed)) < _ORDER_LIMIT
+        ),
     },
 )
 def place(event: Order.Place) -> Order.Place.Placed:
-    """External handler — the invariant is declared here, not inline.
+    """External handler — the invariants are declared here, not inline.
 
     Uses ``@on(invariants=...)`` — no positional event type, inferred from
-    the ``event:`` annotation. The invariant key is the typed class
-    ``Order.Place.CustomerNotBanned``, so a reactor can pin on the same
-    class with mypy/IDE support (and a typo triggers the graph-compile-time
-    drift check rather than silently failing).
+    the ``event:`` annotation. Invariant keys are typed classes so reactors
+    can pin on them with mypy/IDE support (and a typo triggers the
+    graph-compile-time drift check rather than silently failing).
+
+    Two invariants, two semantics:
+
+    - ``CustomerNotBanned`` — only the pre-check can fire it (predicate
+      doesn't depend on this handler's output).
+    - ``OrderTotalWithinLimit`` — only the post-check can fire it
+      (predicate sums ``Placed`` events, and *this* handler's ``Placed``
+      is what pushes the total over the limit).
     """
-    return Order.Place.Placed(order_id=f"order-for-{event.customer_id}")
+    return Order.Place.Placed(
+        order_id=f"order-for-{event.customer_id}", amount=event.amount
+    )
 
 
 @on(InvariantViolated, invariant=Order.Place.CustomerNotBanned)
-def explain_rejection(event: InvariantViolated) -> Order.Place.Rejected:
-    """Turn *this specific* invariant violation into a domain Rejected.
-
-    Uses a pinned ``invariant=`` field matcher so the handler fires only
-    for ``CustomerNotBanned`` failures; other invariants (none here yet,
-    but we could add more) would fall through to their own handlers or to
-    a catch-all ``@on(InvariantViolated)`` if registered.
-    """
+def explain_banned(event: InvariantViolated) -> Order.Place.Rejected:
+    """Turn a ``CustomerNotBanned`` violation into a domain ``Rejected``."""
     return Order.Place.Rejected(reason=type(event.invariant).__name__)
+
+
+@on(InvariantViolated, invariant=Order.Place.OrderTotalWithinLimit)
+def explain_over_limit(event: InvariantViolated) -> Order.Place.Rejected:
+    """Turn an ``OrderTotalWithinLimit`` post-check violation into a
+    ``Rejected``. ``would_emit`` carries the rolled-back ``Placed`` — we
+    surface its amount in the rejection reason for diagnostics.
+    """
+    rolled_back = event.would_emit[0] if event.would_emit else None
+    amount = getattr(rolled_back, "amount", "?")
+    return Order.Place.Rejected(
+        reason=f"OrderTotalWithinLimit (would emit amount={amount})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -153,9 +194,9 @@ def explain_rejection(event: InvariantViolated) -> Order.Place.Rejected:
 # ---------------------------------------------------------------------------
 
 
-graph = EventGraph.from_aggregates(
+graph = EventGraph.from_domains(
     Order,
-    handlers=[place, explain_rejection],
+    handlers=[place, explain_banned, explain_over_limit],
 )
 
 
@@ -167,7 +208,7 @@ def main() -> None:
     print("=== Happy path (external handler + inline handler) ===")
     log = graph.invoke(
         [
-            Order.Place(customer_id="alice"),
+            Order.Place(customer_id="alice", amount=30),
             Order.Ship(order_id="order-for-alice"),
         ]
     )
@@ -175,16 +216,31 @@ def main() -> None:
         print(f"  {type(ev).__qualname__}: {ev}")
     print()
 
-    print("=== Invariant blocks placement (pinned reaction fires) ===")
-    log2 = graph.invoke(
+    print("=== Pre-check: CustomerNotBanned blocks placement ===")
+    log_banned = graph.invoke(
         [
             CustomerBanned(customer_id="bob"),
-            Order.Place(customer_id="bob"),
+            Order.Place(customer_id="bob", amount=10),
         ]
     )
-    for ev in log2:
+    for ev in log_banned:
         print(f"  {type(ev).__qualname__}: {ev}")
-    print(f"  current_status: {Order.current_status.collect(list(log2))!r}")
+    print()
+
+    print("=== Post-check: OrderTotalWithinLimit rolls back the Placed ===")
+    # Two placements. The first (60) commits — pre-check passes, post-check
+    # sees simulated total 60 < 100. The second (60) also passes pre-check
+    # (current total is 60), but post-check sees simulated total 120 ≥ 100
+    # and drops the Placed; the reactor turns the violation into a Rejected.
+    log_over = graph.invoke(
+        [
+            Order.Place(customer_id="carol", amount=60),
+            Order.Place(customer_id="dave", amount=60),
+        ]
+    )
+    for ev in log_over:
+        print(f"  {type(ev).__qualname__}: {ev}")
+    print(f"  current_status: {Order.current_status.collect(list(log_over))!r}")
     print()
 
     print("=== Reducer tracks the latest status on the happy path ===")

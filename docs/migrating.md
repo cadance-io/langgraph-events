@@ -1,8 +1,10 @@
-# Migrating from 0.3.0
+# Migration guide
 
-0.4.0 is a large release — DDD-aligned taxonomy, declarative aggregate-scoped reducers, `invariants=`, `raises=`, introspection APIs. **Only four existing behaviours become stricter.** Fix those and the rest is new vocabulary you can adopt at your own pace.
+## v0.4.0 → v0.5.0
 
-New to the taxonomy? See [Getting Started](getting-started.md) and [`examples/ddd_order.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/ddd_order.py). Feature list lives in the [CHANGELOG](https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.md).
+0.5.0 is a large release — event taxonomy (`Domain`, `Command`, `DomainEvent`), declarative domain-scoped reducers, `invariants=`, strict return-type enforcement, introspection APIs. Most of it is additive vocabulary you can adopt at your own pace. **Six existing behaviours become stricter** and need attention.
+
+New to the taxonomy? See [Getting Started](getting-started.md) and [`examples/order.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py). Feature list lives in the [CHANGELOG](https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.md).
 
 ## Breaking changes
 
@@ -16,7 +18,7 @@ Reducer(name="history", event_type=Event, fn=project_fn)
 Reducer("history", event_type=Event, fn=project_fn)
 ```
 
-Enables declaring reducers as class attributes on an `Aggregate` with `name` auto-filled.
+Enables declaring reducers as class attributes on a `Domain` with `name` auto-filled.
 
 ### 2. Handler return types are enforced at dispatch
 
@@ -27,7 +29,7 @@ Enables declaring reducers as class attributes on an `Aggregate` with `name` aut
 Violations raise `TypeError` at the handler's dispatch, not in the next consumer.
 
 ```python
-# Was silent in 0.3.0; raises TypeError in 0.4.0
+# Was silent in 0.4.0; raises TypeError in 0.5.0
 @on(UserInput)
 def handle(event: UserInput) -> Greeting:
     return Complaint(...)   # not in the declared union
@@ -37,14 +39,14 @@ Fix: match the declared return type, widen the annotation, or drop it (for non-`
 
 ### 3. Bare `Event` subclassing raises `TypeError`
 
-`class Foo(Event)` is no longer allowed. Use `DomainEvent` (inside an Aggregate), `IntegrationEvent` (cross-boundary facts), `Command` (inside an Aggregate), or compose with `Auditable` / `MessageEvent`.
+`class Foo(Event)` is no longer allowed. Use `DomainEvent` (inside a `Domain`), `IntegrationEvent` (cross-boundary facts), `Command` (inside a `Domain`), or compose with `Auditable` / `MessageEvent`.
 
 ```python
-# Before (0.3.0)
+# Before (0.4.0)
 class CustomerBanned(Event):
     customer_id: str
 
-# After (0.4.0)
+# After (0.5.0)
 class CustomerBanned(IntegrationEvent):
     customer_id: str
 ```
@@ -61,11 +63,7 @@ class TaskStarted(Auditable): ...
 class TaskStarted(IntegrationEvent, Auditable): ...
 ```
 
-## DDD consistency pass (v0.4.x)
-
-Still on 0.4 — a follow-up pass aligning the library's own surface with the DDD taxonomy it evangelizes. All breakage intentional.
-
-### 1. Introspection API consolidated
+### 5. Introspection API consolidated
 
 `EventGraph.catalog()` / `.describe()` / `.mermaid()` replaced by a single `EventGraph.domain()` returning a `DomainModel`:
 
@@ -82,12 +80,12 @@ print(d.text(view="structure"))
 print(d.mermaid())                   # default view = choreography
 print(d.mermaid(view="structure"))   # classDiagram
 d.json()                             # JSON snapshot
-d.aggregates, d.command_handlers, d.policies, d.edges, d.seeds
+d.domains, d.command_handlers, d.policies, d.edges, d.seeds
 ```
 
-The `Catalog` / `AggregateEntry` / `CommandEntry` TypedDicts are replaced by nested frozen dataclasses `DomainModel.Aggregate`, `DomainModel.Command`, `DomainModel.CommandHandler`, `DomainModel.Policy`, `DomainModel.Edge`.
+The `Catalog` / `AggregateEntry` / `CommandEntry` TypedDicts are replaced by nested frozen dataclasses `DomainModel.Domain`, `DomainModel.Command`, `DomainModel.CommandHandler`, `DomainModel.Policy`, `DomainModel.Edge`.
 
-### 2. `SystemPromptSet` is now an `IntegrationEvent`
+### 6. `SystemPromptSet` is now an `IntegrationEvent`
 
 Before: `class SystemPromptSet(SystemEvent, MessageEvent)`.
 After: `class SystemPromptSet(IntegrationEvent, MessageEvent)`.
@@ -95,17 +93,20 @@ After: `class SystemPromptSet(IntegrationEvent, MessageEvent)`.
 Rationale: user code constructs it and seeds it as graph input. `SystemEvent` is reserved for framework-emitted facts (`Halted`, `Interrupted`, `HandlerRaised`, ...). "System" in the class name refers to the LLM's system-role message, not to framework origin.
 
 Fix required only if you did one of:
+
 - `@on(SystemEvent)` catch-all that used to pick up system-prompt seeds → now matches only framework events.
 - `isinstance(evt, SystemEvent)` branches that treated system prompts as framework signals.
 
 `graph.domain().integration_events` now lists `SystemPromptSet`; `.system_events` does not.
 
-### 3. Non-DDD example portfolio consolidated
+## Example portfolio reshaped
 
-All examples now use the DDD taxonomy.
+All examples now use the `Domain` taxonomy.
 
-- **`examples/react_agent.py` removed.** Redundant with `examples/ddd_conversation.py` (same `Conversation.Send` → `Sent`/`Blocked` shape, same downstream LLM+tool loop). Direct imports fail — point references at `ddd_conversation.py`.
-- **`examples/supervisor.py`** reshaped into a `Task` aggregate. Event moves:
+- **`examples/react_agent.py` removed.** Redundant with `examples/conversation.py` (same `Conversation.Send` → `Sent`/`Blocked` shape, same downstream LLM+tool loop). Direct imports fail — point references at `conversation.py`.
+- **`examples/reflection_loop.py` removed.** Multi-subscription loop pattern covered by `examples/conversation.py`.
+- **`examples/human_in_the_loop.py` removed.** HITL pattern covered by `examples/expense_approval.py`.
+- **`examples/supervisor.py`** reshaped into a `Task` domain. Event moves:
 
   | Before | After |
   |---|---|
@@ -116,7 +117,7 @@ All examples now use the DDD taxonomy.
   | `CodeProduced` | `Task.Code.Produced` |
   | `ResultFinalized` | `Task.Finalized` |
 
-- **`examples/content_pipeline.py`** reshaped into a `Content` aggregate. Event moves:
+- **`examples/content_pipeline.py`** reshaped into a `Content` domain. Event moves:
 
   | Before | After |
   |---|---|
@@ -127,7 +128,7 @@ All examples now use the DDD taxonomy.
   | `ContentBlocked` | `Content.Blocked` (still a `Halted` subtype, nested for locality) |
   | `PipelineStage` (base) | `StageLabelled` Protocol (reducer uses structural typing) |
 
-- **`examples/map_reduce.py`** reshaped into a `Batch` aggregate. Event moves:
+- **`examples/map_reduce.py`** reshaped into a `Batch` domain. Event moves:
 
   | Before | After |
   |---|---|
@@ -136,7 +137,7 @@ All examples now use the DDD taxonomy.
   | `DocSummarized` | `Batch.DocSummarized` |
   | `BatchSummarized` | `Batch.Summarize.Summarized` |
 
-- **`examples/error_recovery.py`** reshaped into a `Question` aggregate. Event moves:
+- **`examples/error_recovery.py`** reshaped into a `Question` domain. Event moves:
 
   | Before | After |
   |---|---|
@@ -147,21 +148,24 @@ All examples now use the DDD taxonomy.
 
 Direct imports of the old class names (`from examples.map_reduce import BatchReceived`, etc.) fail. Expected — examples are reference material; copy shapes into your code, don't import from them.
 
+The AG-UI frontend-tool examples `agui_frontend_tools.py` and `agui_confirm_dialog.py` are folded into `conversation.py` (LLM-initiated streaming path inside a `Conversation` domain) and `docs/agui.md` (handler-initiated snippet).
+
 ## Non-breaking changes
 
 - `Halted`, `Interrupted`, `Resumed`, `HandlerRaised`, `Cancelled`, `MaxRoundsExceeded` now inherit `SystemEvent`. Existing `@on(Halted)` / `isinstance` checks still match.
-- Aggregate class names must be unique within a process — an accepted v1 constraint.
+- `Domain` class names must be unique within a process.
+- `invariants=` predicates are now evaluated twice per matching event: **pre-check** (before the handler runs, against the current log) and **post-check** (after the handler returns, against `log + emitted events`). Predicates must be pure functions of `log` — idempotent and deterministic. `InvariantViolated` gains a `would_emit: tuple[Event, ...]` field, defaulted to `()`; pre-check failures leave it empty, post-check failures populate it with the rolled-back events. Pinned reactors (`@on(InvariantViolated, invariant=Foo)`) fire for both phases without distinguishing.
 
 ## FAQ
 
-**Do I have to use the DDD taxonomy?**
-Yes. Every event must use one of the four base classes: `DomainEvent`, `IntegrationEvent`, `Command`, or `SystemEvent`. Cross-cutting facts that don't belong to an aggregate use `IntegrationEvent`.
+**Do I have to use the taxonomy?**
+Yes. Every event must use one of the four base classes: `DomainEvent`, `IntegrationEvent`, `Command`, or `SystemEvent`. Cross-cutting facts that don't belong to a domain use `IntegrationEvent`.
 
 **Will my existing `@on(Halted)` / `@on(Interrupted)` subscriptions still fire?**
 Yes. Those classes now inherit `SystemEvent` (which inherits `Event`). `isinstance` traverses the MRO.
 
 **Do I need to update my existing tests?**
-Only if you hit one of the four breaking changes above.
+Only if you hit one of the six breaking changes above.
 
 **Can I mix external `@on(...)` handlers and inline `handle` methods in the same graph?**
-Yes — pass both to `EventGraph([...])`, or call `EventGraph.from_aggregates(Order, handlers=[external_fn])`.
+Yes — pass both to `EventGraph([...])`, or call `EventGraph.from_domains(Order, handlers=[external_fn])`.

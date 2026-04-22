@@ -1,12 +1,12 @@
-"""Tests for declarative reducers on Aggregate classes."""
+"""Tests for declarative reducers on Domain classes."""
 
 from __future__ import annotations
 
 import pytest
 
 from langgraph_events import (
-    Aggregate,
     Command,
+    Domain,
     DomainEvent,
     Event,
     EventGraph,
@@ -16,8 +16,8 @@ from langgraph_events import (
 )
 
 
-# Module-level aggregates so handler type hints resolve at runtime.
-class Alpha(Aggregate):
+# Module-level domains so handler type hints resolve at runtime.
+class Alpha(Domain):
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: type(e).__name__,
@@ -28,7 +28,7 @@ class Alpha(Aggregate):
             marker: str = ""
 
 
-class Beta(Aggregate):
+class Beta(Domain):
     class Trigger(Command):
         class Triggered(DomainEvent):
             marker: str = ""
@@ -38,28 +38,28 @@ def describe_BaseReducer():
 
     def describe___set_name__():
 
-        def when_declared_on_aggregate():
+        def when_declared_on_domain():
 
             def it_fills_name_from_attribute_name():
                 assert Alpha.current_status.name == "current_status"
 
-            def it_fills_aggregate_from_owner_class():
-                assert Alpha.current_status.aggregate is Alpha
+            def it_fills_domain_from_owner_class():
+                assert Alpha.current_status.domain is Alpha
 
-        def when_declared_outside_aggregate():
+        def when_declared_outside_domain():
 
-            def it_leaves_aggregate_as_None():
+            def it_leaves_domain_as_None():
                 external = ScalarReducer(
                     name="external",
                     event_type=Event,
                     fn=lambda e: e,
                 )
-                assert external.aggregate is None
+                assert external.domain is None
 
         def when_name_is_explicitly_set():
 
             def it_preserves_explicit_name():
-                class HasExplicitName(Aggregate):
+                class HasExplicitName(Domain):
                     r = ScalarReducer(
                         name="custom",
                         event_type=Event,
@@ -69,14 +69,14 @@ def describe_BaseReducer():
                 assert HasExplicitName.r.name == "custom"
 
 
-def describe_Aggregate():
+def describe_Domain():
 
     def describe___reducers__():
 
         def when_class_body_has_reducer_attributes():
 
             def it_collects_them_into_tuple():
-                class WithReducers(Aggregate):
+                class WithReducers(Domain):
                     r1 = ScalarReducer(event_type=Event, fn=lambda e: None)
                     r2 = ScalarReducer(event_type=Event, fn=lambda e: None)
 
@@ -86,15 +86,15 @@ def describe_Aggregate():
         def when_no_reducer_attributes():
 
             def it_is_empty_tuple():
-                class Empty(Aggregate):
+                class Empty(Domain):
                     pass
 
                 assert Empty.__reducers__ == ()
 
-        def when_subclass_aggregate_adds_more():
+        def when_subclass_domain_adds_more():
 
             def it_inherits_parent_reducers_and_adds_child():
-                class Parent(Aggregate):
+                class Parent(Domain):
                     shared = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 class Child(Parent):
@@ -104,16 +104,16 @@ def describe_Aggregate():
                 assert names == {"shared", "extra"}
 
 
-def describe_aggregate_scope_filter():
-    """Reducers with aggregate= only contribute when the event matches."""
+def describe_domain_scope_filter():
+    """Reducers with domain= only contribute when the event matches."""
 
-    def when_event_belongs_to_aggregate():
+    def when_event_belongs_to_domain():
 
         def it_contributes_to_collect():
             result = Alpha.current_status.collect([Alpha.Act.Acted(marker="x")])
             assert result == "Acted"
 
-    def when_event_belongs_to_different_aggregate():
+    def when_event_belongs_to_different_domain():
 
         def it_does_not_contribute():
             from langgraph_events._reducer import SKIP
@@ -121,7 +121,7 @@ def describe_aggregate_scope_filter():
             result = Alpha.current_status.collect([Beta.Trigger.Triggered(marker="x")])
             assert result is SKIP
 
-    def when_event_has_no_aggregate():
+    def when_event_has_no_domain():
 
         def it_does_not_contribute():
             class LooseEvent(IntegrationEvent):
@@ -132,7 +132,7 @@ def describe_aggregate_scope_filter():
             result = Alpha.current_status.collect([LooseEvent()])
             assert result is SKIP
 
-    def when_subclass_event_inherits_aggregate():
+    def when_subclass_event_inherits_domain():
 
         def it_contributes():
             class FastActed(Alpha.Act.Acted):
@@ -144,9 +144,9 @@ def describe_aggregate_scope_filter():
 
 def describe_EventGraph_auto_discovery():
 
-    def when_handler_subscribes_to_aggregate_event():
+    def when_handler_subscribes_to_domain_event():
 
-        def it_auto_registers_aggregate_reducers():
+        def it_auto_registers_domain_reducers():
             observed: list[str | None] = []
 
             @on(Alpha.Act)
@@ -162,16 +162,16 @@ def describe_EventGraph_auto_discovery():
             # and projects type(e).__name__ == "Act" before the handler runs.
             assert observed == ["Act"]
 
-    def when_reducer_names_collide_across_aggregates():
+    def when_reducer_names_collide_across_domains():
 
         def it_raises_TypeError_at_init():
-            class Gamma(Aggregate):
+            class Gamma(Domain):
                 shared_name = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 class Go(Command):
                     pass
 
-            class Delta(Aggregate):
+            class Delta(Domain):
                 shared_name = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 class Go(Command):

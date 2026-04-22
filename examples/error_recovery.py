@@ -1,7 +1,7 @@
 """Error Recovery — langgraph-events demo.
 
 Demonstrates declared handler exceptions via ``raises=`` + the built-in
-``HandlerRaised`` event, organized around a DDD ``Question`` aggregate.
+``HandlerRaised`` event, organized around a DDD ``Question`` domain.
 
 A handler declares which exceptions the framework should catch; when one of
 those exceptions fires, the framework surfaces it as a ``HandlerRaised`` event
@@ -23,9 +23,9 @@ from __future__ import annotations
 import warnings
 
 from langgraph_events import (
-    Aggregate,
     Auditable,
     Command,
+    Domain,
     DomainEvent,
     EventGraph,
     EventLog,
@@ -55,11 +55,11 @@ class QuotaExhaustedError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Aggregate: Question
+# Domain: Question
 # ---------------------------------------------------------------------------
 
 
-class Question(Aggregate):
+class Question(Domain):
     """A user question answered via a rate-limit-tolerant LLM call.
 
     ``Ask`` is the entry command. The answering handler declares
