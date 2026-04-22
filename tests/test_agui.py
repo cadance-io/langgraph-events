@@ -112,6 +112,72 @@ class ErrorTrigger(IntegrationEvent):
         return {}
 
 
+# Module-level event classes used as handler return annotations in the
+# test bodies below. Defining them inline would break get_type_hints()
+# resolution (see CLAUDE.md forward-reference convention).
+
+
+class PlainEvent(IntegrationEvent):
+    value: str = "no-dict"
+
+
+class NoDict1(IntegrationEvent):
+    x: int = 0
+
+
+class NoDict2(IntegrationEvent):
+    x: int = 0
+
+
+class DraftUserSent(IntegrationEvent, MessageEvent):
+    message: HumanMessage = None  # type: ignore[assignment]
+
+
+class AgentDrafted(IntegrationEvent, MessageEvent):
+    message: AIMessage = None  # type: ignore[assignment]
+
+
+class AgentRevised(IntegrationEvent, MessageEvent):
+    message: AIMessage = None  # type: ignore[assignment]
+
+
+class MultimodalReply(IntegrationEvent, MessageEvent):
+    message: AIMessage = None  # type: ignore[assignment]
+
+
+class NamedEvent(IntegrationEvent):
+    data: str = ""
+
+    @property
+    def agui_event_name(self) -> str:
+        return "custom.named"
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"data": self.data}
+
+
+class NameOnlyEvent(IntegrationEvent):
+    data: str = ""
+
+    @property
+    def agui_event_name(self) -> str:
+        return "custom.name"
+
+
+class StepA(IntegrationEvent):
+    value: str = ""
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"value": self.value}
+
+
+class StepB(IntegrationEvent):
+    value: str = ""
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"value": self.value}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -422,9 +488,6 @@ def describe_AGUIAdapter():
                 assert text_events[-1].type == EventType.TEXT_MESSAGE_END
 
             async def it_skips_events_lacking_agui_dict():
-                class PlainEvent(IntegrationEvent):
-                    value: str = "no-dict"
-
                 @on(UserAsked)
                 def emit_plain(event: UserAsked) -> PlainEvent:
                     return PlainEvent(value="hello")
@@ -468,12 +531,6 @@ def describe_AGUIAdapter():
                 assert custom_events[0].value == {"title": "with dict"}
 
             async def it_warns_once_per_class():
-                class NoDict1(IntegrationEvent):
-                    x: int = 0
-
-                class NoDict2(IntegrationEvent):
-                    x: int = 0
-
                 @on(UserAsked)
                 def step1(event: UserAsked) -> NoDict1:
                     return NoDict1(x=1)
@@ -629,17 +686,8 @@ def describe_AGUIAdapter():
             async def it_detects_message_content_changes():
                 """MessagesSnapshot emits when add_messages replaces in-place."""
 
-                class UserSent(IntegrationEvent, MessageEvent):
-                    message: HumanMessage = None  # type: ignore[assignment]
-
-                class AgentDrafted(IntegrationEvent, MessageEvent):
-                    message: AIMessage = None  # type: ignore[assignment]
-
-                class AgentRevised(IntegrationEvent, MessageEvent):
-                    message: AIMessage = None  # type: ignore[assignment]
-
-                @on(UserSent)
-                def draft(event: UserSent) -> AgentDrafted:
+                @on(DraftUserSent)
+                def draft(event: DraftUserSent) -> AgentDrafted:
                     return AgentDrafted(
                         message=AIMessage(content="draft v1", id="msg-ai")
                     )
@@ -657,7 +705,7 @@ def describe_AGUIAdapter():
                 )
                 adapter = AGUIAdapter(
                     graph=graph,
-                    seed_factory=lambda inp: UserSent(
+                    seed_factory=lambda inp: DraftUserSent(
                         message=HumanMessage(content="go")
                     ),
                 )
@@ -745,9 +793,6 @@ def describe_AGUIAdapter():
         def when_multimodal_ai_message():
             async def it_handles_list_content_in_snapshot():
                 """Multimodal AIMessage.content (list) must not crash snapshot."""
-
-                class MultimodalReply(IntegrationEvent, MessageEvent):
-                    message: AIMessage = None  # type: ignore[assignment]
 
                 @on(UserAsked)
                 def reply(event: UserAsked) -> MultimodalReply:
@@ -1902,16 +1947,6 @@ def describe_interrupt_replay():
 def describe_AGUICustomEvent():
     def when_agui_event_name_implemented():
         async def it_uses_agui_event_name():
-            class NamedEvent(IntegrationEvent):
-                data: str = ""
-
-                @property
-                def agui_event_name(self) -> str:
-                    return "custom.named"
-
-                def agui_dict(self) -> dict[str, Any]:
-                    return {"data": self.data}
-
             @on(UserAsked)
             def emit(event: UserAsked) -> NamedEvent:
                 return NamedEvent(data="hello")
@@ -2045,15 +2080,6 @@ def describe_agui_event_name_edge_cases():
     def when_event_has_name_but_no_agui_dict():
 
         async def it_warns_and_suppresses():
-            class NameOnlyEvent(IntegrationEvent):
-                data: str = ""
-
-                @property
-                def agui_event_name(self) -> str:
-                    return "custom.name"
-
-                # no agui_dict — not AGUISerializable
-
             @on(UserAsked)
             def emit(event: UserAsked) -> NameOnlyEvent:
                 return NameOnlyEvent(data="test")
@@ -2550,18 +2576,6 @@ def describe_multiple_custom_reducers():
     def when_custom_reducers_change():
         async def it_emits_state_snapshot_for_each_change():
             from langgraph_events._reducer import ScalarReducer
-
-            class StepA(IntegrationEvent):
-                value: str = ""
-
-                def agui_dict(self) -> dict[str, Any]:
-                    return {"value": self.value}
-
-            class StepB(IntegrationEvent):
-                value: str = ""
-
-                def agui_dict(self) -> dict[str, Any]:
-                    return {"value": self.value}
 
             reducer_a = ScalarReducer(
                 name="counter_a",

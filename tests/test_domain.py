@@ -123,6 +123,27 @@ class _Review(Domain):
         reason: str = ""
 
 
+# Module-level fixtures for describe_reactions_classification — keeps
+# forward-reference resolution happy for handler return-type introspection.
+class _AggInline(Domain):
+    class Ping(Command):
+        class Pinged(DomainEvent):
+            pass
+
+        def handle(self) -> _AggInline.Ping.Pinged:
+            return _AggInline.Ping.Pinged()
+
+
+class _AggMulti(Domain):
+    class A(Command):
+        class Done(DomainEvent):
+            pass
+
+    class B(Command):
+        class Done(DomainEvent):
+            pass
+
+
 def describe_domain_model_shape():
     def when_graph_has_domain():
         def with_command_handler():
@@ -237,38 +258,21 @@ def describe_reactions_classification():
 
     def when_handler_is_inline_command_handle():
         def it_flags_inline_true():
-            class AggInline(Domain):
-                class Ping(Command):
-                    class Pinged(DomainEvent):
-                        pass
-
-                    def handle(self) -> AggInline.Ping.Pinged:
-                        return AggInline.Ping.Pinged()
-
-            d = EventGraph([AggInline.Ping]).domain()
+            d = EventGraph([_AggInline.Ping]).domain()
             inline = [ch for ch in d.command_handlers if ch.inline]
             assert len(inline) == 1
-            assert inline[0].commands == (AggInline.Ping,)
+            assert inline[0].commands == (_AggInline.Ping,)
 
     def when_handler_subscribes_to_multiple_commands():
         def it_lists_all_commands_on_handler():
-            class AggMulti(Domain):
-                class A(Command):
-                    class Done(DomainEvent):
-                        pass
-
-                class B(Command):
-                    class Done(DomainEvent):
-                        pass
-
-            @on(AggMulti.A, AggMulti.B)
-            def both(event) -> AggMulti.A.Done | AggMulti.B.Done:
-                return AggMulti.A.Done()
+            @on(_AggMulti.A, _AggMulti.B)
+            def both(event) -> _AggMulti.A.Done | _AggMulti.B.Done:
+                return _AggMulti.A.Done()
 
             d = EventGraph([both]).domain()
             chs = [ch for ch in d.command_handlers if ch.name == "both"]
             assert len(chs) == 1
-            assert set(chs[0].commands) == {AggMulti.A, AggMulti.B}
+            assert set(chs[0].commands) == {_AggMulti.A, _AggMulti.B}
 
     def when_reactions_domains_both_kinds():
         def it_preserves_registration_order():

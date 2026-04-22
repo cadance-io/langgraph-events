@@ -72,6 +72,19 @@ class _OrphanSuite(Domain):
         label: str = ""
 
 
+class _WidgetSuite(Domain):
+    """Command with a nested DomainEvent outcome — no subscriber."""
+
+    class Place(Command):
+        customer_id: str = ""
+
+        class Placed(DomainEvent):
+            order_id: str = ""
+
+        def handle(self) -> "_WidgetSuite.Place.Placed":
+            return _WidgetSuite.Place.Placed(order_id="o1")
+
+
 def _data_reducer() -> Reducer:
     """Simple reducer that accumulates Started.data values."""
     return Reducer(name="data_items", event_type=Started, fn=lambda e: [e.data])
@@ -4190,19 +4203,9 @@ def describe_OrphanedEventWarning():
         def it_does_not_warn_for_terminal_domain_event_outcomes():
             # DomainEvents nested inside a Command are terminal outcomes —
             # having no subscriber is idiomatic DDD, not an orphan.
-            class Widget(Domain):
-                class Place(Command):
-                    customer_id: str = ""
-
-                    class Placed(DomainEvent):
-                        order_id: str = ""
-
-                    def handle(self) -> "Widget.Place.Placed":
-                        return Widget.Place.Placed(order_id="o1")
-
             with warnings.catch_warnings():
                 warnings.simplefilter("error", OrphanedEventWarning)
-                EventGraph([Widget.Place])
+                EventGraph([_WidgetSuite.Place])
 
         def it_does_not_warn_for_free_standing_domain_events():
             # A DomainEvent nested directly under a Domain (not inside a

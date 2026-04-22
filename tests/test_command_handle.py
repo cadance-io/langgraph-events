@@ -158,6 +158,22 @@ class Shop10(Domain):
             return None
 
 
+# Module-level fixtures for describe_handle_aliased_across_commands.
+class LeftAgg(Domain):
+    class Do(Command):
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> LeftAgg.Do.Done:
+            return LeftAgg.Do.Done()
+
+
+class RightAgg(Domain):
+    class Do(Command):
+        class Done(DomainEvent):
+            pass
+
+
 def describe_Command_handle():
 
     def describe_class_creation():
@@ -381,19 +397,6 @@ def describe_handle_aliased_across_commands():
     def when_second_command_reuses_first_handle():
 
         def it_raises():
-            class LeftAgg(Domain):
-                class Do(Command):
-                    class Done(DomainEvent):
-                        pass
-
-                    def handle(self) -> LeftAgg.Do.Done:
-                        return LeftAgg.Do.Done()
-
-            class RightAgg(Domain):
-                class Do(Command):
-                    class Done(DomainEvent):
-                        pass
-
             RightAgg.Do.__command_handler__ = LeftAgg.Do.__command_handler__
 
             EventGraph([LeftAgg.Do])
