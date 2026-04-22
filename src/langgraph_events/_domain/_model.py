@@ -96,8 +96,8 @@ class DomainModel:
 
         d = graph.domain()
         d.text()                      # human-readable tree
-        d.mermaid()                   # default diagram
-        d.mermaid(view="structure")   # classDiagram
+        d.text(view="structure")      # taxonomy only — no handlers
+        d.mermaid()                   # graph LR choreography
         d.json()                      # serializable snapshot
 
     Data access::

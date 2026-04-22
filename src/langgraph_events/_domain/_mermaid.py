@@ -3,55 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph_events._domain._model import (
     DomainModel,
     _event_label,
     _node_class,
 )
-from langgraph_events._event import (
-    Command as CommandBase,
-)
-from langgraph_events._event import (
-    DomainEvent,
-    Event,
-    Halted,
-    HandlerRaised,
-    IntegrationEvent,
-    Interrupted,
-    Resumed,
-)
-from langgraph_events._event import (
-    Invariant as InvariantBase,
-)
 from langgraph_events._mermaid import MermaidFlowchart, Shape
 
-# Order matters: most specific first (Command/DomainEvent before the
-# SystemEvent subclasses, which share a common base).
-_STEREOTYPE_BASES: tuple[tuple[type, str], ...] = (
-    (CommandBase, "Command"),
-    (DomainEvent, "DomainEvent"),
-    (IntegrationEvent, "IntegrationEvent"),
-    (Halted, "Halted"),
-    (Interrupted, "Interrupted"),
-    (Resumed, "Resumed"),
-    (HandlerRaised, "HandlerRaised"),
-)
-
-
-def _event_stereotype(cls: type) -> str:
-    """Short stereotype label for the structure ``classDiagram``.
-
-    Domain membership doesn't affect the label — the stereotype reflects
-    the event's category in the taxonomy (``DomainEvent``, ``Halted``, …),
-    which matters for readers scanning the diagram.
-    """
-    for base, label in _STEREOTYPE_BASES:
-        if issubclass(cls, base):
-            return label
-    return "SystemEvent"
-
+if TYPE_CHECKING:
+    from langgraph_events._event import Event
+    from langgraph_events._event import (
+        Invariant as InvariantBase,
+    )
 
 # Shape per classDef key — used by the mermaid renderer to dispatch through
 # the ``MermaidFlowchart`` builder. ``halt`` uses the stadium shape too;

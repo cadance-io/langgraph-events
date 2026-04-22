@@ -47,7 +47,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `EventGraph.get_state()` | Method | `GraphState` for a checkpointed thread |
 | `EventGraph.domain()` | Method | Code-derived snapshot — domains, commands, outcomes, handlers, policies, edges, seeds. Returns a `DomainModel` |
 | `DomainModel.text(view=...)` | Method | Human-readable tree; `view="structure"` or `"choreography"` (default) |
-| `DomainModel.mermaid(view=...)` | Method | Mermaid diagram; `"structure"` → `classDiagram`, `"choreography"` → `graph LR` (default) |
+| `DomainModel.mermaid()` | Method | Mermaid `graph LR` choreography diagram (handlers, policies, invariants, edges). For a structure-only view use `text(view="structure")`. |
 | `DomainModel.json()` / `.to_dict()` | Method | JSON-serializable snapshot (event classes encoded as qualnames) |
 | `DomainModel.{Domain, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
 | `DomainModel.invariants` | Field | Tuple of `DomainModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |

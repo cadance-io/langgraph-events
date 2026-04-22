@@ -149,7 +149,6 @@ print(d.text())                     # human-readable tree (choreography)
 print(d.text(view="structure"))     # taxonomy only — no handlers
 
 print(d.mermaid())                  # graph LR flowchart (choreography)
-print(d.mermaid(view="structure"))  # classDiagram of the taxonomy
 
 d.json()                            # JSON snapshot (event classes as qualnames)
 

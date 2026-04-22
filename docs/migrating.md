@@ -76,9 +76,8 @@ print(graph.mermaid())
 # After
 d = graph.domain()
 print(d.text())                      # default view = choreography
-print(d.text(view="structure"))
-print(d.mermaid())                   # default view = choreography
-print(d.mermaid(view="structure"))   # classDiagram
+print(d.text(view="structure"))      # taxonomy only — no handlers
+print(d.mermaid())                   # graph LR choreography
 d.json()                             # JSON snapshot
 d.domains, d.command_handlers, d.policies, d.edges, d.seeds
 ```
