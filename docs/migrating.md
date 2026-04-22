@@ -2,7 +2,7 @@
 
 ## v0.4.0 → v0.5.0
 
-0.5.0 is a large release — event taxonomy (`Namespace`, `Command`, `DomainEvent`), declarative domain-scoped reducers, `invariants=`, strict return-type enforcement, introspection APIs. Most of it is additive vocabulary you can adopt at your own pace. **Six existing behaviours become stricter** and need attention.
+0.5.0 is a large release — event taxonomy (`Namespace`, `Command`, `DomainEvent`), declarative namespace-scoped reducers, `invariants=`, strict return-type enforcement, introspection APIs. Most of it is additive vocabulary you can adopt at your own pace. **Eight existing behaviours become stricter** and need attention.
 
 New to the taxonomy? See [Getting Started](getting-started.md) and [`examples/order.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py). Feature list lives in the [CHANGELOG](https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.md).
 
