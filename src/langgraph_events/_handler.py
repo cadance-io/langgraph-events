@@ -190,6 +190,17 @@ def _build_on_decorator(
                 f"@on() field matcher references {field_name!r}, but "
                 f"no field {field_name!r} exists on ({type_names})"
             )
+        # `invariant=` matches against InvariantViolated.invariant (always
+        # an Invariant instance). A string value would never fire at
+        # runtime — reject it at decoration time so the no-op is caught
+        # before it silently ships.
+        if field_name == "invariant" and not is_type:
+            raise TypeError(
+                f"@on() invariant= must reference an Invariant subclass, "
+                f"not {field_match!r}; InvariantViolated.invariant is "
+                f"always an Invariant instance and a string matcher would "
+                f"never fire."
+            )
 
     def decorator(fn: F) -> F:
         fn._event_types = event_types  # type: ignore[attr-defined]

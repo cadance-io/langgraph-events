@@ -317,6 +317,17 @@ def describe_invariants():
                     def place(event: Order.Place) -> Order.Place.Placed:
                         return Order.Place.Placed(order_id="o1")
 
+        def when_pinned_reactor_uses_string_invariant_matcher():
+
+            def it_raises():
+                # InvariantViolated.invariant is always an Invariant instance,
+                # so a string matcher would never fire. Reject at decoration.
+                with pytest.raises(TypeError, match=r"invariant=.*Invariant subclass"):
+
+                    @on(InvariantViolated, invariant="CustomerNotBanned")
+                    def react(event: InvariantViolated) -> None:
+                        return None
+
 
 # ---------------------------------------------------------------------------
 # Post-command invariant check — scenarios exercise the post-handler gate
