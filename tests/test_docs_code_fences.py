@@ -1,6 +1,6 @@
 """Compile every ```python fence in migrating.md and concepts.md.
 
-A previous revision advertised ``DomainModel.mermaid(view="structure")`` in
+A previous revision advertised ``NamespaceModel.mermaid(view="structure")`` in
 three docs — the method never accepted a ``view`` argument, so users hit a
 ``TypeError`` on first call. Compilation alone catches syntax and
 indentation errors; runtime mismatches still slip through, but this is a
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FENCE_RE = re.compile(r"```python\n(.*?)```", re.DOTALL)
+FENCE_RE = re.compile(r"```python\r?\n(.*?)```", re.DOTALL)
 
 
 def _fenced_python(md_path: Path) -> list[tuple[int, str]]:

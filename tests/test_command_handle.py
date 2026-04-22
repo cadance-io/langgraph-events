@@ -284,7 +284,7 @@ def describe_Command_handle():
                 with pytest.raises(TypeError, match=r"must return|outcomes of"):
                     graph.invoke(RogueAgg.Cmd())
 
-    def describe_from_domains():
+    def describe_from_namespaces():
 
         def when_all_commands_define_handle():
 
@@ -320,11 +320,11 @@ def describe_Command_handle():
         def when_non_domain_argument_passed():
 
             def it_raises_TypeError():
-                class NotAnDomain:
+                class NotANamespace:
                     pass
 
                 with pytest.raises(TypeError, match=r"Namespace"):
-                    EventGraph.from_namespaces(NotAnDomain)  # type: ignore[arg-type]
+                    EventGraph.from_namespaces(NotANamespace)  # type: ignore[arg-type]
 
     def describe_handle_signature_validation():
 

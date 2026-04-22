@@ -2,8 +2,8 @@
 
 Thin typed API for composing ``graph LR/TB`` diagrams with named shapes,
 titled subgraphs, tagged edges, and ``linkStyle`` resolution by tag.
-Nothing public — kept inside the package so ``_domain.py`` can focus on
-the DDD domain model and leave mermaid syntax concerns here.
+Nothing public — kept inside the package so ``_namespace/_model.py`` can
+focus on the DDD namespace model and leave mermaid syntax concerns here.
 """
 
 from __future__ import annotations

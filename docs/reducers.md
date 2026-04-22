@@ -37,13 +37,13 @@ class Order(Namespace):
 graph = EventGraph([Order.Place])   # reducer auto-discovered from Order
 ```
 
-- Only sees events whose `__domain__` matches. Child domains inherit parent reducers (dedup by name).
-- Cross-domain name collisions raise `TypeError` at graph construction.
+- Only sees events whose `__namespace__` matches. Child namespaces inherit parent reducers (dedup by name).
+- Cross-namespace name collisions raise `TypeError` at graph construction.
 - Explicit `reducers=[...]` wins on name conflict with an auto-discovered reducer.
 
 ## Graph-wide reducers
 
-For reducers that span domains or aren't domain-scoped, pass them explicitly via `reducers=[...]`. This is the form used by `message_reducer()`:
+For reducers that span namespaces or aren't namespace-scoped, pass them explicitly via `reducers=[...]`. This is the form used by `message_reducer()`:
 
 ```python
 messages = message_reducer()

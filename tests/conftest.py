@@ -42,11 +42,11 @@ class Completed(IntegrationEvent):
     result: str = ""
 
 
-# Canonical domain used by test_invariant.py / test_domain.py /
-# test_reducer_domain.py. The ``current_status`` reducer demonstrates the
-# declarative domain-reducer form — auto-named "current_status", auto-scoped
-# to Order, auto-discovered by any EventGraph that has a handler subscribed
-# to an Order event.
+# Canonical namespace used by test_invariant.py / test_namespace.py /
+# test_reducer_namespace.py. The ``current_status`` reducer demonstrates
+# the declarative namespace-reducer form — auto-named "current_status",
+# auto-scoped to Order, auto-discovered by any EventGraph that has a
+# handler subscribed to an Order event.
 class Order(Namespace):
     current_status = ScalarReducer(
         event_type=Event,

@@ -335,7 +335,7 @@ def describe_FrontendToolCallRequested():
                 FrontendToolCallRequested()  # type: ignore[call-arg]
 
 
-def describe_Domain():
+def describe_Namespace():
 
     def when_subclassed():
 

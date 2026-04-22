@@ -147,7 +147,60 @@ All examples now use the `Namespace` taxonomy.
 
 Direct imports of the old class names (`from examples.map_reduce import BatchReceived`, etc.) fail. Expected — examples are reference material; copy shapes into your code, don't import from them.
 
-The AG-UI frontend-tool examples `agui_frontend_tools.py` and `agui_confirm_dialog.py` are folded into `conversation.py` (LLM-initiated streaming path inside a `Conversation` domain) and `docs/agui.md` (handler-initiated snippet).
+The AG-UI frontend-tool examples `agui_frontend_tools.py` and `agui_confirm_dialog.py` are folded into `conversation.py` (LLM-initiated streaming path inside a `Conversation` namespace) and `docs/agui.md` (handler-initiated snippet).
+
+### 7. `Domain` renamed to `Namespace`
+
+The grouping class for commands and events is now `Namespace`. `Domain` is reserved for a future release with proper aggregate semantics (identity, consistency boundaries). `DomainEvent` is unchanged — it remains the DDD taxonomy base class for events internal to a bounded context.
+
+```python
+# Before
+from langgraph_events import Domain
+
+class Order(Domain):
+    class Place(Command): ...
+
+graph.domain().domains["Order"]
+EventGraph.from_domains(Order)
+
+# After
+from langgraph_events import Namespace
+
+class Order(Namespace):
+    class Place(Command): ...
+
+graph.namespaces().namespaces["Order"]
+EventGraph.from_namespaces(Order)
+```
+
+Related renames: `__domain__` attribute on nested events → `__namespace__`; `DomainModel` → `NamespaceModel` (with nested `NamespaceModel.Namespace`); `Reducer(domain=...)` / `ScalarReducer(domain=...)` kwarg → `namespace=...`; mermaid subgraph labels read `"<X> namespace"`; JSON `to_dict()` top-level key is `"namespaces"` and now carries `"schema_version": "1"`.
+
+One-liner for code migration:
+
+```bash
+rg -l '\bDomain\b|\.domain\(\)|\.domains\b|from_domains|__domain__' src/ tests/ \
+  | xargs perl -i -pe '
+      s/\bDomain\b/Namespace/g;
+      s/\.domain\(\)/.namespaces()/g;
+      s/\.domains\b/.namespaces/g;
+      s/\bfrom_domains\b/from_namespaces/g;
+      s/\b__domain__\b/__namespace__/g;
+    '
+```
+
+The regex uses `\b` word boundaries, so `DomainEvent` is not matched.
+
+### 8. `FrontendToolCallRequested.name` is required
+
+`FrontendToolCallRequested` now raises `ValueError` on an empty or whitespace-only `name`. Rewrite constructor calls to pass `name=` explicitly:
+
+```python
+# Before
+FrontendToolCallRequested(args={"query": "q"})
+
+# After
+FrontendToolCallRequested(name="search", args={"query": "q"})
+```
 
 ## Non-breaking changes
 
@@ -164,7 +217,7 @@ Yes. Every event must use one of the four base classes: `DomainEvent`, `Integrat
 Yes. Those classes now inherit `SystemEvent` (which inherits `Event`). `isinstance` traverses the MRO.
 
 **Do I need to update my existing tests?**
-Only if you hit one of the six breaking changes above.
+Only if you hit one of the eight breaking changes above.
 
 **Can I mix external `@on(...)` handlers and inline `handle` methods in the same graph?**
 Yes — pass both to `EventGraph([...])`, or call `EventGraph.from_namespaces(Order, handlers=[external_fn])`.

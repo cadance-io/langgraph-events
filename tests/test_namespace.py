@@ -144,7 +144,7 @@ class _AggMulti(Namespace):
             pass
 
 
-def describe_domain_model_shape():
+def describe_namespace_model_shape():
     def when_graph_has_domain():
         def with_command_handler():
             def it_groups_under_domain_then_command_then_outcomes():

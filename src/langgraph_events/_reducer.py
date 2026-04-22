@@ -54,13 +54,14 @@ class BaseReducer(ABC):
     structural multi-type matching.
 
     When declared as a class attribute on a ``Namespace`` subclass, the
-    reducer's ``name`` auto-fills from the attribute name and ``domain``
-    auto-fills to the enclosing class — both via ``__set_name__``.
+    reducer's ``name`` auto-fills from the attribute name and
+    ``namespace`` auto-fills to the enclosing class — both via
+    ``__set_name__``.
     """
 
     name: str
     event_type: type
-    domain: type[Namespace] | None
+    namespace: type[Namespace] | None
 
     def __set_name__(self, owner: type, name: str) -> None:
         # __set_name__ runs before Namespace.__init_subclass__ stamps
@@ -71,8 +72,8 @@ class BaseReducer(ABC):
         if isinstance(owner, type) and issubclass(owner, Namespace):
             if not self.name:
                 self.name = name
-            if self.domain is None:
-                self.domain = owner
+            if self.namespace is None:
+                self.namespace = owner
 
     @abstractmethod
     def state_annotation(self) -> Any:
@@ -134,7 +135,7 @@ class Reducer(BaseReducer):
     fn: Callable[[Any], list[Any]] = field(kw_only=True)
     reducer: ReducerFn = field(kw_only=True, default=operator.add)
     default: list[Any] = field(kw_only=True, default_factory=list)
-    domain: type[Namespace] | None = field(kw_only=True, default=None)
+    namespace: type[Namespace] | None = field(kw_only=True, default=None)
 
     def state_annotation(self) -> Any:
         return Annotated[list, self.reducer]
@@ -148,7 +149,7 @@ class Reducer(BaseReducer):
         for event in events:
             if not isinstance(event, self.event_type):
                 continue
-            if not _matches_namespace(event, self.domain):
+            if not _matches_namespace(event, self.namespace):
                 continue
             contrib = self.fn(event)
             if contrib:
@@ -201,7 +202,7 @@ class ScalarReducer(BaseReducer):
     event_type: type = field(kw_only=True)
     fn: Callable[[Any], Any] = field(kw_only=True)
     default: Any = field(kw_only=True, default=None)
-    domain: type[Namespace] | None = field(kw_only=True, default=None)
+    namespace: type[Namespace] | None = field(kw_only=True, default=None)
 
     def state_annotation(self) -> Any:
         return Annotated[Any, _last_write_wins]
@@ -215,7 +216,7 @@ class ScalarReducer(BaseReducer):
         for event in events:
             if not isinstance(event, self.event_type):
                 continue
-            if not _matches_namespace(event, self.domain):
+            if not _matches_namespace(event, self.namespace):
                 continue
             last = event
         return self.fn(last) if last is not SKIP else SKIP

@@ -44,7 +44,7 @@ def describe_BaseReducer():
                 assert Alpha.current_status.name == "current_status"
 
             def it_fills_domain_from_owner_class():
-                assert Alpha.current_status.domain is Alpha
+                assert Alpha.current_status.namespace is Alpha
 
         def when_declared_outside_domain():
 
@@ -54,7 +54,7 @@ def describe_BaseReducer():
                     event_type=Event,
                     fn=lambda e: e,
                 )
-                assert external.domain is None
+                assert external.namespace is None
 
         def when_name_is_explicitly_set():
 
@@ -69,7 +69,7 @@ def describe_BaseReducer():
                 assert HasExplicitName.r.name == "custom"
 
 
-def describe_Domain():
+def describe_Namespace():
 
     def describe___reducers__():
 
@@ -104,8 +104,8 @@ def describe_Domain():
                 assert names == {"shared", "extra"}
 
 
-def describe_domain_scope_filter():
-    """Reducers with domain= only contribute when the event matches."""
+def describe_namespace_scope_filter():
+    """Reducers with namespace= only contribute when the event matches."""
 
     def when_event_belongs_to_domain():
 

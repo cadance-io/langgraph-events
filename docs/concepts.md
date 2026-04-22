@@ -138,7 +138,7 @@ graph = EventGraph([place, respond], max_rounds=100)
 
 Topology is derived from handler subscriptions — no manual node/edge wiring. `max_rounds` (default 100) auto-sets LangGraph's recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) when exceeded.
 
-### Domain introspection & visualization
+### Namespace introspection & visualization
 
 One entry point — `graph.namespaces()` — returns a `NamespaceModel`: a code-derived snapshot of the structure *and* the event-driven flow (choreography). Render it to text, Mermaid, or JSON:
 
@@ -190,9 +190,9 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 | `log.select(T)` / `log.after(T)` / `log.before(T)` | chainable `EventLog` |
 | `len(log)`, `log[i]` | container protocol |
 
-## Domain as a feature hub
+## Namespace as a feature hub
 
-A `Namespace` is a namespace, and also where related features attach: declarative reducers as class attributes (auto-scoped to the domain's events), `invariants=` on `@on(Namespace.Cmd, ...)`, and domain grouping in `graph.namespaces()`. See [Reducers](reducers.md#on-a-namespace) and [Control Flow](control-flow.md#invariants).
+A `Namespace` groups related commands and events, and is where related features attach: declarative reducers as class attributes (auto-scoped to the namespace's events), `invariants=` on `@on(Namespace.Cmd, ...)`, and namespace grouping in `graph.namespaces()`. See [Reducers](reducers.md#on-a-namespace) and [Control Flow](control-flow.md#invariants).
 
 ## System events
 
