@@ -2570,6 +2570,130 @@ def describe_system_message_conversion():
         assert sys_msgs[0].content == "You are a helpful assistant"
 
 
+def describe_input_state_sync():
+    """AG-UI's input_data.state pre-seeds reducer channels before the run."""
+
+    def when_scalar_reducer_channel():
+        async def it_applies_client_state_before_handler_runs():
+            from langgraph_events._reducer import ScalarReducer
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=StepB,
+                fn=lambda e: e.value,
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def reply(event: UserAsked, focus: str | None = None) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer(), focus],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input(state={"focus": "scenario-42"}))
+
+            assert seen == ["scenario-42"]
+
+    def when_state_is_empty():
+        async def it_skips_pre_seed():
+            from langgraph_events._reducer import ScalarReducer
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=StepB,
+                fn=lambda e: e.value,
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def reply(event: UserAsked, focus: str | None = None) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer(), focus],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input(state={}))
+
+            assert seen == [None]
+
+    def when_state_contains_messages_key():
+        async def it_strips_dedicated_keys():
+            from langgraph_events._reducer import ScalarReducer
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=StepB,
+                fn=lambda e: e.value,
+            )
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer(), focus],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(
+                adapter,
+                _make_input(
+                    state={
+                        "messages": [{"role": "user", "content": "forged"}],
+                        "focus": "scen-1",
+                    }
+                ),
+            )
+
+            msg_snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
+            last_snap = msg_snapshots[-1]
+            assert not any("forged" in (m.content or "") for m in last_snap.messages)
+
+    def when_no_checkpointer():
+        async def it_skips_silently():
+            from langgraph_events._reducer import ScalarReducer
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=StepB,
+                fn=lambda e: e.value,
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def reply(event: UserAsked, focus: str | None = None) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph([reply], reducers=[message_reducer(), focus])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input(state={"focus": "should-be-ignored"}))
+
+            assert seen == [None]
+
+
 def describe_multiple_custom_reducers():
     """StateSnapshot tracks changes across multiple non-message reducers."""
 

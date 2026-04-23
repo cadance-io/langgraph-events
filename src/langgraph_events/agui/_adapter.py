@@ -157,6 +157,38 @@ class AGUIAdapter:
         return await self._graph.compiled.aget_state(config)
 
     @staticmethod
+    def _extract_input_state(input_data: RunAgentInput) -> dict[str, Any] | None:
+        """Return pre-seedable keys from ``input_data.state``.
+
+        AG-UI's ``state`` field carries client-owned reducer state.  Keys that
+        have dedicated AG-UI events (``messages``) are filtered out —
+        ``MessagesSnapshotEvent`` / ``TextMessageEvent`` drive those.
+        """
+        raw = input_data.state
+        if not isinstance(raw, dict) or not raw:
+            return None
+        filtered = _strip_dedicated_keys(raw)
+        return filtered or None
+
+    async def _apre_seed_input_state(
+        self, input_data: RunAgentInput, config: Any
+    ) -> None:
+        """Apply ``input_data.state`` to checkpoint channels before the run.
+
+        This honours AG-UI's state-sync contract: the client ships the
+        authoritative reducer state on every run.  Values are routed through
+        each channel's reducer, so scalar channels (``ScalarReducer``) replace
+        and list channels (``Reducer``) accumulate — pick reducer type
+        accordingly.  No-ops if no checkpointer or no syncable keys.
+        """
+        if self._graph._checkpointer is None:
+            return
+        state = self._extract_input_state(input_data)
+        if state is None:
+            return
+        await self._graph.apre_seed(config, state)
+
+    @staticmethod
     def _build_checkpoint_state(snapshot: Any) -> CheckpointState:
         """Build resume-factory state payload from a checkpoint snapshot."""
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
@@ -566,6 +598,7 @@ class AGUIAdapter:
         config: Any = self._build_config(input_data, thread_id)
 
         try:
+            await self._apre_seed_input_state(input_data, config)
             async for agui_event in self._stream_event_source(input_data, ctx, config):
                 yield agui_event
 

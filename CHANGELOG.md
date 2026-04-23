@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `AGUIAdapter.stream()` now consumes `RunAgentInput.state` and pre-seeds reducer channels via `graph.apre_seed()` before the run. Honours the AG-UI spec's state-sync contract: the client ships the authoritative reducer state on every run, and the adapter routes each key through its channel's reducer. The dedicated `messages` key is filtered out (driven by `MessagesSnapshotEvent` / `TextMessageEvent`). No-op without a checkpointer or on empty state. Use `ScalarReducer` for channels meant to be replaced by the client (last-write-wins); list `Reducer` channels will accumulate.
+
 ## [0.5.0] - 2026-04-22
 
 ### Added
