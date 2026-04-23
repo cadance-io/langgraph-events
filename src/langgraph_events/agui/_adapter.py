@@ -22,7 +22,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 
-from langgraph_events._event import Interrupted
+from langgraph_events._event import Event, Interrupted
 from langgraph_events.stream import (
     CustomEventFrame,
     LLMStreamEnd,
@@ -34,6 +34,7 @@ from langgraph_events.stream import (
 )
 
 from ._context import MapperContext
+from ._events import FrontendStateMutated
 from ._mappers import (
     FallbackMapper,
     build_messages_snapshot,
@@ -277,6 +278,83 @@ class AGUIAdapter:
             and checkpoint_state["is_interrupted"]
         )
 
+    @staticmethod
+    def _extract_frontend_state(
+        input_data: RunAgentInput,
+    ) -> dict[str, Any] | None:
+        """Return the pre-filtered client state, or ``None`` if there's
+        nothing to emit.
+
+        AG-UI ships ``RunAgentInput.state`` as a snapshot.  Dedicated keys
+        (``messages``) are driven by purpose-built AG-UI events and are
+        stripped here so they don't collide.  Empty / non-dict state is
+        treated as "no update."
+        """
+        raw = input_data.state
+        if not isinstance(raw, dict) or not raw:
+            return None
+        filtered = _strip_dedicated_keys(raw)
+        return filtered or None
+
+    def _prepend_frontend_state(
+        self,
+        input_data: RunAgentInput,
+        seed: Event | list[Event],
+    ) -> list[Event]:
+        """Return a seed list with ``FrontendStateMutated`` prepended
+        when the input carries non-empty, non-dedicated state.
+
+        Used on the non-resume path; callers pass the result to
+        ``graph.astream_events(...)``.
+        """
+        seed_list: list[Event] = list(seed) if isinstance(seed, list) else [seed]
+        filtered = self._extract_frontend_state(input_data)
+        if filtered is None:
+            return seed_list
+        return [FrontendStateMutated(state=filtered), *seed_list]  # type: ignore[call-arg]
+
+    async def _apply_frontend_state_for_resume(
+        self,
+        input_data: RunAgentInput,
+        config: Any,
+    ) -> None:
+        """Write client state directly to reducer channels via ``apre_seed``.
+
+        NOTE: On resume we bypass the ``FrontendStateMutated`` dispatch
+        path.  ``ainvoke`` on a thread with a pending interrupt would
+        consume the interrupt before ``astream_resume`` runs, so we
+        write channel values directly (matching state key -> channel
+        name).  Trade-off: the reducer's ``fn`` is not invoked on
+        resume — in the idiomatic ``fn=lambda e: e.state.get(name,
+        SKIP)`` pattern the value flows through unchanged, but
+        non-identity ``fn`` logic applies only on non-resume runs.
+        No-op when the input state is empty or contains only dedicated
+        keys.
+        """
+        filtered = self._extract_frontend_state(input_data)
+        if filtered is None:
+            return
+        await self._graph.apre_seed(config, filtered)
+
+    async def _resume_event_stream(
+        self,
+        input_data: RunAgentInput,
+        resume_event: Any,
+        config: Any,
+    ) -> AsyncIterator[StreamItem]:
+        """Resume path that first commits FrontendStateMutated to the
+        checkpoint, then defers to ``astream_resume``.
+        """
+        await self._apply_frontend_state_for_resume(input_data, config)
+        async for item in self._graph.astream_resume(
+            resume_event,
+            include_reducers=self._include_reducers,
+            include_llm_tokens=True,
+            include_custom_events=True,
+            config=config,
+        ):
+            yield item
+
     def _build_event_stream(
         self,
         input_data: RunAgentInput,
@@ -286,16 +364,11 @@ class AGUIAdapter:
     ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream."""
         if resume_event is not None:
-            return self._graph.astream_resume(
-                resume_event,
-                include_reducers=self._include_reducers,
-                include_llm_tokens=True,
-                include_custom_events=True,
-                config=config,
-            )
+            return self._resume_event_stream(input_data, resume_event, config)
         seed = self._call_seed_factory(input_data, checkpoint_state)
+        seeds = self._prepend_frontend_state(input_data, seed)
         return self._graph.astream_events(
-            seed,
+            seeds,
             include_reducers=self._include_reducers,
             include_llm_tokens=True,
             include_custom_events=True,

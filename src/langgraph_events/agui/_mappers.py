@@ -25,6 +25,7 @@ from langgraph_events._event import (
     SystemPromptSet,
 )
 
+from ._events import FrontendStateMutated
 from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
@@ -109,10 +110,16 @@ def _langchain_to_agui_messages(
 
 
 class SkipInternalMapper:
-    """Suppress framework-internal events (Resumed, SystemPromptSet)."""
+    """Suppress framework-internal events (Resumed, SystemPromptSet,
+    FrontendStateMutated).
+
+    ``FrontendStateMutated`` originates from the client — echoing it back
+    over the wire is redundant.  Its downstream reducer changes surface
+    through the usual ``StateSnapshotEvent`` path.
+    """
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        if isinstance(event, (Resumed, SystemPromptSet)):
+        if isinstance(event, (Resumed, SystemPromptSet, FrontendStateMutated)):
             return []
         return None
 
