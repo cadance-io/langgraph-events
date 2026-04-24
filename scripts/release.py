@@ -61,6 +61,11 @@ def compute_new_version(current: str, arg: str) -> str:
     return arg
 
 
+def current_branch() -> str:
+    result = _run(["git", "branch", "--show-current"])
+    return result.stdout.strip()
+
+
 def preflight(new_version: str) -> None:
     errors: list[str] = []
 
@@ -68,10 +73,11 @@ def preflight(new_version: str) -> None:
     if result.stdout.strip():
         errors.append("Working tree is not clean. Commit or stash changes first.")
 
-    result = _run(["git", "branch", "--show-current"])
-    branch = result.stdout.strip()
-    if branch != "main":
-        errors.append(f"Must be on main branch (currently on '{branch}').")
+    branch = current_branch()
+    if branch != "main" and not branch.startswith("release/"):
+        errors.append(
+            f"Must be on main or a release/* branch (currently on '{branch}')."
+        )
 
     changelog = (ROOT / "CHANGELOG.md").read_text()
     unreleased_match = re.search(
@@ -237,9 +243,10 @@ def main() -> None:
     if not args.dry_run:
         print("\nCommitting and tagging...", file=sys.stderr)
         commit_and_tag(new)
+        branch = current_branch()
         print(
             f"\n✅ Release v{new} is ready. Run:\n\n"
-            f"  git push origin main v{new}\n\n"
+            f"  git push origin {branch} v{new}\n\n"
             f"This will trigger the publish workflow (TestPyPI → PyPI).",
             file=sys.stderr,
         )
