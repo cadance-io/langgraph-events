@@ -111,6 +111,13 @@ class ErrorTrigger(Event):
         return {}
 
 
+class FocusLogged(Event):
+    value: str = ""
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"value": self.value}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -3244,3 +3251,451 @@ def describe_detect_new_tool_results():
 
             with pytest.raises(ValueError, match=r"tool_call_id"):
                 detect_new_tool_results(inp, {"messages": []})
+
+
+def describe_frontend_state_mutated_event_class():
+    """Shape checks for the new FrontendStateMutated event."""
+
+    def when_instantiated():
+        def it_is_an_event():
+            from langgraph_events.agui import FrontendStateMutated
+
+            event = FrontendStateMutated(state={"focus": "scene-1"})
+            assert isinstance(event, Event)
+            assert event.state == {"focus": "scene-1"}
+
+        def it_defaults_to_empty_state():
+            from langgraph_events.agui import FrontendStateMutated
+
+            event = FrontendStateMutated()
+            assert event.state == {}
+
+
+def describe_frontend_state_mutated():
+    """AG-UI adapter emits FrontendStateMutated before the seed event."""
+
+    def when_state_has_non_dedicated_keys():
+        async def it_applies_scalar_reducer_before_seed_handler_runs():
+            from langgraph_events import SKIP, ScalarReducer
+            from langgraph_events.agui import FrontendStateMutated
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=FrontendStateMutated,
+                fn=lambda e: e.state.get("focus", SKIP),
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def reply(event: UserAsked, focus: str | None = None) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer(), focus],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input(state={"focus": "scene-42"}))
+
+            assert seen == ["scene-42"]
+
+        async def it_records_frontend_state_mutated_in_event_log():
+            from langgraph_events.agui import FrontendStateMutated
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            config = {"configurable": {"thread_id": "thread-fsm-1"}}
+            await _collect(
+                adapter,
+                _make_input(thread_id="thread-fsm-1", state={"focus": "scene-42"}),
+            )
+
+            log = graph.get_state(config).events
+            fsm_events = [e for e in log if isinstance(e, FrontendStateMutated)]
+            assert len(fsm_events) == 1
+            assert fsm_events[0].state == {"focus": "scene-42"}
+
+            # Ordering: FrontendStateMutated must precede UserAsked in the log.
+            indices = {type(e).__name__: i for i, e in enumerate(log)}
+            assert indices["FrontendStateMutated"] < indices["UserAsked"]
+
+    def when_state_is_empty():
+        async def it_does_not_emit_frontend_state_mutated():
+            from langgraph_events.agui import FrontendStateMutated
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            config = {"configurable": {"thread_id": "thread-fsm-empty"}}
+            await _collect(
+                adapter,
+                _make_input(thread_id="thread-fsm-empty", state={}),
+            )
+
+            log = graph.get_state(config).events
+            assert not any(isinstance(e, FrontendStateMutated) for e in log)
+
+    def when_state_is_none():
+        async def it_does_not_emit_frontend_state_mutated():
+            from langgraph_events.agui import FrontendStateMutated
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            config = {"configurable": {"thread_id": "thread-fsm-none"}}
+            await _collect(
+                adapter,
+                _make_input(thread_id="thread-fsm-none", state=None),
+            )
+
+            log = graph.get_state(config).events
+            assert not any(isinstance(e, FrontendStateMutated) for e in log)
+
+    def when_state_contains_only_dedicated_keys():
+        async def it_does_not_emit_frontend_state_mutated():
+            from langgraph_events.agui import FrontendStateMutated
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            config = {"configurable": {"thread_id": "thread-fsm-msgs-only"}}
+            await _collect(
+                adapter,
+                _make_input(
+                    thread_id="thread-fsm-msgs-only",
+                    state={"messages": [{"role": "user", "content": "forged"}]},
+                ),
+            )
+
+            log = graph.get_state(config).events
+            assert not any(isinstance(e, FrontendStateMutated) for e in log)
+
+    def when_state_has_dedicated_plus_other_keys():
+        async def it_strips_dedicated_keys_from_the_emitted_event():
+            from langgraph_events.agui import FrontendStateMutated
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            config = {"configurable": {"thread_id": "thread-fsm-mixed"}}
+            await _collect(
+                adapter,
+                _make_input(
+                    thread_id="thread-fsm-mixed",
+                    state={
+                        "messages": [{"role": "user", "content": "forged"}],
+                        "focus": "scene-7",
+                    },
+                ),
+            )
+
+            log = graph.get_state(config).events
+            fsm_events = [e for e in log if isinstance(e, FrontendStateMutated)]
+            assert len(fsm_events) == 1
+            assert fsm_events[0].state == {"focus": "scene-7"}
+            assert "messages" not in fsm_events[0].state
+
+    def when_no_checkpointer():
+        async def it_still_applies_state_within_the_run():
+            from langgraph_events import SKIP, ScalarReducer
+            from langgraph_events.agui import FrontendStateMutated
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=FrontendStateMutated,
+                fn=lambda e: e.state.get("focus", SKIP),
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def reply(event: UserAsked, focus: str | None = None) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer(), focus],
+                # No checkpointer — used to be a hard skip under apre_seed.
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input(state={"focus": "no-ckpt"}))
+
+            assert seen == ["no-ckpt"]
+
+    def when_reducer_fn_transforms_the_value():
+        """Witnesses the documented resume-path asymmetry:
+
+        - non-resume: state flows through the reducer's ``fn`` via event
+          dispatch, so the channel holds the transformed value.
+        - resume: the adapter writes channel values directly via
+          ``apre_seed``, bypassing ``fn``; the channel holds the raw
+          client value.
+        """
+
+        async def it_applies_the_transformation_on_non_resume():
+            from langgraph_events import SKIP, ScalarReducer
+            from langgraph_events.agui import FrontendStateMutated
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=FrontendStateMutated,
+                fn=lambda e: e.state["focus"].upper() if "focus" in e.state else SKIP,
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def reply(event: UserAsked, focus: str | None = None) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer(), focus],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input(state={"focus": "scene-lc"}))
+
+            assert seen == ["SCENE-LC"]
+
+        async def it_bypasses_the_transformation_on_resume():
+            from langgraph_events import SKIP, ScalarReducer
+            from langgraph_events.agui import FrontendStateMutated
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=FrontendStateMutated,
+                fn=lambda e: e.state["focus"].upper() if "focus" in e.state else SKIP,
+            )
+            seen: list[str | None] = []
+
+            @on(UserAsked)
+            def ask(event: UserAsked) -> ApprovalRequested:
+                return ApprovalRequested(draft="ship it?")
+
+            @on(ApprovalGiven)
+            def finish(
+                event: ApprovalGiven,
+                focus: str | None = None,
+            ) -> AgentReplied:
+                seen.append(focus)
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [ask, finish],
+                reducers=[message_reducer(), focus],
+                checkpointer=MemorySaver(),
+            )
+
+            thread_id = "thread-fsm-fn-bypass"
+            config = {"configurable": {"thread_id": thread_id}}
+
+            await graph.ainvoke(UserAsked(question="approve?"), config=config)
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="unused"),
+                resume_factory=lambda inp: ApprovalGiven(approved=True),
+            )
+            await _collect(
+                adapter,
+                _make_input(
+                    thread_id=thread_id,
+                    state={"focus": "scene-lc"},
+                ),
+            )
+
+            # Raw value — fn's `.upper()` transformation was bypassed.
+            assert seen == ["scene-lc"]
+
+    def when_handler_subscribes_to_frontend_state_mutated():
+        async def it_fires_and_its_output_event_appears_in_the_log():
+            from langgraph_events.agui import FrontendStateMutated
+
+            @on(FrontendStateMutated)
+            def log_focus(event: FrontendStateMutated) -> FocusLogged | None:
+                focus = event.state.get("focus")
+                if focus is None:
+                    return None
+                return FocusLogged(value=focus)
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [log_focus, reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            config = {"configurable": {"thread_id": "thread-fsm-handler"}}
+            await _collect(
+                adapter,
+                _make_input(
+                    thread_id="thread-fsm-handler",
+                    state={"focus": "handler-case"},
+                ),
+            )
+
+            log = graph.get_state(config).events
+            focus_events = [e for e in log if isinstance(e, FocusLogged)]
+            assert len(focus_events) == 1
+            assert focus_events[0].value == "handler-case"
+
+    def when_resuming():
+        def with_state_change_from_client():
+            async def it_applies_state_before_resume_event_handler_runs():
+                from langgraph_events import SKIP, ScalarReducer
+                from langgraph_events.agui import FrontendStateMutated
+
+                focus = ScalarReducer(
+                    name="focus",
+                    event_type=FrontendStateMutated,
+                    fn=lambda e: e.state.get("focus", SKIP),
+                )
+                seen: list[str | None] = []
+
+                @on(UserAsked)
+                def ask(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="ship it?")
+
+                @on(ApprovalGiven)
+                def finish(
+                    event: ApprovalGiven,
+                    focus: str | None = None,
+                ) -> AgentReplied:
+                    seen.append(focus)
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph(
+                    [ask, finish],
+                    reducers=[message_reducer(), focus],
+                    checkpointer=MemorySaver(),
+                )
+
+                thread_id = "thread-fsm-resume"
+                config = {"configurable": {"thread_id": thread_id}}
+
+                # Drive the graph to an interrupt (bypassing the adapter —
+                # mirrors the priming pattern in
+                # `it_suppresses_resumed_events`).
+                await graph.ainvoke(UserAsked(question="approve?"), config=config)
+
+                # Now resume via the adapter, shipping client state along
+                # with the resume input.  The checkpoint's pending
+                # interrupt causes the adapter to take the resume branch.
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id=thread_id,
+                        state={"focus": "resume-case"},
+                    ),
+                )
+
+                assert seen == ["resume-case"]
+
+    def when_mapping_to_agui_output():
+        async def it_does_not_warn_about_missing_agui_dict():
+            from langgraph_events.agui import FrontendStateMutated
+            from langgraph_events.agui._mappers import _warned_classes
+
+            # Ensure the warning can fire for this class in this test run.
+            _warned_classes.discard(FrontendStateMutated)
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="ok"))
+
+            graph = EventGraph(
+                [reply],
+                reducers=[message_reducer()],
+                checkpointer=MemorySaver(),
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter("always")
+                events = await _collect(
+                    adapter,
+                    _make_input(state={"focus": "wire-check"}),
+                )
+
+            # No missing-agui_dict warning for FrontendStateMutated.
+            assert not any("FrontendStateMutated" in str(w.message) for w in captured)
+            # And no CustomEvent echoing the event to the client.
+            custom_names = [e.name for e in events if isinstance(e, CustomEvent)]
+            assert "FrontendStateMutated" not in custom_names
