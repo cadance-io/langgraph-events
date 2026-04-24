@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-24
+
 ### Added
 - `AGUIAdapter` now emits a new built-in `FrontendStateMutated` event (an `Event`, exported from `langgraph_events.agui`) as the first event of each run when `RunAgentInput.state` carries non-empty client-owned state. The dedicated `messages` key is filtered out (driven by `MessagesSnapshotEvent` / `TextMessageEvent`). Reducers mirroring client-driven channels subscribe to it like any other event — e.g. `ScalarReducer(event_type=FrontendStateMutated, fn=lambda e: e.state.get("focus", SKIP))` — and handlers can optionally `@on(FrontendStateMutated)` to react. On resume, the adapter writes the filtered state directly to reducer channels via `graph.apre_seed` before calling `astream_resume` (LangGraph's `ainvoke` on a pending-interrupt thread would consume the interrupt); in the idiomatic state-key-equals-channel-name pattern the values flow through identically to the non-resume path. `FrontendStateMutated` is not echoed back to the client — its downstream reducer changes surface via the usual `StateSnapshotEvent` path. Works with or without a checkpointer on the non-resume path.
 
@@ -65,7 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/cadance-io/langgraph-events/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cadance-io/langgraph-events/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cadance-io/langgraph-events/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/cadance-io/langgraph-events/compare/v0.2.0...v0.2.1
