@@ -18,7 +18,7 @@ Event-driven abstraction for LangGraph. State IS events.
 
 ## Release
 
-Use `uv run scripts/release.py {major|minor|patch|X.Y.Z}` — do not hand-edit version strings. The script bumps `pyproject.toml`/`README.md`/`docs/index.md`, stamps `[Unreleased]` in `CHANGELOG.md` with today's date, runs `uv lock`, commits as `release: vX.Y.Z`, and tags. Preflight requires a clean working tree on `main` and a non-empty `[Unreleased]` section. Add `--dry-run` to preview. After it runs: `git push origin main vX.Y.Z` triggers the TestPyPI → PyPI publish workflow.
+Use `uv run scripts/release.py {major|minor|patch|X.Y.Z}` — do not hand-edit version strings. The script bumps `pyproject.toml`/`README.md`/`docs/index.md`, stamps `[Unreleased]` in `CHANGELOG.md` with today's date, runs `uv lock`, commits as `release: vX.Y.Z`, and tags. Preflight requires a clean working tree on `main` or any `release/*` branch, plus a non-empty `[Unreleased]` section. Add `--dry-run` to preview. After it runs, the final message prints the exact `git push origin <branch> vX.Y.Z` command to run, which triggers the TestPyPI → PyPI publish workflow.
 
 ## Conventions
 
