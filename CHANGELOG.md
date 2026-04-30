@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-04-30
+
 ### Added
 - **agui**: `AGUIAdapter(include_reducers=...)` validation — malformed values (anything other than `bool | list[str]`) now raise `TypeError` at construction instead of silently producing empty snapshots at runtime.
 
@@ -110,7 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/cadance-io/langgraph-events/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/cadance-io/langgraph-events/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cadance-io/langgraph-events/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/cadance-io/langgraph-events/compare/v0.3.0...v0.4.0
