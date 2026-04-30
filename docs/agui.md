@@ -89,6 +89,43 @@ Events without `agui_dict()` are skipped with a one-time warning.
 
 `StreamFrame` reducer data is emitted outside the mapper chain as `StateSnapshot` and `MessagesSnapshot` events (`include_reducers` defaults to `True`). The `message_reducer()` must be registered on the `EventGraph` for `MessagesSnapshot` delivery.
 
+### Shaping client-facing state
+
+`AGUIAdapter(include_reducers=...)` controls what reducer state crosses the wire. It accepts:
+
+- `True` (default) — ship every user reducer.
+- `list[str]` — allow-list (e.g. `["focus", "scene"]`).
+- `False` — ship no user reducers.
+- `Callable[[dict], dict]` — a `StateProjector` for hide / redact / rename / reshape.
+
+The same value is applied symmetrically to outbound `StateSnapshotEvent` and inbound `RunAgentInput.state` echo (so a stale or untrusted client can't inject keys you've decided are internal). Framework-internal channels (`events`, `_cursor`, `_pending`, `_round`) and dedicated AG-UI keys (`messages`) are always stripped first — your projector never sees them.
+
+Hide a few internal reducers with the `drop_reducers()` builder:
+
+```python
+from langgraph_events.agui import AGUIAdapter, drop_reducers
+
+adapter = AGUIAdapter(
+    graph=graph,
+    seed_factory=lambda inp: UserAsked(question=...),
+    include_reducers=drop_reducers("debug_count", "scratch"),
+)
+```
+
+Custom projection (redact / transform):
+
+```python
+def project(reducers: dict) -> dict:
+    out = dict(reducers)
+    if "user" in out:
+        out["user"] = mask_pii(out["user"])
+    return out
+
+adapter = AGUIAdapter(graph=g, seed_factory=..., include_reducers=project)
+```
+
+When `include_reducers` is a callable, the adapter activates *all* reducers at the graph level (it can't introspect names from a callable) — projection happens after computation. For perf-sensitive setups with expensive reducers, prefer the `list[str]` form.
+
 When reducer delta metadata is available (`StreamFrame.changed_reducers`, emitted by `EventGraph` v2 streaming), the adapter suppresses redundant snapshots:
 
 - `MessagesSnapshot` is emitted only when the `messages` reducer changed.
@@ -216,6 +253,19 @@ adapter = AGUIAdapter(
 When `resume_factory` returns an `Event`, the adapter uses `graph.astream_resume()` internally instead of `graph.astream_events()`. When it returns `None`, a fresh run is started with the `seed_factory`.
 
 The second `checkpoint_state` argument is optional; one-argument factories continue to work.
+
+### Frontend state on resume
+
+When `RunAgentInput.state` is populated alongside a resume, the adapter routes it through `FrontendStateMutated` exactly like the non-resume path:
+
+1. The state dict is projected via `include_reducers` (framework internals + dedicated keys stripped, then your projector if any).
+2. A `FrontendStateMutated(state=projected)` event is built.
+3. For each reducer subscribing to `FrontendStateMutated`, the adapter computes its contribution and writes it to the channel via `apre_seed` *before* the resume's domain dispatch — so the reducer's `fn` runs (transformations, `SKIP`) and handlers reading the channel via parameter injection in the resume step see the updated value.
+4. FSM is also injected as a seed to `astream_resume` so it appears in the output stream and the persisted audit log.
+
+**Reducers driven by backend domain events are not affected by FSM dispatch** — their channels stay intact regardless of what the client echoes. The resume's domain event flows through normal dispatch and wins for shared keys.
+
+**`@on(FrontendStateMutated)` handlers do not fire on resume.** LangGraph's `Command(resume=...)` carries one value, and seeds are dispatched out-of-graph. Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for resume-time side effects.
 
 ## Frontend Tools
 

@@ -1201,6 +1201,195 @@ def describe_AGUIAdapter():
                 snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
                 assert len(snapshots) >= 1
 
+        def when_include_reducers_is_callable():
+            @pytest.mark.asyncio
+            async def it_applies_projector_to_outbound_state_snapshot():
+                """A StateProjector hides reducers from the wire."""
+                from langgraph_events import SKIP, ScalarReducer
+                from langgraph_events.agui import drop_reducers
+
+                focus = ScalarReducer(
+                    name="focus",
+                    event_type=UserAsked,
+                    fn=lambda e: e.question or SKIP,
+                )
+                debug_count = ScalarReducer(
+                    name="debug_count",
+                    event_type=UserAsked,
+                    fn=lambda e: 1,
+                )
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph(
+                    [reply], reducers=[message_reducer(), focus, debug_count]
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="scene-1"),
+                    include_reducers=drop_reducers("debug_count"),
+                )
+                events = await _collect(adapter, _make_input())
+                snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+                assert len(snapshots) >= 1
+                last = snapshots[-1].snapshot
+                assert last.get("focus") == "scene-1"
+                assert "debug_count" not in last
+                assert "messages" not in last  # always stripped (dedicated)
+                assert "events" not in last  # always stripped (framework)
+
+            @pytest.mark.asyncio
+            async def it_strips_framework_keys_before_projector_runs():
+                """The projector receives a dict already stripped of `events`
+                and `messages`, so devs never have to think about them."""
+                from langgraph_events import SKIP, ScalarReducer
+
+                focus = ScalarReducer(
+                    name="focus",
+                    event_type=UserAsked,
+                    fn=lambda e: e.question or SKIP,
+                )
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                seen: list[dict[str, Any]] = []
+
+                def projector(reducers: dict[str, Any]) -> dict[str, Any]:
+                    seen.append(dict(reducers))
+                    return reducers
+
+                graph = EventGraph([reply], reducers=[message_reducer(), focus])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="scene-2"),
+                    include_reducers=projector,
+                )
+                await _collect(adapter, _make_input())
+
+                assert seen, "projector was never invoked"
+                for snap in seen:
+                    assert "events" not in snap
+                    assert "messages" not in snap
+
+            @pytest.mark.asyncio
+            async def it_applies_projector_to_inbound_frontend_state():
+                """Projector applies symmetrically: a stale client echoing a
+                hidden key shouldn't sneak it back into the graph."""
+                from langgraph_events import SKIP, ScalarReducer
+                from langgraph_events.agui import FrontendStateMutated, drop_reducers
+
+                focus = ScalarReducer(
+                    name="focus",
+                    event_type=UserAsked,
+                    fn=lambda e: e.question or SKIP,
+                )
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph(
+                    [reply],
+                    reducers=[message_reducer(), focus],
+                    checkpointer=MemorySaver(),
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    include_reducers=drop_reducers("debug_count"),
+                )
+                config = {"configurable": {"thread_id": "thread-fsm-projector"}}
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id="thread-fsm-projector",
+                        state={
+                            "focus": "client-set",
+                            "debug_count": 999,
+                        },
+                    ),
+                )
+
+                log = graph.get_state(config).events
+                fsm_events = [e for e in log if isinstance(e, FrontendStateMutated)]
+                assert len(fsm_events) == 1
+                assert fsm_events[0].state == {"focus": "client-set"}
+                assert "debug_count" not in fsm_events[0].state
+
+            @pytest.mark.asyncio
+            async def it_activates_all_user_reducers():
+                """A projector callable forces all reducers to be computed at
+                the graph level (we can't introspect names from a callable)."""
+                from langgraph_events import SKIP, ScalarReducer
+
+                focus = ScalarReducer(
+                    name="focus",
+                    event_type=UserAsked,
+                    fn=lambda e: e.question or SKIP,
+                )
+                scene = ScalarReducer(
+                    name="scene",
+                    event_type=UserAsked,
+                    fn=lambda e: f"@{e.question}" if e.question else SKIP,
+                )
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph([reply], reducers=[message_reducer(), focus, scene])
+                # Identity projector — should ship every user reducer.
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="scene-3"),
+                    include_reducers=lambda r: r,
+                )
+                events = await _collect(adapter, _make_input())
+                snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+                assert snapshots
+                last = snapshots[-1].snapshot
+                assert last.get("focus") == "scene-3"
+                assert last.get("scene") == "@scene-3"
+
+        def when_using_drop_helper():
+            def when_names_match_keys():
+                def it_drops_those_keys():
+                    from langgraph_events.agui import drop_reducers
+
+                    projector = drop_reducers("a", "b")
+                    assert projector({"a": 1, "b": 2, "c": 3}) == {"c": 3}
+
+            def when_names_are_not_present():
+                def it_is_a_no_op():
+                    """Silent: unlike the list form, drop_reducers() does not
+                    warn on unknowns — devs commonly pre-declare hides for
+                    reducers that may not be wired in every deployment."""
+                    from langgraph_events.agui import drop_reducers
+
+                    projector = drop_reducers("nonexistent")
+                    assert projector({"a": 1}) == {"a": 1}
+
+        def when_include_reducers_is_malformed():
+            def it_raises_typeerror_at_construction():
+                """Garbage values (int, dict, etc.) fail loudly at init,
+                not silently as empty snapshots at runtime."""
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                with pytest.raises(TypeError, match="include_reducers"):
+                    AGUIAdapter(
+                        graph=graph,
+                        seed_factory=lambda inp: UserAsked(question="hi"),
+                        include_reducers=42,  # type: ignore[arg-type]
+                    )
+
     def describe_seed_factory():
         async def it_passes_input_to_factory():
             received_inputs: list[Any] = []
@@ -1469,6 +1658,61 @@ def describe_connect():
             assert captured[0]["configurable"]["tenant_id"] == "acme"
             assert captured[0]["configurable"]["thread_id"] == "t-connect-config"
             assert any(e.type == EventType.STATE_SNAPSHOT for e in events)
+
+    def when_internal_audit_log_present():
+        async def it_strips_events_audit_log_from_state_snapshot():
+            """`events` is graph-internal and must not leak into client state.
+
+            The EventGraph auto-injects an `events` reducer for the cumulative
+            audit log.  AG-UI clients echo any `state.*` key back via
+            `RunAgentInput.state` on every Send — round-tripping the entire
+            audit log every run is O(history) wire bloat and the log itself is
+            never a client concern.
+            """
+            from langgraph_events import SKIP, ScalarReducer
+
+            focus = ScalarReducer(
+                name="focus",
+                event_type=UserAsked,
+                fn=lambda e: e.question or SKIP,
+            )
+
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="hi"))
+
+            graph = EventGraph(
+                [reply],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer(), focus],
+            )
+            config = {"configurable": {"thread_id": "t-connect-no-events-leak"}}
+            await graph.ainvoke(UserAsked(question="scene-7"), config=config)
+
+            # Sanity: the checkpoint really does carry a non-empty audit log.
+            checkpoint_events = graph.get_state(config).events
+            assert len(checkpoint_events) >= 1
+
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="unused"),
+            )
+            events = [
+                event
+                async for event in adapter.connect(
+                    _make_input(thread_id="t-connect-no-events-leak")
+                )
+            ]
+
+            state_snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+            assert len(state_snapshots) == 1
+            snapshot = state_snapshots[0].snapshot
+            # The internal audit log must NOT leak to the client.
+            assert "events" not in snapshot
+            # Dedicated channels remain stripped.
+            assert "messages" not in snapshot
+            # User-defined reducers must STILL be present (no over-filtering).
+            assert snapshot.get("focus") == "scene-7"
 
 
 def describe_config_passthrough():
@@ -3451,6 +3695,77 @@ def describe_frontend_state_mutated():
             assert fsm_events[0].state == {"focus": "scene-7"}
             assert "messages" not in fsm_events[0].state
 
+    def when_state_echoes_internal_events():
+        def when_state_also_has_user_keys():
+            async def it_strips_internal_keys_from_the_emitted_event():
+                """Defense-in-depth: a stale client echoing `state.events` must
+                never inject the EventGraph audit log back into the graph.
+                """
+                from langgraph_events.agui import FrontendStateMutated
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph(
+                    [reply],
+                    reducers=[message_reducer()],
+                    checkpointer=MemorySaver(),
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                )
+                config = {"configurable": {"thread_id": "thread-fsm-events-echo"}}
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id="thread-fsm-events-echo",
+                        state={
+                            "events": [
+                                {"type": "stale", "payload": "from-client"},
+                            ],
+                            "user_key": "v",
+                        },
+                    ),
+                )
+
+                log = graph.get_state(config).events
+                fsm_events = [e for e in log if isinstance(e, FrontendStateMutated)]
+                assert len(fsm_events) == 1
+                assert fsm_events[0].state == {"user_key": "v"}
+                assert "events" not in fsm_events[0].state
+
+        def when_state_only_has_internal_keys():
+            async def it_drops_the_event_entirely():
+                """If the only key is the internal `events`, no FSM event fires."""
+                from langgraph_events.agui import FrontendStateMutated
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph(
+                    [reply],
+                    reducers=[message_reducer()],
+                    checkpointer=MemorySaver(),
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                )
+                config = {"configurable": {"thread_id": "thread-fsm-events-only"}}
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id="thread-fsm-events-only",
+                        state={"events": [{"type": "stale"}]},
+                    ),
+                )
+
+                log = graph.get_state(config).events
+                assert not any(isinstance(e, FrontendStateMutated) for e in log)
+
     def when_no_checkpointer():
         async def it_still_applies_state_within_the_run():
             from langgraph_events import SKIP, ScalarReducer
@@ -3482,13 +3797,13 @@ def describe_frontend_state_mutated():
             assert seen == ["no-ckpt"]
 
     def when_reducer_fn_transforms_the_value():
-        """Witnesses the documented resume-path asymmetry:
+        """The reducer's ``fn`` runs on both the non-resume and resume paths.
 
-        - non-resume: state flows through the reducer's ``fn`` via event
-          dispatch, so the channel holds the transformed value.
-        - resume: the adapter writes channel values directly via
-          ``apre_seed``, bypassing ``fn``; the channel holds the raw
-          client value.
+        On resume the adapter computes per-reducer contributions from the
+        ``FrontendStateMutated`` event and writes them to channels via
+        ``apre_seed`` *before* the resume's domain dispatch — preserving
+        ``fn`` semantics (transformations, ``SKIP``) symmetrically with the
+        non-resume path.
         """
 
         async def it_applies_the_transformation_on_non_resume():
@@ -3520,7 +3835,7 @@ def describe_frontend_state_mutated():
 
             assert seen == ["SCENE-LC"]
 
-        async def it_bypasses_the_transformation_on_resume():
+        async def it_applies_the_transformation_on_resume():
             from langgraph_events import SKIP, ScalarReducer
             from langgraph_events.agui import FrontendStateMutated
 
@@ -3549,7 +3864,7 @@ def describe_frontend_state_mutated():
                 checkpointer=MemorySaver(),
             )
 
-            thread_id = "thread-fsm-fn-bypass"
+            thread_id = "thread-fsm-fn-resume"
             config = {"configurable": {"thread_id": thread_id}}
 
             await graph.ainvoke(UserAsked(question="approve?"), config=config)
@@ -3567,8 +3882,8 @@ def describe_frontend_state_mutated():
                 ),
             )
 
-            # Raw value — fn's `.upper()` transformation was bypassed.
-            assert seen == ["scene-lc"]
+            # Transformed value — fn's `.upper()` ran on resume too.
+            assert seen == ["SCENE-LC"]
 
     def when_handler_subscribes_to_frontend_state_mutated():
         async def it_fires_and_its_output_event_appears_in_the_log():
@@ -3664,6 +3979,111 @@ def describe_frontend_state_mutated():
                 )
 
                 assert seen == ["resume-case"]
+
+        def with_backend_authoritative_channel():
+            async def it_lets_the_resume_domain_event_win():
+                """Cadance reproduction (`d1b7d7cf-…`, `560203cc-…`).
+
+                A channel driven by a backend domain event must not be
+                overwritten by a stale frontend snapshot key on resume.
+                The reducer subscribes to the backend event only — FSM
+                dispatch is a no-op for that channel, so the resume's
+                domain dispatch wins.
+                """
+                from langgraph_events import ScalarReducer
+
+                # Backend-authoritative: channel only updates from the
+                # domain event, NOT from FrontendStateMutated.
+                strategy = ScalarReducer(
+                    name="walkthrough_strategy",
+                    event_type=ApprovalGiven,
+                    fn=lambda e: "guided" if e.approved else "skipped",
+                )
+                # Backend reads strategy after resume.
+                seen_strategy: list[str | None] = []
+
+                @on(UserAsked)
+                def ask(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="proceed?")
+
+                @on(ApprovalGiven)
+                def finish(
+                    event: ApprovalGiven,
+                    walkthrough_strategy: str | None = None,
+                ) -> AgentReplied:
+                    seen_strategy.append(walkthrough_strategy)
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph(
+                    [ask, finish],
+                    reducers=[message_reducer(), strategy],
+                    checkpointer=MemorySaver(),
+                )
+
+                thread_id = "thread-backend-authoritative"
+                config = {"configurable": {"thread_id": thread_id}}
+                await graph.ainvoke(UserAsked(question="?"), config=config)
+
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                # Stale frontend snapshot tries to inject a NULL strategy.
+                # Under the old apre_seed bypass this would clobber the
+                # channel; under FSM dispatch the reducer doesn't subscribe
+                # to FSM, so it's a no-op and the domain event wins.
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id=thread_id,
+                        state={"walkthrough_strategy": None},
+                    ),
+                )
+
+                assert seen_strategy == ["guided"]
+
+        def with_state_yielded_in_output_stream():
+            async def it_emits_a_frontend_state_mutated_event_on_resume():
+                """FSM appears in the audit log on the resume path,
+                exactly like the non-resume path."""
+                from langgraph_events.agui import FrontendStateMutated
+
+                @on(UserAsked)
+                def ask(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="ok?")
+
+                @on(ApprovalGiven)
+                def finish(event: ApprovalGiven) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="done"))
+
+                graph = EventGraph(
+                    [ask, finish],
+                    reducers=[message_reducer()],
+                    checkpointer=MemorySaver(),
+                )
+
+                thread_id = "thread-fsm-resume-audit"
+                config = {"configurable": {"thread_id": thread_id}}
+                await graph.ainvoke(UserAsked(question="?"), config=config)
+
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id=thread_id,
+                        state={"focus": "resume-audit"},
+                    ),
+                )
+
+                log = graph.get_state(config).events
+                fsm_events = [e for e in log if isinstance(e, FrontendStateMutated)]
+                assert len(fsm_events) == 1
+                assert fsm_events[0].state == {"focus": "resume-audit"}
 
     def when_mapping_to_agui_output():
         async def it_does_not_warn_about_missing_agui_dict():

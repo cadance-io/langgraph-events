@@ -936,6 +936,7 @@ class EventGraph:
         self,
         value: Event,
         *,
+        seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
@@ -947,6 +948,12 @@ class EventGraph:
 
         Args:
             value: The domain event to resume with.
+            seeds: Optional events to dispatch alongside the resume in the
+                same step.  Their reducer contributions layer onto the
+                checkpointed state *before* the resume's downstream events
+                run, so resume-handler outputs win for shared keys.  Used
+                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
+                the dispatch chain on resume.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -956,12 +963,15 @@ class EventGraph:
 
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
-        yield from self._stream_sync(Command(resume=value), [], reducer_names, **kwargs)
+        yield from self._stream_sync(
+            Command(resume=value), seeds or [], reducer_names, **kwargs
+        )
 
     async def astream_resume(
         self,
         value: Event,
         *,
+        seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
@@ -974,6 +984,12 @@ class EventGraph:
 
         Args:
             value: The domain event to resume with.
+            seeds: Optional events to dispatch alongside the resume in the
+                same step.  Their reducer contributions layer onto the
+                checkpointed state *before* the resume's downstream events
+                run, so resume-handler outputs win for shared keys.  Used
+                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
+                the dispatch chain on resume.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -989,18 +1005,19 @@ class EventGraph:
         inp: Any = Command(resume=value)
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
+        seed_list = seeds or []
 
         delegate = (
             self._astream_v2(
                 inp,
-                [],
+                seed_list,
                 reducer_names=reducer_names,
                 include_llm_tokens=include_llm_tokens,
                 include_custom_events=include_custom_events,
                 **kwargs,
             )
             if include_llm_tokens or include_custom_events
-            else self._astream_core(inp, [], reducer_names, **kwargs)
+            else self._astream_core(inp, seed_list, reducer_names, **kwargs)
         )
         async for item in delegate:
             yield item
