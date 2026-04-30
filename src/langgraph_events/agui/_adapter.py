@@ -44,8 +44,8 @@ from ._mappers import (
 from ._state import (
     _DEDICATED_EVENT_KEYS,
     StateProjector,
+    _normalize,
     default_state_projection,
-    normalize,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,7 +114,7 @@ class AGUIAdapter:
         # runtime hot path is one call.  This also validates the input shape:
         # malformed values (anything but bool / list[str] / Callable) raise
         # TypeError here, before any other work happens.
-        self._projector: StateProjector = normalize(include_reducers)
+        self._projector: StateProjector = _normalize(include_reducers)
 
         # Compute graph-level activation (which reducers EventGraph actually
         # computes during streaming).  Callables can't be introspected for
@@ -122,8 +122,11 @@ class AGUIAdapter:
         # at emit time.  bool/list specs need "messages" forced into the
         # activation set so message-driven AG-UI events can read reducer
         # state — Layer 2 of default_state_projection then strips it from
-        # the snapshot before the projector sees it.
-        if callable(include_reducers) and not isinstance(include_reducers, bool):
+        # the snapshot before the projector sees it.  Note: `False` resolves
+        # to activation=["messages"] (so MessagesSnapshot still works) while
+        # the projector returns `{}` — empty StateSnapshot, populated
+        # MessagesSnapshot.  That asymmetry is intentional.
+        if callable(include_reducers):
             self._activation: bool | list[str] = True
         else:
             spec: bool | list[str] = include_reducers
@@ -369,6 +372,15 @@ class AGUIAdapter:
             # resume's domain dispatch runs.  apre_seed merges via the
             # channel reducer (operator.add for `events`, scalar/accumulator
             # for user reducers).
+            #
+            # Safe-from-double-write: the seeds we pass to astream_resume
+            # below are routed via Command(resume=...), which carries one
+            # value and does NOT feed seeds through inp["events"].  Seeds
+            # are yielded into the output stream by _astream_v2 but never
+            # written to the events channel by it, so this apre_seed is the
+            # only path that lands FSM in the audit log.  If a future
+            # refactor unifies seed dispatch through inp["events"], drop
+            # the {"events": [fsm]} entry here to avoid duplication.
             updates: dict[str, Any] = {"events": [fsm]}
             updates.update(self._reducer_updates_for([fsm]))
             await self._graph.apre_seed(config, updates)

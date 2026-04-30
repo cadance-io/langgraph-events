@@ -31,9 +31,11 @@ class FrontendStateMutated(Event):
     ``StateSnapshotEvent`` path.
 
     **Resume-path semantics.**  On resume (``RunAgentInput`` carrying both
-    ``state`` and a resume signal), ``FrontendStateMutated`` is injected as
-    a seed alongside ``Resumed`` so reducers see it before the user's
-    ``@on(Resumed, …)`` handler emits its domain event.  However,
+    ``state`` and a resume signal), reducers subscribed to
+    ``FrontendStateMutated`` *do* fire — the adapter computes their
+    contributions and writes them to channels via ``apre_seed`` before the
+    resume's domain dispatch, so handlers reading reducer state via
+    parameter injection see the updated values.  However,
     ``@on(FrontendStateMutated)`` *handlers* do not fire on resume — the
     LangGraph ``Command(resume=...)`` carries a single value and seeds are
     dispatched out-of-graph.  Use ``@on(Resumed)`` for resume-time side

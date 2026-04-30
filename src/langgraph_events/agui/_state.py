@@ -85,7 +85,7 @@ def _empty(_reducers: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def normalize(spec: bool | list[str] | StateProjector) -> StateProjector:
+def _normalize(spec: bool | list[str] | StateProjector) -> StateProjector:
     """Resolve any ``include_reducers`` shape into a single :class:`StateProjector`.
 
     The adapter calls this once at construction time so the runtime hot path

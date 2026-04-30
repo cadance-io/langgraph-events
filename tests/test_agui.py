@@ -4085,6 +4085,57 @@ def describe_frontend_state_mutated():
                 assert len(fsm_events) == 1
                 assert fsm_events[0].state == {"focus": "resume-audit"}
 
+        def with_dispatch_ordering():
+            async def it_records_fsm_before_the_resume_domain_event():
+                """Plan acceptance criterion 4(a): FSM lands in the audit log
+                before the resume's domain event, so reducers/observers see
+                client-state contributions first and the resume handler's
+                output reduces on top."""
+                from langgraph_events.agui import FrontendStateMutated
+
+                @on(UserAsked)
+                def ask(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="ok?")
+
+                @on(ApprovalGiven)
+                def finish(event: ApprovalGiven) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="done"))
+
+                graph = EventGraph(
+                    [ask, finish],
+                    reducers=[message_reducer()],
+                    checkpointer=MemorySaver(),
+                )
+
+                thread_id = "thread-fsm-resume-order"
+                config = {"configurable": {"thread_id": thread_id}}
+                await graph.ainvoke(UserAsked(question="?"), config=config)
+
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id=thread_id,
+                        state={"focus": "ordering"},
+                    ),
+                )
+
+                log = list(graph.get_state(config).events)
+                idx_fsm = next(
+                    i for i, e in enumerate(log) if isinstance(e, FrontendStateMutated)
+                )
+                idx_resume_event = next(
+                    i for i, e in enumerate(log) if isinstance(e, ApprovalGiven)
+                )
+                assert idx_fsm < idx_resume_event, (
+                    f"FSM must precede the resume domain event "
+                    f"(idx_fsm={idx_fsm}, idx_resume={idx_resume_event})"
+                )
+
     def when_mapping_to_agui_output():
         async def it_does_not_warn_about_missing_agui_dict():
             from langgraph_events.agui import FrontendStateMutated

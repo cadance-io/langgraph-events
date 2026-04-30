@@ -260,12 +260,12 @@ When `RunAgentInput.state` is populated alongside a resume, the adapter routes i
 
 1. The state dict is projected via `include_reducers` (framework internals + dedicated keys stripped, then your projector if any).
 2. A `FrontendStateMutated(state=projected)` event is built.
-3. For each reducer subscribing to `FrontendStateMutated`, the adapter computes its contribution and writes it to the channel via `apre_seed` *before* the resume's domain dispatch — so the reducer's `fn` runs (transformations, `SKIP`) and handlers reading the channel via parameter injection in the resume step see the updated value.
+3. For each reducer subscribing to `FrontendStateMutated`, the adapter computes its contribution and writes it to the channel via `apre_seed` *before* the resume's domain dispatch — so the reducer's `fn` runs (transformations, `SKIP`) and any handler reading **reducer state via parameter injection** (e.g. `def my_handler(event: ApprovalGiven, focus: str | None = None)`) sees the updated value during the resume step.
 4. FSM is also injected as a seed to `astream_resume` so it appears in the output stream and the persisted audit log.
 
 **Reducers driven by backend domain events are not affected by FSM dispatch** — their channels stay intact regardless of what the client echoes. The resume's domain event flows through normal dispatch and wins for shared keys.
 
-**`@on(FrontendStateMutated)` handlers do not fire on resume.** LangGraph's `Command(resume=...)` carries one value, and seeds are dispatched out-of-graph. Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for resume-time side effects.
+**`@on(FrontendStateMutated)` *handler* callbacks do not fire on resume.** This is distinct from the parameter-injection pattern above: a function decorated with `@on(FrontendStateMutated)` will not be invoked, because LangGraph's `Command(resume=...)` carries one value and seeds dispatch out-of-graph. The reducer pipeline still runs (#3 above); it's only the dispatched-handler entry point that's unavailable on resume. Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for resume-time side effects.
 
 ## Frontend Tools
 
