@@ -25,7 +25,7 @@ _DEDICATED_EVENT_KEYS: frozenset[str] = frozenset({"messages"})
 _RESERVED_KEYS: frozenset[str] = _FRAMEWORK_INTERNAL_KEYS | _DEDICATED_EVENT_KEYS
 
 
-def default_state_projection(reducers: dict[str, Any]) -> dict[str, Any]:
+def _default_state_projection(reducers: dict[str, Any]) -> dict[str, Any]:
     """Strip framework-internal channels and dedicated AG-UI keys.
 
     Always applied before any user-supplied ``include_reducers`` filter.

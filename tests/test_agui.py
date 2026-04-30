@@ -118,6 +118,16 @@ class FocusLogged(Event):
         return {"value": self.value}
 
 
+class FocusEcho(Event):
+    """Module-level for handler-annotation type resolution (per CLAUDE.md).
+
+    Used by the C1 regression test that primes an accumulator reducer
+    before a resume.
+    """
+
+    value: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -151,6 +161,52 @@ def _types(events: list[BaseEvent]) -> list[EventType]:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def describe_default_state_projection():
+    """Direct coverage of the framework-strip layer.
+
+    Module-internal but load-bearing: every snapshot (outbound + inbound)
+    flows through it.  A regression here would silently leak framework
+    channels (``events``, ``_cursor``, …) or dedicated AG-UI keys
+    (``messages``) to clients — so we test it directly, independent of
+    the AGUIAdapter integration that also exercises it.
+    """
+
+    def when_input_has_framework_keys():
+        def it_strips_them():
+            from langgraph_events.agui._state import _default_state_projection
+
+            result = _default_state_projection(
+                {
+                    "events": ["audit-log"],
+                    "_cursor": 7,
+                    "_pending": [],
+                    "_round": 3,
+                    "focus": "scene-1",
+                }
+            )
+            assert result == {"focus": "scene-1"}
+
+    def when_input_has_messages_key():
+        def it_strips_the_dedicated_channel():
+            from langgraph_events.agui._state import _default_state_projection
+
+            result = _default_state_projection({"messages": ["m1"], "focus": "scene-2"})
+            assert result == {"focus": "scene-2"}
+
+    def when_input_has_only_user_keys():
+        def it_passes_them_through_unchanged():
+            from langgraph_events.agui._state import _default_state_projection
+
+            payload = {"focus": "scene-3", "scene": "@scene-3", "count": 7}
+            assert _default_state_projection(payload) == payload
+
+    def when_input_is_empty():
+        def it_returns_empty():
+            from langgraph_events.agui._state import _default_state_projection
+
+            assert _default_state_projection({}) == {}
 
 
 def describe_AGUIAdapter():
@@ -3970,10 +4026,8 @@ def describe_frontend_state_mutated():
 
                 # Reducer accumulates from BOTH a domain event (priming) and
                 # FSM (resume payload), so we can prime with real prior
-                # state then layer the FSM contribution on top.
-                class FocusEcho(Event):
-                    value: str = ""
-
+                # state then layer the FSM contribution on top.  FocusEcho
+                # is defined at module level so handler annotations resolve.
                 focus_log = Reducer(
                     name="focus_log",
                     event_type=(FocusEcho, FrontendStateMutated),

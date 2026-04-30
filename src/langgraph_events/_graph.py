@@ -720,7 +720,10 @@ class EventGraph:
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Stream events using LangGraph's v2 event API with LLM token support."""
+        from langgraph.types import Command  # noqa: PLC0415
+
         compiled = self._compile()
+        is_resume = isinstance(inp, Command)
 
         # Initialize incremental reducer state.  When a checkpoint exists
         # (subsequent run / resume), start from the checkpointed values so
@@ -751,16 +754,15 @@ class EventGraph:
         #   (LangGraph's seed_node will copy them into state["events"], but
         #   the in-adapter reducer_state shadow needs the contribution
         #   computed here so the StreamFrame yielded just below reflects it).
-        # - On astream_resume: skipped — the caller (e.g. AGUIAdapter) is
-        #   responsible for pre-seeding contributions via apre_seed before
-        #   calling astream_resume, because Command(resume=...) doesn't
-        #   route seeds through the seed_node.  Re-applying contributions
-        #   here would double-count for accumulator reducers (operator.add
-        #   channel reducers concatenate the contribution twice).  See
+        # - On astream_resume (is_resume=True): skipped — the caller
+        #   (e.g. AGUIAdapter) is responsible for pre-seeding contributions
+        #   via apre_seed before calling astream_resume, because
+        #   Command(resume=...) doesn't route seeds through the seed_node.
+        #   Re-applying contributions here would double-count for
+        #   accumulator reducers (operator.add channel reducers concatenate
+        #   the contribution twice).  See
         #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
-        from langgraph.types import Command  # noqa: PLC0415
-
-        if checkpoint_values is not None and not isinstance(inp, Command):
+        if checkpoint_values is not None and not is_resume:
             for s in seeds:
                 self._update_reducer_state(reducer_state, s, reducer_names)
 

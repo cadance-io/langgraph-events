@@ -41,7 +41,7 @@ from ._mappers import (
     build_state_snapshot,
     default_mappers,
 )
-from ._state import _DEDICATED_EVENT_KEYS, default_state_projection
+from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
 
@@ -97,11 +97,7 @@ class AGUIAdapter:
         # Validate input shape early.  Bools and lists are the only
         # supported forms — fail loudly on garbage instead of silently
         # producing an empty snapshot at runtime.
-        if not (
-            include_reducers is True
-            or include_reducers is False
-            or isinstance(include_reducers, list)
-        ):
+        if not isinstance(include_reducers, (bool, list)):
             raise TypeError(
                 f"include_reducers must be bool | list[str], "
                 f"got {type(include_reducers).__name__}"
@@ -131,7 +127,6 @@ class AGUIAdapter:
                 if isinstance(include_reducers, list)
                 else ["messages"]
             )
-        self._include_reducers: bool | list[str] = include_reducers
         self._activation: bool | list[str] = include_reducers
         # Pre-compute the allow-list set for fast filtering.  None for
         # bool=True (no filter beyond the framework strip).
@@ -155,7 +150,7 @@ class AGUIAdapter:
         both directions: outbound ``StateSnapshotEvent`` and inbound
         ``RunAgentInput.state`` echo into ``FrontendStateMutated``.
         """
-        base = default_state_projection(reducers)
+        base = _default_state_projection(reducers)
         if self._allowed_keys is None:
             return base
         return {k: v for k, v in base.items() if k in self._allowed_keys}
@@ -369,37 +364,51 @@ class AGUIAdapter:
         seeds are dispatched out-of-graph.  Use ``@on(Resumed)`` for
         resume-time side effects.
         """
-        filtered = self._extract_frontend_state(input_data)
-        seeds: list[Event] = []
-        if filtered is not None:
-            fsm = FrontendStateMutated(state=filtered)  # type: ignore[call-arg]
-            seeds.append(fsm)
-            # Persist FSM into the audit log (events channel) AND apply
-            # reducer contributions to user channels — both before the
-            # resume's domain dispatch runs.  apre_seed merges via the
-            # channel reducer (operator.add for `events`, scalar/accumulator
-            # for user reducers).
-            #
-            # Safe-from-double-write: the seeds we pass to astream_resume
-            # below are routed via Command(resume=...), which carries one
-            # value and does NOT feed seeds through inp["events"].  Seeds
-            # are yielded into the output stream by _astream_v2 but never
-            # written to the events channel by it, so this apre_seed is the
-            # only path that lands FSM in the audit log.  If a future
-            # refactor unifies seed dispatch through inp["events"], drop
-            # the {"events": [fsm]} entry here to avoid duplication.
-            updates: dict[str, Any] = {"events": [fsm]}
-            updates.update(self._reducer_updates_for([fsm]))
-            await self._graph.apre_seed(config, updates)
+        fsm = self._build_resume_frontend_state_event(input_data)
+        if fsm is not None:
+            await self._commit_resume_frontend_state(fsm, config)
         async for item in self._graph.astream_resume(
             resume_event,
-            seeds=seeds,
+            seeds=[fsm] if fsm is not None else [],
             include_reducers=self._activation,
             include_llm_tokens=True,
             include_custom_events=True,
             config=config,
         ):
             yield item
+
+    def _build_resume_frontend_state_event(
+        self, input_data: RunAgentInput
+    ) -> FrontendStateMutated | None:
+        """Build a ``FrontendStateMutated`` from the projected client state,
+        or ``None`` when there's nothing to apply on resume.
+        """
+        filtered = self._extract_frontend_state(input_data)
+        if filtered is None:
+            return None
+        return FrontendStateMutated(state=filtered)  # type: ignore[call-arg]
+
+    async def _commit_resume_frontend_state(
+        self, fsm: FrontendStateMutated, config: Any
+    ) -> None:
+        """Persist FSM into the audit log AND apply reducer contributions
+        to user channels — both before the resume's domain dispatch runs.
+
+        Channel reducers merge the writes (``operator.add`` for ``events``,
+        scalar / accumulator for user reducers).  We do NOT emit FSM via
+        the seed_node here: ``Command(resume=...)`` carries one value and
+        doesn't route seeds through ``inp["events"]``, so this ``apre_seed``
+        is the sole path that lands FSM in the persisted ``events``
+        channel.  ``_astream_v2`` yields seeds into the output stream but
+        deliberately skips re-applying seed contributions on resume to
+        avoid double-counting accumulator reducers.
+
+        If a future refactor unifies seed dispatch through ``inp["events"]``,
+        drop the ``{"events": [fsm]}`` entry to avoid duplication.
+        """
+        updates: dict[str, Any] = {"events": [fsm]}
+        updates.update(self._reducer_updates_for([fsm]))
+        await self._graph.apre_seed(config, updates)
 
     def _reducer_updates_for(self, events: list[Event]) -> dict[str, Any]:
         """Compute per-channel reducer contributions for *events*.
