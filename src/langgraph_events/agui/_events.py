@@ -29,6 +29,17 @@ class FrontendStateMutated(Event):
     to client-state changes.  The adapter does not echo this event back to
     the client; downstream reducer changes surface through the usual
     ``StateSnapshotEvent`` path.
+
+    **Resume-path semantics.**  On resume (``RunAgentInput`` carrying both
+    ``state`` and a resume signal), reducers subscribed to
+    ``FrontendStateMutated`` *do* fire — the adapter computes their
+    contributions and writes them to channels via ``apre_seed`` before the
+    resume's domain dispatch, so handlers reading reducer state via
+    parameter injection see the updated values.  However,
+    ``@on(FrontendStateMutated)`` *handlers* do not fire on resume — the
+    LangGraph ``Command(resume=...)`` carries a single value and seeds are
+    dispatched out-of-graph.  Use ``@on(Resumed)`` for resume-time side
+    effects.
     """
 
     state: dict[str, Any] = field(default_factory=dict)

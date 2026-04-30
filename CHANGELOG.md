@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **agui**: `AGUIAdapter(include_reducers=...)` validation — malformed values (anything other than `bool | list[str]`) now raise `TypeError` at construction instead of silently producing empty snapshots at runtime.
+
+### Fixed
+- **agui**: `AGUIAdapter.connect()` and the streaming `StateSnapshotEvent` path no longer leak the EventGraph-internal `events` audit log to clients. The audit log is graph-internal and was causing O(history) wire bloat on every client `Send` via `RunAgentInput.state` round-trip. The strip set is now derived from `_internal._BASE_FIELDS` (single source of truth across all four projection sites) rather than hardcoded; future internal channels propagate automatically. `_extract_frontend_state` also strips internal keys as defense-in-depth against stale-client echo.
+- **agui**: Resume-time frontend state now flows through `FrontendStateMutated` instead of bypassing dispatch via `apre_seed(raw_state)`. The adapter computes per-reducer contributions from the FSM event (preserving `fn` semantics — transformations, `SKIP`) and writes them to channels via `apre_seed` *before* the resume's domain dispatch, then injects FSM as a seed to `astream_resume` so it appears in the output stream and the persisted audit log. Reducers that subscribe to `FrontendStateMutated` see the same contract on resume as on the non-resume path; reducers that subscribe to backend domain events are no longer clobbered by stale frontend snapshot keys (closes the cadance walkthrough-resume hang). `@on(FrontendStateMutated)` *handlers* still do not fire on resume — `Command(resume=...)` carries one value and seeds dispatch out-of-graph; use `@on(Resumed)` for resume-time side effects.
+
+### Changed
+- **agui**: `AGUIAdapter.__init__` validates the `messages` reducer eagerly (raises `ValueError` immediately, before any other setup).
+- **EventGraph**: `stream_resume` and `astream_resume` now accept a `seeds: list[Event] | None = None` kwarg. Seeds are dispatched alongside the resume in the same step — used by `AGUIAdapter` to route `FrontendStateMutated` through reducers on resume. Power users can plumb their own resume-time companion events through this hook.
+
 ## [0.4.1] - 2026-04-24
 
 ### Added
