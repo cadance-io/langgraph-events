@@ -3,7 +3,7 @@
 Opinionated event-driven abstraction for LangGraph. **State IS events.**
 
 > [!CAUTION]
-> **Experimental (v0.4.1)** - This is an early-stage personal project, not a supported product. The API will change without notice or migration path.
+> **Experimental (v0.4.2)** - This is an early-stage personal project, not a supported product. The API will change without notice or migration path.
 
 ## Quick Start
 
