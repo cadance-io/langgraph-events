@@ -95,30 +95,21 @@ Events without `agui_dict()` are skipped with a one-time warning.
 
 - `True` (default) — ship every user reducer.
 - `list[str]` — allow-list (e.g. `["focus", "scene"]`).
-- `False` — ship no user reducers.
-- `drop_reducers(*names)` — sugar for "everything except these names," resolved against the graph's reducer set at adapter construction.
+- `False` — ship no user reducers (the dedicated `messages` snapshot still ships via `MessagesSnapshotEvent`).
 
 The same value is applied symmetrically to outbound `StateSnapshotEvent` and inbound `RunAgentInput.state` echo (so a stale or untrusted client can't inject keys you've decided are internal). Framework-internal channels (`events`, `_cursor`, `_pending`, `_round`) and dedicated AG-UI keys (`messages`) are always stripped first.
 
-Hide a few internal reducers with the `drop_reducers()` builder:
+Allow-list keepers when you want to hide a few internal reducers:
 
 ```python
-from langgraph_events.agui import AGUIAdapter, drop_reducers
-
 adapter = AGUIAdapter(
     graph=graph,
     seed_factory=lambda inp: UserAsked(question=...),
-    include_reducers=drop_reducers("debug_count", "scratch"),
+    include_reducers=["focus", "scene", "user", "context"],  # debug_count, scratch hidden
 )
 ```
 
-Equivalent allow-list form when you want to be explicit:
-
-```python
-include_reducers=["focus", "scene", "user", "context"]
-```
-
-All forms drive both projection (what the snapshot contains) and activation (which reducers EventGraph computes during streaming). If you need redaction or value transformation, write a custom `EventMapper` — that's the supported extension point for shaping AG-UI output.
+The list-form drives both projection (what the snapshot contains) and activation (which reducers EventGraph computes during streaming). If you need redaction or value transformation, write a custom `EventMapper` — that's the supported extension point for shaping AG-UI output.
 
 When reducer delta metadata is available (`StreamFrame.changed_reducers`, emitted by `EventGraph` v2 streaming), the adapter suppresses redundant snapshots:
 

@@ -41,11 +41,7 @@ from ._mappers import (
     build_state_snapshot,
     default_mappers,
 )
-from ._state import (
-    _DEDICATED_EVENT_KEYS,
-    DropReducersSpec,
-    default_state_projection,
-)
+from ._state import _DEDICATED_EVENT_KEYS, default_state_projection
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +80,7 @@ class AGUIAdapter:
         seed_factory: SeedFactory,
         resume_factory: ResumeFactory | None = None,
         mappers: list[EventMapper] | None = None,
-        include_reducers: bool | list[str] | DropReducersSpec = True,
+        include_reducers: bool | list[str] = True,
         error_message: str | None = None,
     ) -> None:
         if resume_factory is not None and graph._checkpointer is None:
@@ -98,22 +94,16 @@ class AGUIAdapter:
                 "EventGraph."
             )
 
-        # Resolve drop_reducers() sugar into a concrete allow-list against
-        # the graph's reducer set.  After this, include_reducers is always
-        # bool | list[str] — the runtime path has one shape.
-        if isinstance(include_reducers, DropReducersSpec):
-            include_reducers = [
-                name
-                for name in graph._reducers
-                if name not in include_reducers.excluded
-            ]
-        elif not (
+        # Validate input shape early.  Bools and lists are the only
+        # supported forms — fail loudly on garbage instead of silently
+        # producing an empty snapshot at runtime.
+        if not (
             include_reducers is True
             or include_reducers is False
             or isinstance(include_reducers, list)
         ):
             raise TypeError(
-                f"include_reducers must be bool | list[str] | drop_reducers(...), "
+                f"include_reducers must be bool | list[str], "
                 f"got {type(include_reducers).__name__}"
             )
 

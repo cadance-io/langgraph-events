@@ -11,18 +11,14 @@ Two layers of stripping always run on every snapshot, in both directions:
    STATE_SNAPSHOT).
 
 User-facing control is via ``AGUIAdapter(include_reducers=...)`` which
-accepts ``bool | list[str] | DropReducersSpec`` — see :func:`drop_reducers`
-for the ergonomic deny-list builder.
+accepts ``bool | list[str]``.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from langgraph_events._internal import _BASE_FIELDS
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 _FRAMEWORK_INTERNAL_KEYS: frozenset[str] = frozenset(_BASE_FIELDS)
 _DEDICATED_EVENT_KEYS: frozenset[str] = frozenset({"messages"})
@@ -36,39 +32,3 @@ def default_state_projection(reducers: dict[str, Any]) -> dict[str, Any]:
     Module-internal: devs interact via ``include_reducers``.
     """
     return {k: v for k, v in reducers.items() if k not in _RESERVED_KEYS}
-
-
-class DropReducersSpec:
-    """Marker carrying the names :func:`drop_reducers` was asked to hide.
-
-    Construct via :func:`drop_reducers`, not directly.  ``AGUIAdapter``
-    resolves this against the graph's reducer set at construction time into
-    a concrete ``list[str]`` allow-list, so the runtime path is always
-    ``bool | list[str]`` — no opaque callables on the hot path.
-    """
-
-    __slots__ = ("excluded",)
-
-    def __init__(self, excluded: Iterable[str]) -> None:
-        self.excluded: frozenset[str] = frozenset(excluded)
-
-
-def drop_reducers(*names: str) -> DropReducersSpec:
-    """Build a deny-list spec — keep every reducer except the named ones.
-
-    Sugar over the ``list[str]`` allow-list form, resolved against the graph's
-    reducer set at adapter construction time::
-
-        from langgraph_events.agui import drop_reducers
-
-        AGUIAdapter(
-            graph=g,
-            seed_factory=...,
-            include_reducers=drop_reducers("debug_count", "scratch"),
-        )
-
-    Framework-internal channels (``events``, ``_cursor``, …) and dedicated
-    AG-UI keys (``messages``) are stripped automatically and don't need to
-    be listed.  Names that don't match any reducer are silently ignored.
-    """
-    return DropReducersSpec(excluded=names)

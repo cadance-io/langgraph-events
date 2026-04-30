@@ -1201,126 +1201,6 @@ def describe_AGUIAdapter():
                 snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
                 assert len(snapshots) >= 1
 
-        def when_include_reducers_uses_drop_reducers():
-            @pytest.mark.asyncio
-            async def it_omits_dropped_reducers_from_outbound_state_snapshot():
-                """drop_reducers() is sugar for an allow-list — the named
-                reducers are absent from the snapshot."""
-                from langgraph_events import SKIP, ScalarReducer
-                from langgraph_events.agui import drop_reducers
-
-                focus = ScalarReducer(
-                    name="focus",
-                    event_type=UserAsked,
-                    fn=lambda e: e.question or SKIP,
-                )
-                debug_count = ScalarReducer(
-                    name="debug_count",
-                    event_type=UserAsked,
-                    fn=lambda e: 1,
-                )
-
-                @on(UserAsked)
-                def reply(event: UserAsked) -> AgentReplied:
-                    return AgentReplied(message=AIMessage(content="ok"))
-
-                graph = EventGraph(
-                    [reply], reducers=[message_reducer(), focus, debug_count]
-                )
-                adapter = AGUIAdapter(
-                    graph=graph,
-                    seed_factory=lambda inp: UserAsked(question="scene-1"),
-                    include_reducers=drop_reducers("debug_count"),
-                )
-                events = await _collect(adapter, _make_input())
-                snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
-                assert len(snapshots) >= 1
-                last = snapshots[-1].snapshot
-                assert last.get("focus") == "scene-1"
-                assert "debug_count" not in last
-                assert "messages" not in last  # always stripped (dedicated)
-                assert "events" not in last  # always stripped (framework)
-
-            @pytest.mark.asyncio
-            async def it_omits_dropped_keys_from_inbound_frontend_state():
-                """Symmetric: a stale client echoing a dropped key doesn't
-                sneak it back into the FrontendStateMutated event."""
-                from langgraph_events import SKIP, ScalarReducer
-                from langgraph_events.agui import FrontendStateMutated, drop_reducers
-
-                focus = ScalarReducer(
-                    name="focus",
-                    event_type=UserAsked,
-                    fn=lambda e: e.question or SKIP,
-                )
-                debug_count = ScalarReducer(
-                    name="debug_count",
-                    event_type=UserAsked,
-                    fn=lambda e: 1,
-                )
-
-                @on(UserAsked)
-                def reply(event: UserAsked) -> AgentReplied:
-                    return AgentReplied(message=AIMessage(content="ok"))
-
-                graph = EventGraph(
-                    [reply],
-                    reducers=[message_reducer(), focus, debug_count],
-                    checkpointer=MemorySaver(),
-                )
-                adapter = AGUIAdapter(
-                    graph=graph,
-                    seed_factory=lambda inp: UserAsked(question="go"),
-                    include_reducers=drop_reducers("debug_count"),
-                )
-                config = {"configurable": {"thread_id": "thread-fsm-drop"}}
-                await _collect(
-                    adapter,
-                    _make_input(
-                        thread_id="thread-fsm-drop",
-                        state={
-                            "focus": "client-set",
-                            "debug_count": 999,
-                        },
-                    ),
-                )
-
-                log = graph.get_state(config).events
-                fsm_events = [e for e in log if isinstance(e, FrontendStateMutated)]
-                assert len(fsm_events) == 1
-                assert fsm_events[0].state == {"focus": "client-set"}
-                assert "debug_count" not in fsm_events[0].state
-
-            def when_no_names_are_dropped():
-                @pytest.mark.asyncio
-                async def it_behaves_like_the_default_true_form():
-                    """drop_reducers() with no names is equivalent to True
-                    (every user reducer ships)."""
-                    from langgraph_events import SKIP, ScalarReducer
-                    from langgraph_events.agui import drop_reducers
-
-                    focus = ScalarReducer(
-                        name="focus",
-                        event_type=UserAsked,
-                        fn=lambda e: e.question or SKIP,
-                    )
-
-                    @on(UserAsked)
-                    def reply(event: UserAsked) -> AgentReplied:
-                        return AgentReplied(message=AIMessage(content="ok"))
-
-                    graph = EventGraph([reply], reducers=[message_reducer(), focus])
-                    adapter = AGUIAdapter(
-                        graph=graph,
-                        seed_factory=lambda inp: UserAsked(question="scene-2"),
-                        include_reducers=drop_reducers(),
-                    )
-                    events = await _collect(adapter, _make_input())
-                    snapshots = [
-                        e for e in events if e.type == EventType.STATE_SNAPSHOT
-                    ]
-                    assert snapshots[-1].snapshot.get("focus") == "scene-2"
-
         def when_include_reducers_is_malformed():
             def it_raises_typeerror_at_construction():
                 """Garbage values (int, dict, callable, etc.) fail loudly at
@@ -1338,9 +1218,9 @@ def describe_AGUIAdapter():
                         include_reducers=42,  # type: ignore[arg-type]
                     )
 
-            def it_rejects_a_bare_callable():
+            def it_rejects_a_callable():
                 """Bare callables aren't a supported include_reducers shape —
-                use drop_reducers() or the list[str] allow-list form."""
+                use the list[str] allow-list form."""
 
                 @on(UserAsked)
                 def reply(event: UserAsked) -> AgentReplied:
@@ -4077,6 +3957,83 @@ def describe_frontend_state_mutated():
                 assert last.get("focus_log") == ["X"], (
                     f"expected ['X'], got {last.get('focus_log')!r} — FSM "
                     "contribution was double-counted in the streamed snapshot"
+                )
+
+            async def it_layers_one_new_entry_onto_existing_accumulator_state():
+                """Stronger C1 regression: when the channel already holds
+                accumulated values from a prior run, the resume's FSM
+                contribution must add exactly one new entry, not two."""
+                import operator
+
+                from langgraph_events import Reducer
+                from langgraph_events.agui import FrontendStateMutated
+
+                # Reducer accumulates from BOTH a domain event (priming) and
+                # FSM (resume payload), so we can prime with real prior
+                # state then layer the FSM contribution on top.
+                class FocusEcho(Event):
+                    value: str = ""
+
+                focus_log = Reducer(
+                    name="focus_log",
+                    event_type=(FocusEcho, FrontendStateMutated),
+                    fn=lambda e: (
+                        [e.value]
+                        if isinstance(e, FocusEcho)
+                        else ([e.state["focus"]] if "focus" in e.state else [])
+                    ),
+                    reducer=operator.add,
+                )
+
+                @on(FocusEcho)
+                def prime(event: FocusEcho) -> ApprovalRequested:
+                    return ApprovalRequested(draft="ok?")
+
+                @on(ApprovalGiven)
+                def finish(event: ApprovalGiven) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="done"))
+
+                graph = EventGraph(
+                    [prime, finish],
+                    reducers=[message_reducer(), focus_log],
+                    checkpointer=MemorySaver(),
+                )
+
+                thread_id = "thread-fsm-layered"
+                config = {"configurable": {"thread_id": thread_id}}
+                # Prime the channel: two prior FocusEcho events accumulate
+                # ["a", "b"] before the interrupt.
+                await graph.ainvoke(
+                    [FocusEcho(value="a"), FocusEcho(value="b")], config=config
+                )
+                checkpoint_before = (await graph.compiled.aget_state(config)).values
+                assert checkpoint_before.get("focus_log") == ["a", "b"]
+
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: FocusEcho(value="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                events = await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id=thread_id,
+                        state={"focus": "X"},
+                    ),
+                )
+
+                # Persisted checkpoint: exactly one new entry layered on top.
+                checkpoint_after = (await graph.compiled.aget_state(config)).values
+                assert checkpoint_after.get("focus_log") == ["a", "b", "X"]
+
+                # Streamed STATE_SNAPSHOT: same — no double-count regression.
+                snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+                assert snapshots, "expected at least one STATE_SNAPSHOT"
+                last = snapshots[-1].snapshot
+                assert last.get("focus_log") == ["a", "b", "X"], (
+                    f"expected ['a', 'b', 'X'], got {last.get('focus_log')!r}"
+                    " — FSM contribution was double-counted on top of "
+                    "pre-existing accumulator state"
                 )
 
         def with_state_yielded_in_output_stream():

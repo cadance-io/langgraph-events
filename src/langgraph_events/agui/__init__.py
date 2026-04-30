@@ -16,7 +16,6 @@ from langgraph_events.agui._protocols import (
     ResumeFactory,
     SeedFactory,
 )
-from langgraph_events.agui._state import DropReducersSpec, drop_reducers
 from langgraph_events.agui._tools import (
     build_langchain_tools,
     detect_new_tool_results,
@@ -30,7 +29,6 @@ __all__ = [
     "AGUIAdapter",
     "AGUICustomEvent",
     "AGUISerializable",
-    "DropReducersSpec",
     "EventMapper",
     "FallbackMapper",
     "FrontendStateMutated",
@@ -43,6 +41,5 @@ __all__ = [
     "build_langchain_tools",
     "create_starlette_response",
     "detect_new_tool_results",
-    "drop_reducers",
     "encode_sse_stream",
 ]
