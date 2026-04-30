@@ -919,6 +919,7 @@ class EventGraph:
     ) -> AsyncIterator[StreamItem]:
         """Stream events using LangGraph's v2 event API with LLM token support."""
         compiled = self._compile()
+        is_resume = isinstance(inp, LGCommand)
 
         # Initialize incremental reducer state.  When a checkpoint exists
         # (subsequent run / resume), start from the checkpointed values so
@@ -944,10 +945,20 @@ class EventGraph:
                 reducer_state[name] = self._reducers[name].seed(seeds)
 
         # Merge seed contributions on top of checkpointed state.
-        # - On astream_resume: seeds=[] so this is a no-op.
-        # - On astream_events second-run: seeds carry new events that
-        #   should layer on top of the restored checkpoint.
-        if checkpoint_values is not None:
+        # - On astream_events second-run: seeds carry new events whose
+        #   contributions need to layer on top of the restored checkpoint
+        #   (LangGraph's seed_node will copy them into state["events"], but
+        #   the in-adapter reducer_state shadow needs the contribution
+        #   computed here so the StreamFrame yielded just below reflects it).
+        # - On astream_resume (is_resume=True): skipped — the caller
+        #   (e.g. AGUIAdapter) is responsible for pre-seeding contributions
+        #   via apre_seed before calling astream_resume, because
+        #   Command(resume=...) doesn't route seeds through the seed_node.
+        #   Re-applying contributions here would double-count for
+        #   accumulator reducers (operator.add channel reducers concatenate
+        #   the contribution twice).  See
+        #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
+        if checkpoint_values is not None and not is_resume:
             for s in seeds:
                 self._update_reducer_state(reducer_state, s, reducer_names)
 
@@ -1134,6 +1145,7 @@ class EventGraph:
         self,
         value: Event,
         *,
+        seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
@@ -1145,6 +1157,12 @@ class EventGraph:
 
         Args:
             value: The domain event to resume with.
+            seeds: Optional events to dispatch alongside the resume in the
+                same step.  Their reducer contributions layer onto the
+                checkpointed state *before* the resume's downstream events
+                run, so resume-handler outputs win for shared keys.  Used
+                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
+                the dispatch chain on resume.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1153,7 +1171,7 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
-            LGCommand(resume=value), [], reducer_names, **kwargs
+            LGCommand(resume=value), seeds or [], reducer_names, **kwargs
         )
 
     async def _astream_entry(
@@ -1188,6 +1206,7 @@ class EventGraph:
         self,
         value: Event,
         *,
+        seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
@@ -1200,6 +1219,12 @@ class EventGraph:
 
         Args:
             value: The domain event to resume with.
+            seeds: Optional events to dispatch alongside the resume in the
+                same step.  Their reducer contributions layer onto the
+                checkpointed state *before* the resume's downstream events
+                run, so resume-handler outputs win for shared keys.  Used
+                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
+                the dispatch chain on resume.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1212,7 +1237,7 @@ class EventGraph:
         self._require_checkpointer("astream_resume")
         async for item in self._astream_entry(
             LGCommand(resume=value),
-            [],
+            seeds or [],
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,

@@ -41,15 +41,9 @@ from ._mappers import (
     build_state_snapshot,
     default_mappers,
 )
+from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
-
-_DEDICATED_EVENT_KEYS: frozenset[str] = frozenset({"messages"})
-
-
-def _strip_dedicated_keys(reducers: dict[str, Any]) -> dict[str, Any]:
-    """Return *reducers* without keys that have dedicated AG-UI events."""
-    return {k: v for k, v in reducers.items() if k not in _DEDICATED_EVENT_KEYS}
 
 
 class CheckpointState(TypedDict):
@@ -93,10 +87,25 @@ class AGUIAdapter:
             raise ValueError(
                 "AGUIAdapter resume_factory requires a checkpointer on the EventGraph"
             )
+        if "messages" not in graph._reducers:
+            raise ValueError(
+                "AGUIAdapter requires a message_reducer() on the EventGraph. "
+                "Add reducers=[message_reducer()] when constructing your "
+                "EventGraph."
+            )
+
+        # Validate input shape early.  Bools and lists are the only
+        # supported forms — fail loudly on garbage instead of silently
+        # producing an empty snapshot at runtime.
+        if not isinstance(include_reducers, (bool, list)):
+            raise TypeError(
+                f"include_reducers must be bool | list[str], "
+                f"got {type(include_reducers).__name__}"
+            )
+
         self._graph = graph
         self._seed_factory = seed_factory
         self._resume_factory = resume_factory
-        self._include_reducers = include_reducers
         self._error_message = error_message
         self._seed_accepts_state = self._accepts_extra_positional(seed_factory)
         self._resume_accepts_state = (
@@ -105,23 +114,25 @@ class AGUIAdapter:
             else False
         )
 
-        # Ensure message_reducer is present and included
+        # Force-include "messages" in the activation set so message-driven
+        # AG-UI events can read reducer state.  Layer 2 of
+        # default_state_projection then strips it from the snapshot.
+        # Note: `False` resolves to activation=["messages"] (so
+        # MessagesSnapshot still works) while the projection returns `{}` —
+        # empty StateSnapshot, populated MessagesSnapshot.  Intentional.
         resolved = graph._resolve_reducer_names(include_reducers)
         if "messages" not in resolved:
-            if "messages" in graph._reducers:
-                # User excluded "messages" — force-include it
-                if isinstance(include_reducers, list):
-                    include_reducers = [*include_reducers, "messages"]
-                else:
-                    include_reducers = ["messages"]
-                self._include_reducers = include_reducers
-            else:
-                raise ValueError(
-                    "AGUIAdapter requires a message_reducer() on the "
-                    "EventGraph. "
-                    "Add reducers=[message_reducer()] when constructing "
-                    "your EventGraph."
-                )
+            include_reducers = (
+                [*include_reducers, "messages"]
+                if isinstance(include_reducers, list)
+                else ["messages"]
+            )
+        self._activation: bool | list[str] = include_reducers
+        # Pre-compute the allow-list set for fast filtering.  None for
+        # bool=True (no filter beyond the framework strip).
+        self._allowed_keys: frozenset[str] | None = (
+            frozenset(include_reducers) if isinstance(include_reducers, list) else None
+        )
 
         # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers()
@@ -129,6 +140,20 @@ class AGUIAdapter:
             chain.extend(mappers)
         chain.append(FallbackMapper())
         self._mappers: list[EventMapper] = chain
+
+    def _project_state(self, reducers: dict[str, Any]) -> dict[str, Any]:
+        """Project raw reducer state to client-facing state.
+
+        Strips framework-internal channels (``events``, ``_cursor``, …) and
+        dedicated AG-UI keys (``messages``), then applies the
+        ``include_reducers`` allow-list (if any).  Used symmetrically in
+        both directions: outbound ``StateSnapshotEvent`` and inbound
+        ``RunAgentInput.state`` echo into ``FrontendStateMutated``.
+        """
+        base = _default_state_projection(reducers)
+        if self._allowed_keys is None:
+            return base
+        return {k: v for k, v in base.items() if k in self._allowed_keys}
 
     def _map_event(self, event: Any, ctx: MapperContext) -> list[BaseEvent]:
         """Run event through the mapper chain. First non-None wins."""
@@ -257,7 +282,7 @@ class AGUIAdapter:
             return
 
         reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
-        yield build_state_snapshot(_strip_dedicated_keys(reducers))
+        yield build_state_snapshot(self._project_state(reducers))
         yield build_messages_snapshot(reducers.get("messages") or [])
 
         for interrupted in self._interrupts_from_snapshot(snapshot):
@@ -278,22 +303,23 @@ class AGUIAdapter:
             and checkpoint_state["is_interrupted"]
         )
 
-    @staticmethod
     def _extract_frontend_state(
+        self,
         input_data: RunAgentInput,
     ) -> dict[str, Any] | None:
-        """Return the pre-filtered client state, or ``None`` if there's
+        """Return the projected client state, or ``None`` if there's
         nothing to emit.
 
-        AG-UI ships ``RunAgentInput.state`` as a snapshot.  Dedicated keys
-        (``messages``) are driven by purpose-built AG-UI events and are
-        stripped here so they don't collide.  Empty / non-dict state is
-        treated as "no update."
+        AG-UI ships ``RunAgentInput.state`` as a snapshot.  We apply the
+        same projection used outbound (framework internals stripped,
+        dedicated keys stripped, then the user's ``include_reducers``) so
+        a stale or untrusted client can't echo back keys the dev decided
+        are internal.  Empty / non-dict state is treated as "no update."
         """
         raw = input_data.state
         if not isinstance(raw, dict) or not raw:
             return None
-        filtered = _strip_dedicated_keys(raw)
+        filtered = self._project_state(raw)
         return filtered or None
 
     def _prepend_frontend_state(
@@ -313,47 +339,92 @@ class AGUIAdapter:
             return seed_list
         return [FrontendStateMutated(state=filtered), *seed_list]  # type: ignore[call-arg]
 
-    async def _apply_frontend_state_for_resume(
-        self,
-        input_data: RunAgentInput,
-        config: Any,
-    ) -> None:
-        """Write client state directly to reducer channels via ``apre_seed``.
-
-        NOTE: On resume we bypass the ``FrontendStateMutated`` dispatch
-        path.  ``ainvoke`` on a thread with a pending interrupt would
-        consume the interrupt before ``astream_resume`` runs, so we
-        write channel values directly (matching state key -> channel
-        name).  Trade-off: the reducer's ``fn`` is not invoked on
-        resume — in the idiomatic ``fn=lambda e: e.state.get(name,
-        SKIP)`` pattern the value flows through unchanged, but
-        non-identity ``fn`` logic applies only on non-resume runs.
-        No-op when the input state is empty or contains only dedicated
-        keys.
-        """
-        filtered = self._extract_frontend_state(input_data)
-        if filtered is None:
-            return
-        await self._graph.apre_seed(config, filtered)
-
     async def _resume_event_stream(
         self,
         input_data: RunAgentInput,
         resume_event: Any,
         config: Any,
     ) -> AsyncIterator[StreamItem]:
-        """Resume path that first commits FrontendStateMutated to the
-        checkpoint, then defers to ``astream_resume``.
+        """Resume path that routes ``FrontendStateMutated`` through both
+        reducer dispatch and the LangGraph channel state.
+
+        For each reducer subscribing to ``FrontendStateMutated``, compute the
+        contribution and ``apre_seed`` it to the channel so handlers reading
+        reducer state via parameter injection on the resumed step see the
+        update.  This preserves reducer ``fn`` semantics (transformations,
+        ``SKIP``) — unlike the old ``apre_seed(raw_state)`` bypass that wrote
+        client values directly and could clobber backend-authoritative
+        channels with stale snapshot keys.
+
+        Then pass FSM as a seed to ``astream_resume`` so it appears in the
+        output stream and audit log alongside the resume event.
+
+        **Limitation**: ``@on(FrontendStateMutated)`` handlers do not fire on
+        resume — LangGraph's ``Command(resume=...)`` carries one value and
+        seeds are dispatched out-of-graph.  Use ``@on(Resumed)`` for
+        resume-time side effects.
         """
-        await self._apply_frontend_state_for_resume(input_data, config)
+        fsm = self._build_resume_frontend_state_event(input_data)
+        if fsm is not None:
+            await self._commit_resume_frontend_state(fsm, config)
         async for item in self._graph.astream_resume(
             resume_event,
-            include_reducers=self._include_reducers,
+            seeds=[fsm] if fsm is not None else [],
+            include_reducers=self._activation,
             include_llm_tokens=True,
             include_custom_events=True,
             config=config,
         ):
             yield item
+
+    def _build_resume_frontend_state_event(
+        self, input_data: RunAgentInput
+    ) -> FrontendStateMutated | None:
+        """Build a ``FrontendStateMutated`` from the projected client state,
+        or ``None`` when there's nothing to apply on resume.
+        """
+        filtered = self._extract_frontend_state(input_data)
+        if filtered is None:
+            return None
+        return FrontendStateMutated(state=filtered)  # type: ignore[call-arg]
+
+    async def _commit_resume_frontend_state(
+        self, fsm: FrontendStateMutated, config: Any
+    ) -> None:
+        """Persist FSM into the audit log AND apply reducer contributions
+        to user channels — both before the resume's domain dispatch runs.
+
+        Channel reducers merge the writes (``operator.add`` for ``events``,
+        scalar / accumulator for user reducers).  We do NOT emit FSM via
+        the seed_node here: ``Command(resume=...)`` carries one value and
+        doesn't route seeds through ``inp["events"]``, so this ``apre_seed``
+        is the sole path that lands FSM in the persisted ``events``
+        channel.  ``_astream_v2`` yields seeds into the output stream but
+        deliberately skips re-applying seed contributions on resume to
+        avoid double-counting accumulator reducers.
+
+        If a future refactor unifies seed dispatch through ``inp["events"]``,
+        drop the ``{"events": [fsm]}`` entry to avoid duplication.
+        """
+        updates: dict[str, Any] = {"events": [fsm]}
+        updates.update(self._reducer_updates_for([fsm]))
+        await self._graph.apre_seed(config, updates)
+
+    def _reducer_updates_for(self, events: list[Event]) -> dict[str, Any]:
+        """Compute per-channel reducer contributions for *events*.
+
+        Runs each registered reducer's ``collect`` against *events* and
+        returns the dict of channel updates (only including channels with
+        actual contributions).  Used on the resume path to materialise FSM
+        reducer effects into LangGraph channel state so subsequent handlers
+        see them via parameter injection.
+        """
+        updates: dict[str, Any] = {}
+        for name, reducer in self._graph._reducers.items():
+            contribution = reducer.collect(events)
+            if reducer.has_contributions(contribution):
+                updates[name] = contribution
+        return updates
 
     def _build_event_stream(
         self,
@@ -369,7 +440,7 @@ class AGUIAdapter:
         seeds = self._prepend_frontend_state(input_data, seed)
         return self._graph.astream_events(
             seeds,
-            include_reducers=self._include_reducers,
+            include_reducers=self._activation,
             include_llm_tokens=True,
             include_custom_events=True,
             config=config,
@@ -473,7 +544,7 @@ class AGUIAdapter:
             )
 
         if should_emit_state_snapshot:
-            events.append(build_state_snapshot(_strip_dedicated_keys(item.reducers)))
+            events.append(build_state_snapshot(self._project_state(item.reducers)))
             state_snapshot_emitted = True
 
         messages = item.reducers.get("messages")
@@ -531,7 +602,7 @@ class AGUIAdapter:
         # Interrupt gate: re-emit state without executing when interrupted
         if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
             state = cast("CheckpointState", checkpoint_state)
-            yield build_state_snapshot(_strip_dedicated_keys(state["reducers"]))
+            yield build_state_snapshot(self._project_state(state["reducers"]))
             messages = state["messages"]
             if messages is not None:
                 yield build_messages_snapshot(messages)
