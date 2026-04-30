@@ -11,8 +11,8 @@ Two layers of stripping always run on every snapshot, in both directions:
    STATE_SNAPSHOT).
 
 User-facing control is via ``AGUIAdapter(include_reducers=...)`` which
-accepts ``bool | list[str] | _Drop`` — see :func:`drop_reducers` for the
-ergonomic deny-list builder.
+accepts ``bool | list[str] | DropReducersSpec`` — see :func:`drop_reducers`
+for the ergonomic deny-list builder.
 """
 
 from __future__ import annotations
@@ -38,12 +38,13 @@ def default_state_projection(reducers: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in reducers.items() if k not in _RESERVED_KEYS}
 
 
-class _Drop:
-    """Internal marker carrying the names ``drop_reducers`` was asked to hide.
+class DropReducersSpec:
+    """Marker carrying the names :func:`drop_reducers` was asked to hide.
 
-    The adapter resolves this against the graph's reducer set at construction
-    time, producing a concrete ``list[str]`` allow-list — so the runtime path
-    is always ``bool | list[str]``, never an opaque callable.
+    Construct via :func:`drop_reducers`, not directly.  ``AGUIAdapter``
+    resolves this against the graph's reducer set at construction time into
+    a concrete ``list[str]`` allow-list, so the runtime path is always
+    ``bool | list[str]`` — no opaque callables on the hot path.
     """
 
     __slots__ = ("excluded",)
@@ -52,7 +53,7 @@ class _Drop:
         self.excluded: frozenset[str] = frozenset(excluded)
 
 
-def drop_reducers(*names: str) -> _Drop:
+def drop_reducers(*names: str) -> DropReducersSpec:
     """Build a deny-list spec — keep every reducer except the named ones.
 
     Sugar over the ``list[str]`` allow-list form, resolved against the graph's
@@ -70,4 +71,4 @@ def drop_reducers(*names: str) -> _Drop:
     AG-UI keys (``messages``) are stripped automatically and don't need to
     be listed.  Names that don't match any reducer are silently ignored.
     """
-    return _Drop(excluded=names)
+    return DropReducersSpec(excluded=names)

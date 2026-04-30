@@ -4007,6 +4007,78 @@ def describe_frontend_state_mutated():
 
                 assert seen_strategy == ["guided"]
 
+        def with_accumulator_reducer_subscribed_to_fsm():
+            async def it_does_not_double_count_the_contribution():
+                """Regression for C1 (PR #56 final review): an
+                ``operator.add``-style accumulator reducer wired to
+                ``FrontendStateMutated`` must not have its FSM contribution
+                applied twice on the resume path — once via the adapter's
+                ``apre_seed`` (which writes the channel), then a second time
+                via ``_astream_v2``'s seed-merge loop on top of the
+                already-written checkpoint state.
+
+                Symptom (pre-fix): the streamed STATE_SNAPSHOT shows the
+                FSM contribution doubled (``["X", "X"]``) while the
+                persisted checkpoint correctly shows ``["X"]``.
+                """
+                import operator
+
+                from langgraph_events import Reducer
+                from langgraph_events.agui import FrontendStateMutated
+
+                # Append-style reducer: each FSM event contributes
+                # [state["focus"]], merged via operator.add on the channel.
+                focus_log = Reducer(
+                    name="focus_log",
+                    event_type=FrontendStateMutated,
+                    fn=lambda e: [e.state["focus"]] if "focus" in e.state else [],
+                    reducer=operator.add,
+                )
+
+                @on(UserAsked)
+                def ask(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="ok?")
+
+                @on(ApprovalGiven)
+                def finish(event: ApprovalGiven) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="done"))
+
+                graph = EventGraph(
+                    [ask, finish],
+                    reducers=[message_reducer(), focus_log],
+                    checkpointer=MemorySaver(),
+                )
+
+                thread_id = "thread-fsm-no-double-count"
+                config = {"configurable": {"thread_id": thread_id}}
+                await graph.ainvoke(UserAsked(question="?"), config=config)
+
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="unused"),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+                events = await _collect(
+                    adapter,
+                    _make_input(
+                        thread_id=thread_id,
+                        state={"focus": "X"},
+                    ),
+                )
+
+                # Persisted checkpoint: single contribution (correct).
+                checkpoint_values = (await graph.compiled.aget_state(config)).values
+                assert checkpoint_values.get("focus_log") == ["X"]
+
+                # Streamed STATE_SNAPSHOT: must also be single contribution.
+                snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
+                assert snapshots, "expected at least one STATE_SNAPSHOT"
+                last = snapshots[-1].snapshot
+                assert last.get("focus_log") == ["X"], (
+                    f"expected ['X'], got {last.get('focus_log')!r} — FSM "
+                    "contribution was double-counted in the streamed snapshot"
+                )
+
         def with_state_yielded_in_output_stream():
             async def it_emits_a_frontend_state_mutated_event_on_resume():
                 """FSM appears in the audit log on the resume path,

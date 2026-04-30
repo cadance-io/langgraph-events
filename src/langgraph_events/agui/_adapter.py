@@ -43,7 +43,7 @@ from ._mappers import (
 )
 from ._state import (
     _DEDICATED_EVENT_KEYS,
-    _Drop,
+    DropReducersSpec,
     default_state_projection,
 )
 
@@ -84,7 +84,7 @@ class AGUIAdapter:
         seed_factory: SeedFactory,
         resume_factory: ResumeFactory | None = None,
         mappers: list[EventMapper] | None = None,
-        include_reducers: bool | list[str] | _Drop = True,
+        include_reducers: bool | list[str] | DropReducersSpec = True,
         error_message: str | None = None,
     ) -> None:
         if resume_factory is not None and graph._checkpointer is None:
@@ -101,7 +101,7 @@ class AGUIAdapter:
         # Resolve drop_reducers() sugar into a concrete allow-list against
         # the graph's reducer set.  After this, include_reducers is always
         # bool | list[str] — the runtime path has one shape.
-        if isinstance(include_reducers, _Drop):
+        if isinstance(include_reducers, DropReducersSpec):
             include_reducers = [
                 name
                 for name in graph._reducers

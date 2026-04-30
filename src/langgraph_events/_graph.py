@@ -746,10 +746,21 @@ class EventGraph:
                 reducer_state[name] = self._reducers[name].seed(seeds)
 
         # Merge seed contributions on top of checkpointed state.
-        # - On astream_resume: seeds=[] so this is a no-op.
-        # - On astream_events second-run: seeds carry new events that
-        #   should layer on top of the restored checkpoint.
-        if checkpoint_values is not None:
+        # - On astream_events second-run: seeds carry new events whose
+        #   contributions need to layer on top of the restored checkpoint
+        #   (LangGraph's seed_node will copy them into state["events"], but
+        #   the in-adapter reducer_state shadow needs the contribution
+        #   computed here so the StreamFrame yielded just below reflects it).
+        # - On astream_resume: skipped — the caller (e.g. AGUIAdapter) is
+        #   responsible for pre-seeding contributions via apre_seed before
+        #   calling astream_resume, because Command(resume=...) doesn't
+        #   route seeds through the seed_node.  Re-applying contributions
+        #   here would double-count for accumulator reducers (operator.add
+        #   channel reducers concatenate the contribution twice).  See
+        #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
+        from langgraph.types import Command  # noqa: PLC0415
+
+        if checkpoint_values is not None and not isinstance(inp, Command):
             for s in seeds:
                 self._update_reducer_state(reducer_state, s, reducer_names)
 
