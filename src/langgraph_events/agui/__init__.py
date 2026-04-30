@@ -16,10 +16,7 @@ from langgraph_events.agui._protocols import (
     ResumeFactory,
     SeedFactory,
 )
-from langgraph_events.agui._state import (
-    StateProjector,
-    drop_reducers,
-)
+from langgraph_events.agui._state import drop_reducers
 from langgraph_events.agui._tools import (
     build_langchain_tools,
     detect_new_tool_results,
@@ -42,7 +39,6 @@ __all__ = [
     "ResumeFactory",
     "SeedFactory",
     "SkipInternalMapper",
-    "StateProjector",
     "build_langchain_tools",
     "create_starlette_response",
     "detect_new_tool_results",

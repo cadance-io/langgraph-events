@@ -96,9 +96,9 @@ Events without `agui_dict()` are skipped with a one-time warning.
 - `True` (default) — ship every user reducer.
 - `list[str]` — allow-list (e.g. `["focus", "scene"]`).
 - `False` — ship no user reducers.
-- `Callable[[dict], dict]` — a `StateProjector` for hide / redact / rename / reshape.
+- `drop_reducers(*names)` — sugar for "everything except these names," resolved against the graph's reducer set at adapter construction.
 
-The same value is applied symmetrically to outbound `StateSnapshotEvent` and inbound `RunAgentInput.state` echo (so a stale or untrusted client can't inject keys you've decided are internal). Framework-internal channels (`events`, `_cursor`, `_pending`, `_round`) and dedicated AG-UI keys (`messages`) are always stripped first — your projector never sees them.
+The same value is applied symmetrically to outbound `StateSnapshotEvent` and inbound `RunAgentInput.state` echo (so a stale or untrusted client can't inject keys you've decided are internal). Framework-internal channels (`events`, `_cursor`, `_pending`, `_round`) and dedicated AG-UI keys (`messages`) are always stripped first.
 
 Hide a few internal reducers with the `drop_reducers()` builder:
 
@@ -112,19 +112,13 @@ adapter = AGUIAdapter(
 )
 ```
 
-Custom projection (redact / transform):
+Equivalent allow-list form when you want to be explicit:
 
 ```python
-def project(reducers: dict) -> dict:
-    out = dict(reducers)
-    if "user" in out:
-        out["user"] = mask_pii(out["user"])
-    return out
-
-adapter = AGUIAdapter(graph=g, seed_factory=..., include_reducers=project)
+include_reducers=["focus", "scene", "user", "context"]
 ```
 
-When `include_reducers` is a callable, the adapter activates *all* reducers at the graph level (it can't introspect names from a callable) — projection happens after computation. For perf-sensitive setups with expensive reducers, prefer the `list[str]` form.
+All forms drive both projection (what the snapshot contains) and activation (which reducers EventGraph computes during streaming). If you need redaction or value transformation, write a custom `EventMapper` — that's the supported extension point for shaping AG-UI output.
 
 When reducer delta metadata is available (`StreamFrame.changed_reducers`, emitted by `EventGraph` v2 streaming), the adapter suppresses redundant snapshots:
 

@@ -1201,10 +1201,11 @@ def describe_AGUIAdapter():
                 snapshots = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT]
                 assert len(snapshots) >= 1
 
-        def when_include_reducers_is_callable():
+        def when_include_reducers_uses_drop_reducers():
             @pytest.mark.asyncio
-            async def it_applies_projector_to_outbound_state_snapshot():
-                """A StateProjector hides reducers from the wire."""
+            async def it_omits_dropped_reducers_from_outbound_state_snapshot():
+                """drop_reducers() is sugar for an allow-list — the named
+                reducers are absent from the snapshot."""
                 from langgraph_events import SKIP, ScalarReducer
                 from langgraph_events.agui import drop_reducers
 
@@ -1241,44 +1242,9 @@ def describe_AGUIAdapter():
                 assert "events" not in last  # always stripped (framework)
 
             @pytest.mark.asyncio
-            async def it_strips_framework_keys_before_projector_runs():
-                """The projector receives a dict already stripped of `events`
-                and `messages`, so devs never have to think about them."""
-                from langgraph_events import SKIP, ScalarReducer
-
-                focus = ScalarReducer(
-                    name="focus",
-                    event_type=UserAsked,
-                    fn=lambda e: e.question or SKIP,
-                )
-
-                @on(UserAsked)
-                def reply(event: UserAsked) -> AgentReplied:
-                    return AgentReplied(message=AIMessage(content="ok"))
-
-                seen: list[dict[str, Any]] = []
-
-                def projector(reducers: dict[str, Any]) -> dict[str, Any]:
-                    seen.append(dict(reducers))
-                    return reducers
-
-                graph = EventGraph([reply], reducers=[message_reducer(), focus])
-                adapter = AGUIAdapter(
-                    graph=graph,
-                    seed_factory=lambda inp: UserAsked(question="scene-2"),
-                    include_reducers=projector,
-                )
-                await _collect(adapter, _make_input())
-
-                assert seen, "projector was never invoked"
-                for snap in seen:
-                    assert "events" not in snap
-                    assert "messages" not in snap
-
-            @pytest.mark.asyncio
-            async def it_applies_projector_to_inbound_frontend_state():
-                """Projector applies symmetrically: a stale client echoing a
-                hidden key shouldn't sneak it back into the graph."""
+            async def it_omits_dropped_keys_from_inbound_frontend_state():
+                """Symmetric: a stale client echoing a dropped key doesn't
+                sneak it back into the FrontendStateMutated event."""
                 from langgraph_events import SKIP, ScalarReducer
                 from langgraph_events.agui import FrontendStateMutated, drop_reducers
 
@@ -1287,6 +1253,11 @@ def describe_AGUIAdapter():
                     event_type=UserAsked,
                     fn=lambda e: e.question or SKIP,
                 )
+                debug_count = ScalarReducer(
+                    name="debug_count",
+                    event_type=UserAsked,
+                    fn=lambda e: 1,
+                )
 
                 @on(UserAsked)
                 def reply(event: UserAsked) -> AgentReplied:
@@ -1294,7 +1265,7 @@ def describe_AGUIAdapter():
 
                 graph = EventGraph(
                     [reply],
-                    reducers=[message_reducer(), focus],
+                    reducers=[message_reducer(), focus, debug_count],
                     checkpointer=MemorySaver(),
                 )
                 adapter = AGUIAdapter(
@@ -1302,11 +1273,11 @@ def describe_AGUIAdapter():
                     seed_factory=lambda inp: UserAsked(question="go"),
                     include_reducers=drop_reducers("debug_count"),
                 )
-                config = {"configurable": {"thread_id": "thread-fsm-projector"}}
+                config = {"configurable": {"thread_id": "thread-fsm-drop"}}
                 await _collect(
                     adapter,
                     _make_input(
-                        thread_id="thread-fsm-projector",
+                        thread_id="thread-fsm-drop",
                         state={
                             "focus": "client-set",
                             "debug_count": 999,
@@ -1320,63 +1291,40 @@ def describe_AGUIAdapter():
                 assert fsm_events[0].state == {"focus": "client-set"}
                 assert "debug_count" not in fsm_events[0].state
 
-            @pytest.mark.asyncio
-            async def it_activates_all_user_reducers():
-                """A projector callable forces all reducers to be computed at
-                the graph level (we can't introspect names from a callable)."""
-                from langgraph_events import SKIP, ScalarReducer
-
-                focus = ScalarReducer(
-                    name="focus",
-                    event_type=UserAsked,
-                    fn=lambda e: e.question or SKIP,
-                )
-                scene = ScalarReducer(
-                    name="scene",
-                    event_type=UserAsked,
-                    fn=lambda e: f"@{e.question}" if e.question else SKIP,
-                )
-
-                @on(UserAsked)
-                def reply(event: UserAsked) -> AgentReplied:
-                    return AgentReplied(message=AIMessage(content="ok"))
-
-                graph = EventGraph([reply], reducers=[message_reducer(), focus, scene])
-                # Identity projector — should ship every user reducer.
-                adapter = AGUIAdapter(
-                    graph=graph,
-                    seed_factory=lambda inp: UserAsked(question="scene-3"),
-                    include_reducers=lambda r: r,
-                )
-                events = await _collect(adapter, _make_input())
-                snapshots = [e for e in events if e.type == EventType.STATE_SNAPSHOT]
-                assert snapshots
-                last = snapshots[-1].snapshot
-                assert last.get("focus") == "scene-3"
-                assert last.get("scene") == "@scene-3"
-
-        def when_using_drop_helper():
-            def when_names_match_keys():
-                def it_drops_those_keys():
+            def when_no_names_are_dropped():
+                @pytest.mark.asyncio
+                async def it_behaves_like_the_default_true_form():
+                    """drop_reducers() with no names is equivalent to True
+                    (every user reducer ships)."""
+                    from langgraph_events import SKIP, ScalarReducer
                     from langgraph_events.agui import drop_reducers
 
-                    projector = drop_reducers("a", "b")
-                    assert projector({"a": 1, "b": 2, "c": 3}) == {"c": 3}
+                    focus = ScalarReducer(
+                        name="focus",
+                        event_type=UserAsked,
+                        fn=lambda e: e.question or SKIP,
+                    )
 
-            def when_names_are_not_present():
-                def it_is_a_no_op():
-                    """Silent: unlike the list form, drop_reducers() does not
-                    warn on unknowns — devs commonly pre-declare hides for
-                    reducers that may not be wired in every deployment."""
-                    from langgraph_events.agui import drop_reducers
+                    @on(UserAsked)
+                    def reply(event: UserAsked) -> AgentReplied:
+                        return AgentReplied(message=AIMessage(content="ok"))
 
-                    projector = drop_reducers("nonexistent")
-                    assert projector({"a": 1}) == {"a": 1}
+                    graph = EventGraph([reply], reducers=[message_reducer(), focus])
+                    adapter = AGUIAdapter(
+                        graph=graph,
+                        seed_factory=lambda inp: UserAsked(question="scene-2"),
+                        include_reducers=drop_reducers(),
+                    )
+                    events = await _collect(adapter, _make_input())
+                    snapshots = [
+                        e for e in events if e.type == EventType.STATE_SNAPSHOT
+                    ]
+                    assert snapshots[-1].snapshot.get("focus") == "scene-2"
 
         def when_include_reducers_is_malformed():
             def it_raises_typeerror_at_construction():
-                """Garbage values (int, dict, etc.) fail loudly at init,
-                not silently as empty snapshots at runtime."""
+                """Garbage values (int, dict, callable, etc.) fail loudly at
+                init, not silently as empty snapshots at runtime."""
 
                 @on(UserAsked)
                 def reply(event: UserAsked) -> AgentReplied:
@@ -1388,6 +1336,22 @@ def describe_AGUIAdapter():
                         graph=graph,
                         seed_factory=lambda inp: UserAsked(question="hi"),
                         include_reducers=42,  # type: ignore[arg-type]
+                    )
+
+            def it_rejects_a_bare_callable():
+                """Bare callables aren't a supported include_reducers shape —
+                use drop_reducers() or the list[str] allow-list form."""
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="ok"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                with pytest.raises(TypeError, match="include_reducers"):
+                    AGUIAdapter(
+                        graph=graph,
+                        seed_factory=lambda inp: UserAsked(question="hi"),
+                        include_reducers=lambda r: r,  # type: ignore[arg-type]
                     )
 
     def describe_seed_factory():

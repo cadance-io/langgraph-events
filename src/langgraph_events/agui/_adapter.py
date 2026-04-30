@@ -43,8 +43,7 @@ from ._mappers import (
 )
 from ._state import (
     _DEDICATED_EVENT_KEYS,
-    StateProjector,
-    _normalize,
+    _Drop,
     default_state_projection,
 )
 
@@ -85,7 +84,7 @@ class AGUIAdapter:
         seed_factory: SeedFactory,
         resume_factory: ResumeFactory | None = None,
         mappers: list[EventMapper] | None = None,
-        include_reducers: bool | list[str] | StateProjector = True,
+        include_reducers: bool | list[str] | _Drop = True,
         error_message: str | None = None,
     ) -> None:
         if resume_factory is not None and graph._checkpointer is None:
@@ -98,10 +97,29 @@ class AGUIAdapter:
                 "Add reducers=[message_reducer()] when constructing your "
                 "EventGraph."
             )
+
+        # Resolve drop_reducers() sugar into a concrete allow-list against
+        # the graph's reducer set.  After this, include_reducers is always
+        # bool | list[str] — the runtime path has one shape.
+        if isinstance(include_reducers, _Drop):
+            include_reducers = [
+                name
+                for name in graph._reducers
+                if name not in include_reducers.excluded
+            ]
+        elif not (
+            include_reducers is True
+            or include_reducers is False
+            or isinstance(include_reducers, list)
+        ):
+            raise TypeError(
+                f"include_reducers must be bool | list[str] | drop_reducers(...), "
+                f"got {type(include_reducers).__name__}"
+            )
+
         self._graph = graph
         self._seed_factory = seed_factory
         self._resume_factory = resume_factory
-        self._include_reducers = include_reducers
         self._error_message = error_message
         self._seed_accepts_state = self._accepts_extra_positional(seed_factory)
         self._resume_accepts_state = (
@@ -110,30 +128,26 @@ class AGUIAdapter:
             else False
         )
 
-        # Resolve include_reducers into a single StateProjector once, so the
-        # runtime hot path is one call.  This also validates the input shape:
-        # malformed values (anything but bool / list[str] / Callable) raise
-        # TypeError here, before any other work happens.
-        self._projector: StateProjector = _normalize(include_reducers)
-
-        # Compute graph-level activation (which reducers EventGraph actually
-        # computes during streaming).  Callables can't be introspected for
-        # names, so they activate all reducers and let _project_state filter
-        # at emit time.  bool/list specs need "messages" forced into the
-        # activation set so message-driven AG-UI events can read reducer
-        # state — Layer 2 of default_state_projection then strips it from
-        # the snapshot before the projector sees it.  Note: `False` resolves
-        # to activation=["messages"] (so MessagesSnapshot still works) while
-        # the projector returns `{}` — empty StateSnapshot, populated
-        # MessagesSnapshot.  That asymmetry is intentional.
-        if callable(include_reducers):
-            self._activation: bool | list[str] = True
-        else:
-            spec: bool | list[str] = include_reducers
-            resolved = graph._resolve_reducer_names(spec)
-            if "messages" not in resolved:
-                spec = [*spec, "messages"] if isinstance(spec, list) else ["messages"]
-            self._activation = spec
+        # Force-include "messages" in the activation set so message-driven
+        # AG-UI events can read reducer state.  Layer 2 of
+        # default_state_projection then strips it from the snapshot.
+        # Note: `False` resolves to activation=["messages"] (so
+        # MessagesSnapshot still works) while the projection returns `{}` —
+        # empty StateSnapshot, populated MessagesSnapshot.  Intentional.
+        resolved = graph._resolve_reducer_names(include_reducers)
+        if "messages" not in resolved:
+            include_reducers = (
+                [*include_reducers, "messages"]
+                if isinstance(include_reducers, list)
+                else ["messages"]
+            )
+        self._include_reducers: bool | list[str] = include_reducers
+        self._activation: bool | list[str] = include_reducers
+        # Pre-compute the allow-list set for fast filtering.  None for
+        # bool=True (no filter beyond the framework strip).
+        self._allowed_keys: frozenset[str] | None = (
+            frozenset(include_reducers) if isinstance(include_reducers, list) else None
+        )
 
         # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers()
@@ -146,12 +160,15 @@ class AGUIAdapter:
         """Project raw reducer state to client-facing state.
 
         Strips framework-internal channels (``events``, ``_cursor``, …) and
-        dedicated AG-UI keys (``messages``), then applies the resolved
-        :class:`StateProjector`.  Used symmetrically in both directions:
-        outbound ``StateSnapshotEvent`` and inbound ``RunAgentInput.state``
-        echo into ``FrontendStateMutated``.
+        dedicated AG-UI keys (``messages``), then applies the
+        ``include_reducers`` allow-list (if any).  Used symmetrically in
+        both directions: outbound ``StateSnapshotEvent`` and inbound
+        ``RunAgentInput.state`` echo into ``FrontendStateMutated``.
         """
-        return self._projector(default_state_projection(reducers))
+        base = default_state_projection(reducers)
+        if self._allowed_keys is None:
+            return base
+        return {k: v for k, v in base.items() if k in self._allowed_keys}
 
     def _map_event(self, event: Any, ctx: MapperContext) -> list[BaseEvent]:
         """Run event through the mapper chain. First non-None wins."""
