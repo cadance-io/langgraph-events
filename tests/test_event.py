@@ -11,7 +11,6 @@ from langgraph_events import (
     Command,
     DomainEvent,
     Event,
-    FrontendToolCallRequested,
     Halted,
     HandlerRaised,
     IntegrationEvent,
@@ -21,6 +20,7 @@ from langgraph_events import (
     Namespace,
     Resumed,
     SystemEvent,
+    on_namespace_finalize,
 )
 
 
@@ -267,72 +267,6 @@ def describe_MessageEvent():
             assert e.as_messages() == [msg]
             with pytest.raises(AttributeError):
                 e.content = "nope"  # type: ignore
-
-
-def describe_FrontendToolCallRequested():
-
-    def when_only_name_provided():
-
-        def it_is_an_interrupted_subclass():
-            e = FrontendToolCallRequested(name="confirm")
-            assert isinstance(e, Interrupted)
-            assert isinstance(e, Event)
-
-        def it_defaults_args_to_empty_dict():
-            e = FrontendToolCallRequested(name="confirm")
-            assert e.args == {}
-
-        def it_auto_generates_tool_call_id():
-            a = FrontendToolCallRequested(name="confirm")
-            b = FrontendToolCallRequested(name="confirm")
-            assert a.tool_call_id
-            assert b.tool_call_id
-            assert a.tool_call_id != b.tool_call_id
-
-    def when_explicit_fields():
-
-        def it_preserves_all_fields():
-            e = FrontendToolCallRequested(
-                name="run_scenario",
-                args={"scenario_id": "s-1"},
-                tool_call_id="tc-fixed",
-            )
-            assert e.name == "run_scenario"
-            assert e.args == {"scenario_id": "s-1"}
-            assert e.tool_call_id == "tc-fixed"
-
-    def when_agui_dict_called():
-
-        def it_returns_name_args_and_id():
-            e = FrontendToolCallRequested(
-                name="confirm",
-                args={"message": "Ship?"},
-                tool_call_id="tc-1",
-            )
-            d = e.agui_dict()
-            assert d == {
-                "name": "confirm",
-                "args": {"message": "Ship?"},
-                "tool_call_id": "tc-1",
-            }
-
-    def when_name_is_empty():
-
-        def it_raises_on_construction():
-            with pytest.raises(ValueError, match=r"non-empty tool name"):
-                FrontendToolCallRequested(name="")
-
-    def when_name_is_whitespace():
-
-        def it_raises_on_construction():
-            with pytest.raises(ValueError, match=r"non-empty tool name"):
-                FrontendToolCallRequested(name="   ")
-
-    def when_no_args():
-
-        def it_raises_missing_name():
-            with pytest.raises(TypeError, match=r"missing.*name"):
-                FrontendToolCallRequested()  # type: ignore[call-arg]
 
 
 def describe_Namespace():
@@ -639,3 +573,61 @@ def describe_SystemEvent():
 
         def it_makes_MaxRoundsExceeded_isinstance_SystemEvent():
             assert issubclass(MaxRoundsExceeded, SystemEvent)
+
+
+def describe_on_namespace_finalize():
+    def when_callback_registered_during_class_body():
+        def it_fires_after_the_enclosing_Namespace_body_completes():
+            captured: list[tuple[type, type]] = []
+
+            class MyNs(Namespace):
+                class Cmd(Command):
+                    class Done(DomainEvent):
+                        pass
+
+                on_namespace_finalize(Cmd, lambda c, ns: captured.append((c, ns)))
+
+            assert captured == [(MyNs.Cmd, MyNs)]
+
+    def when_callback_needs_a_sibling_defined_later_in_the_namespace_body():
+        def it_receives_the_enclosing_namespace_class_directly():
+            captured: list[type] = []
+
+            def capture_sibling(cls):
+                # Callback signature: (cls, namespace_cls). The framework
+                # passes the enclosing Namespace class as the second arg so
+                # decorators can resolve sibling references via vars(ns_cls)
+                # without reaching into private registries.
+                on_namespace_finalize(
+                    cls, lambda c, ns_cls: captured.append(ns_cls.Sibling)
+                )
+                return cls
+
+            class LateRefNs(Namespace):
+                @capture_sibling
+                class Target(Command):
+                    pass
+
+                # Defined AFTER Target — would be unresolvable at Target's
+                # class-body / __init_subclass__ time. The finalize hook
+                # ensures the callback fires once Sibling is bound.
+                class Sibling(Command):
+                    pass
+
+            assert captured == [LateRefNs.Sibling]
+
+    def when_registered_after_the_enclosing_Namespace_finalized():
+        def it_fires_immediately_instead_of_silently_dropping():
+            class FinishedNs(Namespace):
+                class Cmd(Command):
+                    class Done(DomainEvent):
+                        pass
+
+            # Namespace body has completed; FinishedNs.Cmd's enclosing
+            # namespace already drained its finalize queue. A late
+            # registration must not silently dangle — fire eagerly.
+            captured: list[tuple[type, type]] = []
+            on_namespace_finalize(
+                FinishedNs.Cmd, lambda c, ns: captured.append((c, ns))
+            )
+            assert captured == [(FinishedNs.Cmd, FinishedNs)]

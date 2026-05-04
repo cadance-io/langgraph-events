@@ -239,9 +239,10 @@ The AG-UI spec positions tool calls as "inherently frontend-executed" and as the
 3. **Tool results back** — the frontend's handler return value is sent back as a `role: "tool"` message. `detect_new_tool_results(input_data, checkpoint_state)` returns the new `ToolMessage`s; wrap them in a `MessageEvent` (typically `ToolsExecuted(messages=...)`) and return from `resume_factory` to continue the graph.
 
 ```python
-from langgraph_events import FrontendToolCallRequested, on
+from langgraph_events import on
 from langgraph_events.agui import (
     AGUIAdapter,
+    FrontendToolCallRequested,
     build_langchain_tools,
     detect_new_tool_results,
 )
@@ -274,8 +275,11 @@ Runnable example: [`examples/conversation.py`](https://github.com/cadance-io/lan
 When the backend — not the LLM — wants to ask the frontend for something (confirm dialogs, file pickers, deterministic prompts), return a typed `FrontendToolCallRequested(Interrupted)` from a handler. The graph pauses; the AG-UI adapter streams the matching `ToolCallStart` / `ToolCallArgs` / `ToolCallEnd` triple; when the frontend's `useFrontendTool` handler returns, the resume factory surfaces the returning tool message as a typed event and the graph continues. Tool calls become "HITL with typed fields" — same machinery as `ApprovalRequested(Interrupted)`, just for frontend interactions.
 
 ```python
-from langgraph_events import FrontendToolCallRequested, on
-from langgraph_events.agui import detect_new_tool_results
+from langgraph_events import on
+from langgraph_events.agui import (
+    FrontendToolCallRequested,
+    detect_new_tool_results,
+)
 
 
 @on(ShipCommandReceived)
@@ -314,6 +318,38 @@ def ship(event: UserConfirmed) -> ShippedRelease:
 - An inbound `role: "tool"` message reaching `detect_new_tool_results` must carry a non-empty `tool_call_id`; missing/empty raises `ValueError`.
 
 Streaming-path errors propagate through the adapter's top-level handler and surface to the frontend as a `RUN_ERROR` event with the diagnostic message. Conformant CopilotKit clients and LangChain chat models satisfy these invariants by default.
+
+## Typed Interrupt Payloads
+
+For HITL flows whose frontend needs an action-discriminated dict (entity-review vs environment-select vs walkthrough-choice, …), subclass `InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The built-in `InterruptedMapper` recognises the contract and emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.
+
+```python
+from typing import Literal, TypedDict
+
+from langgraph_events import on
+from langgraph_events.agui import InterruptedWithPayload
+
+
+class ReviewPayload(TypedDict):
+    kind: Literal["review"]
+    draft: str
+    revision: int
+
+
+class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
+    draft: str
+    revision: int
+
+    def interrupt_payload(self) -> ReviewPayload:
+        return {"kind": "review", "draft": self.draft, "revision": self.revision}
+
+
+@on(DraftReady)
+def request_review(event: DraftReady) -> ReviewInterrupted:
+    return ReviewInterrupted(draft=event.draft, revision=event.revision)
+```
+
+This is the right shape when several namespace modules each need their own typed `Interrupted` subclass — the shared base lives in `langgraph_events.agui`, so the project doesn't have to invent a local "shim" module to break import cycles between sibling event modules. Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
 
 ## LangGraph Config Passthrough
 

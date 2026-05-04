@@ -40,7 +40,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 
 | Export | Type | Description |
 |---|---|---|
-| `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle` |
+| `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle`. `services=[...]` (type-keyed) or `services={...}` (name-keyed) injects project dependencies into handler params (see [Concepts › Signature injection](concepts.md#signature-injection)) |
 | `EventGraph.from_namespaces()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers |
 | `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog` |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
@@ -63,7 +63,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `Halted` | Event | Signal immediate termination; subclass for domain-specific halts |
 | `MaxRoundsExceeded` | Event | `Halted` subtype when `max_rounds` is exceeded |
 | `Cancelled` | Event | `Halted` subtype when an async handler is cancelled |
-| `Interrupted` | Base class | Subclass with typed fields to pause for human input |
+| `Interrupted` | Base class | Subclass with typed fields to pause for human input. For frontend-discriminated payloads see `InterruptedWithPayload` in `langgraph_events.agui` |
 | `Resumed` | Event | Emitted on `resume()` with the dispatched event + `interrupted` backref |
 | `HandlerRaised` | Event | Emitted when a handler raises a `raises=`-declared exception; carries `handler`, `source_event`, `exception` |
 | `Invariant` | Marker class | Subclass to declare a typed invariant; used as a dict key in `invariants=` and as the matcher value in `@on(InvariantViolated, invariant=...)` |
@@ -78,6 +78,12 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `ScalarReducer` | Class | Last-write-wins for a single value; `None` is valid |
 | `SKIP` | Sentinel | Return from `ScalarReducer.fn` to leave the value unchanged |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |
+
+## Lifecycle Hooks
+
+| Export | Type | Description |
+|---|---|---|
+| `on_namespace_finalize(cls, callback)` | Function | Schedule `callback(cls, namespace_cls)` to fire once `cls`'s enclosing `Namespace.__init_subclass__` finishes. Lets class decorators defer `typing.get_type_hints()` calls until forward references to siblings can resolve. Fires immediately if the enclosing Namespace has already finalized (e.g. when applied post-hoc to a bound class). |
 
 ## Streaming & Frames
 
@@ -113,7 +119,18 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 |---|---|---|
 | `AGUIAdapter` | Class | Map `EventGraph` streams to AG-UI protocol events |
 | `AGUIAdapter.stream()` / `.connect()` / `.reconnect()` | Method | Execute / rehydrate checkpoint / refresh |
+| `FrontendStateMutated` | Event | Adapter-emitted `IntegrationEvent` carrying `RunAgentInput.state` for client-state-mirror reducers |
+| `FrontendToolCallRequested` | Event | `Interrupted` subclass for handler-initiated frontend tool calls (CopilotKit `useFrontendTool`) |
+| `InterruptedWithPayload[PayloadT]` | Generic base | Typed-payload variant of `Interrupted`; subclasses implement `interrupt_payload(self) -> PayloadT`. The built-in `InterruptedMapper` recognizes it directly — no `agui_dict()` override needed |
 | `AGUICustomEvent` / `AGUISerializable` | Protocol | Override fallback event names / payload serialization |
 | `SeedFactory` / `ResumeFactory` / `EventMapper` | Protocol | Input → seed events; resume detection; event mapping |
 | `MapperContext` | Dataclass | Shared state (run ID, thread ID, message counter) per stream |
 | `create_starlette_response` / `encode_sse_stream` | Function | Framework-agnostic SSE wrapping |
+
+## Serde Subpackage
+
+Opt-in subpackage for namespace-aware checkpoint serialization. Use when nested events with sibling-named outcomes (`Persona.Approve.Approved`, `Story.Approve.Approved`) need to round-trip distinctly through a checkpointer.
+
+| Export | Type | Description |
+|---|---|---|
+| `NamespaceAwareSerde` | Class | `JsonPlusSerializer` subclass that keys `Event` identity by `(__module__, __qualname__)` rather than `(__module__, __name__)`. Drop-in for any LangGraph checkpointer that accepts `serde=` (e.g. `MemorySaver(serde=NamespaceAwareSerde())`). Non-event payloads encode exactly as the default serde |

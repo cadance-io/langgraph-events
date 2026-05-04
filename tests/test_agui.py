@@ -20,7 +20,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph_events import (
     Event,
     EventGraph,
-    FrontendToolCallRequested,
     IntegrationEvent,
     Interrupted,
     MessageEvent,
@@ -29,6 +28,8 @@ from langgraph_events import (
 )
 from langgraph_events.agui import (
     AGUIAdapter,
+    FrontendToolCallRequested,
+    InterruptedWithPayload,
     MapperContext,
     build_langchain_tools,
     detect_new_tool_results,
@@ -86,6 +87,19 @@ class ApprovalRequested(Interrupted):
 
     def agui_dict(self) -> dict[str, Any]:
         return {"draft": self.draft}
+
+
+class _ReviewPayload(dict):
+    pass
+
+
+class ReviewWithPayload(InterruptedWithPayload[_ReviewPayload]):
+    """Payload-typed interrupt without an explicit agui_dict() override."""
+
+    draft: str = ""
+
+    def interrupt_payload(self) -> _ReviewPayload:
+        return _ReviewPayload(kind="review", draft=self.draft)
 
 
 class ApprovalGiven(IntegrationEvent):
@@ -4232,3 +4246,209 @@ def describe_frontend_state_mutated():
             # And no CustomEvent echoing the event to the client.
             custom_names = [e.name for e in events if isinstance(e, CustomEvent)]
             assert "FrontendStateMutated" not in custom_names
+
+
+def describe_InterruptedMapper():
+    def when_event_subclasses_InterruptedWithPayload():
+        def it_emits_a_CustomEvent_using_interrupt_payload():
+            from langgraph_events.agui._mappers import InterruptedMapper
+
+            event = ReviewWithPayload(draft="hello")
+            ctx = MapperContext(
+                run_id="r-1",
+                thread_id="t-1",
+                input_data=_make_input(),
+            )
+
+            result = InterruptedMapper().map(event, ctx)
+
+            assert result is not None
+            assert len(result) == 1
+            emitted = result[0]
+            assert isinstance(emitted, CustomEvent)
+            assert emitted.type == EventType.CUSTOM
+            assert emitted.name == "interrupted"
+            assert emitted.value == {"kind": "review", "draft": "hello"}
+
+    def when_event_implements_AGUISerializable_but_not_InterruptedWithPayload():
+        def it_falls_through_to_agui_dict():
+            from langgraph_events.agui._mappers import InterruptedMapper
+
+            event = ApprovalRequested(draft="legacy-shape")
+            ctx = MapperContext(run_id="r-2", thread_id="t-2", input_data=_make_input())
+
+            result = InterruptedMapper().map(event, ctx)
+
+            assert result is not None
+            assert len(result) == 1
+            emitted = result[0]
+            assert isinstance(emitted, CustomEvent)
+            assert emitted.name == "interrupted"
+            # ApprovalRequested.agui_dict returns {"draft": ...}; this path
+            # must keep working for callers that haven't migrated to
+            # InterruptedWithPayload.
+            assert emitted.value == {"draft": "legacy-shape"}
+
+    def when_event_is_a_bare_Interrupted_subclass():
+        def without_agui_dict_implementation():
+            def it_warns_and_returns_empty():
+                from langgraph_events.agui._mappers import (
+                    InterruptedMapper,
+                    _warned_classes,
+                )
+
+                class Bare(Interrupted):
+                    draft: str = ""
+
+                _warned_classes.discard(Bare)
+                event = Bare(draft="x")
+                ctx = MapperContext(
+                    run_id="r-3", thread_id="t-3", input_data=_make_input()
+                )
+
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    result = InterruptedMapper().map(event, ctx)
+
+                assert result == []
+                assert any(
+                    "Bare" in str(w.message) and "agui_dict" in str(w.message)
+                    for w in caught
+                )
+
+
+def describe_FrontendToolCallRequested():
+    def when_only_name_provided():
+        def it_is_an_interrupted_subclass():
+            e = FrontendToolCallRequested(name="confirm")
+            assert isinstance(e, Interrupted)
+            assert isinstance(e, Event)
+
+        def it_defaults_args_to_empty_dict():
+            e = FrontendToolCallRequested(name="confirm")
+            assert e.args == {}
+
+        def it_auto_generates_tool_call_id():
+            a = FrontendToolCallRequested(name="confirm")
+            b = FrontendToolCallRequested(name="confirm")
+            assert a.tool_call_id
+            assert b.tool_call_id
+            assert a.tool_call_id != b.tool_call_id
+
+    def when_explicit_fields():
+        def it_preserves_all_fields():
+            e = FrontendToolCallRequested(
+                name="run_scenario",
+                args={"scenario_id": "s-1"},
+                tool_call_id="tc-fixed",
+            )
+            assert e.name == "run_scenario"
+            assert e.args == {"scenario_id": "s-1"}
+            assert e.tool_call_id == "tc-fixed"
+
+    def when_agui_dict_called():
+        def it_returns_name_args_and_id():
+            e = FrontendToolCallRequested(
+                name="confirm",
+                args={"message": "Ship?"},
+                tool_call_id="tc-1",
+            )
+            d = e.agui_dict()
+            assert d == {
+                "name": "confirm",
+                "args": {"message": "Ship?"},
+                "tool_call_id": "tc-1",
+            }
+
+    def when_name_is_empty():
+        def it_raises_on_construction():
+            with pytest.raises(ValueError, match=r"non-empty tool name"):
+                FrontendToolCallRequested(name="")
+
+    def when_name_is_whitespace():
+        def it_raises_on_construction():
+            with pytest.raises(ValueError, match=r"non-empty tool name"):
+                FrontendToolCallRequested(name="   ")
+
+    def when_no_args():
+        def it_raises_missing_name():
+            with pytest.raises(TypeError, match=r"missing.*name"):
+                FrontendToolCallRequested()  # type: ignore[call-arg]
+
+
+def describe_InterruptedWithPayload():
+    def when_subclassed():
+        def with_a_typed_payload():
+            def it_returns_the_payload_from_interrupt_payload():
+                class ReviewPayload(dict):
+                    pass
+
+                class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
+                    draft: str
+                    revision: int
+
+                    def interrupt_payload(self) -> ReviewPayload:
+                        return ReviewPayload(
+                            kind="review",
+                            draft=self.draft,
+                            revision=self.revision,
+                        )
+
+                event = ReviewInterrupted(draft="hello", revision=2)
+                assert event.interrupt_payload() == {
+                    "kind": "review",
+                    "draft": "hello",
+                    "revision": 2,
+                }
+
+            def it_remains_substitutable_for_Interrupted():
+                class P(dict):
+                    pass
+
+                class MyInterrupt(InterruptedWithPayload[P]):
+                    value: str
+
+                    def interrupt_payload(self) -> P:
+                        return P(value=self.value)
+
+                assert issubclass(MyInterrupt, Interrupted)
+                assert isinstance(MyInterrupt(value="x"), Interrupted)
+
+        def without_overriding_interrupt_payload():
+            def it_raises_NotImplementedError_naming_the_method():
+                class P(dict):
+                    pass
+
+                class Forgotten(InterruptedWithPayload[P]):
+                    pass
+
+                with pytest.raises(NotImplementedError, match="interrupt_payload"):
+                    Forgotten().interrupt_payload()
+
+
+def describe_FrontendToolCallRequested_deprecated_top_level_alias():
+    def when_imported_from_top_level_langgraph_events():
+        def it_resolves_to_the_agui_class_and_warns():
+            import langgraph_events
+            from langgraph_events.agui import FrontendToolCallRequested as Canonical
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                shim_cls = langgraph_events.FrontendToolCallRequested
+
+            assert shim_cls is Canonical
+            depr = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+            assert depr, (
+                "expected DeprecationWarning when accessing the top-level "
+                "FrontendToolCallRequested alias"
+            )
+            assert any("langgraph_events.agui" in str(w.message) for w in depr), (
+                "deprecation message should point users at the new import path"
+            )
+
+        def it_appears_neither_in___all___nor_at_module_attribute_dir():
+            # The deprecated alias is reachable via attribute access for back
+            # compat, but tooling (autoimport, * imports) should not surface it.
+            import langgraph_events
+
+            assert "FrontendToolCallRequested" not in langgraph_events.__all__
