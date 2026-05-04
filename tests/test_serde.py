@@ -205,6 +205,34 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(back.value, Story.Approve.Approved)
                 assert back.value.note == "persona"
 
+        def when_a_checkpoint_carries_multiple_interrupts():
+            # LangGraph's runner emits a *tuple* of ``Interrupt``s on a
+            # checkpoint write (one per parallel branch / interrupt site).
+            # Single-Interrupt round-trip is covered above; this guards the
+            # actual emission shape so a regression that breaks tuple/list
+            # iteration through ``_default`` shows up here.
+            def it_preserves_each_nested_event_class_identity():
+                serde = NamespaceAwareSerde()
+                ivs = [
+                    Interrupt(value=Persona.Approve.Approved(note="x"), id="a"),
+                    Interrupt(value=Story.Approve.Approved(note="y"), id="b"),
+                ]
+
+                back = serde.loads_typed(serde.dumps_typed(ivs))
+
+                assert len(back) == 2
+                assert isinstance(back[0], Interrupt)
+                assert isinstance(back[1], Interrupt)
+                assert isinstance(back[0].value, Persona.Approve.Approved)
+                assert isinstance(back[1].value, Story.Approve.Approved)
+                # Sibling identity is not collapsed across either roundtrip.
+                assert not isinstance(back[0].value, Story.Approve.Approved)
+                assert not isinstance(back[1].value, Persona.Approve.Approved)
+                assert back[0].id == "a"
+                assert back[1].id == "b"
+                assert back[0].value.note == "x"
+                assert back[1].value.note == "y"
+
         def when_round_tripped_through_a_real_interrupt_flow():
             def with_MemorySaver_and_NamespaceAwareSerde():
                 # ``filterwarnings("error", ...)`` locks the warning fix in:

@@ -96,7 +96,22 @@ def _make_ext_hook(errors: list[str]) -> Callable[[int, bytes], Any]:
             value, id_ = ormsgpack.unpackb(
                 data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
             )
-            return Interrupt(value=value, id=id_)
+            try:
+                return Interrupt(value=value, id=id_)
+            except TypeError as exc:
+                # Mirrors the EXT_NAMESPACE_AWARE_EVENT branch below: degrade
+                # gracefully through ``loads_typed``'s ``errors`` channel if
+                # ``Interrupt.__init__`` shape changes upstream (the static
+                # schema guard in tests/test_serde.py catches drift at test
+                # time, but this covers an unpinned-LangGraph runtime gap).
+                errors.append(
+                    f"Cannot revive langgraph.types.Interrupt(value=..., "
+                    f"id=...): {type(exc).__name__}: {exc}. The Interrupt "
+                    f"dataclass shape may have changed since the checkpoint "
+                    f"was written; update NamespaceAwareSerde to track the "
+                    f"new fields."
+                )
+                raise
         if code != EXT_NAMESPACE_AWARE_EVENT:
             return _msgpack_ext_hook(code, data)
         tup = ormsgpack.unpackb(

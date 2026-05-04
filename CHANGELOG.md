@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **serde**: `NamespaceAwareSerde` now preserves namespace identity for `Event` instances nested inside `langgraph.types.Interrupt` (the dataclass LangGraph wraps every interrupted value in before checkpointing). Previously, every namespaced `Interrupted`/`InterruptedWithPayload` subclass round-tripped through a checkpointer would silently decode back as `Interrupt(value=None, id=...)` because LangGraph's generic dataclass branch (`EXT_CONSTRUCTOR_KW_ARGS`) recurses into a hardcoded `_msgpack_default` and bypassed our namespace-aware `default=`. `Interrupt` is now intercepted directly under a dedicated ext code so the wrapped value re-enters our encoder. (#60)
+- **serde**: `NamespaceAwareSerde` now preserves namespace identity for `Event` instances nested inside `langgraph.types.Interrupt` (the dataclass LangGraph wraps every interrupted value in before checkpointing). Previously, every namespaced `Interrupted`/`InterruptedWithPayload` subclass round-tripped through a checkpointer would silently decode back as `Interrupt(value=None, id=...)` because LangGraph's generic dataclass branch (`EXT_CONSTRUCTOR_KW_ARGS`) recurses into a hardcoded `_msgpack_default` and bypassed our namespace-aware `default=`. `Interrupt` is now intercepted directly under a dedicated ext code so the wrapped value re-enters our encoder. Note: this fix applies to checkpoints written *after* the upgrade — checkpoints already persisted under v0.6.0 still decode their nested events as `None` (same risk profile as before). (#60)
 
 ## [0.6.0] - 2026-05-04
 
