@@ -5,9 +5,20 @@ from __future__ import annotations
 import warnings
 
 import pytest
+from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Interrupt
 
-from langgraph_events import Command, DomainEvent, EventGraph, Namespace
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    EventGraph,
+    IntegrationEvent,
+    Interrupted,
+    Namespace,
+    Resumed,
+    on,
+)
 from langgraph_events.serde import NamespaceAwareSerde
 
 
@@ -36,6 +47,21 @@ class Story(Namespace):
 
         def handle(self) -> Story.Approve.Approved:
             return Story.Approve.Approved(note=self.note)
+
+
+# Namespace whose nested ``Reviewed`` is an ``Interrupted`` subclass. This is
+# the shape that hits #60 — handlers return ``Review.Ask.Reviewed(...)`` and
+# LangGraph wraps it in ``langgraph.types.Interrupt(value=..., id=...)`` for
+# the checkpoint write.
+class Review(Namespace):
+    class Ask(Command):
+        draft: str = ""
+
+        class Reviewed(Interrupted):
+            draft: str = ""
+
+        def handle(self) -> Review.Ask.Reviewed:
+            return Review.Ask.Reviewed(draft=self.draft)
 
 
 def describe_NamespaceAwareSerde():
@@ -143,3 +169,71 @@ def describe_NamespaceAwareSerde():
                 # Sanity: helper module is importable (catches an obvious
                 # M4-style refactor regression).
                 assert _jsonplus.NamespaceAwareSerde is NamespaceAwareSerde
+
+    def describe_event_nested_in_langgraph_Interrupt():
+        # Regression for #60: every namespaced ``Interrupted`` subclass that
+        # LangGraph wraps in ``langgraph.types.Interrupt(value=..., id=...)``
+        # used to lose its identity through a checkpoint roundtrip — the
+        # nested Event was encoded by upstream's ``_msgpack_default`` (leaf
+        # ``__name__``) instead of our namespace-aware ext code, so the
+        # decode-time attribute walk failed and was silently swallowed,
+        # leaving ``Interrupt(value=None, id=...)``.
+        def when_interrupt_wraps_a_namespaced_event():
+            def it_preserves_the_nested_event_class_identity():
+                serde = NamespaceAwareSerde()
+                iv = Interrupt(
+                    value=Persona.Approve.Approved(note="persona"),
+                    id="abc123",
+                )
+
+                back = serde.loads_typed(serde.dumps_typed(iv))
+
+                assert isinstance(back, Interrupt)
+                assert back.id == "abc123"
+                assert back.value is not None  # the bug: this used to be None
+                assert isinstance(back.value, Persona.Approve.Approved)
+                # Sibling identity is not collapsed across the roundtrip.
+                assert not isinstance(back.value, Story.Approve.Approved)
+                assert back.value.note == "persona"
+
+        def when_round_tripped_through_a_real_interrupt_flow():
+            def with_MemorySaver_and_NamespaceAwareSerde():
+                def it_round_trips_a_namespaced_Interrupted_subclass():
+                    @on(Started)
+                    def ask(event: Started) -> Review.Ask.Reviewed:
+                        return Review.Ask.Reviewed(draft=event.data)
+
+                    class Approved(IntegrationEvent):
+                        pass
+
+                    @on(Resumed, interrupted=Review.Ask.Reviewed)
+                    def resume(
+                        event: Resumed, interrupted: Review.Ask.Reviewed
+                    ) -> Approved:
+                        # If the nested Event lost identity through the
+                        # checkpoint roundtrip, ``interrupted`` would be
+                        # revived as something other than ``Reviewed`` (or
+                        # ``None``) and this handler wouldn't match.
+                        assert isinstance(interrupted, Review.Ask.Reviewed)
+                        assert interrupted.draft == "hello"
+                        return Approved()
+
+                    graph = EventGraph(
+                        [ask, resume],
+                        checkpointer=MemorySaver(serde=NamespaceAwareSerde()),
+                    )
+                    config = {"configurable": {"thread_id": "review"}}
+                    graph.invoke(Started(data="hello"), config=config)
+
+                    state = graph.get_state(config)
+                    assert state.is_interrupted
+
+                    # The resume handler's own assertions verify that the
+                    # round-tripped ``interrupted`` value retained its
+                    # namespaced ``Review.Ask.Reviewed`` identity (and its
+                    # ``draft`` field). Before the fix, ``Interrupt.value``
+                    # decoded back as ``None``, the field-matcher had nothing
+                    # to inject, the handler never fired, and ``Approved``
+                    # never appeared in the log.
+                    log = graph.resume(Approved(), config=config)
+                    assert log.latest(Approved) == Approved()

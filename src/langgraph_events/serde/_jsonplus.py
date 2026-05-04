@@ -20,6 +20,7 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 import ormsgpack
+from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,6 +43,10 @@ except ImportError as exc:  # pragma: no cover - smoke fence on LangGraph drift
 
 # Unique among LangGraph's existing ext codes (currently 0..6).
 EXT_NAMESPACE_AWARE_EVENT = 100
+# Dedicated code so we can recurse via our own ``_default`` when re-encoding
+# the wrapped value — LangGraph's generic dataclass path uses ``_msgpack_enc``
+# which is hardcoded to ``default=_msgpack_default`` and would bypass us.
+EXT_INTERRUPT = 101
 
 
 def _encode(obj: Any) -> bytes:
@@ -60,6 +65,13 @@ def _default(obj: Any) -> Any:
                 ),
             ),
         )
+    if isinstance(obj, Interrupt):
+        # LangGraph wraps every interrupted value in this dataclass before
+        # checkpointing. Re-encoding via our ``_encode`` (rather than letting
+        # upstream's dataclass branch handle it) is what keeps a nested
+        # namespaced ``Interrupted`` subclass inside ``obj.value`` reachable
+        # through our ``_default`` and revivable under EXT_NAMESPACE_AWARE_EVENT.
+        return ormsgpack.Ext(EXT_INTERRUPT, _encode((obj.value, obj.id)))
     return _msgpack_default(obj)
 
 
@@ -72,6 +84,13 @@ def _make_ext_hook(errors: list[str]) -> Callable[[int, bytes], Any]:
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
+        if code == EXT_INTERRUPT:
+            # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
+            # inside ``value`` resolves back to its namespaced class.
+            value, id_ = ormsgpack.unpackb(
+                data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+            return Interrupt(value=value, id=id_)
         if code != EXT_NAMESPACE_AWARE_EVENT:
             return _msgpack_ext_hook(code, data)
         tup = ormsgpack.unpackb(
