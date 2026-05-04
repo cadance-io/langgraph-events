@@ -79,7 +79,16 @@ def on_namespace_finalize(cls: type, callback: Callable[[type], None]) -> None:
 
     The callback is invoked with the registered class as its sole argument.
     Multiple callbacks for the same class fire in registration order.
+
+    If the enclosing Namespace has *already* finalized when this hook is
+    called (e.g. a decorator applied post-hoc to an existing class), the
+    callback fires immediately rather than queueing into a slot that will
+    never drain.
     """
+    namespace_name = getattr(cls, "__namespace__", None)
+    if namespace_name and namespace_name in _NAMESPACE_REGISTRY:
+        callback(cls)
+        return
     _NAMESPACE_FINALIZE_CALLBACKS.setdefault(cls, []).append(callback)
 
 

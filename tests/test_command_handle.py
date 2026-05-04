@@ -327,6 +327,48 @@ def describe_Command_handle():
                 ):
                     EventGraph([WithService.Cmd], services=[openai, anthropic])
 
+        def when_param_is_annotated_object():
+
+            def it_does_not_silently_consume_a_service():
+                # `param: object` matches every registered type via issubclass,
+                # which would silently inject an unrelated service. The framework
+                # must treat the annotation as too broad to claim a service —
+                # falling through to "unclaimed param" and erroring at build.
+                @on(Shop.Buy.Bought)
+                def overly_broad(
+                    event: Shop.Buy.Bought,
+                    foo: object,
+                ) -> None:
+                    pass
+
+                chat_model = _StubChatModel(value="x")
+                with pytest.raises(TypeError, match=r"foo"):
+                    EventGraph([overly_broad], services=[chat_model])
+
+        def when_base_and_subclass_services_are_both_registered():
+
+            def it_resolves_each_param_to_its_exact_type():
+                # services=[A(), B()] where B(A). Handler annotates one param
+                # as A and another as B. The user has clearly disambiguated by
+                # annotation; multi-match should NOT fire here.
+                observed: dict[str, object] = {}
+
+                @on(Shop.Buy.Bought)
+                def two_typed(
+                    event: Shop.Buy.Bought,
+                    base: _StubChatModel,
+                    sub: _StubOpenAIChat,
+                ) -> None:
+                    observed["base"] = base
+                    observed["sub"] = sub
+
+                base_svc = _StubChatModel(value="base")
+                sub_svc = _StubOpenAIChat(value="sub")
+                graph = EventGraph([two_typed], services=[base_svc, sub_svc])
+                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
+                assert observed["base"] is base_svc
+                assert observed["sub"] is sub_svc
+
         def when_param_name_matches_a_reducer_and_type_matches_a_service():
 
             def it_resolves_to_the_reducer_not_the_service():

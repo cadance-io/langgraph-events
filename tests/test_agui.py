@@ -4378,3 +4378,31 @@ def describe_InterruptedWithPayload():
 
                 with pytest.raises(NotImplementedError, match="interrupt_payload"):
                     Forgotten().interrupt_payload()
+
+
+def describe_FrontendToolCallRequested_deprecated_top_level_alias():
+    def when_imported_from_top_level_langgraph_events():
+        def it_resolves_to_the_agui_class_and_warns():
+            import langgraph_events
+            from langgraph_events.agui import FrontendToolCallRequested as Canonical
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                shim_cls = langgraph_events.FrontendToolCallRequested
+
+            assert shim_cls is Canonical
+            depr = [w for w in caught if issubclass(w.category, DeprecationWarning)]
+            assert depr, (
+                "expected DeprecationWarning when accessing the top-level "
+                "FrontendToolCallRequested alias"
+            )
+            assert any("langgraph_events.agui" in str(w.message) for w in depr), (
+                "deprecation message should point users at the new import path"
+            )
+
+        def it_appears_neither_in___all___nor_at_module_attribute_dir():
+            # The deprecated alias is reachable via attribute access for back
+            # compat, but tooling (autoimport, * imports) should not surface it.
+            import langgraph_events
+
+            assert "FrontendToolCallRequested" not in langgraph_events.__all__

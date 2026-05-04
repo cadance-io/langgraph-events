@@ -14,8 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **on_namespace_finalize(cls, callback)**: public hook that schedules a callback to fire once the enclosing Namespace's `__init_subclass__` finishes (after `_stamp_nested_namespace` and `_attach_command_outcomes`). Useful for class decorators that need to call `typing.get_type_hints()` against forward references to siblings inside the same in-progress Namespace body — those references can't resolve while the class body is evaluating, but resolve cleanly at finalize time. Re-exported at `langgraph_events.on_namespace_finalize`.
 
 ### Changed
-- **EventGraph**: handler params with no injection source now raise `TypeError` at graph construction (previously crashed at first dispatch with a missing-keyword error). Two services of the same exact type are rejected at construction. A handler param annotated as a class that matches multiple registered services is rejected at construction with both candidate type names in the message.
-- **agui**: `FrontendToolCallRequested` (previously top-level `langgraph_events.FrontendToolCallRequested`) now lives in `langgraph_events.agui` alongside `FrontendStateMutated`. Update imports to `from langgraph_events.agui import FrontendToolCallRequested`. The class itself is unchanged.
+- **EventGraph**: handler params with no injection source now raise `TypeError` at graph construction (previously crashed at first dispatch with a missing-keyword error). Two services of the same exact type are rejected at construction. A handler param annotated as a class that matches multiple registered services is rejected at construction with both candidate type names in the message. Resolution prefers an exact-type service match over subclass matches, so `services=[BaseChatModel(), Anthropic()]` cleanly resolves a `param: BaseChatModel` to the base instance. Annotations equal to `object` are skipped — they would otherwise silently match every registered service.
+- **agui**: `FrontendToolCallRequested` (previously top-level `langgraph_events.FrontendToolCallRequested`) now lives in `langgraph_events.agui` alongside `FrontendStateMutated`. Update imports to `from langgraph_events.agui import FrontendToolCallRequested`. **The top-level alias still resolves**, but emits a `DeprecationWarning` per access pointing at the new path; it will be removed in a future release. The class itself is unchanged.
+
+### Fixed
+- **on_namespace_finalize**: callbacks registered after the enclosing Namespace has already finalized now fire immediately rather than dangling in the registry forever. Previously a decorator applied post-hoc to an already-bound class was a silent no-op.
 
 ## [0.5.2] - 2026-04-30
 

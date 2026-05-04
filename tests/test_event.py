@@ -615,3 +615,17 @@ def describe_on_namespace_finalize():
                     pass
 
             assert captured == [LateRefNs.Sibling]
+
+    def when_registered_after_the_enclosing_Namespace_finalized():
+        def it_fires_immediately_instead_of_silently_dropping():
+            class FinishedNs(Namespace):
+                class Cmd(Command):
+                    class Done(DomainEvent):
+                        pass
+
+            # Namespace body has completed; FinishedNs.Cmd's enclosing
+            # namespace already drained its finalize queue. A late
+            # registration must not silently dangle — fire eagerly.
+            captured: list[type] = []
+            on_namespace_finalize(FinishedNs.Cmd, captured.append)
+            assert captured == [FinishedNs.Cmd]

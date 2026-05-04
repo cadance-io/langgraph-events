@@ -368,6 +368,18 @@ def _detect_service_params(
         hint = hints.get(param_name)
         if not isinstance(hint, type):
             continue
+        # ``object`` matches every registered type; treating it as a service
+        # claim would silently consume an unrelated instance. Skip — the
+        # caller meant "untyped" and ``_verify_no_unclaimed_params`` will
+        # surface the missing-source error at graph build.
+        if hint is object:
+            continue
+        # Exact-type match wins over subclass-only match — it lets users
+        # register a base + subclass pair (e.g. ``[BaseChatModel(), Anthropic()]``)
+        # and resolve `param: BaseChatModel` to the base instance unambiguously.
+        if hint in service_types:
+            detected.append((param_name, hint))
+            continue
         matches = [t for t in service_types if issubclass(t, hint)]
         if len(matches) > 1:
             names = ", ".join(sorted(t.__name__ for t in matches))
