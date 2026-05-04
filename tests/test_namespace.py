@@ -737,9 +737,9 @@ def describe_mermaid_renderer():
             assert "Spawn -->|spawn_bar| _Bar_Spawn_Created" in output
             # Sanity: the legacy collapsed form must NOT be emitted.
             assert "--> Created\n" not in output
-            assert "(Created)" not in output.replace(
-                "_Foo_Build_Created(Created)", ""
-            ).replace("_Bar_Spawn_Created(Created)", "")
+            # Exactly two `(Created)` occurrences — one per colliding class,
+            # each prefixed with its qualname-derived ID.
+            assert output.count("(Created)") == 2
 
         def it_keeps_bare_ids_for_non_colliding_classes():
             output = EventGraph([build_foo, spawn_bar]).namespaces().mermaid()

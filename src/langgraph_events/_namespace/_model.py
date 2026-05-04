@@ -79,6 +79,13 @@ def _build_node_id_map(d: NamespaceModel) -> dict[type, str]:
     Display labels are not affected — callers continue to pass
     ``_event_label(cls)`` (the short leaf name) as the node label, since
     the surrounding subgraph cluster already conveys namespace context.
+
+    NOTE: this is qualname-only — two classes in different modules whose
+    qualnames also coincide (e.g. two test modules each declaring
+    ``_Foo.Build.Created``) would still collide. Use
+    ``NamespaceAwareSerde`` if cross-module identity matters at runtime;
+    for the diagram, the same-module qualname space has been sufficient
+    in practice.
     """
     classes: set[type] = set()
 

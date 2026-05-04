@@ -277,8 +277,8 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
         else:
             loose_nodes.append(cls)
     for members in domain_members.values():
-        members.sort(key=_event_label)
-    loose_nodes.sort(key=_event_label)
+        members.sort(key=lambda c: node_id[c])
+    loose_nodes.sort(key=lambda c: node_id[c])
 
     # Place invariant gate nodes under the domain(s) of their commands.
     # If an invariant spans multiple domains, it stays loose (top-level).
