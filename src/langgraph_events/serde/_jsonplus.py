@@ -71,6 +71,12 @@ def _default(obj: Any) -> Any:
         # upstream's dataclass branch handle it) is what keeps a nested
         # namespaced ``Interrupted`` subclass inside ``obj.value`` reachable
         # through our ``_default`` and revivable under EXT_NAMESPACE_AWARE_EVENT.
+        #
+        # Tracks (value, id) explicitly rather than walking
+        # ``dataclasses.fields(obj)`` — Interrupt has a custom ``__init__``
+        # that doesn't accept arbitrary kwargs, so a generic walk would not
+        # round-trip cleanly anyway. ``it_matches_the_schema_we_encode``
+        # in tests/test_serde.py guards against silent field drift.
         return ormsgpack.Ext(EXT_INTERRUPT, _encode((obj.value, obj.id)))
     return _msgpack_default(obj)
 

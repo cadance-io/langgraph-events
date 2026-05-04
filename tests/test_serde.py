@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import pytest
@@ -62,6 +63,14 @@ class Review(Namespace):
 
         def handle(self) -> Review.Ask.Reviewed:
             return Review.Ask.Reviewed(draft=self.draft)
+
+
+# Module-level so the ``resume`` handler's return annotation is resolvable by
+# ``typing.get_type_hints`` against the module globals. Defining it inside the
+# test function would trigger an "unresolved type hints" warning at handler
+# registration.
+class ReviewApproved(IntegrationEvent):
+    pass
 
 
 def describe_NamespaceAwareSerde():
@@ -198,25 +207,31 @@ def describe_NamespaceAwareSerde():
 
         def when_round_tripped_through_a_real_interrupt_flow():
             def with_MemorySaver_and_NamespaceAwareSerde():
+                # ``filterwarnings("error", ...)`` locks the warning fix in:
+                # if a future change demotes ``ReviewApproved`` back to a
+                # local class, this test fails instead of silently emitting
+                # the "Failed to resolve type hints" UserWarning.
+                @pytest.mark.filterwarnings(
+                    r"error:Failed to resolve.*type hints.*:UserWarning"
+                )
                 def it_round_trips_a_namespaced_Interrupted_subclass():
                     @on(Started)
                     def ask(event: Started) -> Review.Ask.Reviewed:
                         return Review.Ask.Reviewed(draft=event.data)
 
-                    class Approved(IntegrationEvent):
-                        pass
-
                     @on(Resumed, interrupted=Review.Ask.Reviewed)
                     def resume(
                         event: Resumed, interrupted: Review.Ask.Reviewed
-                    ) -> Approved:
-                        # If the nested Event lost identity through the
-                        # checkpoint roundtrip, ``interrupted`` would be
-                        # revived as something other than ``Reviewed`` (or
-                        # ``None``) and this handler wouldn't match.
+                    ) -> ReviewApproved:
+                        # The field-matcher only dispatches here if the
+                        # round-tripped ``interrupted`` is a
+                        # ``Review.Ask.Reviewed``. Before the fix it was
+                        # ``None`` (Interrupt.value lost), the handler never
+                        # fired, and ``ReviewApproved`` never appeared in
+                        # the log.
                         assert isinstance(interrupted, Review.Ask.Reviewed)
                         assert interrupted.draft == "hello"
-                        return Approved()
+                        return ReviewApproved()
 
                     graph = EventGraph(
                         [ask, resume],
@@ -228,12 +243,21 @@ def describe_NamespaceAwareSerde():
                     state = graph.get_state(config)
                     assert state.is_interrupted
 
-                    # The resume handler's own assertions verify that the
-                    # round-tripped ``interrupted`` value retained its
-                    # namespaced ``Review.Ask.Reviewed`` identity (and its
-                    # ``draft`` field). Before the fix, ``Interrupt.value``
-                    # decoded back as ``None``, the field-matcher had nothing
-                    # to inject, the handler never fired, and ``Approved``
-                    # never appeared in the log.
-                    log = graph.resume(Approved(), config=config)
-                    assert log.latest(Approved) == Approved()
+                    log = graph.resume(ReviewApproved(), config=config)
+                    assert log.latest(ReviewApproved) == ReviewApproved()
+
+        def describe_Interrupt_schema_guard():
+            # ``_default``/``_ext_hook`` track ``Interrupt`` by its two known
+            # fields (``value``, ``id``). If LangGraph ever adds another
+            # field, our hardcoded reconstruction would silently drop it on
+            # round-trip — this guard surfaces that drift loudly so the
+            # serde gets updated alongside the LangGraph bump.
+            def it_matches_the_schema_we_encode():
+                fields = {f.name for f in dataclasses.fields(Interrupt)}
+                assert fields == {"value", "id"}, (
+                    f"langgraph.types.Interrupt fields drifted from "
+                    f"{{'value', 'id'}} to {fields}. NamespaceAwareSerde "
+                    f"hardcodes (value, id) in _jsonplus.py — extend "
+                    f"_default and the EXT_INTERRUPT branch of _ext_hook "
+                    f"to cover the new field(s)."
+                )
