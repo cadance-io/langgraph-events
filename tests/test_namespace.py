@@ -123,6 +123,36 @@ class _Review(Namespace):
         reason: str = ""
 
 
+# Module-level namespaces with a colliding leaf event name (`Created`) used
+# by the choreography mermaid collision tests. _Foo also has a unique
+# leaf name (`Refined`) so the regression guard can verify non-colliding
+# classes still render with bare IDs. Command names (`Build`, `Spawn`)
+# are deliberately distinct so only `Created` triggers the collision path.
+class _Foo(Namespace):
+    class Build(Command):
+        class Created(DomainEvent):
+            pass
+
+        class Refined(DomainEvent):
+            pass
+
+
+class _Bar(Namespace):
+    class Spawn(Command):
+        class Created(DomainEvent):
+            pass
+
+
+@on(_Foo.Build)
+def build_foo(event: _Foo.Build) -> _Foo.Build.Created | _Foo.Build.Refined:
+    return _Foo.Build.Created()
+
+
+@on(_Bar.Spawn)
+def spawn_bar(event: _Bar.Spawn) -> _Bar.Spawn.Created:
+    return _Bar.Spawn.Created()
+
+
 # Module-level fixtures for describe_reactions_classification — keeps
 # forward-reference resolution happy for handler return-type introspection.
 class _AggInline(Namespace):
@@ -689,6 +719,36 @@ def describe_mermaid_renderer():
 
                 output = EventGraph([place, recover]).namespaces().mermaid()
                 assert "stroke:#6b7280" in output
+
+    def when_two_namespaces_share_a_leaf_event_name():
+        # Issue #62: bare __name__ as both node ID and label causes
+        # mermaid to collapse cross-namespace events that share a leaf
+        # name (Persona/Story/Scenario each having `Approved`).
+
+        def it_uses_qualname_node_ids_for_the_colliding_pair():
+            output = EventGraph([build_foo, spawn_bar]).namespaces().mermaid()
+            # Distinct qualname-based node IDs for the collision pair…
+            assert "_Foo_Build_Created(Created):::devt" in output
+            assert "_Bar_Spawn_Created(Created):::devt" in output
+            # …and the edges reference those qualname IDs. The command
+            # names (`Build`, `Spawn`) are unique so they stay bare —
+            # only `Created` actually collides.
+            assert "Build -->|build_foo| _Foo_Build_Created" in output
+            assert "Spawn -->|spawn_bar| _Bar_Spawn_Created" in output
+            # Sanity: the legacy collapsed form must NOT be emitted.
+            assert "--> Created\n" not in output
+            assert "(Created)" not in output.replace(
+                "_Foo_Build_Created(Created)", ""
+            ).replace("_Bar_Spawn_Created(Created)", "")
+
+        def it_keeps_bare_ids_for_non_colliding_classes():
+            output = EventGraph([build_foo, spawn_bar]).namespaces().mermaid()
+            # _Foo.Build.Refined has a unique __name__ across the graph,
+            # so it stays on the terse bare-ID path. Existing tests in
+            # this describe block (which build graphs from non-colliding
+            # `Order.*` classes) cover the broader regression guard.
+            assert "Refined(Refined):::devt" in output
+            assert "_Foo_Build_Refined" not in output
 
 
 def describe_json_and_to_dict():

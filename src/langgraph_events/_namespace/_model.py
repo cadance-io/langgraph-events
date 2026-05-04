@@ -57,11 +57,65 @@ def _event_label(cls: type) -> str:
 
 
 def _event_node_id(cls: type) -> str:
-    """Mermaid-safe node identifier — qualname-based for structure diagrams
-    so nested events like ``Order.Place.Placed`` don't collide with a sibling
-    domain's similarly-named class.
+    """Mermaid-safe qualname-based node identifier.
+
+    Used by ``_build_node_id_map`` to disambiguate classes whose ``__name__``
+    collides across namespaces (e.g. ``Foo.Make.Created`` vs ``Bar.Spawn.Created``)
+    — without this, mermaid's flat node-ID space would collapse them into a
+    single node.
     """
     return cls.__qualname__.replace("<locals>.", "").replace(".", "_")
+
+
+def _build_node_id_map(d: NamespaceModel) -> dict[type, str]:
+    """Map every renderable class to a mermaid-safe node ID.
+
+    Classes whose ``__name__`` is unique across the model keep that bare
+    name as their node ID — preserving terse, readable mermaid output for
+    the common case. Classes whose leaf name is shared by 2+ classes
+    escalate to ``_event_node_id(cls)`` (qualname-derived, e.g.
+    ``Foo_Make_Created``) so mermaid renders them as distinct nodes.
+
+    Display labels are not affected — callers continue to pass
+    ``_event_label(cls)`` (the short leaf name) as the node label, since
+    the surrounding subgraph cluster already conveys namespace context.
+    """
+    classes: set[type] = set()
+
+    for e in d.edges:
+        classes.add(e.source)
+        classes.add(e.target)
+
+    for r in d.reactions:
+        if isinstance(r, NamespaceModel.CommandHandler):
+            classes.update(r.commands)
+        else:
+            classes.update(r.subscribes)
+        classes.update(r.produces)
+        classes.update(r.scatters)
+
+    for ns in d.namespaces.values():
+        for cmd in ns.commands.values():
+            classes.add(cmd.cls)
+            classes.update(cmd.outcomes)
+        classes.update(ns.events)
+
+    classes.update(d.integration_events)
+    classes.update(d.system_events)
+
+    for inv in d.invariants:
+        classes.add(inv.cls)
+        classes.update(inv.commands)
+
+    by_name: dict[str, list[type]] = {}
+    for cls in classes:
+        by_name.setdefault(cls.__name__, []).append(cls)
+
+    return {
+        cls: cls.__name__ if len(group) == 1 else _event_node_id(cls)
+        for group in by_name.values()
+        for cls in group
+    }
 
 
 def _matcher_repr(matcher: Any, is_type: bool) -> str:
