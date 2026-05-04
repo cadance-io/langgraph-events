@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from langgraph_events._mermaid import MermaidFlowchart, Shape
 from langgraph_events._namespace._model import (
     NamespaceModel,
+    _build_node_id_map,
     _event_label,
     _node_class,
 )
@@ -30,15 +31,27 @@ _NODE_SHAPE_BY_CLASS: dict[str, Shape] = {
 }
 
 
-def _add_node(flow: MermaidFlowchart, cls: type) -> None:
-    """Declare an event class on the flowchart with its shape + class."""
+def _add_node(flow: MermaidFlowchart, cls: type, node_id: dict[type, str]) -> None:
+    """Declare an event class on the flowchart with its shape + class.
+
+    ``node_id`` maps each class to its mermaid-safe ID; the rendered
+    label stays as the short leaf name so the diagram stays readable
+    regardless of whether the ID escalated to qualname form.
+    """
     cls_key = _node_class(cls)
-    flow.node(_event_label(cls), _NODE_SHAPE_BY_CLASS[cls_key], cls=cls_key)
+    flow.node(
+        node_id[cls],
+        _NODE_SHAPE_BY_CLASS[cls_key],
+        cls=cls_key,
+        label=_event_label(cls),
+    )
 
 
-def _add_invariant_node(flow: MermaidFlowchart, inv_cls: type) -> None:
+def _add_invariant_node(
+    flow: MermaidFlowchart, inv_cls: type, node_id: dict[type, str]
+) -> None:
     """Declare an Invariant class as a diamond gate node styled ``:::inv``."""
-    flow.node(inv_cls.__name__, "diamond", cls="inv")
+    flow.node(node_id[inv_cls], "diamond", cls="inv", label=inv_cls.__name__)
 
 
 # Classdef palette used by both choreography and structure renderers.
@@ -107,6 +120,7 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
       reactor is pinned (no catch-all ``@on(InvariantViolated)``).
     - Seed events (no incoming edges) keep the thick ``==>`` entry arrow
     """
+    node_id = _build_node_id_map(d)
     edges: list[_FlowEdge] = []
     side_effect_entries: list[str] = []
     scatter_entries: list[str] = []
@@ -135,16 +149,16 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
             pinned_reactor_invariant[reactor_name] = inv.cls
 
     def _record(src_type: type[Event], tgt_type: type[Event] | None) -> tuple[str, str]:
-        src_label = _event_label(src_type)
+        src_id = node_id[src_type]
         referenced.add(src_type)
         if tgt_type is None:
-            tgt_label = "?"
+            tgt_id = "?"
         else:
-            tgt_label = _event_label(tgt_type)
+            tgt_id = node_id[tgt_type]
             referenced.add(tgt_type)
-        all_sources.add(src_label)
-        all_targets.add(tgt_label)
-        return src_label, tgt_label
+        all_sources.add(src_id)
+        all_targets.add(tgt_id)
+        return src_id, tgt_id
 
     # Edges routed via an Invariant gate instead of InvariantViolated.
     # Keyed by reactor name; appended to `edges` after the main reaction
@@ -197,10 +211,10 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
                 # Invariant → target instead.  Record the (command, target)
                 # pair so ownership-gap fill doesn't draw a redundant arrow.
                 referenced.add(e.target)
-                tgt_label = _event_label(e.target)
-                all_targets.add(tgt_label)
+                tgt_id = node_id[e.target]
+                all_targets.add(tgt_id)
                 rerouted_pinned_edges.append(
-                    _FlowEdge(inv_cls.__name__, tgt_label, "-.->", name, "invariant")
+                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant")
                 )
                 for inv in d.invariants:
                     if inv.cls is inv_cls:
@@ -212,10 +226,10 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
         for e in scatter_edges:
             if inv_cls is not None:
                 referenced.add(e.target)
-                tgt_label = _event_label(e.target)
-                all_targets.add(tgt_label)
+                tgt_id = node_id[e.target]
+                all_targets.add(tgt_id)
                 rerouted_pinned_edges.append(
-                    _FlowEdge(inv_cls.__name__, tgt_label, "-.->", name, "invariant")
+                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant")
                 )
                 for inv in d.invariants:
                     if inv.cls is inv_cls:
@@ -263,8 +277,8 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
         else:
             loose_nodes.append(cls)
     for members in domain_members.values():
-        members.sort(key=_event_label)
-    loose_nodes.sort(key=_event_label)
+        members.sort(key=lambda c: node_id[c])
+    loose_nodes.sort(key=lambda c: node_id[c])
 
     # Place invariant gate nodes under the domain(s) of their commands.
     # If an invariant spans multiple domains, it stays loose (top-level).
@@ -282,8 +296,8 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
         for cmd_cls in inv.commands:
             invariant_edges.append(
                 _FlowEdge(
-                    _event_label(cmd_cls),
-                    inv.cls.__name__,
+                    node_id[cmd_cls],
+                    node_id[inv.cls],
                     "-.->",
                     "invariant",
                     "invariant",
@@ -301,14 +315,14 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
         title = f"{namespace_name} namespace"
         with flow.subgraph(namespace_name, title=title, direction="LR"):
             for member in domain_members.get(namespace_name, []):
-                _add_node(flow, member)
+                _add_node(flow, member, node_id)
             for inv_cls in namespace_invariants.get(namespace_name, []):
-                _add_invariant_node(flow, inv_cls)
+                _add_invariant_node(flow, inv_cls, node_id)
 
     for node in loose_nodes:
-        _add_node(flow, node)
+        _add_node(flow, node, node_id)
     for inv_cls in loose_invariants:
-        _add_invariant_node(flow, inv_cls)
+        _add_invariant_node(flow, inv_cls, node_id)
 
     for seed in sorted(all_sources - all_targets):
         flow.entry_seed(seed)
