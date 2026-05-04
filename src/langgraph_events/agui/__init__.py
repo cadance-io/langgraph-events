@@ -2,7 +2,11 @@
 
 from langgraph_events.agui._adapter import AGUIAdapter
 from langgraph_events.agui._context import MapperContext
-from langgraph_events.agui._events import FrontendStateMutated
+from langgraph_events.agui._events import (
+    FrontendStateMutated,
+    FrontendToolCallRequested,
+    InterruptedWithPayload,
+)
 from langgraph_events.agui._mappers import (
     FallbackMapper,
     FrontendToolCallRequestedMapper,
@@ -32,8 +36,10 @@ __all__ = [
     "EventMapper",
     "FallbackMapper",
     "FrontendStateMutated",
+    "FrontendToolCallRequested",
     "FrontendToolCallRequestedMapper",
     "InterruptedMapper",
+    "InterruptedWithPayload",
     "MapperContext",
     "ResumeFactory",
     "SeedFactory",

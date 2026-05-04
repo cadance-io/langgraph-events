@@ -239,9 +239,10 @@ The AG-UI spec positions tool calls as "inherently frontend-executed" and as the
 3. **Tool results back** — the frontend's handler return value is sent back as a `role: "tool"` message. `detect_new_tool_results(input_data, checkpoint_state)` returns the new `ToolMessage`s; wrap them in a `MessageEvent` (typically `ToolsExecuted(messages=...)`) and return from `resume_factory` to continue the graph.
 
 ```python
-from langgraph_events import FrontendToolCallRequested, on
+from langgraph_events import on
 from langgraph_events.agui import (
     AGUIAdapter,
+    FrontendToolCallRequested,
     build_langchain_tools,
     detect_new_tool_results,
 )
@@ -274,8 +275,11 @@ Runnable example: [`examples/conversation.py`](https://github.com/cadance-io/lan
 When the backend — not the LLM — wants to ask the frontend for something (confirm dialogs, file pickers, deterministic prompts), return a typed `FrontendToolCallRequested(Interrupted)` from a handler. The graph pauses; the AG-UI adapter streams the matching `ToolCallStart` / `ToolCallArgs` / `ToolCallEnd` triple; when the frontend's `useFrontendTool` handler returns, the resume factory surfaces the returning tool message as a typed event and the graph continues. Tool calls become "HITL with typed fields" — same machinery as `ApprovalRequested(Interrupted)`, just for frontend interactions.
 
 ```python
-from langgraph_events import FrontendToolCallRequested, on
-from langgraph_events.agui import detect_new_tool_results
+from langgraph_events import on
+from langgraph_events.agui import (
+    FrontendToolCallRequested,
+    detect_new_tool_results,
+)
 
 
 @on(ShipCommandReceived)

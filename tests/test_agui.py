@@ -20,16 +20,16 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph_events import (
     Event,
     EventGraph,
-    FrontendToolCallRequested,
     IntegrationEvent,
     Interrupted,
-    InterruptedWithPayload,
     MessageEvent,
     message_reducer,
     on,
 )
 from langgraph_events.agui import (
     AGUIAdapter,
+    FrontendToolCallRequested,
+    InterruptedWithPayload,
     MapperContext,
     build_langchain_tools,
     detect_new_tool_results,
@@ -4269,3 +4269,112 @@ def describe_InterruptedMapper():
             assert emitted.type == EventType.CUSTOM
             assert emitted.name == "interrupted"
             assert emitted.value == {"kind": "review", "draft": "hello"}
+
+
+def describe_FrontendToolCallRequested():
+    def when_only_name_provided():
+        def it_is_an_interrupted_subclass():
+            e = FrontendToolCallRequested(name="confirm")
+            assert isinstance(e, Interrupted)
+            assert isinstance(e, Event)
+
+        def it_defaults_args_to_empty_dict():
+            e = FrontendToolCallRequested(name="confirm")
+            assert e.args == {}
+
+        def it_auto_generates_tool_call_id():
+            a = FrontendToolCallRequested(name="confirm")
+            b = FrontendToolCallRequested(name="confirm")
+            assert a.tool_call_id
+            assert b.tool_call_id
+            assert a.tool_call_id != b.tool_call_id
+
+    def when_explicit_fields():
+        def it_preserves_all_fields():
+            e = FrontendToolCallRequested(
+                name="run_scenario",
+                args={"scenario_id": "s-1"},
+                tool_call_id="tc-fixed",
+            )
+            assert e.name == "run_scenario"
+            assert e.args == {"scenario_id": "s-1"}
+            assert e.tool_call_id == "tc-fixed"
+
+    def when_agui_dict_called():
+        def it_returns_name_args_and_id():
+            e = FrontendToolCallRequested(
+                name="confirm",
+                args={"message": "Ship?"},
+                tool_call_id="tc-1",
+            )
+            d = e.agui_dict()
+            assert d == {
+                "name": "confirm",
+                "args": {"message": "Ship?"},
+                "tool_call_id": "tc-1",
+            }
+
+    def when_name_is_empty():
+        def it_raises_on_construction():
+            with pytest.raises(ValueError, match=r"non-empty tool name"):
+                FrontendToolCallRequested(name="")
+
+    def when_name_is_whitespace():
+        def it_raises_on_construction():
+            with pytest.raises(ValueError, match=r"non-empty tool name"):
+                FrontendToolCallRequested(name="   ")
+
+    def when_no_args():
+        def it_raises_missing_name():
+            with pytest.raises(TypeError, match=r"missing.*name"):
+                FrontendToolCallRequested()  # type: ignore[call-arg]
+
+
+def describe_InterruptedWithPayload():
+    def when_subclassed():
+        def with_a_typed_payload():
+            def it_returns_the_payload_from_interrupt_payload():
+                class ReviewPayload(dict):
+                    pass
+
+                class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
+                    draft: str
+                    revision: int
+
+                    def interrupt_payload(self) -> ReviewPayload:
+                        return ReviewPayload(
+                            kind="review",
+                            draft=self.draft,
+                            revision=self.revision,
+                        )
+
+                event = ReviewInterrupted(draft="hello", revision=2)
+                assert event.interrupt_payload() == {
+                    "kind": "review",
+                    "draft": "hello",
+                    "revision": 2,
+                }
+
+            def it_remains_substitutable_for_Interrupted():
+                class P(dict):
+                    pass
+
+                class MyInterrupt(InterruptedWithPayload[P]):
+                    value: str
+
+                    def interrupt_payload(self) -> P:
+                        return P(value=self.value)
+
+                assert issubclass(MyInterrupt, Interrupted)
+                assert isinstance(MyInterrupt(value="x"), Interrupted)
+
+        def without_overriding_interrupt_payload():
+            def it_raises_NotImplementedError_naming_the_method():
+                class P(dict):
+                    pass
+
+                class Forgotten(InterruptedWithPayload[P]):
+                    pass
+
+                with pytest.raises(NotImplementedError, match="interrupt_payload"):
+                    Forgotten().interrupt_payload()

@@ -7,11 +7,9 @@ import functools
 import operator
 import types
 import typing
-import uuid
 import weakref
-from dataclasses import field
 from dataclasses import fields as dc_fields
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -519,84 +517,6 @@ class Interrupted(SystemEvent):
             raise TypeError(f"resume() requires an Event instance, got {got}")
         new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
-
-
-PayloadT = TypeVar("PayloadT")
-
-
-class InterruptedWithPayload(Interrupted, Generic[PayloadT]):
-    """Typed-payload variant of ``Interrupted`` for HITL with a discriminated UI.
-
-    HITL projects whose frontend needs an action-discriminated payload
-    (entity-review vs environment-select vs walkthrough-choice, …) can
-    subclass this base and implement :meth:`interrupt_payload` to return
-    the typed payload. Useful as a single anchor that multiple namespace
-    modules can import without inventing a project-local shim base::
-
-        from typing import TypedDict
-
-        class ReviewPayload(TypedDict):
-            kind: str
-            draft: str
-
-        class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
-            draft: str
-            def interrupt_payload(self) -> ReviewPayload:
-                return {"kind": "review", "draft": self.draft}
-
-    Pure ``Interrupted`` remains the right choice when no payload is needed —
-    this base is opt-in.
-    """
-
-    def interrupt_payload(self) -> PayloadT:
-        """Return the typed payload for this interrupt.
-
-        Subclasses must override.  The default raises ``NotImplementedError``
-        so a forgotten override surfaces as a clear runtime error rather than
-        silently returning ``None``.
-        """
-        raise NotImplementedError(
-            f"{type(self).__qualname__} subclasses InterruptedWithPayload but "
-            f"does not override interrupt_payload(). Implement it to return "
-            f"the typed payload (matching the Generic parameter)."
-        )
-
-
-class FrontendToolCallRequested(Interrupted):
-    """Request a frontend-executed tool call and pause the graph.
-
-    Event-native counterpart to LLM-initiated tool calls: a handler returns
-    this event, the AG-UI adapter emits ``ToolCallStart``/``ToolCallArgs``/
-    ``ToolCallEnd`` for a frontend ``useFrontendTool`` handler to pick up,
-    and the graph pauses via the existing ``Interrupted`` machinery.  Resume
-    with a domain event (typically ``ToolsExecuted(messages=...)`` built via
-    ``detect_new_tool_results`` from the frontend's tool-result message).
-
-    Mirrors the ``ApprovalRequested(Interrupted)`` pattern — tool calls
-    become "HITL with typed fields," exactly as the AG-UI spec positions
-    them::
-
-        FrontendToolCallRequested(name="confirm", args={"message": "Ship?"})
-    """
-
-    name: str
-    args: dict[str, Any] = field(default_factory=dict)
-    tool_call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-
-    def __post_init__(self) -> None:
-        if not self.name or not self.name.strip():
-            raise ValueError(
-                "FrontendToolCallRequested.name must be a non-empty tool name; "
-                "got empty/whitespace. Pass the same `name` your "
-                "useFrontendTool({ name: ... }) registration declares."
-            )
-
-    def agui_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "args": self.args,
-            "tool_call_id": self.tool_call_id,
-        }
 
 
 class Resumed(SystemEvent):
