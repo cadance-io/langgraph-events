@@ -20,6 +20,7 @@ import warnings
 from typing import TYPE_CHECKING, Any
 
 import ormsgpack
+from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,6 +43,10 @@ except ImportError as exc:  # pragma: no cover - smoke fence on LangGraph drift
 
 # Unique among LangGraph's existing ext codes (currently 0..6).
 EXT_NAMESPACE_AWARE_EVENT = 100
+# Dedicated code so we can recurse via our own ``_default`` when re-encoding
+# the wrapped value — LangGraph's generic dataclass path uses ``_msgpack_enc``
+# which is hardcoded to ``default=_msgpack_default`` and would bypass us.
+EXT_INTERRUPT = 101
 
 
 def _encode(obj: Any) -> bytes:
@@ -60,6 +65,19 @@ def _default(obj: Any) -> Any:
                 ),
             ),
         )
+    if isinstance(obj, Interrupt):
+        # LangGraph wraps every interrupted value in this dataclass before
+        # checkpointing. Re-encoding via our ``_encode`` (rather than letting
+        # upstream's dataclass branch handle it) is what keeps a nested
+        # namespaced ``Interrupted`` subclass inside ``obj.value`` reachable
+        # through our ``_default`` and revivable under EXT_NAMESPACE_AWARE_EVENT.
+        #
+        # Tracks (value, id) explicitly rather than walking
+        # ``dataclasses.fields(obj)`` — Interrupt has a custom ``__init__``
+        # that doesn't accept arbitrary kwargs, so a generic walk would not
+        # round-trip cleanly anyway. ``it_matches_the_schema_we_encode``
+        # in tests/test_serde.py guards against silent field drift.
+        return ormsgpack.Ext(EXT_INTERRUPT, _encode((obj.value, obj.id)))
     return _msgpack_default(obj)
 
 
@@ -72,6 +90,28 @@ def _make_ext_hook(errors: list[str]) -> Callable[[int, bytes], Any]:
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
+        if code == EXT_INTERRUPT:
+            # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
+            # inside ``value`` resolves back to its namespaced class.
+            value, id_ = ormsgpack.unpackb(
+                data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+            try:
+                return Interrupt(value=value, id=id_)
+            except TypeError as exc:
+                # Mirrors the EXT_NAMESPACE_AWARE_EVENT branch below: degrade
+                # gracefully through ``loads_typed``'s ``errors`` channel if
+                # ``Interrupt.__init__`` shape changes upstream (the static
+                # schema guard in tests/test_serde.py catches drift at test
+                # time, but this covers an unpinned-LangGraph runtime gap).
+                errors.append(
+                    f"Cannot revive langgraph.types.Interrupt(value=..., "
+                    f"id=...): {type(exc).__name__}: {exc}. The Interrupt "
+                    f"dataclass shape may have changed since the checkpoint "
+                    f"was written; update NamespaceAwareSerde to track the "
+                    f"new fields."
+                )
+                raise
         if code != EXT_NAMESPACE_AWARE_EVENT:
             return _msgpack_ext_hook(code, data)
         tup = ormsgpack.unpackb(

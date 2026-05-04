@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import pytest
+from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Interrupt
 
-from langgraph_events import Command, DomainEvent, EventGraph, Namespace
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    EventGraph,
+    IntegrationEvent,
+    Interrupted,
+    Namespace,
+    Resumed,
+    on,
+)
 from langgraph_events.serde import NamespaceAwareSerde
 
 
@@ -36,6 +48,29 @@ class Story(Namespace):
 
         def handle(self) -> Story.Approve.Approved:
             return Story.Approve.Approved(note=self.note)
+
+
+# Namespace whose nested ``Reviewed`` is an ``Interrupted`` subclass. This is
+# the shape that hits #60 — handlers return ``Review.Ask.Reviewed(...)`` and
+# LangGraph wraps it in ``langgraph.types.Interrupt(value=..., id=...)`` for
+# the checkpoint write.
+class Review(Namespace):
+    class Ask(Command):
+        draft: str = ""
+
+        class Reviewed(Interrupted):
+            draft: str = ""
+
+        def handle(self) -> Review.Ask.Reviewed:
+            return Review.Ask.Reviewed(draft=self.draft)
+
+
+# Module-level so the ``resume`` handler's return annotation is resolvable by
+# ``typing.get_type_hints`` against the module globals. Defining it inside the
+# test function would trigger an "unresolved type hints" warning at handler
+# registration.
+class ReviewApproved(IntegrationEvent):
+    pass
 
 
 def describe_NamespaceAwareSerde():
@@ -143,3 +178,114 @@ def describe_NamespaceAwareSerde():
                 # Sanity: helper module is importable (catches an obvious
                 # M4-style refactor regression).
                 assert _jsonplus.NamespaceAwareSerde is NamespaceAwareSerde
+
+    def describe_event_nested_in_langgraph_Interrupt():
+        # Regression for #60: every namespaced ``Interrupted`` subclass that
+        # LangGraph wraps in ``langgraph.types.Interrupt(value=..., id=...)``
+        # used to lose its identity through a checkpoint roundtrip — the
+        # nested Event was encoded by upstream's ``_msgpack_default`` (leaf
+        # ``__name__``) instead of our namespace-aware ext code, so the
+        # decode-time attribute walk failed and was silently swallowed,
+        # leaving ``Interrupt(value=None, id=...)``.
+        def when_interrupt_wraps_a_namespaced_event():
+            def it_preserves_the_nested_event_class_identity():
+                serde = NamespaceAwareSerde()
+                iv = Interrupt(
+                    value=Persona.Approve.Approved(note="persona"),
+                    id="abc123",
+                )
+
+                back = serde.loads_typed(serde.dumps_typed(iv))
+
+                assert isinstance(back, Interrupt)
+                assert back.id == "abc123"
+                assert back.value is not None  # the bug: this used to be None
+                assert isinstance(back.value, Persona.Approve.Approved)
+                # Sibling identity is not collapsed across the roundtrip.
+                assert not isinstance(back.value, Story.Approve.Approved)
+                assert back.value.note == "persona"
+
+        def when_a_checkpoint_carries_multiple_interrupts():
+            # LangGraph's runner emits a *tuple* of ``Interrupt``s on a
+            # checkpoint write (one per parallel branch / interrupt site).
+            # Single-Interrupt round-trip is covered above; this guards the
+            # actual emission shape so a regression that breaks tuple/list
+            # iteration through ``_default`` shows up here.
+            def it_preserves_each_nested_event_class_identity():
+                serde = NamespaceAwareSerde()
+                ivs = [
+                    Interrupt(value=Persona.Approve.Approved(note="x"), id="a"),
+                    Interrupt(value=Story.Approve.Approved(note="y"), id="b"),
+                ]
+
+                back = serde.loads_typed(serde.dumps_typed(ivs))
+
+                assert len(back) == 2
+                assert isinstance(back[0], Interrupt)
+                assert isinstance(back[1], Interrupt)
+                assert isinstance(back[0].value, Persona.Approve.Approved)
+                assert isinstance(back[1].value, Story.Approve.Approved)
+                # Sibling identity is not collapsed across either roundtrip.
+                assert not isinstance(back[0].value, Story.Approve.Approved)
+                assert not isinstance(back[1].value, Persona.Approve.Approved)
+                assert back[0].id == "a"
+                assert back[1].id == "b"
+                assert back[0].value.note == "x"
+                assert back[1].value.note == "y"
+
+        def when_round_tripped_through_a_real_interrupt_flow():
+            def with_MemorySaver_and_NamespaceAwareSerde():
+                # ``filterwarnings("error", ...)`` locks the warning fix in:
+                # if a future change demotes ``ReviewApproved`` back to a
+                # local class, this test fails instead of silently emitting
+                # the "Failed to resolve type hints" UserWarning.
+                @pytest.mark.filterwarnings(
+                    r"error:Failed to resolve.*type hints.*:UserWarning"
+                )
+                def it_round_trips_a_namespaced_Interrupted_subclass():
+                    @on(Started)
+                    def ask(event: Started) -> Review.Ask.Reviewed:
+                        return Review.Ask.Reviewed(draft=event.data)
+
+                    @on(Resumed, interrupted=Review.Ask.Reviewed)
+                    def resume(
+                        event: Resumed, interrupted: Review.Ask.Reviewed
+                    ) -> ReviewApproved:
+                        # The field-matcher only dispatches here if the
+                        # round-tripped ``interrupted`` is a
+                        # ``Review.Ask.Reviewed``. Before the fix it was
+                        # ``None`` (Interrupt.value lost), the handler never
+                        # fired, and ``ReviewApproved`` never appeared in
+                        # the log.
+                        assert isinstance(interrupted, Review.Ask.Reviewed)
+                        assert interrupted.draft == "hello"
+                        return ReviewApproved()
+
+                    graph = EventGraph(
+                        [ask, resume],
+                        checkpointer=MemorySaver(serde=NamespaceAwareSerde()),
+                    )
+                    config = {"configurable": {"thread_id": "review"}}
+                    graph.invoke(Started(data="hello"), config=config)
+
+                    state = graph.get_state(config)
+                    assert state.is_interrupted
+
+                    log = graph.resume(ReviewApproved(), config=config)
+                    assert log.latest(ReviewApproved) == ReviewApproved()
+
+        def describe_Interrupt_schema_guard():
+            # ``_default``/``_ext_hook`` track ``Interrupt`` by its two known
+            # fields (``value``, ``id``). If LangGraph ever adds another
+            # field, our hardcoded reconstruction would silently drop it on
+            # round-trip — this guard surfaces that drift loudly so the
+            # serde gets updated alongside the LangGraph bump.
+            def it_matches_the_schema_we_encode():
+                fields = {f.name for f in dataclasses.fields(Interrupt)}
+                assert fields == {"value", "id"}, (
+                    f"langgraph.types.Interrupt fields drifted from "
+                    f"{{'value', 'id'}} to {fields}. NamespaceAwareSerde "
+                    f"hardcodes (value, id) in _jsonplus.py — extend "
+                    f"_default and the EXT_INTERRUPT branch of _ext_hook "
+                    f"to cover the new field(s)."
+                )
