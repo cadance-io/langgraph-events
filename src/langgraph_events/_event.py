@@ -8,11 +8,14 @@ import operator
 import types
 import typing
 import uuid
+import weakref
 from dataclasses import field
 from dataclasses import fields as dc_fields
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langchain_core.messages import BaseMessage, SystemMessage
 
 
@@ -57,6 +60,49 @@ _NAMESPACE_REGISTRY: dict[str, type[Namespace]] = {}
 declarative reducers via a handler's subscribed event types."""
 
 
+_NAMESPACE_FINALIZE_CALLBACKS: weakref.WeakKeyDictionary[
+    type, list[Callable[[type], None]]
+] = weakref.WeakKeyDictionary()
+"""Per-class queues of callbacks to fire when the enclosing Namespace's
+``__init_subclass__`` finishes. Populated by ``on_namespace_finalize`` and
+drained inside ``Namespace.__init_subclass__``."""
+
+
+def on_namespace_finalize(cls: type, callback: Callable[[type], None]) -> None:
+    """Schedule *callback* to fire once *cls*'s enclosing Namespace finalizes.
+
+    Useful for class decorators that need post-body work — e.g. calling
+    ``typing.get_type_hints()`` on annotations that reference siblings inside
+    the same Namespace body. Forward references to siblings can't resolve
+    while the enclosing class body is still being evaluated; this hook lets
+    decorators defer that work until the Namespace's ``__init_subclass__``
+    completes (after ``_stamp_nested_namespace`` and
+    ``_attach_command_outcomes``).
+
+    The callback is invoked with the registered class as its sole argument.
+    Multiple callbacks for the same class fire in registration order.
+    """
+    _NAMESPACE_FINALIZE_CALLBACKS.setdefault(cls, []).append(callback)
+
+
+def _drain_namespace_finalize(container: type) -> None:
+    """Fire callbacks queued for any nested ``Event`` class under *container*.
+
+    Walks only ``Event`` subclasses (Commands and DomainEvents); recurses
+    into Commands so callbacks registered on DomainEvents nested inside a
+    Command fire after the enclosing Namespace finalizes.
+    """
+    for attr in container.__dict__.values():
+        if not isinstance(attr, type) or not issubclass(attr, Event):
+            continue
+        callbacks = _NAMESPACE_FINALIZE_CALLBACKS.pop(attr, None)
+        if callbacks:
+            for cb in callbacks:
+                cb(attr)
+        if issubclass(attr, Command):
+            _drain_namespace_finalize(attr)
+
+
 class Namespace:
     """Namespace for a group of related commands and events.
 
@@ -95,6 +141,7 @@ class Namespace:
         # known at that point). Fill them in now.
         _stamp_nested_namespace(cls, cls.__name__)
         _attach_command_outcomes(cls)
+        _drain_namespace_finalize(cls)
 
 
 def _collect_namespace_reducers(cls: type) -> tuple[Any, ...]:
@@ -472,6 +519,47 @@ class Interrupted(SystemEvent):
             raise TypeError(f"resume() requires an Event instance, got {got}")
         new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
+
+
+PayloadT = TypeVar("PayloadT")
+
+
+class InterruptedWithPayload(Interrupted, Generic[PayloadT]):
+    """Typed-payload variant of ``Interrupted`` for HITL with a discriminated UI.
+
+    HITL projects whose frontend needs an action-discriminated payload
+    (entity-review vs environment-select vs walkthrough-choice, …) can
+    subclass this base and implement :meth:`interrupt_payload` to return
+    the typed payload. Useful as a single anchor that multiple namespace
+    modules can import without inventing a project-local shim base::
+
+        from typing import TypedDict
+
+        class ReviewPayload(TypedDict):
+            kind: str
+            draft: str
+
+        class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
+            draft: str
+            def interrupt_payload(self) -> ReviewPayload:
+                return {"kind": "review", "draft": self.draft}
+
+    Pure ``Interrupted`` remains the right choice when no payload is needed —
+    this base is opt-in.
+    """
+
+    def interrupt_payload(self) -> PayloadT:
+        """Return the typed payload for this interrupt.
+
+        Subclasses must override.  The default raises ``NotImplementedError``
+        so a forgotten override surfaces as a clear runtime error rather than
+        silently returning ``None``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__qualname__} subclasses InterruptedWithPayload but "
+            f"does not override interrupt_payload(). Implement it to return "
+            f"the typed payload (matching the Generic parameter)."
+        )
 
 
 class FrontendToolCallRequested(Interrupted):

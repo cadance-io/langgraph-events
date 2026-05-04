@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **EventGraph**: `services=` kwarg for type-matched dependency injection. Pass a flat list of service instances (`EventGraph(services=[chat_model, session_factory])`); handler params resolve by their type annotation via an MRO walk (a base-class annotation matches a registered subclass instance). Inline `Command.handle(self, chat_model: BaseChatModel)` and external `@on(...)` handlers share the same mechanism. Resolution order: reducer name → framework type (`EventLog` / `RunnableConfig` / `BaseStore`) → service type. Eliminates the closure-factory pattern downstream projects use today to shuttle services into handlers.
+- **serde**: new opt-in `langgraph_events.serde.NamespaceAwareSerde` — a `JsonPlusSerializer` subclass that keys `Event` identity by `(__module__, __qualname__)` instead of `(__module__, __name__)`. Drop-in for any LangGraph checkpointer that accepts `serde=` (e.g. `MemorySaver(serde=NamespaceAwareSerde())`). Two namespaces with sibling-named events (`Persona.Approve.Approved`, `Story.Approve.Approved`) now round-trip distinctly; non-event payloads encode exactly as the default serde.
+- **InterruptedWithPayload[PayloadT]**: new generic base for HITL with a discriminated frontend payload. Subclasses implement `interrupt_payload(self) -> PayloadT` and inherit from `Interrupted`. The AG-UI `InterruptedMapper` recognises it directly — no `agui_dict()` override needed. Re-exported at `langgraph_events.InterruptedWithPayload`. Eliminates the project-local "shim base" pattern downstream HITL projects use today to break import cycles between sibling namespace modules.
+- **on_namespace_finalize(cls, callback)**: public hook that schedules a callback to fire once the enclosing Namespace's `__init_subclass__` finishes (after `_stamp_nested_namespace` and `_attach_command_outcomes`). Useful for class decorators that need to call `typing.get_type_hints()` against forward references to siblings inside the same in-progress Namespace body — those references can't resolve while the class body is evaluating, but resolve cleanly at finalize time. Re-exported at `langgraph_events.on_namespace_finalize`.
+
+### Changed
+- **EventGraph**: handler params with no injection source now raise `TypeError` at graph construction (previously crashed at first dispatch with a missing-keyword error). Two services of the same exact type are rejected at construction. A handler param annotated as a class that matches multiple registered services is rejected at construction with both candidate type names in the message.
+
 ## [0.5.2] - 2026-04-30
 
 ### Added

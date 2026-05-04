@@ -23,6 +23,7 @@ from langgraph_events import (
     FrontendToolCallRequested,
     IntegrationEvent,
     Interrupted,
+    InterruptedWithPayload,
     MessageEvent,
     message_reducer,
     on,
@@ -86,6 +87,19 @@ class ApprovalRequested(Interrupted):
 
     def agui_dict(self) -> dict[str, Any]:
         return {"draft": self.draft}
+
+
+class _ReviewPayload(dict):
+    pass
+
+
+class ReviewWithPayload(InterruptedWithPayload[_ReviewPayload]):
+    """Payload-typed interrupt without an explicit agui_dict() override."""
+
+    draft: str = ""
+
+    def interrupt_payload(self) -> _ReviewPayload:
+        return _ReviewPayload(kind="review", draft=self.draft)
 
 
 class ApprovalGiven(IntegrationEvent):
@@ -4232,3 +4246,26 @@ def describe_frontend_state_mutated():
             # And no CustomEvent echoing the event to the client.
             custom_names = [e.name for e in events if isinstance(e, CustomEvent)]
             assert "FrontendStateMutated" not in custom_names
+
+
+def describe_InterruptedMapper():
+    def when_event_subclasses_InterruptedWithPayload():
+        def it_emits_a_CustomEvent_using_interrupt_payload():
+            from langgraph_events.agui._mappers import InterruptedMapper
+
+            event = ReviewWithPayload(draft="hello")
+            ctx = MapperContext(
+                run_id="r-1",
+                thread_id="t-1",
+                input_data=_make_input(),
+            )
+
+            result = InterruptedMapper().map(event, ctx)
+
+            assert result is not None
+            assert len(result) == 1
+            emitted = result[0]
+            assert isinstance(emitted, CustomEvent)
+            assert emitted.type == EventType.CUSTOM
+            assert emitted.name == "interrupted"
+            assert emitted.value == {"kind": "review", "draft": "hello"}

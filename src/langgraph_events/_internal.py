@@ -186,6 +186,7 @@ def _build_inject(
     state: StateDict,
     reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
+    services: dict[type, Any] | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
@@ -210,6 +211,9 @@ def _build_inject(
                 "is configured. Pass store=... to EventGraph(...)."
             )
         inject[meta.store_param] = store
+    if services and meta.service_params:
+        for param_name, svc_type in meta.service_params:
+            inject[param_name] = services[svc_type]
     return inject
 
 
@@ -430,6 +434,7 @@ def make_handler_node(
     meta: HandlerMeta,
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: Any = None,
+    services: dict[type, Any] | None = None,
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
@@ -450,12 +455,13 @@ def make_handler_node(
     from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
     reds = reducers or {}
+    svcs = services
 
     def _prepare(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[Event], dict[str, Any]]:
         matching = [e for e in state["_pending"] if meta.matches(e)]
-        inject = _build_inject(meta, state, reds, config)
+        inject = _build_inject(meta, state, reds, config, svcs)
         return matching, inject
 
     def _finalize(new_events: list[Event]) -> StateDict:

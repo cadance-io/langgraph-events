@@ -16,11 +16,13 @@ from langgraph_events import (
     HandlerRaised,
     IntegrationEvent,
     Interrupted,
+    InterruptedWithPayload,
     MaxRoundsExceeded,
     MessageEvent,
     Namespace,
     Resumed,
     SystemEvent,
+    on_namespace_finalize,
 )
 
 
@@ -639,3 +641,95 @@ def describe_SystemEvent():
 
         def it_makes_MaxRoundsExceeded_isinstance_SystemEvent():
             assert issubclass(MaxRoundsExceeded, SystemEvent)
+
+
+def describe_InterruptedWithPayload():
+    def when_subclassed():
+        def with_a_typed_payload():
+            def it_returns_the_payload_from_interrupt_payload():
+                class ReviewPayload(dict):
+                    pass
+
+                class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
+                    draft: str
+                    revision: int
+
+                    def interrupt_payload(self) -> ReviewPayload:
+                        return ReviewPayload(
+                            kind="review",
+                            draft=self.draft,
+                            revision=self.revision,
+                        )
+
+                event = ReviewInterrupted(draft="hello", revision=2)
+                assert event.interrupt_payload() == {
+                    "kind": "review",
+                    "draft": "hello",
+                    "revision": 2,
+                }
+
+            def it_remains_substitutable_for_Interrupted():
+                class P(dict):
+                    pass
+
+                class MyInterrupt(InterruptedWithPayload[P]):
+                    value: str
+
+                    def interrupt_payload(self) -> P:
+                        return P(value=self.value)
+
+                assert issubclass(MyInterrupt, Interrupted)
+                assert isinstance(MyInterrupt(value="x"), Interrupted)
+
+        def without_overriding_interrupt_payload():
+            def it_raises_NotImplementedError_naming_the_method():
+                class P(dict):
+                    pass
+
+                class Forgotten(InterruptedWithPayload[P]):
+                    pass
+
+                with pytest.raises(NotImplementedError, match="interrupt_payload"):
+                    Forgotten().interrupt_payload()
+
+
+def describe_on_namespace_finalize():
+    def when_callback_registered_during_class_body():
+        def it_fires_after_the_enclosing_Namespace_body_completes():
+            captured: list[type] = []
+
+            class MyNs(Namespace):
+                class Cmd(Command):
+                    class Done(DomainEvent):
+                        pass
+
+                on_namespace_finalize(Cmd, captured.append)
+
+            assert captured == [MyNs.Cmd]
+
+    def when_callback_needs_a_sibling_defined_later_in_the_namespace_body():
+        def it_can_resolve_the_sibling_at_callback_time():
+            from langgraph_events._event import _NAMESPACE_REGISTRY
+
+            captured: list[type] = []
+
+            def capture_sibling(cls):
+                def cb(c):
+                    ns_cls = _NAMESPACE_REGISTRY[c.__namespace__]
+                    captured.append(ns_cls.Sibling)
+
+                on_namespace_finalize(cls, cb)
+                return cls
+
+            class LateRefNs(Namespace):
+                @capture_sibling
+                class Target(Command):
+                    pass
+
+                # Defined AFTER Target — would be unresolvable at Target's
+                # class-body / __init_subclass__ time. The finalize hook
+                # ensures the callback fires once Sibling is bound.
+                class Sibling(Command):
+                    pass
+
+            assert captured == [LateRefNs.Sibling]

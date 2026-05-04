@@ -296,6 +296,11 @@ class HandlerMeta:
     field_inject_params: frozenset[str] = frozenset()
     raises: tuple[type[Exception], ...] = ()
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
+    # (param_name, registered_service_type) for params whose annotation is a
+    # base class of (or identical to) a service type registered on
+    # EventGraph(services=...). Used as the lookup key in the services map
+    # at dispatch time.
+    service_params: tuple[tuple[str, type], ...] = ()
 
     def matches(self, event: Event) -> bool:
         """Check whether *event* satisfies this handler's type + field matchers.
@@ -319,11 +324,77 @@ class HandlerMeta:
         return self.log_param is not None
 
 
+def _warn_on_unknown_reducer_params(
+    fn: Callable[..., Any],
+    sig: inspect.Signature,
+    *,
+    reducer_names: frozenset[str],
+    consumed: set[str | None],
+) -> None:
+    """Surface a typo warning when reducer-style param names go unmatched."""
+    unknown = [
+        name for name in sig.parameters if name not in consumed and name != "self"
+    ]
+    if not unknown:
+        return
+    warnings.warn(
+        f"Handler {fn.__qualname__!r} has parameter(s) {unknown} that "
+        f"don't match any reducer. "
+        f"Available reducers: {sorted(reducer_names)}. Typo?",
+        stacklevel=4,
+    )
+
+
+def _detect_service_params(
+    fn: Callable[..., Any],
+    sig: inspect.Signature,
+    hints: dict[str, Any],
+    service_types: frozenset[type],
+    consumed: set[str | None],
+) -> tuple[tuple[str, type], ...]:
+    """Match unclaimed handler params against registered service types.
+
+    For each param whose annotation is a class, the matching service type is
+    the unique registered type that is a subclass of (or equal to) the
+    annotation. Multi-match is rejected — the user must disambiguate by
+    narrowing the annotation or registering only one matching service.
+    """
+    if not service_types:
+        return ()
+    detected: list[tuple[str, type]] = []
+    for param_name in sig.parameters:
+        if param_name in consumed:
+            continue
+        hint = hints.get(param_name)
+        if not isinstance(hint, type):
+            continue
+        matches = [t for t in service_types if issubclass(t, hint)]
+        if len(matches) > 1:
+            names = ", ".join(sorted(t.__name__ for t in matches))
+            raise TypeError(
+                f"Handler {fn.__qualname__!r} parameter {param_name!r} "
+                f"annotated as {hint.__name__!r} matches multiple "
+                f"registered services ({names}). Disambiguate by "
+                f"narrowing the annotation, or register only one "
+                f"service that satisfies it."
+            )
+        if matches:
+            detected.append((param_name, matches[0]))
+    return tuple(detected)
+
+
 def extract_handler_meta(
     fn: Callable[..., Any],
     reducer_names: frozenset[str] = frozenset(),
+    service_types: frozenset[type] = frozenset(),
 ) -> HandlerMeta:
-    """Extract handler metadata from a decorated function."""
+    """Extract handler metadata from a decorated function.
+
+    ``service_types`` is the set of exact types registered on
+    ``EventGraph(services=...)``. Each handler param whose annotation is a
+    base class of (or identical to) a registered service type is recorded
+    as a service param.
+    """
     event_types = getattr(fn, "_event_types", None)
     if event_types is None:
         raise ValueError(
@@ -383,30 +454,30 @@ def extract_handler_meta(
         fn, "_invariants", ()
     )
 
-    # Warn about handler params that don't match any known injection source
+    # Detect service params by type. Resolution order: anything claimed by
+    # log/config/store/reducer/field-matcher or the first (event) param is
+    # already consumed; the rest are candidates for service injection.
+    first_param = next(iter(sig.parameters), None)
+    consumed_for_services: set[str | None] = {first_param, "self"}
+    if log_param:
+        consumed_for_services.add(log_param)
+    if config_param:
+        consumed_for_services.add(config_param)
+    if store_param:
+        consumed_for_services.add(store_param)
+    consumed_for_services.update(reducer_params)
+    consumed_for_services.update(raw_field_matchers.keys())
+    service_params = _detect_service_params(
+        fn, sig, hints, service_types, consumed_for_services
+    )
+
     if reducer_names:
-        first_param = next(iter(sig.parameters), None)
-        known_params = {first_param}  # first param is always the event
-        if log_param:
-            known_params.add(log_param)
-        if config_param:
-            known_params.add(config_param)
-        if store_param:
-            known_params.add(store_param)
-        known_params.update(reducer_names)
-        known_params.update(raw_field_matchers.keys())
-        unknown = [
-            name
-            for name in sig.parameters
-            if name not in known_params and name != "self"
-        ]
-        if unknown:
-            warnings.warn(
-                f"Handler {fn.__qualname__!r} has parameter(s) {unknown} that "
-                f"don't match any reducer. "
-                f"Available reducers: {sorted(reducer_names)}. Typo?",
-                stacklevel=3,
-            )
+        _warn_on_unknown_reducer_params(
+            fn,
+            sig,
+            reducer_names=reducer_names,
+            consumed=consumed_for_services | {n for n, _ in service_params},
+        )
 
     return HandlerMeta(
         name=fn.__name__,
@@ -421,4 +492,5 @@ def extract_handler_meta(
         field_inject_params=field_inject_params,
         raises=raises,
         invariants=invariants,
+        service_params=service_params,
     )

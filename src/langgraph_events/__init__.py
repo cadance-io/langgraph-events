@@ -18,6 +18,7 @@ from langgraph_events._event import (
     HandlerRaised,
     IntegrationEvent,
     Interrupted,
+    InterruptedWithPayload,
     Invariant,
     InvariantViolated,
     MaxRoundsExceeded,
@@ -27,6 +28,7 @@ from langgraph_events._event import (
     Scatter,
     SystemEvent,
     SystemPromptSet,
+    on_namespace_finalize,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._graph import (
@@ -59,6 +61,7 @@ __all__ = [
     "HandlerRaised",
     "IntegrationEvent",
     "Interrupted",
+    "InterruptedWithPayload",
     "Invariant",
     "InvariantViolated",
     "LLMStreamEnd",
@@ -81,4 +84,5 @@ __all__ = [
     "emit_state_snapshot",
     "message_reducer",
     "on",
+    "on_namespace_finalize",
 ]

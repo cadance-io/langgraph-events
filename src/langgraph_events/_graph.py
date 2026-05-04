@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import typing
 import warnings
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
@@ -44,7 +45,7 @@ from langgraph_events._internal import (
 from langgraph_events._namespace import NamespaceModel
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
@@ -343,6 +344,38 @@ def _discover_namespace_reducers(
         explicit_reducers.setdefault(name, r)
 
 
+def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
+    """Raise if a handler declares a param the framework cannot inject.
+
+    Every parameter must be claimed by exactly one source: the event itself
+    (the first positional param), ``EventLog``/``RunnableConfig``/``BaseStore``
+    framework injectables, a registered reducer name, a field matcher, or a
+    type-matched service. An unclaimed param means the user intended an
+    injection the framework has no way to provide — surface it at graph
+    build time so the failure is colocated with the misconfiguration.
+    """
+    sig = inspect.signature(meta.fn)
+    first_param = next(iter(sig.parameters), None)
+    claimed: set[str | None] = {first_param, "self"}
+    if meta.log_param:
+        claimed.add(meta.log_param)
+    if meta.config_param:
+        claimed.add(meta.config_param)
+    if meta.store_param:
+        claimed.add(meta.store_param)
+    claimed.update(meta.reducer_params)
+    claimed.update(meta.field_inject_params)
+    claimed.update(name for name, _ in meta.service_params)
+    unclaimed = [name for name in sig.parameters if name not in claimed]
+    if unclaimed:
+        raise TypeError(
+            f"Handler {meta.name!r} declares parameter(s) {unclaimed} that "
+            f"the framework cannot inject. For service injection, register "
+            f"a matching instance via EventGraph(services=[...]); for state, "
+            f"register a Reducer; otherwise remove the parameter."
+        )
+
+
 def _expand_command_handlers(
     handlers: list[Any],
 ) -> list[Callable[..., Any]]:
@@ -404,6 +437,7 @@ class EventGraph:
         *,
         max_rounds: int = 100,
         reducers: list[BaseReducer] | None = None,
+        services: Sequence[Any] | None = None,
         checkpointer: Any = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
@@ -424,13 +458,36 @@ class EventGraph:
             raise ValueError(
                 f"Reducer name(s) {conflicts} conflict with reserved state fields"
             )
+
+        # services=[...] — flat type-keyed registry. Each registered instance
+        # is keyed by its exact type; handler param annotations resolve via
+        # the MRO (a param annotated as a base class matches a registered
+        # subclass instance). Two instances of the same exact type are
+        # rejected — disambiguate by subclassing or registering only one.
+        self._services: dict[type, Any] = {}
+        for s in services or ():
+            t = type(s)
+            if t in self._services:
+                raise TypeError(
+                    f"EventGraph(services=...) has two instances of type "
+                    f"{t.__name__!r} — same-type collision. Register only "
+                    f"one instance, or use a subclass to distinguish them."
+                )
+            self._services[t] = s
+
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
 
         reducer_names = frozenset(self._reducers.keys())
+        service_types = frozenset(self._services.keys())
         seen_names: dict[str, int] = {}
         for fn in handlers:
-            meta = extract_handler_meta(fn, reducer_names=reducer_names)
+            meta = extract_handler_meta(
+                fn,
+                reducer_names=reducer_names,
+                service_types=service_types,
+            )
+            _verify_no_unclaimed_params(meta)
             # Deduplicate node names — preserve all other meta fields
             # (raises, field_matchers, field_inject_params, ...) so the second
             # copy behaves identically to the first.
@@ -560,6 +617,7 @@ class EventGraph:
                 meta,
                 reducers=self._reducers,
                 return_contract=self._return_contracts.get(meta.name),
+                services=self._services or None,
             )
             graph.add_node(meta.name, cast("Any", handler_node))
             handler_names.append(meta.name)

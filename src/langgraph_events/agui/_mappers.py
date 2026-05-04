@@ -21,6 +21,7 @@ from langgraph_events._event import (
     Event,
     FrontendToolCallRequested,
     Interrupted,
+    InterruptedWithPayload,
     Resumed,
     SystemPromptSet,
 )
@@ -156,11 +157,24 @@ class FrontendToolCallRequestedMapper:
 
 
 class InterruptedMapper:
-    """Map Interrupted events to AG-UI CustomEvent."""
+    """Map Interrupted events to AG-UI CustomEvent.
+
+    ``InterruptedWithPayload`` subclasses are recognized via their
+    ``interrupt_payload()`` method (no ``agui_dict()`` override needed);
+    other ``Interrupted`` subclasses must implement ``AGUISerializable``.
+    """
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
         if not isinstance(event, Interrupted):
             return None
+        if isinstance(event, InterruptedWithPayload):
+            return [
+                CustomEvent(
+                    type=EventType.CUSTOM,
+                    name="interrupted",
+                    value=event.interrupt_payload(),
+                )
+            ]
         if not isinstance(event, AGUISerializable):
             _warn_missing_agui_dict(type(event))
             return []
