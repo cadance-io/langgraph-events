@@ -134,6 +134,10 @@ log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 
 See the [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
 
+### Typed payloads — `InterruptedWithPayload`
+
+When the frontend needs an action-discriminated dict (entity-review vs environment-select vs walkthrough-choice, …), subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The AG-UI adapter recognises the contract directly — no `agui_dict()` override needed. See [AG-UI](agui.md) for the streaming details.
+
 ## Field Matchers
 
 Narrow dispatch by requiring a field to be a specific type. The handler only fires when the named field is an `isinstance` match; if the handler signature includes a matching parameter, the value is injected:

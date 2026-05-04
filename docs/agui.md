@@ -319,6 +319,38 @@ def ship(event: UserConfirmed) -> ShippedRelease:
 
 Streaming-path errors propagate through the adapter's top-level handler and surface to the frontend as a `RUN_ERROR` event with the diagnostic message. Conformant CopilotKit clients and LangChain chat models satisfy these invariants by default.
 
+## Typed Interrupt Payloads
+
+For HITL flows whose frontend needs an action-discriminated dict (entity-review vs environment-select vs walkthrough-choice, …), subclass `InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The built-in `InterruptedMapper` recognises the contract and emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.
+
+```python
+from typing import Literal, TypedDict
+
+from langgraph_events import on
+from langgraph_events.agui import InterruptedWithPayload
+
+
+class ReviewPayload(TypedDict):
+    kind: Literal["review"]
+    draft: str
+    revision: int
+
+
+class ReviewInterrupted(InterruptedWithPayload[ReviewPayload]):
+    draft: str
+    revision: int
+
+    def interrupt_payload(self) -> ReviewPayload:
+        return {"kind": "review", "draft": self.draft, "revision": self.revision}
+
+
+@on(DraftReady)
+def request_review(event: DraftReady) -> ReviewInterrupted:
+    return ReviewInterrupted(draft=event.draft, revision=event.revision)
+```
+
+This is the right shape when several namespace modules each need their own typed `Interrupted` subclass — the shared base lives in `langgraph_events.agui`, so the project doesn't have to invent a local "shim" module to break import cycles between sibling event modules. Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
+
 ## LangGraph Config Passthrough
 
 `stream()` and `connect()` accept LangGraph config via `RunAgentInput.forwarded_props` — keys `langgraph_config`, `config`, or the whole dict when it already looks like a LangGraph config. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`; other keys (e.g. `recursion_limit`, tenant routing) pass through.

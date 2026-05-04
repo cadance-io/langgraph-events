@@ -1,5 +1,37 @@
 # Migration guide
 
+## v0.5.x → next
+
+The next minor release adds dependency injection, namespace-aware checkpoint serde, typed Interrupted payloads, a Namespace finalize hook, and relocates two AG-UI-coupled classes out of the core package. Most of this is additive — only the import-path move below is a deprecation.
+
+### `FrontendToolCallRequested` moved to `langgraph_events.agui`
+
+The class lives at `langgraph_events.agui.FrontendToolCallRequested` alongside `FrontendStateMutated`. The top-level alias `langgraph_events.FrontendToolCallRequested` still resolves but emits a `DeprecationWarning` per access — fix imports now:
+
+```python
+# Before
+from langgraph_events import FrontendToolCallRequested
+
+# After
+from langgraph_events.agui import FrontendToolCallRequested
+```
+
+The class behavior is unchanged.
+
+### Handler params raise at graph construction (was first dispatch)
+
+Declaring a handler parameter the framework can't fill (no reducer, no service, no `EventLog` / `RunnableConfig` / `BaseStore` annotation, no field matcher) now raises `TypeError` from `EventGraph(...)` instead of crashing at `graph.invoke(...)` with a missing-keyword error. The diagnostic names the unclaimed parameter and points at the available registration knobs. Two patterns to know:
+
+- `def react(event, *args, **kwargs)` — variadic params are ignored by the check; generic catchers build cleanly.
+- `def h(event, foo: object)` — `object` annotations are skipped by service detection (they would otherwise silently match every registered service). Treat `foo` as untyped.
+
+### New affordances (no migration required)
+
+- **`EventGraph(services=...)`** — type-keyed list (`[chat_model, session_factory]`) or name-keyed mapping (`{"primary": a, "backup": b}`) for project dependencies. See [Concepts › Signature injection](concepts.md#signature-injection).
+- **`langgraph_events.serde.NamespaceAwareSerde`** — opt-in `JsonPlusSerializer` subclass that keys nested-event identity by `__qualname__`, so `Persona.Approve.Approved` and `Story.Approve.Approved` round-trip distinctly through any checkpointer.
+- **`langgraph_events.agui.InterruptedWithPayload[PayloadT]`** — typed-payload variant of `Interrupted` for HITL flows whose frontend needs an action-discriminated dict.
+- **`langgraph_events.on_namespace_finalize(cls, callback)`** — public hook firing once a `Namespace.__init_subclass__` finishes; useful for class decorators that need to call `typing.get_type_hints()` against forward references to siblings inside the same in-progress Namespace body.
+
 ## v0.4.0 → v0.5.0
 
 0.5.0 is a large release — event taxonomy (`Namespace`, `Command`, `DomainEvent`), declarative namespace-scoped reducers, `invariants=`, strict return-type enforcement, introspection APIs. Most of it is additive vocabulary you can adopt at your own pace. **Eight existing behaviours become stricter** and need attention.
@@ -201,6 +233,8 @@ FrontendToolCallRequested(args={"query": "q"})
 # After
 FrontendToolCallRequested(name="search", args={"query": "q"})
 ```
+
+> **Note:** `FrontendToolCallRequested` itself relocated from `langgraph_events` to `langgraph_events.agui` in a later release — see the [v0.5.x → next](#v05x-next) section above.
 
 ## Non-breaking changes
 

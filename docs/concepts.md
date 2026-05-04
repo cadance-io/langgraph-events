@@ -120,6 +120,35 @@ Handlers receive injections by type or name:
 - `config: RunnableConfig` / `store: BaseStore` — LangGraph injections
 - Reducer channel by **parameter name** (see [Reducers](reducers.md))
 - Field matchers (external only) — typed subset dispatch plus injection
+- **Services** — project dependencies registered on `EventGraph(services=...)`
+
+Resolution order: reducer name → framework type (`EventLog` / `RunnableConfig` / `BaseStore`) → service. The first match wins.
+
+`services=` accepts two shapes (mutually exclusive within a graph):
+
+```python
+# Type-keyed: handler params resolve by their annotation. Same-type
+# collisions are rejected at build; subclass annotations match registered
+# subclass instances via an MRO walk.
+EventGraph(handlers=[...], services=[chat_model, session_factory])
+
+class Story(Namespace):
+    class Refine(Command):
+        async def handle(self, chat_model: BaseChatModel) -> Refined:
+            ...
+
+# Name-keyed: handler params resolve by name. Allows multiple instances
+# of the same type (primary + backup chat models, etc.).
+EventGraph(
+    handlers=[...],
+    services={"primary_chat": chat_a, "backup_chat": chat_b},
+)
+
+@on(SomeEvent)
+def react(event, primary_chat, backup_chat) -> ...: ...
+```
+
+Handler params with no injection source raise `TypeError` at graph construction (not at first dispatch).
 
 Async is supported on both forms.
 
