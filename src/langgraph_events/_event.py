@@ -59,14 +59,14 @@ declarative reducers via a handler's subscribed event types."""
 
 
 _NAMESPACE_FINALIZE_CALLBACKS: weakref.WeakKeyDictionary[
-    type, list[Callable[[type], None]]
+    type, list[Callable[[type, type], None]]
 ] = weakref.WeakKeyDictionary()
 """Per-class queues of callbacks to fire when the enclosing Namespace's
 ``__init_subclass__`` finishes. Populated by ``on_namespace_finalize`` and
 drained inside ``Namespace.__init_subclass__``."""
 
 
-def on_namespace_finalize(cls: type, callback: Callable[[type], None]) -> None:
+def on_namespace_finalize(cls: type, callback: Callable[[type, type], None]) -> None:
     """Schedule *callback* to fire once *cls*'s enclosing Namespace finalizes.
 
     Useful for class decorators that need post-body work — e.g. calling
@@ -77,7 +77,9 @@ def on_namespace_finalize(cls: type, callback: Callable[[type], None]) -> None:
     completes (after ``_stamp_nested_namespace`` and
     ``_attach_command_outcomes``).
 
-    The callback is invoked with the registered class as its sole argument.
+    The callback is invoked as ``callback(cls, namespace_cls)`` — the second
+    arg is the enclosing Namespace class, so decorators can resolve sibling
+    references via ``vars(namespace_cls)`` without touching private state.
     Multiple callbacks for the same class fire in registration order.
 
     If the enclosing Namespace has *already* finalized when this hook is
@@ -86,18 +88,21 @@ def on_namespace_finalize(cls: type, callback: Callable[[type], None]) -> None:
     never drain.
     """
     namespace_name = getattr(cls, "__namespace__", None)
-    if namespace_name and namespace_name in _NAMESPACE_REGISTRY:
-        callback(cls)
+    namespace_cls = _NAMESPACE_REGISTRY.get(namespace_name) if namespace_name else None
+    if namespace_cls is not None:
+        callback(cls, namespace_cls)
         return
     _NAMESPACE_FINALIZE_CALLBACKS.setdefault(cls, []).append(callback)
 
 
-def _drain_namespace_finalize(container: type) -> None:
+def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
     """Fire callbacks queued for any nested ``Event`` class under *container*.
 
     Walks only ``Event`` subclasses (Commands and DomainEvents); recurses
     into Commands so callbacks registered on DomainEvents nested inside a
-    Command fire after the enclosing Namespace finalizes.
+    Command fire after the enclosing Namespace finalizes. ``namespace_cls``
+    stays fixed across recursion — it is always the outermost Namespace
+    whose ``__init_subclass__`` triggered the drain.
     """
     for attr in container.__dict__.values():
         if not isinstance(attr, type) or not issubclass(attr, Event):
@@ -105,9 +110,9 @@ def _drain_namespace_finalize(container: type) -> None:
         callbacks = _NAMESPACE_FINALIZE_CALLBACKS.pop(attr, None)
         if callbacks:
             for cb in callbacks:
-                cb(attr)
+                cb(attr, namespace_cls)
         if issubclass(attr, Command):
-            _drain_namespace_finalize(attr)
+            _drain_namespace_finalize(attr, namespace_cls)
 
 
 class Namespace:
@@ -148,7 +153,7 @@ class Namespace:
         # known at that point). Fill them in now.
         _stamp_nested_namespace(cls, cls.__name__)
         _attach_command_outcomes(cls)
-        _drain_namespace_finalize(cls)
+        _drain_namespace_finalize(cls, cls)
 
 
 def _collect_namespace_reducers(cls: type) -> tuple[Any, ...]:

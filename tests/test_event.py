@@ -578,29 +578,29 @@ def describe_SystemEvent():
 def describe_on_namespace_finalize():
     def when_callback_registered_during_class_body():
         def it_fires_after_the_enclosing_Namespace_body_completes():
-            captured: list[type] = []
+            captured: list[tuple[type, type]] = []
 
             class MyNs(Namespace):
                 class Cmd(Command):
                     class Done(DomainEvent):
                         pass
 
-                on_namespace_finalize(Cmd, captured.append)
+                on_namespace_finalize(Cmd, lambda c, ns: captured.append((c, ns)))
 
-            assert captured == [MyNs.Cmd]
+            assert captured == [(MyNs.Cmd, MyNs)]
 
     def when_callback_needs_a_sibling_defined_later_in_the_namespace_body():
-        def it_can_resolve_the_sibling_at_callback_time():
-            from langgraph_events._event import _NAMESPACE_REGISTRY
-
+        def it_receives_the_enclosing_namespace_class_directly():
             captured: list[type] = []
 
             def capture_sibling(cls):
-                def cb(c):
-                    ns_cls = _NAMESPACE_REGISTRY[c.__namespace__]
-                    captured.append(ns_cls.Sibling)
-
-                on_namespace_finalize(cls, cb)
+                # Callback signature: (cls, namespace_cls). The framework
+                # passes the enclosing Namespace class as the second arg so
+                # decorators can resolve sibling references via vars(ns_cls)
+                # without reaching into private registries.
+                on_namespace_finalize(
+                    cls, lambda c, ns_cls: captured.append(ns_cls.Sibling)
+                )
                 return cls
 
             class LateRefNs(Namespace):
@@ -626,6 +626,8 @@ def describe_on_namespace_finalize():
             # Namespace body has completed; FinishedNs.Cmd's enclosing
             # namespace already drained its finalize queue. A late
             # registration must not silently dangle — fire eagerly.
-            captured: list[type] = []
-            on_namespace_finalize(FinishedNs.Cmd, captured.append)
-            assert captured == [FinishedNs.Cmd]
+            captured: list[tuple[type, type]] = []
+            on_namespace_finalize(
+                FinishedNs.Cmd, lambda c, ns: captured.append((c, ns))
+            )
+            assert captured == [(FinishedNs.Cmd, FinishedNs)]

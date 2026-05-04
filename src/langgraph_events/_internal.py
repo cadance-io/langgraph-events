@@ -186,7 +186,8 @@ def _build_inject(
     state: StateDict,
     reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
-    services: dict[type, Any] | None = None,
+    services_by_type: dict[type, Any] | None = None,
+    services_by_name: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
@@ -211,9 +212,12 @@ def _build_inject(
                 "is configured. Pass store=... to EventGraph(...)."
             )
         inject[meta.store_param] = store
-    if services and meta.service_params:
+    if services_by_type and meta.service_params:
         for param_name, svc_type in meta.service_params:
-            inject[param_name] = services[svc_type]
+            inject[param_name] = services_by_type[svc_type]
+    if services_by_name and meta.service_name_params:
+        for param_name, svc_name in meta.service_name_params:
+            inject[param_name] = services_by_name[svc_name]
     return inject
 
 
@@ -434,7 +438,8 @@ def make_handler_node(
     meta: HandlerMeta,
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: Any = None,
-    services: dict[type, Any] | None = None,
+    services_by_type: dict[type, Any] | None = None,
+    services_by_name: dict[str, Any] | None = None,
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
@@ -455,13 +460,14 @@ def make_handler_node(
     from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
     reds = reducers or {}
-    svcs = services
+    svcs_by_type = services_by_type
+    svcs_by_name = services_by_name
 
     def _prepare(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[Event], dict[str, Any]]:
         matching = [e for e in state["_pending"] if meta.matches(e)]
-        inject = _build_inject(meta, state, reds, config, svcs)
+        inject = _build_inject(meta, state, reds, config, svcs_by_type, svcs_by_name)
         return matching, inject
 
     def _finalize(new_events: list[Event]) -> StateDict:

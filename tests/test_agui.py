@@ -4270,6 +4270,52 @@ def describe_InterruptedMapper():
             assert emitted.name == "interrupted"
             assert emitted.value == {"kind": "review", "draft": "hello"}
 
+    def when_event_implements_AGUISerializable_but_not_InterruptedWithPayload():
+        def it_falls_through_to_agui_dict():
+            from langgraph_events.agui._mappers import InterruptedMapper
+
+            event = ApprovalRequested(draft="legacy-shape")
+            ctx = MapperContext(run_id="r-2", thread_id="t-2", input_data=_make_input())
+
+            result = InterruptedMapper().map(event, ctx)
+
+            assert result is not None
+            assert len(result) == 1
+            emitted = result[0]
+            assert isinstance(emitted, CustomEvent)
+            assert emitted.name == "interrupted"
+            # ApprovalRequested.agui_dict returns {"draft": ...}; this path
+            # must keep working for callers that haven't migrated to
+            # InterruptedWithPayload.
+            assert emitted.value == {"draft": "legacy-shape"}
+
+    def when_event_is_a_bare_Interrupted_subclass():
+        def without_agui_dict_implementation():
+            def it_warns_and_returns_empty():
+                from langgraph_events.agui._mappers import (
+                    InterruptedMapper,
+                    _warned_classes,
+                )
+
+                class Bare(Interrupted):
+                    draft: str = ""
+
+                _warned_classes.discard(Bare)
+                event = Bare(draft="x")
+                ctx = MapperContext(
+                    run_id="r-3", thread_id="t-3", input_data=_make_input()
+                )
+
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    result = InterruptedMapper().map(event, ctx)
+
+                assert result == []
+                assert any(
+                    "Bare" in str(w.message) and "agui_dict" in str(w.message)
+                    for w in caught
+                )
+
 
 def describe_FrontendToolCallRequested():
     def when_only_name_provided():

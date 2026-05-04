@@ -298,9 +298,13 @@ class HandlerMeta:
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
     # (param_name, registered_service_type) for params whose annotation is a
     # base class of (or identical to) a service type registered on
-    # EventGraph(services=...). Used as the lookup key in the services map
-    # at dispatch time.
+    # EventGraph(services=[...]). Used as the lookup key in the type-keyed
+    # services map at dispatch time.
     service_params: tuple[tuple[str, type], ...] = ()
+    # (param_name, registered_service_name) for params whose name matches a
+    # key in EventGraph(services={...}). Used as the lookup key in the
+    # name-keyed services map at dispatch time.
+    service_name_params: tuple[tuple[str, str], ...] = ()
 
     def matches(self, event: Event) -> bool:
         """Check whether *event* satisfies this handler's type + field matchers.
@@ -342,6 +346,26 @@ def _warn_on_unknown_reducer_params(
         f"don't match any reducer. "
         f"Available reducers: {sorted(reducer_names)}. Typo?",
         stacklevel=4,
+    )
+
+
+def _detect_service_name_params(
+    sig: inspect.Signature,
+    service_names: frozenset[str],
+    consumed: set[str | None],
+) -> tuple[tuple[str, str], ...]:
+    """Match unclaimed handler params against the name-keyed services map.
+
+    A param whose name appears as a key in ``EventGraph(services={...})`` is
+    bound to the corresponding instance at dispatch. Annotation-free params
+    are eligible — name-keyed binding does not require a type hint.
+    """
+    if not service_names:
+        return ()
+    return tuple(
+        (param_name, param_name)
+        for param_name in sig.parameters
+        if param_name not in consumed and param_name in service_names
     )
 
 
@@ -399,13 +423,21 @@ def extract_handler_meta(
     fn: Callable[..., Any],
     reducer_names: frozenset[str] = frozenset(),
     service_types: frozenset[type] = frozenset(),
+    service_names: frozenset[str] = frozenset(),
 ) -> HandlerMeta:
     """Extract handler metadata from a decorated function.
 
     ``service_types`` is the set of exact types registered on
-    ``EventGraph(services=...)``. Each handler param whose annotation is a
-    base class of (or identical to) a registered service type is recorded
-    as a service param.
+    ``EventGraph(services=[...])`` (sequence form). Each handler param whose
+    annotation is a base class of (or identical to) a registered service
+    type is recorded as a service param.
+
+    ``service_names`` is the set of keys in ``EventGraph(services={...})``
+    (mapping form). Each handler param whose name matches a key is recorded
+    as a name-keyed service param.
+
+    Only one of the two forms is populated per ``EventGraph`` — they are
+    mutually exclusive.
     """
     event_types = getattr(fn, "_event_types", None)
     if event_types is None:
@@ -482,13 +514,20 @@ def extract_handler_meta(
     service_params = _detect_service_params(
         fn, sig, hints, service_types, consumed_for_services
     )
+    service_name_params = _detect_service_name_params(
+        sig, service_names, consumed_for_services
+    )
 
     if reducer_names:
         _warn_on_unknown_reducer_params(
             fn,
             sig,
             reducer_names=reducer_names,
-            consumed=consumed_for_services | {n for n, _ in service_params},
+            consumed=(
+                consumed_for_services
+                | {n for n, _ in service_params}
+                | {n for n, _ in service_name_params}
+            ),
         )
 
     return HandlerMeta(
@@ -505,4 +544,5 @@ def extract_handler_meta(
         raises=raises,
         invariants=invariants,
         service_params=service_params,
+        service_name_params=service_name_params,
     )

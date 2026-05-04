@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import warnings
+
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import Command, DomainEvent, EventGraph, Namespace
@@ -82,3 +85,61 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(s_event, Persona.Approve.Approved)
                 assert p_event.note == "persona"
                 assert s_event.note == "story"
+
+    def describe_revival_of_a_missing_class():
+        def when_the_qualname_path_no_longer_resolves():
+            def it_raises_a_clear_error_naming_the_missing_class():
+                serde = NamespaceAwareSerde()
+
+                # Encode a known class, then mutate the bytes so the qualname
+                # references a path that doesn't exist on the module. Stand-in
+                # for the real-world case: a checkpoint produced by an older
+                # build whose Event class has since been renamed/removed.
+                ev = Persona.Approve.Approved(note="ghost")
+                kind, payload = serde.dumps_typed(ev)
+                # Replace the qualname segment with a path that won't resolve.
+                # Both b"Approved" and b"Approve" appear; replacing the rare
+                # leaf is sufficient to break the attribute walk.
+                tampered = payload.replace(b"Approved", b"GhostClass")
+                assert tampered != payload
+
+                with pytest.raises(ValueError, match=r"GhostClass|Persona\.Approve"):
+                    serde.loads_typed((kind, tampered))
+
+    def describe_encode_fallback():
+        def when_msgpack_encoding_fails():
+            def it_warns_before_falling_through_to_super():
+                # An object neither the namespace-aware ``_default`` nor the
+                # upstream default knows how to encode. The namespace-aware
+                # path raises MsgpackEncodeError; we warn, then defer to the
+                # parent (which then raises further). The point of the test
+                # is that the warning fires before the parent path runs — so
+                # users notice the namespace-aware identity scheme is not in
+                # effect for this blob (collision-prone).
+                from langgraph_events.serde import _jsonplus
+
+                class Unencodable:
+                    pass
+
+                serde = NamespaceAwareSerde()
+                with (
+                    warnings.catch_warnings(record=True) as caught,
+                    pytest.raises(TypeError),
+                ):
+                    warnings.simplefilter("always")
+                    serde.dumps_typed(Unencodable())
+
+                fallback_warnings = [
+                    w
+                    for w in caught
+                    if "fall" in str(w.message).lower()
+                    or "namespace" in str(w.message).lower()
+                ]
+                assert fallback_warnings, (
+                    f"expected a fallback warning, got: "
+                    f"{[str(w.message) for w in caught]}"
+                )
+
+                # Sanity: helper module is importable (catches an obvious
+                # M4-style refactor regression).
+                assert _jsonplus.NamespaceAwareSerde is NamespaceAwareSerde

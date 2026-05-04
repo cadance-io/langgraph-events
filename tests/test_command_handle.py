@@ -345,6 +345,112 @@ def describe_Command_handle():
                 with pytest.raises(TypeError, match=r"foo"):
                     EventGraph([overly_broad], services=[chat_model])
 
+        def when_param_is_resolved_as_a_service_alongside_a_reducer():
+
+            def it_does_not_trigger_the_unknown_reducer_warning():
+                # The "unknown reducer" warning fires for any handler
+                # parameter that isn't claimed by a known injection source.
+                # A param resolved via service-type matching MUST count as
+                # claimed — otherwise users get a noisy false-positive
+                # warning every time they declare a service param while
+                # reducers are also registered.
+                import warnings as _warnings
+
+                @on(Shop.Buy.Bought)
+                def with_both(
+                    event: Shop.Buy.Bought,
+                    chat_model: _StubChatModel,
+                    items: list,
+                ) -> None:
+                    pass
+
+                from langgraph_events import Reducer as _Reducer
+
+                items_reducer = _Reducer(
+                    name="items",
+                    event_type=Shop.Buy.Bought,
+                    fn=lambda e: [e.item],
+                )
+                chat_model_svc = _StubChatModel(value="x")
+
+                with _warnings.catch_warnings(record=True) as caught:
+                    _warnings.simplefilter("always")
+                    EventGraph(
+                        [with_both],
+                        reducers=[items_reducer],
+                        services=[chat_model_svc],
+                    )
+
+                # No "don't match any reducer" warning should fire — the
+                # service param is claimed; the reducer param is matched.
+                offending = [
+                    w for w in caught if "don't match any reducer" in str(w.message)
+                ]
+                assert not offending, (
+                    f"unexpected typo warning: {[str(w.message) for w in offending]}"
+                )
+
+        def when_services_are_passed_as_a_name_keyed_mapping():
+
+            def it_resolves_each_handler_param_by_its_name():
+                # `services={"primary_chat": ..., "backup_chat": ...}` allows
+                # two instances of the same type — the type-keyed list form
+                # would reject that as a collision. Resolution is by handler
+                # parameter name matching the registry key.
+                observed: dict[str, object] = {}
+
+                @on(Shop.Buy.Bought)
+                def two_chats(
+                    event: Shop.Buy.Bought,
+                    primary_chat: _StubChatModel,
+                    backup_chat: _StubChatModel,
+                ) -> None:
+                    observed["primary_chat"] = primary_chat
+                    observed["backup_chat"] = backup_chat
+
+                primary = _StubChatModel(value="primary")
+                backup = _StubChatModel(value="backup")
+                graph = EventGraph(
+                    [two_chats],
+                    services={"primary_chat": primary, "backup_chat": backup},
+                )
+                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
+                assert observed["primary_chat"] is primary
+                assert observed["backup_chat"] is backup
+
+        def when_handler_param_name_has_no_matching_service_key():
+
+            def it_raises_at_graph_construction():
+                # Annotation alone is not enough in name-keyed mode — the
+                # framework cannot guess which service to bind. Surface the
+                # missing-binding at graph build.
+                @on(Shop.Buy.Bought)
+                def picky(
+                    event: Shop.Buy.Bought,
+                    chat_model: _StubChatModel,
+                ) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"chat_model"):
+                    EventGraph(
+                        [picky],
+                        services={"primary_chat": _StubChatModel(value="x")},
+                    )
+
+        def when_handler_uses_args_and_kwargs():
+
+            def it_does_not_flag_them_as_unclaimed():
+                # Variadic parameters cannot be filled by name- or type-based
+                # injection — they are caller-controlled and should be ignored
+                # by the unclaimed-param check. A generic catcher is a valid
+                # use case and must not raise at graph build.
+                @on(Shop.Buy.Bought)
+                def variadic(event: Shop.Buy.Bought, *args, **kwargs) -> None:
+                    pass
+
+                # Build should succeed; no unclaimed-param error.
+                EventGraph([variadic])
+
         def when_base_and_subclass_services_are_both_registered():
 
             def it_resolves_each_param_to_its_exact_type():
