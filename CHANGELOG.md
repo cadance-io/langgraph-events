@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-05-04
+
 ### Added
 - **EventGraph**: `services=` kwarg for dependency injection in two forms. (1) `services=[chat_model, session_factory]` — type-keyed; handler params resolve by their type annotation via an MRO walk (a base-class annotation matches a registered subclass instance), with exact-type match preferred over subclass match. (2) `services={"primary_chat": a, "backup_chat": b}` — name-keyed; handler params resolve by name. The mapping form allows multiple instances of the same type. Inline `Command.handle(self, chat_model: BaseChatModel)` and external `@on(...)` handlers share the same mechanism. Resolution order: reducer name → framework type (`EventLog` / `RunnableConfig` / `BaseStore`) → service. Eliminates the closure-factory pattern downstream projects use today to shuttle services into handlers.
 - **serde**: new opt-in `langgraph_events.serde.NamespaceAwareSerde` — a `JsonPlusSerializer` subclass that keys `Event` identity by `(__module__, __qualname__)` instead of `(__module__, __name__)`. Drop-in for any LangGraph checkpointer that accepts `serde=` (e.g. `MemorySaver(serde=NamespaceAwareSerde())`). Two namespaces with sibling-named events (`Persona.Approve.Approved`, `Story.Approve.Approved`) now round-trip distinctly; non-event payloads encode exactly as the default serde.
@@ -127,7 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cadance-io/langgraph-events/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/cadance-io/langgraph-events/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/cadance-io/langgraph-events/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cadance-io/langgraph-events/compare/v0.4.0...v0.5.0
