@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-04
+
 ### Fixed
 - **mermaid**: `render_mermaid_choreography` no longer collapses cross-namespace events that share a leaf class name. Previously, a project with sibling namespaces (e.g. `Persona.Approve.Approved`, `Story.Approve.Approved`, `Scenario.Approve.Approved`) emitted a single mermaid node for all three, merging their incoming/outgoing edges. The renderer now detects leaf-name collisions across the model and escalates only the colliding classes to qualname-based node IDs (`Persona_Approve_Approved`, …); display labels stay terse since the surrounding subgraph cluster already conveys namespace context. Non-colliding diagrams render byte-identically. (#62)
 
@@ -137,7 +139,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/cadance-io/langgraph-events/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cadance-io/langgraph-events/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cadance-io/langgraph-events/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/cadance-io/langgraph-events/compare/v0.5.1...v0.5.2
