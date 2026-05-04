@@ -17,19 +17,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  # Validate the docs build on every PR + push. Catches breakage early
+  # without requiring access to the github-pages environment (gated to
+  # the main branch). PR branches that touch docs see a real signal here
+  # instead of the noisy "deployment was rejected" failure.
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --group docs --frozen
       - run: uv run mkdocs build --strict
-      - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           path: site
+
+  # Deploy only runs on pushes to main; PR branches cannot deploy to the
+  # github-pages environment.
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/configure-pages@v5
       - id: deployment
         uses: actions/deploy-pages@v4
