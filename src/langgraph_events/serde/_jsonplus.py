@@ -50,7 +50,7 @@ if not hasattr(JsonPlusSerializer(), "_unpack_ext_hook"):  # pragma: no cover
         "langgraph_events.serde.NamespaceAwareSerde depends on the "
         "per-instance ``JsonPlusSerializer._unpack_ext_hook`` attribute. "
         "It appears to have been renamed or removed. Pin a compatible "
-        "LangGraph version (langgraph-checkpoint>=4.0.0 is supported), "
+        "LangGraph version (langgraph-checkpoint>=4.0.3 is supported), "
         "or open an issue against langgraph-events."
     )
 

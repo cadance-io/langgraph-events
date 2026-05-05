@@ -653,7 +653,7 @@ examples = [
 requires-dist = [
     { name = "ag-ui-protocol", marker = "extra == 'agui'", specifier = ">=0.1.0" },
     { name = "langgraph", specifier = ">=0.2.0" },
-    { name = "langgraph-checkpoint", specifier = ">=4.0.0" },
+    { name = "langgraph-checkpoint", specifier = ">=4.0.3" },
 ]
 provides-extras = ["agui"]
 

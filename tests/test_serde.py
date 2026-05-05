@@ -8,7 +8,6 @@ import warnings
 import pytest
 from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Interrupt
 from pydantic import BaseModel
 
@@ -351,22 +350,31 @@ def describe_NamespaceAwareSerde():
                 assert back.name == "x"
                 assert back.count == 42
 
-        def when_constructor_strict_mode_is_used():
-            # Parity guard: a strict-mode ``NamespaceAwareSerde`` should
-            # demote non-event payloads to ``dict`` *exactly like* a strict-
-            # mode ``JsonPlusSerializer`` would — i.e. the override cedes
-            # control to the parent's allowlist mechanism rather than ever
-            # falling back to a hardcoded permissive or strict path of its
-            # own. This locks #68's contract in: whatever the parent does
-            # with the allowlist, the namespace-aware subclass mirrors.
-            def it_demotes_non_event_payloads_to_dict_matching_JsonPlusSerializer():
-                baseline = JsonPlusSerializer(allowed_msgpack_modules=None)
-                serde = NamespaceAwareSerde(allowed_msgpack_modules=None)
-                obj = PlainPayload(name="strict", count=7)
+        def when_constructor_allowlist_explicitly_admits_a_type():
+            # Asymmetric guard that actually proves delegation: with strict
+            # mode plus an explicit allowlist, a class that *is* on the
+            # allowlist must revive as itself, while a class that *isn't*
+            # must demote to ``dict``. A subclass that hardcoded its own
+            # permissive or strict path (i.e. didn't actually consult the
+            # parent's allowlist) would fail one of these two halves —
+            # which is the contract #68 broke.
+            def it_revives_allowlisted_types_and_demotes_others():
+                serde = NamespaceAwareSerde(
+                    allowed_msgpack_modules=[
+                        (PlainPayload.__module__, PlainPayload.__name__),
+                    ],
+                )
+                allowed = PlainPayload(name="ok", count=1)
+                blocked = PydanticPayload(name="no", count=2)
 
-                baseline_back = baseline.loads_typed(baseline.dumps_typed(obj))
-                serde_back = serde.loads_typed(serde.dumps_typed(obj))
+                allowed_back = serde.loads_typed(serde.dumps_typed(allowed))
+                blocked_back = serde.loads_typed(serde.dumps_typed(blocked))
 
-                assert isinstance(baseline_back, dict)
-                assert isinstance(serde_back, dict)
-                assert serde_back == baseline_back
+                assert isinstance(allowed_back, PlainPayload)
+                assert allowed_back.name == "ok"
+                assert allowed_back.count == 1
+                # PydanticPayload is not in the allowlist, so the parent's
+                # strict path demotes it. If the subclass were ignoring the
+                # allowlist (the #68 regression), this would revive instead.
+                assert isinstance(blocked_back, dict)
+                assert blocked_back == {"name": "no", "count": 2}
