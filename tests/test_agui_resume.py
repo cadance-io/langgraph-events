@@ -276,6 +276,14 @@ def describe_agui_messages_to_langchain():
             with pytest.raises(ValueError, match="alien"):
                 agui_messages_to_langchain([Foreign()])  # type: ignore[list-item]
 
+    def when_role_attribute_is_missing():
+        def it_raises_value_error_naming_the_class():
+            class NoRole:
+                id = "z1"
+
+            with pytest.raises(ValueError, match="NoRole"):
+                agui_messages_to_langchain([NoRole()])  # type: ignore[list-item]
+
     def when_message_list_is_empty():
         def it_returns_empty_list():
             assert agui_messages_to_langchain([]) == []
@@ -380,6 +388,13 @@ def describe_agui_messages_to_langchain():
                 msg = AssistantMessage(id="a1", content="hello")
                 [out] = agui_messages_to_langchain([msg], drop_invalid_tool_calls=True)
                 assert out.content == "hello"
+
+        def when_tool_calls_is_an_empty_list():
+            def it_passes_the_message_through():
+                msg = AssistantMessage(id="a1", content="hi", tool_calls=[])
+                [out] = agui_messages_to_langchain([msg], drop_invalid_tool_calls=True)
+                assert out.content == "hi"
+                assert out.tool_calls == []
 
 
 def describe_extract_resume_input():

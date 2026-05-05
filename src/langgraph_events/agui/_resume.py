@@ -30,11 +30,12 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     Reasoning and developer messages are skipped (logged at DEBUG); activity
     and unknown roles raise ``ValueError``.
 
-    With ``drop_invalid_tool_calls=True``, ``AssistantMessage`` tool_calls
-    whose ``function.arguments`` fail ``json.loads`` are dropped (with a
-    WARNING). If all tool_calls in a message are invalid, the message itself
-    is dropped. The default ``False`` propagates ``json.JSONDecodeError`` —
-    matches upstream ``ag-ui-langgraph``.
+    The default ``drop_invalid_tool_calls=False`` propagates
+    ``json.JSONDecodeError`` for parity with upstream ``ag-ui-langgraph`` —
+    drop-in replacement for migrators. Set ``True`` for production resume
+    factories that need resilience: ``AssistantMessage`` tool_calls whose
+    ``function.arguments`` fail ``json.loads`` are dropped (WARNING-logged);
+    if all tool_calls in a message are invalid, the message itself is dropped.
     """
     from ag_ui.core import AssistantMessage, UserMessage  # noqa: PLC0415
     from ag_ui.core import SystemMessage as AGUISystemMessage  # noqa: PLC0415
@@ -113,10 +114,14 @@ def agui_messages_to_langchain(  # noqa: PLR0912
             out.append(
                 ToolMessage(id=m.id, content=m.content, tool_call_id=m.tool_call_id)
             )
-        elif m.role in ("reasoning", "developer"):
-            logger.debug("Skipping AG-UI %s message %s", m.role, m.id)
         else:
-            raise ValueError(f"Unsupported message role: {m.role}")
+            role = getattr(m, "role", type(m).__name__)
+            if role in ("reasoning", "developer"):
+                logger.debug(
+                    "Skipping AG-UI %s message %s", role, getattr(m, "id", "?")
+                )
+            else:
+                raise ValueError(f"Unsupported message role: {role}")
     return out
 
 

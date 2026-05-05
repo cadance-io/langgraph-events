@@ -325,14 +325,21 @@ Streaming-path errors propagate through the adapter's top-level handler and surf
 
 - **`extract_resume_input(input_data)`** — pulls `RunAgentInput.forwarded_props["command"]["resume"]`. If the value is a JSON string it's decoded; otherwise it passes through. Returns `None` if absent or falsy.
 - **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — converts a list of AG-UI protocol messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage` instances. `ReasoningMessage` and `DeveloperMessage` are skipped (DEBUG log); `ActivityMessage` and unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls whose JSON `arguments` fail to parse are dropped (WARNING-logged); if every tool call on an `AssistantMessage` is dropped, the message itself is dropped.
-- **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — the high-level helper. Reads existing messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages` via `agui_messages_to_langchain`, and merges via langgraph's `add_messages` (id-based dedup). Returns a tuple — the immutable shape resume events typically carry.
+- **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — the high-level helper. Reads existing messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages` via `agui_messages_to_langchain`, and merges via langgraph's `add_messages` (id-based dedup; messages without ids get a UUID assigned by the merge — don't rely on positional identity downstream). Returns a tuple — the immutable shape resume events typically carry.
 
 ```python
+from langgraph_events import Event, MessageEvent
 from langgraph_events.agui import (
     detect_new_tool_results,
     extract_resume_input,
     merge_frontend_messages,
 )
+
+
+# Domain-specific resume event — define alongside your other events.
+class UserResumed(Event, MessageEvent):
+    response: object  # resume payload (dict, str, …); your shape
+    messages: tuple = ()
 
 
 def resume_factory(input_data, checkpoint_state=None):
@@ -348,6 +355,8 @@ def resume_factory(input_data, checkpoint_state=None):
     merged = merge_frontend_messages(input_data, checkpoint_state)
     return UserResumed(response=resume_input, messages=merged)
 ```
+
+`extract_resume_input` returns `None` for absent **or falsy** `resume` values (matches the convention shipped by downstream consumers — `0`, `""`, `[]`, `{}`, `False` all collapse to `None`). If your HITL flow uses `False` as a meaningful "deny" signal, normalise it on the frontend side (e.g. send `{"approved": false}` instead of bare `false`).
 
 Use the lower-level `agui_messages_to_langchain` directly when you need converted messages outside the `merge_frontend_messages` orchestration — e.g. inside a `seed_factory` that builds events from the most recent inbound `UserMessage`.
 
