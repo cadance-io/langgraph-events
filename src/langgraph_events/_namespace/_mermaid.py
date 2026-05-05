@@ -229,6 +229,10 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
 
     # Tracks hubs whose ``Source → Hub`` connector has already been emitted
     # — we emit one such edge per hub regardless of how many targets it has.
+    # The connector itself is intentionally tag-less (no linkStyle): it's
+    # structural, the visual identity of the dispatch lives on the hub label.
+    # Per-target ``Hub → Target`` edges keep their original solid/scatter tag
+    # so existing linkStyle rules continue to apply.
     emitted_hub_inbound: set[str] = set()
 
     def _record(src_type: type[Event], tgt_type: type[Event] | None) -> tuple[str, str]:
