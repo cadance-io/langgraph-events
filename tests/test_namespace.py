@@ -174,6 +174,188 @@ class _AggMulti(Namespace):
             pass
 
 
+# Subgraph affinity-ordering fixtures.  Four namespaces with controlled
+# cross-namespace edge counts; the greedy nearest-neighbor ordering should
+# produce _AffA → _AffC → _AffD → _AffB (alphabetical would be A,B,C,D).
+#
+# Cross-namespace edge layout (undirected):
+#   _AffA ↔ _AffC: 5 (Trigger fans out to five _AffC.* outcomes)
+#   _AffA ↔ _AffD: 2 (Trigger.Done fans out to two _AffD.* outcomes)
+#   _AffC ↔ _AffD: 1 (CO1 → DO1)
+#   _AffB has only intra-namespace traffic.
+class _AffA(Namespace):
+    class Trigger(Command):
+        class Done(DomainEvent):
+            pass
+
+
+class _AffB(Namespace):
+    class IsolatedCmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+class _AffC(Namespace):
+    class CO1(DomainEvent):
+        pass
+
+    class CO2(DomainEvent):
+        pass
+
+    class CO3(DomainEvent):
+        pass
+
+    class CO4(DomainEvent):
+        pass
+
+    class CO5(DomainEvent):
+        pass
+
+
+class _AffD(Namespace):
+    class DO1(DomainEvent):
+        pass
+
+    class DO2(DomainEvent):
+        pass
+
+
+@on(_AffA.Trigger)
+def aff_a_to_c(
+    event: _AffA.Trigger,
+) -> _AffC.CO1 | _AffC.CO2 | _AffC.CO3 | _AffC.CO4 | _AffC.CO5:
+    return _AffC.CO1()
+
+
+@on(_AffA.Trigger.Done)
+def aff_done_to_d(event: _AffA.Trigger.Done) -> _AffD.DO1 | _AffD.DO2:
+    return _AffD.DO1()
+
+
+@on(_AffC.CO1)
+def aff_c_to_d(event: _AffC.CO1) -> _AffD.DO1:
+    return _AffD.DO1()
+
+
+@on(_AffB.IsolatedCmd)
+def aff_b_internal(event: _AffB.IsolatedCmd) -> _AffB.IsolatedCmd.Done:
+    return _AffB.IsolatedCmd.Done()
+
+
+_AFFINITY_HANDLERS = [aff_a_to_c, aff_done_to_d, aff_c_to_d, aff_b_internal]
+
+
+# Tie-break fixture: two namespaces both have equal affinity to the head.
+# Greedy should pick the alphabetically-earlier one first.
+class _TieHead(Namespace):
+    class Cmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+class _TieZ(Namespace):
+    class ZOut1(DomainEvent):
+        pass
+
+
+class _TieA(Namespace):
+    class AOut1(DomainEvent):
+        pass
+
+
+@on(_TieHead.Cmd)
+def tie_head_to_z(event: _TieHead.Cmd) -> _TieZ.ZOut1:
+    return _TieZ.ZOut1()
+
+
+@on(_TieHead.Cmd.Done)
+def tie_head_to_a(event: _TieHead.Cmd.Done) -> _TieA.AOut1:
+    return _TieA.AOut1()
+
+
+_TIE_HANDLERS = [tie_head_to_z, tie_head_to_a]
+
+
+# Disconnected-namespace fixture: three connected namespaces plus two
+# entirely-isolated ones (each has only intra-namespace traffic).  The two
+# isolates should land at the tail in alphabetical order.
+class _DiscX(Namespace):
+    class Cmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+class _DiscY(Namespace):
+    class YOut(DomainEvent):
+        pass
+
+
+class _DiscIslandM(Namespace):
+    class IslMCmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+class _DiscIslandK(Namespace):
+    class IslKCmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+@on(_DiscX.Cmd)
+def disc_x_to_y(event: _DiscX.Cmd) -> _DiscY.YOut:
+    return _DiscY.YOut()
+
+
+@on(_DiscIslandM.IslMCmd)
+def disc_isl_m(event: _DiscIslandM.IslMCmd) -> _DiscIslandM.IslMCmd.Done:
+    return _DiscIslandM.IslMCmd.Done()
+
+
+@on(_DiscIslandK.IslKCmd)
+def disc_isl_k(event: _DiscIslandK.IslKCmd) -> _DiscIslandK.IslKCmd.Done:
+    return _DiscIslandK.IslKCmd.Done()
+
+
+_DISC_HANDLERS = [disc_x_to_y, disc_isl_m, disc_isl_k]
+
+
+# Pure-intra-namespace fixture: every edge stays within a single namespace.
+# Affinity ordering should fall through to alphabetical.
+class _PureA(Namespace):
+    class Cmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+class _PureB(Namespace):
+    class Cmd(Command):
+        class Done(DomainEvent):
+            pass
+
+
+@on(_PureA.Cmd)
+def pure_a(event: _PureA.Cmd) -> _PureA.Cmd.Done:
+    return _PureA.Cmd.Done()
+
+
+@on(_PureB.Cmd)
+def pure_b(event: _PureB.Cmd) -> _PureB.Cmd.Done:
+    return _PureB.Cmd.Done()
+
+
+_PURE_HANDLERS = [pure_a, pure_b]
+
+
+def _subgraph_indices(output: str, names: list[str]) -> list[int]:
+    """Return the position of each namespace's subgraph header in `output`.
+
+    Helper used by the affinity-ordering tests so each assertion can read
+    "namespace X appears before namespace Y" without re-parsing the diagram.
+    """
+    return [output.index(f'subgraph {n}["{n} namespace"]') for n in names]
+
+
 def describe_namespace_model_shape():
     def when_graph_has_domain():
         def with_command_handler():
@@ -749,6 +931,62 @@ def describe_mermaid_renderer():
             # `Order.*` classes) cover the broader regression guard.
             assert "Refined(Refined):::devt" in output
             assert "_Foo_Build_Refined" not in output
+
+
+def describe_subgraph_ordering():
+    def when_namespace_order_is_default_affinity():
+        def it_places_heavily_connected_namespaces_adjacent():
+            # Cross-edge layout puts _AffA at top of cross-traffic with
+            # heaviest connection to _AffC (5 edges), then _AffD (2),
+            # then nothing to _AffB.  Greedy: A → C → D → B.
+            output = EventGraph(_AFFINITY_HANDLERS).namespaces().mermaid()
+            positions = _subgraph_indices(output, ["_AffA", "_AffC", "_AffD", "_AffB"])
+            assert positions == sorted(positions), (
+                f"expected order _AffA → _AffC → _AffD → _AffB, "
+                f"got positions {positions}"
+            )
+
+        def it_breaks_ties_alphabetically():
+            # _TieHead has equal affinity to _TieA and _TieZ (1 edge each).
+            # Starting head is _TieHead (highest total cross-traffic = 2).
+            # Tie-break alphabetical → _TieA before _TieZ.
+            output = EventGraph(_TIE_HANDLERS).namespaces().mermaid()
+            positions = _subgraph_indices(output, ["_TieHead", "_TieA", "_TieZ"])
+            assert positions == sorted(positions), (
+                f"expected _TieHead → _TieA → _TieZ, got {positions}"
+            )
+
+        def it_orders_disconnected_namespaces_alphabetically_at_tail():
+            # _DiscX↔_DiscY are connected; _DiscIslandK and _DiscIslandM are
+            # entirely isolated.  Connected core comes first; isolates land
+            # alphabetically at the tail.
+            output = EventGraph(_DISC_HANDLERS).namespaces().mermaid()
+            positions = _subgraph_indices(
+                output,
+                ["_DiscX", "_DiscY", "_DiscIslandK", "_DiscIslandM"],
+            )
+            assert positions == sorted(positions), (
+                f"connected core must come before isolated tail; got {positions}"
+            )
+
+        def when_no_cross_namespace_edges_exist():
+            def it_falls_back_to_alphabetical():
+                output = EventGraph(_PURE_HANDLERS).namespaces().mermaid()
+                a_idx = output.index('subgraph _PureA["_PureA namespace"]')
+                b_idx = output.index('subgraph _PureB["_PureB namespace"]')
+                assert a_idx < b_idx
+
+    def when_namespace_order_is_alphabetical():
+        def it_uses_alphabetical_ordering():
+            output = (
+                EventGraph(_AFFINITY_HANDLERS)
+                .namespaces()
+                .mermaid(namespace_order="alphabetical")
+            )
+            positions = _subgraph_indices(output, ["_AffA", "_AffB", "_AffC", "_AffD"])
+            assert positions == sorted(positions), (
+                f"opt-out flag should produce alphabetical, got {positions}"
+            )
 
 
 def describe_json_and_to_dict():
