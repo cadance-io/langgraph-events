@@ -23,6 +23,13 @@ classifiers = [
 ]
 dependencies = [
     "langgraph>=0.2.0",
+    # NamespaceAwareSerde extends JsonPlusSerializer and relies on its
+    # per-instance ``_unpack_ext_hook`` attribute (and on ``_msgpack_default``
+    # / ``_option`` symbols). Floor pinned to 4.0.0: bundles the
+    # CVE-2026-27794 fix (GHSA-mhr3-j7m5-c7c9) and is the version family our
+    # test suite exercises (lockfile pins 4.0.3, where the strict
+    # module-level ``_msgpack_ext_hook`` alias triggered #68).
+    "langgraph-checkpoint>=4.0.0",
 ]
 
 [project.urls]

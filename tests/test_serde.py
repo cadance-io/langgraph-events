@@ -8,7 +8,9 @@ import warnings
 import pytest
 from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Interrupt
+from pydantic import BaseModel
 
 from langgraph_events import (
     Command,
@@ -71,6 +73,23 @@ class Review(Namespace):
 # registration.
 class ReviewApproved(IntegrationEvent):
     pass
+
+
+# Plain (non-Event) dataclass — exercises the upstream
+# ``EXT_CONSTRUCTOR_KW_ARGS`` revival path that #68 broke. Module-level so
+# the qualname registered at encode time resolves on the import-and-getattr
+# walk performed by upstream's ext-hook.
+@dataclasses.dataclass
+class PlainPayload:
+    name: str
+    count: int
+
+
+# Pydantic v2 model — separate ext-code branch (``EXT_PYDANTIC_V2``) than
+# ``PlainPayload``. Pydantic-heavy state was the reported repro for #68.
+class PydanticPayload(BaseModel):
+    name: str
+    count: int
 
 
 def describe_NamespaceAwareSerde():
@@ -289,3 +308,65 @@ def describe_NamespaceAwareSerde():
                     f"_default and the EXT_INTERRUPT branch of _ext_hook "
                     f"to cover the new field(s)."
                 )
+
+    def describe_non_event_payload_round_trip():
+        # Regression for #68: ``langgraph-checkpoint>=4.0.3`` rebinds the
+        # module-level ``_msgpack_ext_hook`` to a strict hook whose default
+        # ``allowed_modules=None`` blocks everything outside
+        # ``SAFE_MSGPACK_TYPES`` and silently demotes the value to a plain
+        # ``dict``. Before the fix, ``NamespaceAwareSerde`` reached for that
+        # module-level alias as the fallback for codes it didn't own — so
+        # any non-event payload (Pydantic models, plain dataclasses, app
+        # types) round-tripped as ``dict`` regardless of the constructor's
+        # permissive default. The fix routes the fallback through the
+        # parent's per-instance ``_unpack_ext_hook`` so the constructor's
+        # allowlist (and ``LANGGRAPH_STRICT_MSGPACK``) take effect as
+        # documented.
+        def when_a_plain_dataclass_round_trips():
+            def it_revives_as_the_original_class_not_a_dict():
+                serde = NamespaceAwareSerde()
+                obj = PlainPayload(name="x", count=42)
+
+                back = serde.loads_typed(serde.dumps_typed(obj))
+
+                assert isinstance(back, PlainPayload), (
+                    f"expected PlainPayload, got {type(back).__name__}: {back!r}"
+                )
+                assert back.name == "x"
+                assert back.count == 42
+
+        def when_a_pydantic_v2_model_round_trips():
+            # Different ext-code branch from ``PlainPayload``
+            # (``EXT_PYDANTIC_V2``). Pydantic-heavy state is the realistic
+            # production payload reported in #68.
+            def it_revives_as_the_original_model_not_a_dict():
+                serde = NamespaceAwareSerde()
+                obj = PydanticPayload(name="x", count=42)
+
+                back = serde.loads_typed(serde.dumps_typed(obj))
+
+                assert isinstance(back, PydanticPayload), (
+                    f"expected PydanticPayload, got {type(back).__name__}: {back!r}"
+                )
+                assert back.name == "x"
+                assert back.count == 42
+
+        def when_constructor_strict_mode_is_used():
+            # Parity guard: a strict-mode ``NamespaceAwareSerde`` should
+            # demote non-event payloads to ``dict`` *exactly like* a strict-
+            # mode ``JsonPlusSerializer`` would — i.e. the override cedes
+            # control to the parent's allowlist mechanism rather than ever
+            # falling back to a hardcoded permissive or strict path of its
+            # own. This locks #68's contract in: whatever the parent does
+            # with the allowlist, the namespace-aware subclass mirrors.
+            def it_demotes_non_event_payloads_to_dict_matching_JsonPlusSerializer():
+                baseline = JsonPlusSerializer(allowed_msgpack_modules=None)
+                serde = NamespaceAwareSerde(allowed_msgpack_modules=None)
+                obj = PlainPayload(name="strict", count=7)
+
+                baseline_back = baseline.loads_typed(baseline.dumps_typed(obj))
+                serde_back = serde.loads_typed(serde.dumps_typed(obj))
+
+                assert isinstance(baseline_back, dict)
+                assert isinstance(serde_back, dict)
+                assert serde_back == baseline_back
