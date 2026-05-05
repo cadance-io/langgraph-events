@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **agui**: `agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False) -> list[BaseMessage]` — public helper at `langgraph_events.agui` for converting AG-UI protocol messages to LangChain `BaseMessage` instances. Mirrors the existing internal LangChain→AG-UI direction. Handles `UserMessage` (string and multimodal content with the `url > data > id` priority cascade), `AssistantMessage` (with optional `tool_calls`, parsing `function.arguments` JSON), `SystemMessage`, and `ToolMessage`. `ReasoningMessage` and `DeveloperMessage` are skipped with a DEBUG log; `ActivityMessage` and unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls whose `function.arguments` fail to JSON-parse are dropped (WARNING-logged); if all of an `AssistantMessage`'s tool calls are dropped, the message itself is dropped. Removes the need to depend on `ag-ui-langgraph` for this utility.
+- **agui**: `merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True) -> tuple[BaseMessage, ...]` — high-level helper for `ResumeFactory` implementations. Reads existing messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages` via `agui_messages_to_langchain`, and merges via langgraph's `add_messages` (id-based dedup). Defensive default for malformed tool-call JSON; pass `drop_invalid_tool_calls=False` for strict parity with upstream.
+- **agui**: `extract_resume_input(input_data) -> Any` — pulls resume input from `RunAgentInput.forwarded_props["command"]["resume"]`. If the value is a string, attempts `json.loads` (returns the decoded JSON value — dict, list, scalar — on success; the raw string on `JSONDecodeError`). Dicts/lists/numbers pass through unchanged. Returns `None` if absent or falsy.
+
 ## [0.7.0] - 2026-05-05
 
 ### Added
