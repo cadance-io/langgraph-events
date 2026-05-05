@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-05
+
 ### Fixed
 - **serde**: `NamespaceAwareSerde` no longer silently degrades non-event payloads (Pydantic models, plain dataclasses, project types) to `dict` on `langgraph-checkpoint>=4.0.3`. The fallback for ext codes the namespace-aware serde doesn't own previously dispatched through the *module-level* `_msgpack_ext_hook` from `langgraph.checkpoint.serde.jsonplus`, which 4.0.3 rebound to a strict hook (`_create_msgpack_ext_hook(allowed_modules=None)`). That bypassed both `LANGGRAPH_STRICT_MSGPACK` and the `JsonPlusSerializer` constructor's `allowed_msgpack_modules` argument, so every checkpointed non-event value came back as a `dict` (with a logged `Blocked deserialization of <module>.<name>` warning) and downstream code blew up with `AttributeError` when it called methods on the supposed instance. The fallback now routes through the parent's *per-instance* `_unpack_ext_hook`, so the constructor-level allowlist and `LANGGRAPH_STRICT_MSGPACK` work as documented for non-event payloads passing through `NamespaceAwareSerde`. (#68)
 
@@ -157,7 +159,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/cadance-io/langgraph-events/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cadance-io/langgraph-events/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cadance-io/langgraph-events/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cadance-io/langgraph-events/compare/v0.6.0...v0.6.1
