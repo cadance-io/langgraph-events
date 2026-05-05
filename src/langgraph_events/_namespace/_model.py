@@ -319,6 +319,7 @@ class NamespaceModel:
         self,
         *,
         namespace_order: Literal["affinity", "alphabetical"] = "affinity",
+        reactor_hub_min: int | None = None,
     ) -> str:
         """Render the unified choreography mermaid diagram.
 
@@ -336,12 +337,33 @@ class NamespaceModel:
         - ``"alphabetical"`` — preserve the original alphabetical order.
           Use when stable byte-for-byte output matters (e.g. snapshot
           tests pinned before the affinity default landed).
+
+        ``reactor_hub_min`` opts in to **hub-style fanout rendering**.
+
+        - ``None`` (default) — flat fanout: each ``(source, handler) →
+          target`` becomes its own labelled edge.
+        - ``int N`` — when a single ``(source, handler)`` pair produces
+          ``≥ N`` solid-or-scatter targets, replace the flat fanout with a
+          hub: emit one labelled hub node per qualifying pair (label = the
+          handler name, shape = small circle, ``classDef hub``) inside the
+          source's subgraph; route ``Source --> Hub`` (solid, no label) and
+          ``Hub --> Target`` for each target, preserving the original
+          per-target arrow style (solid or scatter). Useful for tracing in
+          large graphs: the handler name appears once at the dispatch
+          point instead of repeated on every fanout edge. Invariant-gated
+          reactors and ``raises`` edges are not hubbed (the invariant
+          chain already concentrates dispatch and ``raises`` is a single
+          error path).
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
         )
 
-        return render_mermaid_choreography(self, namespace_order=namespace_order)
+        return render_mermaid_choreography(
+            self,
+            namespace_order=namespace_order,
+            reactor_hub_min=reactor_hub_min,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dict representation.

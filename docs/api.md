@@ -47,7 +47,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `EventGraph.get_state()` | Method | `GraphState` for a checkpointed thread |
 | `EventGraph.namespaces()` | Method | Code-derived snapshot — domains, commands, outcomes, handlers, policies, edges, seeds. Returns a `NamespaceModel` |
 | `NamespaceModel.text(view=...)` | Method | Human-readable tree; `view="structure"` or `"choreography"` (default) |
-| `NamespaceModel.mermaid()` | Method | Mermaid `graph LR` choreography diagram (handlers, policies, invariants, edges). For a structure-only view use `text(view="structure")`. |
+| `NamespaceModel.mermaid(namespace_order=..., reactor_hub_min=...)` | Method | Mermaid `graph LR` choreography diagram (handlers, policies, invariants, edges). `namespace_order` is `"affinity"` (default — cluster heavily-connected namespaces adjacent) or `"alphabetical"` (legacy, byte-stable for snapshot-pinned consumers). `reactor_hub_min=N` opts in to hub-style fanout: any `(source, handler)` producing ≥N solid-or-scatter targets renders as `Source → Hub → {targets}` with the handler name on the hub instead of repeated on every edge. For a structure-only view use `text(view="structure")`. |
 | `NamespaceModel.json()` / `.to_dict()` | Method | JSON-serializable snapshot (event classes encoded as qualnames). Top-level `schema_version` is bumped on field removal, rename, or semantic change; additions don't bump. |
 | `NamespaceModel.{Namespace, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |

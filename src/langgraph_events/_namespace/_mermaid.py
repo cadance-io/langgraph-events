@@ -55,6 +55,18 @@ def _add_invariant_node(
     flow.node(node_id[inv_cls], "diamond", cls="inv", label=inv_cls.__name__)
 
 
+def _add_hub_node(flow: MermaidFlowchart, hub_id: str, handler_name: str) -> None:
+    """Declare a reactor hub: small circle, ``:::hub`` styling.
+
+    The handler name lives on the hub label rather than repeated on every
+    fanout edge — see ``reactor_hub_min`` on ``NamespaceModel.mermaid``.
+    """
+    flow.node(hub_id, "circle", cls="hub", label=handler_name)
+
+
+_HUB_CLASSDEF_STYLE = "fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-dasharray:3 2"
+
+
 # Classdef palette used by both choreography and structure renderers.
 # Order matters: `render()` preserves registration order, and we want a
 # stable output for the drift detector.
@@ -139,6 +151,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     d: NamespaceModel,
     *,
     namespace_order: Literal["affinity", "alphabetical"] = "affinity",
+    reactor_hub_min: int | None = None,
 ) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
@@ -187,6 +200,40 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     for inv in d.invariants:
         for reactor_name in inv.reactors:
             pinned_reactor_invariant[reactor_name] = inv.cls
+
+    # Reactor-hub pre-computation.  When ``reactor_hub_min`` is set, any
+    # ``(source, handler)`` pair producing ``≥ reactor_hub_min`` solid +
+    # scatter targets gets a hub node — the handler name moves from being
+    # repeated on every fanout edge to a single label on the hub, and the
+    # source dispatches once into the hub before fanning out.  Invariant-
+    # gated reactors are skipped (the invariant chain already concentrates).
+    hubs: dict[tuple[type[Event], str], str] = {}
+    hub_in_namespace: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    if reactor_hub_min is not None:
+        pair_count: dict[tuple[type[Event], str], int] = defaultdict(int)
+        for e in d.edges:
+            if e.kind not in ("solid", "scatter"):
+                continue
+            if pinned_reactor_invariant.get(e.via) is not None:
+                continue
+            pair_count[(e.source, e.via)] += 1
+        for (source_cls, handler_name), count in pair_count.items():
+            if count < reactor_hub_min:
+                continue
+            src_id = node_id[source_cls]
+            new_hub_id = f"_hub_{src_id}_{handler_name}"
+            hubs[(source_cls, handler_name)] = new_hub_id
+            ns = getattr(source_cls, "__namespace__", None)
+            if ns is not None:
+                hub_in_namespace[ns].append((new_hub_id, handler_name))
+
+    # Tracks hubs whose ``Source → Hub`` connector has already been emitted
+    # — we emit one such edge per hub regardless of how many targets it has.
+    # The connector itself is intentionally tag-less (no linkStyle): it's
+    # structural, the visual identity of the dispatch lives on the hub label.
+    # Per-target ``Hub → Target`` edges keep their original solid/scatter tag
+    # so existing linkStyle rules continue to apply.
+    emitted_hub_inbound: set[str] = set()
 
     def _record(src_type: type[Event], tgt_type: type[Event] | None) -> tuple[str, str]:
         src_id = node_id[src_type]
@@ -261,6 +308,19 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                         for cmd_cls in inv.commands:
                             reached_via_invariant.add((cmd_cls, e.target))
                 continue
+            hub_id: str | None = hubs.get((e.source, name))
+            if hub_id is not None:
+                referenced.add(e.source)
+                referenced.add(e.target)
+                src_id = node_id[e.source]
+                tgt_id = node_id[e.target]
+                all_sources.add(src_id)
+                all_targets.add(tgt_id)
+                if hub_id not in emitted_hub_inbound:
+                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None))
+                    emitted_hub_inbound.add(hub_id)
+                edges.append(_FlowEdge(hub_id, tgt_id, "-->", None, "solid"))
+                continue
             src, tgt = _record(e.source, e.target)
             edges.append(_FlowEdge(src, tgt, "-->", name, "solid"))
         for e in scatter_edges:
@@ -275,6 +335,19 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                     if inv.cls is inv_cls:
                         for cmd_cls in inv.commands:
                             reached_via_invariant.add((cmd_cls, e.target))
+                continue
+            hub_id = hubs.get((e.source, name))
+            if hub_id is not None:
+                referenced.add(e.source)
+                referenced.add(e.target)
+                src_id = node_id[e.source]
+                tgt_id = node_id[e.target]
+                all_sources.add(src_id)
+                all_targets.add(tgt_id)
+                if hub_id not in emitted_hub_inbound:
+                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None))
+                    emitted_hub_inbound.add(hub_id)
+                edges.append(_FlowEdge(hub_id, tgt_id, "-.->", None, "scatter"))
                 continue
             src, tgt = _record(e.source, e.target)
             edges.append(_FlowEdge(src, tgt, "-.->", name, "scatter"))
@@ -349,6 +422,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
 
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
+    if hubs:
+        flow.classdef("hub", _HUB_CLASSDEF_STYLE)
 
     all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
     if namespace_order == "affinity":
@@ -384,6 +459,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 _add_node(flow, member, node_id)
             for inv_cls in namespace_invariants.get(namespace_name, []):
                 _add_invariant_node(flow, inv_cls, node_id)
+            for hub_id, handler_name in hub_in_namespace.get(namespace_name, []):
+                _add_hub_node(flow, hub_id, handler_name)
 
     for node in loose_nodes:
         _add_node(flow, node, node_id)

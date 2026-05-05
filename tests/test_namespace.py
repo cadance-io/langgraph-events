@@ -347,6 +347,105 @@ def pure_b(event: _PureB.Cmd) -> _PureB.Cmd.Done:
 _PURE_HANDLERS = [pure_a, pure_b]
 
 
+# Reactor-hub fixtures.  All sit at module level so handler return-type
+# resolution can see the namespaced classes.
+
+
+class _HubFour(Namespace):
+    class HubTrigger(Command):
+        class Done(DomainEvent):
+            pass
+
+    class O1(DomainEvent):
+        pass
+
+    class O2(DomainEvent):
+        pass
+
+    class O3(DomainEvent):
+        pass
+
+    class O4(DomainEvent):
+        pass
+
+
+@on(_HubFour.HubTrigger)
+def hub_four(
+    event: _HubFour.HubTrigger,
+) -> _HubFour.O1 | _HubFour.O2 | _HubFour.O3 | _HubFour.O4:
+    return _HubFour.O1()
+
+
+class _HubTwo(Namespace):
+    class HubTrigger(Command):
+        class Done(DomainEvent):
+            pass
+
+    class T1(DomainEvent):
+        pass
+
+    class T2(DomainEvent):
+        pass
+
+
+@on(_HubTwo.HubTrigger)
+def hub_two_targets(event: _HubTwo.HubTrigger) -> _HubTwo.T1 | _HubTwo.T2:
+    return _HubTwo.T1()
+
+
+class _HubScatter(Namespace):
+    class ScatterTrigger(Command):
+        class Done(DomainEvent):
+            pass
+
+    class S1(DomainEvent):
+        pass
+
+    class S2(DomainEvent):
+        pass
+
+    class S3(DomainEvent):
+        pass
+
+
+@on(_HubScatter.ScatterTrigger)
+def hub_scatter(
+    event: _HubScatter.ScatterTrigger,
+) -> Scatter[_HubScatter.S1] | Scatter[_HubScatter.S2] | Scatter[_HubScatter.S3]:
+    return Scatter([_HubScatter.S1()])
+
+
+class InvHubExists(Invariant):
+    pass
+
+
+class _InvHub(Namespace):
+    class InvHubTrigger(Command):
+        class Done(DomainEvent):
+            pass
+
+    class IO1(DomainEvent):
+        pass
+
+    class IO2(DomainEvent):
+        pass
+
+    class IO3(DomainEvent):
+        pass
+
+
+@on(_InvHub.InvHubTrigger, invariants={InvHubExists: lambda log: True})
+def inv_hub_trigger(event: _InvHub.InvHubTrigger) -> _InvHub.InvHubTrigger.Done:
+    return _InvHub.InvHubTrigger.Done()
+
+
+@on(InvariantViolated, invariant=InvHubExists)
+def inv_hub_pinned_reactor(
+    event: InvariantViolated,
+) -> _InvHub.IO1 | _InvHub.IO2 | _InvHub.IO3:
+    return _InvHub.IO1()
+
+
 def _subgraph_indices(output: str, names: list[str]) -> list[int]:
     """Return the position of each namespace's subgraph header in `output`.
 
@@ -987,6 +1086,99 @@ def describe_subgraph_ordering():
             assert positions == sorted(positions), (
                 f"opt-out flag should produce alphabetical, got {positions}"
             )
+
+
+def describe_reactor_hubs():
+    # Module-level fixtures live further up the file (search for "_HubFour"
+    # etc.); each describe-block here exercises one rendering decision.
+
+    def when_reactor_hub_min_is_none():
+        def it_does_not_emit_any_hub_node():
+            output = EventGraph([hub_four]).namespaces().mermaid()
+            assert "_hub_" not in output
+            # And the flat fanout edges still carry the handler-name label.
+            assert "|hub_four|" in output
+
+    def when_handler_has_threshold_targets():
+        def it_emits_a_hub_node_inside_source_namespace():
+            output = EventGraph([hub_four]).namespaces().mermaid(reactor_hub_min=3)
+            # Hub node declared with the handler name as label, hub class.
+            assert "_hub_HubTrigger_hub_four((hub_four)):::hub" in output
+            # Source -> Hub solid edge present.
+            assert "HubTrigger --> _hub_HubTrigger_hub_four" in output
+            # Hub -> each target.
+            assert "_hub_HubTrigger_hub_four --> O1" in output
+            assert "_hub_HubTrigger_hub_four --> O2" in output
+            assert "_hub_HubTrigger_hub_four --> O3" in output
+            assert "_hub_HubTrigger_hub_four --> O4" in output
+            # The flat per-edge handler labels are gone — handler name lives
+            # on the hub node now, not on every edge.
+            assert "|hub_four|" not in output
+
+        def it_places_hub_inside_source_namespace_subgraph():
+            output = EventGraph([hub_four]).namespaces().mermaid(reactor_hub_min=3)
+            sub_start = output.index('subgraph _HubFour["_HubFour namespace"]')
+            sub_end = output.index("end", sub_start)
+            block = output[sub_start:sub_end]
+            assert "_hub_HubTrigger_hub_four" in block
+
+        def it_declares_a_hub_classdef():
+            output = EventGraph([hub_four]).namespaces().mermaid(reactor_hub_min=3)
+            assert "classDef hub" in output
+
+    def when_handler_has_below_threshold_targets():
+        def it_does_not_emit_a_hub():
+            output = (
+                EventGraph([hub_two_targets]).namespaces().mermaid(reactor_hub_min=3)
+            )
+            assert "_hub_" not in output
+            # Flat edges still carry the handler label.
+            assert "|hub_two_targets|" in output
+
+    def when_handler_returns_scatter():
+        def it_propagates_scatter_style_to_hub_to_target_edges():
+            output = EventGraph([hub_scatter]).namespaces().mermaid(reactor_hub_min=3)
+            # Source -> Hub stays solid (no scatter style).
+            assert "ScatterTrigger --> _hub_ScatterTrigger_hub_scatter" in output
+            # Hub -> Target uses the scatter arrow ``-.->``.
+            assert "_hub_ScatterTrigger_hub_scatter -.-> S1" in output
+            assert "_hub_ScatterTrigger_hub_scatter -.-> S2" in output
+            assert "_hub_ScatterTrigger_hub_scatter -.-> S3" in output
+
+        def it_keeps_scatter_linkstyle_indices_correct_for_hub_edges():
+            # All three hub→target scatter edges must be styled as scatter
+            # (purple thick dashed). ``linkStyle <indices> stroke:#7c3aed…``
+            # must include exactly the three hub→target edges.
+            output = EventGraph([hub_scatter]).namespaces().mermaid(reactor_hub_min=3)
+            scatter_lines = [
+                line for line in output.splitlines() if "stroke:#7c3aed" in line
+            ]
+            assert len(scatter_lines) == 1
+            link_line = scatter_lines[0]
+            # Format: "    linkStyle 3,4,5 stroke:#7c3aed,…"
+            indices_part = link_line.strip().split(maxsplit=2)[1]
+            indices = indices_part.split(",")
+            assert len(indices) == 3, (
+                f"expected linkStyle to cover 3 scatter hub→target edges, "
+                f"got {indices_part!r}"
+            )
+
+    def when_reactor_is_invariant_gated():
+        def it_does_not_emit_a_hub():
+            # Pinned reactor for an invariant: the rendered chain already
+            # routes Source → Invariant → outcomes, so adding a hub would
+            # double-pivot. Hub logic must skip it.
+            output = (
+                EventGraph([inv_hub_trigger, inv_hub_pinned_reactor])
+                .namespaces()
+                .mermaid(reactor_hub_min=2)
+            )
+            # No hub classDef declared (we emit it conditionally on hubs).
+            assert "classDef hub " not in output
+            # No hub node for the pinned reactor.
+            assert "((inv_hub_pinned_reactor))" not in output
+            # The invariant chain is still rendered as before.
+            assert "InvHubExists -.->|inv_hub_pinned_reactor|" in output
 
 
 def describe_json_and_to_dict():
