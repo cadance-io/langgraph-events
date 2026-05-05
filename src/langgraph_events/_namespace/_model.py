@@ -24,6 +24,7 @@ from langgraph_events._event import (
 from langgraph_events._event import (
     Invariant as InvariantBase,
 )
+from langgraph_events._namespace._smells import emit_domain_pattern_warnings
 
 if TYPE_CHECKING:
     from langgraph_events._graph import ReturnInfo
@@ -314,7 +315,11 @@ class NamespaceModel:
             f"Unknown view {view!r}; expected 'structure' or 'choreography'"
         )
 
-    def mermaid(self) -> str:
+    def mermaid(
+        self,
+        *,
+        namespace_order: Literal["affinity", "alphabetical"] = "affinity",
+    ) -> str:
         """Render the unified choreography mermaid diagram.
 
         Shows handler-driven flow edges plus dashed ownership arrows for
@@ -322,12 +327,21 @@ class NamespaceModel:
         declared outcomes always appear connected to their command, even
         when produced indirectly via a policy reacting to an intermediate
         event.
+
+        ``namespace_order`` controls how subgraph clusters are sequenced:
+
+        - ``"affinity"`` (default) — cluster heavily-connected namespaces
+          adjacent using a greedy nearest-neighbor walk. Reduces long
+          cross-cluster arrow crossings in graphs with many namespaces.
+        - ``"alphabetical"`` — preserve the original alphabetical order.
+          Use when stable byte-for-byte output matters (e.g. snapshot
+          tests pinned before the affinity default landed).
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
         )
 
-        return render_mermaid_choreography(self)
+        return render_mermaid_choreography(self, namespace_order=namespace_order)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable dict representation.
@@ -579,7 +593,7 @@ def _build_domain_model(  # noqa: PLR0912
 
     invariants_rolled = _rollup_invariants(command_handlers, policies)
 
-    return NamespaceModel(
+    model = NamespaceModel(
         namespaces=namespaces,
         integration_events=tuple(integration),
         system_events=tuple(system),
@@ -589,6 +603,10 @@ def _build_domain_model(  # noqa: PLR0912
         seeds=seeds,
         invariants=invariants_rolled,
     )
+
+    emit_domain_pattern_warnings(model)
+
+    return model
 
 
 def _rollup_invariants(

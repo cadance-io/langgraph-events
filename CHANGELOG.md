@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **DomainPatternWarning**: new exported warning class. Emitted at `EventGraph.namespaces()` time when 2+ events in the same namespace fan out (via 2+ distinct reactor handlers) to identical target sets — typically a sign that a shared abstraction was missed (a common base event or a single reactor on a common subscription would collapse them). Detection is exact-set-equality only; subset/superset overlaps don't qualify. Silence via the standard warnings filter: `warnings.filterwarnings("ignore", category=DomainPatternWarning)`. The warning fires once per pattern at construction time; renderers (`mermaid()`, `text()`, etc.) do not re-emit.
+- **NamespaceModel.mermaid(namespace_order=…)**: new keyword controlling how namespace subgraph clusters are sequenced. Pass `"alphabetical"` to preserve the legacy alphabetical order (useful for snapshot-pinned consumers). Defaults to `"affinity"` — see Changed.
+
+### Changed
+- **mermaid**: subgraph clusters now sort by inter-namespace edge affinity by default (greedy nearest-neighbor) instead of alphabetically. Heavily-connected namespaces land adjacent in the rendered diagram, substantially shortening the long crossing arrows that dominate multi-namespace graphs (Definition→Persona/Story/Scenario in real usage). Affinity counts solid + scatter + framework reaction edges plus invariant chain edges; ownership-fill `-.- ` arrows and `raises` edges don't contribute. Ties break alphabetically. **Default rendered output changes for any consumer with multi-namespace graphs** — pass `mermaid(namespace_order="alphabetical")` to opt out for snapshot stability.
+
 ## [0.6.2] - 2026-05-04
 
 ### Fixed

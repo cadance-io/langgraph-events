@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._mermaid import MermaidFlowchart, Shape
 from langgraph_events._namespace._model import (
@@ -99,7 +100,46 @@ def _reaction_subscribes(r: Any) -> tuple[type[Event], ...]:
     return r.subscribes  # Policy
 
 
-def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR0915
+def _order_namespaces_by_affinity(
+    namespaces: list[str],
+    affinity: dict[frozenset[str], int],
+) -> list[str]:
+    """Greedy nearest-neighbor ordering of namespaces by inter-namespace edges.
+
+    Picks the namespace with the highest total cross-traffic as the head,
+    then repeatedly appends the unplaced namespace with highest affinity
+    to the current tail. Ties break alphabetically — so disconnected
+    namespaces (zero affinity to the tail) land alphabetically at the end.
+    """
+    if not namespaces:
+        return []
+
+    def aff(a: str, b: str) -> int:
+        return affinity.get(frozenset([a, b]), 0)
+
+    remaining = sorted(namespaces)
+
+    def total(n: str) -> int:
+        return sum(aff(n, m) for m in remaining if m != n)
+
+    head = sorted(remaining, key=lambda n: (-total(n), n))[0]
+    ordered = [head]
+    pool = set(remaining) - {head}
+
+    while pool:
+        last = ordered[-1]
+        nxt = sorted(pool, key=lambda n: (-aff(last, n), n))[0]
+        ordered.append(nxt)
+        pool.remove(nxt)
+
+    return ordered
+
+
+def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
+    d: NamespaceModel,
+    *,
+    namespace_order: Literal["affinity", "alphabetical"] = "affinity",
+) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
     Visual vocabulary:
@@ -311,6 +351,32 @@ def render_mermaid_choreography(d: NamespaceModel) -> str:  # noqa: PLR0912, PLR
     _apply_classdefs(flow)
 
     all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
+    if namespace_order == "affinity":
+        # Affinity counts: solid + scatter reaction edges plus invariant
+        # chain edges (Command → Invariant). Ownership-fill ``-.- `` arrows
+        # and ``raises`` edges are rendering scaffolding rather than real
+        # flow, so they don't contribute. The framework ``Interrupted →
+        # Resumed`` edge carries ``__namespace__ = None`` on both endpoints
+        # and is filtered by the cross-namespace guard below.
+        affinity: dict[frozenset[str], int] = defaultdict(int)
+
+        def _bump(a: type, b: type) -> None:
+            ns_a = getattr(a, "__namespace__", None)
+            ns_b = getattr(b, "__namespace__", None)
+            if ns_a is None or ns_b is None or ns_a == ns_b:
+                return
+            affinity[frozenset([ns_a, ns_b])] += 1
+
+        for e in d.edges:
+            if e.kind == "raises":
+                continue
+            _bump(e.source, e.target)
+        for inv in d.invariants:
+            for cmd_cls in inv.commands:
+                _bump(cmd_cls, inv.cls)
+
+        all_domain_names = _order_namespaces_by_affinity(all_domain_names, affinity)
+
     for namespace_name in all_domain_names:
         title = f"{namespace_name} namespace"
         with flow.subgraph(namespace_name, title=title, direction="LR"):
