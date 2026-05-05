@@ -9,6 +9,7 @@ import pytest
 from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Interrupt
+from pydantic import BaseModel
 
 from langgraph_events import (
     Command,
@@ -71,6 +72,23 @@ class Review(Namespace):
 # registration.
 class ReviewApproved(IntegrationEvent):
     pass
+
+
+# Plain (non-Event) dataclass — exercises the upstream
+# ``EXT_CONSTRUCTOR_KW_ARGS`` revival path that #68 broke. Module-level so
+# the qualname registered at encode time resolves on the import-and-getattr
+# walk performed by upstream's ext-hook.
+@dataclasses.dataclass
+class PlainPayload:
+    name: str
+    count: int
+
+
+# Pydantic v2 model — separate ext-code branch (``EXT_PYDANTIC_V2``) than
+# ``PlainPayload``. Pydantic-heavy state was the reported repro for #68.
+class PydanticPayload(BaseModel):
+    name: str
+    count: int
 
 
 def describe_NamespaceAwareSerde():
@@ -289,3 +307,74 @@ def describe_NamespaceAwareSerde():
                     f"_default and the EXT_INTERRUPT branch of _ext_hook "
                     f"to cover the new field(s)."
                 )
+
+    def describe_non_event_payload_round_trip():
+        # Regression for #68: ``langgraph-checkpoint>=4.0.3`` rebinds the
+        # module-level ``_msgpack_ext_hook`` to a strict hook whose default
+        # ``allowed_modules=None`` blocks everything outside
+        # ``SAFE_MSGPACK_TYPES`` and silently demotes the value to a plain
+        # ``dict``. Before the fix, ``NamespaceAwareSerde`` reached for that
+        # module-level alias as the fallback for codes it didn't own — so
+        # any non-event payload (Pydantic models, plain dataclasses, app
+        # types) round-tripped as ``dict`` regardless of the constructor's
+        # permissive default. The fix routes the fallback through the
+        # parent's per-instance ``_unpack_ext_hook`` so the constructor's
+        # allowlist (and ``LANGGRAPH_STRICT_MSGPACK``) take effect as
+        # documented.
+        def when_a_plain_dataclass_round_trips():
+            def it_revives_as_the_original_class_not_a_dict():
+                serde = NamespaceAwareSerde()
+                obj = PlainPayload(name="x", count=42)
+
+                back = serde.loads_typed(serde.dumps_typed(obj))
+
+                assert isinstance(back, PlainPayload), (
+                    f"expected PlainPayload, got {type(back).__name__}: {back!r}"
+                )
+                assert back.name == "x"
+                assert back.count == 42
+
+        def when_a_pydantic_v2_model_round_trips():
+            # Different ext-code branch from ``PlainPayload``
+            # (``EXT_PYDANTIC_V2``). Pydantic-heavy state is the realistic
+            # production payload reported in #68.
+            def it_revives_as_the_original_model_not_a_dict():
+                serde = NamespaceAwareSerde()
+                obj = PydanticPayload(name="x", count=42)
+
+                back = serde.loads_typed(serde.dumps_typed(obj))
+
+                assert isinstance(back, PydanticPayload), (
+                    f"expected PydanticPayload, got {type(back).__name__}: {back!r}"
+                )
+                assert back.name == "x"
+                assert back.count == 42
+
+        def when_constructor_allowlist_explicitly_admits_a_type():
+            # Asymmetric guard that actually proves delegation: with strict
+            # mode plus an explicit allowlist, a class that *is* on the
+            # allowlist must revive as itself, while a class that *isn't*
+            # must demote to ``dict``. A subclass that hardcoded its own
+            # permissive or strict path (i.e. didn't actually consult the
+            # parent's allowlist) would fail one of these two halves —
+            # which is the contract #68 broke.
+            def it_revives_allowlisted_types_and_demotes_others():
+                serde = NamespaceAwareSerde(
+                    allowed_msgpack_modules=[
+                        (PlainPayload.__module__, PlainPayload.__name__),
+                    ],
+                )
+                allowed = PlainPayload(name="ok", count=1)
+                blocked = PydanticPayload(name="no", count=2)
+
+                allowed_back = serde.loads_typed(serde.dumps_typed(allowed))
+                blocked_back = serde.loads_typed(serde.dumps_typed(blocked))
+
+                assert isinstance(allowed_back, PlainPayload)
+                assert allowed_back.name == "ok"
+                assert allowed_back.count == 1
+                # PydanticPayload is not in the allowlist, so the parent's
+                # strict path demotes it. If the subclass were ignoring the
+                # allowlist (the #68 regression), this would revive instead.
+                assert isinstance(blocked_back, dict)
+                assert blocked_back == {"name": "no", "count": 2}

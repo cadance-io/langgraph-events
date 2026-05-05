@@ -7,9 +7,9 @@ and therefore collides across namespaces. We override the dataclass branch
 to encode by ``(__module__, __qualname__)`` and revive via attribute walk.
 
 We depend on a few private helpers from
-``langgraph.checkpoint.serde.jsonplus`` (``_msgpack_default``,
-``_msgpack_ext_hook``, ``_option``). They have been stable for some time but
-are technically private — pin a compatible LangGraph version.
+``langgraph.checkpoint.serde.jsonplus`` (``_msgpack_default``, ``_option``).
+They have been stable for some time but are technically private — pin a
+compatible LangGraph version.
 """
 
 from __future__ import annotations
@@ -29,17 +29,30 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 try:
     from langgraph.checkpoint.serde.jsonplus import (
         _msgpack_default,
-        _msgpack_ext_hook,
         _option,
     )
 except ImportError as exc:  # pragma: no cover - smoke fence on LangGraph drift
     raise ImportError(
         "langgraph_events.serde.NamespaceAwareSerde depends on private "
         "helpers from langgraph.checkpoint.serde.jsonplus "
-        "(_msgpack_default, _msgpack_ext_hook, _option). They appear to "
-        "have moved or been renamed. Pin a compatible LangGraph version, "
-        "or open an issue against langgraph-events."
+        "(_msgpack_default, _option). They appear to have moved or been "
+        "renamed. Pin a compatible LangGraph version, or open an issue "
+        "against langgraph-events."
     ) from exc
+
+# Smoke fence on the per-instance ``_unpack_ext_hook`` attribute: ``loads_typed``
+# threads it through ``_make_ext_hook`` as the fallback for ext codes we don't
+# own (#68). Failing fast at import time gives a single actionable error
+# instead of an ``AttributeError`` deep in the first checkpoint load if a
+# future LangGraph rev renames or hides the attribute.
+if not hasattr(JsonPlusSerializer(), "_unpack_ext_hook"):  # pragma: no cover
+    raise ImportError(
+        "langgraph_events.serde.NamespaceAwareSerde depends on the "
+        "per-instance ``JsonPlusSerializer._unpack_ext_hook`` attribute. "
+        "It appears to have been renamed or removed. Pin a compatible "
+        "LangGraph version (langgraph-checkpoint>=4.0.3 is supported), "
+        "or open an issue against langgraph-events."
+    )
 
 # Unique among LangGraph's existing ext codes (currently 0..6).
 EXT_NAMESPACE_AWARE_EVENT = 100
@@ -81,12 +94,25 @@ def _default(obj: Any) -> Any:
     return _msgpack_default(obj)
 
 
-def _make_ext_hook(errors: list[str]) -> Callable[[int, bytes], Any]:
+def _make_ext_hook(
+    errors: list[str],
+    fallback: Callable[[int, bytes], Any],
+) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
     ormsgpack swallows the original exception from an ext-hook and re-raises
     a generic ``ValueError("ext_hook failed")``. The error list lets
     ``loads_typed`` reconstruct an actionable message after the fact.
+
+    *fallback* handles ext codes we don't own (everything emitted by
+    upstream's ``_msgpack_default`` — Pydantic models, plain dataclasses,
+    ``UUID``s, ``datetime``s, etc.). Callers thread the parent's
+    *per-instance* ``_unpack_ext_hook`` here rather than the module-level
+    alias from ``langgraph.checkpoint.serde.jsonplus``: in
+    ``langgraph-checkpoint>=4.0.3`` that alias is hardcoded strict
+    (``allowed_modules=None``) and silently demotes non-event payloads to
+    plain ``dict`` regardless of ``LANGGRAPH_STRICT_MSGPACK`` or the
+    constructor's ``allowed_msgpack_modules`` argument (#68).
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
@@ -113,7 +139,7 @@ def _make_ext_hook(errors: list[str]) -> Callable[[int, bytes], Any]:
                 )
                 raise
         if code != EXT_NAMESPACE_AWARE_EVENT:
-            return _msgpack_ext_hook(code, data)
+            return fallback(code, data)
         tup = ormsgpack.unpackb(
             data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
         )
@@ -173,10 +199,12 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         if type_ != "msgpack":
             return super().loads_typed(data)
         errors: list[str] = []
+        # Route fallback through the parent's *per-instance* hook — see the
+        # docstring on ``_make_ext_hook`` for the #68 backstory.
         try:
             return ormsgpack.unpackb(
                 data_,
-                ext_hook=_make_ext_hook(errors),
+                ext_hook=_make_ext_hook(errors, self._unpack_ext_hook),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )
         except ValueError as exc:
