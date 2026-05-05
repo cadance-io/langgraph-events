@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-05
+
 ### Added
 - **DomainPatternWarning**: new exported warning class. Emitted at `EventGraph.namespaces()` time when 2+ events in the same namespace fan out (via 2+ distinct reactor handlers) to identical target sets — typically a sign that a shared abstraction was missed (a common base event or a single reactor on a common subscription would collapse them). Detection is exact-set-equality only; subset/superset overlaps don't qualify. Silence via the standard warnings filter: `warnings.filterwarnings("ignore", category=DomainPatternWarning)`. The warning fires once per pattern at construction time; renderers (`mermaid()`, `text()`, etc.) do not re-emit.
 - **NamespaceModel.mermaid(namespace_order=…)**: new keyword controlling how namespace subgraph clusters are sequenced. Pass `"alphabetical"` to preserve the legacy alphabetical order (useful for snapshot-pinned consumers). Defaults to `"affinity"` — see Changed.
@@ -147,7 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/cadance-io/langgraph-events/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cadance-io/langgraph-events/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/cadance-io/langgraph-events/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cadance-io/langgraph-events/compare/v0.5.2...v0.6.0
