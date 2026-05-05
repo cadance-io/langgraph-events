@@ -319,6 +319,38 @@ def ship(event: UserConfirmed) -> ShippedRelease:
 
 Streaming-path errors propagate through the adapter's top-level handler and surface to the frontend as a `RUN_ERROR` event with the diagnostic message. Conformant CopilotKit clients and LangChain chat models satisfy these invariants by default.
 
+## Resume Helpers
+
+`detect_new_tool_results` covers the *frontend-tool-result* arm of resume. The other arm — when the frontend sends a `Command(resume=…)` plus new chat messages (e.g. answering a typed `Interrupted` payload) — has three small helpers that collapse the boilerplate every consumer would otherwise write inside `resume_factory`:
+
+- **`extract_resume_input(input_data)`** — pulls `RunAgentInput.forwarded_props["command"]["resume"]`. If the value is a JSON string it's decoded; otherwise it passes through. Returns `None` if absent or falsy.
+- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — converts a list of AG-UI protocol messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage` instances. `ReasoningMessage` and `DeveloperMessage` are skipped (DEBUG log); `ActivityMessage` and unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls whose JSON `arguments` fail to parse are dropped (WARNING-logged); if every tool call on an `AssistantMessage` is dropped, the message itself is dropped.
+- **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — the high-level helper. Reads existing messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages` via `agui_messages_to_langchain`, and merges via langgraph's `add_messages` (id-based dedup). Returns a tuple — the immutable shape resume events typically carry.
+
+```python
+from langgraph_events.agui import (
+    detect_new_tool_results,
+    extract_resume_input,
+    merge_frontend_messages,
+)
+
+
+def resume_factory(input_data, checkpoint_state=None):
+    # 1. Frontend tool result path (covered above)
+    tool_results = detect_new_tool_results(input_data, checkpoint_state)
+    if tool_results:
+        return ToolsExecuted(messages=tuple(tool_results))
+
+    # 2. Command(resume=…) + new chat messages path
+    resume_input = extract_resume_input(input_data)
+    if resume_input is None:
+        return None
+    merged = merge_frontend_messages(input_data, checkpoint_state)
+    return UserResumed(response=resume_input, messages=merged)
+```
+
+Use the lower-level `agui_messages_to_langchain` directly when you need converted messages outside the `merge_frontend_messages` orchestration — e.g. inside a `seed_factory` that builds events from the most recent inbound `UserMessage`.
+
 ## Typed Interrupt Payloads
 
 For HITL flows whose frontend needs an action-discriminated dict (entity-review vs environment-select vs walkthrough-choice, …), subclass `InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The built-in `InterruptedMapper` recognises the contract and emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.

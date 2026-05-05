@@ -20,6 +20,11 @@ from langgraph_events.agui._protocols import (
     ResumeFactory,
     SeedFactory,
 )
+from langgraph_events.agui._resume import (
+    agui_messages_to_langchain,
+    extract_resume_input,
+    merge_frontend_messages,
+)
 from langgraph_events.agui._tools import (
     build_langchain_tools,
     detect_new_tool_results,
@@ -44,8 +49,11 @@ __all__ = [
     "ResumeFactory",
     "SeedFactory",
     "SkipInternalMapper",
+    "agui_messages_to_langchain",
     "build_langchain_tools",
     "create_starlette_response",
     "detect_new_tool_results",
     "encode_sse_stream",
+    "extract_resume_input",
+    "merge_frontend_messages",
 ]
