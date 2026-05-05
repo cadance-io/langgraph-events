@@ -151,6 +151,8 @@ def merge_frontend_messages(
         input_data.messages or [],
         drop_invalid_tool_calls=drop_invalid_tool_calls,
     )
+    # langgraph's add_messages signature accepts dict/tuple/str shapes for
+    # checkpoint-stored messages; our inputs and output are always BaseMessage.
     merged: list[BaseMessage] = add_messages(existing, new)  # type: ignore[arg-type,assignment]
     return tuple(merged)
 
