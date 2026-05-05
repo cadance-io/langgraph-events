@@ -243,3 +243,16 @@ def describe_domain_pattern_warning():
             joined = "\n".join(messages)
             assert "_SmellTwoNs1" in joined
             assert "_SmellTwoNs2" in joined
+
+    def when_warning_anchors_call_site():
+        def it_points_at_user_code_not_library_internals():
+            # Regression guard: stacklevel on warnings.warn must walk past
+            # the library frames so the warning surfaces the user's
+            # `EventGraph(...).namespaces()` line, not an internal file.
+            captured = _capture_smell_warnings(_SMELL_PAIR_HANDLERS)
+            assert len(captured) == 1
+            filename = captured[0].filename
+            assert "langgraph_events" not in filename, (
+                f"warning anchored to library file {filename!r}; expected "
+                "user code. Check stacklevel in emit_domain_pattern_warnings."
+            )

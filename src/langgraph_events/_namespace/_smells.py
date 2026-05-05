@@ -84,4 +84,4 @@ def emit_domain_pattern_warnings(model: NamespaceModel) -> None:
             f"target set {targets_repr}: {pairs_repr}. Consider unifying these "
             "reactors or extracting a shared base event."
         )
-        warnings.warn(msg, category=DomainPatternWarning, stacklevel=4)
+        warnings.warn(msg, category=DomainPatternWarning, stacklevel=5)

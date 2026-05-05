@@ -352,10 +352,12 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
 
     all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
     if namespace_order == "affinity":
-        # Affinity counts: solid + scatter + framework reaction edges plus
-        # invariant chain edges (Command → Invariant). Ownership-fill
-        # ``-.- `` arrows and ``raises`` edges are rendering scaffolding
-        # rather than real flow, so they don't contribute.
+        # Affinity counts: solid + scatter reaction edges plus invariant
+        # chain edges (Command → Invariant). Ownership-fill ``-.- `` arrows
+        # and ``raises`` edges are rendering scaffolding rather than real
+        # flow, so they don't contribute. The framework ``Interrupted →
+        # Resumed`` edge carries ``__namespace__ = None`` on both endpoints
+        # and is filtered by the cross-namespace guard below.
         affinity: dict[frozenset[str], int] = defaultdict(int)
 
         def _bump(a: type, b: type) -> None:

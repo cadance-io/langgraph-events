@@ -24,6 +24,7 @@ from langgraph_events._event import (
 from langgraph_events._event import (
     Invariant as InvariantBase,
 )
+from langgraph_events._namespace._smells import emit_domain_pattern_warnings
 
 if TYPE_CHECKING:
     from langgraph_events._graph import ReturnInfo
@@ -601,10 +602,6 @@ def _build_domain_model(  # noqa: PLR0912
         edges=tuple(edges),
         seeds=seeds,
         invariants=invariants_rolled,
-    )
-
-    from langgraph_events._namespace._smells import (  # noqa: PLC0415
-        emit_domain_pattern_warnings,
     )
 
     emit_domain_pattern_warnings(model)
