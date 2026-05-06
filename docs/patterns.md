@@ -78,8 +78,8 @@ graph LR
         end
         _e0_[ ]:::entry ==> Place
         _e1_[ ]:::entry ==> Ship
-        Ship -->|handle| Shipped
-        Place -->|place| Placed
+        Place -->|handle| Placed
+        Ship -->|handle_2| Shipped
         CustomerNotBanned -.->|explain_banned| Rejected
         OrderTotalWithinLimit -.->|explain_over_limit| Rejected
         Place -.->|invariant| CustomerNotBanned
@@ -92,11 +92,11 @@ graph LR
     ```text
     Namespaces:
       Order
-        Command: Ship  (handlers: handle)
-          → Shipped
-        Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+        Command: Place  (handlers: handle; invariant: CustomerNotBanned, OrderTotalWithinLimit)
           → Placed
-          → Rejected
+        Command: Ship  (handlers: handle_2)
+          → Shipped
+        Event: Rejected
     System events:
       InvariantViolated
     Invariants:
@@ -268,8 +268,8 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         Produced -->|supervisor| Research
         Produced -->|supervisor| Code
         Produced -->|supervisor| Finalized
-        Research -->|researcher| Completed
-        Code -->|coder| Produced
+        Research -->|handle| Completed
+        Code -->|handle_2| Produced
     %% Side-effect handlers: audit_trail (Auditable)
     ```
 
@@ -279,9 +279,9 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
     Namespaces:
       Task
         Command: Run  (handlers: supervisor)
-        Command: Research  (handlers: researcher)
+        Command: Research  (handlers: handle)
           → Completed
-        Command: Code  (handlers: coder)
+        Command: Code  (handlers: handle_2)
           → Produced
         Event: Finalized
     Policies:
@@ -295,7 +295,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 
 ## Scatter fan-out (Batch namespace) { #scatter-fan-out }
 
-`Batch.Summarize` fans out to per-document work via [`Scatter`](control-flow.md#scatter); a gather handler uses `EventLog.filter()` to complete when all `Batch.DocSummarized` facts arrive and emit `Batch.Summarize.Summarized`.
+`Batch.Summarize` fans out to per-document work via [`Scatter`](control-flow.md#scatter); a gather handler uses `EventLog.filter()` to complete when all `Batch.DocSummarized` facts arrive and emit `Batch.Summarized` (a namespace-level sibling — gather isn't `Summarize.handle()`, so the outcome can't be Command-private).
 
 <!-- autogen:start:map_reduce -->
 === "Diagram"
@@ -320,10 +320,8 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         Summarize -.->|split_batch| DocDispatched
         DocDispatched -->|summarize_one| DocSummarized
         DocSummarized -->|gather_summaries| Summarized
-        Summarize -.- Summarized
     %% Side-effect handlers: audit_trail (Auditable)
         linkStyle 1 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
-        linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
     ```
 
 === "Flow (text)"
@@ -332,9 +330,9 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
     Namespaces:
       Batch
         Command: Summarize  (handlers: split_batch; scatters Scatter[DocDispatched])
-          → Summarized
         Event: DocDispatched
         Event: DocSummarized
+        Event: Summarized
     Policies:
       summarize_one  (DocDispatched → DocSummarized)
       gather_summaries  (DocSummarized → Summarized)
@@ -399,7 +397,7 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 
 ## Retries & escalation (Question namespace) { #error-recovery }
 
-Declared handler exceptions with retry + escalation via [`raises=`](control-flow.md#handler-exceptions) and `HandlerRaised`. `Question.Ask` is the entry command; a rate-limit catcher emits `Question.RetryScheduled`; chained catchers escalate to `Question.GaveUp` (a `Halted` subtype) after `MAX_ATTEMPTS`.
+Declared handler exceptions with retry + escalation via class-level `raises` on the Command and `HandlerRaised`. `Question.Ask` is the entry command — its inline `handle()` calls the LLM and may raise `RateLimitError`; a rate-limit catcher re-issues a fresh `Question.Ask` (with `attempt+1`), looping back through `Ask.handle()`. `Ask.Answered` stays Command-private, produced only by `Ask.handle()`. Chained catchers escalate to `Question.GaveUp` (a `Halted` subtype) after `MAX_ATTEMPTS`.
 
 <!-- autogen:start:error_recovery -->
 === "Diagram"
@@ -418,18 +416,14 @@ Declared handler exceptions with retry + escalation via [`raises=`](control-flow
             Answered(Answered):::devt
             Ask{{Ask}}:::cmd
             GaveUp([GaveUp]):::halt
-            RetryScheduled(RetryScheduled):::devt
         end
         HandlerRaised([HandlerRaised]):::syst
-        _e0_[ ]:::entry ==> Ask
-        Ask -.->|"call_llm (raises)"| HandlerRaised
-        RetryScheduled -.->|"call_llm (raises)"| HandlerRaised
-        Ask -->|call_llm| Answered
-        RetryScheduled -->|call_llm| Answered
+        Ask -.->|"handle (raises)"| HandlerRaised
+        Ask -->|handle| Answered
         HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-        HandlerRaised -->|backoff_and_retry| RetryScheduled
+        HandlerRaised -->|backoff_and_retry| Ask
         HandlerRaised -->|give_up| GaveUp
-        linkStyle 1,2,5 stroke:#6b7280,stroke-dasharray:3 3
+        linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
     ```
 
 === "Flow (text)"
@@ -437,17 +431,14 @@ Declared handler exceptions with retry + escalation via [`raises=`](control-flow
     ```text
     Namespaces:
       Question
-        Command: Ask  (handlers: call_llm; raises RateLimitError)
+        Command: Ask  (handlers: handle; raises RateLimitError)
           → Answered
-        Event: RetryScheduled
         Event: GaveUp  [Halted]
     System events:
       HandlerRaised
     Policies:
-      backoff_and_retry  (HandlerRaised → RetryScheduled)  [raises QuotaExhaustedError]
+      backoff_and_retry  (HandlerRaised → Ask)  [raises QuotaExhaustedError]
       give_up  (HandlerRaised → GaveUp)
-    Seed events:
-      Ask
     ```
 
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.graph.md)

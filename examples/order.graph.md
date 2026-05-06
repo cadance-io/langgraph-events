@@ -62,8 +62,8 @@ graph LR
     end
     _e0_[ ]:::entry ==> Place
     _e1_[ ]:::entry ==> Ship
-    Ship -->|handle| Shipped
-    Place -->|place| Placed
+    Place -->|handle| Placed
+    Ship -->|handle_2| Shipped
     CustomerNotBanned -.->|explain_banned| Rejected
     OrderTotalWithinLimit -.->|explain_over_limit| Rejected
     Place -.->|invariant| CustomerNotBanned
@@ -76,11 +76,11 @@ graph LR
 ```text
 Namespaces:
   Order
-    Command: Ship  (handlers: handle)
-      → Shipped
-    Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+    Command: Place  (handlers: handle; invariant: CustomerNotBanned, OrderTotalWithinLimit)
       → Placed
-      → Rejected
+    Command: Ship  (handlers: handle_2)
+      → Shipped
+    Event: Rejected
 System events:
   InvariantViolated
 Invariants:

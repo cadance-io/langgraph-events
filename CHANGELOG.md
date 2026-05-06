@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **CommandPrivacyError**: new exported exception class (subclass of `TypeError`). Raised at `EventGraph` construction when a handler emits a `DomainEvent` it isn't allowed to emit. Two symmetric rules enforce that *outcomes nested inside a `Command` are private to that Command's inline `handle()`*:
+  1. An inline `Command.handle()` may only return events nested under that same Command (or a parent Command, via inheritance) — not sibling/namespace-level events, not another Command's private outcomes.
+  2. Any non-inline handler (`@on(...)` reactor) is forbidden from emitting a Command-private event. The owning Command's `handle()` is the single canonical producer; recovery and observer reactors emit namespace-level sibling events instead.
+- **Class-level `invariants` and `raises` on `Command`**: declare invariants and catchable exceptions for an inline `handle()` directly on the Command class (e.g. `invariants: ClassVar = {Inv: predicate}`, `raises: ClassVar = (RateLimitError,)`). The framework forwards them to the synthesized `@on(Cmd)` wrapper. Closes a gap where modifiers were only available on the external `@on(Cmd, ...)` form. (closes #71)
+
+### Changed
+- `@on(Cmd) -> Cmd.Outcome` patterns are no longer allowed. A Command's nested outcomes must be produced by `Cmd.handle()` only. Tests, examples, and docs that previously relied on the external `@on(Cmd) -> Cmd.Outcome` form now use inline `handle()` (with class-level `invariants` / `raises` where needed). Recovery patterns that produced nested outcomes from outside (`@on(InvariantViolated) -> Cmd.Rejected`, `@on(HandlerRaised) -> Cmd.Rejected`) emit namespace-level events instead — for example, `Order.Place.Rejected` becomes `Order.Rejected` in the canonical `examples/order.py`.
+
 ## [0.8.0] - 2026-05-05
 
 ### Fixed

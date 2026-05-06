@@ -44,6 +44,7 @@ from langgraph_events._internal import (
     make_seed_node,
 )
 from langgraph_events._namespace import NamespaceModel
+from langgraph_events._namespace._command_privacy import enforce_command_privacy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
@@ -273,12 +274,9 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     require the annotation to cover every nested ``DomainEvent`` of the
     owning ``Command``.
 
-    External ``@on(Cmd)`` handlers are intentionally exempt: outcome
-    production can be distributed across multiple handlers (e.g. one
-    handler returns ``Placed``, another reacts to ``InvariantViolated``
-    and produces ``Rejected``). Inline ``handle`` is the "I own this
-    command end-to-end" form, so dropping an outcome there is almost
-    always a mistake.
+    Inline ``handle`` is the only producer of a Command's nested outcomes
+    (see :class:`CommandPrivacyError`); dropping an outcome from its
+    annotation is almost always a mistake.
 
     No annotation → skipped; the contract falls back to ``Command.Outcomes``.
     """
@@ -425,9 +423,12 @@ def _expand_command_handlers(
 ) -> list[Callable[..., Any]]:
     """Replace ``Command`` subclasses with their inline ``handle`` functions.
 
-    Each substituted function is stamped via ``on(cls)(fn)`` so that
-    ``extract_handler_meta`` sees it like any other ``@on``-subscribed
-    handler. Raises ``TypeError`` if a Command subclass has no ``handle``.
+    Each substituted function is stamped via ``on(cls, raises=..., invariants=...)
+    (fn)`` so that ``extract_handler_meta`` sees it like any other
+    ``@on``-subscribed handler. ``raises``/``invariants`` are read from
+    class-level attributes on the Command (since inline ``handle`` has no
+    decorator slot for them). Raises ``TypeError`` if a Command subclass has
+    no ``handle``.
     """
     expanded: list[Callable[..., Any]] = []
     for h in handlers:
@@ -436,8 +437,7 @@ def _expand_command_handlers(
             if fn is None:
                 raise TypeError(
                     f"Command {h.__qualname__} has no `handle` method. "
-                    f"Either define `handle` inside the command class or "
-                    f"register a handler via @on({h.__qualname__})."
+                    f"Define `handle` inside the command class."
                 )
             existing = getattr(fn, "_inline_command", None)
             if existing is not None and existing is not h:
@@ -447,7 +447,9 @@ def _expand_command_handlers(
                     f"`handle` across Command classes — define each "
                     f"Command's `handle` in its own class body."
                 )
-            on(h)(fn)  # sets fn._event_types = (h,); idempotent
+            cmd_raises = getattr(h, "raises", ())
+            cmd_invariants = getattr(h, "invariants", None)
+            on(h, raises=cmd_raises, invariants=cmd_invariants)(fn)
             fn._inline_command = h
             expanded.append(fn)
         else:
@@ -589,6 +591,7 @@ class EventGraph:
                 stacklevel=2,
             )
 
+        enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_raises_coverage()
         self._verify_invariants_coverage()
 

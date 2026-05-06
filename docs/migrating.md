@@ -166,7 +166,7 @@ All examples now use the `Namespace` taxonomy.
   | `BatchReceived` | `Batch.Summarize` (command) |
   | `DocDispatched` | `Batch.DocDispatched` |
   | `DocSummarized` | `Batch.DocSummarized` |
-  | `BatchSummarized` | `Batch.Summarize.Summarized` |
+  | `BatchSummarized` | `Batch.Summarized` (sibling — emitted by the gather reactor, not by `Summarize.handle()`) |
 
 - **`examples/error_recovery.py`** reshaped into a `Question` domain. Event moves:
 
@@ -174,7 +174,7 @@ All examples now use the `Namespace` taxonomy.
   |---|---|
   | `QuestionAsked` | `Question.Ask` (command) |
   | `AnswerReceived` | `Question.Ask.Answered` |
-  | `RetryScheduled` | `Question.RetryScheduled` |
+  | `RetryScheduled` | (removed — backoff reactor now emits a fresh `Question.Ask` to retry) |
   | `GaveUp` | `Question.GaveUp` (still a `Halted` subtype) |
 
 Direct imports of the old class names (`from examples.map_reduce import BatchReceived`, etc.) fail. Expected — examples are reference material; copy shapes into your code, don't import from them.

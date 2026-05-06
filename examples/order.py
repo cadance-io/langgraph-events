@@ -4,24 +4,20 @@ Demonstrates the DDD-aligned taxonomy end-to-end:
 
 - ``Namespace`` — the ``Order`` namespace
 - ``Command`` — ``Order.Place`` (with invariants) and ``Order.Ship`` (inline)
-- ``DomainEvent`` — nested outcomes auto-unioned as ``Command.Outcomes``
-- Handler forms — pick the shortest that fits:
-    * **Inline** ``handle`` method on a command — colocated with the
-      command, most DDD-idiomatic for trivial commands. ``Order.Ship.handle``
-      below.
-    * **``@on``** (bare) — reads the event type from the first parameter's
-      annotation.
-    * **``@on(Cmd, ...)``** — explicit form needed for ``invariants=``,
-      ``raises=``, field matchers, or multi-event subscription. ``place``
-      below uses the modifiers-only variant ``@on(invariants=...)``.
+- ``DomainEvent`` — outcomes nested under their owning Command (private to
+  that Command's ``handle()``) or sibling to the Namespace (free-standing
+  facts, e.g. ``Order.Rejected`` below — emitted by recovery reactors).
+- Handler form — every Command's outcome must come from its inline
+  ``handle()``. Use class-level ``invariants`` / ``raises`` attributes when
+  the handler needs them.
 - ``Invariant`` — typed marker class (nested under the command for DDD
-  locality). Declare predicates with ``invariants={Cls: lambda log: ...}``;
-  the framework emits ``InvariantViolated(invariant=Cls(), ...)`` when the
+  locality). Declare predicates as a class-level ``invariants`` dict; the
+  framework emits ``InvariantViolated(invariant=Cls(), ...)`` when the
   predicate returns False.
 - Pinned reactions use the ``invariant=`` field matcher:
   ``@on(InvariantViolated, invariant=Cls)`` fires only for that specific
-  invariant class's failures. A graph-construction-time drift check catches
-  matchers that reference undeclared invariant classes.
+  invariant class's failures. Recovery reactors emit namespace-level events
+  (``Order.Rejected``), never Command-private outcomes.
 - ``ScalarReducer`` as an domain class attribute — auto-named,
   auto-scoped to the domain's events, surfaced via ``log.reduced_state``.
 - ``EventGraph.from_namespaces`` — auto-registers inline handlers and mixes
@@ -32,6 +28,8 @@ Usage:
 """
 
 from __future__ import annotations
+
+from typing import ClassVar
 
 from langgraph_events import (
     SKIP,
@@ -50,6 +48,14 @@ from langgraph_events import (
 # ---------------------------------------------------------------------------
 # Namespace: Order
 # ---------------------------------------------------------------------------
+
+
+# Cross-cutting fact (not an Order event) used by the invariant below.
+class CustomerBanned(IntegrationEvent):
+    customer_id: str = ""
+
+
+_ORDER_LIMIT = 100
 
 
 class Order(Namespace):
@@ -71,9 +77,10 @@ class Order(Namespace):
     class Place(Command):
         """Place an order for a given customer.
 
-        No inline ``handle`` — this command needs an ``invariants=`` clause
-        to guard against banned customers, so its handler lives externally
-        as ``place`` below.
+        Inline ``handle`` produces ``Placed``; ``invariants`` are declared as
+        a class-level attribute. Failure modes (banned customer, over-limit)
+        are surfaced as ``InvariantViolated``; namespace-level recovery
+        reactors translate those into ``Order.Rejected``.
         """
 
         customer_id: str = ""
@@ -105,17 +112,29 @@ class Order(Namespace):
             order_id: str = ""
             amount: int = 0
 
-        class Rejected(DomainEvent):
-            """Order rejected (e.g. by an invariant)."""
+        invariants: ClassVar = {
+            CustomerNotBanned: lambda log: not log.has(CustomerBanned),
+            OrderTotalWithinLimit: lambda log: (
+                sum(e.amount for e in log.filter(Order.Place.Placed)) < _ORDER_LIMIT
+            ),
+        }
 
-            reason: str = ""
+        def handle(self) -> Order.Place.Placed:
+            return Order.Place.Placed(
+                order_id=f"order-for-{self.customer_id}", amount=self.amount
+            )
+
+    class Rejected(DomainEvent):
+        """Order rejected (e.g. by an invariant).
+
+        Sibling to ``Place``, not nested — emitted by recovery reactors,
+        never from ``Place.handle()`` itself.
+        """
+
+        reason: str = ""
 
     class Ship(Command):
-        """Ship an accepted order.
-
-        Simple enough to use the **inline** form — the command owns its
-        own handler via ``handle``.
-        """
+        """Ship an accepted order. Inline ``handle``."""
 
         order_id: str = ""
 
@@ -128,75 +147,36 @@ class Order(Namespace):
             return Order.Ship.Shipped(tracking=f"track-{self.order_id}")
 
 
-# Cross-cutting fact (not an Order event) used by the invariant below.
-class CustomerBanned(IntegrationEvent):
-    customer_id: str = ""
-
-
 # ---------------------------------------------------------------------------
-# External handlers — for what inline can't express
+# Recovery reactors — emit namespace-level Order.Rejected
 # ---------------------------------------------------------------------------
-
-
-_ORDER_LIMIT = 100
-
-
-@on(
-    invariants={
-        Order.Place.CustomerNotBanned: lambda log: not log.has(CustomerBanned),
-        Order.Place.OrderTotalWithinLimit: lambda log: (
-            sum(e.amount for e in log.filter(Order.Place.Placed)) < _ORDER_LIMIT
-        ),
-    },
-)
-def place(event: Order.Place) -> Order.Place.Placed:
-    """External handler — the invariants are declared here, not inline.
-
-    Uses ``@on(invariants=...)`` — no positional event type, inferred from
-    the ``event:`` annotation. Invariant keys are typed classes so reactors
-    can pin on them with mypy/IDE support (and a typo triggers the
-    graph-compile-time drift check rather than silently failing).
-
-    Two invariants, two semantics:
-
-    - ``CustomerNotBanned`` — only the pre-check can fire it (predicate
-      doesn't depend on this handler's output).
-    - ``OrderTotalWithinLimit`` — only the post-check can fire it
-      (predicate sums ``Placed`` events, and *this* handler's ``Placed``
-      is what pushes the total over the limit).
-    """
-    return Order.Place.Placed(
-        order_id=f"order-for-{event.customer_id}", amount=event.amount
-    )
 
 
 @on(InvariantViolated, invariant=Order.Place.CustomerNotBanned)
-def explain_banned(event: InvariantViolated) -> Order.Place.Rejected:
+def explain_banned(event: InvariantViolated) -> Order.Rejected:
     """Turn a ``CustomerNotBanned`` violation into a domain ``Rejected``."""
-    return Order.Place.Rejected(reason=type(event.invariant).__name__)
+    return Order.Rejected(reason=type(event.invariant).__name__)
 
 
 @on(InvariantViolated, invariant=Order.Place.OrderTotalWithinLimit)
-def explain_over_limit(event: InvariantViolated) -> Order.Place.Rejected:
+def explain_over_limit(event: InvariantViolated) -> Order.Rejected:
     """Turn an ``OrderTotalWithinLimit`` post-check violation into a
     ``Rejected``. ``would_emit`` carries the rolled-back ``Placed`` — we
     surface its amount in the rejection reason for diagnostics.
     """
     rolled_back = event.would_emit[0] if event.would_emit else None
     amount = getattr(rolled_back, "amount", "?")
-    return Order.Place.Rejected(
-        reason=f"OrderTotalWithinLimit (would emit amount={amount})"
-    )
+    return Order.Rejected(reason=f"OrderTotalWithinLimit (would emit amount={amount})")
 
 
 # ---------------------------------------------------------------------------
-# Graph — auto-registers Order's inline handlers; extras are appended
+# Graph
 # ---------------------------------------------------------------------------
 
 
 graph = EventGraph.from_namespaces(
     Order,
-    handlers=[place, explain_banned, explain_over_limit],
+    handlers=[explain_banned, explain_over_limit],
 )
 
 
@@ -205,7 +185,7 @@ def main() -> None:
     print(graph.namespaces().text())
     print()
 
-    print("=== Happy path (external handler + inline handler) ===")
+    print("=== Happy path ===")
     log = graph.invoke(
         [
             Order.Place(customer_id="alice", amount=30),
@@ -228,10 +208,6 @@ def main() -> None:
     print()
 
     print("=== Post-check: OrderTotalWithinLimit rolls back the Placed ===")
-    # Two placements. The first (60) commits — pre-check passes, post-check
-    # sees simulated total 60 < 100. The second (60) also passes pre-check
-    # (current total is 60), but post-check sees simulated total 120 ≥ 100
-    # and drops the Placed; the reactor turns the violation into a Rejected.
     log_over = graph.invoke(
         [
             Order.Place(customer_id="carol", amount=60),
