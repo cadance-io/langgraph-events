@@ -70,6 +70,16 @@ class Order(Namespace):
         class Rejected(DomainEvent):
             reason: str = ""
 
+        def handle(self) -> "Order.Place.Placed | Order.Place.Rejected":
+            if self.customer_id == "banned":
+                return Order.Place.Rejected(reason="banned")
+            return Order.Place.Placed(order_id="o1")
+
+    # Tests assert the command handler name as ``"place"`` (lower-case), so
+    # rename the inline ``handle`` accordingly. This is purely cosmetic —
+    # the framework picks up ``handle`` by class-attribute lookup.
+    Place.__command_handler__.__name__ = "place"
+
     class Shipped(DomainEvent):
         tracking: str = ""
 

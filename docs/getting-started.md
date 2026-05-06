@@ -38,7 +38,7 @@ print(log.latest(Order.Place.Placed))
 - `Order.Place.Outcomes` is auto-generated as `Placed | Rejected` — used in `isinstance` and enforced as the handler's return contract.
 - `handle(self)` is the command's inline handler; `self` is the event.
 
-Need `invariants=`, `raises=`, or a handler across multiple event types? Use the external `@on(...)` form — see [Concepts](concepts.md#on-decorator).
+Need `invariants` or `raises`? Declare them as class-level attributes on the `Command` — they're forwarded to the inline `handle`. Need a handler across multiple event types or a reactor on a `DomainEvent`? Use the external `@on(...)` form — see [Concepts](concepts.md#on-decorator).
 
 ## Run the graph
 
@@ -78,13 +78,13 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 | I want to... | Reach for... | Docs |
 |---|---|---|
 | Query past events in a handler | `EventLog` (`log.filter()`, `log.latest()`) | [Concepts](concepts.md#eventlog) |
-| Enforce a precondition before a handler runs | `invariants=` on `@on()` | [Control Flow](control-flow.md#invariants) |
+| Enforce a precondition before a handler runs | `invariants` on the `Command` (or `@on()` for non-Command handlers) | [Control Flow](control-flow.md#invariants) |
 | Register every inline handler on a domain | `EventGraph.from_namespaces(Order)` | [Concepts](concepts.md#inline-command-handlers) |
 | Accumulate state across events | `ScalarReducer` on the domain class | [Reducers](reducers.md) |
 | Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
 | Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
 | Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#system-events) |
-| Catch handler exceptions | `raises=` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |
+| Catch handler exceptions | `raises` on the `Command` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |
 | Stream LLM tokens | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
 | Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI](agui.md) |

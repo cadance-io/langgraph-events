@@ -34,6 +34,43 @@ class Beta(Namespace):
             marker: str = ""
 
 
+# Auto-discovery fixture — module-level so handler return-type hints resolve
+# at runtime. ``_AUTO_OBSERVED`` is cleared at the start of each test that
+# uses it so no leakage occurs between runs.
+_AUTO_OBSERVED: list[str | None] = []
+
+
+class _AlphaAuto(Namespace):
+    current_status = ScalarReducer(
+        event_type=Event,
+        fn=lambda e: type(e).__name__,
+    )
+
+    class Act(Command):
+        class Acted(DomainEvent):
+            marker: str = ""
+
+        def handle(self, current_status) -> _AlphaAuto.Act.Acted:
+            _AUTO_OBSERVED.append(current_status)
+            return _AlphaAuto.Act.Acted(marker="after")
+
+
+class _AlphaExplicit(Namespace):
+    current_status = ScalarReducer(
+        event_type=Event,
+        fn=lambda e: type(e).__name__,
+    )
+
+    class Act(Command):
+        class Acted(DomainEvent):
+            marker: str = ""
+
+        def handle(self, current_status) -> _AlphaExplicit.Act.Acted:
+            # Explicit list-reducer wins over discovered scalar reducer.
+            assert current_status == ["EXPLICIT"]
+            return _AlphaExplicit.Act.Acted(marker="done")
+
+
 def describe_BaseReducer():
 
     def describe___set_name__():
@@ -147,20 +184,15 @@ def describe_EventGraph_auto_discovery():
     def when_handler_subscribes_to_domain_event():
 
         def it_auto_registers_domain_reducers():
-            observed: list[str | None] = []
+            _AUTO_OBSERVED.clear()
+            # No explicit reducers= — must be auto-discovered from _AlphaAuto.
+            graph = EventGraph([_AlphaAuto.Act])
+            graph.invoke(_AlphaAuto.Act())
 
-            @on(Alpha.Act)
-            def run(event: Alpha.Act, current_status) -> Alpha.Act.Acted:
-                observed.append(current_status)
-                return Alpha.Act.Acted(marker="after")
-
-            # No explicit reducers= — must be auto-discovered from Alpha.
-            graph = EventGraph([run])
-            graph.invoke(Alpha.Act())
-
-            # The seed Alpha.Act is an Alpha event, so the reducer sees it
-            # and projects type(e).__name__ == "Act" before the handler runs.
-            assert observed == ["Act"]
+            # The seed _AlphaAuto.Act is an _AlphaAuto event, so the reducer
+            # sees it and projects type(e).__name__ == "Act" before the
+            # handler runs.
+            assert _AUTO_OBSERVED == ["Act"]
 
     def when_reducer_names_collide_across_domains():
 
@@ -199,11 +231,5 @@ def describe_EventGraph_auto_discovery():
                 fn=lambda e: ["EXPLICIT"],
             )
 
-            @on(Alpha.Act)
-            def run(event: Alpha.Act, current_status) -> Alpha.Act.Acted:
-                # Explicit list-reducer provides ["EXPLICIT"] regardless of events.
-                assert current_status == ["EXPLICIT"]
-                return Alpha.Act.Acted(marker="done")
-
-            graph = EventGraph([run], reducers=[explicit])
-            graph.invoke(Alpha.Act())
+            graph = EventGraph([_AlphaExplicit.Act], reducers=[explicit])
+            graph.invoke(_AlphaExplicit.Act())

@@ -40,20 +40,21 @@ class Batch(Namespace):
 
     ``Summarize`` is the entry command. A fan-out handler returns
     ``Scatter[Batch.DocDispatched]``; per-doc handlers emit ``DocSummarized``;
-    a gather handler collects them and produces ``Summarize.Summarized`` when
+    a gather handler collects them and produces ``Batch.Summarized`` when
     all documents have been processed.
     """
 
     class Summarize(Command, Auditable):
-        """Summarize this batch of documents."""
+        """Summarize this batch of documents.
+
+        ``Summarize`` is purely a fan-out command — the per-doc work and the
+        gather step both live in reactors, so ``Summarize.handle()`` would
+        have nothing useful to do as inline. ``Summarized`` is therefore a
+        namespace-level fact (sibling of ``Summarize``), not a Command-private
+        outcome — recovery/gather reactors can produce it.
+        """
 
         documents: tuple = ()  # tuple of (title, content) pairs
-
-        class Summarized(DomainEvent, Auditable):
-            """Final outcome — combined summary of the whole batch."""
-
-            combined: str = ""
-            individual: tuple = ()  # tuple of (title, summary) pairs
 
     class DocDispatched(DomainEvent, Auditable):
         """Scatter target — one document dispatched for summarization."""
@@ -67,6 +68,12 @@ class Batch(Namespace):
 
         title: str = ""
         summary: str = ""
+
+    class Summarized(DomainEvent, Auditable):
+        """Final outcome — combined summary of the whole batch."""
+
+        combined: str = ""
+        individual: tuple = ()  # tuple of (title, summary) pairs
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +161,7 @@ async def summarize_one(event: Batch.DocDispatched) -> Batch.DocSummarized:
 @on(Batch.DocSummarized)
 def gather_summaries(
     event: Batch.DocSummarized, log: EventLog
-) -> Batch.Summarize.Summarized | None:
+) -> Batch.Summarized | None:
     """Reduce: collect all summaries once all documents are processed.
 
     This handler fires once per ``DocSummarized`` in the pending batch. Since
@@ -171,7 +178,7 @@ def gather_summaries(
 
     individual = tuple((s.title, s.summary) for s in all_summaries)
     combined = "\n\n".join(f"**{title}**: {summary}" for title, summary in individual)
-    return Batch.Summarize.Summarized(combined=combined, individual=individual)
+    return Batch.Summarized(combined=combined, individual=individual)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +199,7 @@ async def main() -> None:
     log = await graph.ainvoke(Batch.Summarize(documents=DOCUMENTS))
 
     print("\n--- Combined Summary ---")
-    result = log.latest(Batch.Summarize.Summarized)
+    result = log.latest(Batch.Summarized)
     print(result.combined)
 
 

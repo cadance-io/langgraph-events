@@ -88,7 +88,23 @@ graph = EventGraph([Order.Ship])
 graph = EventGraph.from_namespaces(Order, handlers=[react])
 ```
 
-When an inline `handle` has an explicit return annotation, it must cover every nested `DomainEvent` — dropping an outcome there is almost always a mistake. External `@on(Cmd)` handlers are exempt (distributed outcome production is a valid pattern).
+When an inline `handle` has an explicit return annotation, it must cover every nested `DomainEvent`. A `DomainEvent` nested inside a `Command` is *Command-private*: only that Command's `handle()` may emit it. Reactors that need to surface a domain failure as part of recovery emit a namespace-level sibling event (e.g. `Order.Rejected`), not a Command-private outcome — graph construction raises `CommandPrivacyError` if a non-`handle()` handler returns one.
+
+`invariants` and `raises` for an inline handle are declared as class-level attributes on the `Command`:
+
+```python
+class Order(Namespace):
+    class Place(Command):
+        customer_id: str = ""
+        invariants = {CustomerNotBanned: lambda log: not log.has(CustomerBanned)}
+        raises = (RateLimitError,)
+
+        class Placed(DomainEvent):
+            order_id: str = ""
+
+        def handle(self) -> Order.Place.Placed:
+            return Order.Place.Placed(order_id=f"o-{self.customer_id}")
+```
 
 ### External: `@on`
 
@@ -97,13 +113,12 @@ Three shapes. Pick the shortest that conveys intent:
 ```python
 # Bare — event type inferred from the annotation
 @on
-def explain(event: InvariantViolated) -> Order.Place.Rejected:
-    return Order.Place.Rejected(reason=type(event.invariant).__name__)
+def notify(event: Order.Placed) -> None:
+    log_to_audit(event)
 
 # Modifiers only — event type inferred, modifiers applied
-@on(invariants={CustomerNotBanned: lambda log: not log.has(CustomerBanned)})
-def place(event: Order.Place) -> Order.Place.Placed:
-    return Order.Place.Placed(order_id=f"o-{event.customer_id}")
+@on(raises=NotifyError)
+def push_notification(event: Order.Placed) -> None: ...
 
 # Explicit types — required for multi-event subscription
 @on(UserMessage, ToolResults)
@@ -221,7 +236,7 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 
 ## Namespace as a feature hub
 
-A `Namespace` groups related commands and events, and is where related features attach: declarative reducers as class attributes (auto-scoped to the namespace's events), `invariants=` on `@on(Namespace.Cmd, ...)`, and namespace grouping in `graph.namespaces()`. See [Reducers](reducers.md#on-a-namespace) and [Control Flow](control-flow.md#invariants).
+A `Namespace` groups related commands and events, and is where related features attach: declarative reducers as class attributes (auto-scoped to the namespace's events), `invariants` / `raises` declared as class-level attributes on a `Command` (forwarded to its inline `handle()`), and namespace grouping in `graph.namespaces()`. See [Reducers](reducers.md#on-a-namespace) and [Control Flow](control-flow.md#invariants).
 
 ## System events
 

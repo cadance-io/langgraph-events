@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from langgraph_events import (
@@ -133,20 +135,6 @@ class Shop8(Namespace):
             return Shop8.Buy.Bought()
 
 
-class Shop9(Namespace):
-    class Buy(Command):
-        class Bought(DomainEvent):
-            pass
-
-        class OutOfStock(DomainEvent):
-            pass
-
-
-@on(Shop9.Buy)
-def shop9_partial(event: Shop9.Buy) -> Shop9.Buy.Bought:
-    return Shop9.Buy.Bought()
-
-
 class Shop10(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
@@ -241,6 +229,82 @@ def describe_Command_handle():
                             pass
 
                 assert Odd.Cmd.__command_handler__ is None
+
+    def describe_class_level_modifiers():
+        def when_invariants_set_as_class_attribute():
+            def it_evaluates_the_predicate_at_dispatch():
+                from langgraph_events import Invariant, InvariantViolated
+
+                class _BlockedInv(Invariant):
+                    pass
+
+                class _InlineInv(Namespace):
+                    class Cmd(Command):
+                        invariants: ClassVar = {_BlockedInv: lambda log: False}
+
+                        class Done(DomainEvent):
+                            pass
+
+                        def handle(self) -> _InlineInv.Cmd.Done:
+                            return _InlineInv.Cmd.Done()
+
+                graph = EventGraph([_InlineInv.Cmd])
+                log = graph.invoke(_InlineInv.Cmd())
+                assert log.has(InvariantViolated)
+                assert not log.has(_InlineInv.Cmd.Done)
+
+        def when_invariants_inherited_from_a_parent_command():
+            def it_evaluates_the_inherited_predicate():
+                from langgraph_events import Invariant, InvariantViolated
+
+                class _BlockedInheritedInv(Invariant):
+                    pass
+
+                class _InlineInherit(Namespace):
+                    class Parent(Command):
+                        invariants: ClassVar = {
+                            _BlockedInheritedInv: lambda log: False,
+                        }
+
+                        class Done(DomainEvent):
+                            pass
+
+                        def handle(self) -> _InlineInherit.Parent.Done:
+                            return _InlineInherit.Parent.Done()
+
+                    class Child(Parent):
+                        def handle(self) -> _InlineInherit.Parent.Done:
+                            return _InlineInherit.Parent.Done()
+
+                graph = EventGraph([_InlineInherit.Child])
+                log = graph.invoke(_InlineInherit.Child())
+                assert log.has(InvariantViolated)
+                assert not log.has(_InlineInherit.Parent.Done)
+
+        def when_raises_set_as_class_attribute():
+            def it_routes_the_exception_to_HandlerRaised():
+                from langgraph_events import HandlerRaised
+
+                class _BoomError(Exception):
+                    pass
+
+                class _InlineRaises(Namespace):
+                    class Cmd(Command):
+                        raises: ClassVar = (_BoomError,)
+
+                        class Done(DomainEvent):
+                            pass
+
+                        def handle(self) -> _InlineRaises.Cmd.Done:
+                            raise _BoomError("nope")
+
+                @on(HandlerRaised, exception=_BoomError)
+                def catch(event: HandlerRaised) -> None:
+                    return None
+
+                graph = EventGraph([_InlineRaises.Cmd, catch])
+                log = graph.invoke(_InlineRaises.Cmd())
+                assert log.has(HandlerRaised)
 
     def describe_EventGraph_registration():
 
@@ -674,15 +738,6 @@ def describe_Command_handle():
             def it_falls_back_to_outcomes_contract():
                 graph = EventGraph([Shop8.Buy])
                 assert graph.invoke(Shop8.Buy()).has(Shop8.Buy.Bought)
-
-        def when_external_handler_declares_narrow_return():
-            # External (@on) handlers are exempt — distributed outcome
-            # production (one handler → Placed, another reacts to
-            # InvariantViolated → Rejected) is a valid DDD pattern.
-
-            def it_does_not_enforce_coverage():
-                graph = EventGraph([shop9_partial])
-                assert graph.invoke(Shop9.Buy()).has(Shop9.Buy.Bought)
 
         def when_annotation_includes_None_in_union():
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from conftest import Order
 
@@ -18,9 +20,41 @@ from langgraph_events import (
     on,
 )
 
+# Snapshot Order.Place's original inline handler / invariants / raises so
+# the autouse fixture below can restore them after every test that mutates
+# them via ``_place_with``. ``invariants`` and ``raises`` are normally
+# absent on the class.
+_ORIGINAL_PLACE_HANDLER = Order.Place.__command_handler__
+_ORIGINAL_PLACE_HAS_INVARIANTS = "invariants" in Order.Place.__dict__
+_ORIGINAL_PLACE_INVARIANTS = Order.Place.__dict__.get("invariants")
+_ORIGINAL_PLACE_HAS_RAISES = "raises" in Order.Place.__dict__
+_ORIGINAL_PLACE_RAISES = Order.Place.__dict__.get("raises")
+
+
+@pytest.fixture(autouse=True)
+def _reset_place_invariants():
+    """Restore ``Order.Place`` after each test mutates its inline handler."""
+    yield
+    Order.Place.__command_handler__ = _ORIGINAL_PLACE_HANDLER
+    if _ORIGINAL_PLACE_HAS_INVARIANTS:
+        Order.Place.invariants = _ORIGINAL_PLACE_INVARIANTS
+    elif "invariants" in Order.Place.__dict__:
+        del Order.Place.invariants
+    if _ORIGINAL_PLACE_HAS_RAISES:
+        Order.Place.raises = _ORIGINAL_PLACE_RAISES
+    elif "raises" in Order.Place.__dict__:
+        del Order.Place.raises
+
 
 class CustomerBanned(IntegrationEvent):
     customer_id: str = ""
+
+
+class _Notified(IntegrationEvent):
+    """Namespace-level sink for tests that need a non-Command-private outcome
+    emitted from an external reactor (e.g. ``@on(InvariantViolated)``)."""
+
+    reason: str = ""
 
 
 class _PredicateError(Exception):
@@ -62,22 +96,38 @@ class Undeclared(Invariant):
 
 
 def _place_with(invariants, *, async_handler=False):
-    """Build a Place handler with the given invariants= dict. Reused across
-    tests to avoid repeating the @on/return boilerplate in every case -- each
-    test only varies the invariants argument (and occasionally async-ness)."""
+    """Set ``invariants`` on ``Order.Place`` and return the command class.
+
+    Each test in this module asserts handler name ``"place"`` and uses
+    ``Order.Place(...)`` / ``Order.Place.Placed`` directly, so the test
+    invariants are mutated onto ``Order.Place`` for the duration of the
+    test. The autouse ``_reset_place_invariants`` fixture (below) restores
+    the original state after each test.
+
+    ``async_handler=True`` swaps the inline ``handle`` for an async variant
+    on the same class; the fixture restores the sync version afterward.
+    """
+    Order.Place.invariants = invariants
     if async_handler:
 
-        @on(Order.Place, invariants=invariants)
-        async def place(event: Order.Place) -> Order.Place.Placed:
+        async def handle(
+            self,
+        ) -> Order.Place.Placed | Order.Place.Rejected:
             return Order.Place.Placed(order_id="o1")
 
-        return place
+        # Rename for handler-name assertions like ``v.handler == "place"``.
+        handle.__name__ = "place"
+        Order.Place.__command_handler__ = handle
+    else:
 
-    @on(Order.Place, invariants=invariants)
-    def place(event: Order.Place) -> Order.Place.Placed:
-        return Order.Place.Placed(order_id="o1")
+        def handle(
+            self,
+        ) -> Order.Place.Placed | Order.Place.Rejected:
+            return Order.Place.Placed(order_id="o1")
 
-    return place
+        handle.__name__ = "place"
+        Order.Place.__command_handler__ = handle
+    return Order.Place
 
 
 def describe_invariants():
@@ -163,24 +213,35 @@ def describe_invariants():
 
             def it_evaluates_invariant_before_handler_body():
                 # If the invariant fails, the handler body never runs, so its
-                # raised exception is never produced.
-                @on(
-                    Order.Place,
-                    raises=_PredicateError,
-                    invariants={Blocked: lambda log: False},
-                )
-                def place(event: Order.Place) -> Order.Place.Placed:
+                # raised exception is never produced. Inline handle on
+                # Order.Place declares both invariants and raises; an
+                # external HandlerRaised reactor records whether it fired.
+                seen: list[str] = []
+
+                Order.Place.invariants = {Blocked: lambda log: False}
+                Order.Place.raises = (_PredicateError,)
+
+                def handle(
+                    self,
+                ) -> Order.Place.Placed | Order.Place.Rejected:
                     raise _PredicateError("would have run")
 
-                @on(HandlerRaised, exception=_PredicateError)
-                def caught(event: HandlerRaised) -> Order.Place.Rejected:
-                    return Order.Place.Rejected(reason="should not see this")
+                handle.__name__ = "place"
+                Order.Place.__command_handler__ = handle
 
-                graph = EventGraph([place, caught])
+                @on(HandlerRaised, exception=_PredicateError)
+                def caught(event: HandlerRaised) -> None:
+                    seen.append("fired")
+
+                graph = EventGraph([Order.Place, caught])
                 log = graph.invoke(Order.Place(customer_id="c1"))
                 assert log.has(InvariantViolated)
                 assert not log.has(HandlerRaised)
-                assert not log.has(Order.Place.Rejected)
+                # Recovery reactor never fired because invariant short-circuited.
+                assert seen == []
+                # Cleanup raises attribute the autouse fixture doesn't track.
+                if "raises" in Order.Place.__dict__:
+                    del Order.Place.raises
 
         def when_InvariantViolated_subscribed():
 
@@ -188,15 +249,15 @@ def describe_invariants():
                 place = _place_with({Blocked: lambda log: False})
 
                 @on(InvariantViolated)
-                def react(event: InvariantViolated) -> Order.Place.Rejected:
-                    return Order.Place.Rejected(reason=type(event.invariant).__name__)
+                def react(event: InvariantViolated) -> _Notified:
+                    return _Notified(reason=type(event.invariant).__name__)
 
                 graph = EventGraph([place, react])
                 log = graph.invoke(Order.Place(customer_id="c1"))
-                assert log.has(Order.Place.Rejected)
-                rejected = log.latest(Order.Place.Rejected)
-                assert rejected is not None
-                assert rejected.reason == "Blocked"
+                assert log.has(_Notified)
+                notified = log.latest(_Notified)
+                assert notified is not None
+                assert notified.reason == "Blocked"
 
         def when_InvariantViolated_field_matcher_on_invariant():
 
@@ -357,27 +418,78 @@ class AlwaysHolds(Invariant):
     pass
 
 
+_ORIGINAL_DEPOSIT_HANDLER = Ledger.Deposit.__command_handler__
+_ORIGINAL_DEPOSIT_HAS_INVARIANTS = "invariants" in Ledger.Deposit.__dict__
+_ORIGINAL_DEPOSIT_INVARIANTS = Ledger.Deposit.__dict__.get("invariants")
+
+
+@pytest.fixture(autouse=True)
+def _reset_deposit_invariants():
+    """Restore ``Ledger.Deposit`` after each test mutates its inline handler."""
+    yield
+    Ledger.Deposit.__command_handler__ = _ORIGINAL_DEPOSIT_HANDLER
+    if _ORIGINAL_DEPOSIT_HAS_INVARIANTS:
+        Ledger.Deposit.invariants = _ORIGINAL_DEPOSIT_INVARIANTS
+    elif "invariants" in Ledger.Deposit.__dict__:
+        del Ledger.Deposit.invariants
+
+
 def _deposit_with(invariants, *, async_handler=False):
-    """Build a Ledger.Deposit handler with the given invariants= dict."""
+    """Set ``invariants`` on ``Ledger.Deposit`` and return the command class.
+
+    Same pattern as ``_place_with``: tests assert handler name ``"deposit"``
+    and use ``Ledger.Deposit`` directly, so we mutate the class and rely on
+    the autouse fixture above to restore the original state.
+    """
+    Ledger.Deposit.invariants = invariants
     if async_handler:
 
-        @on(Ledger.Deposit, invariants=invariants)
-        async def deposit(event: Ledger.Deposit) -> Ledger.Deposit.Deposited:
-            return Ledger.Deposit.Deposited(amount=event.amount)
+        async def handle(self) -> Ledger.Deposit.Deposited:
+            return Ledger.Deposit.Deposited(amount=self.amount)
 
-        return deposit
+        handle.__name__ = "deposit"
+        Ledger.Deposit.__command_handler__ = handle
+    else:
 
-    @on(Ledger.Deposit, invariants=invariants)
-    def deposit(event: Ledger.Deposit) -> Ledger.Deposit.Deposited:
-        return Ledger.Deposit.Deposited(amount=event.amount)
+        def handle(self) -> Ledger.Deposit.Deposited:
+            return Ledger.Deposit.Deposited(amount=self.amount)
 
-    return deposit
+        handle.__name__ = "deposit"
+        Ledger.Deposit.__command_handler__ = handle
+    return Ledger.Deposit
 
 
 def _total_under(limit):
     return lambda log: (
         sum(e.amount for e in log.filter(Ledger.Deposit.Deposited)) < limit
     )
+
+
+def _bulk_total_under(limit):
+    return lambda log: sum(e.amount for e in log.filter(_BulkLedger.Bulk.Each)) < limit
+
+
+class _BulkLedger(Namespace):
+    """One-shot Command whose inline handle scatters its own nested outcomes;
+    used by when_handler_scatters_violating_buffer to verify that post-check
+    rollback drops the entire scatter expansion."""
+
+    class Bulk(Command):
+        amount: int = 0
+
+        invariants: ClassVar = {OverBudget: _bulk_total_under(100)}
+
+        class Each(DomainEvent):
+            amount: int = 0
+
+        def handle(self) -> Scatter[_BulkLedger.Bulk.Each]:
+            return Scatter(
+                [
+                    _BulkLedger.Bulk.Each(amount=40),
+                    _BulkLedger.Bulk.Each(amount=40),
+                    _BulkLedger.Bulk.Each(amount=40),
+                ]
+            )
 
 
 def describe_post_command_invariant_check():
@@ -432,36 +544,25 @@ def describe_post_command_invariant_check():
             assert not log.has(InvariantViolated)
 
     def when_handler_scatters_violating_buffer():
+        # Inline Cmd.handle() may scatter its own nested outcomes — each
+        # Scatter element must satisfy the same Command-privacy rule. The
+        # _BulkLedger Command is defined at module level so the inline
+        # handle's return-type annotation resolves at graph build.
 
         def _build_graph():
-            @on(
-                Ledger.Deposit,
-                invariants={OverBudget: _total_under(100)},
-            )
-            def bulk_deposit(event: Ledger.Deposit) -> Scatter:
-                # One Deposit command fans out into three Deposited events;
-                # combined total 120 exceeds the limit.
-                return Scatter(
-                    [
-                        Ledger.Deposit.Deposited(amount=40),
-                        Ledger.Deposit.Deposited(amount=40),
-                        Ledger.Deposit.Deposited(amount=40),
-                    ]
-                )
-
-            return EventGraph([bulk_deposit])
+            return EventGraph([_BulkLedger.Bulk])
 
         def it_drops_the_full_scatter_expansion():
-            log = _build_graph().invoke(Ledger.Deposit(amount=0))
-            assert log.count(Ledger.Deposit.Deposited) == 0
+            log = _build_graph().invoke(_BulkLedger.Bulk(amount=0))
+            assert log.count(_BulkLedger.Bulk.Each) == 0
             assert log.count(InvariantViolated) == 1
 
         def it_lists_all_scatter_events_in_would_emit():
-            log = _build_graph().invoke(Ledger.Deposit(amount=0))
+            log = _build_graph().invoke(_BulkLedger.Bulk(amount=0))
             v = log.latest(InvariantViolated)
             assert v is not None
             assert len(v.would_emit) == 3
-            assert all(isinstance(e, Ledger.Deposit.Deposited) for e in v.would_emit)
+            assert all(isinstance(e, _BulkLedger.Bulk.Each) for e in v.would_emit)
 
     def when_handler_returns_None():
 
@@ -472,11 +573,18 @@ def describe_post_command_invariant_check():
                 calls.append("called")
                 return True
 
-            @on(Ledger.Deposit, invariants={AlwaysHolds: predicate})
-            def noop(event: Ledger.Deposit) -> None:
+            Ledger.Deposit.invariants = {AlwaysHolds: predicate}
+
+            # No return annotation — Outcomes contract falls back to the
+            # command's nested DomainEvents, but returning ``None`` is
+            # always allowed (side-effect-only handler).
+            def handle(self):
                 return None
 
-            graph = EventGraph([noop])
+            handle.__name__ = "noop"
+            Ledger.Deposit.__command_handler__ = handle
+
+            graph = EventGraph([Ledger.Deposit])
             graph.invoke(Ledger.Deposit(amount=10))
             # Only the pre-check ran (1 call).  Post-check bypassed because
             # the emitted buffer was empty.
@@ -488,11 +596,7 @@ def describe_post_command_invariant_check():
             # Plain handler with no invariants — post-check must be a no-op.
             # Verified indirectly: handler runs and commits normally with no
             # violation events ever emitted.
-            @on(Ledger.Deposit)
-            def deposit(event: Ledger.Deposit) -> Ledger.Deposit.Deposited:
-                return Ledger.Deposit.Deposited(amount=event.amount)
-
-            graph = EventGraph([deposit])
+            graph = EventGraph([_deposit_with({})])
             log = graph.invoke(Ledger.Deposit(amount=999))
             assert log.count(Ledger.Deposit.Deposited) == 1
             assert not log.has(InvariantViolated)

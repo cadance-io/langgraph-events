@@ -70,6 +70,21 @@ class Task(Namespace, Auditable):
             def context_part(self) -> str:
                 return f"[Research Result] {self.findings}"
 
+        async def handle(self) -> Task.Research.Completed:
+            """Research specialist — answers research queries."""
+            messages = [
+                SystemMessage(
+                    content=(
+                        "You are a research specialist. Provide clear, concise "
+                        "findings about the topic. Focus on key facts, use "
+                        "cases, and practical details."
+                    )
+                ),
+                HumanMessage(content=self.query),
+            ]
+            response = await researcher_llm.ainvoke(messages)
+            return Task.Research.Completed(findings=response.content)
+
     class Code(Command, Auditable):
         spec: str = ""
         context: str = ""
@@ -79,6 +94,24 @@ class Task(Namespace, Auditable):
 
             def context_part(self) -> str:
                 return f"[Code Result]\n{self.code}"
+
+        async def handle(self) -> Task.Code.Produced:
+            """Coding specialist — writes code based on specs."""
+            prompt = self.spec
+            if self.context:
+                prompt = f"Context:\n{self.context}\n\nTask:\n{self.spec}"
+            messages = [
+                SystemMessage(
+                    content=(
+                        "You are an expert Python programmer. Write clean, "
+                        "working code based on the specification. Include brief "
+                        "comments. Return only the code, no explanation."
+                    )
+                ),
+                HumanMessage(content=prompt),
+            ]
+            response = await coder_llm.ainvoke(messages)
+            return Task.Code.Produced(code=response.content)
 
     class Finalized(DomainEvent, Auditable):
         """Final synthesized answer — terminal domain fact."""
@@ -188,50 +221,13 @@ async def supervisor(
         return Task.Finalized(answer=tc["args"]["answer"])
 
 
-@on(Task.Research)
-async def researcher(event: Task.Research) -> Task.Research.Completed:
-    """Research specialist — answers research queries."""
-    messages = [
-        SystemMessage(
-            content=(
-                "You are a research specialist. Provide clear, concise findings "
-                "about the topic. Focus on key facts, use cases, and practical details."
-            )
-        ),
-        HumanMessage(content=event.query),
-    ]
-    response = await researcher_llm.ainvoke(messages)
-    return Task.Research.Completed(findings=response.content)
-
-
-@on(Task.Code)
-async def coder(event: Task.Code) -> Task.Code.Produced:
-    """Coding specialist — writes code based on specs."""
-    prompt = event.spec
-    if event.context:
-        prompt = f"Context:\n{event.context}\n\nTask:\n{event.spec}"
-
-    messages = [
-        SystemMessage(
-            content=(
-                "You are an expert Python programmer. Write clean, working code "
-                "based on the specification. Include brief comments. "
-                "Return only the code, no explanation."
-            )
-        ),
-        HumanMessage(content=prompt),
-    ]
-    response = await coder_llm.ainvoke(messages)
-    return Task.Code.Produced(code=response.content)
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 graph = EventGraph(
-    [supervisor, researcher, coder, audit_trail],
+    [supervisor, Task.Research, Task.Code, audit_trail],
     reducers=[context_reducer],
 )
 
