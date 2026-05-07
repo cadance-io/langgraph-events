@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-07
+
 ### Added
 - **CommandPrivacyError**: new exported exception class (subclass of `TypeError`). Raised at `EventGraph` construction when a handler emits a `DomainEvent` it isn't allowed to emit. Two symmetric rules enforce that *outcomes nested inside a `Command` are private to that Command's inline `handle()`*:
   1. An inline `Command.handle()` may only return events nested under that same Command (or a parent Command, via inheritance) — not sibling/namespace-level events, not another Command's private outcomes.
@@ -172,7 +174,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/cadance-io/langgraph-events/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/cadance-io/langgraph-events/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cadance-io/langgraph-events/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/cadance-io/langgraph-events/compare/v0.6.1...v0.6.2
