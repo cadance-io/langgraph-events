@@ -1,6 +1,7 @@
 """Integration tests for EventGraph — the full event-driven graph engine."""
 
 import asyncio
+import typing
 import warnings
 
 import pytest
@@ -4130,7 +4131,92 @@ def describe_OrphanedEventWarning():
             with pytest.warns(OrphanedEventWarning, match="ScatterOrphan"):
                 EventGraph([scatter_producer])
 
+        def it_warns_for_each_orphan_in_scatter_union():
+            class UnionScatterA(IntegrationEvent):
+                pass
+
+            class UnionScatterB(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def scatter_producer(
+                event: Started,
+            ) -> Scatter[UnionScatterA | UnionScatterB]:
+                return Scatter([UnionScatterA()])
+
+            with pytest.warns(
+                OrphanedEventWarning, match=r"UnionScatterA.*UnionScatterB"
+            ):
+                EventGraph([scatter_producer])
+
+        def it_warns_for_each_orphan_in_scatter_typing_union():
+            # Same behavior as ``Scatter[A | B]`` for the legacy ``typing.Union``
+            # spelling — exercises the helper's ``typing.Union`` branch.
+            class TypingUnionScatterA(IntegrationEvent):
+                pass
+
+            class TypingUnionScatterB(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def scatter_producer(
+                event: Started,
+            ) -> Scatter[typing.Union[TypingUnionScatterA, TypingUnionScatterB]]:  # noqa: UP007
+                return Scatter([TypingUnionScatterA()])
+
+            with pytest.warns(
+                OrphanedEventWarning,
+                match=r"TypingUnionScatterA.*TypingUnionScatterB",
+            ):
+                EventGraph([scatter_producer])
+
+        def it_warns_for_each_orphan_in_union_of_scatters():
+            # ``Scatter[A] | Scatter[B]`` — the original workaround form, parsed
+            # at the outer ``_parse_return_types`` loop rather than the helper.
+            class OuterScatterA(IntegrationEvent):
+                pass
+
+            class OuterScatterB(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def scatter_producer(
+                event: Started,
+            ) -> Scatter[OuterScatterA] | Scatter[OuterScatterB]:
+                return Scatter([OuterScatterA()])
+
+            with pytest.warns(
+                OrphanedEventWarning, match=r"OuterScatterA.*OuterScatterB"
+            ):
+                EventGraph([scatter_producer])
+
     def when_not_orphaned():
+
+        def when_all_scatter_union_members_subscribed():
+            def it_does_not_warn():
+                class SubscribedScatterA(IntegrationEvent):
+                    pass
+
+                class SubscribedScatterB(IntegrationEvent):
+                    pass
+
+                @on(Started)
+                def scatter_producer(
+                    event: Started,
+                ) -> Scatter[SubscribedScatterA | SubscribedScatterB]:
+                    return Scatter([SubscribedScatterA()])
+
+                @on(SubscribedScatterA)
+                def consume_a(event: SubscribedScatterA):
+                    pass
+
+                @on(SubscribedScatterB)
+                def consume_b(event: SubscribedScatterB):
+                    pass
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error", OrphanedEventWarning)
+                    EventGraph([scatter_producer, consume_a, consume_b])
 
         def it_does_not_warn_for_subscribed_via_inheritance():
             class Base(IntegrationEvent):
