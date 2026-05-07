@@ -394,7 +394,7 @@ def describe_Command_handle():
         def when_command_class_has_no_handle():
 
             def it_raises_TypeError_at_graph_construction():
-                with pytest.raises(TypeError, match=r"no `handle` method"):
+                with pytest.raises(TypeError, match=r"no inline handler"):
                     EventGraph([Shop2.NoHandler])
 
         def when_mixing_command_classes_and_at_on_functions():

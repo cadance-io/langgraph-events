@@ -298,17 +298,16 @@ def _inherits_namespace(cls: type) -> bool:
 
 
 def _validate_handle_signature(cls: type, handle: Any) -> None:
-    """Check that an inline ``handle`` takes ``self`` as its first parameter.
+    """Check that the inline handler takes ``self`` as its first parameter.
 
     Reducer / log / config / store params are validated later at graph
     construction, where the reducer names are known.
     """
-    import inspect  # noqa: PLC0415
-
+    name = getattr(handle, "__name__", "handler")
     if isinstance(handle, (staticmethod, classmethod)):
         raise TypeError(
-            f"Command {cls.__name__!r}: `handle` must be a regular method "
-            f"(no @staticmethod / @classmethod)."
+            f"Command {cls.__name__!r}: inline handler {name!r} must be a "
+            f"regular method (no @staticmethod / @classmethod)."
         )
     try:
         sig = inspect.signature(handle)
@@ -317,8 +316,8 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
     params = list(sig.parameters.values())
     if not params or params[0].name != "self":
         raise TypeError(
-            f"Command {cls.__name__!r}: `handle` must take `self` as its "
-            f"first parameter."
+            f"Command {cls.__name__!r}: inline handler {name!r} must take "
+            f"`self` as its first parameter."
         )
 
 

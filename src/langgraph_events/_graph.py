@@ -270,11 +270,10 @@ def _compute_return_contract(
 
 
 def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None:
-    """For inline ``handle`` handlers with an explicit return annotation,
-    require the annotation to cover every nested ``DomainEvent`` of the
-    owning ``Command``.
+    """For inline handlers with an explicit return annotation, require the
+    annotation to cover every nested ``DomainEvent`` of the owning ``Command``.
 
-    Inline ``handle`` is the only producer of a Command's nested outcomes
+    The inline handler is the only producer of a Command's nested outcomes
     (see :class:`CommandPrivacyError`); dropping an outcome from its
     annotation is almost always a mistake.
 
@@ -296,10 +295,11 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
         return
     declared = " | ".join(t.__name__ for t in covered) or "(no types)"
     missing_names = ", ".join(o.__name__ for o in missing)
+    handler_name = getattr(meta.fn, "__name__", "handler")
     raise TypeError(
-        f"Inline `handle` on {cmd.__qualname__} declares return type "
-        f"`{declared}` but does not cover outcome(s): {missing_names}. "
-        f"Add them to the annotation (e.g. `-> "
+        f"Inline handler {handler_name!r} on {cmd.__qualname__} declares "
+        f"return type `{declared}` but does not cover outcome(s): "
+        f"{missing_names}. Add them to the annotation (e.g. `-> "
         f"{' | '.join(o.__name__ for o in nested_outcomes)}`) or drop "
         f"the annotation to let Outcomes drive the contract."
     )
@@ -421,14 +421,14 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
 def _expand_command_handlers(
     handlers: list[Any],
 ) -> list[Callable[..., Any]]:
-    """Replace ``Command`` subclasses with their inline ``handle`` functions.
+    """Replace ``Command`` subclasses with their inline handler functions.
 
     Each substituted function is stamped via ``on(cls, raises=..., invariants=...)
     (fn)`` so that ``extract_handler_meta`` sees it like any other
     ``@on``-subscribed handler. ``raises``/``invariants`` are read from
-    class-level attributes on the Command (since inline ``handle`` has no
+    class-level attributes on the Command (since inline handlers have no
     decorator slot for them). Raises ``TypeError`` if a Command subclass has
-    no ``handle``.
+    no inline handler.
     """
     expanded: list[Callable[..., Any]] = []
     for h in handlers:
@@ -436,16 +436,19 @@ def _expand_command_handlers(
             fn = getattr(h, "__command_handler__", None)
             if fn is None:
                 raise TypeError(
-                    f"Command {h.__qualname__} has no `handle` method. "
-                    f"Define `handle` inside the command class."
+                    f"Command {h.__qualname__} has no inline handler. "
+                    f"Define one public method inside the command class "
+                    f"(any name — `handle`, `place`, `ship`, …)."
                 )
             existing = getattr(fn, "_inline_command", None)
             if existing is not None and existing is not h:
+                handler_name = getattr(fn, "__name__", "<handler>")
                 raise TypeError(
-                    f"Command {h.__qualname__}'s `handle` is already bound "
-                    f"to {existing.__qualname__}. This happens if you alias "
-                    f"`handle` across Command classes — define each "
-                    f"Command's `handle` in its own class body."
+                    f"Command {h.__qualname__}'s inline handler "
+                    f"({handler_name!r}) is already bound to "
+                    f"{existing.__qualname__}. This happens if you alias the "
+                    f"same function across Command classes — define each "
+                    f"Command's handler in its own class body."
                 )
             cmd_raises = getattr(h, "raises", ())
             cmd_invariants = getattr(h, "invariants", None)
@@ -818,9 +821,9 @@ class EventGraph:
         """Build an ``EventGraph`` from domains' inline command handlers.
 
         Walks each domain's class namespace and registers every ``Command``
-        that defines a ``handle`` method. Commands without ``handle`` are
-        silently skipped — register those via the ``handlers=`` kwarg or
-        ``EventGraph([...])`` directly, which errors on missing ``handle``.
+        that defines an inline handler. Commands without one are silently
+        skipped — register those via the ``handlers=`` kwarg or
+        ``EventGraph([...])`` directly, which errors on missing handlers.
 
         The ``handlers=`` kwarg is appended as-is — useful for reaction
         handlers subscribed to ``DomainEvent``s, ``HandlerRaised``,
