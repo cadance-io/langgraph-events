@@ -471,7 +471,7 @@ class _HubScatter(Namespace):
 @on(_HubScatter.ScatterTrigger)
 def hub_scatter(
     event: _HubScatter.ScatterTrigger,
-) -> Scatter[_HubScatter.S1] | Scatter[_HubScatter.S2] | Scatter[_HubScatter.S3]:
+) -> Scatter[_HubScatter.S1 | _HubScatter.S2 | _HubScatter.S3]:
     return Scatter([_HubScatter.S1()])
 
 

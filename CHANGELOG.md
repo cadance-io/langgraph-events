@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Scatter return-type parser**: `Scatter[A | B]` now extracts both `A` and `B` as scatter targets, matching the behavior of the equivalent `Scatter[A] | Scatter[B]` form. Previously the Union argument was rejected by an `isinstance(..., type)` check and silently dropped, so `info.scatter_types` came back empty — orphan-warning detection and choreography diagrams missed those targets entirely. (closes #66)
+
 ## [0.9.0] - 2026-05-07
 
 ### Added

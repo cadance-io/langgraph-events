@@ -4130,6 +4130,24 @@ def describe_OrphanedEventWarning():
             with pytest.warns(OrphanedEventWarning, match="ScatterOrphan"):
                 EventGraph([scatter_producer])
 
+        def it_warns_for_each_orphan_in_scatter_union():
+            class UnionScatterA(IntegrationEvent):
+                pass
+
+            class UnionScatterB(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def scatter_producer(
+                event: Started,
+            ) -> Scatter[UnionScatterA | UnionScatterB]:
+                return Scatter([UnionScatterA()])
+
+            with pytest.warns(
+                OrphanedEventWarning, match=r"UnionScatterA.*UnionScatterB"
+            ):
+                EventGraph([scatter_producer])
+
     def when_not_orphaned():
 
         def it_does_not_warn_for_subscribed_via_inheritance():

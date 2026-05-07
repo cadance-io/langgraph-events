@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
+import types
 import typing
 import warnings
 from collections.abc import Mapping as _Mapping
@@ -99,6 +100,24 @@ class ReturnContract(NamedTuple):
     """Human-readable origin of the contract, used in error messages."""
 
 
+def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
+    """Extract Event types from a parameterized ``Scatter[X]`` alias.
+
+    Unpacks Union/UnionType members so ``Scatter[A | B]`` behaves like
+    ``Scatter[A] | Scatter[B]`` for topology parsing.
+    """
+    out: list[type[Event]] = []
+    for arg in typing.get_args(scatter_alias):
+        if typing.get_origin(arg) in (typing.Union, types.UnionType):
+            members = typing.get_args(arg)
+        else:
+            members = (arg,)
+        for member in members:
+            if isinstance(member, type) and issubclass(member, Event):
+                out.append(member)
+    return out
+
+
 def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     """Parse handler return annotation into a ``ReturnInfo``."""
     try:
@@ -134,10 +153,7 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
         if arg is Scatter:
             has_scatter = True
         elif typing.get_origin(arg) is Scatter:
-            # Parameterized Scatter[X] — extract event types
-            for scatter_arg in typing.get_args(arg):
-                if isinstance(scatter_arg, type) and issubclass(scatter_arg, Event):
-                    scatter_types.append(scatter_arg)
+            scatter_types.extend(_scatter_event_types(arg))
         elif isinstance(arg, type) and issubclass(arg, Event):
             if issubclass(arg, Interrupted):
                 has_interrupted = True
