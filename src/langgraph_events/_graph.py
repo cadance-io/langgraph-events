@@ -104,7 +104,9 @@ def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
     """Extract Event types from a parameterized ``Scatter[X]`` alias.
 
     Unpacks Union/UnionType members so ``Scatter[A | B]`` behaves like
-    ``Scatter[A] | Scatter[B]`` for topology parsing.
+    ``Scatter[A] | Scatter[B]`` for topology parsing. Non-Event members
+    (e.g. ``None`` from ``Scatter[A | None]``) are silently dropped — only
+    Event subclasses participate in topology.
     """
     out: list[type[Event]] = []
     for arg in typing.get_args(scatter_alias):
