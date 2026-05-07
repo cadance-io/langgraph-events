@@ -104,8 +104,15 @@ def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
     Command fire after the enclosing Namespace finalizes. ``namespace_cls``
     stays fixed across recursion — it is always the outermost Namespace
     whose ``__init_subclass__`` triggered the drain.
+
+    Skips the ``Outcomes`` alias on Commands — for single-outcome Commands
+    it points at the same class object as a directly-nested DomainEvent,
+    which would re-visit (currently a no-op via ``pop``, but keeps the
+    invariant explicit if a future visitor mutates per visit).
     """
-    for attr in container.__dict__.values():
+    for name, attr in container.__dict__.items():
+        if name == "Outcomes":
+            continue
         if not isinstance(attr, type) or not issubclass(attr, Event):
             continue
         callbacks = _NAMESPACE_FINALIZE_CALLBACKS.pop(attr, None)
@@ -114,6 +121,21 @@ def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
                 cb(attr, namespace_cls)
         if issubclass(attr, Command):
             _drain_namespace_finalize(attr, namespace_cls)
+
+
+def _iter_nested_outcomes(cmd: type) -> list[type[DomainEvent]]:
+    """``DomainEvent`` classes directly nested under *cmd*.
+
+    Excludes the synthesized or user-declared ``Outcomes`` alias — for
+    single-outcome Commands it shares the same class object as the real
+    nested outcome, and for unions it is a ``UnionType`` not a class.
+    Single source of truth for outcome enumeration.
+    """
+    return [
+        t
+        for name, t in cmd.__dict__.items()
+        if name != "Outcomes" and isinstance(t, type) and issubclass(t, DomainEvent)
+    ]
 
 
 class Namespace:
@@ -189,11 +211,7 @@ def _attach_command_outcomes(namespace_cls: type) -> None:
     for cmd in namespace_cls.__dict__.values():
         if not (isinstance(cmd, type) and issubclass(cmd, Command)):
             continue
-        outcomes = [
-            x
-            for x in cmd.__dict__.values()
-            if isinstance(x, type) and issubclass(x, DomainEvent)
-        ]
+        outcomes = _iter_nested_outcomes(cmd)
         if not outcomes:
             continue
 

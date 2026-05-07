@@ -25,6 +25,7 @@ from langgraph_events._event import (
     InvariantViolated,
     Namespace,
     Scatter,
+    _iter_nested_outcomes,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import (
@@ -282,16 +283,7 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     cmd = getattr(meta.fn, "_inline_command", None)
     if cmd is None or not info.has_annotation:
         return
-    # Skip the synthesized/declared `Outcomes` alias — for single-outcome
-    # Commands it points at the same class object as the nested DomainEvent.
-    nested_outcomes = [
-        t
-        for name, t in cmd.__dict__.items()
-        if name != "Outcomes"
-        and isinstance(t, type)
-        and issubclass(t, Event)
-        and issubclass(t, DomainEvent)
-    ]
+    nested_outcomes = _iter_nested_outcomes(cmd)
     if not nested_outcomes:
         return
     handler_name = getattr(meta.fn, "__name__", "handler")

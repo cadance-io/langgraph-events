@@ -123,6 +123,24 @@ class _PrivInherit(Namespace):
             return _PrivInherit.Parent.Done()
 
 
+class _PrivInheritAdd(Namespace):
+    """Child Command adds its own private outcome alongside the parent's."""
+
+    class Parent(Command):
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _PrivInheritAdd.Parent.Done:
+            return _PrivInheritAdd.Parent.Done()
+
+    class Child(Parent):
+        class Other(DomainEvent):
+            pass
+
+        def handle(self) -> _PrivInheritAdd.Child.Other:
+            return _PrivInheritAdd.Child.Other()
+
+
 class _PrivLeaky(Namespace):
     """Reactor that emits a Command-private event from outside its owner."""
 
@@ -189,6 +207,13 @@ def describe_command_privacy():
             def it_builds_the_graph():
                 EventGraph([_PrivInherit.Child])  # no raise
 
+        def when_child_command_adds_a_new_outcome():
+            def it_admits_the_new_outcome():
+                EventGraph([_PrivInheritAdd.Child])  # no raise
+
+            def it_synthesises_a_fresh_outcomes_alias():
+                assert _PrivInheritAdd.Child.Outcomes is _PrivInheritAdd.Child.Other
+
     def describe_reactor():
         def when_reactor_returns_a_command_private_event():
             def it_raises_CommandPrivacyError():
@@ -214,6 +239,15 @@ def describe_command_privacy():
                 ):
                     EventGraph([_PrivLeaky.Persist, burst])
 
+        def when_reactor_returns_a_namespace_level_event():
+            def it_builds_the_graph():
+                @on(_PrivShared.Note)
+                def echo(event: _PrivShared.Note) -> _PrivShared.Reminder:
+                    return _PrivShared.Reminder()
+
+                EventGraph([_PrivShared.Persist, echo])  # no raise
+
+    def describe_runtime_enforcement():
         def when_reactor_scatters_a_Command_private_event_via_bare_Scatter():
             # Bare ``-> Scatter`` is a legitimate annotation when the
             # handler scatters non-private events, so we don't reject it at
@@ -230,14 +264,6 @@ def describe_command_privacy():
                     match=r"private to _PrivLeaky\.Persist",
                 ):
                     graph.invoke(_PrivLeaky.Trigger())
-
-        def when_reactor_returns_a_namespace_level_event():
-            def it_builds_the_graph():
-                @on(_PrivShared.Note)
-                def echo(event: _PrivShared.Note) -> _PrivShared.Reminder:
-                    return _PrivShared.Reminder()
-
-                EventGraph([_PrivShared.Persist, echo])  # no raise
 
     def describe_error():
         def it_subclasses_TypeError():
