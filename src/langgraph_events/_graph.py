@@ -282,20 +282,33 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     cmd = getattr(meta.fn, "_inline_command", None)
     if cmd is None or not info.has_annotation:
         return
+    # Skip the synthesized/declared `Outcomes` alias — for single-outcome
+    # Commands it points at the same class object as the nested DomainEvent.
     nested_outcomes = [
         t
-        for t in cmd.__dict__.values()
-        if isinstance(t, type) and issubclass(t, Event) and issubclass(t, DomainEvent)
+        for name, t in cmd.__dict__.items()
+        if name != "Outcomes"
+        and isinstance(t, type)
+        and issubclass(t, Event)
+        and issubclass(t, DomainEvent)
     ]
     if not nested_outcomes:
         return
+    handler_name = getattr(meta.fn, "__name__", "handler")
+    if info.has_scatter:
+        example = " | ".join(o.__name__ for o in nested_outcomes)
+        raise TypeError(
+            f"Inline handler {handler_name!r} on {cmd.__qualname__} uses bare "
+            f"`Scatter`; this is not allowed on a Command's inline handler. "
+            f"Use `Scatter[{example}]` — or drop the annotation to let "
+            f"`Outcomes` drive the contract."
+        )
     covered = tuple(info.event_types) + tuple(info.scatter_types)
     missing = [o for o in nested_outcomes if not any(issubclass(c, o) for c in covered)]
     if not missing:
         return
     declared = " | ".join(t.__name__ for t in covered) or "(no types)"
     missing_names = ", ".join(o.__name__ for o in missing)
-    handler_name = getattr(meta.fn, "__name__", "handler")
     raise TypeError(
         f"Inline handler {handler_name!r} on {cmd.__qualname__} declares "
         f"return type `{declared}` but does not cover outcome(s): "

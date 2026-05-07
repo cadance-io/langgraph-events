@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import ClassVar
 
 import pytest
@@ -13,6 +14,7 @@ from langgraph_events import (
     EventLog,
     Namespace,
     Reducer,
+    Scatter,
     on,
 )
 
@@ -145,6 +147,28 @@ class Shop10(Namespace):
 
         def handle(self) -> Shop10.Buy.Bought | Shop10.Buy.OutOfStock | None:
             return None
+
+
+class Shop11(Namespace):
+    class Other(DomainEvent):
+        pass
+
+    class Buy(Command):
+        class Done(DomainEvent):
+            pass
+
+        # Annotates a sibling event so the coverage check runs and Done is missing.
+        def handle(self) -> Shop11.Other:
+            return Shop11.Buy.Done()
+
+
+class Shop12(Namespace):
+    class Buy(Command):
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> Scatter:
+            return Scatter([])
 
 
 # Module-level fixtures for describe_handle_aliased_across_commands.
@@ -802,6 +826,22 @@ def describe_Command_handle():
 
             def it_accepts_if_all_outcomes_present():
                 EventGraph([Shop10.Buy])
+
+        def when_single_outcome_command_misses_annotation():
+
+            def it_lists_the_outcome_only_once():
+                with pytest.raises(TypeError) as exc:
+                    EventGraph([Shop11.Buy])
+                msg = str(exc.value)
+                assert "Done, Done" not in msg
+                assert re.search(r"does not cover outcome\(s\): Done\b", msg)
+
+        def when_inline_handle_uses_bare_scatter():
+
+            def it_raises():
+                with pytest.raises(TypeError, match=r"bare `Scatter`") as exc:
+                    EventGraph([Shop12.Buy])
+                assert "Scatter[Done]" in str(exc.value)
 
 
 def describe_handle_aliased_across_commands():

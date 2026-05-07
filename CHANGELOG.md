@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `@on(Cmd) -> Cmd.Outcome` patterns are no longer allowed. A Command's nested outcomes must be produced by `Cmd.handle()` only. Tests, examples, and docs that previously relied on the external `@on(Cmd) -> Cmd.Outcome` form now use inline `handle()` (with class-level `invariants` / `raises` where needed). Recovery patterns that produced nested outcomes from outside (`@on(InvariantViolated) -> Cmd.Rejected`, `@on(HandlerRaised) -> Cmd.Rejected`) emit namespace-level events instead — for example, `Order.Place.Rejected` becomes `Order.Rejected` in the canonical `examples/order.py`.
 
+### Fixed
+- **Inline-handle outcome-coverage messages**: single-outcome Commands no longer report duplicate outcome names (`Done, Done`) in the missing-outcomes error — the synthesized `Outcomes` alias is excluded from the walk over nested DomainEvents. Bare `-> Scatter` on a Command's inline handler is now rejected up front with a message pointing at `Scatter[…]` or dropping the annotation, instead of falling through to a confusing `(no types)` coverage error. (closes #73)
+
 ## [0.8.0] - 2026-05-05
 
 ### Fixed
