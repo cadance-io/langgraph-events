@@ -69,8 +69,8 @@ graph LR
     Produced -->|supervisor| Research
     Produced -->|supervisor| Code
     Produced -->|supervisor| Finalized
-    Research -->|researcher| Completed
-    Code -->|coder| Produced
+    Research -->|handle| Completed
+    Code -->|handle_2| Produced
 %% Side-effect handlers: audit_trail (Auditable)
 ```
 
@@ -80,9 +80,9 @@ graph LR
 Namespaces:
   Task
     Command: Run  (handlers: supervisor)
-    Command: Research  (handlers: researcher)
+    Command: Research  (handlers: handle)
       → Completed
-    Command: Code  (handlers: coder)
+    Command: Code  (handlers: handle_2)
       → Produced
     Event: Finalized
 Policies:

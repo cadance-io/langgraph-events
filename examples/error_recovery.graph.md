@@ -55,18 +55,14 @@ graph LR
         Answered(Answered):::devt
         Ask{{Ask}}:::cmd
         GaveUp([GaveUp]):::halt
-        RetryScheduled(RetryScheduled):::devt
     end
     HandlerRaised([HandlerRaised]):::syst
-    _e0_[ ]:::entry ==> Ask
-    Ask -.->|"call_llm (raises)"| HandlerRaised
-    RetryScheduled -.->|"call_llm (raises)"| HandlerRaised
-    Ask -->|call_llm| Answered
-    RetryScheduled -->|call_llm| Answered
+    Ask -.->|"handle (raises)"| HandlerRaised
+    Ask -->|handle| Answered
     HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-    HandlerRaised -->|backoff_and_retry| RetryScheduled
+    HandlerRaised -->|backoff_and_retry| Ask
     HandlerRaised -->|give_up| GaveUp
-    linkStyle 1,2,5 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
 ```
 
 ## Choreography (text)
@@ -74,15 +70,12 @@ graph LR
 ```text
 Namespaces:
   Question
-    Command: Ask  (handlers: call_llm; raises RateLimitError)
+    Command: Ask  (handlers: handle; raises RateLimitError)
       → Answered
-    Event: RetryScheduled
     Event: GaveUp  [Halted]
 System events:
   HandlerRaised
 Policies:
-  backoff_and_retry  (HandlerRaised → RetryScheduled)  [raises QuotaExhaustedError]
+  backoff_and_retry  (HandlerRaised → Ask)  [raises QuotaExhaustedError]
   give_up  (HandlerRaised → GaveUp)
-Seed events:
-  Ask
 ```

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import inspect
 import operator
 import types
 import typing
@@ -103,8 +104,15 @@ def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
     Command fire after the enclosing Namespace finalizes. ``namespace_cls``
     stays fixed across recursion — it is always the outermost Namespace
     whose ``__init_subclass__`` triggered the drain.
+
+    Skips the ``Outcomes`` alias on Commands — for single-outcome Commands
+    it points at the same class object as a directly-nested DomainEvent,
+    which would re-visit (currently a no-op via ``pop``, but keeps the
+    invariant explicit if a future visitor mutates per visit).
     """
-    for attr in container.__dict__.values():
+    for name, attr in container.__dict__.items():
+        if name == "Outcomes":
+            continue
         if not isinstance(attr, type) or not issubclass(attr, Event):
             continue
         callbacks = _NAMESPACE_FINALIZE_CALLBACKS.pop(attr, None)
@@ -113,6 +121,21 @@ def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
                 cb(attr, namespace_cls)
         if issubclass(attr, Command):
             _drain_namespace_finalize(attr, namespace_cls)
+
+
+def _iter_nested_outcomes(cmd: type) -> list[type[DomainEvent]]:
+    """``DomainEvent`` classes directly nested under *cmd*.
+
+    Excludes the synthesized or user-declared ``Outcomes`` alias — for
+    single-outcome Commands it shares the same class object as the real
+    nested outcome, and for unions it is a ``UnionType`` not a class.
+    Single source of truth for outcome enumeration.
+    """
+    return [
+        t
+        for name, t in cmd.__dict__.items()
+        if name != "Outcomes" and isinstance(t, type) and issubclass(t, DomainEvent)
+    ]
 
 
 class Namespace:
@@ -188,11 +211,7 @@ def _attach_command_outcomes(namespace_cls: type) -> None:
     for cmd in namespace_cls.__dict__.values():
         if not (isinstance(cmd, type) and issubclass(cmd, Command)):
             continue
-        outcomes = [
-            x
-            for x in cmd.__dict__.values()
-            if isinstance(x, type) and issubclass(x, DomainEvent)
-        ]
+        outcomes = _iter_nested_outcomes(cmd)
         if not outcomes:
             continue
 
@@ -297,17 +316,16 @@ def _inherits_namespace(cls: type) -> bool:
 
 
 def _validate_handle_signature(cls: type, handle: Any) -> None:
-    """Check that an inline ``handle`` takes ``self`` as its first parameter.
+    """Check that the inline handler takes ``self`` as its first parameter.
 
     Reducer / log / config / store params are validated later at graph
     construction, where the reducer names are known.
     """
-    import inspect  # noqa: PLC0415
-
+    name = getattr(handle, "__name__", "handler")
     if isinstance(handle, (staticmethod, classmethod)):
         raise TypeError(
-            f"Command {cls.__name__!r}: `handle` must be a regular method "
-            f"(no @staticmethod / @classmethod)."
+            f"Command {cls.__name__!r}: inline handler {name!r} must be a "
+            f"regular method (no @staticmethod / @classmethod)."
         )
     try:
         sig = inspect.signature(handle)
@@ -316,8 +334,8 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
     params = list(sig.parameters.values())
     if not params or params[0].name != "self":
         raise TypeError(
-            f"Command {cls.__name__!r}: `handle` must take `self` as its "
-            f"first parameter."
+            f"Command {cls.__name__!r}: inline handler {name!r} must take "
+            f"`self` as its first parameter."
         )
 
 
@@ -353,10 +371,34 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                 f"subclass, e.g. "
                 f"class Order(Namespace): class {cls.__name__}(Command): ..."
             )
-        # Detect an inline ``handle`` method; auto-registered when the command
-        # class is passed to ``EventGraph`` (see _graph.py:_expand_command_handlers).
-        handle = cls.__dict__.get("handle")
-        if callable(handle):
+        # A Command represents one intent and gets one handler. The handler
+        # method may be named anything meaningful (``handle``, ``place``,
+        # ``buy``, ...); the framework picks up the sole public method in
+        # the class body. Helpers must be underscore-prefixed; dunders,
+        # nested DomainEvent classes, and properties don't count.
+        # ``staticmethod`` / ``classmethod`` count toward the limit so they
+        # still trigger the same rejection as before via
+        # ``_validate_handle_signature``.
+        public_methods = [
+            (name, attr)
+            for name, attr in cls.__dict__.items()
+            if not name.startswith("_")
+            and (
+                inspect.isfunction(attr)
+                or isinstance(attr, (staticmethod, classmethod))
+            )
+        ]
+        if len(public_methods) > 1:
+            names = ", ".join(sorted(name for name, _ in public_methods))
+            raise TypeError(
+                f"Command {cls.__qualname__!r} declares more than one public "
+                f"method ({names}). A Command represents a single intent and "
+                f"may have at most one public method (its handler). Make "
+                f"helpers private with a leading underscore, or move them to "
+                f"a separate utility class."
+            )
+        if public_methods:
+            _, handle = public_methods[0]
             _validate_handle_signature(cls, handle)
             cls.__command_handler__ = handle
 

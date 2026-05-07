@@ -111,6 +111,12 @@ from langgraph_events.stream import (
 |---|---|---|
 | `OrphanedEventWarning` | Warning | Issued at graph construction when a return type has no subscriber |
 
+## Errors
+
+| Export | Type | Description |
+|---|---|---|
+| `CommandPrivacyError` | TypeError subclass | Raised at `EventGraph` construction (and at runtime for bare-`Scatter` reactors) when a handler emits a `DomainEvent` it isn't allowed to emit. Outcomes nested inside a `Command` are private to that Command's inline `handle()` — neither sibling Commands nor non-inline reactors may produce them |
+
 ## AG-UI Subpackage
 
 Requires `[agui]`. See [AG-UI Adapter](agui.md).

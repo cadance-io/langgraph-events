@@ -58,11 +58,7 @@ def describe_return_contract():
         def when_return_is_a_declared_outcome():
 
             def it_accepts():
-                @on(Order.Place)
-                def place(event: Order.Place) -> Order.Place.Placed:
-                    return Order.Place.Placed(order_id="o1")
-
-                graph = EventGraph([place])
+                graph = EventGraph([Order.Place])
                 log = graph.invoke(Order.Place(customer_id="c1"))
                 assert log.has(Order.Place.Placed)
 

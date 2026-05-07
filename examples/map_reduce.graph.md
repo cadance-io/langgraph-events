@@ -61,10 +61,8 @@ graph LR
     Summarize -.->|split_batch| DocDispatched
     DocDispatched -->|summarize_one| DocSummarized
     DocSummarized -->|gather_summaries| Summarized
-    Summarize -.- Summarized
 %% Side-effect handlers: audit_trail (Auditable)
     linkStyle 1 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
-    linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
 ```
 
 ## Choreography (text)
@@ -73,9 +71,9 @@ graph LR
 Namespaces:
   Batch
     Command: Summarize  (handlers: split_batch; scatters Scatter[DocDispatched])
-      → Summarized
     Event: DocDispatched
     Event: DocSummarized
+    Event: Summarized
 Policies:
   summarize_one  (DocDispatched → DocSummarized)
   gather_summaries  (DocSummarized → Summarized)

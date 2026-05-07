@@ -566,6 +566,8 @@ def _collect_result(
     if return_contract is not None:
         _assert_return_matches(result, meta, return_contract)
 
+    _assert_no_private_leak(result, meta)
+
     result._collect_into(new_events, lg_interrupt)
 
 
@@ -592,6 +594,37 @@ def _collect_and_check(
     if violation is not None:
         del new_events[pre_len:]
         new_events.append(violation)
+
+
+def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -> None:
+    """Closes the bare-``Scatter`` privacy escape at runtime.
+
+    Static analysis catches Command-private leaks for handlers whose return
+    annotation enumerates concrete types, but a reactor annotated bare
+    ``-> Scatter`` reveals nothing at build time. Check at emission instead:
+    a non-inline handler may not produce any ``DomainEvent`` whose
+    ``__command__`` is set.
+    """
+    if meta is None:
+        return
+    if getattr(meta.fn, "_inline_command", None) is not None:
+        return  # inline Cmd.handle — already constrained by static check
+    from langgraph_events._event import DomainEvent  # noqa: PLC0415
+    from langgraph_events._namespace._command_privacy import (  # noqa: PLC0415
+        CommandPrivacyError,
+    )
+
+    events = result.events if isinstance(result, Scatter) else (result,)
+    for ev in events:
+        if not isinstance(ev, DomainEvent):
+            continue
+        owner_cmd = getattr(type(ev), "__command__", None)
+        if owner_cmd is not None:
+            raise CommandPrivacyError(
+                f"Reactor {meta.name!r} emitted {type(ev).__qualname__}, "
+                f"which is private to {owner_cmd.__qualname__}. Only "
+                f"{owner_cmd.__qualname__}.handle() may emit it."
+            )
 
 
 def _assert_return_matches(

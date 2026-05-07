@@ -30,7 +30,7 @@ See the [Map-Reduce pattern](patterns.md#scatter-fan-out).
 
 ## Invariants
 
-`invariants={InvariantClass: predicate, ...}` on `@on()` gates a handler with consistency rules. Each predicate runs twice per matching event:
+`invariants={InvariantClass: predicate, ...}` declared as a class-level attribute on a `Command` (or via `invariants=` on `@on()` for non-Command handlers) gates the handler with consistency rules. Each predicate runs twice per matching event:
 
 - **Pre-check** — before the handler body, against the current log. If any predicate returns `False`, the handler is skipped and `InvariantViolated` is emitted. (A skipped handler never runs, so no return-type contract applies to it.) `would_emit` is empty.
 - **Post-check** — after the handler returns, against `log + emitted events`. If any predicate returns `False`, the emitted events are dropped and one `InvariantViolated` is committed in their place, carrying the rolled-back events in `would_emit: tuple[Event, ...]`.
@@ -39,7 +39,7 @@ Together the two phases give the DDD atomicity semantic: the domain's consistenc
 
 Invariants are **typed markers** — subclass `Invariant` once per rule, then reference the class on both the declaration side and the reactor side. Typos fail at graph-construction time, not silently at runtime.
 
-Invariants are declared via the external `@on(...)` form — inline `handle` methods ([Concepts](concepts.md#on-decorator)) don't take modifiers.
+Invariants live next to the Command they guard. Declare them as a class-level `invariants` dict on the `Command`; the framework forwards them to the inline `handle()` wrapper. Recovery reactors emit namespace-level events (Cmd-private outcomes are reserved for `handle()`).
 
 ```python
 class CustomerNotBanned(Invariant):
@@ -50,23 +50,37 @@ class OrderTotalWithinLimit(Invariant):
     """Cumulative placed amount must stay under a daily limit."""  # post-check catches
 
 
-@on(
-    Order.Place,
-    invariants={
-        CustomerNotBanned: lambda log: not log.has(CustomerBanned),
-        OrderTotalWithinLimit: lambda log: (
-            sum(e.amount for e in log.filter(Order.Place.Placed)) < 100
-        ),
-    },
-)
-def place(event: Order.Place) -> Order.Place.Placed:
-    return Order.Place.Placed(order_id=f"o-{event.customer_id}", amount=event.amount)
+class Order(Namespace):
+    class Place(Command):
+        customer_id: str = ""
+        amount: int = 0
+
+        invariants = {
+            CustomerNotBanned: lambda log: not log.has(CustomerBanned),
+            OrderTotalWithinLimit: lambda log: (
+                sum(e.amount for e in log.filter("Order.Place.Placed")) < 100
+            ),
+        }
+
+        class Placed(DomainEvent):
+            order_id: str = ""
+            amount: int = 0
+
+        def handle(self) -> Order.Place.Placed:
+            return Order.Place.Placed(
+                order_id=f"o-{self.customer_id}", amount=self.amount
+            )
+
+    class Rejected(DomainEvent):
+        """Sibling to ``Place`` — emitted by recovery reactors."""
+
+        reason: str = ""
 
 
 @on(InvariantViolated, invariant=OrderTotalWithinLimit)
-def rolled_back(event: InvariantViolated) -> Order.Place.Rejected:
+def rolled_back(event: InvariantViolated) -> Order.Rejected:
     rolled = event.would_emit[0]  # the Placed the handler would have emitted
-    return Order.Place.Rejected(reason=f"over limit (would emit {rolled.amount})")
+    return Order.Rejected(reason=f"over limit (would emit {rolled.amount})")
 ```
 
 `CustomerNotBanned` is a pure **pre-check** — its truth doesn't depend on what the handler emits. `OrderTotalWithinLimit` is a pure **post-check** — pre-check sees the committed log (total 0), but *this* handler's emitted `Placed` is what pushes the total over the limit; only the post-check catches that.
@@ -153,7 +167,7 @@ Works on any field typed as `Event` or `Exception`. Field names are validated at
 
 ## Handler Exceptions
 
-`raises=` declares exceptions the framework catches from a handler; caught exceptions surface as `HandlerRaised` events with the exception, the handler name, and the originating event. Subscribe with a field matcher on `exception` to react:
+`raises` declares exceptions the framework catches from a Command's inline `handle()`. Declared as a class-level tuple on the Command (or via `raises=` on `@on(...)` for non-Command handlers); caught exceptions surface as `HandlerRaised` events with the exception, the handler name, and the originating event. Subscribe with a field matcher on `exception` to react:
 
 ```python
 class RateLimitError(Exception):
@@ -162,16 +176,23 @@ class RateLimitError(Exception):
         self.retry_after = retry_after
 
 
-@on(Question.Ask, raises=RateLimitError)
-def call_llm(event: Question.Ask) -> Question.Ask.Answered:
-    if upstream_rate_limited():
-        raise RateLimitError(retry_after=0.2)
-    return Question.Ask.Answered(answer=...)
+class Question(Namespace):
+    class Ask(Command):
+        question: str = ""
+        raises = (RateLimitError,)
+
+        class Answered(DomainEvent):
+            answer: str = ""
+
+        def handle(self) -> Question.Ask.Answered:
+            if upstream_rate_limited():
+                raise RateLimitError(retry_after=0.2)
+            return Question.Ask.Answered(answer=...)
 
 
 @on(HandlerRaised, exception=RateLimitError)
-def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.RetryScheduled:
-    return Question.RetryScheduled(question=event.source_event.question)
+def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.Ask:
+    return Question.Ask(question=event.source_event.question)  # retry
 ```
 
 Key rules:

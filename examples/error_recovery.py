@@ -1,18 +1,21 @@
 """Error Recovery — langgraph-events demo.
 
-Demonstrates declared handler exceptions via ``raises=`` + the built-in
-``HandlerRaised`` event, organized around a DDD ``Question`` domain.
+Demonstrates declared handler exceptions via class-level ``raises`` + the
+built-in ``HandlerRaised`` event, organized around a DDD ``Question`` domain.
 
-A handler declares which exceptions the framework should catch; when one of
+A Command declares which exceptions the framework should catch; when one of
 those exceptions fires, the framework surfaces it as a ``HandlerRaised`` event
 so other handlers can react (retry, back off, halt) without try/except
 boilerplate at the raise site.
 
 Covers APIs not shown in other examples:
-  - ``raises=`` on ``@on(...)`` — declare catchable exceptions
+  - ``raises = (...,)`` as a class-level attribute on a ``Command``
   - ``HandlerRaised`` — built-in event wrapping a caught exception
   - Field injection of the exception (``exception: RateLimitError``)
-  - Chained error handling: the catcher itself declares ``raises=`` to escalate
+  - Chained error handling: a catcher itself declares ``raises=`` to escalate
+  - Retry loop expressed as the catcher emitting a fresh ``Ask`` command —
+    Cmd-private outcomes (``Ask.Answered``) only ever come from
+    ``Ask.handle()``.
 
 Usage:
     python examples/error_recovery.py
@@ -59,12 +62,17 @@ class QuotaExhaustedError(Exception):
 # ---------------------------------------------------------------------------
 
 
+MAX_ATTEMPTS = 3
+_scenario = {"succeed_after": 3}  # attempt # at which the call starts succeeding
+
+
 class Question(Namespace):
     """A user question answered via a rate-limit-tolerant LLM call.
 
-    ``Ask`` is the entry command. The answering handler declares
-    ``raises=RateLimitError``; a catcher schedules retries via
-    ``RetryScheduled``, re-entering the answering handler. After
+    ``Ask`` is the entry command. Its inline ``handle`` declares
+    ``raises = (RateLimitError,)`` as a class attribute; a catcher schedules
+    a retry by emitting a fresh ``Ask`` command (with an incremented
+    ``attempt``), which goes back through ``Ask.handle()``. After
     ``MAX_ATTEMPTS``, the catcher escalates to ``QuotaExhaustedError`` which
     a second catcher turns into the terminal ``GaveUp`` ``Halted`` signal.
     """
@@ -75,16 +83,17 @@ class Question(Namespace):
         question: str = ""
         attempt: int = 1
 
+        raises = (RateLimitError,)
+
         class Answered(DomainEvent, Auditable):
             """Question answered — terminal outcome of Ask."""
 
             answer: str = ""
 
-    class RetryScheduled(DomainEvent, Auditable):
-        """Internal retry fact — emitted by the backoff policy."""
-
-        question: str = ""
-        attempt: int = 2
+        def handle(self) -> Question.Ask.Answered:
+            if self.attempt < _scenario["succeed_after"]:
+                raise RateLimitError(retry_after=0.1 * self.attempt)
+            return Question.Ask.Answered(answer=f"Answer to: {self.question!r}")
 
     class GaveUp(Halted):
         """Terminal halt — retry budget exhausted."""
@@ -93,32 +102,24 @@ class Question(Namespace):
 
 
 # ---------------------------------------------------------------------------
-# Handlers
+# Handlers — recovery only; the success path lives on Ask.handle().
 # ---------------------------------------------------------------------------
-
-MAX_ATTEMPTS = 3
-_scenario = {"succeed_after": 3}  # attempt # at which the call starts succeeding
-
-
-@on(Question.Ask, Question.RetryScheduled, raises=RateLimitError)
-def call_llm(
-    event: Question.Ask | Question.RetryScheduled,
-) -> Question.Ask.Answered:
-    """Simulated LLM call — rate-limits until the scenario's success threshold."""
-    attempt = event.attempt
-    if attempt < _scenario["succeed_after"]:
-        raise RateLimitError(retry_after=0.1 * attempt)
-    return Question.Ask.Answered(answer=f"Answer to: {event.question!r}")
 
 
 @on(HandlerRaised, exception=RateLimitError, raises=QuotaExhaustedError)
 def backoff_and_retry(
     event: HandlerRaised,
     exception: RateLimitError,
-) -> Question.RetryScheduled:
-    """Catches rate-limit failures and schedules a retry of the original question."""
+) -> Question.Ask:
+    """Catches rate-limit failures and re-issues ``Ask`` with attempt+1.
+
+    Re-emitting the Command is the canonical retry pattern under the strict
+    Command-privacy rule: only ``Ask.handle()`` may produce ``Ask.Answered``,
+    so the recovery reactor schedules a fresh ``Ask`` rather than emitting an
+    answer itself.
+    """
     original = event.source_event
-    assert isinstance(original, (Question.Ask, Question.RetryScheduled))
+    assert isinstance(original, Question.Ask)
     prev_attempt = original.attempt
     next_attempt = prev_attempt + 1
     if next_attempt > MAX_ATTEMPTS:
@@ -127,7 +128,7 @@ def backoff_and_retry(
         f"  [backoff] attempt {prev_attempt} hit rate limit "
         f"(retry_after={exception.retry_after}s); retrying as attempt {next_attempt}"
     )
-    return Question.RetryScheduled(question=original.question, attempt=next_attempt)
+    return Question.Ask(question=original.question, attempt=next_attempt)
 
 
 @on(HandlerRaised, exception=QuotaExhaustedError)
@@ -141,7 +142,7 @@ def give_up(event: HandlerRaised) -> Question.GaveUp:
 # ---------------------------------------------------------------------------
 
 
-graph = EventGraph([call_llm, backoff_and_retry, give_up])
+graph = EventGraph([Question.Ask, backoff_and_retry, give_up])
 
 
 # ---------------------------------------------------------------------------

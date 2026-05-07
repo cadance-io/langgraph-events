@@ -70,6 +70,11 @@ class Order(Namespace):
         class Rejected(DomainEvent):
             reason: str = ""
 
+        def place(self) -> "Order.Place.Placed | Order.Place.Rejected":
+            if self.customer_id == "banned":
+                return Order.Place.Rejected(reason="banned")
+            return Order.Place.Placed(order_id="o1")
+
     class Shipped(DomainEvent):
         tracking: str = ""
 

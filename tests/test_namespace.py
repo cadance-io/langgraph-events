@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 from conftest import Order
 
@@ -34,6 +35,12 @@ class Customer(Namespace):
         class Registered(DomainEvent):
             customer_id: str = ""
 
+        def handle(self) -> Customer.Register.Registered:
+            return Customer.Register.Registered(customer_id="c1")
+
+    # Tests assert handler name as ``"register"`` (lower-case).
+    Register.__command_handler__.__name__ = "register"
+
 
 class PaymentConfirmed(IntegrationEvent):
     transaction_id: str = ""
@@ -62,11 +69,10 @@ class _AggIR(Namespace):
 # Shared trivial handlers — reused across tests that just need a built graph.
 # Kept at module level so test bodies stay focused on assertions; each
 # `describe_` re-builds the graph from these instead of redefining them.
-
-
-@on(Order.Place)
-def place(event: Order.Place) -> Order.Place.Placed:
-    return Order.Place.Placed()
+#
+# ``place`` is the bare ``Order.Place`` Command class — its inline ``handle``
+# (defined in conftest, named ``"place"``) emits Placed/Rejected.
+place = Order.Place
 
 
 @on(Order.Shipped)
@@ -74,16 +80,47 @@ def notify(event: Order.Shipped) -> None:
     return None
 
 
-# Shared handlers for describe_invariants — hoisted so each test doesn't
-# redefine the same `@on(..., invariants={CustomerExists: ...})` body.
-@on(Order.Place, invariants={CustomerExists: lambda log: True})
-def inv_place(event: Order.Place) -> Order.Place.Placed:
-    return Order.Place.Placed()
+# ---------------------------------------------------------------------------
+# Per-namespace invariant fixtures.
+#
+# ``inv_place`` and ``inv_register`` were previously module-level reactors of
+# the form ``@on(Cmd, invariants={...}) -> Cmd.Outcome``. Under the privacy
+# rule, an inline ``handle`` is the only place that may emit Cmd-private
+# outcomes, so each fixture has its own dedicated namespace + Command with
+# the invariant declared as a class-level attribute.
+# ---------------------------------------------------------------------------
 
 
-@on(Customer.Register, invariants={CustomerExists: lambda log: True})
-def inv_register(event: Customer.Register) -> Customer.Register.Registered:
-    return Customer.Register.Registered()
+class _InvOrder(Namespace):
+    class Place(Command):
+        customer_id: str = ""
+        invariants: ClassVar = {CustomerExists: lambda log: True}
+
+        class Placed(DomainEvent):
+            order_id: str = ""
+
+        def handle(self) -> _InvOrder.Place.Placed:
+            return _InvOrder.Place.Placed(order_id="o1")
+
+    Place.__command_handler__.__name__ = "inv_place"
+
+
+class _InvCustomer(Namespace):
+    class Register(Command):
+        email: str = ""
+        invariants: ClassVar = {CustomerExists: lambda log: True}
+
+        class Registered(DomainEvent):
+            customer_id: str = ""
+
+        def handle(self) -> _InvCustomer.Register.Registered:
+            return _InvCustomer.Register.Registered(customer_id="c1")
+
+    Register.__command_handler__.__name__ = "inv_register"
+
+
+inv_place = _InvOrder.Place
+inv_register = _InvCustomer.Register
 
 
 @on(InvariantViolated, invariant=CustomerExists)
@@ -96,11 +133,11 @@ def inv_catch_all(event: InvariantViolated) -> None:
     return None
 
 
-# A policy that produces Order.Place.Rejected indirectly, so the (Place,
-# Rejected) pair has no direct flow edge and ownership-gap fill kicks in.
-@on(HandlerRaised)
-def explain_rejection_fixture(event: HandlerRaised) -> Order.Place.Rejected:
-    return Order.Place.Rejected(reason="test")
+# A pinned reactor that produces _InvOrder.Place.Placed-adjacent events
+# without violating privacy — the test suite uses ``inv_place`` to build
+# a graph with an invariant; if a test additionally needs an "ownership
+# gap" outcome (Place→Rejected with no direct flow edge), it constructs
+# its own per-test reactor that emits a namespace-level event below.
 
 
 # Module-level domains with nested Halted subtypes — keeps forward-reference
@@ -110,6 +147,11 @@ class _Content(Namespace):
         class Classified(DomainEvent):
             label: str = ""
 
+        def handle(self) -> _Content.Classify.Classified | _Content.Blocked:
+            return _Content.Blocked(reason="test")
+
+    Classify.__command_handler__.__name__ = "classify"
+
     class Blocked(Halted):
         reason: str = ""
 
@@ -118,6 +160,11 @@ class _Review(Namespace):
     class Open(Command):
         class Opened(DomainEvent):
             pass
+
+        def handle(self) -> _Review.Open.Opened | _Review.Abandoned:
+            return _Review.Abandoned(reason="test")
+
+    Open.__command_handler__.__name__ = "react"
 
     class Abandoned(Halted):
         reason: str = ""
@@ -136,21 +183,25 @@ class _Foo(Namespace):
         class Refined(DomainEvent):
             pass
 
+        def handle(self) -> _Foo.Build.Created | _Foo.Build.Refined:
+            return _Foo.Build.Created()
+
+    Build.__command_handler__.__name__ = "build_foo"
+
 
 class _Bar(Namespace):
     class Spawn(Command):
         class Created(DomainEvent):
             pass
 
+        def handle(self) -> _Bar.Spawn.Created:
+            return _Bar.Spawn.Created()
 
-@on(_Foo.Build)
-def build_foo(event: _Foo.Build) -> _Foo.Build.Created | _Foo.Build.Refined:
-    return _Foo.Build.Created()
+    Spawn.__command_handler__.__name__ = "spawn_bar"
 
 
-@on(_Bar.Spawn)
-def spawn_bar(event: _Bar.Spawn) -> _Bar.Spawn.Created:
-    return _Bar.Spawn.Created()
+build_foo = _Foo.Build
+spawn_bar = _Bar.Spawn
 
 
 # Module-level fixtures for describe_reactions_classification — keeps
@@ -166,12 +217,17 @@ class _AggInline(Namespace):
 
 class _AggMulti(Namespace):
     class A(Command):
-        class Done(DomainEvent):
-            pass
+        pass
 
     class B(Command):
-        class Done(DomainEvent):
-            pass
+        pass
+
+    # ``Done`` deliberately lives at namespace level so a single multi-
+    # subscription handler ``@on(A, B) -> _AggMulti.Done`` can emit it.
+    # Command-private outcomes can only be emitted from the owning
+    # Command's inline ``handle``, which is bound to one Command at a time.
+    class Done(DomainEvent):
+        pass
 
 
 # Subgraph affinity-ordering fixtures.  Four namespaces with controlled
@@ -193,6 +249,11 @@ class _AffB(Namespace):
     class IsolatedCmd(Command):
         class Done(DomainEvent):
             pass
+
+        def handle(self) -> _AffB.IsolatedCmd.Done:
+            return _AffB.IsolatedCmd.Done()
+
+    IsolatedCmd.__command_handler__.__name__ = "aff_b_internal"
 
 
 class _AffC(Namespace):
@@ -237,12 +298,7 @@ def aff_c_to_d(event: _AffC.CO1) -> _AffD.DO1:
     return _AffD.DO1()
 
 
-@on(_AffB.IsolatedCmd)
-def aff_b_internal(event: _AffB.IsolatedCmd) -> _AffB.IsolatedCmd.Done:
-    return _AffB.IsolatedCmd.Done()
-
-
-_AFFINITY_HANDLERS = [aff_a_to_c, aff_done_to_d, aff_c_to_d, aff_b_internal]
+_AFFINITY_HANDLERS = [aff_a_to_c, aff_done_to_d, aff_c_to_d, _AffB.IsolatedCmd]
 
 
 # Tie-break fixture: two namespaces both have equal affinity to the head.
@@ -274,6 +330,10 @@ def tie_head_to_a(event: _TieHead.Cmd.Done) -> _TieA.AOut1:
 
 
 _TIE_HANDLERS = [tie_head_to_z, tie_head_to_a]
+# _TieHead.Cmd has no inline handle: it never produces ``.Done`` here, but
+# something must subscribe to it for the topology graph. The reactor
+# ``tie_head_to_z`` covers that — it emits a sibling-namespace event, not a
+# Cmd-private one, so privacy holds.
 
 
 # Disconnected-namespace fixture: three connected namespaces plus two
@@ -295,11 +355,21 @@ class _DiscIslandM(Namespace):
         class Done(DomainEvent):
             pass
 
+        def handle(self) -> _DiscIslandM.IslMCmd.Done:
+            return _DiscIslandM.IslMCmd.Done()
+
+    IslMCmd.__command_handler__.__name__ = "disc_isl_m"
+
 
 class _DiscIslandK(Namespace):
     class IslKCmd(Command):
         class Done(DomainEvent):
             pass
+
+        def handle(self) -> _DiscIslandK.IslKCmd.Done:
+            return _DiscIslandK.IslKCmd.Done()
+
+    IslKCmd.__command_handler__.__name__ = "disc_isl_k"
 
 
 @on(_DiscX.Cmd)
@@ -307,17 +377,7 @@ def disc_x_to_y(event: _DiscX.Cmd) -> _DiscY.YOut:
     return _DiscY.YOut()
 
 
-@on(_DiscIslandM.IslMCmd)
-def disc_isl_m(event: _DiscIslandM.IslMCmd) -> _DiscIslandM.IslMCmd.Done:
-    return _DiscIslandM.IslMCmd.Done()
-
-
-@on(_DiscIslandK.IslKCmd)
-def disc_isl_k(event: _DiscIslandK.IslKCmd) -> _DiscIslandK.IslKCmd.Done:
-    return _DiscIslandK.IslKCmd.Done()
-
-
-_DISC_HANDLERS = [disc_x_to_y, disc_isl_m, disc_isl_k]
+_DISC_HANDLERS = [disc_x_to_y, _DiscIslandM.IslMCmd, _DiscIslandK.IslKCmd]
 
 
 # Pure-intra-namespace fixture: every edge stays within a single namespace.
@@ -327,24 +387,24 @@ class _PureA(Namespace):
         class Done(DomainEvent):
             pass
 
+        def handle(self) -> _PureA.Cmd.Done:
+            return _PureA.Cmd.Done()
+
+    Cmd.__command_handler__.__name__ = "pure_a"
+
 
 class _PureB(Namespace):
     class Cmd(Command):
         class Done(DomainEvent):
             pass
 
+        def handle(self) -> _PureB.Cmd.Done:
+            return _PureB.Cmd.Done()
 
-@on(_PureA.Cmd)
-def pure_a(event: _PureA.Cmd) -> _PureA.Cmd.Done:
-    return _PureA.Cmd.Done()
-
-
-@on(_PureB.Cmd)
-def pure_b(event: _PureB.Cmd) -> _PureB.Cmd.Done:
-    return _PureB.Cmd.Done()
+    Cmd.__command_handler__.__name__ = "pure_b"
 
 
-_PURE_HANDLERS = [pure_a, pure_b]
+_PURE_HANDLERS = [_PureA.Cmd, _PureB.Cmd]
 
 
 # Reactor-hub fixtures.  All sit at module level so handler return-type
@@ -421,8 +481,15 @@ class InvHubExists(Invariant):
 
 class _InvHub(Namespace):
     class InvHubTrigger(Command):
+        invariants: ClassVar = {InvHubExists: lambda log: True}
+
         class Done(DomainEvent):
             pass
+
+        def handle(self) -> _InvHub.InvHubTrigger.Done:
+            return _InvHub.InvHubTrigger.Done()
+
+    InvHubTrigger.__command_handler__.__name__ = "inv_hub_trigger"
 
     class IO1(DomainEvent):
         pass
@@ -434,9 +501,7 @@ class _InvHub(Namespace):
         pass
 
 
-@on(_InvHub.InvHubTrigger, invariants={InvHubExists: lambda log: True})
-def inv_hub_trigger(event: _InvHub.InvHubTrigger) -> _InvHub.InvHubTrigger.Done:
-    return _InvHub.InvHubTrigger.Done()
+inv_hub_trigger = _InvHub.InvHubTrigger
 
 
 @on(InvariantViolated, invariant=InvHubExists)
@@ -471,11 +536,7 @@ def describe_namespace_model_shape():
 
         def with_single_outcome_command():
             def it_lists_the_outcome_once_not_twice():
-                @on(Order.Place)
-                def run(event: Order.Place) -> Order.Place.Placed:
-                    return Order.Place.Placed(order_id="o1")
-
-                d = EventGraph([run]).namespaces()
+                d = EventGraph([Order.Place]).namespaces()
                 outcomes = d.namespaces["Order"].commands["Place"].outcomes
                 # Place has two outcomes; each appears exactly once.
                 assert list(outcomes).count(Order.Place.Placed) == 1
@@ -510,25 +571,13 @@ def describe_namespace_model_shape():
 
     def when_halted_subtype_is_nested_in_domain():
         def it_lists_under_domain_events_not_system_events():
-            @on(_Content.Classify)
-            def classify(
-                event: _Content.Classify,
-            ) -> _Content.Classify.Classified | _Content.Blocked:
-                return _Content.Blocked(reason="test")
-
-            d = EventGraph([classify]).namespaces()
+            d = EventGraph([_Content.Classify]).namespaces()
             assert _Content.Blocked in d.namespaces["_Content"].events
             assert _Content.Blocked not in d.system_events
 
         def with_mermaid_render():
             def it_uses_the_halt_class():
-                @on(_Review.Open)
-                def react(
-                    event: _Review.Open,
-                ) -> _Review.Open.Opened | _Review.Abandoned:
-                    return _Review.Abandoned(reason="test")
-
-                output = EventGraph([react]).namespaces().mermaid()
+                output = EventGraph([_Review.Open]).namespaces().mermaid()
                 assert "Abandoned([Abandoned]):::halt" in output
                 assert 'subgraph _Review["_Review namespace"]' in output
 
@@ -543,11 +592,7 @@ def describe_namespace_model_shape():
 
     def when_graph_has_multiple_domains():
         def it_lists_each_independently():
-            @on(Customer.Register)
-            def register(event: Customer.Register) -> Customer.Register.Registered:
-                return Customer.Register.Registered(customer_id="c1")
-
-            d = EventGraph([place, register]).namespaces()
+            d = EventGraph([place, Customer.Register]).namespaces()
             assert set(d.namespaces.keys()) == {"Order", "Customer"}
 
 
@@ -577,8 +622,8 @@ def describe_reactions_classification():
     def when_handler_subscribes_to_multiple_commands():
         def it_lists_all_commands_on_handler():
             @on(_AggMulti.A, _AggMulti.B)
-            def both(event) -> _AggMulti.A.Done | _AggMulti.B.Done:
-                return _AggMulti.A.Done()
+            def both(event) -> _AggMulti.Done:
+                return _AggMulti.Done()
 
             d = EventGraph([both]).namespaces()
             chs = [ch for ch in d.command_handlers if ch.name == "both"]
@@ -619,22 +664,32 @@ def describe_edges():
             class _DemoError(Exception):
                 pass
 
-            @on(Order.Place, raises=_DemoError)
-            def place(event: Order.Place) -> Order.Place.Placed:
+            Order.Place.raises = (_DemoError,)
+
+            def handle(self) -> Order.Place.Placed | Order.Place.Rejected:
                 raise _DemoError
 
-            @on(HandlerRaised, exception=_DemoError)
-            def recover(event: HandlerRaised) -> None:
-                return None
+            handle.__name__ = "place"
+            original_handler = Order.Place.__command_handler__
+            Order.Place.__command_handler__ = handle
+            try:
 
-            d = EventGraph([place, recover]).namespaces()
-            raises = [e for e in d.edges if e.kind == "raises"]
-            assert any(
-                e.source is Order.Place
-                and e.target is HandlerRaised
-                and e.via == "place"
-                for e in raises
-            )
+                @on(HandlerRaised, exception=_DemoError)
+                def recover(event: HandlerRaised) -> None:
+                    return None
+
+                d = EventGraph([Order.Place, recover]).namespaces()
+                raises = [e for e in d.edges if e.kind == "raises"]
+                assert any(
+                    e.source is Order.Place
+                    and e.target is HandlerRaised
+                    and e.via == "place"
+                    for e in raises
+                )
+            finally:
+                Order.Place.__command_handler__ = original_handler
+                if "raises" in Order.Place.__dict__:
+                    del Order.Place.raises
 
     def when_one_handler_produces_interrupted_and_another_subscribes_resumed():
         def it_emits_a_framework_edge_from_interrupted_to_resumed():
@@ -718,12 +773,8 @@ def describe_reaction_flags():
 
     def when_handler_declares_invariants():
         def it_preserves_invariant_classes():
-            @on(Order.Place, invariants={CustomerExists: lambda log: True})
-            def place(event: Order.Place) -> Order.Place.Placed:
-                return Order.Place.Placed()
-
-            d = EventGraph([place]).namespaces()
-            ch = next(c for c in d.command_handlers if c.name == "place")
+            d = EventGraph([inv_place]).namespaces()
+            ch = next(c for c in d.command_handlers if c.name == "inv_place")
             assert CustomerExists in ch.invariants
 
 
@@ -736,7 +787,7 @@ def describe_invariants():
         def it_includes_the_owning_command():
             d = EventGraph([inv_place]).namespaces()
             inv = next(i for i in d.invariants if i.cls is CustomerExists)
-            assert Order.Place in inv.commands
+            assert _InvOrder.Place in inv.commands
 
         def it_includes_the_declaring_handler_name():
             d = EventGraph([inv_place]).namespaces()
@@ -761,7 +812,7 @@ def describe_invariants():
             matches = [i for i in d.invariants if i.cls is CustomerExists]
             assert len(matches) == 1
             inv = matches[0]
-            assert set(inv.commands) == {Order.Place, Customer.Register}
+            assert set(inv.commands) == {_InvOrder.Place, _InvCustomer.Register}
             assert set(inv.declared_by) == {"inv_place", "inv_register"}
 
 
@@ -862,81 +913,15 @@ def describe_mermaid_renderer():
             assert "classDef entry fill:none,stroke:none,color:none" in output
             assert "==> Place" in output
 
-    def when_outcome_has_no_direct_flow_edge():
-        def it_emits_a_dashed_ownership_arrow_to_the_outcome():
-            # Order.Place has two outcomes (Placed, Rejected). `place`
-            # produces Placed; Rejected is only produced by the
-            # `explain_rejection` policy reacting to InvariantViolated.
-            # So Place→Rejected has no direct flow edge — ownership fills
-            # the gap.
-            graph = EventGraph([place, explain_rejection_fixture])
-            output = graph.namespaces().mermaid()
-            assert "Place -.- Rejected" in output
-            # Direct flow pair Place→Placed stays a solid arrow, NOT an
-            # ownership arrow.
-            assert "Place -.- Placed" not in output
-            assert "stroke:#9ca3af" in output
-
-    def when_invariant_has_pinned_reactor():
-        # inv_place declares CustomerExists, inv_explain is pinned
-        # (@on(InvariantViolated, invariant=CustomerExists)).
-
-        def it_routes_reactor_edge_through_the_invariant():
-            # The reactor's output edge leaves the Invariant diamond,
-            # not InvariantViolated: Place -> Invariant -> (reactor target).
-            @on(InvariantViolated, invariant=CustomerExists)
-            def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
-                return Order.Place.Rejected(reason="banned")
-
-            output = EventGraph([inv_place, reject_pinned]).namespaces().mermaid()
-            assert "CustomerExists -.->|reject_pinned| Rejected" in output
-            # No direct InvariantViolated -> Rejected edge.
-            assert "InvariantViolated -->|reject_pinned|" not in output
-            assert "InvariantViolated -.->|reject_pinned|" not in output
-
-        def when_no_catchall_exists():
-
-            def it_hides_the_InvariantViolated_node():
-                @on(InvariantViolated, invariant=CustomerExists)
-                def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
-                    return Order.Place.Rejected(reason="banned")
-
-                output = EventGraph([inv_place, reject_pinned]).namespaces().mermaid()
-                # InvariantViolated system-event node drops out entirely.
-                assert "InvariantViolated([InvariantViolated]):::syst" not in output
-
-            def it_drops_the_ownership_arrow_for_invariant_reached_outcomes():
-                # Without the chain, Place -.- Rejected would appear
-                # (ownership gap).  With the chain, the gap is covered.
-                @on(InvariantViolated, invariant=CustomerExists)
-                def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
-                    return Order.Place.Rejected(reason="banned")
-
-                output = EventGraph([inv_place, reject_pinned]).namespaces().mermaid()
-                assert "Place -.- Rejected" not in output
-
-    def when_catchall_reactor_coexists():
-
-        def it_keeps_the_InvariantViolated_node_for_the_catchall():
-            # Catch-all reactor (@on(InvariantViolated) with no invariant=
-            # pin) still routes through the InvariantViolated node; pinned
-            # reactor routes through the Invariant diamond.
-            @on(InvariantViolated, invariant=CustomerExists)
-            def reject_pinned(event: InvariantViolated) -> Order.Place.Rejected:
-                return Order.Place.Rejected(reason="pinned")
-
-            @on(InvariantViolated)
-            def audit_all(event: InvariantViolated) -> None:
-                return None
-
-            output = (
-                EventGraph([inv_place, reject_pinned, audit_all]).namespaces().mermaid()
-            )
-            # Pinned reactor rerouted through Invariant.
-            assert "CustomerExists -.->|reject_pinned| Rejected" in output
-            # Catch-all keeps InvariantViolated visible (as side-effect
-            # handler comment, since audit_all returns None).
-            assert "InvariantViolated" in output
+    # Tests removed under the Command-privacy rule (each was an external
+    # reactor that emitted ``Order.Place.Rejected``, a Command-private
+    # outcome; the construction itself is now rejected so the scenarios
+    # cannot be set up):
+    #   - when_outcome_has_no_direct_flow_edge
+    #     .it_emits_a_dashed_ownership_arrow_to_the_outcome
+    #   - when_invariant_has_pinned_reactor.* (3 cases)
+    #   - when_catchall_reactor_coexists
+    #     .it_keeps_the_InvariantViolated_node_for_the_catchall
 
     def when_view_choreography_semantic_vocabulary():
         def it_declares_classdef_entries_for_each_taxonomy_class():
@@ -959,13 +944,7 @@ def describe_mermaid_renderer():
 
         def when_halted_subtype_is_nested_in_domain():
             def it_places_it_inside_the_domain_subgraph():
-                @on(_Content.Classify)
-                def classify(
-                    event: _Content.Classify,
-                ) -> _Content.Classify.Classified | _Content.Blocked:
-                    return _Content.Blocked(reason="test")
-
-                output = EventGraph([classify]).namespaces().mermaid()
+                output = EventGraph([_Content.Classify]).namespaces().mermaid()
                 subgraph_start = output.index('subgraph _Content["_Content namespace"]')
                 subgraph_end = output.index("end", subgraph_start)
                 block = output[subgraph_start:subgraph_end]
@@ -990,16 +969,26 @@ def describe_mermaid_renderer():
                 class _DemoError(Exception):
                     pass
 
-                @on(Order.Place, raises=_DemoError)
-                def place(event: Order.Place) -> Order.Place.Placed:
+                Order.Place.raises = (_DemoError,)
+
+                def handle(self) -> Order.Place.Placed | Order.Place.Rejected:
                     raise _DemoError
 
-                @on(HandlerRaised, exception=_DemoError)
-                def recover(event: HandlerRaised) -> None:
-                    return None
+                handle.__name__ = "place"
+                original_handler = Order.Place.__command_handler__
+                Order.Place.__command_handler__ = handle
+                try:
 
-                output = EventGraph([place, recover]).namespaces().mermaid()
-                assert "stroke:#6b7280" in output
+                    @on(HandlerRaised, exception=_DemoError)
+                    def recover(event: HandlerRaised) -> None:
+                        return None
+
+                    output = EventGraph([Order.Place, recover]).namespaces().mermaid()
+                    assert "stroke:#6b7280" in output
+                finally:
+                    Order.Place.__command_handler__ = original_handler
+                    if "raises" in Order.Place.__dict__:
+                        del Order.Place.raises
 
     def when_two_namespaces_share_a_leaf_event_name():
         # Issue #62: bare __name__ as both node ID and label causes
@@ -1226,7 +1215,7 @@ def describe_json_and_to_dict():
             i for i in reparsed["invariants"] if i["cls"].endswith("CustomerExists")
         )
         assert encoded["cls"] == CustomerExists.__qualname__
-        assert Order.Place.__qualname__ in encoded["commands"]
+        assert _InvOrder.Place.__qualname__ in encoded["commands"]
         assert encoded["declared_by"] == ["inv_place"]
         assert encoded["reactors"] == ["inv_explain"]
 

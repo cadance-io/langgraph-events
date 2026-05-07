@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from typing import ClassVar
+
 import pytest
 
 from langgraph_events import (
@@ -11,6 +14,7 @@ from langgraph_events import (
     EventLog,
     Namespace,
     Reducer,
+    Scatter,
     on,
 )
 
@@ -133,20 +137,6 @@ class Shop8(Namespace):
             return Shop8.Buy.Bought()
 
 
-class Shop9(Namespace):
-    class Buy(Command):
-        class Bought(DomainEvent):
-            pass
-
-        class OutOfStock(DomainEvent):
-            pass
-
-
-@on(Shop9.Buy)
-def shop9_partial(event: Shop9.Buy) -> Shop9.Buy.Bought:
-    return Shop9.Buy.Bought()
-
-
 class Shop10(Namespace):
     class Buy(Command):
         class Bought(DomainEvent):
@@ -157,6 +147,28 @@ class Shop10(Namespace):
 
         def handle(self) -> Shop10.Buy.Bought | Shop10.Buy.OutOfStock | None:
             return None
+
+
+class Shop11(Namespace):
+    class Other(DomainEvent):
+        pass
+
+    class Buy(Command):
+        class Done(DomainEvent):
+            pass
+
+        # Annotates a sibling event so the coverage check runs and Done is missing.
+        def handle(self) -> Shop11.Other:
+            return Shop11.Buy.Done()
+
+
+class Shop12(Namespace):
+    class Buy(Command):
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> Scatter:
+            return Scatter([])
 
 
 # Module-level fixtures for describe_handle_aliased_across_commands.
@@ -242,6 +254,141 @@ def describe_Command_handle():
 
                 assert Odd.Cmd.__command_handler__ is None
 
+        def when_command_has_a_meaningfully_named_public_method():
+            # The handler can be named anything meaningful — not just
+            # ``handle``. The framework picks up the sole public method.
+
+            def it_stamps___command_handler__():
+                class Boutique(Namespace):
+                    class Buy(Command):
+                        item: str = ""
+
+                        class Bought(DomainEvent):
+                            item: str = ""
+
+                        def buy(self) -> Boutique.Buy.Bought:
+                            return Boutique.Buy.Bought(item=self.item)
+
+                assert Boutique.Buy.__command_handler__ is Boutique.Buy.__dict__["buy"]
+                graph = EventGraph([Boutique.Buy])
+                log = graph.invoke(Boutique.Buy(item="apple"))
+                assert log.latest(Boutique.Buy.Bought).item == "apple"
+
+        def when_command_has_two_public_methods():
+            # A Command represents a single intent; two public methods is
+            # ambiguous. Helpers must be underscore-prefixed.
+
+            def it_rejects_at_class_creation():
+                with pytest.raises(TypeError, match=r"more than one public method"):
+
+                    class _Bad(Namespace):
+                        class Cmd(Command):
+                            class Done(DomainEvent):
+                                pass
+
+                            def place(self) -> _Bad.Cmd.Done:
+                                return _Bad.Cmd.Done()
+
+                            def helper(self) -> str:
+                                return "x"
+
+        def when_command_has_a_private_helper_alongside_handler():
+            # Underscore-prefixed methods are exempt from the public-methods
+            # cap; the framework still picks up the sole public method as
+            # the handler.
+
+            def it_picks_up_only_the_public_method():
+                class _Helped(Namespace):
+                    class Cmd(Command):
+                        class Done(DomainEvent):
+                            note: str = ""
+
+                        def place(self) -> _Helped.Cmd.Done:
+                            return _Helped.Cmd.Done(note=self._note())
+
+                        def _note(self) -> str:
+                            return "ok"
+
+                graph = EventGraph([_Helped.Cmd])
+                log = graph.invoke(_Helped.Cmd())
+                assert log.latest(_Helped.Cmd.Done).note == "ok"
+
+    def describe_class_level_modifiers():
+        def when_invariants_set_as_class_attribute():
+            def it_evaluates_the_predicate_at_dispatch():
+                from langgraph_events import Invariant, InvariantViolated
+
+                class _BlockedInv(Invariant):
+                    pass
+
+                class _InlineInv(Namespace):
+                    class Cmd(Command):
+                        invariants: ClassVar = {_BlockedInv: lambda log: False}
+
+                        class Done(DomainEvent):
+                            pass
+
+                        def handle(self) -> _InlineInv.Cmd.Done:
+                            return _InlineInv.Cmd.Done()
+
+                graph = EventGraph([_InlineInv.Cmd])
+                log = graph.invoke(_InlineInv.Cmd())
+                assert log.has(InvariantViolated)
+                assert not log.has(_InlineInv.Cmd.Done)
+
+        def when_invariants_inherited_from_a_parent_command():
+            def it_evaluates_the_inherited_predicate():
+                from langgraph_events import Invariant, InvariantViolated
+
+                class _BlockedInheritedInv(Invariant):
+                    pass
+
+                class _InlineInherit(Namespace):
+                    class Parent(Command):
+                        invariants: ClassVar = {
+                            _BlockedInheritedInv: lambda log: False,
+                        }
+
+                        class Done(DomainEvent):
+                            pass
+
+                        def handle(self) -> _InlineInherit.Parent.Done:
+                            return _InlineInherit.Parent.Done()
+
+                    class Child(Parent):
+                        def handle(self) -> _InlineInherit.Parent.Done:
+                            return _InlineInherit.Parent.Done()
+
+                graph = EventGraph([_InlineInherit.Child])
+                log = graph.invoke(_InlineInherit.Child())
+                assert log.has(InvariantViolated)
+                assert not log.has(_InlineInherit.Parent.Done)
+
+        def when_raises_set_as_class_attribute():
+            def it_routes_the_exception_to_HandlerRaised():
+                from langgraph_events import HandlerRaised
+
+                class _BoomError(Exception):
+                    pass
+
+                class _InlineRaises(Namespace):
+                    class Cmd(Command):
+                        raises: ClassVar = (_BoomError,)
+
+                        class Done(DomainEvent):
+                            pass
+
+                        def handle(self) -> _InlineRaises.Cmd.Done:
+                            raise _BoomError("nope")
+
+                @on(HandlerRaised, exception=_BoomError)
+                def catch(event: HandlerRaised) -> None:
+                    return None
+
+                graph = EventGraph([_InlineRaises.Cmd, catch])
+                log = graph.invoke(_InlineRaises.Cmd())
+                assert log.has(HandlerRaised)
+
     def describe_EventGraph_registration():
 
         def when_command_class_passed_in_handlers_list():
@@ -271,7 +418,7 @@ def describe_Command_handle():
         def when_command_class_has_no_handle():
 
             def it_raises_TypeError_at_graph_construction():
-                with pytest.raises(TypeError, match=r"no `handle` method"):
+                with pytest.raises(TypeError, match=r"no inline handler"):
                     EventGraph([Shop2.NoHandler])
 
         def when_mixing_command_classes_and_at_on_functions():
@@ -675,19 +822,26 @@ def describe_Command_handle():
                 graph = EventGraph([Shop8.Buy])
                 assert graph.invoke(Shop8.Buy()).has(Shop8.Buy.Bought)
 
-        def when_external_handler_declares_narrow_return():
-            # External (@on) handlers are exempt — distributed outcome
-            # production (one handler → Placed, another reacts to
-            # InvariantViolated → Rejected) is a valid DDD pattern.
-
-            def it_does_not_enforce_coverage():
-                graph = EventGraph([shop9_partial])
-                assert graph.invoke(Shop9.Buy()).has(Shop9.Buy.Bought)
-
         def when_annotation_includes_None_in_union():
 
             def it_accepts_if_all_outcomes_present():
                 EventGraph([Shop10.Buy])
+
+        def when_single_outcome_command_misses_annotation():
+
+            def it_lists_the_outcome_only_once():
+                with pytest.raises(TypeError) as exc:
+                    EventGraph([Shop11.Buy])
+                msg = str(exc.value)
+                assert "Done, Done" not in msg
+                assert re.search(r"does not cover outcome\(s\): Done\b", msg)
+
+        def when_inline_handle_uses_bare_scatter():
+
+            def it_raises():
+                with pytest.raises(TypeError, match=r"bare `Scatter`") as exc:
+                    EventGraph([Shop12.Buy])
+                assert "Scatter[Done]" in str(exc.value)
 
 
 def describe_handle_aliased_across_commands():

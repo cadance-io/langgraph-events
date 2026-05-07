@@ -41,6 +41,7 @@ from langgraph_events._graph import (
 )
 from langgraph_events._handler import on
 from langgraph_events._namespace import NamespaceModel
+from langgraph_events._namespace._command_privacy import CommandPrivacyError
 from langgraph_events._namespace._smells import DomainPatternWarning
 from langgraph_events._reducer import SKIP, Reducer, ScalarReducer, message_reducer
 from langgraph_events._types import (
@@ -79,6 +80,7 @@ __all__ = [
     "Auditable",
     "Cancelled",
     "Command",
+    "CommandPrivacyError",
     "DomainEvent",
     "DomainPatternWarning",
     "EventGraph",
