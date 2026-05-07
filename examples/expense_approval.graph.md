@@ -63,10 +63,10 @@ graph LR
     ApprovalRequired([ApprovalRequired]):::syst
     _e0_[ ]:::entry ==> Reject
     _e1_[ ]:::entry ==> Submit
-    Submit -->|handle| Submitted
-    Submit -->|handle| Invalidated
-    Approve -->|handle_2| Approved
-    Reject -->|handle_3| Rejected
+    Submit -->|submit| Submitted
+    Submit -->|submit| Invalidated
+    Approve -->|approve| Approved
+    Reject -->|reject| Rejected
     Submitted -->|check_policy| Approve
     Submitted -->|check_policy| ApprovalRequired
 ```
@@ -76,12 +76,12 @@ graph LR
 ```text
 Namespaces:
   Expense
-    Command: Submit  (handlers: handle)
+    Command: Submit  (handlers: submit)
       → Submitted
       → Invalidated
-    Command: Approve  (handlers: handle_2)
+    Command: Approve  (handlers: approve)
       → Approved
-    Command: Reject  (handlers: handle_3)
+    Command: Reject  (handlers: reject)
       → Rejected
 System events:
   ApprovalRequired

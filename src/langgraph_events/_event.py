@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import inspect
 import operator
 import types
 import typing
@@ -353,10 +354,34 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                 f"subclass, e.g. "
                 f"class Order(Namespace): class {cls.__name__}(Command): ..."
             )
-        # Detect an inline ``handle`` method; auto-registered when the command
-        # class is passed to ``EventGraph`` (see _graph.py:_expand_command_handlers).
-        handle = cls.__dict__.get("handle")
-        if callable(handle):
+        # A Command represents one intent and gets one handler. The handler
+        # method may be named anything meaningful (``handle``, ``place``,
+        # ``buy``, ...); the framework picks up the sole public method in
+        # the class body. Helpers must be underscore-prefixed; dunders,
+        # nested DomainEvent classes, and properties don't count.
+        # ``staticmethod`` / ``classmethod`` count toward the limit so they
+        # still trigger the same rejection as before via
+        # ``_validate_handle_signature``.
+        public_methods = [
+            (name, attr)
+            for name, attr in cls.__dict__.items()
+            if not name.startswith("_")
+            and (
+                inspect.isfunction(attr)
+                or isinstance(attr, (staticmethod, classmethod))
+            )
+        ]
+        if len(public_methods) > 1:
+            names = ", ".join(sorted(name for name, _ in public_methods))
+            raise TypeError(
+                f"Command {cls.__qualname__!r} declares more than one public "
+                f"method ({names}). A Command represents a single intent and "
+                f"may have at most one public method (its handler). Make "
+                f"helpers private with a leading underscore, or move them to "
+                f"a separate utility class."
+            )
+        if public_methods:
+            _, handle = public_methods[0]
             _validate_handle_signature(cls, handle)
             cls.__command_handler__ = handle
 

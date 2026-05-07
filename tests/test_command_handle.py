@@ -230,6 +230,65 @@ def describe_Command_handle():
 
                 assert Odd.Cmd.__command_handler__ is None
 
+        def when_command_has_a_meaningfully_named_public_method():
+            # The handler can be named anything meaningful — not just
+            # ``handle``. The framework picks up the sole public method.
+
+            def it_stamps___command_handler__():
+                class Boutique(Namespace):
+                    class Buy(Command):
+                        item: str = ""
+
+                        class Bought(DomainEvent):
+                            item: str = ""
+
+                        def buy(self) -> Boutique.Buy.Bought:
+                            return Boutique.Buy.Bought(item=self.item)
+
+                assert Boutique.Buy.__command_handler__ is Boutique.Buy.__dict__["buy"]
+                graph = EventGraph([Boutique.Buy])
+                log = graph.invoke(Boutique.Buy(item="apple"))
+                assert log.latest(Boutique.Buy.Bought).item == "apple"
+
+        def when_command_has_two_public_methods():
+            # A Command represents a single intent; two public methods is
+            # ambiguous. Helpers must be underscore-prefixed.
+
+            def it_rejects_at_class_creation():
+                with pytest.raises(TypeError, match=r"more than one public method"):
+
+                    class _Bad(Namespace):
+                        class Cmd(Command):
+                            class Done(DomainEvent):
+                                pass
+
+                            def place(self) -> _Bad.Cmd.Done:
+                                return _Bad.Cmd.Done()
+
+                            def helper(self) -> str:
+                                return "x"
+
+        def when_command_has_a_private_helper_alongside_handler():
+            # Underscore-prefixed methods are exempt from the public-methods
+            # cap; the framework still picks up the sole public method as
+            # the handler.
+
+            def it_picks_up_only_the_public_method():
+                class _Helped(Namespace):
+                    class Cmd(Command):
+                        class Done(DomainEvent):
+                            note: str = ""
+
+                        def place(self) -> _Helped.Cmd.Done:
+                            return _Helped.Cmd.Done(note=self._note())
+
+                        def _note(self) -> str:
+                            return "ok"
+
+                graph = EventGraph([_Helped.Cmd])
+                log = graph.invoke(_Helped.Cmd())
+                assert log.latest(_Helped.Cmd.Done).note == "ok"
+
     def describe_class_level_modifiers():
         def when_invariants_set_as_class_attribute():
             def it_evaluates_the_predicate_at_dispatch():

@@ -36,7 +36,7 @@ print(log.latest(Order.Place.Placed))
 - `Order` is the domain (namespace). `Place` is a command. `Placed` / `Rejected` are its outcomes. `Shipped` is a free event.
 - Commands use **imperative** names; events use **past-participle**.
 - `Order.Place.Outcomes` is auto-generated as `Placed | Rejected` — used in `isinstance` and enforced as the handler's return contract.
-- `handle(self)` is the command's inline handler; `self` is the event.
+- `handle(self)` is the command's inline handler; `self` is the event. The handler can be named anything meaningful (`place`, `ship`, `submit`, …) — the framework picks up the sole public method on the Command.
 
 Need `invariants` or `raises`? Declare them as class-level attributes on the `Command` — they're forwarded to the inline `handle`. Need a handler across multiple event types or a reactor on a `DomainEvent`? Use the external `@on(...)` form — see [Concepts](concepts.md#on-decorator).
 

@@ -51,8 +51,8 @@ graph LR
     end
     _e0_[ ]:::entry ==> Place
     _e1_[ ]:::entry ==> Ship
-    Place -->|handle| Placed
-    Ship -->|handle_2| Shipped
+    Place -->|place| Placed
+    Ship -->|ship| Shipped
     CustomerNotBanned -.->|explain_banned| Rejected
     OrderTotalWithinLimit -.->|explain_over_limit| Rejected
     Place -.->|invariant| CustomerNotBanned

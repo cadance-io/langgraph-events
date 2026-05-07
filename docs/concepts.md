@@ -65,11 +65,11 @@ class Order(Namespace):
 
 ## Handlers { #on-decorator }
 
-Two styles: inline `handle` on a command, or the `@on` decorator.
+Two styles: an inline handler on a command, or the `@on` decorator.
 
-### Inline: `handle` on the command { #inline-command-handlers }
+### Inline handler on the command { #inline-command-handlers }
 
-The command owns its handler. `self` is the command instance. Pass the command class to `EventGraph` — no decorator.
+The command owns its handler. The handler is the **sole public method** in the class body — name it after the verb (`place`, `ship`, `submit`, …) or use the generic `handle`. `self` is the command instance. Pass the command class to `EventGraph` — no decorator.
 
 ```python
 class Order(Namespace):
@@ -79,7 +79,7 @@ class Order(Namespace):
         class Shipped(DomainEvent):
             tracking: str
 
-        def handle(self) -> Shipped:
+        def ship(self) -> Shipped:
             return Order.Ship.Shipped(tracking=f"track-{self.order_id}")
 
 
@@ -88,7 +88,9 @@ graph = EventGraph([Order.Ship])
 graph = EventGraph.from_namespaces(Order, handlers=[react])
 ```
 
-When an inline `handle` has an explicit return annotation, it must cover every nested `DomainEvent`. A `DomainEvent` nested inside a `Command` is *Command-private*: only that Command's `handle()` may emit it. Reactors that need to surface a domain failure as part of recovery emit a namespace-level sibling event (e.g. `Order.Rejected`), not a Command-private outcome — graph construction raises `CommandPrivacyError` if a non-`handle()` handler returns one.
+A Command represents one intent and gets one public method — the handler. Helpers must be underscore-prefixed; declaring more than one public method on a Command raises `TypeError` at class creation.
+
+When an inline handler has an explicit return annotation, it must cover every nested `DomainEvent`. A `DomainEvent` nested inside a `Command` is *Command-private*: only that Command's handler may emit it. Reactors that need to surface a domain failure as part of recovery emit a namespace-level sibling event (e.g. `Order.Rejected`), not a Command-private outcome — graph construction raises `CommandPrivacyError` if a non-handler returns one.
 
 `invariants` and `raises` for an inline handle are declared as class-level attributes on the `Command`:
 

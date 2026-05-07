@@ -107,7 +107,7 @@ class Expense(Namespace):
 
             reason: str = ""
 
-        def handle(self) -> Expense.Submit.Submitted | Expense.Submit.Invalidated:
+        def submit(self) -> Expense.Submit.Submitted | Expense.Submit.Invalidated:
             result = expense_llm.invoke(
                 f"Extract the expense details from this description. "
                 f"Mark it invalid if it is not a recognisable business "
@@ -132,7 +132,7 @@ class Expense(Namespace):
 
             approver: str = ""
 
-        def handle(self) -> Expense.Approve.Approved:
+        def approve(self) -> Expense.Approve.Approved:
             return Expense.Approve.Approved(approver=self.approver)
 
     class Reject(Command):
@@ -145,7 +145,7 @@ class Expense(Namespace):
 
             reason: str = ""
 
-        def handle(self) -> Expense.Reject.Rejected:
+        def reject(self) -> Expense.Reject.Rejected:
             return Expense.Reject.Rejected(reason=self.reason)
 
 

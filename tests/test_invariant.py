@@ -98,35 +98,27 @@ class Undeclared(Invariant):
 def _place_with(invariants, *, async_handler=False):
     """Set ``invariants`` on ``Order.Place`` and return the command class.
 
-    Each test in this module asserts handler name ``"place"`` and uses
-    ``Order.Place(...)`` / ``Order.Place.Placed`` directly, so the test
-    invariants are mutated onto ``Order.Place`` for the duration of the
-    test. The autouse ``_reset_place_invariants`` fixture (below) restores
-    the original state after each test.
+    The conftest's inline handler is named ``place`` (the framework picks
+    up any single public method on a Command). Tests mutate the live class
+    here; the autouse ``_reset_place_invariants`` fixture restores
+    ``invariants`` and the original ``__command_handler__`` afterwards.
 
-    ``async_handler=True`` swaps the inline ``handle`` for an async variant
-    on the same class; the fixture restores the sync version afterward.
+    ``async_handler=True`` swaps in an async variant of ``place`` for the
+    duration of the test.
     """
     Order.Place.invariants = invariants
     if async_handler:
 
-        async def handle(
-            self,
-        ) -> Order.Place.Placed | Order.Place.Rejected:
+        async def place(self) -> Order.Place.Placed | Order.Place.Rejected:
             return Order.Place.Placed(order_id="o1")
 
-        # Rename for handler-name assertions like ``v.handler == "place"``.
-        handle.__name__ = "place"
-        Order.Place.__command_handler__ = handle
+        Order.Place.__command_handler__ = place
     else:
 
-        def handle(
-            self,
-        ) -> Order.Place.Placed | Order.Place.Rejected:
+        def place(self) -> Order.Place.Placed | Order.Place.Rejected:
             return Order.Place.Placed(order_id="o1")
 
-        handle.__name__ = "place"
-        Order.Place.__command_handler__ = handle
+        Order.Place.__command_handler__ = place
     return Order.Place
 
 
@@ -221,13 +213,12 @@ def describe_invariants():
                 Order.Place.invariants = {Blocked: lambda log: False}
                 Order.Place.raises = (_PredicateError,)
 
-                def handle(
+                def place(
                     self,
                 ) -> Order.Place.Placed | Order.Place.Rejected:
                     raise _PredicateError("would have run")
 
-                handle.__name__ = "place"
-                Order.Place.__command_handler__ = handle
+                Order.Place.__command_handler__ = place
 
                 @on(HandlerRaised, exception=_PredicateError)
                 def caught(event: HandlerRaised) -> None:
@@ -444,18 +435,16 @@ def _deposit_with(invariants, *, async_handler=False):
     Ledger.Deposit.invariants = invariants
     if async_handler:
 
-        async def handle(self) -> Ledger.Deposit.Deposited:
+        async def deposit(self) -> Ledger.Deposit.Deposited:
             return Ledger.Deposit.Deposited(amount=self.amount)
 
-        handle.__name__ = "deposit"
-        Ledger.Deposit.__command_handler__ = handle
+        Ledger.Deposit.__command_handler__ = deposit
     else:
 
-        def handle(self) -> Ledger.Deposit.Deposited:
+        def deposit(self) -> Ledger.Deposit.Deposited:
             return Ledger.Deposit.Deposited(amount=self.amount)
 
-        handle.__name__ = "deposit"
-        Ledger.Deposit.__command_handler__ = handle
+        Ledger.Deposit.__command_handler__ = deposit
     return Ledger.Deposit
 
 

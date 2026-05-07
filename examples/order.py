@@ -119,7 +119,9 @@ class Order(Namespace):
             ),
         }
 
-        def handle(self) -> Order.Place.Placed:
+        def place(self) -> Order.Place.Placed:
+            # The framework picks up any sole public method as the handler —
+            # use a domain verb (``place``, ``ship``, ...) for readability.
             return Order.Place.Placed(
                 order_id=f"order-for-{self.customer_id}", amount=self.amount
             )
@@ -128,13 +130,13 @@ class Order(Namespace):
         """Order rejected (e.g. by an invariant).
 
         Sibling to ``Place``, not nested — emitted by recovery reactors,
-        never from ``Place.handle()`` itself.
+        never from ``Place.place()`` itself.
         """
 
         reason: str = ""
 
     class Ship(Command):
-        """Ship an accepted order. Inline ``handle``."""
+        """Ship an accepted order. Inline handler named ``ship``."""
 
         order_id: str = ""
 
@@ -143,7 +145,7 @@ class Order(Namespace):
 
             tracking: str = ""
 
-        def handle(self) -> Order.Ship.Shipped:
+        def ship(self) -> Order.Ship.Shipped:
             return Order.Ship.Shipped(tracking=f"track-{self.order_id}")
 
 

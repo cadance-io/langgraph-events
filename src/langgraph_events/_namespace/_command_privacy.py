@@ -48,6 +48,11 @@ def enforce_command_privacy(
     """
     for meta in handler_metas:
         info = return_info[meta.name]
+        # ``_inline_command`` is set by ``_expand_command_handlers`` on the
+        # wrapper of an inline ``Cmd.handle()``; the rule treats functions
+        # carrying this marker as the privileged owner. A user who manually
+        # stamps this private attribute on an arbitrary function is opting
+        # out of the check on purpose — not defended against.
         owner: type[Command] | None = getattr(meta.fn, "_inline_command", None)
         for event_cls in (*info.event_types, *info.scatter_types):
             if not (isinstance(event_cls, type) and issubclass(event_cls, DomainEvent)):

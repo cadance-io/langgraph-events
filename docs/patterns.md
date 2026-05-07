@@ -78,8 +78,8 @@ graph LR
         end
         _e0_[ ]:::entry ==> Place
         _e1_[ ]:::entry ==> Ship
-        Place -->|handle| Placed
-        Ship -->|handle_2| Shipped
+        Place -->|place| Placed
+        Ship -->|ship| Shipped
         CustomerNotBanned -.->|explain_banned| Rejected
         OrderTotalWithinLimit -.->|explain_over_limit| Rejected
         Place -.->|invariant| CustomerNotBanned
@@ -92,9 +92,9 @@ graph LR
     ```text
     Namespaces:
       Order
-        Command: Place  (handlers: handle; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+        Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
           → Placed
-        Command: Ship  (handlers: handle_2)
+        Command: Ship  (handlers: ship)
           → Shipped
         Event: Rejected
     System events:
@@ -142,10 +142,10 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
         ApprovalRequired([ApprovalRequired]):::syst
         _e0_[ ]:::entry ==> Reject
         _e1_[ ]:::entry ==> Submit
-        Submit -->|handle| Submitted
-        Submit -->|handle| Invalidated
-        Approve -->|handle_2| Approved
-        Reject -->|handle_3| Rejected
+        Submit -->|submit| Submitted
+        Submit -->|submit| Invalidated
+        Approve -->|approve| Approved
+        Reject -->|reject| Rejected
         Submitted -->|check_policy| Approve
         Submitted -->|check_policy| ApprovalRequired
     ```
@@ -155,12 +155,12 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
     ```text
     Namespaces:
       Expense
-        Command: Submit  (handlers: handle)
+        Command: Submit  (handlers: submit)
           → Submitted
           → Invalidated
-        Command: Approve  (handlers: handle_2)
+        Command: Approve  (handlers: approve)
           → Approved
-        Command: Reject  (handlers: handle_3)
+        Command: Reject  (handlers: reject)
           → Rejected
     System events:
       ApprovalRequired
