@@ -366,6 +366,21 @@ def describe_scatter_must_declare_concrete_types():
                 with pytest.raises(TypeError, match=r"Scatter"):
                     EventGraph([_ScatHost.Persist, burst])
 
+        def when_return_mixes_a_concrete_event():
+            # The realistic developer mistake: declare one concrete target,
+            # then "widen" with DomainEvent. The widening defeats privacy
+            # enforcement on every Cmd-private event the union implies.
+            def with_an_abstract_base():
+                def it_raises_TypeError_at_build():
+                    @on(_ScatHost.Trigger)
+                    def burst(
+                        event: _ScatHost.Trigger,
+                    ) -> Scatter[_ScatHost.Note | DomainEvent]:
+                        return Scatter([_ScatHost.Note()])
+
+                    with pytest.raises(TypeError, match=r"Scatter"):
+                        EventGraph([_ScatHost.Persist, burst])
+
         def when_return_is_parameterised_Scatter_of_concrete_events():
             def it_builds_the_graph():
                 @on(_ScatHost.Trigger)

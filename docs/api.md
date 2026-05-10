@@ -115,7 +115,7 @@ from langgraph_events.stream import (
 
 | Export | Type | Description |
 |---|---|---|
-| `CommandPrivacyError` | TypeError subclass | Raised at `EventGraph` construction (and at runtime for bare-`Scatter` reactors) when a handler emits a `DomainEvent` it isn't allowed to emit. Outcomes nested inside a `Command` are private to that Command's inline `handle()` — neither sibling Commands nor non-inline reactors may produce them |
+| `CommandPrivacyError` | TypeError subclass | Raised at `EventGraph` construction; also at runtime when a handler with a broad base-class annotation (e.g. `-> DomainEvent`) constructs a `Cmd.Private(...)` that bypasses the static contract check. Outcomes nested inside a `Command` are private to that Command's inline `handle()` — neither sibling Commands nor non-inline reactors may produce them |
 
 ## AG-UI Subpackage
 

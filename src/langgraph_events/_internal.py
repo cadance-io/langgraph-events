@@ -602,9 +602,9 @@ def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -
     Empty-typed ``Scatter`` annotations (bare, ``Scatter[Any]``,
     ``Scatter[Event]``, ``Scatter[DomainEvent]``, ``Scatter[TypeVar]``) are
     rejected at build time, so static analysis is the primary guard. This
-    check still fires when a handler with a broad return annotation (e.g.
-    ``-> Event``) constructs ``Scatter([Cmd.Private(...)])`` at runtime —
-    Python's type system doesn't enforce annotations at the call site, so
+    check still fires when a handler with a broad base-class annotation (e.g.
+    ``-> DomainEvent``) constructs ``Scatter([Cmd.Private(...)])`` at runtime
+    — Python's type system doesn't enforce annotations at the call site, so
     the runtime check catches what the static check structurally cannot see.
     """
     if meta is None:
