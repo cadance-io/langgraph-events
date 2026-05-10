@@ -229,7 +229,6 @@ class NamespaceModel:
         inline: bool
         side_effect: bool
         has_annotation: bool
-        has_untyped_scatter: bool
 
     @dataclass(frozen=True)
     class Policy:
@@ -244,7 +243,6 @@ class NamespaceModel:
         field_matchers: tuple[tuple[str, str], ...]
         side_effect: bool
         has_annotation: bool
-        has_untyped_scatter: bool
 
     @dataclass(frozen=True)
     class Edge:
@@ -506,9 +504,7 @@ def _build_domain_model(  # noqa: PLR0912
         is_command_handler = any(
             isinstance(t, type) and issubclass(t, CommandBase) for t in meta.event_types
         )
-        side_effect = (
-            not info.event_types and not info.scatter_types and not info.has_scatter
-        )
+        side_effect = not info.event_types and not info.scatter_types
         invariants = tuple(cls for cls, _fn in meta.invariants)
         field_matchers = tuple(
             (fname, _matcher_repr(matcher, is_type))
@@ -532,7 +528,6 @@ def _build_domain_model(  # noqa: PLR0912
                 inline=getattr(meta.fn, "_inline_command", None) is not None,
                 side_effect=side_effect,
                 has_annotation=info.has_annotation,
-                has_untyped_scatter=info.has_scatter and not info.scatter_types,
             )
             command_handlers.append(ch)
             for cmd in cmds:
@@ -548,7 +543,6 @@ def _build_domain_model(  # noqa: PLR0912
                 field_matchers=field_matchers,
                 side_effect=side_effect,
                 has_annotation=info.has_annotation,
-                has_untyped_scatter=info.has_scatter and not info.scatter_types,
             )
             policies.append(policy)
 

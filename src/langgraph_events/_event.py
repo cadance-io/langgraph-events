@@ -725,7 +725,7 @@ class Scatter:
     Example::
 
         @on(BatchReceived)
-        def split(event: BatchReceived) -> Scatter:
+        def split(event: BatchReceived) -> Scatter[ItemToProcess]:
             return Scatter([ItemToProcess(item=i) for i in event.items])
     """
 

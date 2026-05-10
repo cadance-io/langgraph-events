@@ -21,11 +21,13 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerRaised,
+    IntegrationEvent,
     Interrupted,
     Invariant,
     InvariantViolated,
     Namespace,
     Scatter,
+    SystemEvent,
     _iter_nested_outcomes,
 )
 from langgraph_events._event_log import EventLog
@@ -78,7 +80,6 @@ class ReturnInfo(NamedTuple):
 
     event_types: list[type[Event]]
     scatter_types: list[type[Event]]
-    has_scatter: bool
     has_interrupted: bool
     has_annotation: bool
 
@@ -98,6 +99,14 @@ class ReturnContract(NamedTuple):
 
     source: str
     """Human-readable origin of the contract, used in error messages."""
+
+
+_ABSTRACT_EVENT_BASES: tuple[type, ...] = (
+    Event,
+    DomainEvent,
+    IntegrationEvent,
+    SystemEvent,
+)
 
 
 def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
@@ -120,8 +129,59 @@ def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
     return out
 
 
+def _format_scatter_repr(scatter_alias: Any) -> str:
+    """Render a Scatter annotation back into a readable form for error text."""
+    args = typing.get_args(scatter_alias)
+    if not args:
+        return "Scatter"
+    parts: list[str] = []
+    for arg in args:
+        if typing.get_origin(arg) in (typing.Union, types.UnionType):
+            inner = " | ".join(
+                getattr(m, "__name__", repr(m)) for m in typing.get_args(arg)
+            )
+            parts.append(inner)
+        else:
+            parts.append(getattr(arg, "__name__", repr(arg)))
+    return f"Scatter[{' | '.join(parts)}]"
+
+
+def _raise_empty_scatter(fn: Callable[..., Any], offending: str) -> None:
+    """Reject a Scatter annotation that contributes no concrete event types.
+
+    Bare ``Scatter``, ``Scatter[Any]``, ``Scatter[TypeVar]``, and
+    ``Scatter[<abstract base>]`` (Event/DomainEvent/IntegrationEvent/
+    SystemEvent) all bypass build-time privacy enforcement because the
+    resolved target set is empty or non-discriminating. Raise at build time
+    so users can't paper over a privacy violation by widening the annotation.
+    """
+    handler_name = getattr(fn, "__name__", "handler")
+    cmd: type[Command] | None = getattr(fn, "_inline_command", None)
+    if cmd is not None:
+        nested = _iter_nested_outcomes(cmd)
+        suggested = (
+            " | ".join(o.__name__ for o in nested) if nested else "EventA | EventB"
+        )
+        location = f"Inline handler {handler_name!r} on {cmd.__qualname__}"
+    else:
+        suggested = "EventA | EventB"
+        location = f"Handler {handler_name!r}"
+    raise TypeError(
+        f"{location} returns {offending}, which declares no concrete event "
+        f"types and bypasses build-time privacy enforcement. "
+        f"Use `Scatter[{suggested}]` to enumerate the events you scatter. "
+        f"(Do not work around this by demoting your Command to a "
+        f"DomainEvent/IntegrationEvent — that loses privacy and outcome "
+        f"guarantees.)"
+    )
+
+
 def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
-    """Parse handler return annotation into a ``ReturnInfo``."""
+    """Parse handler return annotation into a ``ReturnInfo``.
+
+    Raises ``TypeError`` for Scatter shapes that contribute no concrete event
+    types — see :func:`_raise_empty_scatter`.
+    """
     try:
         hints = _resolve_type_hints(fn)
     except Exception as exc:
@@ -134,7 +194,7 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
 
     return_hint = hints.get("return")
     if return_hint is None:
-        return ReturnInfo([], [], False, False, False)
+        return ReturnInfo([], [], False, False)
 
     # If the top-level hint is Scatter[X], wrap it so the loop sees Scatter[X]
     # as a single candidate (otherwise get_args returns the type params).
@@ -147,21 +207,23 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
 
     event_types: list[type[Event]] = []
     scatter_types: list[type[Event]] = []
-    has_scatter = False
     has_interrupted = False
     for arg in candidates:
         if arg is type(None):
             continue
         if arg is Scatter:
-            has_scatter = True
+            _raise_empty_scatter(fn, "bare `Scatter`")
         elif typing.get_origin(arg) is Scatter:
-            scatter_types.extend(_scatter_event_types(arg))
+            members = _scatter_event_types(arg)
+            if not members or any(m in _ABSTRACT_EVENT_BASES for m in members):
+                _raise_empty_scatter(fn, f"`{_format_scatter_repr(arg)}`")
+            scatter_types.extend(members)
         elif isinstance(arg, type) and issubclass(arg, Event):
             if issubclass(arg, Interrupted):
                 has_interrupted = True
             event_types.append(arg)
 
-    return ReturnInfo(event_types, scatter_types, has_scatter, has_interrupted, True)
+    return ReturnInfo(event_types, scatter_types, has_interrupted, True)
 
 
 class GraphState(NamedTuple):
@@ -305,14 +367,6 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     if not nested_outcomes:
         return
     handler_name = getattr(meta.fn, "__name__", "handler")
-    if info.has_scatter:
-        example = " | ".join(o.__name__ for o in nested_outcomes)
-        raise TypeError(
-            f"Inline handler {handler_name!r} on {cmd.__qualname__} uses bare "
-            f"`Scatter`; this is not allowed on a Command's inline handler. "
-            f"Use `Scatter[{example}]` — or drop the annotation to let "
-            f"`Outcomes` drive the contract."
-        )
     covered = tuple(info.event_types) + tuple(info.scatter_types)
     missing = [o for o in nested_outcomes if not any(issubclass(c, o) for c in covered)]
     if not missing:

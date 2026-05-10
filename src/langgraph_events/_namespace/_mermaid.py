@@ -176,7 +176,6 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     node_id = _build_node_id_map(d)
     edges: list[_FlowEdge] = []
     side_effect_entries: list[str] = []
-    scatter_entries: list[str] = []
     referenced: set[type[Event]] = set()
     all_sources: set[str] = set()
     all_targets: set[str] = set()
@@ -271,17 +270,12 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         scatter_edges = [e for e in re_edges if e.kind == "scatter"]
 
         has_annotation = getattr(r, "has_annotation", True)
-        has_untyped_scatter = getattr(r, "has_untyped_scatter", False)
         side_effect = getattr(r, "side_effect", False)
 
         if not solid_edges and not scatter_edges:
-            if has_annotation and not has_untyped_scatter and side_effect:
+            if has_annotation and side_effect:
                 subs_label = ", ".join(_event_label(t) for t in subs)
                 side_effect_entries.append(f"{name} ({subs_label})")
-                continue
-            if has_untyped_scatter:
-                subs_label = ", ".join(_event_label(t) for t in subs)
-                scatter_entries.append(f"{name} ({subs_label})")
                 continue
             if not has_annotation:
                 # Unannotated handler with no known target → show "?" target.
@@ -480,8 +474,6 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     flow.link_style("ownership", _LINKSTYLE_OWNS)
     flow.link_style("invariant", _LINKSTYLE_INVARIANT)
 
-    if scatter_entries:
-        flow.comment(f"Scatter handlers: {', '.join(scatter_entries)}")
     if side_effect_entries:
         flow.comment(f"Side-effect handlers: {', '.join(side_effect_entries)}")
 

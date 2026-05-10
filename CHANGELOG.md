@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Scatter must enumerate concrete event types**. Return annotations of the form `-> Scatter`, `-> Scatter[Any]`, `-> Scatter[Event]`, `-> Scatter[DomainEvent]`, `-> Scatter[IntegrationEvent]`, `-> Scatter[SystemEvent]`, and `-> Scatter[T]` (TypeVar) are now rejected at `EventGraph` construction with a `TypeError`. These shapes contributed no usable types to the privacy graph, so the v0.9.0 `enforce_command_privacy()` check passed silently and the leak was only caught at runtime — turning the previous build-time `CommandPrivacyError` into something developers could paper over by widening the annotation. **Migration**: replace `-> Scatter` with `-> Scatter[Event1 | Event2 | ...]` enumerating the concrete events you scatter. The error message points at the right form (and steers away from demoting the offending `Command` to `DomainEvent`/`IntegrationEvent`, which would silently lose privacy guarantees).
+- **NamespaceModel JSON schema bumped to v2**. `CommandHandler.has_untyped_scatter` and `Policy.has_untyped_scatter` are removed (the represented condition is now impossible at build time). The "Scatter handlers: …" footer in mermaid output and the bare `Scatter` token in text output are both gone for the same reason. Consumers reading `to_dict()` must update.
+
 ### Fixed
 - **Scatter return-type parser**: `Scatter[A | B]` now extracts both `A` and `B` as scatter targets, matching the behavior of the equivalent `Scatter[A] | Scatter[B]` form. Previously the Union argument was rejected by an `isinstance(..., type)` check and silently dropped, so `info.scatter_types` came back empty — orphan-warning detection and choreography diagrams missed those targets entirely. (closes #66)
 

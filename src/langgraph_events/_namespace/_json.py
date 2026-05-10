@@ -6,7 +6,7 @@ from typing import Any
 
 from langgraph_events._namespace._model import NamespaceModel
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 """Top-level ``schema_version`` string stamped on ``to_dict()`` output.
 
 Bumped when fields are removed, renamed, or change meaning. Additions
@@ -28,7 +28,6 @@ def _encode_reaction(r: Any) -> dict[str, Any]:
         "field_matchers": [list(fm) for fm in r.field_matchers],
         "side_effect": r.side_effect,
         "has_annotation": r.has_annotation,
-        "has_untyped_scatter": r.has_untyped_scatter,
     }
     if isinstance(r, NamespaceModel.CommandHandler):
         base["kind"] = "command_handler"
