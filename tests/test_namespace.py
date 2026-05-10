@@ -749,7 +749,6 @@ def describe_reaction_flags():
             policy = next(p for p in d.policies if p.name == "notify")
             assert policy.side_effect is True
             assert policy.has_annotation is True
-            assert policy.has_untyped_scatter is False
 
     def when_handler_has_no_return_annotation():
         def it_flags_has_annotation_false():
@@ -760,16 +759,6 @@ def describe_reaction_flags():
             d = EventGraph([mystery]).namespaces()
             ch = next(c for c in d.command_handlers if c.name == "mystery")
             assert ch.has_annotation is False
-
-    def when_handler_returns_bare_scatter():
-        def it_flags_has_untyped_scatter_true():
-            @on(_Batch)
-            def split(event: _Batch) -> Scatter:
-                return Scatter([_Batch()])
-
-            d = EventGraph([split]).namespaces()
-            policy = next(p for p in d.policies if p.name == "split")
-            assert policy.has_untyped_scatter is True
 
     def when_handler_declares_invariants():
         def it_preserves_invariant_classes():
@@ -1173,7 +1162,7 @@ def describe_reactor_hubs():
 def describe_json_and_to_dict():
     def it_stamps_schema_version():
         payload = EventGraph([place]).namespaces().to_dict()
-        assert payload["schema_version"] == "1"
+        assert payload["schema_version"] == "2"
 
     def it_returns_json_serializable_dict():
 

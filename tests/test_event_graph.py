@@ -1198,7 +1198,7 @@ def describe_EventGraph():
 
             def it_fans_out_work_items_and_gathers_results():
                 @on(BatchReceived)
-                def split(event: BatchReceived) -> Scatter:
+                def split(event: BatchReceived) -> Scatter[WorkItemDispatched]:
                     return Scatter(
                         [
                             WorkItemDispatched(item=item, batch_size=len(event.items))
@@ -1233,7 +1233,7 @@ def describe_EventGraph():
 
             def it_still_produces_output():
                 @on(BatchReceived)
-                def split(event: BatchReceived) -> Scatter:
+                def split(event: BatchReceived) -> Scatter[WorkItemDispatched]:
                     return Scatter([WorkItemDispatched(item=event.items[0])])
 
                 @on(WorkItemDispatched)
@@ -3228,17 +3228,6 @@ def describe_EventGraph():
             output = graph.namespaces().mermaid()
             assert "%% Side-effect handlers: side_effect (Started)" in output
             assert "Started -->|producer| Ended" in output
-
-        def it_shows_scatter_in_footer():
-            @on(Started)
-            def split(event: Started) -> Scatter:
-                return Scatter([Processed(data="a")])
-
-            graph = EventGraph([split])
-            output = graph.namespaces().mermaid()
-            # No edge to a Scatter node
-            assert "-->|split| Scatter" not in output
-            assert "%% Scatter handlers: split (Started)" in output
 
         def it_dashes_raises_edge_to_handler_raised():
             from langgraph_events import HandlerRaised

@@ -27,8 +27,6 @@ def _command_annotations(
             label = f"Scatter[{_event_label(tgt)}]"
             if label not in scatters:
                 scatters.append(label)
-        if ch.has_untyped_scatter and "Scatter" not in scatters:
-            scatters.append("Scatter")
     return tuple(raises), tuple(invariants), tuple(scatters)
 
 
@@ -37,8 +35,6 @@ def _policy_targets(p: NamespaceModel.Policy) -> str:
     parts = [_event_label(t) for t in p.produces]
     for tgt in p.scatters:
         parts.append(f"Scatter[{_event_label(tgt)}]")
-    if p.has_untyped_scatter:
-        parts.append("Scatter")
     return ", ".join(parts)
 
 

@@ -10,18 +10,25 @@ Two symmetric rules:
 
 from __future__ import annotations
 
+from typing import Any, TypeVar
+
 import pytest
 
 from langgraph_events import (
     Command,
     CommandPrivacyError,
     DomainEvent,
+    Event,
     EventGraph,
+    IntegrationEvent,
     Interrupted,
     Namespace,
     Scatter,
+    SystemEvent,
     on,
 )
+
+_T = TypeVar("_T", bound=Event)
 
 # ---- Module-level fixtures -------------------------------------------------
 # Annotations on Command.handle() and @on handlers in the test bodies below
@@ -247,24 +254,6 @@ def describe_command_privacy():
 
                 EventGraph([_PrivShared.Persist, echo])  # no raise
 
-    def describe_runtime_enforcement():
-        def when_reactor_scatters_a_Command_private_event_via_bare_Scatter():
-            # Bare ``-> Scatter`` is a legitimate annotation when the
-            # handler scatters non-private events, so we don't reject it at
-            # build time. Privacy is enforced at runtime instead, when the
-            # reactor actually emits a Command-private event.
-            def it_raises_CommandPrivacyError_at_dispatch():
-                @on(_PrivLeaky.Trigger)
-                def burst(event: _PrivLeaky.Trigger) -> Scatter:
-                    return Scatter([_PrivLeaky.Persist.Persisted()])
-
-                graph = EventGraph([_PrivLeaky.Persist, burst])
-                with pytest.raises(
-                    CommandPrivacyError,
-                    match=r"private to _PrivLeaky\.Persist",
-                ):
-                    graph.invoke(_PrivLeaky.Trigger())
-
     def describe_error():
         def it_subclasses_TypeError():
             assert issubclass(CommandPrivacyError, TypeError)
@@ -274,3 +263,153 @@ def describe_command_privacy():
                 EventGraph([_PrivSib.DoIt])
             msg = str(exc_info.value)
             assert "_PrivSib.DoIt" in msg and "_PrivSib.Stray" in msg
+
+
+# ---- Empty-typed Scatter rejection -----------------------------------------
+# A reactor that returns a Scatter without enumerating concrete event types
+# bypasses the privacy graph (the build-time check has nothing to inspect; the
+# runtime check only fires on actual emission). Reject all such shapes at
+# build time so users can't paper over a CommandPrivacyError by widening the
+# annotation.
+
+
+class _ScatHost(Namespace):
+    """Host namespace providing a Command + a trigger event for reactors."""
+
+    class Persist(Command):
+        class Persisted(DomainEvent):
+            pass
+
+        def handle(self) -> _ScatHost.Persist.Persisted:
+            return _ScatHost.Persist.Persisted()
+
+    class Trigger(DomainEvent):
+        pass
+
+    class Note(DomainEvent):
+        pass
+
+
+class _InlineBareScatter(Namespace):
+    """Inline handler returning bare ``Scatter`` (no params)."""
+
+    class Buy(Command):
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> Scatter:
+            return Scatter([_InlineBareScatter.Buy.Done()])
+
+
+def describe_scatter_must_declare_concrete_types():
+    def describe_at_handlers():
+        def when_return_is_bare_Scatter():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"bare `?Scatter`?"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_Any():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[Any]:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"Scatter"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_Event_base():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[Event]:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"Scatter"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_DomainEvent_base():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[DomainEvent]:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"Scatter"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_IntegrationEvent_base():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[IntegrationEvent]:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"Scatter"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_SystemEvent_base():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[SystemEvent]:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"Scatter"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_TypeVar():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[_T]:
+                    return Scatter([_ScatHost.Note()])
+
+                with pytest.raises(TypeError, match=r"Scatter"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_mixes_a_concrete_event():
+            # The realistic developer mistake: declare one concrete target,
+            # then "widen" with DomainEvent. The widening defeats privacy
+            # enforcement on every Cmd-private event the union implies.
+            def with_an_abstract_base():
+                def it_raises_TypeError_at_build():
+                    @on(_ScatHost.Trigger)
+                    def burst(
+                        event: _ScatHost.Trigger,
+                    ) -> Scatter[_ScatHost.Note | DomainEvent]:
+                        return Scatter([_ScatHost.Note()])
+
+                    with pytest.raises(TypeError, match=r"Scatter"):
+                        EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_parameterised_Scatter_of_concrete_events():
+            def it_builds_the_graph():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[_ScatHost.Note]:
+                    return Scatter([_ScatHost.Note()])
+
+                EventGraph([_ScatHost.Persist, burst])  # no raise
+
+    def describe_inline_handler():
+        def when_inline_handle_returns_bare_Scatter():
+            def it_raises_TypeError_at_build():
+                with pytest.raises(TypeError, match=r"bare `?Scatter`?") as exc_info:
+                    EventGraph([_InlineBareScatter.Buy])
+                msg = str(exc_info.value)
+                # Inline error must name the Command and suggest the
+                # actual nested outcomes in the Scatter[...] form.
+                assert "Buy" in msg
+                assert "Scatter[Done]" in msg
+
+    def describe_error_message():
+        def it_mentions_the_demotion_anti_pattern():
+            # Pin this guidance: the only remaining escape (drop the Command,
+            # use DomainEvent/IntegrationEvent instead) loses privacy
+            # guarantees and is rarely the right answer.
+            @on(_ScatHost.Trigger)
+            def burst(event: _ScatHost.Trigger) -> Scatter:
+                return Scatter([_ScatHost.Note()])
+
+            with pytest.raises(TypeError) as exc_info:
+                EventGraph([_ScatHost.Persist, burst])
+            msg = str(exc_info.value).lower()
+            assert "demot" in msg or "domainevent" in msg or "integrationevent" in msg
