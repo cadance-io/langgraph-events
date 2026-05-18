@@ -135,8 +135,24 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 
 ## Serde Subpackage
 
-Opt-in subpackage for namespace-aware checkpoint serialization. Use when nested events with sibling-named outcomes (`Persona.Approve.Approved`, `Story.Approve.Approved`) need to round-trip distinctly through a checkpointer.
+Opt-in subpackage for namespace-aware checkpoint serialization. Use when nested events with sibling-named outcomes (`Persona.Approve.Approved`, `Story.Approve.Approved`) need to round-trip distinctly through a checkpointer. The common evolution path is **decorator-first**: `@migrate_from` / `@backfill` on the class, auto-collected by `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` — no manual serde wiring. See [Event migrations](event-migrations.md).
+
+Exported from `langgraph_events.serde` unless a different module is noted.
 
 | Export | Type | Description |
 |---|---|---|
-| `NamespaceAwareSerde` | Class | `JsonPlusSerializer` subclass that keys `Event` identity by `(__module__, __qualname__)` rather than `(__module__, __name__)`. Drop-in for any LangGraph checkpointer that accepts `serde=` (e.g. `MemorySaver(serde=NamespaceAwareSerde())`). Non-event payloads encode exactly as the default serde |
+| `NamespaceAwareSerde` | Class | `JsonPlusSerializer` subclass keying `Event` identity by `(__module__, __qualname__)`. Drop-in for any checkpointer accepting `serde=`. `EventGraph.from_namespaces` auto-wires one scoped to its namespaces when the checkpointer carries the default serde; pass your own via `MemorySaver(serde=...)` to opt out. Kwargs: `migrations=`, `namespaces=`, `legacy_write=` |
+| `migrate_from` | Decorator | `@migrate_from(*old_qualnames, in_module=None)` — records historic identities a class held. Auto-collected from the namespaces the serde was built with; stacks; not MRO-inherited |
+| `backfill` | Decorator | `@backfill(field, *, default=… \| default_factory=…)` — class-scoped back-fill for a field that is required in code but absent from pre-existing payloads. Same auto-collection as `@migrate_from`; reuses the `AddField` mutable-default guard |
+| `Migration` | Class | Hand-authored migration group for cross-module / composite cases. `Migration.rename(...)` / `Migration.add_field(...)` are single-op sugar; pass the live target as `to=<class>` / `target=<class>` (refactor-safe) instead of `new_module`/`new_qualname` strings |
+| `assert_all_baselined_revive` | Function | `assert_all_baselined_revive(serde, baseline_path)` — the zero-maintenance pre-deploy gate: pushes a synthesized payload for every baselined identity through the real read path and asserts it revives. No per-event list to maintain |
+| `synthesize_legacy_payload` | Function | `synthesize_legacy_payload(module, qualname, kwargs)` — builds the `(format, bytes)` a prior release would have written. For pinning a specific drifted field shape; the loop gate above covers identity reachability |
+| `replay_reducer` | Function | `replay_reducer(reducer, events)` — rebuild a reducer's channel value from its (already-migrated) event log when the projection/output shape changed. Thin wrapper over `BaseReducer.seed` |
+| `NamespaceAwareSerde.assert_covers` | Method | `assert_covers(baseline_path)` — raises `MigrationCoverageError` if a baselined identity is neither live nor covered by a rename migration. Set-membership check |
+| `NamespaceAwareSerde.revivable_identities` | Method | Read-only `frozenset` of every revivable `(module, qualname)`. For custom coverage rules; `assert_covers` is the gate |
+| `MigrationCoverageError` | Exception | Raised by `assert_covers`; `ValueError` subclass. `.uncovered` is the offending identity tuple |
+| `write_baseline` | Function (`…serde.migrations.detect`) | `write_baseline(graph, path, *, allow_removed=False)` — snapshots topology. Raises `BaselineRegressionError` rather than silently overwriting away identities the old baseline recorded; `allow_removed=True` for intentional deletes |
+| `detect_changes` | Function (`…serde.migrations.detect`) | `detect_changes(graph, baseline_path)` — diffs topology vs baseline into rename/ambiguous/removed buckets. Also runnable as the CI gate `python -m langgraph_events.serde.migrations <module:factory> <baseline>` |
+| `BaselineRegressionError` | Exception (`…serde.migrations.detect`) | Raised by `write_baseline`; `ValueError` subclass. `.removed` is the tuple of dropped identities |
+
+Raw `RenameEvent` / `AddField` operation constructors are the composite escape hatch in `langgraph_events.serde.migrations` — intentionally **not** re-exported at the top level (the decorator + `Migration` sugar is the public tier).

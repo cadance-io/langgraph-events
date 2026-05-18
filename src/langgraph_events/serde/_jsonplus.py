@@ -15,15 +15,16 @@ compatible LangGraph version.
 from __future__ import annotations
 
 import dataclasses
-import importlib
-import warnings
 from typing import TYPE_CHECKING, Any
 
 import ormsgpack
 from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
+    from pathlib import Path
+
+    from langgraph_events.serde.migrations._core import AddField, Migration
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 try:
@@ -61,42 +62,94 @@ EXT_NAMESPACE_AWARE_EVENT = 100
 # which is hardcoded to ``default=_msgpack_default`` and would bypass us.
 EXT_INTERRUPT = 101
 
+# Imported AFTER the EXT constants and ``_option`` are bound: ``_core``
+# pulls in the ``serde.migrations`` package whose ``__init__`` re-exports
+# ``testing.synthesize_legacy_payload``, which imports the two names above
+# back from this module. Defining them first lets that re-entry resolve
+# against a partially-initialized ``_jsonplus`` without a circular import.
+from langgraph_events.serde.migrations._core import (  # noqa: E402
+    _apply_identity_migrations,
+    _collect_decorated_migrations,
+    _flatten_and_validate,
+    _resolve_identity,
+)
+from langgraph_events.serde.migrations.detect import (  # noqa: E402
+    MigrationCoverageError,
+    _load_baseline,
+)
 
-def _encode(obj: Any) -> bytes:
-    return ormsgpack.packb(obj, default=_default, option=_option)
 
+def _make_default(
+    legacy_write: bool,
+    oldest_historic: dict[tuple[str, str], tuple[str, str]],
+) -> Callable[[Any], Any]:
+    """Build the ``default=`` hook ormsgpack uses for unknown types.
 
-def _default(obj: Any) -> Any:
-    if isinstance(obj, Event) and dataclasses.is_dataclass(obj):
-        return ormsgpack.Ext(
-            EXT_NAMESPACE_AWARE_EVENT,
-            _encode(
-                (
-                    obj.__class__.__module__,
-                    obj.__class__.__qualname__,
-                    {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)},
+    Closure so the per-serde ``legacy_write`` flag and ``oldest_historic``
+    map thread down into recursive sub-encodes (Interrupt-wrapped values,
+    etc.) without relying on module-level state.
+
+    ``oldest_historic`` is built at construction from the serde's
+    ``namespaces=`` scope. Encoding under an oldest historic identity is
+    gated on the class being in this map — out-of-scope decorated classes
+    fall through to their current qualname so bytes never reference a
+    historic name the serde's own read path can't migrate back.
+    """
+
+    def _default(obj: Any) -> Any:
+        if isinstance(obj, Event) and dataclasses.is_dataclass(obj):
+            cls = obj.__class__
+            module, qualname = cls.__module__, cls.__qualname__
+            if legacy_write:
+                # Consult the serde's scoped map (not ``__lge_migrate_from__``
+                # on the class) so encode/decode scope stays symmetric: bytes
+                # are only relabelled under a historic identity the read-side
+                # rename table knows how to migrate. Subclasses inherit
+                # neither the parent's history nor its scope mapping —
+                # ``oldest_historic`` only records identities the namespace
+                # walk reached directly via ``__dict__``.
+                if (oldest := oldest_historic.get((module, qualname))) is not None:
+                    module, qualname = oldest
+            return ormsgpack.Ext(
+                EXT_NAMESPACE_AWARE_EVENT,
+                ormsgpack.packb(
+                    (
+                        module,
+                        qualname,
+                        {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)},
+                    ),
+                    default=_default,
+                    option=_option,
                 ),
-            ),
-        )
-    if isinstance(obj, Interrupt):
-        # LangGraph wraps every interrupted value in this dataclass before
-        # checkpointing. Re-encoding via our ``_encode`` (rather than letting
-        # upstream's dataclass branch handle it) is what keeps a nested
-        # namespaced ``Interrupted`` subclass inside ``obj.value`` reachable
-        # through our ``_default`` and revivable under EXT_NAMESPACE_AWARE_EVENT.
-        #
-        # Tracks (value, id) explicitly rather than walking
-        # ``dataclasses.fields(obj)`` — Interrupt has a custom ``__init__``
-        # that doesn't accept arbitrary kwargs, so a generic walk would not
-        # round-trip cleanly anyway. ``it_matches_the_schema_we_encode``
-        # in tests/test_serde.py guards against silent field drift.
-        return ormsgpack.Ext(EXT_INTERRUPT, _encode((obj.value, obj.id)))
-    return _msgpack_default(obj)
+            )
+        if isinstance(obj, Interrupt):
+            # LangGraph wraps every interrupted value in this dataclass
+            # before checkpointing. Re-encoding through our own ``default``
+            # (rather than letting upstream's dataclass branch handle it)
+            # is what keeps a nested namespaced ``Interrupted`` subclass
+            # inside ``obj.value`` reachable through this hook and revivable
+            # under EXT_NAMESPACE_AWARE_EVENT.
+            #
+            # Tracks (value, id) explicitly rather than walking
+            # ``dataclasses.fields(obj)`` — Interrupt has a custom
+            # ``__init__`` that doesn't accept arbitrary kwargs, so a
+            # generic walk would not round-trip cleanly anyway.
+            # ``it_matches_the_schema_we_encode`` in tests/test_serde.py
+            # guards against silent field drift.
+            return ormsgpack.Ext(
+                EXT_INTERRUPT,
+                ormsgpack.packb((obj.value, obj.id), default=_default, option=_option),
+            )
+        return _msgpack_default(obj)
+
+    return _default
 
 
 def _make_ext_hook(
     errors: list[str],
     fallback: Callable[[int, bytes], Any],
+    rename_table: dict[tuple[str, str], tuple[str, str]],
+    addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -144,11 +197,14 @@ def _make_ext_hook(
             data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
         )
         module_name, qualname, kwargs = tup
+        # Rewrite historic identity to current and inject any AddField
+        # defaults — shared with the baseline test helper so the read-side
+        # migration rule lives in exactly one place.
+        module_name, qualname = _apply_identity_migrations(
+            module_name, qualname, kwargs, rename_table, addfield_table
+        )
         try:
-            obj: Any = importlib.import_module(module_name)
-            for part in qualname.split("."):
-                obj = getattr(obj, part)
-            return obj(**kwargs)
+            return _resolve_identity(module_name, qualname)(**kwargs)
         except (ImportError, AttributeError) as exc:
             errors.append(
                 f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: {exc}. "
@@ -173,26 +229,75 @@ class NamespaceAwareSerde(JsonPlusSerializer):
     Non-event payloads are encoded exactly as the default
     ``JsonPlusSerializer`` would — the override applies only to ``Event``
     subclasses.
+
+    Pass ``namespaces=`` to scope decorator-driven (``@migrate_from``)
+    collection to the namespaces in play for this graph. Pass
+    ``migrations=`` for hand-authored cross-module renames or composite
+    operations; the two compose. See :mod:`langgraph_events.serde.migrations`.
     """
+
+    def __init__(
+        self,
+        migrations: Sequence[Migration] = (),
+        *,
+        namespaces: Sequence[type] = (),
+        legacy_write: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        # Decorator-driven migrations come first so the duplicate-source
+        # diagnostic, when a user-passed hand-authored entry conflicts,
+        # names the user's migration as the second (more actionable than
+        # naming the auto-collected one).
+        decorated, oldest_historic, live = _collect_decorated_migrations(namespaces)
+        all_migrations = (*decorated, *migrations)
+        self._rename_table, self._addfield_table = _flatten_and_validate(all_migrations)
+        self._live_identities = live
+        self._legacy_write = legacy_write
+        self._encode_default = _make_default(legacy_write, oldest_historic)
+
+    def revivable_identities(self) -> frozenset[tuple[str, str]]:
+        """Every ``(module, qualname)`` this serde can revive — either still
+        live in the namespaces it was constructed with, or covered by a
+        rename migration (``@migrate_from`` decorators in ``namespaces=``
+        and hand-authored ``migrations=``).
+
+        Read-only view. AddField targets are NOT included: they key on the
+        post-rename (currently-live) identity and add no new revivable
+        identities.
+        """
+        return self._live_identities | frozenset(self._rename_table.keys())
+
+    def assert_covers(self, baseline_path: Path) -> None:
+        """Raise :class:`MigrationCoverageError` if any identity in
+        *baseline_path* is neither currently live in this serde's
+        ``namespaces=`` nor covered by a rename migration.
+
+        Construct the serde the same way the runtime does — this verifies
+        the production migration table covers every event the production
+        cluster could hand it on the next read.
+        """
+        baseline = _load_baseline(baseline_path)
+        missing = tuple(sorted(baseline - self.revivable_identities()))
+        if missing:
+            raise MigrationCoverageError(missing)
 
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):
             return super().dumps_typed(obj)
-        try:
-            return "msgpack", _encode(obj)
-        except ormsgpack.MsgpackEncodeError as exc:
-            # Falling through to ``JsonPlusSerializer.dumps_typed`` re-encodes
-            # under the leaf-``__name__`` scheme — exactly the collision the
-            # namespace-aware serde exists to prevent. Warn so users notice
-            # and either avoid the unencodable payload or extend ``_default``
-            # to handle it.
-            warnings.warn(
-                f"NamespaceAwareSerde could not encode {type(obj).__name__!r}; "
-                f"falling back to JsonPlusSerializer (leaf-name identity, "
-                f"collision-prone for nested events). Reason: {exc}",
-                stacklevel=2,
-            )
-            return super().dumps_typed(obj)
+        # ``_encode_default`` is a strict superset of upstream's
+        # ``_msgpack_default``: anything upstream encodes, we encode the
+        # same way. So an ``MsgpackEncodeError`` here is genuinely
+        # unencodable. The old behaviour warned and called
+        # ``super().dumps_typed`` — which in the default config simply
+        # re-raised, and with the parent's binary-fallback kwarg enabled
+        # would silently emit unsafe-binary bytes that bypass the
+        # migration table. Let the encode error propagate at the source
+        # so the caller widens ``_default`` or removes the payload from
+        # state explicitly.
+        return "msgpack", ormsgpack.packb(
+            obj, default=self._encode_default, option=_option
+        )
 
     def loads_typed(self, data: tuple[str, bytes]) -> Any:
         type_, data_ = data
@@ -204,7 +309,12 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         try:
             return ormsgpack.unpackb(
                 data_,
-                ext_hook=_make_ext_hook(errors, self._unpack_ext_hook),
+                ext_hook=_make_ext_hook(
+                    errors,
+                    self._unpack_ext_hook,
+                    self._rename_table,
+                    self._addfield_table,
+                ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )
         except ValueError as exc:

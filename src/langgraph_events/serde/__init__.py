@@ -16,8 +16,32 @@ Usage::
         handlers=[...],
         checkpointer=MemorySaver(serde=NamespaceAwareSerde()),
     )
+
+Pass ``migrations=`` to keep old checkpoints readable after a refactor —
+see :mod:`langgraph_events.serde.migrations` and ``docs/event-migrations.md``.
 """
 
 from langgraph_events.serde._jsonplus import NamespaceAwareSerde
+from langgraph_events.serde.migrations import (
+    Migration,
+    assert_all_baselined_revive,
+    backfill,
+    migrate_from,
+    replay_reducer,
+    synthesize_legacy_payload,
+)
 
-__all__ = ["NamespaceAwareSerde"]
+# Raw RenameEvent / AddField are deliberately NOT re-exported here. The
+# common path is decorator-first (@migrate_from) plus Migration.rename /
+# Migration.add_field sugar. The raw operation constructors remain
+# importable from ``langgraph_events.serde.migrations`` for the rare
+# composite multi-op Migration — keeping the top-level surface small.
+__all__ = [
+    "Migration",
+    "NamespaceAwareSerde",
+    "assert_all_baselined_revive",
+    "backfill",
+    "migrate_from",
+    "replay_reducer",
+    "synthesize_legacy_payload",
+]

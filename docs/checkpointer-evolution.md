@@ -19,6 +19,7 @@ When using a checkpointer (`MemorySaver`, `SqliteSaver`, etc.), existing threads
 | **Remove a handler** (normal checkpoint) | Events that *only* the removed handler subscribed to become undeliverable. The graph halts early — no crash, but incomplete execution. |
 | **Remove a handler** (interrupted checkpoint) | If the graph was paused inside the removed handler via `Interrupted`, `graph.resume(value)` silently does nothing. The pending Send to the missing node is dropped. The human-in-the-loop flow breaks without error. |
 | **Rename a handler** | Same as remove + add. If an `Interrupted` checkpoint targeted the old name, the resume is lost. |
+| **Rename / relocate an Event class** | Old checkpoints fail revival under the default serde. Add `@migrate_from` (and `@backfill` for a new required field) on the class — `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` auto-wires the migration-aware serde; hand-authored `migrations=` is the cross-module escape hatch. See [Event migrations](event-migrations.md). |
 | **Add a reducer** | The new reducer starts cold — it **misses its default values and all historical event projections**. Only events added after the resume point contribute. |
 | **Remove a reducer** | The reducer's channel data is silently dropped from the checkpoint. |
 

@@ -29,6 +29,8 @@ Declaring a handler parameter the framework can't fill (no reducer, no service, 
 
 - **`EventGraph(services=...)`** — type-keyed list (`[chat_model, session_factory]`) or name-keyed mapping (`{"primary": a, "backup": b}`) for project dependencies. See [Concepts › Signature injection](concepts.md#signature-injection).
 - **`langgraph_events.serde.NamespaceAwareSerde`** — opt-in `JsonPlusSerializer` subclass that keys nested-event identity by `__qualname__`, so `Persona.Approve.Approved` and `Story.Approve.Approved` round-trip distinctly through any checkpointer.
+- **`langgraph_events.serde.migrate_from`** — declare historic qualnames on the class; `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` auto-wires a serde scoped to its namespaces and picks up every decorated class — no manual `NamespaceAwareSerde` construction. Pair with `legacy_write=True` for zero-downtime rolling deploys. See [Event migrations](event-migrations.md).
+- **`langgraph_events.serde.backfill`** — `@backfill(field, default=…)` on the class for a field that is required in new code but absent from pre-existing payloads; same auto-collection as `@migrate_from`. See [Event migrations](event-migrations.md#adding-a-required-field).
 - **`langgraph_events.agui.InterruptedWithPayload[PayloadT]`** — typed-payload variant of `Interrupted` for HITL flows whose frontend needs an action-discriminated dict.
 - **`langgraph_events.on_namespace_finalize(cls, callback)`** — public hook firing once a `Namespace.__init_subclass__` finishes; useful for class decorators that need to call `typing.get_type_hints()` against forward references to siblings inside the same in-progress Namespace body.
 
