@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage, SystemMessage
 
 
+OUTCOMES_ATTR = "Outcomes"
+"""Public attribute name attached to ``Command`` subclasses by
+``_attach_command_outcomes`` — the union (or single class) of nested
+``DomainEvent`` outcomes. Referenced wherever we need to skip this alias
+during ``__dict__`` walks (it shares a class object with a directly-nested
+DomainEvent for single-outcome Commands) or look it up by attribute access."""
+
+
 class Event:
     """Internal base class for all events.
 
@@ -96,31 +104,44 @@ def on_namespace_finalize(cls: type, callback: Callable[[type, type], None]) -> 
     _NAMESPACE_FINALIZE_CALLBACKS.setdefault(cls, []).append(callback)
 
 
+def _iter_nested_events(container: type, *, recurse_commands: bool) -> list[type]:
+    """Every ``Event`` subclass nested directly under *container*, in
+    declaration order.
+
+    The framework's single notion of "events nested under a namespace":
+    callers that walk a Namespace/Command body for nested events go through
+    here so they stay in sync. Skips the ``Outcomes`` alias on Commands —
+    for single-outcome Commands it points at the same class object as a
+    directly-nested DomainEvent, so yielding it would re-visit. With
+    ``recurse_commands`` the walk descends into nested Commands so
+    DomainEvents declared inside a Command are reached.
+    """
+    out: list[type] = []
+    for name, attr in container.__dict__.items():
+        if name == OUTCOMES_ATTR:
+            continue
+        if not isinstance(attr, type) or not issubclass(attr, Event):
+            continue
+        out.append(attr)
+        if recurse_commands and issubclass(attr, Command):
+            out.extend(_iter_nested_events(attr, recurse_commands=True))
+    return out
+
+
 def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
     """Fire callbacks queued for any nested ``Event`` class under *container*.
 
-    Walks only ``Event`` subclasses (Commands and DomainEvents); recurses
+    Walks every ``Event`` subclass (Commands and DomainEvents), descending
     into Commands so callbacks registered on DomainEvents nested inside a
     Command fire after the enclosing Namespace finalizes. ``namespace_cls``
     stays fixed across recursion — it is always the outermost Namespace
     whose ``__init_subclass__`` triggered the drain.
-
-    Skips the ``Outcomes`` alias on Commands — for single-outcome Commands
-    it points at the same class object as a directly-nested DomainEvent,
-    which would re-visit (currently a no-op via ``pop``, but keeps the
-    invariant explicit if a future visitor mutates per visit).
     """
-    for name, attr in container.__dict__.items():
-        if name == "Outcomes":
-            continue
-        if not isinstance(attr, type) or not issubclass(attr, Event):
-            continue
+    for attr in _iter_nested_events(container, recurse_commands=True):
         callbacks = _NAMESPACE_FINALIZE_CALLBACKS.pop(attr, None)
         if callbacks:
             for cb in callbacks:
                 cb(attr, namespace_cls)
-        if issubclass(attr, Command):
-            _drain_namespace_finalize(attr, namespace_cls)
 
 
 def _iter_nested_outcomes(cmd: type) -> list[type[DomainEvent]]:
@@ -133,8 +154,8 @@ def _iter_nested_outcomes(cmd: type) -> list[type[DomainEvent]]:
     """
     return [
         t
-        for name, t in cmd.__dict__.items()
-        if name != "Outcomes" and isinstance(t, type) and issubclass(t, DomainEvent)
+        for t in _iter_nested_events(cmd, recurse_commands=False)
+        if issubclass(t, DomainEvent)
     ]
 
 
@@ -215,7 +236,7 @@ def _attach_command_outcomes(namespace_cls: type) -> None:
         if not outcomes:
             continue
 
-        declared = cmd.__dict__.get("Outcomes")
+        declared = cmd.__dict__.get(OUTCOMES_ATTR)
         if declared is not None:
             declared_set = set(typing.get_args(declared)) or {declared}
             if declared_set != set(outcomes):

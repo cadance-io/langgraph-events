@@ -16,6 +16,7 @@ from langgraph.types import Command as LGCommand
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     _NAMESPACE_REGISTRY,
+    OUTCOMES_ATTR,
     Command,
     DomainEvent,
     Event,
@@ -330,7 +331,7 @@ def _compute_return_contract(
     for et in meta.event_types:
         if not (isinstance(et, type) and issubclass(et, Command)):
             continue
-        outs = getattr(et, "Outcomes", None)
+        outs = getattr(et, OUTCOMES_ATTR, None)
         if outs is None:
             continue
         args = typing.get_args(outs) or (outs,)
@@ -926,6 +927,21 @@ class EventGraph:
                     collected.append(attr)
         if handlers:
             collected.extend(handlers)
+
+        # Auto-wire migration-aware deserialization: the user only writes
+        # @migrate_from on the class. We have both the domains and the
+        # checkpointer here, so scope a NamespaceAwareSerde to these
+        # namespaces. A user-supplied NamespaceAwareSerde (possibly
+        # carrying hand-authored migrations=) is left untouched — that is
+        # the opt-out. The serde still owns coverage; we own construction.
+        checkpointer = kwargs.get("checkpointer")
+        if checkpointer is not None:
+            from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
+
+            serde = getattr(checkpointer, "serde", None)
+            if serde is not None and not isinstance(serde, NamespaceAwareSerde):
+                checkpointer.serde = NamespaceAwareSerde(namespaces=domains)
+
         return cls(collected, **kwargs)
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:

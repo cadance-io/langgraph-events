@@ -19,6 +19,7 @@ nav:
   - Migrating from 0.3.0: migrating.md
   - AG-UI Adapter: agui.md
   - Checkpointer & Graph Evolution: checkpointer-evolution.md
+  - Event Migrations: event-migrations.md
 
 markdown_extensions:
   - md_in_html

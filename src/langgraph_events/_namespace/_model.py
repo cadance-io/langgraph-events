@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from langgraph_events._event import (
-    Command as CommandBase,
-)
-from langgraph_events._event import (
+    OUTCOMES_ATTR,
     DomainEvent,
     Event,
     Halted,
@@ -20,6 +18,9 @@ from langgraph_events._event import (
     InvariantViolated,
     Resumed,
     SystemEvent,
+)
+from langgraph_events._event import (
+    Command as CommandBase,
 )
 from langgraph_events._event import (
     Invariant as InvariantBase,
@@ -420,7 +421,7 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
             event_type.__name__, {"type": event_type, "outcomes": []}
         )
         cmd_entry["type"] = event_type
-        outcomes_union = getattr(event_type, "Outcomes", None)
+        outcomes_union = getattr(event_type, OUTCOMES_ATTR, None)
         if outcomes_union is not None:
             args = typing.get_args(outcomes_union) or (outcomes_union,)
             for t in args:
