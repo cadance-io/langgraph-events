@@ -115,6 +115,14 @@ def render_text_choreography(d: NamespaceModel) -> str:
                 annotations.append("side-effect")
             tail = f"  [{'; '.join(annotations)}]" if annotations else ""
             lines.append(f"  {p.name}  ({flow}){tail}")
+    notable = [e for e in d.edges if e.causation in ("orchestrate", "chain")]
+    if notable:
+        lines.append("Causal notes:")
+        for e in notable:
+            lines.append(
+                f"  {_event_label(e.source)} → {_event_label(e.target)}  "
+                f"via {e.via}  [{e.causation}]"
+            )
     framework = [e for e in d.edges if e.kind == "framework"]
     if framework:
         lines.append("Framework:")

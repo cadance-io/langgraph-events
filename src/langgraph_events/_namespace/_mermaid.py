@@ -87,6 +87,22 @@ _LINKSTYLE_RAISES = "stroke:#6b7280,stroke-dasharray:3 3"
 _LINKSTYLE_SCATTER = "stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3"
 _LINKSTYLE_OWNS = "stroke:#9ca3af,stroke-dasharray:3 3"
 _LINKSTYLE_INVARIANT = "stroke:#c2410c,stroke-dasharray:4 2"
+# Orchestrate (reactor → Command, a saga move) is visually loud; chain
+# (Command → Command) is deliberately awkward to discourage the pattern.
+_LINKSTYLE_ORCHESTRATE = "stroke:#0369a1,stroke-width:3px"
+_LINKSTYLE_CHAIN = "stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3"
+
+
+def _causation_override(e: NamespaceModel.Edge) -> tuple[str | None, str]:
+    """``(tag, label_suffix)`` for a notable causation; ``(None, "")`` else.
+
+    Only ``orchestrate`` / ``chain`` deviate from the default solid/scatter
+    style — ``intent`` / ``react`` are the healthy defaults and stay
+    visually unchanged (zero snapshot churn).
+    """
+    if e.causation in ("orchestrate", "chain"):
+        return e.causation, f" [{e.causation}]"
+    return None, ""
 
 
 def _apply_classdefs(flow: MermaidFlowchart) -> None:
@@ -316,7 +332,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 edges.append(_FlowEdge(hub_id, tgt_id, "-->", None, "solid"))
                 continue
             src, tgt = _record(e.source, e.target)
-            edges.append(_FlowEdge(src, tgt, "-->", name, "solid"))
+            ctag, csuf = _causation_override(e)
+            edges.append(_FlowEdge(src, tgt, "-->", f"{name}{csuf}", ctag or "solid"))
         for e in scatter_edges:
             if inv_cls is not None:
                 referenced.add(e.target)
@@ -344,7 +361,10 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 edges.append(_FlowEdge(hub_id, tgt_id, "-.->", None, "scatter"))
                 continue
             src, tgt = _record(e.source, e.target)
-            edges.append(_FlowEdge(src, tgt, "-.->", name, "scatter"))
+            ctag, csuf = _causation_override(e)
+            edges.append(
+                _FlowEdge(src, tgt, "-.->", f"{name}{csuf}", ctag or "scatter")
+            )
 
     # Framework Interrupted → Resumed edge.
     for e in (x for x in d.edges if x.kind == "framework"):
@@ -473,6 +493,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     flow.link_style("raises", _LINKSTYLE_RAISES)
     flow.link_style("ownership", _LINKSTYLE_OWNS)
     flow.link_style("invariant", _LINKSTYLE_INVARIANT)
+    flow.link_style("orchestrate", _LINKSTYLE_ORCHESTRATE)
+    flow.link_style("chain", _LINKSTYLE_CHAIN)
 
     if side_effect_entries:
         flow.comment(f"Side-effect handlers: {', '.join(side_effect_entries)}")

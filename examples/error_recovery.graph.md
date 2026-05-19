@@ -29,10 +29,14 @@ graph LR
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
+    DomainEvent -->|"reactor [orchestrate]"| Command
+    Command -->|"handler [chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 7 stroke:#0369a1,stroke-width:3px
+    linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
 ```
 
 </details>
@@ -60,9 +64,10 @@ graph LR
     Ask -.->|"handle (raises)"| HandlerRaised
     Ask -->|handle| Answered
     HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-    HandlerRaised -->|backoff_and_retry| Ask
+    HandlerRaised -->|backoff_and_retry [orchestrate]| Ask
     HandlerRaised -->|give_up| GaveUp
     linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 3 stroke:#0369a1,stroke-width:3px
 ```
 
 ## Choreography (text)
@@ -78,4 +83,6 @@ System events:
 Policies:
   backoff_and_retry  (HandlerRaised → Ask)  [raises QuotaExhaustedError]
   give_up  (HandlerRaised → GaveUp)
+Causal notes:
+  HandlerRaised → Ask  via backoff_and_retry  [orchestrate]
 ```

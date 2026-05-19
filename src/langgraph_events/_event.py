@@ -326,6 +326,13 @@ class _NestedEventMeta(type):
                     f"DomainEvent {cls.__name__!r} must be nested inside a "
                     f"Namespace or Command, got owner {owner.__name__!r}"
                 )
+        elif issubclass(cls, IntegrationEvent):
+            if isinstance(owner, type) and issubclass(owner, (Namespace, Command)):
+                raise TypeError(
+                    f"IntegrationEvent {cls.__name__!r} must live at module "
+                    f"level — it crosses a context boundary by definition. "
+                    f"Move it out of {owner.__name__!r}."
+                )
 
 
 def _inherits_namespace(cls: type) -> bool:
@@ -451,10 +458,12 @@ class DomainEvent(Event, _event_base=True, metaclass=_NestedEventMeta):
             )
 
 
-class IntegrationEvent(Event, _event_base=True):
+class IntegrationEvent(Event, _event_base=True, metaclass=_NestedEventMeta):
     """Fact that crosses a context or system boundary. Past-participle.
 
-    Lives at module level (no nesting requirement), typically serializable,
+    Must live at module level — an integration event crosses a boundary by
+    definition, so nesting it inside a ``Namespace`` or ``Command`` is a
+    category error (rejected at class creation). Typically serializable,
     intended to be published to or consumed from external systems.
 
     Example::
