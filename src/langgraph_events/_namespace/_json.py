@@ -67,6 +67,7 @@ def encode_model(d: NamespaceModel) -> dict[str, Any]:
                 "via": e.via,
                 "target": _qn(e.target),
                 "kind": e.kind,
+                "causation": e.causation,
             }
             for e in d.edges
         ],

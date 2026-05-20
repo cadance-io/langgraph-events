@@ -41,10 +41,14 @@ graph LR
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
+    DomainEvent -->|"reactor [orchestrate]"| Command
+    Command -->|"handler [chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 7 stroke:#0369a1,stroke-width:3px
+    linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
 ```
 
 </details>
@@ -146,8 +150,9 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
         Submit -->|submit| Invalidated
         Approve -->|approve| Approved
         Reject -->|reject| Rejected
-        Submitted -->|check_policy| Approve
+        Submitted -->|check_policy [orchestrate]| Approve
         Submitted -->|check_policy| ApprovalRequired
+        linkStyle 6 stroke:#0369a1,stroke-width:3px
     ```
 
 === "Flow (text)"
@@ -166,6 +171,8 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
       ApprovalRequired
     Policies:
       check_policy  (Submitted → Approve, ApprovalRequired)
+    Causal notes:
+      Submitted → Approve  via check_policy  [orchestrate]
     Seed events:
       Reject
       Submit
@@ -259,18 +266,19 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
             Run{{Run}}:::cmd
         end
         _e0_[ ]:::entry ==> Run
-        Run -->|supervisor| Research
-        Run -->|supervisor| Code
+        Run -->|supervisor [orchestrate]| Research
+        Run -->|supervisor [orchestrate]| Code
         Run -->|supervisor| Finalized
-        Completed -->|supervisor| Research
-        Completed -->|supervisor| Code
+        Completed -->|supervisor [orchestrate]| Research
+        Completed -->|supervisor [orchestrate]| Code
         Completed -->|supervisor| Finalized
-        Produced -->|supervisor| Research
-        Produced -->|supervisor| Code
+        Produced -->|supervisor [orchestrate]| Research
+        Produced -->|supervisor [orchestrate]| Code
         Produced -->|supervisor| Finalized
         Research -->|handle| Completed
         Code -->|handle_2| Produced
     %% Side-effect handlers: audit_trail (Auditable)
+        linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
     ```
 
 === "Flow (text)"
@@ -286,6 +294,13 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
         Event: Finalized
     Policies:
       audit_trail  (Auditable)  [side-effect]
+    Causal notes:
+      Run → Research  via supervisor  [orchestrate]
+      Run → Code  via supervisor  [orchestrate]
+      Completed → Research  via supervisor  [orchestrate]
+      Completed → Code  via supervisor  [orchestrate]
+      Produced → Research  via supervisor  [orchestrate]
+      Produced → Code  via supervisor  [orchestrate]
     Seed events:
       Run
     ```
@@ -421,9 +436,10 @@ Declared handler exceptions with retry + escalation via class-level `raises` on 
         Ask -.->|"handle (raises)"| HandlerRaised
         Ask -->|handle| Answered
         HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-        HandlerRaised -->|backoff_and_retry| Ask
+        HandlerRaised -->|backoff_and_retry [orchestrate]| Ask
         HandlerRaised -->|give_up| GaveUp
         linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
+        linkStyle 3 stroke:#0369a1,stroke-width:3px
     ```
 
 === "Flow (text)"
@@ -439,6 +455,8 @@ Declared handler exceptions with retry + escalation via class-level `raises` on 
     Policies:
       backoff_and_retry  (HandlerRaised → Ask)  [raises QuotaExhaustedError]
       give_up  (HandlerRaised → GaveUp)
+    Causal notes:
+      HandlerRaised → Ask  via backoff_and_retry  [orchestrate]
     ```
 
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.graph.md)

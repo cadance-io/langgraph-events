@@ -25,7 +25,10 @@ from langgraph_events._event import (
 from langgraph_events._event import (
     Invariant as InvariantBase,
 )
-from langgraph_events._namespace._smells import emit_domain_pattern_warnings
+from langgraph_events._namespace._smells import (
+    emit_command_chain_warnings,
+    emit_domain_pattern_warnings,
+)
 
 if TYPE_CHECKING:
     from langgraph_events._graph import ReturnInfo
@@ -253,6 +256,7 @@ class NamespaceModel:
         via: str
         target: type[Event]
         kind: Literal["solid", "scatter", "raises", "framework"]
+        causation: Literal["intent", "react", "orchestrate", "chain"] | None = None
 
     @dataclass(frozen=True)
     class Invariant:
@@ -468,6 +472,31 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
             system.append(event_type)
 
 
+def _edge_causation(
+    is_inline: bool, target: type[Event]
+) -> Literal["intent", "react", "orchestrate", "chain"] | None:
+    """Causal role of a solid/scatter edge.
+
+    Only the domain axis is classified: a ``Command`` or ``DomainEvent``
+    target. Boundary-crossing targets (``IntegrationEvent`` / ``SystemEvent``)
+    carry no domain causation and stay ``None`` — same as raises/framework
+    edges, which never call this.
+    """
+    is_cmd = isinstance(target, type) and issubclass(target, CommandBase)
+    is_devt = isinstance(target, type) and issubclass(target, DomainEvent)
+    if is_inline:
+        if is_cmd:
+            return "chain"
+        if is_devt:
+            return "intent"
+    else:
+        if is_cmd:
+            return "orchestrate"
+        if is_devt:
+            return "react"
+    return None
+
+
 def _build_domain_model(  # noqa: PLR0912
     handler_metas: list[HandlerMeta],
     return_info: dict[str, ReturnInfo],
@@ -549,17 +578,29 @@ def _build_domain_model(  # noqa: PLR0912
 
         # Emit edges — solid for declared returns, scatter for Scatter[X],
         # raises edges to HandlerRaised, mirroring the current mermaid() logic.
+        # `meta` is this edge's producing handler, so `meta.fn` is the right
+        # source for the inline/reactor split (no name-map needed — we're
+        # inside the meta loop and edge.via is meta.name).
+        is_inline = getattr(meta.fn, "_inline_command", None) is not None
         for src_type in meta.event_types:
             for tgt in info.event_types:
                 edges.append(
                     NamespaceModel.Edge(
-                        source=src_type, via=meta.name, target=tgt, kind="solid"
+                        source=src_type,
+                        via=meta.name,
+                        target=tgt,
+                        kind="solid",
+                        causation=_edge_causation(is_inline, tgt),
                     )
                 )
             for tgt in info.scatter_types:
                 edges.append(
                     NamespaceModel.Edge(
-                        source=src_type, via=meta.name, target=tgt, kind="scatter"
+                        source=src_type,
+                        via=meta.name,
+                        target=tgt,
+                        kind="scatter",
+                        causation=_edge_causation(is_inline, tgt),
                     )
                 )
             for _exc in meta.raises:
@@ -622,6 +663,7 @@ def _build_domain_model(  # noqa: PLR0912
     )
 
     emit_domain_pattern_warnings(model)
+    emit_command_chain_warnings(model)
 
     return model
 

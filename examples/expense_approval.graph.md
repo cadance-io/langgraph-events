@@ -29,10 +29,14 @@ graph LR
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
+    DomainEvent -->|"reactor [orchestrate]"| Command
+    Command -->|"handler [chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 7 stroke:#0369a1,stroke-width:3px
+    linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
 ```
 
 </details>
@@ -67,8 +71,9 @@ graph LR
     Submit -->|submit| Invalidated
     Approve -->|approve| Approved
     Reject -->|reject| Rejected
-    Submitted -->|check_policy| Approve
+    Submitted -->|check_policy [orchestrate]| Approve
     Submitted -->|check_policy| ApprovalRequired
+    linkStyle 6 stroke:#0369a1,stroke-width:3px
 ```
 
 ## Choreography (text)
@@ -87,6 +92,8 @@ System events:
   ApprovalRequired
 Policies:
   check_policy  (Submitted → Approve, ApprovalRequired)
+Causal notes:
+  Submitted → Approve  via check_policy  [orchestrate]
 Seed events:
   Reject
   Submit
