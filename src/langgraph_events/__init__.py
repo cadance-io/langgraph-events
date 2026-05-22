@@ -46,7 +46,13 @@ from langgraph_events._namespace._smells import (
     CommandChainWarning,
     DomainPatternWarning,
 )
-from langgraph_events._reducer import SKIP, Reducer, ScalarReducer, message_reducer
+from langgraph_events._reducer import (
+    SKIP,
+    Reducer,
+    ReducerNotSetError,
+    ScalarReducer,
+    message_reducer,
+)
 from langgraph_events._types import (
     HandlerReturn,  # noqa: F401 (importable but not promoted)
 )
@@ -105,6 +111,7 @@ __all__ = [
     "NamespaceModel",
     "OrphanedEventWarning",
     "Reducer",
+    "ReducerNotSetError",
     "Resumed",
     "ScalarReducer",
     "Scatter",
