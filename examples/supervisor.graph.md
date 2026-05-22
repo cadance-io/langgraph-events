@@ -29,10 +29,14 @@ graph LR
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
+    DomainEvent -->|"reactor [orchestrate]"| Command
+    Command -->|"handler [chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 7 stroke:#0369a1,stroke-width:3px
+    linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
 ```
 
 </details>
@@ -60,18 +64,19 @@ graph LR
         Run{{Run}}:::cmd
     end
     _e0_[ ]:::entry ==> Run
-    Run -->|supervisor| Research
-    Run -->|supervisor| Code
+    Run -->|supervisor [orchestrate]| Research
+    Run -->|supervisor [orchestrate]| Code
     Run -->|supervisor| Finalized
-    Completed -->|supervisor| Research
-    Completed -->|supervisor| Code
+    Completed -->|supervisor [orchestrate]| Research
+    Completed -->|supervisor [orchestrate]| Code
     Completed -->|supervisor| Finalized
-    Produced -->|supervisor| Research
-    Produced -->|supervisor| Code
+    Produced -->|supervisor [orchestrate]| Research
+    Produced -->|supervisor [orchestrate]| Code
     Produced -->|supervisor| Finalized
     Research -->|handle| Completed
     Code -->|handle_2| Produced
 %% Side-effect handlers: audit_trail (Auditable)
+    linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
 ```
 
 ## Choreography (text)
@@ -87,6 +92,13 @@ Namespaces:
     Event: Finalized
 Policies:
   audit_trail  (Auditable)  [side-effect]
+Causal notes:
+  Run → Research  via supervisor  [orchestrate]
+  Run → Code  via supervisor  [orchestrate]
+  Completed → Research  via supervisor  [orchestrate]
+  Completed → Code  via supervisor  [orchestrate]
+  Produced → Research  via supervisor  [orchestrate]
+  Produced → Code  via supervisor  [orchestrate]
 Seed events:
   Run
 ```

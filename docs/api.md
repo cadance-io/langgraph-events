@@ -50,6 +50,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `NamespaceModel.mermaid(namespace_order=..., reactor_hub_min=...)` | Method | Mermaid `graph LR` choreography diagram (handlers, policies, invariants, edges). `namespace_order` is `"affinity"` (default — cluster heavily-connected namespaces adjacent) or `"alphabetical"` (legacy, byte-stable for snapshot-pinned consumers). `reactor_hub_min=N` opts in to hub-style fanout: any `(source, handler)` producing ≥N solid-or-scatter targets renders as `Source → Hub → {targets}` with the handler name on the hub instead of repeated on every edge. For a structure-only view use `text(view="structure")`. |
 | `NamespaceModel.json()` / `.to_dict()` | Method | JSON-serializable snapshot (event classes encoded as qualnames). Top-level `schema_version` is bumped on field removal, rename, or semantic change; additions don't bump. |
 | `NamespaceModel.{Namespace, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
+| `NamespaceModel.Edge` | Nested dataclass | `source`, `via`, `target`, `kind` (*how* produced: `solid`/`scatter`/`raises`/`framework`), `causation` (*causal role*: `intent`/`react`/`orchestrate`/`chain`/`None`) |
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |
 | `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
@@ -110,6 +111,8 @@ from langgraph_events.stream import (
 | Export | Type | Description |
 |---|---|---|
 | `OrphanedEventWarning` | Warning | Issued at graph construction when a return type has no subscriber |
+| `DomainPatternWarning` | Warning | A namespace has 2+ events fanning out to an identical target set — a missing shared abstraction |
+| `CommandChainWarning` | Warning | An inline `Command.handle()` emits another `Command` (a `chain`-causation edge) — prefer emitting a fact and reacting to it |
 
 ## Errors
 

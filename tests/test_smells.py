@@ -1,4 +1,4 @@
-"""Tests for the domain-pattern smell warning."""
+"""Tests for the domain-pattern and command-chain smell warnings."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import warnings
 
 from langgraph_events import (
     Command,
+    CommandChainWarning,
     DomainEvent,
     DomainPatternWarning,
     EventGraph,
@@ -256,3 +257,71 @@ def describe_domain_pattern_warning():
                 f"warning anchored to library file {filename!r}; expected "
                 "user code. Check stacklevel in emit_domain_pattern_warnings."
             )
+
+
+# A Command whose inline handle() returns another Command — a `chain`
+# causation edge. Usually a smell: the intent should split into a reactor
+# or collapse into one larger command.
+class _ChainSmell(Namespace):
+    class Start(Command):
+        def handle(self) -> _ChainSmell.Finish:
+            return _ChainSmell.Finish()
+
+    class Finish(Command):
+        class Finished(DomainEvent):
+            pass
+
+        def handle(self) -> _ChainSmell.Finish.Finished:
+            return _ChainSmell.Finish.Finished()
+
+
+class _NoChainSmell(Namespace):
+    class Act(Command):
+        class Acted(DomainEvent):
+            pass
+
+        def handle(self) -> _NoChainSmell.Act.Acted:
+            return _NoChainSmell.Act.Acted()
+
+
+def _capture_chain_warnings(handlers: list) -> list[warnings.WarningMessage]:
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        EventGraph(handlers).namespaces()
+        return [w for w in captured if issubclass(w.category, CommandChainWarning)]
+
+
+def describe_command_chain_warning():
+    def when_inline_handle_returns_another_command():
+        def it_emits_one_warning():
+            captured = _capture_chain_warnings([_ChainSmell.Start, _ChainSmell.Finish])
+            assert len(captured) == 1
+
+        def it_names_the_source_target_and_handler():
+            captured = _capture_chain_warnings([_ChainSmell.Start, _ChainSmell.Finish])
+            msg = str(captured[0].message)
+            assert "Start" in msg
+            assert "Finish" in msg
+            assert "handle" in msg
+
+    def when_no_command_emits_a_command():
+        def it_does_not_warn():
+            assert _capture_chain_warnings([_NoChainSmell.Act]) == []
+
+    def when_warning_is_silenced_via_filter():
+        def it_emits_no_warning():
+            with warnings.catch_warnings(record=True) as captured:
+                warnings.simplefilter("always")
+                warnings.filterwarnings("ignore", category=CommandChainWarning)
+                EventGraph([_ChainSmell.Start, _ChainSmell.Finish]).namespaces()
+            chain = [w for w in captured if issubclass(w.category, CommandChainWarning)]
+            assert chain == []
+
+    def when_categorised():
+        def it_subclasses_UserWarning():
+            assert issubclass(CommandChainWarning, UserWarning)
+
+    def when_warning_anchors_call_site():
+        def it_points_at_user_code_not_library_internals():
+            captured = _capture_chain_warnings([_ChainSmell.Start, _ChainSmell.Finish])
+            assert "langgraph_events" not in captured[0].filename

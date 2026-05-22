@@ -13,8 +13,8 @@ Four event base classes plus a `Namespace` namespace. Pick the right one and the
 | `Namespace` | Namespace for related commands and events | Noun (`Order`) | Top-level class |
 | `Command` | Intent / request | **Imperative** (`Place`, `Ship`) | Nested inside a `Namespace` |
 | `DomainEvent` | Fact inside the domain | Past-participle (`Placed`, `Shipped`) | Nested under a `Namespace` or `Command` |
-| `IntegrationEvent` | Fact crossing a system boundary | Past-participle | Top-level |
-| `SystemEvent` | Framework-emitted fact | Past-participle | Top-level (`Halted`, `HandlerRaised`, ...) |
+| `IntegrationEvent` | Fact crossing a system boundary | Past-participle | Top-level — **enforced** at class creation |
+| `SystemEvent` | Framework-emitted fact | Past-participle | Top-level; `Halted` subclasses may nest under a domain for locality |
 | `Invariant` | Named rule gating a handler | Noun phrase (`CustomerNotBanned`) | Anywhere — nesting under a `Command` is encouraged |
 
 `Auditable` and `MessageEvent` are behavioural **mixins** — compose them with any event branch (e.g. `class Foo(DomainEvent, Auditable)`). `Invariant` is a **marker class**, not an `Event` subclass — see [control-flow](control-flow.md#invariants). Declared invariants surface as first-class nodes in `graph.namespaces()`: `.invariants` lists every subclass with its owning commands, declaring handlers, and pinned reactors; mermaid diagrams render each as a diamond gate inside its owning domain.
@@ -23,7 +23,7 @@ Four event base classes plus a `Namespace` namespace. Pick the right one and the
 
     `Namespace` is a namespace — for grouping related commands and events, plus the target for declarative reducers and the `invariants=` kwarg. A richer construct — with identity and size discipline — may layer on top in a future release.
 
-Nesting is enforced at class-creation time — `Command` / `DomainEvent` defined outside a `Namespace` raise `TypeError`. Direct `Event` subclassing also raises `TypeError` — use one of the four bases above.
+Nesting is enforced at class-creation time — `Command` / `DomainEvent` defined outside a `Namespace` raise `TypeError`, and an `IntegrationEvent` nested *inside* a `Namespace` or `Command` raises `TypeError` (it crosses a boundary by definition). Direct `Event` subclassing also raises `TypeError` — use one of the four bases above.
 
 ```python
 class Order(Namespace):
@@ -202,11 +202,13 @@ d.json()                            # JSON snapshot (event classes as qualnames)
 d.namespaces                 # dict[str, NamespaceModel.Namespace]
 d.command_handlers        # tuple[NamespaceModel.CommandHandler, ...]
 d.policies                # tuple[NamespaceModel.Policy, ...]
-d.edges                   # tuple[NamespaceModel.Edge, ...]  — source, via, target, kind
+d.edges                   # tuple[NamespaceModel.Edge, ...]  — source, via, target, kind, causation
 d.seeds                   # tuple[type[Event], ...]       — events with no incoming edges
 d.integration_events      # tuple[type[IntegrationEvent], ...]
 d.system_events           # tuple[type[SystemEvent], ...]
 ```
+
+Each edge also carries a `causation` role — `intent` (a command emits its own outcome), `react` (a reactor emits a domain fact), `orchestrate` (a reactor emits a *command* — a saga move), or `chain` (a command emits another command). It surfaces in `text()`, `json()`, and the mermaid styling, so a diagram shows at a glance whether a system is fact-flowing or orchestration-heavy.
 
 Rendered diagrams live on the [Patterns](patterns.md) page — the collapsible legend at the top shows the shape/edge vocabulary used across every example.
 

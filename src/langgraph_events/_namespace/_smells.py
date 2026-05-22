@@ -35,9 +35,43 @@ class DomainPatternWarning(UserWarning):
     """
 
 
+class CommandChainWarning(UserWarning):
+    """An inline ``Command.handle()`` emits another ``Command``.
+
+    A ``chain``-causation edge. Usually the intent should either split into
+    a reactor on the first command's outcome, or collapse into one larger
+    command. Silence via::
+
+        import warnings
+        from langgraph_events import CommandChainWarning
+        warnings.filterwarnings("ignore", category=CommandChainWarning)
+    """
+
+
 def _qualname(cls: type) -> str:
     """Return ``cls.__qualname__`` with ``<locals>.`` strip-out for cleanliness."""
     return cls.__qualname__.replace("<locals>.", "")
+
+
+def emit_command_chain_warnings(model: NamespaceModel) -> None:
+    """Warn once per ``causation == "chain"`` edge.
+
+    ``Command → Command`` via an inline handler: the producing command
+    reaches straight into another command instead of emitting a fact and
+    letting a reactor decide. Cheap, total scan over edges already carrying
+    the causal role.
+    """
+    for edge in model.edges:
+        if edge.causation != "chain":
+            continue
+        warnings.warn(
+            f"{_qualname(edge.source)}.{edge.via}() emits "
+            f"{_qualname(edge.target)}, another Command "
+            f"(causation='chain'). Prefer emitting a DomainEvent and "
+            f"reacting to it, or collapse the two intents into one command.",
+            category=CommandChainWarning,
+            stacklevel=5,
+        )
 
 
 def emit_domain_pattern_warnings(model: NamespaceModel) -> None:
