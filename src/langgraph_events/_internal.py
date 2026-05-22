@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
+    from langgraph_events._reducer import BaseReducer
+
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
@@ -30,7 +32,7 @@ from langgraph_events._event import (
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
-from langgraph_events._reducer import BaseReducer  # noqa: TC001
+from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
 
 # ---------------------------------------------------------------------------
@@ -195,7 +197,10 @@ def _build_inject(
         inject[meta.log_param] = EventLog(state["events"])
     for param_name in meta.reducer_params:
         r = reducers.get(param_name)
-        inject[param_name] = state.get(param_name, r.empty if r else [])
+        value = state.get(param_name, r.empty if r else [])
+        if value is None and param_name in meta.required_reducer_params:
+            raise _make_reducer_not_set_error(meta.name, param_name, r)
+        inject[param_name] = value
     if meta.config_param and config is not None:
         inject[meta.config_param] = config
     if meta.store_param:
@@ -219,6 +224,29 @@ def _build_inject(
         for param_name, svc_name in meta.service_name_params:
             inject[param_name] = services_by_name[svc_name]
     return inject
+
+
+def _make_reducer_not_set_error(
+    handler_name: str, param_name: str, r: BaseReducer | None
+) -> ReducerNotSetError:
+    """Build a ``ReducerNotSetError`` with an actionable message.
+
+    A catch-all reducer (``event_type=Event``) gives no useful hint, so drop
+    the "Ensure an event of type Event…" sentence in that case and keep only
+    the annotation suggestion.
+    """
+    if r is not None and r.event_type is not Event:
+        event_hint = (
+            f"Ensure an event of type {r.event_type.__name__} has been "
+            f"processed before this handler runs, or "
+        )
+    else:
+        event_hint = "Set the reducer before this handler runs, or "
+    return ReducerNotSetError(
+        f"Handler {handler_name!r} requires reducer {param_name!r} to be "
+        f"set, but its value is None. {event_hint}change the annotation to "
+        f"permit None (e.g. '{param_name}: <type> | None')."
+    )
 
 
 def _apply_reducers(

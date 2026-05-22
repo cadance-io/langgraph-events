@@ -16,6 +16,17 @@ if TYPE_CHECKING:
     from langgraph_events._types import ReducerFn
 
 
+class ReducerNotSetError(ValueError):
+    """Raised when a handler declares a non-``None`` reducer parameter but the
+    channel value is ``None`` at injection time.
+
+    A handler signature like ``def h(event, strategy: str)`` declares that
+    ``strategy`` must be a ``str`` — ``None`` is not in the annotation, so the
+    framework asserts the value before calling the handler. To opt out, widen
+    the annotation to ``str | None`` / ``Optional[str]`` / ``Any``.
+    """
+
+
 class _SkipType:
     """Sentinel returned from ``ScalarReducer.fn`` to signal no contribution."""
 
@@ -185,6 +196,12 @@ class ScalarReducer(BaseReducer):
     Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
     multiple event types structurally.
 
+    A handler's parameter annotation declares whether the value may be
+    ``None``. ``strategy: str`` rejects ``None`` and raises
+    :class:`ReducerNotSetError` at injection if the channel is unset; widen
+    to ``strategy: str | None`` (or ``Optional[str]`` / ``Any`` / ``object``,
+    or omit the annotation) to allow ``None``.
+
     Example::
 
         strategy = ScalarReducer(
@@ -195,6 +212,8 @@ class ScalarReducer(BaseReducer):
 
         @on(TaskReceived)
         def handle(event: TaskReceived, strategy: str) -> Completed:
+            # strategy is guaranteed non-None here; otherwise the framework
+            # raises ReducerNotSetError before this body runs.
             ...
     """
 

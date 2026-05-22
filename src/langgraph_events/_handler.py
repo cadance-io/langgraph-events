@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import types
 import typing
 import warnings
 from dataclasses import dataclass
@@ -65,6 +66,32 @@ def _validate_invariants(
             ) from exc
         validated.append((inv_cls, pred))
     return tuple(validated)
+
+
+def _annotation_accepts_none(hint: Any) -> bool:
+    """Return True if *hint* permits ``None`` as a value.
+
+    A handler reducer-parameter whose annotation rejects ``None`` (e.g.
+    ``strategy: str``) opts the parameter into the required-value assertion;
+    ``str | None``, ``Optional[str]``, ``Any``, ``object``, and missing
+    annotations all keep the legacy permissive behavior.
+    """
+    if hint is None or hint is type(None):
+        return True
+    if hint is typing.Any:
+        return True
+    origin = typing.get_origin(hint)
+    if origin is typing.Union or origin is types.UnionType:
+        return any(_annotation_accepts_none(a) for a in typing.get_args(hint))
+    # ``object`` (and any other class that is ``None``'s supertype) accepts
+    # None. For parameterised generics (``list[str]``), ``isinstance`` raises
+    # ``TypeError`` — conservatively treat them as rejecting None.
+    if isinstance(hint, type):
+        try:
+            return isinstance(None, hint)
+        except TypeError:
+            return False
+    return False
 
 
 def _resolve_type_hints(fn: Any) -> dict[str, Any]:
@@ -284,6 +311,10 @@ class HandlerMeta:
     log_param: str | None
     is_async: bool
     reducer_params: tuple[str, ...] = ()
+    # Subset of ``reducer_params`` whose annotation rejects ``None`` — the
+    # framework raises ``ReducerNotSetError`` if the channel value is ``None``
+    # at injection. Computed once at extraction; consulted in _build_inject.
+    required_reducer_params: frozenset[str] = frozenset()
     config_param: str | None = None
     store_param: str | None = None
     # Each entry is (field_name, matcher, is_type_matcher). The bool is
@@ -477,6 +508,11 @@ def extract_handler_meta(
     # Detect reducer parameters by name match
     sig = inspect.signature(fn)
     reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
+    required_reducer_params = frozenset(
+        name
+        for name in reducer_params
+        if name in hints and not _annotation_accepts_none(hints[name])
+    )
 
     # Extract field matchers; classify each now so dispatch avoids isinstance.
     raw_field_matchers: dict[
@@ -537,6 +573,7 @@ def extract_handler_meta(
         log_param=log_param,
         is_async=asyncio.iscoroutinefunction(fn),
         reducer_params=reducer_params,
+        required_reducer_params=required_reducer_params,
         config_param=config_param,
         store_param=store_param,
         field_matchers=field_matchers,

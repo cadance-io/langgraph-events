@@ -84,6 +84,29 @@ temperature = ScalarReducer(
 )
 ```
 
+### Required values { #scalar-reducer-required }
+
+The handler parameter annotation declares whether the value may be `None`. A non-`None` annotation opts the parameter into a runtime assertion: if the channel value is `None` at injection time (no event has projected a value and `default` is `None`), the framework raises `ReducerNotSetError` *before* the handler body runs.
+
+```python
+from langgraph_events import ReducerNotSetError  # noqa: F401  (catch it if you want)
+
+@on(TaskReceived)
+def strict(event: TaskReceived, strategy: str) -> Completed:
+    # strategy is guaranteed non-None here — otherwise ReducerNotSetError
+    # was raised at injection.
+    ...
+
+@on(TaskReceived)
+def permissive(event: TaskReceived, strategy: str | None) -> Completed:
+    # strategy may be None; handle it explicitly.
+    if strategy is None: ...
+```
+
+`str | None`, `Optional[str]`, `Any`, `object`, and a missing annotation all opt out. `ReducerNotSetError` is a `ValueError` subclass and is raised outside the handler's `raises=` boundary, so a broad `raises=ValueError` declaration cannot silently swallow it.
+
+The check relies on `typing.get_type_hints(fn)` resolving the annotation. If a forward reference fails to resolve the framework emits a `UserWarning` and falls back to the permissive behavior — annotate against importable types so the assertion sticks.
+
 ## `message_reducer`
 
 Built-in reducer for LangChain message accumulation. Projects `MessageEvent.as_messages()` into the `messages` channel using `add_messages` for deduplication:
