@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-05-23
+
 ### Added
 - **Required `ScalarReducer` values via handler type annotations** — when a handler declares a reducer parameter whose type annotation rejects `None` (e.g. `strategy: str`), the framework raises `ReducerNotSetError` at injection time if the channel value is `None`. Use `str | None` / `Optional[str]` / `Any` / `object` (or omit the annotation) to opt out and keep the legacy permissive behavior. `ReducerNotSetError` is a `ValueError` subclass exported from `langgraph_events`; the precondition raise sits outside the `raises=` catch boundary, so a broad `raises=ValueError` declaration cannot silently swallow it. Note: handlers previously receiving `None` through a non-`None`-typed parameter and handling it internally will now raise at injection — widen the annotation to opt out.
 - **`NamespaceModel.Edge.causation`** — a causal-role axis alongside `kind`: `intent` (a command emits its own outcome), `react` (a reactor emits a fact), `orchestrate` (a reactor emits a command — a saga move), `chain` (a command emits another command), or `None` (`raises`/`framework`/boundary-crossing edges). Surfaces in `text()`, `to_dict()`/`json()` (additive — no schema bump), and `mermaid()` (`orchestrate` bold, `chain` dashed-warning; `intent`/`react` unchanged, so no diagram churn). The `supervisor`, `error_recovery`, and `expense_approval` example diagrams now mark their orchestration edges.
@@ -196,7 +198,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/cadance-io/langgraph-events/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/cadance-io/langgraph-events/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/cadance-io/langgraph-events/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cadance-io/langgraph-events/compare/v0.6.2...v0.7.0
