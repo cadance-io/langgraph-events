@@ -41,7 +41,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | Export | Type | Description |
 |---|---|---|
 | `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle`. `services=[...]` (type-keyed) or `services={...}` (name-keyed) injects project dependencies into handler params (see [Concepts › Signature injection](concepts.md#signature-injection)) |
-| `EventGraph.from_namespaces()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers |
+| `EventGraph.from_namespaces()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers. With `checkpointer=MemorySaver()` auto-wires a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` decorator on those classes. Opt out by passing `MemorySaver(serde=<custom>)` — a user-supplied serde always wins |
 | `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog` |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
 | `EventGraph.get_state()` | Method | `GraphState` for a checkpointed thread |
@@ -69,7 +69,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `HandlerRaised` | Event | Emitted when a handler raises a `raises=`-declared exception; carries `handler`, `source_event`, `exception` |
 | `Invariant` | Marker class | Subclass to declare a typed invariant; used as a dict key in `invariants=` and as the matcher value in `@on(InvariantViolated, invariant=...)` |
 | `InvariantViolated` | Event | Emitted when an `invariants=` predicate returns false; carries `invariant` (instance of the declared `Invariant` subclass), `handler`, `source_event`. Use `@on(InvariantViolated, invariant=SomeInvariant)` to pin to a specific invariant |
-| `Scatter` | Class | Fan-out into multiple events; `Scatter[T]` annotates the produced type |
+| `Scatter` | Class | Fan-out into multiple events. Return type must enumerate concrete events (`Scatter[WorkItem]` or `Scatter[A \| B]`); bare `Scatter`, `Scatter[Any]`, `Scatter[Event]`, and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError` |
 
 ## Reducers
 
@@ -119,6 +119,7 @@ from langgraph_events.stream import (
 | Export | Type | Description |
 |---|---|---|
 | `CommandPrivacyError` | TypeError subclass | Raised at `EventGraph` construction; also at runtime when a handler with a broad base-class annotation (e.g. `-> DomainEvent`) constructs a `Cmd.Private(...)` that bypasses the static contract check. Outcomes nested inside a `Command` are private to that Command's inline `handle()` — neither sibling Commands nor non-inline reactors may produce them |
+| `ReducerNotSetError` | ValueError subclass | Raised at injection time (before the handler body runs) when a handler parameter rejects `None` (e.g. `strategy: str`) and the channel value is `None`. Sits outside the `raises=` catch boundary — a broad `raises=ValueError` cannot swallow it. Opt out by widening the annotation to `str | None`, `Any`, `object`, or omitting it |
 
 ## AG-UI Subpackage
 
@@ -135,10 +136,14 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `SeedFactory` / `ResumeFactory` / `EventMapper` | Protocol | Input → seed events; resume detection; event mapping |
 | `MapperContext` | Dataclass | Shared state (run ID, thread ID, message counter) per stream |
 | `create_starlette_response` / `encode_sse_stream` | Function | Framework-agnostic SSE wrapping |
+| `extract_resume_input` | Function | Pulls and JSON-decodes `RunAgentInput.forwarded_props["command"]["resume"]`. Returns `None` if absent or falsy |
+| `agui_messages_to_langchain` | Function | Converts AG-UI protocol messages to LangChain `BaseMessage` instances. Optional `drop_invalid_tool_calls=True` to skip tool calls whose JSON arguments fail to parse |
+| `merge_frontend_messages` | Function | `resume_factory` helper: reads messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages`, merges via `add_messages` (id-based dedup). Returns a tuple |
+| `build_langchain_tools` / `detect_new_tool_results` | Function | Convert `RunAgentInput.tools` to OpenAI-format / extract new `ToolMessage`s from a resume request |
 
 ## Serde Subpackage
 
-Opt-in subpackage for namespace-aware checkpoint serialization. Use when nested events with sibling-named outcomes (`Persona.Approve.Approved`, `Story.Approve.Approved`) need to round-trip distinctly through a checkpointer. The common evolution path is **decorator-first**: `@migrate_from` / `@backfill` on the class, auto-collected by `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` — no manual serde wiring. See [Event migrations](event-migrations.md).
+Namespace-aware serialization, auto-wired by default. `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` builds a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` on those classes. Opt out by passing `MemorySaver(serde=<custom>)`. See [Event migrations](event-migrations.md).
 
 Exported from `langgraph_events.serde` unless a different module is noted.
 

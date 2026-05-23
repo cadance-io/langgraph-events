@@ -1,8 +1,8 @@
 # AG-UI Protocol Adapter
 
-[AG-UI](https://docs.ag-ui.com) is an open protocol (by CopilotKit) for streaming agent events to frontends. The `langgraph_events.agui` subpackage maps EventGraph streams to AG-UI SSE events.
+[AG-UI](https://docs.ag-ui.com) is an open protocol (by CopilotKit) for streaming agent events to frontends. `langgraph_events.agui` maps `EventGraph` streams to AG-UI SSE events.
 
-```
+```text
 RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> SSE
                                                   ^
                               ResumeFactory -> astream_resume (if resuming)
@@ -10,7 +10,7 @@ RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> S
 RunAgentInput -> AGUIAdapter.connect/reconnect -> checkpoint snapshots + interrupts
 ```
 
-`AGUIAdapter` streams LLM tokens and passthrough custom events by default, emitting `TextMessageStart` / `Content` / `End` during generation. Requires `message_reducer()` on the `EventGraph` for authoritative message delivery.
+`AGUIAdapter` streams LLM tokens and custom events; requires [`message_reducer()`](reducers.md#message_reducer) for authoritative message delivery.
 
 ## Install
 
@@ -18,7 +18,7 @@ RunAgentInput -> AGUIAdapter.connect/reconnect -> checkpoint snapshots + interru
 pip install "langgraph-events[agui]"
 ```
 
-You'll also need `starlette` or `fastapi` for the HTTP layer.
+Also need `starlette` or `fastapi` for the HTTP layer.
 
 ## Quick Start
 
@@ -27,16 +27,16 @@ from fastapi import FastAPI, Request
 from ag_ui.core import RunAgentInput
 from langgraph.checkpoint.memory import MemorySaver
 
-from langgraph_events import Event, EventGraph, on, MessageEvent, message_reducer
+from langgraph_events import Event, EventGraph, IntegrationEvent, MessageEvent, message_reducer, on
 from langgraph_events.agui import AGUIAdapter, create_starlette_response
 from langchain_core.messages import HumanMessage, AIMessage
 
 
-class UserMessageReceived(MessageEvent):
+class UserMessageReceived(IntegrationEvent, MessageEvent):
     message: HumanMessage
 
 
-class AssistantReplied(MessageEvent):
+class AssistantReplied(IntegrationEvent, MessageEvent):
     message: AIMessage
 
 
@@ -64,46 +64,43 @@ async def run(request: Request):
     return create_starlette_response(adapter.stream(input_data))
 ```
 
-Use `error_message` to avoid leaking internal exception details to clients:
-
-```python
-adapter = AGUIAdapter(
-    graph,
-    seed_factory=seed_factory,
-    error_message="Something went wrong. Please try again.",
-)
-```
+!!! tip "Error handling"
+    Use `error_message=...` to avoid leaking exception details: `AGUIAdapter(graph, seed_factory=..., error_message="Something went wrong.")`.
 
 ## Built-in Mapper Chain
 
-Events flow through a priority chain of mappers. The first mapper to claim an event (return non-`None`) wins; unclaimed events fall through to the next mapper.
+Mappers claim events in priority order; first non-`None` return wins. Unclaimed events fall through.
 
 | Priority | Mapper | Handles | AG-UI Events Produced |
-|----------|--------|---------|-----------------------|
-| 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet` | *(suppressed — claims but emits nothing)* |
+|---|---|---|---|
+| 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet` | *(suppressed)* |
 | 2 | `InterruptedMapper` | `Interrupted` subclasses | `CustomEvent` (name=`"interrupted"`) |
 | 3 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
-| 4 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` when implemented, else class name; value=`agui_dict()`) |
+| 4 | `FallbackMapper` | Unclaimed `AGUISerializable` events | `CustomEvent` (name=`agui_event_name` if implemented else class name; value=`agui_dict()`) |
 
 Events without `agui_dict()` are skipped with a one-time warning.
 
-Outside the mapper chain, the adapter also emits:
+Outside the chain, the adapter also emits:
 
-- `StateSnapshot` / `MessagesSnapshot` from `StreamFrame` reducer data (`include_reducers` defaults to `True`; `MessagesSnapshot` requires `message_reducer()`). When `changed_reducers` is available, redundant snapshots are skipped.
-- `StateSnapshot` for `StateSnapshotFrame`; `CustomEvent` for `CustomEventFrame` (name/value passthrough).
-- Lifecycle: `RunStarted`, `RunFinished`, or `RunError` on exception.
+- `StateSnapshot` / `MessagesSnapshot` from `StreamFrame` reducer data (`MessagesSnapshot` requires `message_reducer()`).
+- `StateSnapshotFrame` → `StateSnapshot`; `CustomEventFrame` → `CustomEvent` (name/value passthrough).
+- Lifecycle: `RunStarted`, `RunFinished`, `RunError` on exception.
+- Skips redundant snapshots when `changed_reducers` is available.
 
 ### Shaping client-facing state
 
-`AGUIAdapter(include_reducers=...)` controls what reducer state crosses the wire. It accepts:
+`AGUIAdapter(include_reducers=...)` controls what reducer state crosses the wire:
 
-- `True` (default) — ship every user reducer.
-- `list[str]` — allow-list (e.g. `["focus", "scene"]`).
-- `False` — ship no user reducers (the dedicated `messages` snapshot still ships via `MessagesSnapshotEvent`).
+| Value | Behaviour |
+|---|---|
+| `True` (default) | All user reducers |
+| `list[str]` | Allow-list only (e.g. `["focus", "scene"]`) |
+| `False` | No user reducers (`MessagesSnapshot` still ships) |
 
-The same value is applied symmetrically to outbound `StateSnapshotEvent` and inbound `RunAgentInput.state` echo (so a stale or untrusted client can't inject keys you've decided are internal). Framework-internal channels (`events`, `_cursor`, `_pending`, `_round`) and dedicated AG-UI keys (`messages`) are always stripped first.
+Applied symmetrically to outbound state and inbound `RunAgentInput.state` echo (framework internals — `events`, `_cursor`, `_pending`, `_round` — always stripped first). The allow-list also gates **which reducers `EventGraph` computes during streaming**.
 
-Allow-list keepers when you want to hide a few internal reducers:
+!!! note "Symmetry is a security boundary"
+    The same value applies to both directions — a stale or untrusted client cannot inject keys you've decided are internal by echoing them back in `RunAgentInput.state`. The framework-internal channels are always stripped first regardless of `include_reducers`.
 
 ```python
 adapter = AGUIAdapter(
@@ -113,54 +110,47 @@ adapter = AGUIAdapter(
 )
 ```
 
-The list-form drives both projection (what the snapshot contains) and activation (which reducers EventGraph computes during streaming). If you need redaction or value transformation, write a custom `EventMapper` — that's the supported extension point for shaping AG-UI output.
+For redaction or value transformation, write a custom `EventMapper`.
 
-Messages are delivered via two channels — authoritative `MessagesSnapshot` from the reducer, plus real-time `TextMessageStart` / `Content` / `End` tokens. AG-UI clients reconcile them.
+!!! note "Message delivery uses two channels"
+    Messages reach the client via two paths simultaneously: authoritative `MessagesSnapshot` from the `message_reducer()` channel, plus real-time `TextMessageStart` / `Content` / `End` tokens. AG-UI clients reconcile them by message id.
 
 ## Connect / Reconnect
 
-For page refreshes and reconnects, use `connect()` to emit checkpoint-backed state without running handlers again:
+`connect()` (alias `reconnect()`) emits checkpoint-backed state without running handlers — `StateSnapshot` + `MessagesSnapshot` from the checkpoint plus any pending `Interrupted` events.
 
 ```python
 events = [event async for event in adapter.connect(input_data)]
 ```
 
-`connect()` emits `StateSnapshot` + `MessagesSnapshot` from the checkpoint (empty for new threads) and any pending `Interrupted` events. `reconnect()` is an alias. Restores UI state without advancing the graph.
+Use on page load / refresh.
 
-## Endpoint Pattern (Run + Connect)
+!!! tip "Typical endpoint split"
+    - `/api/copilotkit` (run): `adapter.stream(input_data)`
+    - `/api/copilotkit/connect` (reconnect): `adapter.connect(input_data)`
+    - Client: call `connect` on load/refresh; call `stream` only to start/resume execution.
 
-AG-UI doesn't mandate endpoint names. A practical split:
-
-```python
-from fastapi import FastAPI, Request
-from ag_ui.core import RunAgentInput
-from langgraph_events.agui import create_starlette_response
-
-app = FastAPI()
-
-
-@app.post("/api/copilotkit")
-async def run(request: Request):
-    input_data = RunAgentInput.model_validate_json(await request.body())
-    return create_starlette_response(adapter.stream(input_data))
+    ```python
+    @app.post("/api/copilotkit")
+    async def run(request: Request):
+        input_data = RunAgentInput.model_validate_json(await request.body())
+        return create_starlette_response(adapter.stream(input_data))
 
 
-@app.post("/api/copilotkit/connect")
-async def connect(request: Request):
-    input_data = RunAgentInput.model_validate_json(await request.body())
-    return create_starlette_response(adapter.connect(input_data))
-```
-
-Client: call `connect` on page load/refresh; call `stream` only to start or resume execution.
+    @app.post("/api/copilotkit/connect")
+    async def connect(request: Request):
+        input_data = RunAgentInput.model_validate_json(await request.body())
+        return create_starlette_response(adapter.connect(input_data))
+    ```
 
 ## Custom Mappers
 
-Implement the `EventMapper` protocol — a single `map()` method. Return `None` to pass, `[]` to suppress, or a list of AG-UI events to emit.
+Implement `EventMapper.map()`: return `None` (pass), `[]` (suppress), or AG-UI events.
 
 ```python
 from ag_ui.core import BaseEvent, EventType, CustomEvent
+from langgraph_events import Event, IntegrationEvent
 from langgraph_events.agui import EventMapper, MapperContext
-from langgraph_events import Event
 
 
 class PlanningStarted(IntegrationEvent):
@@ -179,11 +169,11 @@ class PlanMapper:
 adapter = AGUIAdapter(graph, seed_factory=seed_factory, mappers=[PlanMapper()])
 ```
 
-User mappers run after the built-in mappers (priority 3) but before `FallbackMapper`, so they can intercept domain events that would otherwise become generic `CustomEvent`s.
+User mappers (priority 3) intercept before `FallbackMapper`.
 
 ## Resume Support
 
-To handle resumed conversations (e.g., after a human-in-the-loop interrupt), implement `resume_factory`:
+For resuming (e.g. after HITL), implement `resume_factory(input_data, checkpoint_state)`. Return an `Event` to trigger `astream_resume()`; return `None` for a fresh run via `seed_factory`. `checkpoint_state` is optional — one-argument factories still work.
 
 ```python
 from ag_ui.core import RunAgentInput
@@ -206,37 +196,40 @@ def resume_factory(
     return None  # fresh run
 
 
-adapter = AGUIAdapter(
-    graph,
-    seed_factory=seed_factory,
-    resume_factory=resume_factory,
+adapter = AGUIAdapter(graph, seed_factory=seed_factory, resume_factory=resume_factory)
+```
+
+!!! warning "Frontend state on resume"
+    When `RunAgentInput.state` is populated alongside a resume:
+
+    - State dict is projected via `include_reducers` (framework internals + dedicated keys stripped).
+    - `FrontendStateMutated(state=projected)` event is built.
+    - For each reducer subscribing to `FrontendStateMutated`, the adapter writes via `apre_seed` **before** the resume's domain dispatch — so handlers reading the channel via parameter injection see the updated value.
+    - FSM is also injected as a seed to `astream_resume` (appears in stream + audit log).
+    - **Domain-driven reducers win for shared keys** — backend channels stay intact regardless of what the client echoes.
+    - **`@on(FrontendStateMutated)` *handler* callbacks do NOT fire on resume** (reducer pipeline still runs). Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for resume-time side effects.
+
+Reducers can subscribe to `FrontendStateMutated` to mirror selected client-state keys server-side:
+
+```python
+from langgraph_events import ScalarReducer, SKIP
+from langgraph_events.agui import FrontendStateMutated
+
+focus = ScalarReducer(
+    event_type=FrontendStateMutated,
+    fn=lambda e: e.state.get("focus", SKIP),
 )
 ```
 
-Returning an `Event` triggers `graph.astream_resume()`; `None` starts a fresh run via `seed_factory`. The `checkpoint_state` argument is optional — one-argument factories still work.
-
-### Frontend state on resume
-
-When `RunAgentInput.state` is populated alongside a resume, the adapter routes it through `FrontendStateMutated` exactly like the non-resume path:
-
-1. The state dict is projected via `include_reducers` (framework internals + dedicated keys stripped, then your projector if any).
-2. A `FrontendStateMutated(state=projected)` event is built.
-3. For each reducer subscribing to `FrontendStateMutated`, the adapter computes its contribution and writes it to the channel via `apre_seed` *before* the resume's domain dispatch — so the reducer's `fn` runs (transformations, `SKIP`) and any handler reading **reducer state via parameter injection** (e.g. `def my_handler(event: ApprovalGiven, focus: str | None = None)`) sees the updated value during the resume step.
-4. FSM is also injected as a seed to `astream_resume` so it appears in the output stream and the persisted audit log.
-
-**Reducers driven by backend domain events are not affected by FSM dispatch** — their channels stay intact regardless of what the client echoes. The resume's domain event flows through normal dispatch and wins for shared keys.
-
-**`@on(FrontendStateMutated)` *handler* callbacks do not fire on resume.** This is distinct from the parameter-injection pattern above: a function decorated with `@on(FrontendStateMutated)` will not be invoked, because LangGraph's `Command(resume=...)` carries one value and seeds dispatch out-of-graph. The reducer pipeline still runs (#3 above); it's only the dispatched-handler entry point that's unavailable on resume. Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for resume-time side effects.
-
 ## Frontend Tools
 
-The AG-UI spec positions tool calls as "inherently frontend-executed" and as the mechanism for HITL. The adapter wires all three halves of that contract to an `EventGraph`:
+The AG-UI spec positions tool calls as "inherently frontend-executed" and as the mechanism for HITL. The adapter wires all three halves to an `EventGraph`:
 
-1. **Tool definitions in** — a page's `useFrontendTool` registrations arrive on each request as `RunAgentInput.tools`. The `build_langchain_tools(...)` helper converts them to OpenAI-format dicts suitable for `llm.bind_tools(...)`.
+1. **Tool definitions in** — page's `useFrontendTool` registrations arrive as `RunAgentInput.tools`. `build_langchain_tools(...)` converts them to OpenAI-format dicts for `llm.bind_tools(...)`.
 2. **Tool calls out** — two paths, both mapping to `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`:
-    - **LLM-initiated** — when the bound LLM streams `tool_call_chunks`, they auto-translate to the streaming triple (transport-level, emitted progressively).
-    - **Handler-initiated** — a handler returns the built-in `FrontendToolCallRequested(Interrupted)` event. The adapter emits the full triple and the graph pauses, exactly like `ApprovalRequested(Interrupted)` in [`examples/human_in_the_loop.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/human_in_the_loop.py). Tool calls become "HITL with typed fields."
-3. **Tool results back** — the frontend's handler return value is sent back as a `role: "tool"` message. `detect_new_tool_results(input_data, checkpoint_state)` returns the new `ToolMessage`s; wrap them in a `MessageEvent` (typically `ToolsExecuted(messages=...)`) and return from `resume_factory` to continue the graph.
+    - **LLM-initiated** — bound LLM `tool_call_chunks` auto-translate to the streaming triple.
+    - **Handler-initiated** — return `FrontendToolCallRequested(Interrupted)` from a handler. Graph pauses; AG-UI emits the triple. (Same machinery as `ApprovalRequested(Interrupted)` in [`examples/expense_approval.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/expense_approval.py).)
+3. **Tool results back** — frontend handler return value comes back as `role: "tool"`. `detect_new_tool_results(input_data, checkpoint_state)` returns the new `ToolMessage`s; wrap as `MessageEvent` and return from `resume_factory`.
 
 ```python
 from langgraph_events import on
@@ -268,11 +261,11 @@ async def call_llm(event, messages, log):
     return LLMResponded(message=await llm.ainvoke(messages))
 ```
 
-Runnable example: [`examples/conversation.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.py) wires AG-UI frontend tools end-to-end (LLM-initiated streaming path) inside a domain with content moderation.
+See [`examples/conversation.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/conversation.py).
 
 ### Handler-initiated frontend tools
 
-When the backend — not the LLM — wants to ask the frontend for something (confirm dialogs, file pickers, deterministic prompts), return a typed `FrontendToolCallRequested(Interrupted)` from a handler. The graph pauses; the AG-UI adapter streams the matching `ToolCallStart` / `ToolCallArgs` / `ToolCallEnd` triple; when the frontend's `useFrontendTool` handler returns, the resume factory surfaces the returning tool message as a typed event and the graph continues. Tool calls become "HITL with typed fields" — same machinery as `ApprovalRequested(Interrupted)`, just for frontend interactions.
+For backend-initiated tool calls (confirm dialogs, file pickers, deterministic prompts), return `FrontendToolCallRequested(Interrupted)`. Graph pauses; AG-UI streams the call triple; frontend result becomes a typed event on resume.
 
 ```python
 from langgraph_events import on
@@ -303,32 +296,38 @@ def ship(event: UserConfirmed) -> ShippedRelease:
     return ShippedRelease(release="v1", approved=approved)
 ```
 
-**`useCopilotAction` (v1) vs `useFrontendTool` (v2).** The v1 hook consumes tool calls from `MessagesSnapshot` — the existing `MessagesSnapshot` path already covers it unchanged. The v2 hook needs the streaming `ToolCallStart/Args/End` events that this section describes. Both paths coexist: CopilotKit reconciles by `tool_call_id`.
+!!! note "CopilotKit versioning"
+    - v1 (`useCopilotAction`): uses `MessagesSnapshot` (no changes).
+    - v2 (`useFrontendTool`): needs streaming `ToolCallStart/Args/End`.
+    - Both coexist; CopilotKit reconciles by `tool_call_id`.
 
-**`parent_message_id` caveat.** For LLM-initiated tool calls, `ToolCallStartEvent.parent_message_id` references the currently-open text message id (or `None` when the assistant emits tool calls without prose). LangChain does not expose the final `AIMessage.id` until the stream ends, so this id is not guaranteed to match the id later carried in `MessagesSnapshot`.
+!!! warning "`parent_message_id` caveat"
+    For LLM-initiated tool calls, `ToolCallStartEvent.parent_message_id` may not match the final `MessagesSnapshot` id — LangChain doesn't expose the final `AIMessage.id` until the stream ends.
 
-**Reconnect replay.** If a page refresh hits `connect()` while the graph is paused on `FrontendToolCallRequested`, the adapter replays the `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd` triple using the stored `tool_call_id`. CopilotKit's `useFrontendTool` is idempotent by `tool_call_id`, so replay is safe.
+!!! note "Reconnect replay"
+    If a page refresh hits `connect()` while the graph is paused on `FrontendToolCallRequested`, the adapter replays the triple using the stored `tool_call_id`. CopilotKit's `useFrontendTool` is idempotent by `tool_call_id` — replay is safe.
 
-**Strict contract — no silent fallbacks.** The adapter rejects malformed tool-call traffic on the spot rather than coercing missing fields:
+!!! warning "Strict contract — no silent fallbacks"
+    The adapter rejects malformed tool-call traffic at the source:
 
-- `FrontendToolCallRequested(name="")` (or whitespace-only) raises `ValueError` at construction.
-- `FrontendToolCallRequested.args` is serialized with `json.dumps()` at emit time; non-JSON-serializable values (e.g. `datetime`) raise `TypeError`, which the adapter surfaces as a `RUN_ERROR`. Keep `args` JSON-compatible — the same constraint the frontend `useFrontendTool` schema imposes.
-- An LLM `tool_call_chunk` lacking `index` raises `ValueError` from `astream_events`.
-- The first chunk of a streaming call must carry both `id` and `name`; a missing value raises `ValueError`. Continuation chunks may omit them.
-- An inbound `role: "tool"` message reaching `detect_new_tool_results` must carry a non-empty `tool_call_id`; missing/empty raises `ValueError`.
+    - `FrontendToolCallRequested(name="")` (or whitespace-only) raises `ValueError` at construction.
+    - `FrontendToolCallRequested.args` is JSON-serialized at emit time; non-serializable values raise `TypeError` → adapter surfaces `RUN_ERROR`. Keep `args` JSON-compatible.
+    - An LLM `tool_call_chunk` lacking `index` raises `ValueError` from `astream_events`.
+    - First chunk of a streaming call must carry both `id` and `name`; missing raises `ValueError`. Continuation chunks may omit.
+    - Inbound `role: "tool"` message must carry a non-empty `tool_call_id`; missing raises `ValueError` from `detect_new_tool_results`.
 
-Streaming-path errors propagate through the adapter's top-level handler and surface to the frontend as a `RUN_ERROR` event with the diagnostic message. Conformant CopilotKit clients and LangChain chat models satisfy these invariants by default.
+Streaming-path errors propagate to the frontend as a `RUN_ERROR` event with the diagnostic message.
 
 ## Resume Helpers
 
-`detect_new_tool_results` covers the *frontend-tool-result* arm of resume. The other arm — when the frontend sends a `Command(resume=…)` plus new chat messages (e.g. answering a typed `Interrupted` payload) — has three small helpers that collapse the boilerplate every consumer would otherwise write inside `resume_factory`:
+`detect_new_tool_results` covers the frontend-tool-result arm of resume. The other arm — frontend sends `Command(resume=…)` plus new chat messages — has three helpers that collapse `resume_factory` boilerplate:
 
-- **`extract_resume_input(input_data)`** — pulls `RunAgentInput.forwarded_props["command"]["resume"]`. If the value is a JSON string it's decoded; otherwise it passes through. Returns `None` if absent or falsy.
-- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — converts a list of AG-UI protocol messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage` instances. `ReasoningMessage` and `DeveloperMessage` are skipped (DEBUG log); `ActivityMessage` and unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls whose JSON `arguments` fail to parse are dropped (WARNING-logged); if every tool call on an `AssistantMessage` is dropped, the message itself is dropped.
-- **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — the high-level helper. Reads existing messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages` via `agui_messages_to_langchain`, and merges via langgraph's `add_messages` (id-based dedup; messages without ids get a UUID assigned by the merge — don't rely on positional identity downstream). Returns a tuple — the immutable shape resume events typically carry.
+- **`extract_resume_input(input_data)`** — pull & decode `RunAgentInput.forwarded_props["command"]["resume"]`.
+- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage`. `ReasoningMessage` / `DeveloperMessage` skipped (DEBUG); `ActivityMessage` / unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls with unparseable JSON args are dropped (WARNING).
+- **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — read existing messages from checkpoint, convert, merge via `add_messages` (id-based dedup; missing ids get UUIDs assigned). Returns a tuple.
 
 ```python
-from langgraph_events import Event, MessageEvent
+from langgraph_events import IntegrationEvent, MessageEvent
 from langgraph_events.agui import (
     detect_new_tool_results,
     extract_resume_input,
@@ -337,7 +336,7 @@ from langgraph_events.agui import (
 
 
 # Domain-specific resume event — define alongside your other events.
-class UserResumed(Event, MessageEvent):
+class UserResumed(IntegrationEvent, MessageEvent):
     response: object  # resume payload (dict, str, …); your shape
     messages: tuple = ()
 
@@ -356,13 +355,14 @@ def resume_factory(input_data, checkpoint_state=None):
     return UserResumed(response=resume_input, messages=merged)
 ```
 
-`extract_resume_input` returns `None` for absent **or falsy** `resume` values (matches the convention shipped by downstream consumers — `0`, `""`, `[]`, `{}`, `False` all collapse to `None`). If your HITL flow uses `False` as a meaningful "deny" signal, normalise it on the frontend side (e.g. send `{"approved": false}` instead of bare `false`).
+!!! tip "Falsy resume handling"
+    `extract_resume_input` treats all falsy values (`0`, `""`, `[]`, `{}`, `False`) as "no resume". For meaningful "deny" signals, send `{"approved": false}` instead of bare `false`.
 
-Use the lower-level `agui_messages_to_langchain` directly when you need converted messages outside the `merge_frontend_messages` orchestration — e.g. inside a `seed_factory` that builds events from the most recent inbound `UserMessage`.
+Use `agui_messages_to_langchain` directly for custom merging (e.g. in `seed_factory`).
 
 ## Typed Interrupt Payloads
 
-For HITL flows whose frontend needs an action-discriminated dict (entity-review vs environment-select vs walkthrough-choice, …), subclass `InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The built-in `InterruptedMapper` recognises the contract and emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.
+For HITL flows whose frontend needs an action-discriminated dict, subclass `InterruptedWithPayload[PayloadT]` (builds on [`Interrupted`](control-flow.md#interrupted-resumed) from Control Flow) and implement `interrupt_payload()`. `InterruptedMapper` emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.
 
 ```python
 from typing import Literal, TypedDict
@@ -390,18 +390,18 @@ def request_review(event: DraftReady) -> ReviewInterrupted:
     return ReviewInterrupted(draft=event.draft, revision=event.revision)
 ```
 
-This is the right shape when several namespace modules each need their own typed `Interrupted` subclass — the shared base lives in `langgraph_events.agui`, so the project doesn't have to invent a local "shim" module to break import cycles between sibling event modules. Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
+Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
 
 ## LangGraph Config Passthrough
 
-`stream()` and `connect()` accept LangGraph config via `RunAgentInput.forwarded_props` — keys `langgraph_config`, `config`, or the whole dict when it already looks like a LangGraph config. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`; other keys (e.g. `recursion_limit`, tenant routing) pass through.
+`stream()` / `connect()` accept LangGraph config via `RunAgentInput.forwarded_props` — keys `langgraph_config`, `config`, or the dict itself. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`; other keys (`recursion_limit`, tenant routing) pass through.
 
 ## AG-UI Spec Coverage
 
-Built-in for 9 of 33 event types; the rest via custom mappers or not applicable.
+Built-in for 12 of 33 event types; the rest via custom mappers or N/A.
 
 | Category | Count | Event Types |
-|----------|-------|-------------|
+|---|---|---|
 | **Built-in** | 12 | `RunStarted`, `RunFinished`, `RunError`, `TextMessageStart/Content/End`, `ToolCallStart/Args/End`, `StateSnapshot`, `MessagesSnapshot`, `Custom` |
 | **User mapper** | 17 | `TextMessageChunk`, `ToolCallResult`, `ToolCallChunk`, `StepStarted/Finished`, `StateDelta`, `ActivitySnapshot/Delta`, `ThinkingStart/End`, `ThinkingTextMessageStart/Content/End`, `Raw`, `ReasoningStart/End` |
-| **N/A** | 4 | `ReasoningMessageStart/Content/End/Chunk` — extended reasoning events that require provider-specific integration |
+| **N/A** | 4 | `ReasoningMessageStart/Content/End/Chunk` — extended reasoning, provider-specific |

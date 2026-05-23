@@ -16,7 +16,6 @@ nav:
   - Streaming: streaming.md
   - Patterns: patterns.md
   - API Reference: api.md
-  - Migrating from 0.3.0: migrating.md
   - AG-UI Adapter: agui.md
   - Checkpointer & Graph Evolution: checkpointer-evolution.md
   - Event Migrations: event-migrations.md

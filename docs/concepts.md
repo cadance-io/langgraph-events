@@ -2,28 +2,24 @@
 
 ## State IS events
 
-A run is an append-only log of frozen, typed events. Handlers read events in, emit events out. Projections (`EventLog.filter()`, reducers) derive whatever view you need — there is no mutable shared state.
+Append-only log of frozen, typed events. Handlers consume and emit events; projections (`EventLog.filter()`, reducers) derive views. No mutable shared state.
 
 ## The taxonomy
 
-Four event base classes plus a `Namespace` namespace. Pick the right one and the naming discipline follows:
+Four event base classes plus a `Namespace`:
 
 | Class | Role | Naming | Where it lives |
 |---|---|---|---|
-| `Namespace` | Namespace for related commands and events | Noun (`Order`) | Top-level class |
-| `Command` | Intent / request | **Imperative** (`Place`, `Ship`) | Nested inside a `Namespace` |
-| `DomainEvent` | Fact inside the domain | Past-participle (`Placed`, `Shipped`) | Nested under a `Namespace` or `Command` |
-| `IntegrationEvent` | Fact crossing a system boundary | Past-participle | Top-level — **enforced** at class creation |
-| `SystemEvent` | Framework-emitted fact | Past-participle | Top-level; `Halted` subclasses may nest under a domain for locality |
-| `Invariant` | Named rule gating a handler | Noun phrase (`CustomerNotBanned`) | Anywhere — nesting under a `Command` is encouraged |
+| `Namespace` | Group of related commands/events | Noun (`Order`) | Top-level |
+| `Command` | Intent / request | **Imperative** (`Place`, `Ship`) | Nested in `Namespace` |
+| `DomainEvent` | Fact inside the domain | Past-participle (`Placed`) | Nested in `Namespace` or `Command` |
+| `IntegrationEvent` | Fact crossing a system boundary | Past-participle | **Top-level only** (enforced) |
+| `SystemEvent` | Framework-emitted fact | Past-participle | Top-level (`Halted` subclasses may nest for locality) |
+| `Invariant` | Named rule gating a handler | Noun phrase (`CustomerNotBanned`) | Anywhere; nesting under `Command` encouraged |
 
-`Auditable` and `MessageEvent` are behavioural **mixins** — compose them with any event branch (e.g. `class Foo(DomainEvent, Auditable)`). `Invariant` is a **marker class**, not an `Event` subclass — see [control-flow](control-flow.md#invariants). Declared invariants surface as first-class nodes in `graph.namespaces()`: `.invariants` lists every subclass with its owning commands, declaring handlers, and pinned reactors; mermaid diagrams render each as a diamond gate inside its owning domain.
+Event class names use past-participle — they're facts. `Auditable` / `MessageEvent` are mixins (compose with any branch). `Invariant` is a marker class, not an `Event` subclass — see [control-flow](control-flow.md#invariants).
 
-!!! note "On `Namespace`"
-
-    `Namespace` is a namespace — for grouping related commands and events, plus the target for declarative reducers and the `invariants=` kwarg. A richer construct — with identity and size discipline — may layer on top in a future release.
-
-Nesting is enforced at class-creation time — `Command` / `DomainEvent` defined outside a `Namespace` raise `TypeError`, and an `IntegrationEvent` nested *inside* a `Namespace` or `Command` raises `TypeError` (it crosses a boundary by definition). Direct `Event` subclassing also raises `TypeError` — use one of the four bases above.
+`Command` / `DomainEvent` must nest inside a `Namespace`; `IntegrationEvent` must be top-level; direct `Event` subclassing is forbidden. All three raise `TypeError` at class creation.
 
 ```python
 class Order(Namespace):
@@ -40,36 +36,24 @@ class Order(Namespace):
         tracking: str
 ```
 
-Nested classes inherit nothing implicit. `Order.Place.Placed` is *not* a subclass of `Order.Place` — it's a `DomainEvent` scoped to the `Order` domain with a `__command__` back-reference to `Place`.
+Nesting is syntactic only — `Order.Place.Placed` is a `DomainEvent` with a `__command__` back-reference, not a subclass of `Place`.
 
 ### `Command.Outcomes`
 
-Auto-generated union of the command's nested `DomainEvent` classes:
+Auto-generated union of the command's nested `DomainEvent` classes; used in `isinstance` and as the inline-handler return contract. Declare an `Outcomes: TypeAlias = …` yourself if you want mypy to see it — drift-checked against the nested events at class creation.
 
 ```python
-isinstance(evt, Order.Place.Outcomes)   # matches Placed OR Rejected
+isinstance(evt, Order.Place.Outcomes)   # Placed OR Rejected
 typing.get_args(Order.Place.Outcomes)   # (Placed, Rejected)
-```
-
-Declare `Outcomes` yourself if you want `mypy` to see it — the framework drift-checks against the nested events at class-creation time:
-
-```python
-from typing import TypeAlias
-
-class Order(Namespace):
-    class Place(Command):
-        class Placed(DomainEvent): ...
-        class Rejected(DomainEvent): ...
-        Outcomes: TypeAlias = Placed | Rejected   # optional; drift-checked
 ```
 
 ## Handlers { #on-decorator }
 
-Two styles: an inline handler on a command, or the `@on` decorator.
+Two styles: inline on a `Command`, or external via `@on`.
 
-### Inline handler on the command { #inline-command-handlers }
+### Inline { #inline-command-handlers }
 
-The command owns its handler. The handler is the **sole public method** in the class body — name it after the verb (`place`, `ship`, `submit`, …) or use the generic `handle`. `self` is the command instance. Pass the command class to `EventGraph` — no decorator.
+The **sole public method** in the class body. Name it after the verb (`place`, `ship`, …) or use `handle`. `self` is the command instance. Pass the class to `EventGraph` — no decorator.
 
 ```python
 class Order(Namespace):
@@ -84,15 +68,15 @@ class Order(Namespace):
 
 
 graph = EventGraph([Order.Ship])
-# or register every inline handler on a domain in one call:
+# or register every inline handler on a namespace in one call:
 graph = EventGraph.from_namespaces(Order, handlers=[react])
 ```
 
-A Command represents one intent and gets one public method — the handler. Helpers must be underscore-prefixed; declaring more than one public method on a Command raises `TypeError` at class creation.
+- Exactly one public method per `Command`; helpers must be underscore-prefixed (else `TypeError` at class creation).
+- Annotated return types must cover every nested `DomainEvent`.
+- `DomainEvent`s nested inside a `Command` are **Command-private** — only that Command's handler may emit them. Recovery reactors emit namespace-level siblings (e.g. `Order.Rejected`). Violations raise `CommandPrivacyError` at graph construction.
 
-When an inline handler has an explicit return annotation, it must cover every nested `DomainEvent`. A `DomainEvent` nested inside a `Command` is *Command-private*: only that Command's handler may emit it. Reactors that need to surface a domain failure as part of recovery emit a namespace-level sibling event (e.g. `Order.Rejected`), not a Command-private outcome — graph construction raises `CommandPrivacyError` if a non-handler returns one.
-
-`invariants` and `raises` for an inline handle are declared as class-level attributes on the `Command`:
+Declare `invariants` and `raises` as class-level attributes:
 
 ```python
 class Order(Namespace):
@@ -110,7 +94,7 @@ class Order(Namespace):
 
 ### External: `@on`
 
-Three shapes. Pick the shortest that conveys intent:
+Three shorthand forms:
 
 ```python
 # Bare — event type inferred from the annotation
@@ -127,35 +111,35 @@ def push_notification(event: Order.Placed) -> None: ...
 async def call_llm(event: Event) -> AssistantMessage: ...
 ```
 
-The bare form errors at decoration if the first parameter is missing, unannotated, or not a single `Event` subclass.
+Bare `@on` requires a single annotated `Event` parameter (errors at decoration otherwise).
 
 ### Signature injection
 
-Handlers receive injections by type or name:
+Handler params resolve from:
 
 - `log: EventLog` — full history
 - `config: RunnableConfig` / `store: BaseStore` — LangGraph injections
 - Reducer channel by **parameter name** (see [Reducers](reducers.md))
-- Field matchers (external only) — typed subset dispatch plus injection
+- Field matchers (external only) — typed subset dispatch + injection
 - **Services** — project dependencies registered on `EventGraph(services=...)`
 
-Resolution order: reducer name → framework type (`EventLog` / `RunnableConfig` / `BaseStore`) → service. The first match wins.
+Resolution order: reducer name → framework type → service. First match wins. Unresolved params raise `TypeError` at graph construction.
 
-`services=` accepts two shapes (mutually exclusive within a graph):
+`services=` accepts two shapes (mutually exclusive per graph):
 
 ```python
-# Type-keyed: handler params resolve by their annotation. Same-type
-# collisions are rejected at build; subclass annotations match registered
-# subclass instances via an MRO walk.
+# Type-keyed: handler params resolve by annotation. Same-type
+# collisions rejected at build; subclass annotations match via MRO walk.
 EventGraph(handlers=[...], services=[chat_model, session_factory])
 
 class Story(Namespace):
     class Refine(Command):
-        async def handle(self, chat_model: BaseChatModel) -> Refined:
-            ...
+        class Refined(DomainEvent):
+            text: str
 
-# Name-keyed: handler params resolve by name. Allows multiple instances
-# of the same type (primary + backup chat models, etc.).
+        async def handle(self, chat_model: BaseChatModel) -> Refined: ...
+
+# Name-keyed: handler params resolve by name. Multiple instances of same type allowed.
 EventGraph(
     handlers=[...],
     services={"primary_chat": chat_a, "backup_chat": chat_b},
@@ -165,16 +149,11 @@ EventGraph(
 def react(event, primary_chat, backup_chat) -> ...: ...
 ```
 
-Handler params with no injection source raise `TypeError` at graph construction (not at first dispatch).
-
-Async is supported on both forms.
-
 ### Return contract
 
 - Annotated handlers must return a type in the declared union (or `None`).
 - Unannotated `Command`-subscribing handlers must return one of `Command.Outcomes` (or `None`); other unannotated handlers keep a shape-only check.
-
-Violations raise `TypeError` at dispatch.
+- Violations raise `TypeError` at dispatch.
 
 ## `EventGraph`
 
@@ -182,43 +161,26 @@ Violations raise `TypeError` at dispatch.
 graph = EventGraph([place, respond], max_rounds=100)
 ```
 
-Topology is derived from handler subscriptions — no manual node/edge wiring. `max_rounds` (default 100) auto-sets LangGraph's recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) when exceeded.
+Topology derived from handler subscriptions — no manual node/edge wiring. `max_rounds` (default 100) sets the recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) on overflow.
 
 ### Namespace introspection & visualization
 
-One entry point — `graph.namespaces()` — returns a `NamespaceModel`: a code-derived snapshot of the structure *and* the event-driven flow (choreography). Render it to text, Mermaid, or JSON:
+- `graph.namespaces()` returns a `NamespaceModel` — code-derived structure + choreography.
+- **Render**: `.text()` (tree), `.text(view="structure")` (taxonomy only), `.mermaid()` (flowchart), `.json()` / `.to_dict()`.
+- **Inspect** (all frozen dataclass tuples/dicts):
+    - `.namespaces` — `dict[str, NamespaceModel.Namespace]`
+    - `.command_handlers`, `.policies`, `.edges`, `.seeds`, `.integration_events`, `.system_events`
+- `Edge` carries `kind` (how — `solid`/`scatter`/`raises`/`framework`) and `causation` (causal role — `intent`/`react`/`orchestrate`/`chain`). Surfaces in `text()`, `json()`, and mermaid styling.
 
-```python
-d = graph.namespaces()
-
-print(d.text())                     # human-readable tree (choreography)
-print(d.text(view="structure"))     # taxonomy only — no handlers
-
-print(d.mermaid())                  # graph LR flowchart (choreography)
-
-d.json()                            # JSON snapshot (event classes as qualnames)
-
-# Data access — everything is a frozen dataclass tuple/dict:
-d.namespaces                 # dict[str, NamespaceModel.Namespace]
-d.command_handlers        # tuple[NamespaceModel.CommandHandler, ...]
-d.policies                # tuple[NamespaceModel.Policy, ...]
-d.edges                   # tuple[NamespaceModel.Edge, ...]  — source, via, target, kind, causation
-d.seeds                   # tuple[type[Event], ...]       — events with no incoming edges
-d.integration_events      # tuple[type[IntegrationEvent], ...]
-d.system_events           # tuple[type[SystemEvent], ...]
-```
-
-Each edge also carries a `causation` role — `intent` (a command emits its own outcome), `react` (a reactor emits a domain fact), `orchestrate` (a reactor emits a *command* — a saga move), or `chain` (a command emits another command). It surfaces in `text()`, `json()`, and the mermaid styling, so a diagram shows at a glance whether a system is fact-flowing or orchestration-heavy.
-
-Rendered diagrams live on the [Patterns](patterns.md) page — the collapsible legend at the top shows the shape/edge vocabulary used across every example.
+Rendered diagrams live on the [Patterns](patterns.md) page — the collapsible legend shows the shape/edge vocabulary.
 
 ### Escape hatch
 
-`graph.compiled` exposes the underlying `CompiledStateGraph` for subgraph composition, custom streaming modes, or direct state access.
+`graph.compiled` exposes the underlying `CompiledStateGraph` for subgraph composition or direct state access.
 
 ## `EventLog`
 
-Immutable, ordered container returned by `invoke` / `ainvoke`. Handlers receive it by type hint.
+Immutable, ordered container returned by `invoke` / `ainvoke`. Inject by type hint.
 
 ```python
 @on(DraftProduced)
@@ -238,15 +200,22 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 | `log.select(T)` / `log.after(T)` / `log.before(T)` | chainable `EventLog` |
 | `len(log)`, `log[i]` | container protocol |
 
-## Namespace as a feature hub
+## `Namespace` as a feature hub
 
-A `Namespace` groups related commands and events, and is where related features attach: declarative reducers as class attributes (auto-scoped to the namespace's events), `invariants` / `raises` declared as class-level attributes on a `Command` (forwarded to its inline `handle()`), and namespace grouping in `graph.namespaces()`. See [Reducers](reducers.md#on-a-namespace) and [Control Flow](control-flow.md#invariants).
+A `Namespace` is where related features attach:
+
+- Declarative reducers as class attributes (auto-scoped to namespace events) — see [Reducers](reducers.md#on-a-namespace)
+- Class-level `invariants` / `raises` on a `Command` (forwarded to inline `handle()`) — see [Control Flow](control-flow.md#invariants)
+- Grouping in `graph.namespaces()`
+
+!!! note "On `Namespace`"
+    `Namespace` is a namespace — for grouping. A richer construct (with identity and size discipline) may layer on top in a future release.
 
 ## System events
 
-Framework-emitted events for runtime control — all `SystemEvent` subclasses. Subscribe via `@on(SomeSystemEvent)` like any other event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed` (HITL), `HandlerRaised` (`raises=`), and `InvariantViolated`. Full table in [API](api.md#system-events).
+`SystemEvent` subclasses control runtime flow; subscribe like any event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed`, `HandlerRaised`, `InvariantViolated`. Full table in [API](api.md#system-events).
 
-Custom halts subclass `Halted` with domain-specific fields. Nest them inside their domain for locality; `graph.namespaces()` groups them with the rest of the domain's events rather than with framework system events:
+Custom halts subclass `Halted` and nest under their domain for locality; `graph.namespaces()` groups them with the domain's events rather than with framework system events:
 
 ```python
 class Content(Namespace):
@@ -265,9 +234,9 @@ def guard(event: Content.Classified) -> Reply | Content.Blocked:
 
 ## Mixins
 
-`Auditable` and `MessageEvent` are plain mixins — not `Event` subclasses. Compose them with any event branch.
+`Auditable` and `MessageEvent` are plain mixins (not `Event` subclasses). Compose with any event branch.
 
-**`Auditable`** — marker for auto-logging. `@on(Auditable)` captures every marked event:
+**`Auditable`** — auto-logging marker. `@on(Auditable)` subscribes to all marked events:
 
 ```python
 class OrderPlaced(DomainEvent, Auditable):
@@ -278,7 +247,7 @@ def audit(event: Auditable) -> None:
     print(event.trail())
 ```
 
-**`MessageEvent`** — wraps LangChain `BaseMessage` objects. Declare a `message` or `messages` field; pair with `message_reducer()`:
+**`MessageEvent`** — wraps LangChain `BaseMessage`; declare a `message` or `messages` field; pair with `message_reducer()`:
 
 ```python
 class UserMessageReceived(IntegrationEvent, MessageEvent, Auditable):

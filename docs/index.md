@@ -7,7 +7,7 @@ Opinionated event-driven abstraction for LangGraph with a **DDD-aligned event ta
 
 ## What is this?
 
-LangGraph gives you full control over agent topology, but wiring `StateGraph` nodes and conditional edges by hand is tedious. `langgraph-events` replaces that boilerplate with a reactive model: model your domain as **domains with commands and outcomes**, colocate the handler on the command, and let `EventGraph` derive the topology.
+Replace hand-wired LangGraph edges with event-driven topology: model your domain as **namespaces with commands and outcomes**, colocate the handler on the command, and let `EventGraph` derive the topology.
 
 ```python
 class Order(Namespace):
@@ -27,7 +27,7 @@ log = graph.invoke(Order.Place(customer_id="alice"))
 
 ### What the graph looks like
 
-`graph.namespaces().mermaid()` on the canonical [`order`](patterns.md#order) example:
+`graph.namespaces().mermaid()` on the [`order`](patterns.md#order) example:
 
 <!-- autogen:start:hero -->
 ```mermaid

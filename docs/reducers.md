@@ -1,10 +1,13 @@
 # Reducers
 
-Incremental state accumulation. `EventLog.filter()` covers most cases — reach for a reducer when recomputing from the full log every round would be expensive (e.g. LangChain message history) or when you want a last-write-wins value injected by name.
+Reducers cache expensive projections or last-write-wins values. Use `EventLog.filter()` for one-shot queries.
+
+- **Reach for a reducer** when the projection runs in many handlers, when you want a value injected by parameter name, or when recomputing from the full log each round would be expensive (e.g. LangChain message history).
+- **Reach for `EventLog.filter(T)`** for one-shot lookups inside a single handler.
 
 ## On a Namespace { #on-a-namespace }
 
-Declare a reducer as a class attribute inside a `Namespace`. The channel name auto-fills from the attribute name (you don't pass `name=`), the namespace scope auto-fills to the enclosing class, and `EventGraph` auto-registers it when any handler subscribes to one of the namespace's events:
+Declare reducers as `Namespace` class attributes. Channel name auto-fills from the attribute name; namespace scope auto-fills to the enclosing class; `EventGraph` auto-registers on first subscriber.
 
 ```python
 from langgraph_events import Namespace, Command, DomainEvent, Event, ScalarReducer
@@ -37,13 +40,14 @@ class Order(Namespace):
 graph = EventGraph([Order.Place])   # reducer auto-discovered from Order
 ```
 
-- Only sees events whose `__namespace__` matches. Child namespaces inherit parent reducers (dedup by name).
+- Only sees events whose `__namespace__` matches.
+- Child namespaces inherit parent reducers (dedup by name).
 - Cross-namespace name collisions raise `TypeError` at graph construction.
-- Explicit `reducers=[...]` wins on name conflict with an auto-discovered reducer.
+- Explicit `reducers=[...]` wins on conflict with an auto-discovered reducer.
 
 ## Graph-wide reducers
 
-For reducers that span namespaces or aren't namespace-scoped, pass them explicitly via `reducers=[...]`. This is the form used by `message_reducer()`:
+For reducers spanning namespaces or not namespace-scoped, pass via `reducers=[...]` (the form used by `message_reducer()`):
 
 ```python
 messages = message_reducer()
@@ -57,7 +61,7 @@ log = graph.invoke([
 
 ## `Reducer`
 
-Maps matching events to list contributions, merged by a binary operator (default `operator.add` for list concatenation). Any LangGraph-compatible reducer function works — e.g. `add_messages` for smart message deduplication.
+List accumulator. Default merge `operator.add`; any LangGraph-compatible reducer function works (e.g. `add_messages` for smart dedup).
 
 ```python
 history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], default=[])
@@ -65,17 +69,12 @@ history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], def
 
 ## `ScalarReducer`
 
-Last-write-wins for single values. Unlike `Reducer` (list), `ScalarReducer` injects the bare value — the most recent non-`SKIP` contribution. `None` is a valid value.
+Last-write-wins scalar. `None` is valid; return `SKIP` from `fn` to leave the current value unchanged (distinguishes "set to `None`" from "don't update").
 
 ```python
 temperature = ScalarReducer(name="temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7)
-```
 
-Return `SKIP` from `fn` to leave the current value unchanged — distinguishes "set to `None`" from "don't update":
-
-```python
-from langgraph_events import SKIP
-
+# Conditional updates with SKIP:
 temperature = ScalarReducer(
     name="temperature",
     event_type=ConfigUpdated,
@@ -86,54 +85,64 @@ temperature = ScalarReducer(
 
 ### Required values { #scalar-reducer-required }
 
-The handler parameter annotation declares whether the value may be `None`. A non-`None` annotation opts the parameter into a runtime assertion: if the channel value is `None` at injection time (no event has projected a value and `default` is `None`), the framework raises `ReducerNotSetError` *before* the handler body runs.
+The handler parameter annotation declares whether the value may be `None`. A non-`None` annotation opts the parameter into a runtime assertion: if the channel value is `None` at injection time, `ReducerNotSetError` raises **before** the handler body runs.
 
 ```python
-from langgraph_events import ReducerNotSetError  # noqa: F401  (catch it if you want)
+from langgraph_events import ReducerNotSetError  # catch it if you want
+
 
 @on(TaskReceived)
 def strict(event: TaskReceived, strategy: str) -> Completed:
-    # strategy is guaranteed non-None here — otherwise ReducerNotSetError
-    # was raised at injection.
+    # `strategy` guaranteed non-None — otherwise ReducerNotSetError at injection.
     ...
 
 @on(TaskReceived)
 def permissive(event: TaskReceived, strategy: str | None) -> Completed:
-    # strategy may be None; handle it explicitly.
     if strategy is None: ...
 ```
 
-`str | None`, `Optional[str]`, `Any`, `object`, and a missing annotation all opt out. `ReducerNotSetError` is a `ValueError` subclass and is raised outside the handler's `raises=` boundary, so a broad `raises=ValueError` declaration cannot silently swallow it.
-
-The check relies on `typing.get_type_hints(fn)` resolving the annotation. If a forward reference fails to resolve the framework emits a `UserWarning` and falls back to the permissive behavior — annotate against importable types so the assertion sticks.
+!!! note "`ReducerNotSetError` contract"
+    - `ValueError` subclass; exported from `langgraph_events`.
+    - Raised at injection time, **outside** the `raises=` catch boundary — a broad `raises=ValueError` cannot silently swallow it.
+    - Opt out by widening the annotation: `str | None`, `Optional[str]`, `Any`, `object`, or no annotation.
+    - Forward-ref failures: framework emits `UserWarning` and falls back to permissive mode. Annotate against importable types so the assertion sticks.
 
 ## `message_reducer`
 
-Built-in reducer for LangChain message accumulation. Projects `MessageEvent.as_messages()` into the `messages` channel using `add_messages` for deduplication:
+Built-in reducer for LangChain messages — projects `MessageEvent.as_messages()` into the `messages` channel using `add_messages` for id-based dedup.
 
 ```python
 messages = message_reducer()
-# or with a default prompt
+# or with a default prompt:
 messages = message_reducer([SystemMessage(content="You are helpful.")])
-```
 
-Handler parameter `messages` matches the channel name:
-
-```python
 @on(UserMessageReceived, ToolsExecuted)
 async def call_llm(event: Event, messages: list[BaseMessage]) -> LLMResponded: ...
 ```
 
-See the [Conversation Agent pattern](patterns.md#conversation-agui) and [Supervisor](patterns.md#supervisor).
+See [Conversation Agent](patterns.md#conversation-agui) and [Supervisor](patterns.md#supervisor).
 
 ## Pre-seeding
 
-Prefer seeding state as events — the log stays the single source of truth. When external state must be injected outside the event path (migration, test fixture), use `pre_seed`:
+Seed state via events — the log stays the single source of truth. For external state injection outside the event path (migration, test fixture), use `pre_seed`:
 
 ```python
-graph.pre_seed(config, {"my_reducer": value})
+graph.pre_seed(config, {"my_reducer": value})  # or: await graph.apre_seed(...)
 graph.invoke(SeedEvent(), config=config)
-# or: await graph.apre_seed(...)
 ```
 
 Pre-seeded values bypass the event log — `log.filter()` won't reflect them.
+
+## Recovering from projection changes { #replay_reducer }
+
+When a reducer's `fn` or output shape changes, the cached channel value in existing checkpoints is stale. Replay the (already-migrated) event log to rebuild it:
+
+```python
+from langgraph_events.serde import replay_reducer
+
+event_log = checkpointer.get_tuple(config).checkpoint["channel_values"]["event_log"]
+rebuilt = replay_reducer(my_reducer, event_log)
+# Write `rebuilt` back through the checkpointer's put API.
+```
+
+The library doesn't iterate the checkpointer for you — wire the loop in your own startup or migration script. See [Event migrations](event-migrations.md) for the reducer-state matrix.

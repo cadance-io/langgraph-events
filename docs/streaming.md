@@ -1,11 +1,8 @@
 # Streaming
 
-Real-time event streaming, LLM token deltas, and custom telemetry from handlers. Use streaming when you need live UI updates instead of waiting for the full run to complete.
-
-All `invoke`/`stream` methods have async counterparts: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`.
+Streaming yields events in real-time for live UI updates. All methods have async variants: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`.
 
 ```python
-# Async stream with real-time LLM token deltas and passthrough custom frames
 from langgraph_events import emit_custom, emit_state_snapshot
 from langgraph_events.stream import (
     CustomEventFrame,
@@ -41,27 +38,25 @@ async for item in graph.astream_events(
 
 ## Stream Options
 
-| Flag | Enables | Frame types yielded |
-|------|---------|-------------------|
+| Flag | Enables | Frame types |
+|---|---|---|
 | `include_reducers=True` | Reducer snapshots alongside events | `StreamFrame(event, reducers, changed_reducers)` |
 | `include_llm_tokens=True` | Real-time LLM token deltas | `LLMToken(run_id, content)`, `LLMStreamEnd(run_id, message_id)` |
 | `include_custom_events=True` | Custom event passthrough | `CustomEventFrame(name, data)`, `StateSnapshotFrame(data)` |
 
 ## Emission Helpers
 
-Emit telemetry from inside handlers without importing LangGraph callback APIs directly:
+Emit telemetry from handlers without importing LangGraph callback APIs.
 
 | Function | Use case |
-|----------|----------|
-| `emit_custom(name, data)` | Arbitrary stream-only telemetry (sync) |
-| `aemit_custom(name, data)` | Async variant |
-| `emit_state_snapshot(data)` | Typed state snapshot for UI (sync) |
-| `aemit_state_snapshot(data)` | Async variant |
+|---|---|
+| `emit_custom(name, data)` / `aemit_custom(...)` | Arbitrary stream-only telemetry |
+| `emit_state_snapshot(data)` / `aemit_state_snapshot(...)` | Typed state snapshot for UI |
 
-These surface in `astream_events(..., include_custom_events=True)` as `CustomEventFrame` or `StateSnapshotFrame`.
+Surface in `astream_events(..., include_custom_events=True)` as `CustomEventFrame` / `StateSnapshotFrame`.
 
 ## Reducer Deltas
 
-When `include_reducers=True`, each `StreamFrame` includes `changed_reducers: frozenset[str] | None` — the set of reducer names that the event actually updated. Consumers can use this to skip re-emitting unchanged state. `None` means delta metadata is not available.
+With `include_reducers=True`, `StreamFrame.changed_reducers: frozenset[str] | None` carries the names of reducers this event updated. Use to skip re-emitting unchanged state. `None` means delta metadata is unavailable.
 
-For streaming to AG-UI frontends, see the [AG-UI Adapter](agui.md).
+See [AG-UI Adapter](agui.md) for streaming to AG-UI frontends.

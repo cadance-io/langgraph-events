@@ -1,28 +1,22 @@
 # Event migrations
 
-`NamespaceAwareSerde` keys event identity by `(__module__, __qualname__)` so nested events with colliding leaf names (`Persona.Approve.Approved` vs. `Story.Approve.Approved`) round-trip distinctly. The flip side: any rename or relocation invalidates every active checkpoint holding the affected class — revival fails on `importlib.import_module` or the dotted `getattr` walk.
+See also: [Checkpointer & graph evolution](checkpointer-evolution.md).
 
-Migrations declare the historic identities a class previously held. On read, the serde rewrites old `(module, qualname)` to the current one in memory before reviving. The wire format is unchanged: payloads written by any prior library version remain readable, and payloads written today remain readable by future versions.
+`NamespaceAwareSerde` keys event identity by `(__module__, __qualname__)` so nested events with colliding leaf names round-trip distinctly. Migrations rewrite historic identities on read while preserving wire format — payloads from any prior library version remain readable both ways.
 
 ## The minimum case: rename inside a namespace
-
-Cadance wants to nest its outcome events inside the producing command. `Persona.Persisted` becomes `Persona.Persist.Persisted`:
 
 ```python
 from langgraph_events import Command, DomainEvent, Namespace
 from langgraph_events.serde import migrate_from
+
 
 class Persona(Namespace):
     class Persist(Command):
         @migrate_from("Persona.Persisted")
         class Persisted(DomainEvent):
             note: str = ""
-```
 
-That's the whole authoring story. `EventGraph.from_namespaces` already knows its namespaces and receives the checkpointer, so it auto-wires a migration-aware serde scoped to exactly those namespaces — you do not construct `NamespaceAwareSerde` or repeat a namespace tuple:
-
-```python
-from langgraph.checkpoint.memory import MemorySaver
 
 graph = EventGraph.from_namespaces(
     Persona,
@@ -31,13 +25,13 @@ graph = EventGraph.from_namespaces(
 )
 ```
 
-The serde walks only those namespaces for `@migrate_from` metadata and assembles a `Migration` per decorated class — no separate collection step. New writes use the current qualname; old payloads with `Persona.Persisted` get rewritten to `Persona.Persist.Persisted` before revival. A `@migrate_from` in some unrelated imported module never contributes migrations or affects `legacy_write` for this serde.
-
-To opt out — hand-authored `migrations=`, `legacy_write=True`, or a custom serde — pass your own `NamespaceAwareSerde` via `MemorySaver(serde=...)`; a user-supplied serde always wins over auto-wiring.
+- `from_namespaces(..., checkpointer=...)` auto-wires a migration-aware serde scoped to the passed namespaces — no manual `NamespaceAwareSerde` construction.
+- The serde walks only those namespaces for `@migrate_from` metadata; decorators on unrelated imported modules contribute nothing.
+- Opt out by passing `MemorySaver(serde=<custom>)` — a user-supplied serde always wins.
 
 ## Adding a field with a default
 
-The common case needs **no migration at all**. Events are frozen dataclasses; a new field that declares a default (or `default_factory`) simply uses it when an old payload omits the key — the serde constructs the class with whatever kwargs the old payload carried:
+**No migration needed.** Events are frozen dataclasses; a new field with a default (or `default_factory`) simply uses it when an old payload omits the key:
 
 ```python
 class Persisted(DomainEvent):
@@ -45,180 +39,115 @@ class Persisted(DomainEvent):
     tags: tuple[str, ...] = ()   # added later — old payloads revive with ()
 ```
 
-Reach for `@backfill` (below) only when the new field is **required** (no default) and you cannot give it one.
+Reach for `@backfill` (below) only when the new field is **required** (no default).
 
 ## Multi-step chains
 
-A class that was renamed twice declares both historic identities, oldest first:
-
 ```python
-@migrate_from("Persona.Persisted", "Persona.OldNest.Persisted")
+@migrate_from("Persona.Persisted", "Persona.OldNest.Persisted")  # oldest first
 class Persisted(DomainEvent): ...
 ```
 
-The serde flattens the chain so a payload at any historic step revives directly at the current class in a single dict lookup.
+- Multi-arg form: oldest qualname first.
+- Stacked decorators apply bottom-up; the bottom-most decorator is the oldest. Both forms produce the same chain.
+- Serde flattens the chain so any historic step revives directly at the current class in one lookup.
 
-The multi-arg form above is the canonical one. Stacked decorators work too — Python applies decorators bottom-up, so the bottom-most decorator's qualname is the oldest:
-
-```python
-@migrate_from("Persona.OldNest.Persisted")   # ← newer
-@migrate_from("Persona.Persisted")           # ← oldest (applied first)
-class Persisted(DomainEvent): ...
-```
-
-Both produce the same chain. Prefer the multi-arg form for new code; the stacked form is useful when migrations are added incrementally across releases.
+Prefer the multi-arg form for new code.
 
 ## Adding a required field
 
-A new field that can carry a dataclass default needs no migration at all (above). The case that *does*: the field is **required** when the event is constructed in code, but pre-existing checkpoints predate it. A plain default can't express that — it would relax the constructor for everyone. `@backfill` declares the legacy value on the class, right next to the field, and is auto-collected exactly like `@migrate_from` — no `migrations=` list, no manual serde:
+Use `@backfill` when the field is **required** in code but absent from pre-existing payloads. Auto-collected like `@migrate_from`:
 
 ```python
 from langgraph_events.serde import backfill, migrate_from
 
+
 class Persona(Namespace):
     class Persist(Command):
-        @migrate_from("Persona.Persisted")     # renamed…
-        @backfill("command_id", default="legacy")  # …and gained a required field
+        @migrate_from("Persona.Persisted")          # renamed…
+        @backfill("command_id", default="legacy")   # …and gained a required field
         class Persisted(DomainEvent):
             command_id: str        # required when constructed in code
             note: str = ""
 ```
 
-`EventGraph.from_namespaces(Persona, checkpointer=MemorySaver())` picks it up — a pre-`command_id` payload revives with `command_id="legacy"`. Stacked `@backfill` accumulate (one per added field). Rename is applied first, then the back-fill on the resulting identity, so the two decorators compose. `default` / `default_factory` follow the `AddField` convention; a mutable `default=[]` raises `ValueError` at serde construction (use `default_factory=list`) — the *same* guard, not a forked rule.
+- Compose with `@migrate_from`: rename is applied first, then back-fill on the resulting identity.
+- Stacked `@backfill` accumulate (one per added field).
+- `default`/`default_factory` follow the `AddField` convention; mutable `default=[]` raises `ValueError` at construction (use `default_factory=list`).
 
-For a **cross-module** relocation, or grouping several operations, drop to the hand-authored escape hatch. Raw operation constructors live in `serde.migrations`:
+### Hand-authored escape hatch
 
-```python
-from langgraph_events.serde import NamespaceAwareSerde
-from langgraph_events.serde.migrations import AddField, Migration
+For cross-module relocations or composite operations, drop to `langgraph_events.serde.migrations`:
 
-serde = NamespaceAwareSerde(
-    namespaces=(Persona,),
-    migrations=[
-        Migration(
-            name="add-command-id",
-            operations=(
-                AddField(
-                    module="cadance.persona",
-                    qualname="Persona.Persist.Persisted",
-                    field="command_id",
-                    default="legacy",
-                ),
-            ),
-        ),
-    ],
-)
-```
-
-`AddField` applies after any matching `RenameEvent`, so `module`/`qualname` name the **current** (post-rename) class — exactly what `@backfill` derives for you from the decorated class.
-
-### Single-op sugar
-
-Hand-authored migrations are common enough that a one-op rename or field addition usually doesn't need the full `Migration(name=..., operations=(...))` envelope:
+| Use case | Pattern |
+|---|---|
+| Single rename | `Migration.rename(to=Class, ...)` |
+| Add field | `Migration.add_field(target=Class, field=..., default=...)` |
+| Cross-module rename | `Migration(name=..., operations=(RenameEvent(...),))` |
+| Multiple ops | `Migration(name=..., operations=(op1, op2, ...))` |
 
 ```python
+from cadance.persona import Persona
 from langgraph_events.serde import Migration
 
 migrations = [
     Migration.rename(
-        name="rename-persona-persisted",
         old_module="cadance.persona",
         old_qualname="Persona.Persisted",
-        new_module="cadance.persona",
-        new_qualname="Persona.Persist.Persisted",
+        to=Persona.Persist.Persisted,        # ← live class, not strings
     ),
     Migration.add_field(
-        "add-command-id",
-        module="cadance.persona",
-        qualname="Persona.Persist.Persisted",
+        target=Persona.Persist.Persisted,    # ← same
         field="command_id",
         default="legacy",
     ),
 ]
 ```
 
-The *new* (post-rename) and *target* identities always name a class that still exists, so pass the class itself — refactor-safe, an IDE rename moves with it. The string `new_module`/`new_qualname` and `module`/`qualname` forms remain for the cross-module case where the live class can't be imported at authoring time. The old identity stays a string (that class is gone):
-
-```python
-from cadance.persona import Persona
-
-migrations = [
-    Migration.rename(
-        old_module="cadance.persona",
-        old_qualname="Persona.Persisted",
-        to=Persona.Persist.Persisted,           # ← live class, not strings
-    ),
-    Migration.add_field(
-        target=Persona.Persist.Persisted,       # ← same
-        field="command_id",
-        default="legacy",
-    ),
-]
-```
-
-`Migration.rename` and `Migration.add_field` are equivalent to wrapping a single `RenameEvent` / `AddField` operation in a `Migration`. Reach for the full constructor when one migration groups multiple operations.
-
-`name` is optional everywhere — `Migration(operations=(...))` and `Migration.rename(...)` without `name=` both work. Naming helps when the validator surfaces a conflict between two hand-authored migrations.
+Pass the live class for refactor safety; strings only for cross-module cases where the class can't be imported at authoring time. `name` is optional everywhere. Raw `RenameEvent` / `AddField` are imported from `langgraph_events.serde.migrations` (not re-exported at `langgraph_events.serde`).
 
 ## Rolling deploys
 
-The library's read path makes new code tolerant of old payloads, but the **write path is asymmetric**: new pods writing under a new qualname produce payloads that old pods (running the previous release) can't revive — they don't know the class yet. To bridge a rolling deploy without resume failures, ship the migration in **two releases**:
+!!! warning "Rolling deploys require two releases"
+    New pods writing under a new qualname produce payloads old pods can't revive. Ship the migration in **two releases**:
 
-### Release N+1 — `legacy_write=True`
+    **Release N+1: `legacy_write=True`**
+    ```python
+    serde = NamespaceAwareSerde(namespaces=NAMESPACES, legacy_write=True)
+    ```
+    New pods encode events under the oldest historic qualname (recorded by `@migrate_from`). Old pods (release N) read those via existing class defs. Both pod versions can resume each other's threads.
 
-```python
-serde = NamespaceAwareSerde(
-    namespaces=NAMESPACES,
-    legacy_write=True,    # ← writes use the OLDEST historic qualname
-)
-```
+    **Release N+2: `legacy_write=False` (default)**
+    Once release N is fully drained, flip writes to current qualname. Keep `@migrate_from` — it covers remaining old-format payloads in storage. Drop the decorator only after every old payload has been touched by new code.
 
-While `legacy_write=True`, new pods encode events under the qualname recorded by `@migrate_from` (for classes inside `namespaces=`). Old pods (release N) read those payloads via their existing class definitions. New pods read both old- and new-format payloads via the migration table. Both pod versions can resume each other's threads throughout the rollout window.
+    `legacy_write` is scope-symmetric: decorated classes outside `namespaces=` are encoded under their current qualname (otherwise the read path of the same serde could not migrate them). Keep `namespaces=` consistent between encode and decode pods.
 
-`legacy_write` is scope-symmetric: a decorated class outside the serde's `namespaces=` is encoded under its current qualname, not its historic one. Otherwise the read path of the same serde would not know how to migrate the bytes back. Keep `namespaces=` consistent between encode and decode pods.
+### Concurrency guarantees
 
-### Release N+2 — `legacy_write=False` (default)
+No locks or transactions in the serde/migration layer. Safe by **idempotency** and **by construction**:
 
-Once release N is fully drained:
-
-```python
-serde = NamespaceAwareSerde(namespaces=NAMESPACES)
-```
-
-Writes flip to the current qualname. The decorator entries stay on the classes — they cover any old-format payloads still in storage.
-
-### Eventually — drop the migration
-
-After every old-format payload has been touched by the new code (the next write rewrites under the current qualname), the migration entry becomes purely defensive. Drop it when you're confident no legacy payloads remain.
-
-## Concurrency & rolling deploys
-
-There is **no lock or transaction** in the serde/migration layer. Two instances coming up at once is safe by *idempotency* and *by construction*, not by mutual exclusion — which is sufficient for the rolling-deploy case and keeps the hot path lock-free.
-
-- **Concurrent reads are safe.** The migration ext-hook is a pure rewrite with no write-back; the rename table is the transitive closure, so any historic identity reaches the current class in a single lookup. Re-reading the same checkpoint from any number of pods yields the same revived object.
-- **Old and new code cannot share a process — enforced, not assumed.** A `@migrate_from` whose historic identity still resolves to a live class is rejected at serde construction (see [Validation guarantees](#validation-guarantees): "shadowing a currently-live class"). The library therefore *structurally* requires the previous release's class to be gone in the new release's process — exactly the rolling-deploy model. The two releases coexist only as bytes on the shared checkpointer, never as classes in one interpreter.
-- **`legacy_write=True` is coexistence, not a lock.** It is the format-compatibility mechanism for the two-release window (see [Rolling deploys](#rolling-deploys)); both releases can revive each other's payloads. Nothing is serialized.
-- **Adding a required field is a two-release operation, like a rename.** An instance whose class lacks a field that is present in the bytes fails loudly on construction — never a silent drop. Pair the field addition with `@backfill` and ship it over the same N → N+1 cadence.
-- **Thread-level concurrency on a single `thread_id` is the checkpointer's job.** `MemorySaver` provides none; the SQLite/Postgres savers bring their own semantics. `langgraph-events` adds nothing on top — concurrent writers to the same thread are governed entirely by your saver.
-- **Recovery replay is idempotent.** `replay_reducer` recomputes the channel value from the (already-migrated) event log and the documented recipe overwrites it. Two instances running the startup-replay script concurrently both write the same correct value; the only residual concern is your checkpointer's own put atomicity.
-- **One un-protected spot:** `write_baseline` is a non-atomic read-modify-write. Sequential divergent writers are caught by the regression guard (the second raises `BaselineRegressionError`), but a true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, not in parallel.
+- **Concurrent reads are safe** — rewrite is pure, no write-back; rename table is a transitive closure.
+- **Old and new code cannot share a process** — a `@migrate_from` whose historic identity still resolves to a live class is rejected at serde construction (the rolling-deploy model is structurally enforced).
+- **`legacy_write=True` is coexistence, not a lock** — format compatibility for the two-release window.
+- **Required-field addition is a two-release operation, like a rename** — pair with `@backfill` and ship over the N → N+1 cadence.
+- **Thread-level concurrency on a single `thread_id` is the checkpointer's job** (`MemorySaver` provides none; SQLite/Postgres savers bring their own).
+- **Recovery replay is idempotent** — `replay_reducer` overwrites with the same correct value from any number of concurrent runners.
+- **One unprotected spot: `write_baseline` is non-atomic.** Sequential divergent writers are caught by the regression guard (the second raises `BaselineRegressionError`), but a true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, never in parallel.
 
 ## Reducer state migration
 
-Reducer projections live in checkpoint channel values. The library doesn't add channel-level migration ops because they aren't necessary — the truth is in the events, and events already migrate. Empirically measured behaviour across realistic reducer-state changes (see `tests/test_reducer_migration_scenarios.py`):
+Reducer projections live in checkpoint channel values. Events already migrate, so most changes are automatic:
 
-| Change | Behaviour | Action needed |
+| Change | Behaviour | Action |
 |---|---|---|
-| Reducer value is `list[Event]` and an event class was renamed | Each event migrates through the ext-hook recursively | ✅ Nothing — works automatically |
-| `ScalarReducer` holding a single Event + class renamed | Migrates | ✅ Nothing |
+| `list[Event]` reducer + event class renamed | Each event migrates through ext-hook recursively | ✅ Nothing |
+| `ScalarReducer` holding single Event + class renamed | Migrates | ✅ Nothing |
 | `dict[str, list[Event]]` grouping reducer + event renamed | Migrates | ✅ Nothing |
-| Plain dataclass channel value + new field WITH default | Revives via the dataclass default | ✅ Nothing |
-| Plain dataclass channel value + new REQUIRED field | **Silently revives as `None`** | ⚠️ Use replay or strict mode (below) |
-| Pydantic model channel value + new REQUIRED field | **Revives as malformed instance** — passes `isinstance`, `AttributeError` on field access | ⚠️ Use replay or strict mode |
-| Reducer output shape changed (e.g., `dict[str, int]` → `dict[str, dict]`) | Revives as old shape — consumer crashes downstream | ⚠️ Use replay |
-| Projection function semantics changed (e.g., dollars → cents) | Silent stale data, no exception ever | ⚠️ Use replay (only fix) |
-
-The four ⚠️ cases all share one recovery path: replay events through the current reducer to rebuild the channel value from truth.
+| Plain dataclass channel + new field WITH default | Revives via dataclass default | ✅ Nothing |
+| Plain dataclass channel + new REQUIRED field | **Silently revives as `None`** | ⚠️ [`replay_reducer`](reducers.md#replay_reducer) or strict mode |
+| Pydantic model channel + new REQUIRED field | **Revives malformed** — passes `isinstance`, `AttributeError` on access | ⚠️ [`replay_reducer`](reducers.md#replay_reducer) or strict mode |
+| Reducer output shape changed | Revives as old shape — consumer crashes downstream | ⚠️ [`replay_reducer`](reducers.md#replay_reducer) |
+| Projection function semantics changed | Silent stale data, no exception | ⚠️ [`replay_reducer`](reducers.md#replay_reducer) (only fix) |
 
 ### Recovering with `replay_reducer`
 
@@ -232,62 +161,36 @@ event_log = tup.checkpoint["channel_values"]["event_log"]   # adjust to your cha
 rebuilt = replay_reducer(my_reducer, event_log)
 
 # Write `rebuilt` back through the checkpointer's put API.
-# The exact call depends on your saver (MemorySaver / SqliteSaver / PostgresSaver).
 ```
 
-`replay_reducer` is a thin wrapper around `BaseReducer.seed(events)` — the reducer's default, namespace filter, and `event_type` predicate all apply uniformly. Composes with the existing event-rename machinery because `event_log` was already migrated on read.
-
-The library doesn't iterate the checkpointer for you. Concrete savers vary in their iteration semantics (`MemorySaver.list(None)` yields all threads; `SqliteSaver` / `PostgresSaver` typically need a `thread_id`). Wire the read/write loop in your own startup script.
+- Thin wrapper around `BaseReducer.seed(events)` — reducer default, namespace filter, and `event_type` predicate all apply.
+- Composes with event-rename machinery (`event_log` was already migrated on read).
+- Library doesn't iterate the checkpointer for you — wire the read/write loop in your own startup script.
 
 ### Catching silent revivals loudly
 
-The "silent fail" rows above are upstream LangGraph behaviour for partial dataclass / Pydantic revival. Strict mode flips them from "silently malformed object" to "loudly-broken `dict`" — the first consumer access (`isinstance` check, attribute read) trips a `TypeError` or `AttributeError`, much louder than a `None` channel value.
+Strict mode demotes unrecognised classes to raw kwargs `dict` instead of malformed objects — the first consumer access trips `AttributeError`/`TypeError`, much louder than `None`.
 
-**Env var (process-wide):**
-```bash
-export LANGGRAPH_STRICT_MSGPACK=true
-```
-Set this in development and CI. Unrecognised classes are **demoted to their raw kwargs `dict`** instead of being revived, and LangGraph emits a `logging.warning`:
+- Env var (process-wide): `export LANGGRAPH_STRICT_MSGPACK=true`. Set in dev and CI.
+- Per-serde allowlist: `NamespaceAwareSerde(..., allowed_msgpack_modules=[("module", "ClassName"), ...])`. Use in production for fine-grained scoping.
 
-```
-Blocked deserialization of <module>.<ClassName> - not in allowed_msgpack_modules.
-Add to allowed_msgpack_modules to allow: [('<module>', '<ClassName>')]
-```
-
-The demoted `dict` then fails downstream — `isinstance(value, ExpectedClass)` returns `False`, field access raises `AttributeError`. That's the "loud" part: the failure is impossible to ignore at the first read, instead of festering as `None` in a channel.
-
-Strict mode does **not raise** at the serde boundary. For "fail at deserialization, not at first consumer access" semantics, use `replay_reducer` to rebuild from event truth (see above) — that remains the recovery path for the ⚠️ rows.
-
-**Explicit allowlist (per-serde, fine-grained):**
-```python
-serde = NamespaceAwareSerde(
-    namespaces=NAMESPACES,
-    allowed_msgpack_modules=[("cadance.state", "Stats"), ("cadance.state", "Summary")],
-)
-```
-`NamespaceAwareSerde` forwards `**kwargs` to `JsonPlusSerializer`, so any upstream constructor option works. Use this in production when you want strict mode scoped to one serde instance — classes in the allowlist revive normally; everything else is demoted as above.
+Strict mode does NOT raise at the serde boundary. For "fail at deserialization, not first access" semantics, use `replay_reducer` to rebuild from event truth.
 
 ## What is NOT migrated
 
-**Non-Event payloads in general.** Pydantic models, plain dataclasses, LangGraph `Interrupt` wrappers, and other non-event values flow through LangGraph's default serde paths. The migration system only rewrites `EXT_NAMESPACE_AWARE_EVENT` payloads (your `Event` subclasses). Events nested inside `Interrupt.value` are reached automatically through the serde's recursive ext-hook — no extra wiring needed.
-
-**Reducer channel-name renames.** That's a LangGraph channel-routing concern, not a serde concern. See [Checkpointer & Graph Evolution](checkpointer-evolution.md) for the documented behaviour.
-
-**Payloads ormsgpack refuses to encode.** `NamespaceAwareSerde._default` is a strict superset of upstream's `_msgpack_default`, so an `ormsgpack.MsgpackEncodeError` means a value in state has no encode path at all. The error propagates at the source — there is no fallback. Resolve by either removing the unencodable value from state or extending the encode hook (subclass `NamespaceAwareSerde` and override `_make_default`).
-
-**Channel values that aren't reducer state.** `replay_reducer` rebuilds a reducer's output from its event log, but for non-reducer channel values (e.g. a Pydantic model written directly by a node), no analogous rebuild path exists. If you add a required field to such a class, old payloads either revive missing the attribute (raising `AttributeError` on first access) or are demoted to `dict` under strict mode. The recovery path is custom: read the old value, transform it, write it back through your saver's put API.
+- **Non-Event payloads** (Pydantic models, plain dataclasses, LangGraph `Interrupt` wrappers) — flow through LangGraph's default serde. Events nested inside `Interrupt.value` are migrated automatically.
+- **Reducer channel-name renames** — LangGraph channel-routing concern; see [Checkpointer evolution](checkpointer-evolution.md).
+- **Payloads `ormsgpack` refuses to encode** — error propagates at the source, no fallback. Subclass `NamespaceAwareSerde` and override `_make_default` to extend encoding.
+- **Non-reducer channel values** — no analogous rebuild path. Recovery is custom (read → transform → write back through the saver's put API).
 
 ## Detection tooling
 
-`detect_changes` diffs the current graph topology against a stored baseline, surfacing event identity changes that need migration entries:
+`detect_changes` diffs current graph topology against a stored baseline:
 
 ```python
-from langgraph_events.serde.migrations.detect import (
-    detect_changes,
-    write_baseline,
-)
+from langgraph_events.serde.migrations.detect import detect_changes, write_baseline
 
-# After authoring the initial migrations, snapshot the current topology:
+# After authoring the initial migrations, snapshot:
 write_baseline(graph, Path("migrations/baseline.json"))
 
 # In a pre-commit hook:
@@ -302,43 +205,36 @@ if report.has_changes():
     raise SystemExit(1)
 ```
 
-`detect_changes` is a **suggestion engine**, not an applicator. It matches removals to additions by leaf name; multi-match cases land in `ambiguous` for human review, and pure deletes land in `unmatched_removed` rather than being silently dropped. The library never auto-edits a migration list.
-
-For the common case you don't need to write the loop above — the package is runnable as a one-line CI gate. Given a factory that builds your graph (`module:attr`, called with no args, or an `EventGraph` instance attribute):
-
-```bash
-python -m langgraph_events.serde.migrations myapp.graph:build migrations/baseline.json
-```
-
-It exits `0` when the topology matches the baseline, `1` when it diverges (printing the added / removed / rename-candidate buckets), and `2` on a usage error. Wire that command into pre-commit or CI. The library ships no hook *configuration* because the entry point to your `EventGraph` is project-specific — but the runner itself is built in. Drop to the programmatic `detect_changes` form only when you want a custom reporter.
+- **Suggestion engine, not applicator** — matches removals to additions by leaf name; multi-match → `ambiguous`; pure deletes → `unmatched_removed`. Never auto-edits.
+- **One-line CI gate** for the common case:
+  ```bash
+  python -m langgraph_events.serde.migrations myapp.graph:build migrations/baseline.json
+  ```
+  Exits `0` (match), `1` (diverge), `2` (usage error). Drop to the programmatic form only for custom reporters.
 
 ### When to commit the baseline
 
-The baseline records "what did the topology look like before this change." Commit it **alongside the migration that covers the change** — never after. This is enforced, not just advised: `write_baseline` refuses to overwrite an existing baseline when the new snapshot would drop identities the old one recorded, raising `BaselineRegressionError` (`.removed` lists the dropped identities for CI reporters). Writing the baseline after a rename landed — before authoring `@migrate_from` / `@backfill` — is exactly that case, so the silent miss is now a loud failure.
+Commit the baseline **alongside** the migration that covers the change — never after. Enforced: `write_baseline` raises `BaselineRegressionError` (`.removed` lists dropped identities) if the new snapshot would drop identities the old baseline recorded.
 
-The expected workflow:
+Workflow:
 
 1. Open the branch that contains the rename.
-2. Author the migration (`@migrate_from` / `@backfill` on the surviving class, or a hand-authored `Migration`).
+2. Author the migration (`@migrate_from` / `@backfill` on the surviving class, or hand-authored `Migration`).
 3. Run `write_baseline(graph, "migrations/baseline.json")` and commit the regenerated JSON in the same PR.
 
-If you genuinely intend to drop an identity (a real delete, no replacement), pass `write_baseline(graph, path, allow_removed=True)` to acknowledge it. The guard compares the on-disk baseline against current topology only — it never inspects the serde or migration table; *coverage* (does a migration actually exist for a renamed identity?) remains the job of `assert_covers` / `assert_all_baselined_revive`. The baseline file is also versioned; `_load_baseline` (and therefore `write_baseline`'s pre-check and `detect_changes`) raises `ValueError` on an incompatible version, so a stale snapshot can't silently mis-classify diffs.
+For intentional deletes (no replacement), pass `allow_removed=True`. The guard compares baseline ↔ topology only; *coverage* (does a migration exist?) is `assert_covers` / `assert_all_baselined_revive`'s job. The baseline file is versioned — a stale snapshot raises `ValueError`.
 
 ## Testing your migrations
 
-The first production read is the wrong place to discover a missing migration. Make it a `pytest` gate that runs on every PR.
+Run coverage tests on every PR; three patterns: `assert_all_baselined_revive`, `synthesize_legacy_payload`, `assert_covers`.
 
-`detect_changes` works against a **graph** topology; the coverage checks below work against a **serde** construction — because coverage depends on the `migrations=` / `namespaces=` the serde was actually built with, the serde owns it.
+### `assert_all_baselined_revive` — zero-maintenance gate
 
-### `assert_all_baselined_revive` — the zero-maintenance gate
-
-This is the one test most projects need. It walks every identity in the committed baseline, pushes a synthesized legacy payload for each through the real read path, and asserts it revives to an `Event`. A new `@migrate_from` / `@backfill` plus a regenerated baseline is covered with **no new test code** — there is no per-event list to maintain:
+Walks every baselined identity, pushes a synthesized legacy payload through the real read path, asserts it revives.
 
 ```python
 from pathlib import Path
-
 from langgraph_events.serde import NamespaceAwareSerde, assert_all_baselined_revive
-
 from cadance.namespaces import Persona
 
 BASELINE = Path(__file__).parent / "migrations" / "baseline.json"
@@ -349,96 +245,74 @@ def test_every_baselined_identity_revives():
     assert_all_baselined_revive(serde, BASELINE)
 ```
 
-It fills required fields of the resolved live class with placeholders, so it proves **identity reachability + constructability**: every historic identity maps through the migration table to a class that still constructs. It deliberately does *not* assert specific old field values — for the narrow case where a field genuinely changed shape (not merely appeared), pin it explicitly with `synthesize_legacy_payload` below.
+- Proves identity reachability + constructability for every baselined `(module, qualname)`.
+- Fills required fields with placeholders — does NOT assert specific old field values (use `synthesize_legacy_payload` for that).
+- A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
 
 ### `synthesize_legacy_payload` — pin a specific old field shape
 
-Reach for this only when a field's *shape* drifted and you want to prove a specific old payload still revives — the loop gate above already covers identity reachability for everything else. The serde never encodes under a qualname whose class no longer exists, so you synthesize the bytes a prior release would have written. `synthesize_legacy_payload(module, qualname, kwargs)` does exactly that — no need to import private wire-format symbols:
+Reach for this only when a field's *shape* drifted. Builds the bytes a prior release would have written:
 
 ```python
 import pytest
-from langgraph_events.serde import (
-    NamespaceAwareSerde,
-    synthesize_legacy_payload,
-)
-
+from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payload
 from cadance.namespaces import Persona
-
-NAMESPACES = (Persona,)
 
 
 @pytest.mark.parametrize(
     "module, qualname, kwargs, expected_cls",
     [
-        (
-            "cadance.persona",
-            "Persona.Persisted",
-            {"note": "n"},
-            Persona.Persist.Persisted,
-        ),
+        ("cadance.persona", "Persona.Persisted", {"note": "n"}, Persona.Persist.Persisted),
         # only events whose field shape changed — not every rename
     ],
 )
 def test_revives_release_N_payloads(module, qualname, kwargs, expected_cls):
-    serde = NamespaceAwareSerde(namespaces=NAMESPACES)
-    revived = serde.loads_typed(
-        synthesize_legacy_payload(module, qualname, kwargs)
-    )
+    serde = NamespaceAwareSerde(namespaces=(Persona,))
+    revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))
     assert isinstance(revived, expected_cls)
 ```
 
-If the migration is present but the dataclass shape drifted (a new required field), this test fails with the dataclass `TypeError` — exactly where you want a field-shape regression caught.
+- Pin only when a field's shape genuinely changed (not for plain renames).
+- Failing test = dataclass `TypeError` on the missing field — exactly where you want a field-shape regression caught.
 
-### `assert_covers` — is every baselined identity still reachable?
+### `assert_covers` — every baselined identity reachable?
 
-`NamespaceAwareSerde.assert_covers(baseline_path)` raises `MigrationCoverageError` if any identity in the baseline is neither still live in the serde's namespaces nor covered by a rename migration:
+`NamespaceAwareSerde.assert_covers(baseline_path)` raises `MigrationCoverageError` if any baselined identity is neither live nor covered by a rename migration:
 
 ```python
-from pathlib import Path
-
-from langgraph_events.serde import NamespaceAwareSerde
-
-from cadance.namespaces import Persona
-
-BASELINE = Path(__file__).parent / "migrations" / "baseline.json"
-
-
 def test_covers_every_baselined_identity():
     serde = NamespaceAwareSerde(namespaces=(Persona,))
     serde.assert_covers(BASELINE)
 ```
 
-`MigrationCoverageError` extends `ValueError`; its `.uncovered` attribute is the tuple of offending `(module, qualname)` identities so a custom CI reporter can format them however it wants. The message points at the three remedies: add `@migrate_from` to the surviving class, append a `Migration` to `migrations=`, or regenerate the baseline if the identity was intentionally dropped.
-
-If a developer removes a `@migrate_from` by accident, this test fails naming the now-uncovered identity — before the bytes ever reach production.
-
-### `revivable_identities` — the introspection escape hatch
-
-For custom coverage rules, `NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of every `(module, qualname)` the serde can revive — the union of live classes in scope and every historic identity a rename migration rewrites. It is a set, not a coverage check; `assert_covers` is the gate. (AddField targets are not included — they key on the post-rename identity and add no new revivable identities.)
+- `MigrationCoverageError` extends `ValueError`; `.uncovered` is the tuple of offending identities.
+- Catches accidentally-removed `@migrate_from` before bytes reach production.
+- `revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules. `AddField` targets are not included (they key on post-rename identity).
 
 ### Release N → N+1 walkthrough
 
-1. **At release N**, run `write_baseline(graph, BASELINE)` once and commit the JSON (see [When to commit the baseline](#when-to-commit-the-baseline) — the same "commit alongside the migration entries" rule applies).
-2. **On the feature branch**, rename the event and add `@migrate_from("Persona.Persisted")` (plus `@backfill` if it also gained a required field). No new test code: `test_every_baselined_identity_revives` already covers the historic identity through the real read path.
-3. **In CI**, the loop gate runs on every PR — it catches an accidentally-dropped migration *and* a class that no longer constructs. Add a `synthesize_legacy_payload` entry only if a field's shape changed and you want to pin the exact old payload.
-4. **At release N+1 cutover**, re-run `write_baseline(graph, BASELINE)` in the same PR that introduced the rename. The next round of removals is measured against the new baseline.
+1. **At release N**, run `write_baseline(graph, BASELINE)` once and commit the JSON.
+2. **On the feature branch**, rename the event and add `@migrate_from("Persona.Persisted")` (plus `@backfill` if it gained a required field). The loop gate already covers the historic identity.
+3. **In CI**, the loop gate runs on every PR — catches accidentally-dropped migrations and classes that no longer construct. Add `synthesize_legacy_payload` entries only if a field's shape changed.
+4. **At release N+1 cutover**, re-run `write_baseline(graph, BASELINE)` in the same PR as the rename. Next removals are measured against the new baseline.
 
 ## Reserved attributes
 
-`__lge_migrate_from__` is set on every class decorated with `@migrate_from`, carrying the historic-qualname chain. The serde reads it during the namespace walk (driven by `namespaces=`) at construction and uses the recorded oldest entry for `legacy_write=True` rewriting. It is **not** inherited through MRO — a subclass of a decorated class does not pick up its parent's history. Treat the attribute as library-private; if you need to inspect a class's history, read it via `cls.__lge_migrate_from__` directly (it's a tuple of `(module, qualname)` pairs, oldest first).
+Library-private; read directly if introspection needed (neither is MRO-inherited):
 
-`__lge_backfill__` is the equivalent marker set by `@backfill`, carrying the accumulated field/default entries. Same contract: collected during the namespace walk, **not** MRO-inherited, library-private.
+- `__lge_migrate_from__` — set by `@migrate_from`; tuple of `(module, qualname)` pairs, oldest first.
+- `__lge_backfill__` — set by `@backfill`; accumulated field/default entries.
 
 ## Validation guarantees
 
-Errors that would otherwise surface on first production read are raised at serde construction:
+Errors raised at serde construction (not at first production read):
 
 - Duplicate `old_*` keys (ambiguous rewrites) — `ValueError`
-- Dead-end chains (the migration target doesn't resolve to an importable class) — `ValueError`
-- `old_qualname` shadowing a currently-live class (would silently rewrite live payloads) — `ValueError`
+- Dead-end chains (migration target doesn't resolve to an importable class) — `ValueError`
+- `old_qualname` shadowing a currently-live class — `ValueError`
 - Cycles (`A→B` then `B→A`) — `ValueError`
 - `AddField` targets that don't resolve — `ValueError`
-- `AddField(default=<mutable>)` — steers user to `default_factory` (`ValueError`). `@backfill` funnels into `AddField`, so the same guard applies to a `@backfill(default=[...])`
-- Unknown `Operation` type in `Migration.operations` (anything other than `RenameEvent` / `AddField`) — `TypeError`
+- `AddField(default=<mutable>)` — `ValueError` (steers to `default_factory`); `@backfill` funnels into `AddField`, same guard
+- Unknown `Operation` type in `Migration.operations` — `TypeError`
 
-A misspelled `@migrate_from("Persona.Persistedd")` fails at `NamespaceAwareSerde(...)` construction, not at the first checkpoint load in production.
+A misspelled `@migrate_from("Persona.Persistedd")` fails at construction, not at first checkpoint load in production.
