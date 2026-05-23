@@ -132,7 +132,7 @@ No locks or transactions in the serde/migration layer. Safe by **idempotency** a
 - **Required-field addition is a two-release operation, like a rename** — pair with `@backfill` and ship over the N → N+1 cadence.
 - **Thread-level concurrency on a single `thread_id` is the checkpointer's job** (`MemorySaver` provides none; SQLite/Postgres savers bring their own).
 - **Recovery replay is idempotent** — `replay_reducer` overwrites with the same correct value from any number of concurrent runners.
-- **One unprotected spot: `write_baseline` is non-atomic** (dev/CI tool, not a runtime path). Generate the baseline from a single CI job, not in parallel.
+- **One unprotected spot: `write_baseline` is non-atomic.** Sequential divergent writers are caught by the regression guard (the second raises `BaselineRegressionError`), but a true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, never in parallel.
 
 ## Reducer state migration
 

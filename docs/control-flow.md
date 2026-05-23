@@ -2,9 +2,28 @@
 
 ## `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan out into multiple events; each dispatches separately in the next round. Annotate the return as `Scatter[WorkItem]` (or `Scatter[A | B]` for heterogeneous targets) — bare `Scatter`, `Scatter[Any]`, `Scatter[Event]`, and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError` (v0.10).
+Return `Scatter([event1, event2, ...])` to fan out into multiple events; each dispatches separately in the next round. Annotate the return as `Scatter[WorkItem]` (or `Scatter[A | B]` for heterogeneous targets) — renders as a dashed edge in `graph.namespaces().mermaid()`. Bare `Scatter`, `Scatter[Any]`, `Scatter[Event]`, and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError` (v0.10).
 
 ```python
+from langgraph_events import EventLog, IntegrationEvent, Scatter, on
+
+
+class Batch(IntegrationEvent):
+    items: tuple[str, ...]
+
+
+class WorkItem(IntegrationEvent):
+    item: str
+
+
+class WorkDone(IntegrationEvent):
+    result: str
+
+
+class BatchResult(IntegrationEvent):
+    results: tuple[str, ...]
+
+
 @on(Batch)
 def split(event: Batch) -> Scatter[WorkItem]:
     return Scatter([WorkItem(item=i) for i in event.items])

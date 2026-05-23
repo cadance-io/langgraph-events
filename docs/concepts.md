@@ -134,6 +134,9 @@ EventGraph(handlers=[...], services=[chat_model, session_factory])
 
 class Story(Namespace):
     class Refine(Command):
+        class Refined(DomainEvent):
+            text: str
+
         async def handle(self, chat_model: BaseChatModel) -> Refined: ...
 
 # Name-keyed: handler params resolve by name. Multiple instances of same type allowed.

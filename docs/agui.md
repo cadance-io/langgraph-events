@@ -2,7 +2,7 @@
 
 [AG-UI](https://docs.ag-ui.com) is an open protocol (by CopilotKit) for streaming agent events to frontends. `langgraph_events.agui` maps `EventGraph` streams to AG-UI SSE events.
 
-```
+```text
 RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> SSE
                                                   ^
                               ResumeFactory -> astream_resume (if resuming)
@@ -32,11 +32,11 @@ from langgraph_events.agui import AGUIAdapter, create_starlette_response
 from langchain_core.messages import HumanMessage, AIMessage
 
 
-class UserMessageReceived(MessageEvent):
+class UserMessageReceived(IntegrationEvent, MessageEvent):
     message: HumanMessage
 
 
-class AssistantReplied(MessageEvent):
+class AssistantReplied(IntegrationEvent, MessageEvent):
     message: AIMessage
 
 
@@ -99,6 +99,9 @@ Outside the chain, the adapter also emits:
 
 Applied symmetrically to outbound state and inbound `RunAgentInput.state` echo (framework internals — `events`, `_cursor`, `_pending`, `_round` — always stripped first). The allow-list also gates **which reducers `EventGraph` computes during streaming**.
 
+!!! note "Symmetry is a security boundary"
+    The same value applies to both directions — a stale or untrusted client cannot inject keys you've decided are internal by echoing them back in `RunAgentInput.state`. The framework-internal channels are always stripped first regardless of `include_reducers`.
+
 ```python
 adapter = AGUIAdapter(
     graph=graph,
@@ -108,6 +111,9 @@ adapter = AGUIAdapter(
 ```
 
 For redaction or value transformation, write a custom `EventMapper`.
+
+!!! note "Message delivery uses two channels"
+    Messages reach the client via two paths simultaneously: authoritative `MessagesSnapshot` from the `message_reducer()` channel, plus real-time `TextMessageStart` / `Content` / `End` tokens. AG-UI clients reconcile them by message id.
 
 ## Connect / Reconnect
 
@@ -321,7 +327,7 @@ Streaming-path errors propagate to the frontend as a `RUN_ERROR` event with the 
 - **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — read existing messages from checkpoint, convert, merge via `add_messages` (id-based dedup; missing ids get UUIDs assigned). Returns a tuple.
 
 ```python
-from langgraph_events import Event, MessageEvent
+from langgraph_events import IntegrationEvent, MessageEvent
 from langgraph_events.agui import (
     detect_new_tool_results,
     extract_resume_input,
@@ -330,7 +336,7 @@ from langgraph_events.agui import (
 
 
 # Domain-specific resume event — define alongside your other events.
-class UserResumed(Event, MessageEvent):
+class UserResumed(IntegrationEvent, MessageEvent):
     response: object  # resume payload (dict, str, …); your shape
     messages: tuple = ()
 
@@ -356,7 +362,7 @@ Use `agui_messages_to_langchain` directly for custom merging (e.g. in `seed_fact
 
 ## Typed Interrupt Payloads
 
-For HITL flows whose frontend needs an action-discriminated dict, subclass `InterruptedWithPayload[PayloadT]` and implement `interrupt_payload()`. `InterruptedMapper` emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.
+For HITL flows whose frontend needs an action-discriminated dict, subclass `InterruptedWithPayload[PayloadT]` (builds on [`Interrupted`](control-flow.md#interrupted-resumed) from Control Flow) and implement `interrupt_payload()`. `InterruptedMapper` emits the payload as `CustomEvent(name="interrupted", value=...)` — no `agui_dict()` override needed.
 
 ```python
 from typing import Literal, TypedDict

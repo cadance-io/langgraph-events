@@ -69,7 +69,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `HandlerRaised` | Event | Emitted when a handler raises a `raises=`-declared exception; carries `handler`, `source_event`, `exception` |
 | `Invariant` | Marker class | Subclass to declare a typed invariant; used as a dict key in `invariants=` and as the matcher value in `@on(InvariantViolated, invariant=...)` |
 | `InvariantViolated` | Event | Emitted when an `invariants=` predicate returns false; carries `invariant` (instance of the declared `Invariant` subclass), `handler`, `source_event`. Use `@on(InvariantViolated, invariant=SomeInvariant)` to pin to a specific invariant |
-| `Scatter` | Class | Fan-out into multiple events; `Scatter[T]` annotates the produced type |
+| `Scatter` | Class | Fan-out into multiple events. Return type must enumerate concrete events (`Scatter[WorkItem]` or `Scatter[A \| B]`); bare `Scatter`, `Scatter[Any]`, `Scatter[Event]`, and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError` |
 
 ## Reducers
 

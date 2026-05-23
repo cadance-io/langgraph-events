@@ -2,6 +2,9 @@
 
 Reducers cache expensive projections or last-write-wins values. Use `EventLog.filter()` for one-shot queries.
 
+- **Reach for a reducer** when the projection runs in many handlers, when you want a value injected by parameter name, or when recomputing from the full log each round would be expensive (e.g. LangChain message history).
+- **Reach for `EventLog.filter(T)`** for one-shot lookups inside a single handler.
+
 ## On a Namespace { #on-a-namespace }
 
 Declare reducers as `Namespace` class attributes. Channel name auto-fills from the attribute name; namespace scope auto-fills to the enclosing class; `EventGraph` auto-registers on first subscriber.
