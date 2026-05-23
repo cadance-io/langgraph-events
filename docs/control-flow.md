@@ -1,10 +1,8 @@
 # Control Flow
 
-Fan-out, invariants, human-in-the-loop pauses, field matchers, and handler exceptions.
-
 ## `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan out into multiple events. Each dispatches separately in the next round. Use `Scatter[WorkItem]` to annotate the produced type — renders as a dashed edge in `graph.namespaces().mermaid()`.
+Return `Scatter([event1, event2, ...])` to fan out into multiple events; each dispatches separately in the next round. Annotate the return as `Scatter[WorkItem]` (or `Scatter[A | B]` for heterogeneous targets) — bare `Scatter`, `Scatter[Any]`, `Scatter[Event]`, and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError` (v0.10).
 
 ```python
 @on(Batch)
@@ -30,16 +28,19 @@ See the [Map-Reduce pattern](patterns.md#scatter-fan-out).
 
 ## Invariants
 
-`invariants={InvariantClass: predicate, ...}` declared as a class-level attribute on a `Command` (or via `invariants=` on `@on()` for non-Command handlers) gates the handler with consistency rules. Each predicate runs twice per matching event:
+Declare `invariants={InvariantClass: predicate, ...}` as a class-level attribute on a `Command` (or via `invariants=` on `@on()` for external handlers). Each predicate runs twice per matching event:
 
-- **Pre-check** — before the handler body, against the current log. If any predicate returns `False`, the handler is skipped and `InvariantViolated` is emitted. (A skipped handler never runs, so no return-type contract applies to it.) `would_emit` is empty.
-- **Post-check** — after the handler returns, against `log + emitted events`. If any predicate returns `False`, the emitted events are dropped and one `InvariantViolated` is committed in their place, carrying the rolled-back events in `would_emit: tuple[Event, ...]`.
+| Phase | Timing | Log scope | On failure |
+|---|---|---|---|
+| **Pre-check** | Before handler body | Committed events | Skip handler; emit `InvariantViolated` (`would_emit` empty) |
+| **Post-check** | After handler returns | Committed + emitted | Drop emissions; emit `InvariantViolated` (`would_emit` = handler's events) |
 
-Together the two phases give the DDD atomicity semantic: the domain's consistency rules hold before the handler runs *and* after its effects commit.
+!!! note "Atomicity"
+    The two phases give the DDD semantic: the domain's consistency rules hold **before** the handler runs and **after** its effects commit.
 
-Invariants are **typed markers** — subclass `Invariant` once per rule, then reference the class on both the declaration side and the reactor side. Typos fail at graph-construction time, not silently at runtime.
-
-Invariants live next to the Command they guard. Declare them as a class-level `invariants` dict on the `Command`; the framework forwards them to the inline `handle()` wrapper. Recovery reactors emit namespace-level events (Cmd-private outcomes are reserved for `handle()`).
+- Typed markers — subclass `Invariant` once per rule; reference the class on declaration and reactor sides. Typos fail at graph construction.
+- Declared on the `Command`'s `invariants` dict; forwarded to the inline `handle()` wrapper.
+- Recovery reactors emit **namespace-level** events (Command-private outcomes are reserved for `handle()`).
 
 ```python
 class CustomerNotBanned(Invariant):
@@ -58,7 +59,7 @@ class Order(Namespace):
         invariants = {
             CustomerNotBanned: lambda log: not log.has(CustomerBanned),
             OrderTotalWithinLimit: lambda log: (
-                sum(e.amount for e in log.filter("Order.Place.Placed")) < 100
+                sum(e.amount for e in log.filter(Order.Place.Placed)) < 100
             ),
         }
 
@@ -83,19 +84,21 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
     return Order.Rejected(reason=f"over limit (would emit {rolled.amount})")
 ```
 
-`CustomerNotBanned` is a pure **pre-check** — its truth doesn't depend on what the handler emits. `OrderTotalWithinLimit` is a pure **post-check** — pre-check sees the committed log (total 0), but *this* handler's emitted `Placed` is what pushes the total over the limit; only the post-check catches that.
+`CustomerNotBanned`: pre-check only — truth ≠ handler outputs. `OrderTotalWithinLimit`: post-check catches the case where this handler's `Placed` is what pushes the total over.
 
-Catch every violation with `@on(InvariantViolated)`, or pin a handler to a specific invariant class with the `invariant=` field matcher. At graph construction time the framework verifies that every `invariant=` matcher references a class some handler actually declares — otherwise it raises `TypeError` ("would never fire"). Pinned reactors fire for both pre-check and post-check failures without distinguishing between them — inspect `event.would_emit` if you need to tell them apart.
+!!! warning "Invariant reactors"
+    - Catch all: `@on(InvariantViolated)`. Pin to a class: `@on(InvariantViolated, invariant=SomeInvariant)`.
+    - Framework verifies pinned classes are actually declared somewhere — otherwise `TypeError` at graph construction ("would never fire").
+    - Pinned reactors fire for both pre- and post-check failures without distinguishing them — inspect `event.would_emit` to tell them apart.
 
-Semantics:
-
-- Predicates receive the `EventLog` and must be **sync** (async is rejected at decoration). The same predicate runs in both phases; it must be a **pure function of `log`** — deterministic side-effect-free.
-- Pre-check log = committed events. Post-check log = committed events + everything the current node call has buffered so far (including prior handler iterations in the same node and this call's emissions).
-- Multiple invariants short-circuit on the first failure; one `InvariantViolated` is emitted per phase.
-- Predicate exceptions propagate — they are not converted to violations.
-- Invariants run around `raises=`: pre-check gates the body entirely, post-check runs only if the handler completed normally (a caught exception skips post-check and emits `HandlerRaised` instead).
-- Post-check is a no-op when the handler returned `None` (empty buffer) or declares no invariants.
-- `Invariant` subclasses must be zero-arg instantiable — the framework calls `Cls()` at emission time for `isinstance` matching. Nesting under a `Namespace` / `Command` is encouraged for locality but not enforced.
+!!! note "Semantics"
+    - Predicates receive `EventLog`; must be **sync** (async rejected at decoration) and **pure functions of `log`**.
+    - Pre-check log = committed events. Post-check log = committed + everything the current node call has buffered.
+    - Multiple invariants short-circuit; one `InvariantViolated` per phase.
+    - Predicate exceptions propagate (not converted to violations).
+    - Invariants run around `raises=`: pre-check gates the body entirely; post-check skips on caught exceptions (those emit `HandlerRaised` instead).
+    - Post-check is a no-op when the handler returned `None` (empty buffer) or declares no invariants.
+    - `Invariant` subclasses must be zero-arg instantiable (framework calls `Cls()` at emission time for `isinstance` matching).
 
 ### Modeling errors — when to use what
 
@@ -105,9 +108,19 @@ Semantics:
 | Consistency rule gating a command (pre and/or post) | `invariants=` → `InvariantViolated` |
 | Infrastructure failure (rate limit, timeout, parse error) | `Exception` + `raises=` → `HandlerRaised` |
 
+## Warnings at construction
+
+`graph.namespaces()` emits two warnings that flag structural smells. Filter with `warnings.filterwarnings("ignore", category=...)` if intentional.
+
+- **`CommandChainWarning`** — `chain`-causation edge: an inline `Command.handle()` returning another `Command`. Prefer emitting a fact and reacting to it.
+- **`DomainPatternWarning`** — 2+ events in the same namespace fan out to identical target sets (a missing shared base / common reactor).
+
+!!! note "`IntegrationEvent` placement"
+    `IntegrationEvent` must be defined at module scope. Nesting inside a `Namespace` or `Command` raises `TypeError` at class creation (v0.10) — integration events cross a context boundary by definition.
+
 ## `Interrupted` / `Resumed`
 
-`Interrupted` is a bare marker — subclass with typed fields to pause for human input. Resume with `graph.resume(event)`; the event dispatches and a `Resumed` event is emitted alongside. Requires a **checkpointer** (`MemorySaver`, etc.).
+Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)` (requires a checkpointer); a `Resumed` event emits alongside the dispatched event.
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
@@ -146,15 +159,15 @@ if state.is_interrupted:
 log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 ```
 
-See the [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
+See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
 
 ### Typed payloads — `InterruptedWithPayload`
 
-When the frontend needs an action-discriminated dict (entity-review vs environment-select vs walkthrough-choice, …), subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The AG-UI adapter recognises the contract directly — no `agui_dict()` override needed. See [AG-UI](agui.md) for the streaming details.
+For interrupts whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The AG-UI adapter recognises the contract directly — see [AG-UI](agui.md).
 
 ## Field Matchers
 
-Narrow dispatch by requiring a field to be a specific type. The handler only fires when the named field is an `isinstance` match; if the handler signature includes a matching parameter, the value is injected:
+`@on(Event, field=Type)` dispatches only when `event.field` is a `Type` instance; if the handler signature includes a parameter named `field`, the value is injected:
 
 ```python
 @on(Resumed, interrupted=OrderConfirmationRequested)
@@ -163,11 +176,13 @@ def handle(event: Resumed, interrupted: OrderConfirmationRequested) -> OrderConf
     ...
 ```
 
-Works on any field typed as `Event` or `Exception`. Field names are validated at graph construction — typos raise `TypeError`. Omitting the parameter still filters dispatch without injection.
+- Works on any field typed as `Event` or `Exception`.
+- Field names validated at graph construction (typos raise `TypeError`).
+- Omit the parameter to filter dispatch without injection.
 
 ## Handler Exceptions
 
-`raises` declares exceptions the framework catches from a Command's inline `handle()`. Declared as a class-level tuple on the Command (or via `raises=` on `@on(...)` for non-Command handlers); caught exceptions surface as `HandlerRaised` events with the exception, the handler name, and the originating event. Subscribe with a field matcher on `exception` to react:
+Declare `raises=(ExceptionClass, ...)` on a `Command` (or via `raises=` on `@on(...)`). Caught exceptions emit `HandlerRaised` carrying the exception, handler name, and `source_event`; subscribe with `@on(HandlerRaised, exception=…)` to react.
 
 ```python
 class RateLimitError(Exception):
@@ -195,11 +210,9 @@ def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.Ask:
     return Question.Ask(question=event.source_event.question)  # retry
 ```
 
-Key rules:
-
-- Every type in `raises=` must be covered by at least one catcher, or graph construction fails with `TypeError`. A catcher covers `X` if it has no field matchers, or only `exception=X`-or-superclass. Non-`exception` matchers don't count.
-- Only `Exception` subclasses are allowed — `BaseException` / `KeyboardInterrupt` / `SystemExit` / `GeneratorExit` / `asyncio.CancelledError` are rejected. `CancelledError` surfaces as `Cancelled` (a `Halted` subtype).
+- Every type in `raises=` must be covered by at least one catcher, else graph construction fails with `TypeError`. A catcher covers `X` if it has no field matchers, or only `exception=X`-or-superclass. Non-`exception` matchers don't count.
+- Only `Exception` subclasses allowed — `BaseException`/`KeyboardInterrupt`/`SystemExit`/`GeneratorExit`/`asyncio.CancelledError` rejected. `CancelledError` surfaces as `Cancelled` (a `Halted` subtype).
 - Unhandled raises propagate and crash the run. Catchers can themselves declare `raises=` to escalate.
-- `HandlerRaised.source_event` (not `event`) holds the triggering event — avoids kwarg collision.
+- Use `HandlerRaised.source_event` (not `event`) for the triggering event — avoids kwarg collision.
 
-See the [Error Recovery pattern](patterns.md#error-recovery) for retry-and-escalate.
+See the [Error Recovery pattern](patterns.md#error-recovery).

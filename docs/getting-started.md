@@ -2,10 +2,13 @@
 
 ## Model your domain
 
-Events are **facts** about what happened. Commands are **intents** for what should happen. Group both under a `Namespace` — and, for simple cases, put the handler right there too:
+- **Events** — facts about what happened.
+- **Commands** — intents for what should happen.
+
+Group both under a `Namespace`; for simple cases, colocate the handler inline:
 
 ```python
-from langgraph_events import Domain, Command, DomainEvent, EventGraph
+from langgraph_events import Command, DomainEvent, EventGraph, Namespace
 
 
 class Order(Namespace):
@@ -33,12 +36,7 @@ log = graph.invoke(Order.Place(customer_id="alice", items=("book",)))
 print(log.latest(Order.Place.Placed))
 ```
 
-- `Order` is the domain (namespace). `Place` is a command. `Placed` / `Rejected` are its outcomes. `Shipped` is a free event.
-- Commands use **imperative** names; events use **past-participle**.
-- `Order.Place.Outcomes` is auto-generated as `Placed | Rejected` — used in `isinstance` and enforced as the handler's return contract.
-- `handle(self)` is the command's inline handler; `self` is the event. The handler can be named anything meaningful (`place`, `ship`, `submit`, …) — the framework picks up the sole public method on the Command.
-
-Need `invariants` or `raises`? Declare them as class-level attributes on the `Command` — they're forwarded to the inline `handle`. Need a handler across multiple event types or a reactor on a `DomainEvent`? Use the external `@on(...)` form — see [Concepts](concepts.md#on-decorator).
+See [Concepts](concepts.md#the-taxonomy) for the full taxonomy and the `Outcomes` contract. For class-level `invariants` / `raises` or cross-domain reactors via `@on(...)`, see [Control Flow](control-flow.md#invariants).
 
 ## Run the graph
 
@@ -51,7 +49,7 @@ for event in graph.stream_events(seed): ... # stream as produced
 ## Inspect
 
 ```python
-print(graph.namespaces().text())             # human-readable tree (choreography)
+print(graph.namespaces().text())             # human-readable tree
 print(graph.namespaces().mermaid())          # Mermaid diagram
 graph.namespaces().namespaces                # structured NamespaceModel access
 log.filter(Order.Place.Placed)
@@ -61,7 +59,7 @@ log.has(Order.Shipped)
 
 ## Cross-cutting events
 
-Events that don't belong to any domain — external facts, shared signals — use `IntegrationEvent`:
+`IntegrationEvent` for facts that don't belong to any domain (external signals, shared events). Must live at module scope.
 
 ```python
 from langgraph_events import Auditable, IntegrationEvent
@@ -82,7 +80,7 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 | Register every inline handler on a domain | `EventGraph.from_namespaces(Order)` | [Concepts](concepts.md#inline-command-handlers) |
 | Accumulate state across events | `ScalarReducer` on the domain class | [Reducers](reducers.md) |
 | Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
-| Fan out parallel work | `Scatter` | [Control Flow](control-flow.md#scatter) |
+| Fan out parallel work | `Scatter[T]` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
 | Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#system-events) |
 | Catch handler exceptions | `raises` on the `Command` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |

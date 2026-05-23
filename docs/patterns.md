@@ -1,6 +1,6 @@
 # Patterns
 
-Runnable examples in `examples/`. Diagrams are auto-generated from each example's `graph.namespaces()` via `scripts/generate_mermaid.py` — always in sync with the code.
+Runnable examples in `examples/`. Diagrams auto-generated from each example's `graph.namespaces()` (always in sync with code).
 
 | If you need…                          | See                                       | Related docs                                                          |
 | ------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------- |
@@ -56,7 +56,9 @@ graph LR
 
 ## Invariants & reactions (Order namespace) { #order }
 
-`Order` namespace, `Place` command, `Placed` / `Rejected` outcomes, a typed `CustomerNotBanned(Invariant)` that blocks banned customers, a pinned `@on(InvariantViolated, invariant=…)` reaction turning violations into domain rejections, and a declarative `ScalarReducer` as domain attribute tracking `current_status`.
+- Commands: `Place`, `Ship`. Outcomes: `Placed`, `Rejected`, `Shipped`.
+- Invariants: `CustomerNotBanned`, `OrderTotalWithinLimit` (typed, with pinned reactors turning violations into namespace-level `Order.Rejected`).
+- State: `current_status` (`ScalarReducer` as domain attribute).
 
 <!-- autogen:start:order -->
 === "Diagram"
@@ -117,9 +119,13 @@ graph LR
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.graph.md)
 <!-- autogen:end -->
 
+!!! note "Domain-named inline handlers"
+    A `Command`'s inline handler can be named after its verb (`place`, `ship`, `submit`, …) instead of the generic `handle`. The framework picks up the **sole public method** in the class body; underscore-prefix helpers. Declaring more than one public method on a `Command` raises `TypeError` at class creation. See [`examples/order.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/order.py) for the canonical form.
+
 ## Human-in-the-loop approval (Expense namespace) { #expense-hitl }
 
-DDD domain combined with human-in-the-loop approval. LLM extracts expense data; policy checker auto-approves small expenses or pauses the graph with [`Interrupted`](control-flow.md#interrupted-resumed) for manager review. Resume with an `Approve` or `Reject` command.
+- LLM extracts expense data; policy checker auto-approves small expenses or pauses with [`Interrupted`](control-flow.md#interrupted-resumed) for manager review.
+- Resume with an `Approve` or `Reject` command.
 
 <!-- autogen:start:expense_approval -->
 === "Diagram"
@@ -183,7 +189,13 @@ DDD domain combined with human-in-the-loop approval. LLM extracts expense data; 
 
 ## Tool-calling + AG-UI (Conversation namespace) { #conversation-agui }
 
-DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI frontend tools** (CopilotKit `useFrontendTool`). `Conversation.Send` enforces content moderation before the LLM sees the message; tools declared by the frontend are bound to the LLM via `build_langchain_tools`; tool calls stream to the client as `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`; results return via `detect_new_tool_results` → `ToolsExecuted`, closing the ReAct loop. Combines `DomainEvent + MessageEvent` mixin with [`message_reducer()`](reducers.md#message_reducer). For the handler-initiated `FrontendToolCallRequested` pattern, see [AG-UI docs](agui.md#handler-initiated-frontend-tools).
+ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKit `useFrontendTool`).
+
+- `Conversation.Send` enforces content moderation before the LLM sees the message.
+- Frontend-declared tools bound to the LLM via `build_langchain_tools`.
+- Tool calls stream as `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`; results return via `detect_new_tool_results` → `ToolsExecuted`.
+- `DomainEvent + MessageEvent` mixin with [`message_reducer()`](reducers.md#message_reducer).
+- For the handler-initiated `FrontendToolCallRequested` pattern, see [AG-UI](agui.md#handler-initiated-frontend-tools).
 
 <!-- autogen:start:conversation -->
 === "Diagram"
@@ -242,7 +254,8 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 
 ## Supervisor fan-in (Task namespace) { #supervisor }
 
-`Task.Run` kicks off the supervisor loop; the supervisor handler dispatches sub-commands `Task.Research` / `Task.Code` or emits the terminal `Task.Finalized` fact. A custom [`Reducer`](reducers.md#reducer) accumulates context across specialist completions. Typed events replace manual subgraph wiring.
+- `Task.Run` kicks off the supervisor loop; supervisor dispatches sub-commands `Task.Research` / `Task.Code` or emits the terminal `Task.Finalized` fact.
+- Custom [`Reducer`](reducers.md#reducer) folds specialist outputs into shared context.
 
 <!-- autogen:start:supervisor -->
 === "Diagram"
@@ -310,7 +323,8 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 
 ## Scatter fan-out (Batch namespace) { #scatter-fan-out }
 
-`Batch.Summarize` fans out to per-document work via [`Scatter`](control-flow.md#scatter); a gather handler uses `EventLog.filter()` to complete when all `Batch.DocSummarized` facts arrive and emit `Batch.Summarized` (a namespace-level sibling — gather isn't `Summarize.handle()`, so the outcome can't be Command-private).
+- `Batch.Summarize` fans out to per-document work via [`Scatter[DocDispatched]`](control-flow.md#scatter).
+- Gather handler uses `EventLog.filter()` to wait for all `DocSummarized` facts, then emits `Batch.Summarized` (namespace-level sibling — gather isn't `Summarize.handle()`, so the outcome can't be Command-private).
 
 <!-- autogen:start:map_reduce -->
 === "Diagram"
@@ -361,7 +375,9 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 
 ## Safety gates + streaming (Content namespace) { #content-pipeline }
 
-`Content.Process` with an inline `handle` classifies text; external reactions gate approval (emitting `Content.Blocked` — a `Halted` subtype — or `Content.Approved`) and analyze. Safety gates via [`Halted`](concepts.md#system-events) and live streaming via `astream_events()`. Keyword classification — no LLM required.
+- Inline `Content.Process.handle` classifies text (keyword-based — no LLM).
+- External reactors gate approval, emitting `Content.Blocked` ([`Halted`](concepts.md#system-events) subtype) or `Content.Approved`.
+- Live streaming via `astream_events()`.
 
 <!-- autogen:start:content_pipeline -->
 === "Diagram"
@@ -412,7 +428,9 @@ DDD domain wrapping a ReAct tool-calling agent, end-to-end wired to **AG-UI fron
 
 ## Retries & escalation (Question namespace) { #error-recovery }
 
-Declared handler exceptions with retry + escalation via class-level `raises` on the Command and `HandlerRaised`. `Question.Ask` is the entry command — its inline `handle()` calls the LLM and may raise `RateLimitError`; a rate-limit catcher re-issues a fresh `Question.Ask` (with `attempt+1`), looping back through `Ask.handle()`. `Ask.Answered` stays Command-private, produced only by `Ask.handle()`. Chained catchers escalate to `Question.GaveUp` (a `Halted` subtype) after `MAX_ATTEMPTS`.
+- `Question.Ask` declares `raises=(RateLimitError,)`; its inline `handle()` may raise.
+- A rate-limit catcher re-issues `Question.Ask` with `attempt+1`, looping through `Ask.handle()`.
+- `Ask.Answered` stays Command-private (produced only by `Ask.handle()`); chained catchers escalate to `Question.GaveUp` ([`Halted`](concepts.md#system-events) subtype) after `MAX_ATTEMPTS`.
 
 <!-- autogen:start:error_recovery -->
 === "Diagram"

@@ -10,7 +10,7 @@ Opinionated event-driven abstraction for LangGraph. **State IS events.**
 Group related commands and events into a `Namespace`; colocate the handler on the command.
 
 ```python
-from langgraph_events import Command, Domain, DomainEvent, EventGraph
+from langgraph_events import Command, DomainEvent, EventGraph, Namespace
 
 
 class Order(Namespace):
@@ -29,9 +29,7 @@ log = graph.invoke(Order.Place(customer_id="alice"))
 print(log.latest(Order.Place.Placed))
 ```
 
-External `@on(...)` handlers compose in the same graph — use them for
-invariants, declared exceptions, or reactions across domains. See
-[Concepts](docs/concepts.md) and [Control Flow](docs/control-flow.md).
+`@on(...)` handlers add invariants, declared exceptions, and cross-namespace reactions. See [Concepts](docs/concepts.md) and [Control Flow](docs/control-flow.md).
 
 ## Installation
 
