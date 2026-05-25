@@ -156,7 +156,7 @@ graph LR
         Submit -->|submit| Invalidated
         Approve -->|approve| Approved
         Reject -->|reject| Rejected
-        Submitted -->|check_policy [orchestrate]| Approve
+        Submitted -->|"check_policy [orchestrate]"| Approve
         Submitted -->|check_policy| ApprovalRequired
         linkStyle 6 stroke:#0369a1,stroke-width:3px
     ```
@@ -279,14 +279,14 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
             Run{{Run}}:::cmd
         end
         _e0_[ ]:::entry ==> Run
-        Run -->|supervisor [orchestrate]| Research
-        Run -->|supervisor [orchestrate]| Code
+        Run -->|"supervisor [orchestrate]"| Research
+        Run -->|"supervisor [orchestrate]"| Code
         Run -->|supervisor| Finalized
-        Completed -->|supervisor [orchestrate]| Research
-        Completed -->|supervisor [orchestrate]| Code
+        Completed -->|"supervisor [orchestrate]"| Research
+        Completed -->|"supervisor [orchestrate]"| Code
         Completed -->|supervisor| Finalized
-        Produced -->|supervisor [orchestrate]| Research
-        Produced -->|supervisor [orchestrate]| Code
+        Produced -->|"supervisor [orchestrate]"| Research
+        Produced -->|"supervisor [orchestrate]"| Code
         Produced -->|supervisor| Finalized
         Research -->|handle| Completed
         Code -->|handle_2| Produced
@@ -454,7 +454,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Ask -.->|"handle (raises)"| HandlerRaised
         Ask -->|handle| Answered
         HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-        HandlerRaised -->|backoff_and_retry [orchestrate]| Ask
+        HandlerRaised -->|"backoff_and_retry [orchestrate]"| Ask
         HandlerRaised -->|give_up| GaveUp
         linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
         linkStyle 3 stroke:#0369a1,stroke-width:3px

@@ -71,7 +71,7 @@ graph LR
     Submit -->|submit| Invalidated
     Approve -->|approve| Approved
     Reject -->|reject| Rejected
-    Submitted -->|check_policy [orchestrate]| Approve
+    Submitted -->|"check_policy [orchestrate]"| Approve
     Submitted -->|check_policy| ApprovalRequired
     linkStyle 6 stroke:#0369a1,stroke-width:3px
 ```

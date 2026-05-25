@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Mermaid v11 pipe-label bracket quoting**: `NamespaceModel.mermaid()` now wraps any pipe-edge label containing `[`/`]` in double quotes, so the `[chain]` / `[orchestrate]` causation suffix renders under `mermaid@11.x` instead of tripping the node-shape parser (`SQE`/`SQS` expected error). Labels without brackets are unchanged. Affected example snapshots (`supervisor`, `error_recovery`, `expense_approval`) and `docs/patterns.md` regenerate with quoted causation labels; no other diagrams change. (closes #85)
+
 ### Added
 - **Per-call soft-timeout via `deadline=` kwarg + `RunPaused(SystemEvent)`** — every graph entry point (`invoke`, `ainvoke`, `resume`, `aresume`, `stream_events`, `astream_events`, `stream_resume`, `astream_resume`) and `AGUIAdapter.stream` now accept `deadline: float | None = None`, an absolute `time.monotonic()` reference. When the router observes a wall-clock time past the deadline between dispatch rounds, it emits `RunPaused(elapsed_seconds=…)` (a new `SystemEvent`, **not** a `Halted` subtype) and the run terminates cleanly through the existing finalize path. The cursor advances past `RunPaused` so a fresh `/run` on the same `thread_id` excludes it from `new_events` and continues from the LangGraph checkpoint — resume is implicit, not via `Command(resume=...)`. On the AG-UI side, `RunPaused` maps to `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` via the existing `FallbackMapper`, sharing the wire vocabulary with HITL pauses (discriminated by `value.kind`). Closes #83.
 
