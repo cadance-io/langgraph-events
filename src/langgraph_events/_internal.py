@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import operator
+import time
 from collections.abc import Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
@@ -28,6 +29,7 @@ from langgraph_events._event import (
     InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
+    RunPaused,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
@@ -46,6 +48,23 @@ _BASE_FIELDS: dict[str, Any] = {
     "_pending": list[Event],
     "_round": int,
 }
+
+# Per-call deadline keys written into LangGraph ``configurable`` by the
+# graph/adapter entry points and read by the router below. Names are
+# centralised so a grep for the constant finds every writer and reader.
+_DEADLINE_KEY = "__lge_deadline"
+_DEADLINE_STARTED_AT_KEY = "__lge_deadline_started_at"
+
+
+def _inject_deadline_keys(configurable: dict[str, Any], deadline: float) -> None:
+    """Write the paired deadline keys into a ``configurable`` dict.
+
+    Single writer for the two-key contract: every entry point that accepts
+    a ``deadline=`` kwarg routes through here so the router can rely on
+    both keys being present.
+    """
+    configurable[_DEADLINE_KEY] = deadline
+    configurable[_DEADLINE_STARTED_AT_KEY] = time.monotonic()
 
 
 class _InputState(TypedDict):
@@ -123,10 +142,12 @@ def make_seed_node(
     return seed
 
 
-def make_router_node(max_rounds: int) -> Callable[[StateDict], StateDict]:
+def make_router_node(
+    max_rounds: int,
+) -> Callable[[StateDict, RunnableConfig], StateDict]:
     """Create the router node that collects new events and advances the cursor."""
 
-    def router(state: StateDict) -> StateDict:
+    def router(state: StateDict, config: RunnableConfig) -> StateDict:
         new_events = state["events"][state["_cursor"] :]
         has_resume = any(isinstance(e, Resumed) for e in new_events)
         current_round = 1 if has_resume else state.get("_round", 0) + 1
@@ -137,6 +158,23 @@ def make_router_node(max_rounds: int) -> Callable[[StateDict], StateDict]:
                 "_pending": [halted],
                 "_round": current_round,
                 "events": [halted],
+            }
+        configurable = (config or {}).get("configurable", {})
+        deadline = configurable.get(_DEADLINE_KEY)
+        if deadline is not None and time.monotonic() >= deadline:
+            started_at = configurable[_DEADLINE_STARTED_AT_KEY]
+            paused = RunPaused(  # type: ignore[call-arg]
+                elapsed_seconds=time.monotonic() - started_at,
+            )
+            return {
+                # Advance cursor PAST the paused event so a fresh /run on
+                # the same thread excludes it from new_events. Distinct
+                # from MaxRoundsExceeded above which keeps cursor AT the
+                # halted (terminal across runs).
+                "_cursor": len(state["events"]) + 1,
+                "_pending": [paused],
+                "_round": current_round,
+                "events": [paused],
             }
         return {
             "_cursor": len(state["events"]),

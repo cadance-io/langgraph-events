@@ -40,6 +40,7 @@ from langgraph_events._handler import (
 )
 from langgraph_events._internal import (
     _BASE_FIELDS,
+    _inject_deadline_keys,
     _InputState,
     _OutputState,
     build_state_schema,
@@ -879,12 +880,34 @@ class EventGraph:
             return {"events": seed}
         return {"events": [seed]}
 
+    @staticmethod
+    def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
+
+        Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
+        and threads it into a copied ``config`` dict, so callers can pass
+        ``deadline=...`` through any entry point
+        (invoke/ainvoke/resume/aresume/stream_events/...) and the router
+        sees it via parameter injection.
+        """
+        deadline = kwargs.pop("deadline", None)
+        if deadline is None:
+            return kwargs
+        config = dict(kwargs.get("config") or {})
+        configurable = dict(config.get("configurable", {}))
+        _inject_deadline_keys(configurable, deadline)
+        config["configurable"] = configurable
+        kwargs["config"] = config
+        return kwargs
+
     def _run(self, inp: Any, **kwargs: Any) -> EventLog:
+        kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_owned(result["events"])
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
+        kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_owned(result["events"])
@@ -1269,6 +1292,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
+        kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         if not reducer_names:
             yield from seeds
@@ -1385,6 +1409,7 @@ class EventGraph:
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags."""
         kwargs.pop("stream_mode", None)
+        kwargs = self._apply_deadline_kwarg(kwargs)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(

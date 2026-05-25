@@ -912,6 +912,62 @@ def describe_AGUIAdapter():
                 # List content not representable as str → None
                 assert ai_msgs[0].content is None
 
+        def when_deadline_is_already_expired():
+
+            async def it_emits_a_custom_event_named_interrupted():
+                """RunPaused emitted by the router maps through the existing
+                mapper chain (FallbackMapper picks it up via the
+                ``agui_event_name`` / ``agui_dict`` duck-typed protocols) to
+                a ``CustomEvent(name="interrupted", value={"kind":
+                "soft_timeout", ...})``.  Same wire vocabulary as HITL
+                pauses, discriminated by ``value.kind``.
+                """
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hi"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                )
+
+                events: list[BaseEvent] = []
+                async for event in adapter.stream(_make_input(), deadline=0.0):
+                    events.append(event)
+
+                interrupted = [
+                    e
+                    for e in events
+                    if e.type == EventType.CUSTOM and e.name == "interrupted"
+                ]
+                assert len(interrupted) == 1
+                assert interrupted[0].value["kind"] == "soft_timeout"
+                assert "elapsed_seconds" in interrupted[0].value
+
+            async def it_emits_run_finished_as_the_last_event():
+                """The existing finalize path inside ``AGUIAdapter.stream``
+                still closes the stream cleanly when the run pauses; no
+                early break needed in the adapter.
+                """
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hi"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                )
+
+                events: list[BaseEvent] = []
+                async for event in adapter.stream(_make_input(), deadline=0.0):
+                    events.append(event)
+
+                assert events[-1].type == EventType.RUN_FINISHED
+
     def describe_custom_mappers():
         async def it_allows_user_mapper_to_claim_events():
             class TaskMapper:

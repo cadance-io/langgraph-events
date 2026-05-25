@@ -30,6 +30,7 @@ from langgraph_events import (
     OrphanedEventWarning,
     Reducer,
     Resumed,
+    RunPaused,
     ScalarReducer,
     Scatter,
     SystemPromptSet,
@@ -3134,6 +3135,116 @@ def describe_EventGraph():
                 graph = EventGraph([looper], max_rounds=3)
                 events = list(graph.stream_events(LoopEvent(n=0)))
                 assert any(isinstance(e, MaxRoundsExceeded) for e in events)
+
+        def describe_deadline():
+
+            def when_deadline_is_already_expired():
+
+                def it_emits_RunPaused():
+                    @on(Started)
+                    def handler(event: Started) -> Ended:
+                        return Ended(result="should-not-matter")
+
+                    graph = EventGraph([handler])
+                    log = graph.invoke(Started(data="go"), deadline=0.0)
+                    assert log.latest(RunPaused) is not None
+
+            def when_using_astream_events():
+
+                async def it_emits_RunPaused_in_the_async_stream():
+                    @on(Started)
+                    def handler(event: Started) -> Ended:
+                        return Ended(result="never")
+
+                    graph = EventGraph([handler])
+                    events: list[Event] = []
+                    async for event in graph.astream_events(
+                        Started(data="go"), deadline=0.0
+                    ):
+                        events.append(event)
+                    assert any(isinstance(e, RunPaused) for e in events)
+
+            def when_resuming_an_interrupted_run():
+
+                def it_respects_deadline_on_the_resume_path():
+                    """``deadline=`` flows through the ``resume()`` entry
+                    point the same way it flows through ``invoke()`` — the
+                    router emits ``RunPaused`` between dispatch rounds.
+                    Pins the contract that the shared
+                    ``_apply_deadline_kwarg`` injector covers the resume
+                    path too.
+                    """
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    class ConfirmationRequested(Interrupted):
+                        pass
+
+                    class Confirmed(IntegrationEvent):
+                        pass
+
+                    @on(Started)
+                    def need_input(event: Started) -> ConfirmationRequested:
+                        return ConfirmationRequested()
+
+                    @on(Confirmed)
+                    def handle_confirm(event: Confirmed) -> Ended:
+                        return Ended(result="confirmed")
+
+                    graph = EventGraph(
+                        [need_input, handle_confirm],
+                        checkpointer=MemorySaver(),
+                    )
+                    config = {"configurable": {"thread_id": "resume-deadline"}}
+                    graph.invoke(Started(data="test"), config=config)
+
+                    log = graph.resume(Confirmed(), config=config, deadline=0.0)
+                    assert log.latest(RunPaused) is not None
+                    assert log.latest(Ended) is None
+
+            def when_a_fresh_run_follows_a_paused_run():
+
+                def it_continues_past_the_old_RunPaused():
+                    """Fresh /run on the same thread excludes the old
+                    RunPaused from new_events (cursor advanced past it)
+                    and dispatches the new seeds normally.
+
+                    This is the resumable semantic that justifies
+                    RunPaused being a SystemEvent rather than a Halted
+                    subclass — MaxRoundsExceeded would re-terminate here.
+                    """
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    @on(Started)
+                    def to_processed(event: Started) -> Processed:
+                        return Processed(data=event.data)
+
+                    @on(MessageReceived)
+                    def to_ended(event: MessageReceived) -> Ended:
+                        return Ended(result=event.text)
+
+                    graph = EventGraph(
+                        [to_processed, to_ended],
+                        checkpointer=MemorySaver(),
+                    )
+                    config = {"configurable": {"thread_id": "deadline-resume"}}
+
+                    # Run 1: deadline already expired → RunPaused emitted.
+                    log1 = graph.invoke(
+                        Started(data="first"),
+                        deadline=0.0,
+                        config=config,
+                    )
+                    assert log1.latest(RunPaused) is not None
+
+                    # Run 2: same thread, no deadline → must continue
+                    # normally. The to_ended handler should fire on the
+                    # new MessageReceived seed.
+                    log2 = graph.invoke(
+                        MessageReceived(text="second"),
+                        config=config,
+                    )
+                    assert log2.latest(Ended) is not None
+                    assert log2.latest(Ended).result == "second"
 
         def describe_cancellation():
 

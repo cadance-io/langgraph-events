@@ -184,6 +184,34 @@ See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkp
 
 For interrupts whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The AG-UI adapter recognises the contract directly — see [AG-UI](agui.md).
 
+## Soft-timeout — `RunPaused`
+
+Pass `deadline=time.monotonic() + budget` to any graph entry point (`invoke`, `ainvoke`, `astream_events`, `stream_events`, `resume`, `aresume`, `astream_resume`, `stream_resume`, or `AGUIAdapter.stream`). When the router observes a wall-clock time past the deadline between dispatch rounds, it emits a `RunPaused(elapsed_seconds=…)` and the run terminates cleanly.
+
+```python
+from time import monotonic
+
+log = graph.invoke(Started(data="job-42"), deadline=monotonic() + 25.0)
+
+if log.latest(RunPaused):
+    # Soft-stopped. The next /run on the same thread_id continues
+    # from the LangGraph checkpoint — same mechanism as a normal
+    # follow-up turn. No Command(resume=...) required.
+    ...
+```
+
+Unlike `MaxRoundsExceeded`, `RunPaused` is **not terminal across runs**: the router advances the cursor past it so a fresh `/run` on the same `thread_id` excludes the old `RunPaused` from `new_events` and continues. Resume semantics intentionally differ from `Interrupted`:
+
+- `Interrupted` writes a pending interrupt task to the checkpoint; resume uses `Command(resume=value)` to deliver a typed resume value to the paused node.
+- `RunPaused` writes **no** checkpoint task; the worker/UI just makes a new `/run` call (with the same `thread_id` and a fresh deadline). LangGraph's checkpointer replays from the last completed node.
+
+Position `deadline` strictly tighter than whichever hard cancellation the caller already has (`asyncio.wait_for`, SAQ `job_timeout`, LangGraph's `timeout=`) so the soft boundary fires first and the wire-format finalize path runs cleanly. In-flight events from the round when the deadline fires are persisted in the event log but not dispatched — same drop-on-pause semantic as `MaxRoundsExceeded`. Handlers should produce events such that a clean round-boundary stop leaves recoverable state.
+
+On the AG-UI side, `RunPaused` is forwarded through the existing mapper chain as `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` — same wire vocabulary as HITL pauses, discriminated by `value.kind` (matches the `InterruptedWithPayload` convention). See [AG-UI → Soft-timeout](agui.md).
+
+!!! warning "`name="interrupted"` is shared — branch on `value.kind`"
+    Both `RunPaused` and `Interrupted` (HITL) surface on the wire as `CustomEvent(name="interrupted", ...)`. A client that handles `name == "interrupted"` and ignores `value.kind` will treat soft-timeouts as HITL pauses (and may wait for human input that never comes). Inspect `value.kind` — `"soft_timeout"` for this event; HITL payloads should set their own discriminator (`InterruptedWithPayload` subclasses are responsible for emitting one).
+
 ## Field Matchers
 
 `@on(Event, field=Type)` dispatches only when `event.field` is a `Type` instance; if the handler signature includes a parameter named `field`, the value is injected:
