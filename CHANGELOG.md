@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-05-25
+
 ### Fixed
 - **Mermaid v11 pipe-label bracket/brace quoting**: `NamespaceModel.mermaid()` now wraps any pipe-edge label containing `[`/`]` or `{`/`}` in double quotes, so the `[chain]` / `[orchestrate]` causation suffix renders under `mermaid@11.x` instead of tripping the node-shape parser (`SQE`/`SQS` expected error). Braces are covered defensively for the same class of bug (diamond/hex node-shape literals); no current emitter produces them. Labels without these chars are unchanged. Affected example snapshots (`supervisor`, `error_recovery`, `expense_approval`) and `docs/patterns.md` regenerate with quoted causation labels; no other diagrams change. (closes #85)
 
@@ -204,7 +206,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/cadance-io/langgraph-events/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cadance-io/langgraph-events/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/cadance-io/langgraph-events/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/cadance-io/langgraph-events/compare/v0.7.0...v0.8.0
