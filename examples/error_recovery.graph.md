@@ -64,7 +64,7 @@ graph LR
     Ask -.->|"handle (raises)"| HandlerRaised
     Ask -->|handle| Answered
     HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-    HandlerRaised -->|backoff_and_retry [orchestrate]| Ask
+    HandlerRaised -->|"backoff_and_retry [orchestrate]"| Ask
     HandlerRaised -->|give_up| GaveUp
     linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 3 stroke:#0369a1,stroke-width:3px

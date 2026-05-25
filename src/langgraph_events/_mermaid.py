@@ -49,11 +49,15 @@ Arrow = Literal["-->", "-.->", "-.-", "==>", "---"]
 def _quote(label: str) -> str:
     """Wrap *label* in double quotes when it contains mermaid-special chars.
 
-    Parens, pipes, quotes, and ``#`` all trip the pipe-label parser; quoting
-    sidesteps the issue. Plain labels are left alone so the common case
-    stays readable.
+    Parens, brackets, braces, pipes, quotes, and ``#`` all trip the
+    pipe-label parser; quoting sidesteps the issue. Brackets and braces
+    matter under mermaid v11 because ``|x [y]|`` / ``|x {y}|`` are parsed
+    as node-shape literals (square / diamond) otherwise (#85). Braces
+    are covered defensively — no current emitter produces them — to fix
+    the class of bug rather than just the reported instance. Plain labels
+    are left alone so the common case stays readable.
     """
-    if any(c in label for c in '()|"#'):
+    if any(c in label for c in '()[]{}|"#'):
         return f'"{label}"'
     return label
 

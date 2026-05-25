@@ -64,14 +64,14 @@ graph LR
         Run{{Run}}:::cmd
     end
     _e0_[ ]:::entry ==> Run
-    Run -->|supervisor [orchestrate]| Research
-    Run -->|supervisor [orchestrate]| Code
+    Run -->|"supervisor [orchestrate]"| Research
+    Run -->|"supervisor [orchestrate]"| Code
     Run -->|supervisor| Finalized
-    Completed -->|supervisor [orchestrate]| Research
-    Completed -->|supervisor [orchestrate]| Code
+    Completed -->|"supervisor [orchestrate]"| Research
+    Completed -->|"supervisor [orchestrate]"| Code
     Completed -->|supervisor| Finalized
-    Produced -->|supervisor [orchestrate]| Research
-    Produced -->|supervisor [orchestrate]| Code
+    Produced -->|"supervisor [orchestrate]"| Research
+    Produced -->|"supervisor [orchestrate]"| Code
     Produced -->|supervisor| Finalized
     Research -->|handle| Completed
     Code -->|handle_2| Produced
