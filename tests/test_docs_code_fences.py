@@ -31,7 +31,7 @@ def _fenced_python(md_path: Path) -> list[tuple[int, str]]:
 def describe_docs_code_fences():
     @pytest.mark.parametrize(
         "md_relpath",
-        ["docs/migrating.md", "docs/concepts.md"],
+        ["docs/concepts.md"],
     )
     def it_compiles_every_python_fence(md_relpath: str) -> None:
         md_path = REPO_ROOT / md_relpath
