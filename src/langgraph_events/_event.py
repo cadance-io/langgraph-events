@@ -575,6 +575,41 @@ class Cancelled(Halted):
     """
 
 
+class RunPaused(SystemEvent):
+    """Soft pause emitted by the router when a per-run deadline expires.
+
+    Distinct from :class:`Halted` — *not* terminal across runs.  The router
+    advances the cursor past this event so a fresh ``/run`` on the same
+    ``thread_id`` continues normally: LangGraph's checkpointer replays from
+    the last completed node and the graph picks up from the new seeds.
+
+    Distinct from :class:`Interrupted` — no pending interrupt task is
+    written to the checkpoint; resume is implicit via fresh ``/run`` and
+    *not* via ``Command(resume=...)``.  Use :class:`Interrupted` (or
+    :class:`agui.InterruptedWithPayload`) for HITL pauses that need a
+    typed resume value.
+
+    In-flight events from the current dispatch round that hadn't been
+    dispatched at the time the deadline fired are persisted in the event
+    log but not dispatched — same semantic as :class:`MaxRoundsExceeded`.
+
+    AG-UI wire format: the ``agui_event_name`` / ``agui_dict`` pair makes
+    ``FallbackMapper`` emit ``CustomEvent(name="interrupted", value={"kind":
+    "soft_timeout", "elapsed_seconds": …})`` — same wire vocabulary as
+    HITL pauses, discriminated by ``value.kind`` (matches the documented
+    ``InterruptedWithPayload`` convention).
+    """
+
+    elapsed_seconds: float = 0.0
+
+    @property
+    def agui_event_name(self) -> str:
+        return "interrupted"
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"kind": "soft_timeout", "elapsed_seconds": self.elapsed_seconds}
+
+
 class Interrupted(SystemEvent):
     """Special event that pauses the graph for human input.
 

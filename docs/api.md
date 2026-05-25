@@ -64,6 +64,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `Halted` | Event | Signal immediate termination; subclass for domain-specific halts |
 | `MaxRoundsExceeded` | Event | `Halted` subtype when `max_rounds` is exceeded |
 | `Cancelled` | Event | `Halted` subtype when an async handler is cancelled |
+| `RunPaused` | Event | `SystemEvent` (not `Halted`) emitted by the router when a per-call `deadline=monotonic()+budget` expires between dispatch rounds. Cursor is advanced past it so a fresh `/run` on the same `thread_id` continues normally. Wire format on the AG-UI side: `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` |
 | `Interrupted` | Base class | Subclass with typed fields to pause for human input. For frontend-discriminated payloads see `InterruptedWithPayload` in `langgraph_events.agui` |
 | `Resumed` | Event | Emitted on `resume()` with the dispatched event + `interrupted` backref |
 | `HandlerRaised` | Event | Emitted when a handler raises a `raises=`-declared exception; carries `handler`, `source_event`, `exception` |

@@ -238,8 +238,20 @@ class AGUIAdapter:
         return factory(input_data)
 
     @staticmethod
-    def _build_config(input_data: RunAgentInput, thread_id: str) -> dict[str, Any]:
-        """Build LangGraph config, including passthrough forwarded props."""
+    def _build_config(
+        input_data: RunAgentInput,
+        thread_id: str,
+        *,
+        deadline: float | None = None,
+    ) -> dict[str, Any]:
+        """Build LangGraph config, including passthrough forwarded props.
+
+        When ``deadline`` is provided, the per-run soft-timeout keys are
+        injected into ``configurable`` so the framework router sees them
+        and emits :class:`RunPaused` on expiry.  The keys mirror what
+        :meth:`EventGraph._apply_deadline_kwarg` writes — same contract,
+        single realisation.
+        """
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         forwarded_raw = input_data.forwarded_props
         forwarded = forwarded_raw if isinstance(forwarded_raw, dict) else {}
@@ -254,16 +266,24 @@ class AGUIAdapter:
         ):
             candidate = forwarded
 
-        if not isinstance(candidate, dict):
-            return config
+        if isinstance(candidate, dict):
+            merged = {**candidate}
+            configurable = candidate.get("configurable")
+            merged["configurable"] = {
+                **(configurable if isinstance(configurable, dict) else {}),
+                "thread_id": thread_id,
+            }
+            config = merged
 
-        merged = {**candidate}
-        configurable = candidate.get("configurable")
-        merged["configurable"] = {
-            **(configurable if isinstance(configurable, dict) else {}),
-            "thread_id": thread_id,
-        }
-        return merged
+        if deadline is not None:
+            import time  # noqa: PLC0415
+
+            configurable = dict(config.get("configurable", {}))
+            configurable["__lge_deadline"] = deadline
+            configurable["__lge_deadline_started_at"] = time.monotonic()
+            config["configurable"] = configurable
+
+        return config
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph."""
@@ -685,12 +705,29 @@ class AGUIAdapter:
                 for agui_event in self._map_event(interrupted, ctx):
                     yield agui_event
 
-    async def stream(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
+    async def stream(
+        self,
+        input_data: RunAgentInput,
+        *,
+        deadline: float | None = None,
+    ) -> AsyncIterator[BaseEvent]:
         """Yield AG-UI events for one request.
 
         This is the core method — call it from your endpoint handler
         and pass the result to ``encode_sse_stream()`` or
         ``create_starlette_response()``.
+
+        Args:
+            input_data: AG-UI ``RunAgentInput``.
+            deadline: Absolute ``time.monotonic()`` value.  When the run's
+                router observes a current time >= deadline between
+                dispatch rounds, it emits :class:`RunPaused` (mapped to a
+                ``CustomEvent(name="interrupted", value={"kind":
+                "soft_timeout", "elapsed_seconds": …})`` on the wire) and
+                the run finalises cleanly.  Pair with a strictly larger
+                outer hard cancellation (``asyncio.wait_for`` /
+                ``timeout=`` etc.) to avoid wire-format violations from
+                mid-stream cancellation.  ``None`` (default) disables.
         """
         run_id = input_data.run_id or str(uuid.uuid4())
         thread_id = input_data.thread_id or str(uuid.uuid4())
@@ -707,7 +744,7 @@ class AGUIAdapter:
             run_id=run_id,
         )
 
-        config: Any = self._build_config(input_data, thread_id)
+        config: Any = self._build_config(input_data, thread_id, deadline=deadline)
 
         try:
             async for agui_event in self._stream_event_source(input_data, ctx, config):

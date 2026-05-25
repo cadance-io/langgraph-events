@@ -396,6 +396,31 @@ Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
 
 `stream()` / `connect()` accept LangGraph config via `RunAgentInput.forwarded_props` — keys `langgraph_config`, `config`, or the dict itself. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`; other keys (`recursion_limit`, tenant routing) pass through.
 
+## Soft-timeout
+
+`stream()` accepts an optional `deadline: float` keyword — an absolute `time.monotonic()` reference. When the graph's router observes a current time past the deadline between dispatch rounds, it emits `RunPaused` (see [Control Flow → Soft-timeout](control-flow.md#soft-timeout--runpaused)) and the run finalises cleanly through the same drain + `RunFinishedEvent` path as a normal completion. No early break, no special control flow in the adapter.
+
+```python
+from time import monotonic
+
+
+@app.post("/api/copilotkit")
+async def run(input_data: RunAgentInput) -> StreamingResponse:
+    # Worker has a hard job_timeout of 180s; soft-pause 30s before.
+    hard_budget_s = 180
+    soft_margin_s = 30
+    return create_starlette_response(
+        adapter.stream(
+            input_data,
+            deadline=monotonic() + (hard_budget_s - soft_margin_s),
+        )
+    )
+```
+
+On the wire, `RunPaused` becomes `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` via the existing `FallbackMapper` — same vocabulary as HITL `Interrupted` events, discriminated by `value.kind`. A client UI that handles `name == "interrupted"` and branches on `value.kind` covers both pause kinds with one handler.
+
+Resume is implicit: the consumer's "Continue" button issues a new `/run` on the same `thread_id` (with a fresh deadline). LangGraph's checkpointer replays from the last completed node — no `Command(resume=...)` required. Position `deadline` strictly tighter than whichever outer hard cancellation the caller has (`asyncio.wait_for`, SAQ `job_timeout`, LangGraph's own `timeout=`) so the soft boundary fires first.
+
 ## AG-UI Spec Coverage
 
 Built-in for 12 of 33 event types; the rest via custom mappers or N/A.

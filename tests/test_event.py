@@ -19,6 +19,7 @@ from langgraph_events import (
     MessageEvent,
     Namespace,
     Resumed,
+    RunPaused,
     SystemEvent,
     on_namespace_finalize,
 )
@@ -573,6 +574,20 @@ def describe_SystemEvent():
 
         def it_makes_MaxRoundsExceeded_isinstance_SystemEvent():
             assert issubclass(MaxRoundsExceeded, SystemEvent)
+
+        def it_makes_RunPaused_isinstance_SystemEvent():
+            assert issubclass(RunPaused, SystemEvent)
+
+        def it_does_not_make_RunPaused_a_Halted_subclass():
+            """RunPaused is intentionally *not* a Halted subclass.
+
+            Halted is terminal-across-runs (preserved by MaxRoundsExceeded);
+            RunPaused must be resumable on fresh /run, which requires the
+            router-level cursor advancement that only kicks in for
+            non-Halted system events. Guarding the type hierarchy here
+            keeps the design decision visible.
+            """
+            assert not issubclass(RunPaused, Halted)
 
 
 def describe_on_namespace_finalize():
