@@ -398,7 +398,7 @@ Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
 
 ## Soft-timeout
 
-`stream()` accepts an optional `deadline: float` keyword — an absolute `time.monotonic()` reference. When the graph's router observes a current time past the deadline between dispatch rounds, it emits `RunPaused` (see [Control Flow → Soft-timeout](control-flow.md#soft-timeout--runpaused)) and the run finalises cleanly through the same drain + `RunFinishedEvent` path as a normal completion. No early break, no special control flow in the adapter.
+`stream()` accepts an optional `deadline: float` keyword — an absolute `time.monotonic()` reference. When the graph's router observes a current time past the deadline between dispatch rounds, it emits `RunPaused` (see [Control Flow → Soft-timeout](control-flow.md#soft-timeout-runpaused)) and the run finalises cleanly through the same drain + `RunFinishedEvent` path as a normal completion. No early break, no special control flow in the adapter.
 
 ```python
 from time import monotonic
@@ -418,6 +418,9 @@ async def run(input_data: RunAgentInput) -> StreamingResponse:
 ```
 
 On the wire, `RunPaused` becomes `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` via the existing `FallbackMapper` — same vocabulary as HITL `Interrupted` events, discriminated by `value.kind`. A client UI that handles `name == "interrupted"` and branches on `value.kind` covers both pause kinds with one handler.
+
+!!! warning "Branch on `value.kind`, not just `name`"
+    `RunPaused` and HITL `Interrupted` share `name="interrupted"`. A client that ignores `value.kind` will treat a soft-timeout as a HITL pause (and may wait for human input that never arrives). For `RunPaused`, `value.kind == "soft_timeout"`; HITL payloads must emit their own discriminator (`InterruptedWithPayload` subclasses are responsible for that).
 
 Resume is implicit: the consumer's "Continue" button issues a new `/run` on the same `thread_id` (with a fresh deadline). LangGraph's checkpointer replays from the last completed node — no `Command(resume=...)` required. Position `deadline` strictly tighter than whichever outer hard cancellation the caller has (`asyncio.wait_for`, SAQ `job_timeout`, LangGraph's own `timeout=`) so the soft boundary fires first.
 

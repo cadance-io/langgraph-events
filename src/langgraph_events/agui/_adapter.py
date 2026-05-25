@@ -23,6 +23,7 @@ from ag_ui.core import (
 )
 
 from langgraph_events._event import Event, Interrupted
+from langgraph_events._internal import _inject_deadline_keys
 from langgraph_events.stream import (
     CustomEventFrame,
     LLMStreamEnd,
@@ -246,11 +247,11 @@ class AGUIAdapter:
     ) -> dict[str, Any]:
         """Build LangGraph config, including passthrough forwarded props.
 
-        When ``deadline`` is provided, the per-run soft-timeout keys are
-        injected into ``configurable`` so the framework router sees them
-        and emits :class:`RunPaused` on expiry.  The keys mirror what
-        :meth:`EventGraph._apply_deadline_kwarg` writes — same contract,
-        single realisation.
+        When ``deadline`` is provided, delegates to
+        :func:`_inject_deadline_keys` (same writer as the
+        :class:`EventGraph` entry points) so the framework router sees
+        the per-run soft-timeout keys and emits :class:`RunPaused` on
+        expiry.
         """
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         forwarded_raw = input_data.forwarded_props
@@ -276,11 +277,8 @@ class AGUIAdapter:
             config = merged
 
         if deadline is not None:
-            import time  # noqa: PLC0415
-
             configurable = dict(config.get("configurable", {}))
-            configurable["__lge_deadline"] = deadline
-            configurable["__lge_deadline_started_at"] = time.monotonic()
+            _inject_deadline_keys(configurable, deadline)
             config["configurable"] = configurable
 
         return config

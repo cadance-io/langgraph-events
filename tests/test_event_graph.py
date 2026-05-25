@@ -3164,6 +3164,43 @@ def describe_EventGraph():
                         events.append(event)
                     assert any(isinstance(e, RunPaused) for e in events)
 
+            def when_resuming_an_interrupted_run():
+
+                def it_respects_deadline_on_the_resume_path():
+                    """``deadline=`` flows through the ``resume()`` entry
+                    point the same way it flows through ``invoke()`` — the
+                    router emits ``RunPaused`` between dispatch rounds.
+                    Pins the contract that the shared
+                    ``_apply_deadline_kwarg`` injector covers the resume
+                    path too.
+                    """
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    class ConfirmationRequested(Interrupted):
+                        pass
+
+                    class Confirmed(IntegrationEvent):
+                        pass
+
+                    @on(Started)
+                    def need_input(event: Started) -> ConfirmationRequested:
+                        return ConfirmationRequested()
+
+                    @on(Confirmed)
+                    def handle_confirm(event: Confirmed) -> Ended:
+                        return Ended(result="confirmed")
+
+                    graph = EventGraph(
+                        [need_input, handle_confirm],
+                        checkpointer=MemorySaver(),
+                    )
+                    config = {"configurable": {"thread_id": "resume-deadline"}}
+                    graph.invoke(Started(data="test"), config=config)
+
+                    log = graph.resume(Confirmed(), config=config, deadline=0.0)
+                    assert log.latest(RunPaused) is not None
+                    assert log.latest(Ended) is None
+
             def when_a_fresh_run_follows_a_paused_run():
 
                 def it_continues_past_the_old_RunPaused():

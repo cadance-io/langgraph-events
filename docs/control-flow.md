@@ -209,6 +209,9 @@ Position `deadline` strictly tighter than whichever hard cancellation the caller
 
 On the AG-UI side, `RunPaused` is forwarded through the existing mapper chain as `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` — same wire vocabulary as HITL pauses, discriminated by `value.kind` (matches the `InterruptedWithPayload` convention). See [AG-UI → Soft-timeout](agui.md).
 
+!!! warning "`name="interrupted"` is shared — branch on `value.kind`"
+    Both `RunPaused` and `Interrupted` (HITL) surface on the wire as `CustomEvent(name="interrupted", ...)`. A client that handles `name == "interrupted"` and ignores `value.kind` will treat soft-timeouts as HITL pauses (and may wait for human input that never comes). Inspect `value.kind` — `"soft_timeout"` for this event; HITL payloads should set their own discriminator (`InterruptedWithPayload` subclasses are responsible for emitting one).
+
 ## Field Matchers
 
 `@on(Event, field=Type)` dispatches only when `event.field` is a `Type` instance; if the handler signature includes a parameter named `field`, the value is injected:

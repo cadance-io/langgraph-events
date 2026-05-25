@@ -49,6 +49,23 @@ _BASE_FIELDS: dict[str, Any] = {
     "_round": int,
 }
 
+# Per-call deadline keys written into LangGraph ``configurable`` by the
+# graph/adapter entry points and read by the router below. Names are
+# centralised so a grep for the constant finds every writer and reader.
+_DEADLINE_KEY = "__lge_deadline"
+_DEADLINE_STARTED_AT_KEY = "__lge_deadline_started_at"
+
+
+def _inject_deadline_keys(configurable: dict[str, Any], deadline: float) -> None:
+    """Write the paired deadline keys into a ``configurable`` dict.
+
+    Single writer for the two-key contract: every entry point that accepts
+    a ``deadline=`` kwarg routes through here so the router can rely on
+    both keys being present.
+    """
+    configurable[_DEADLINE_KEY] = deadline
+    configurable[_DEADLINE_STARTED_AT_KEY] = time.monotonic()
+
 
 class _InputState(TypedDict):
     events: list[Event]
@@ -143,11 +160,9 @@ def make_router_node(
                 "events": [halted],
             }
         configurable = (config or {}).get("configurable", {})
-        deadline = configurable.get("__lge_deadline")
+        deadline = configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
-            started_at = (
-                configurable.get("__lge_deadline_started_at") or time.monotonic()
-            )
+            started_at = configurable[_DEADLINE_STARTED_AT_KEY]
             paused = RunPaused(  # type: ignore[call-arg]
                 elapsed_seconds=time.monotonic() - started_at,
             )

@@ -947,9 +947,9 @@ def describe_AGUIAdapter():
                 assert "elapsed_seconds" in interrupted[0].value
 
             async def it_emits_run_finished_as_the_last_event():
-                """The existing finalize path (drain → RunFinishedEvent at
-                ``_adapter.py:734-738``) still closes the stream cleanly;
-                no early break needed in the adapter.
+                """The existing finalize path inside ``AGUIAdapter.stream``
+                still closes the stream cleanly when the run pauses; no
+                early break needed in the adapter.
                 """
 
                 @on(UserAsked)

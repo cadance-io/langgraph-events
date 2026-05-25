@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import dataclasses
 import inspect
-import time
 import types
 import typing
 import warnings
@@ -41,6 +40,7 @@ from langgraph_events._handler import (
 )
 from langgraph_events._internal import (
     _BASE_FIELDS,
+    _inject_deadline_keys,
     _InputState,
     _OutputState,
     build_state_schema,
@@ -884,19 +884,18 @@ class EventGraph:
     def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
         """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
 
-        Sole source of truth for translating the per-call ``deadline`` kwarg
-        into the ``__lge_deadline`` / ``__lge_deadline_started_at`` keys the
-        router reads.  Callers thread ``deadline`` through any entry point
-        (invoke/ainvoke/resume/aresume/stream_events/...) and the kwarg
-        becomes config so the router sees it via parameter injection.
+        Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
+        and threads it into a copied ``config`` dict, so callers can pass
+        ``deadline=...`` through any entry point
+        (invoke/ainvoke/resume/aresume/stream_events/...) and the router
+        sees it via parameter injection.
         """
         deadline = kwargs.pop("deadline", None)
         if deadline is None:
             return kwargs
         config = dict(kwargs.get("config") or {})
         configurable = dict(config.get("configurable", {}))
-        configurable["__lge_deadline"] = deadline
-        configurable["__lge_deadline_started_at"] = time.monotonic()
+        _inject_deadline_keys(configurable, deadline)
         config["configurable"] = configurable
         kwargs["config"] = config
         return kwargs
