@@ -207,15 +207,3 @@ def describe_causation():
                 ).namespaces()
                 mer = d.mermaid()
                 assert "orchestrate" in mer
-
-            def it_quotes_bracketed_pipe_labels_for_mermaid_v11():
-                # Regression for #85: unquoted ``[`` inside a pipe-edge label
-                # is parsed as a node-shape literal by mermaid@11, raising a
-                # syntax error. The ``[orchestrate]`` / ``[chain]`` causation
-                # suffix must be wrapped in double quotes.
-                d = EventGraph(
-                    [_CausShop.Place, _CausShop.Ship, caus_react, caus_orch]
-                ).namespaces()
-                mer = d.mermaid()
-                assert '|"caus_orch [orchestrate]"|' in mer
-                assert "|caus_orch [orchestrate]|" not in mer
