@@ -47,10 +47,7 @@ _BASE_FIELDS: dict[str, Any] = {
     "_cursor": int,
     "_pending": list[Event],
     "_round": int,
-    # Set True by the router on the first RunPaused emission and reset by
-    # the seed on each fresh /run; gates the router so a single pause maps
-    # to a single event regardless of how many post-pause fan-ins re-enter
-    # the router (issue #88).
+    # Router-side gate: one RunPaused per /run regardless of fan-ins (#88).
     "_run_paused_emitted": bool,
 }
 
@@ -169,12 +166,9 @@ def make_router_node(
         deadline = configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
             if state.get("_run_paused_emitted"):
-                # Already paused this run — late fan-ins from parallel
-                # branches must not re-emit. Drop _pending so dispatch
-                # returns END for this fan-in; events from concurrent
-                # handlers persist in the log via operator.add but are
-                # not dispatched (same in-flight semantic as
-                # MaxRoundsExceeded). See issue #88.
+                # Late fan-ins past the deadline drain without
+                # re-emitting; in-flight events persist via
+                # operator.add. See #88.
                 return {
                     "_cursor": len(state["events"]),
                     "_pending": [],

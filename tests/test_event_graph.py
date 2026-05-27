@@ -3247,21 +3247,62 @@ def describe_EventGraph():
                     assert log2.latest(Ended) is not None
                     assert log2.latest(Ended).result == "second"
 
+            def when_many_parallel_branches_finish_after_the_deadline():
+
+                async def it_emits_RunPaused_exactly_once_per_run():
+                    """End-to-end contract pin for #88: a ``Scatter``
+                    fans out many concurrent async branches; the
+                    deadline expires while every branch is sleeping;
+                    the resulting run carries exactly one
+                    ``RunPaused``. The narrow state-machine
+                    discriminator lives in ``it_routes_late_fan_in_to_END``
+                    below — LangGraph's scheduler batches the fan-in
+                    so this end-to-end test does not by itself catch
+                    a regression where the router re-emits per
+                    invocation (the issue author noted the same gap
+                    in their own integration suite). Keep both: this
+                    one guards the user-visible contract, the unit
+                    test guards the state machine.
+                    """
+
+                    class FanOut(IntegrationEvent):
+                        pass
+
+                    class Work(IntegrationEvent):
+                        n: int = 0
+
+                    class WorkDone(IntegrationEvent):
+                        n: int = 0
+
+                    @on(FanOut)
+                    def split(event: FanOut) -> Scatter[Work]:
+                        return Scatter([Work(n=i) for i in range(8)])
+
+                    @on(Work)
+                    async def do_work(event: Work) -> WorkDone:
+                        await asyncio.sleep(0.05)
+                        return WorkDone(n=event.n)
+
+                    graph = EventGraph([split, do_work])
+                    log = await graph.ainvoke(
+                        FanOut(), deadline=time.monotonic() + 0.005
+                    )
+                    count = log.count(RunPaused)
+                    assert count == 1, (
+                        f"expected exactly one RunPaused per /run, got "
+                        f"{count}: {log.filter(RunPaused)!r}"
+                    )
+
             def when_the_router_is_re_entered_after_the_deadline():
 
-                def it_emits_RunPaused_at_most_once_per_run():
-                    """Regression for #88: the router must emit
-                    ``RunPaused`` at most once per ``/run`` even if it
-                    is re-invoked while the deadline is still expired.
-
-                    The end-to-end LangGraph schedule batches parallel
-                    fan-ins, so the production multi-emission
-                    (~1000 events in a single pause) is hard to model
-                    via two parallel handlers in a unit test. The
-                    state-machine contract is, however, exactly
-                    once-per-run regardless of how many times the
-                    router is invoked: this test exercises that
-                    contract directly against ``make_router_node``.
+                def it_routes_late_fan_in_to_END():
+                    """Direct contract test for the once-per-pause
+                    state machine in ``make_router_node``. Once the
+                    router has emitted ``RunPaused`` in a run, any
+                    subsequent invocation while the deadline is still
+                    expired must return an empty ``_pending`` (so
+                    ``dispatch`` returns ``END``) and must not append
+                    another ``RunPaused`` to the events channel.
                     """
                     from langgraph_events._internal import (
                         _DEADLINE_KEY,
@@ -3277,107 +3318,81 @@ def describe_EventGraph():
                             _DEADLINE_STARTED_AT_KEY: now - 2,
                         }
                     }
-
-                    # First call: deadline expired, no prior pause —
-                    # router must emit RunPaused.
                     state: dict[str, typing.Any] = {
                         "events": [Started(data="seed")],
                         "_cursor": 1,
                         "_round": 1,
                     }
-                    result1 = router(state, config)
-                    pauses1 = [
-                        e for e in result1.get("events", []) if isinstance(e, RunPaused)
-                    ]
-                    assert len(pauses1) == 1
 
-                    # Simulate post-merge state (operator.add applied
-                    # by LangGraph) plus a late-arriving event from a
-                    # parallel handler that fanned in after the pause.
-                    merged_events = [
-                        *state["events"],
-                        *result1.get("events", []),
-                        Processed(data="late-fan-in"),
-                    ]
-                    state2: dict[str, typing.Any] = {
-                        **state,
-                        "events": merged_events,
-                        "_cursor": result1["_cursor"],
-                        "_round": result1["_round"],
-                    }
-                    for key in ("_run_paused_emitted",):
-                        if key in result1:
-                            state2[key] = result1[key]
-
-                    # Second call: deadline still expired AND the
-                    # router was already paused this run — must NOT
-                    # emit another RunPaused.
-                    result2 = router(state2, config)
-                    pauses2 = [
-                        e for e in result2.get("events", []) if isinstance(e, RunPaused)
-                    ]
-                    assert pauses2 == [], (
-                        f"router re-emitted {len(pauses2)} additional "
-                        f"RunPaused on re-entry while already paused (#88)."
+                    first = router(state, config)
+                    assert [e for e in first["events"] if isinstance(e, RunPaused)], (
+                        "first invocation past the deadline must emit"
                     )
 
-            def when_a_user_reducer_projects_RunPaused_into_messages():
+                    late = router(
+                        {
+                            **state,
+                            "events": [
+                                *state["events"],
+                                *first["events"],
+                                Processed(data="late-fan-in"),
+                            ],
+                            "_cursor": first["_cursor"],
+                            "_round": first["_round"],
+                            "_run_paused_emitted": first["_run_paused_emitted"],
+                        },
+                        config,
+                    )
+                    assert late.get("_pending") == []
+                    assert "events" not in late, (
+                        f"late fan-in must not append another RunPaused; "
+                        f"got events={late.get('events')!r}"
+                    )
 
-                def it_yields_exactly_one_system_message_per_pause():
-                    """DX pin for #88: the documented user-side
-                    pattern — a ``Reducer`` whose ``event_type``
-                    spans both ``MessageEvent`` and ``RunPaused``,
-                    mapping the pause into an inline ``SystemMessage``
-                    — must produce exactly one contribution per
-                    pause.
+            def when_two_consecutive_runs_each_expire_their_deadline():
 
-                    Pre-fix, the router re-emitted ``RunPaused`` on
-                    every fan-in past the deadline; each emission
-                    carried a fresh ``elapsed_seconds`` so id-based
-                    dedup (``add_messages``) could not collapse the
-                    duplicates and the channel accumulated one entry
-                    per emission. Post-fix the channel holds a single
-                    inline notice — this test pins the projection
-                    contract that consumers rely on.
+                def it_pauses_again_on_the_second_run():
+                    """The once-per-pause gate is scoped to a single
+                    ``/run``, not to the lifetime of the thread.  Seed
+                    must reset ``_run_paused_emitted`` so a subsequent
+                    ``/run`` on the same ``thread_id`` can pause again
+                    if its own deadline expires.  Without the reset,
+                    the second run would inherit a stuck flag and
+                    drain silently with no ``RunPaused`` event.
                     """
-                    from langgraph.graph.message import add_messages
+                    from langgraph.checkpoint.memory import MemorySaver
 
-                    def project(event: Event) -> list[BaseMessage]:
-                        if isinstance(event, MessageEvent):
-                            return event.as_messages()
-                        if isinstance(event, RunPaused):
-                            return [
-                                SystemMessage(
-                                    id=(f"sys-paused-{event.elapsed_seconds:.6f}"),
-                                    content=(
-                                        f"paused after {round(event.elapsed_seconds)}s"
-                                    ),
-                                )
-                            ]
-                        return []
+                    @on(Started)
+                    def to_processed(event: Started) -> Processed:
+                        return Processed(data=event.data)
 
-                    messages = Reducer(
-                        name="messages",
-                        event_type=(MessageEvent, RunPaused),  # type: ignore[arg-type]
-                        fn=project,
-                        reducer=add_messages,
-                        default=[],
-                    )
+                    @on(MessageReceived)
+                    def to_ended(event: MessageReceived) -> Ended:
+                        return Ended(result=event.text)
 
-                    # With the once-per-pause router fix, a single
-                    # /run's event log contains exactly one RunPaused;
-                    # this is what the reducer ``collect`` sees and
-                    # what ``add_messages`` then dedups.
-                    paused = RunPaused(  # type: ignore[call-arg]
-                        elapsed_seconds=3.0,
+                    graph = EventGraph(
+                        [to_processed, to_ended],
+                        checkpointer=MemorySaver(),
                     )
-                    contributions = messages.collect([paused])
-                    assert len(contributions) == 1, (
-                        f"expected 1 SystemMessage contribution, got "
-                        f"{len(contributions)}"
+                    config = {"configurable": {"thread_id": "double-pause"}}
+
+                    log1 = graph.invoke(
+                        Started(data="first"), deadline=0.0, config=config
                     )
-                    assert isinstance(contributions[0], SystemMessage)
-                    assert contributions[0].content == "paused after 3s"
+                    assert log1.count(RunPaused) == 1
+
+                    log2 = graph.invoke(
+                        MessageReceived(text="second"),
+                        deadline=0.0,
+                        config=config,
+                    )
+                    # log2 includes the events from log1 (checkpoint
+                    # restore), so filter to the new pause.
+                    pauses = log2.filter(RunPaused)
+                    assert len(pauses) == 2, (
+                        f"second /run must produce its own RunPaused; "
+                        f"got {len(pauses)} pause(s) in log2"
+                    )
 
         def describe_cancellation():
 
