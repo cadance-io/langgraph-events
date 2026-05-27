@@ -1,6 +1,7 @@
 """Integration tests for EventGraph — the full event-driven graph engine."""
 
 import asyncio
+import time
 import typing
 import warnings
 
@@ -3245,6 +3246,138 @@ def describe_EventGraph():
                     )
                     assert log2.latest(Ended) is not None
                     assert log2.latest(Ended).result == "second"
+
+            def when_the_router_is_re_entered_after_the_deadline():
+
+                def it_emits_RunPaused_at_most_once_per_run():
+                    """Regression for #88: the router must emit
+                    ``RunPaused`` at most once per ``/run`` even if it
+                    is re-invoked while the deadline is still expired.
+
+                    The end-to-end LangGraph schedule batches parallel
+                    fan-ins, so the production multi-emission
+                    (~1000 events in a single pause) is hard to model
+                    via two parallel handlers in a unit test. The
+                    state-machine contract is, however, exactly
+                    once-per-run regardless of how many times the
+                    router is invoked: this test exercises that
+                    contract directly against ``make_router_node``.
+                    """
+                    from langgraph_events._internal import (
+                        _DEADLINE_KEY,
+                        _DEADLINE_STARTED_AT_KEY,
+                        make_router_node,
+                    )
+
+                    router = make_router_node(max_rounds=100)
+                    now = time.monotonic()
+                    config: dict[str, typing.Any] = {
+                        "configurable": {
+                            _DEADLINE_KEY: now - 1,
+                            _DEADLINE_STARTED_AT_KEY: now - 2,
+                        }
+                    }
+
+                    # First call: deadline expired, no prior pause —
+                    # router must emit RunPaused.
+                    state: dict[str, typing.Any] = {
+                        "events": [Started(data="seed")],
+                        "_cursor": 1,
+                        "_round": 1,
+                    }
+                    result1 = router(state, config)
+                    pauses1 = [
+                        e for e in result1.get("events", []) if isinstance(e, RunPaused)
+                    ]
+                    assert len(pauses1) == 1
+
+                    # Simulate post-merge state (operator.add applied
+                    # by LangGraph) plus a late-arriving event from a
+                    # parallel handler that fanned in after the pause.
+                    merged_events = [
+                        *state["events"],
+                        *result1.get("events", []),
+                        Processed(data="late-fan-in"),
+                    ]
+                    state2: dict[str, typing.Any] = {
+                        **state,
+                        "events": merged_events,
+                        "_cursor": result1["_cursor"],
+                        "_round": result1["_round"],
+                    }
+                    for key in ("_run_paused_emitted",):
+                        if key in result1:
+                            state2[key] = result1[key]
+
+                    # Second call: deadline still expired AND the
+                    # router was already paused this run — must NOT
+                    # emit another RunPaused.
+                    result2 = router(state2, config)
+                    pauses2 = [
+                        e for e in result2.get("events", []) if isinstance(e, RunPaused)
+                    ]
+                    assert pauses2 == [], (
+                        f"router re-emitted {len(pauses2)} additional "
+                        f"RunPaused on re-entry while already paused (#88)."
+                    )
+
+            def when_a_user_reducer_projects_RunPaused_into_messages():
+
+                def it_yields_exactly_one_system_message_per_pause():
+                    """DX pin for #88: the documented user-side
+                    pattern — a ``Reducer`` whose ``event_type``
+                    spans both ``MessageEvent`` and ``RunPaused``,
+                    mapping the pause into an inline ``SystemMessage``
+                    — must produce exactly one contribution per
+                    pause.
+
+                    Pre-fix, the router re-emitted ``RunPaused`` on
+                    every fan-in past the deadline; each emission
+                    carried a fresh ``elapsed_seconds`` so id-based
+                    dedup (``add_messages``) could not collapse the
+                    duplicates and the channel accumulated one entry
+                    per emission. Post-fix the channel holds a single
+                    inline notice — this test pins the projection
+                    contract that consumers rely on.
+                    """
+                    from langgraph.graph.message import add_messages
+
+                    def project(event: Event) -> list[BaseMessage]:
+                        if isinstance(event, MessageEvent):
+                            return event.as_messages()
+                        if isinstance(event, RunPaused):
+                            return [
+                                SystemMessage(
+                                    id=(f"sys-paused-{event.elapsed_seconds:.6f}"),
+                                    content=(
+                                        f"paused after {round(event.elapsed_seconds)}s"
+                                    ),
+                                )
+                            ]
+                        return []
+
+                    messages = Reducer(
+                        name="messages",
+                        event_type=(MessageEvent, RunPaused),  # type: ignore[arg-type]
+                        fn=project,
+                        reducer=add_messages,
+                        default=[],
+                    )
+
+                    # With the once-per-pause router fix, a single
+                    # /run's event log contains exactly one RunPaused;
+                    # this is what the reducer ``collect`` sees and
+                    # what ``add_messages`` then dedups.
+                    paused = RunPaused(  # type: ignore[call-arg]
+                        elapsed_seconds=3.0,
+                    )
+                    contributions = messages.collect([paused])
+                    assert len(contributions) == 1, (
+                        f"expected 1 SystemMessage contribution, got "
+                        f"{len(contributions)}"
+                    )
+                    assert isinstance(contributions[0], SystemMessage)
+                    assert contributions[0].content == "paused after 3s"
 
         def describe_cancellation():
 

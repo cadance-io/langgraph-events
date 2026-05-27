@@ -47,6 +47,11 @@ _BASE_FIELDS: dict[str, Any] = {
     "_cursor": int,
     "_pending": list[Event],
     "_round": int,
+    # Set True by the router on the first RunPaused emission and reset by
+    # the seed on each fresh /run; gates the router so a single pause maps
+    # to a single event regardless of how many post-pause fan-ins re-enter
+    # the router (issue #88).
+    "_run_paused_emitted": bool,
 }
 
 # Per-call deadline keys written into LangGraph ``configurable`` by the
@@ -112,6 +117,7 @@ def make_seed_node(
             "_cursor": len(all_events),
             "_pending": new_events,
             "_round": 0,
+            "_run_paused_emitted": False,
         }
         if reds:
             if prev_cursor == 0:
@@ -162,6 +168,18 @@ def make_router_node(
         configurable = (config or {}).get("configurable", {})
         deadline = configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
+            if state.get("_run_paused_emitted"):
+                # Already paused this run — late fan-ins from parallel
+                # branches must not re-emit. Drop _pending so dispatch
+                # returns END for this fan-in; events from concurrent
+                # handlers persist in the log via operator.add but are
+                # not dispatched (same in-flight semantic as
+                # MaxRoundsExceeded). See issue #88.
+                return {
+                    "_cursor": len(state["events"]),
+                    "_pending": [],
+                    "_round": current_round,
+                }
             started_at = configurable[_DEADLINE_STARTED_AT_KEY]
             paused = RunPaused(  # type: ignore[call-arg]
                 elapsed_seconds=time.monotonic() - started_at,
@@ -175,6 +193,7 @@ def make_router_node(
                 "_pending": [paused],
                 "_round": current_round,
                 "events": [paused],
+                "_run_paused_emitted": True,
             }
         return {
             "_cursor": len(state["events"]),

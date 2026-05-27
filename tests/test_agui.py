@@ -23,6 +23,7 @@ from langgraph_events import (
     IntegrationEvent,
     Interrupted,
     MessageEvent,
+    RunPaused,
     message_reducer,
     on,
 )
@@ -914,13 +915,19 @@ def describe_AGUIAdapter():
 
         def when_deadline_is_already_expired():
 
-            async def it_emits_a_custom_event_named_interrupted():
-                """RunPaused emitted by the router maps through the existing
-                mapper chain (FallbackMapper picks it up via the
-                ``agui_event_name`` / ``agui_dict`` duck-typed protocols) to
-                a ``CustomEvent(name="interrupted", value={"kind":
-                "soft_timeout", ...})``.  Same wire vocabulary as HITL
-                pauses, discriminated by ``value.kind``.
+            async def it_does_not_emit_RunPaused_on_the_wire_by_default():
+                """Issue #88 DX change: ``RunPaused`` no longer
+                masquerades as ``CustomEvent(name="interrupted")``
+                on the wire. The class intentionally does not
+                implement ``agui_dict`` / ``agui_event_name``, so
+                ``FallbackMapper`` suppresses it (with the standard
+                one-time warning). Apps that want a wire signal opt
+                in by registering their own ``EventMapper``.
+
+                This removes the previous overload with HITL
+                ``Interrupted`` events (which legitimately share
+                ``name="interrupted"``) and hands wire shape control
+                back to the application.
                 """
 
                 @on(UserAsked)
@@ -933,18 +940,75 @@ def describe_AGUIAdapter():
                     seed_factory=lambda inp: UserAsked(question="hi"),
                 )
 
-                events: list[BaseEvent] = []
-                async for event in adapter.stream(_make_input(), deadline=0.0):
-                    events.append(event)
+                # Reset the one-time warning cache so this test is
+                # order-independent.
+                _warned_classes.discard(RunPaused)
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    events: list[BaseEvent] = []
+                    async for event in adapter.stream(_make_input(), deadline=0.0):
+                        events.append(event)
 
                 interrupted = [
                     e
                     for e in events
-                    if e.type == EventType.CUSTOM and e.name == "interrupted"
+                    if e.type == EventType.CUSTOM
+                    and e.name == "interrupted"
+                    and e.value.get("kind") == "soft_timeout"
                 ]
-                assert len(interrupted) == 1
-                assert interrupted[0].value["kind"] == "soft_timeout"
-                assert "elapsed_seconds" in interrupted[0].value
+                assert interrupted == [], (
+                    'RunPaused must not emit CustomEvent(name="interrupted", '
+                    f'kind="soft_timeout") by default; got {interrupted!r}'
+                )
+
+            async def it_supports_a_user_mapper_to_surface_RunPaused():
+                """Counterpart to the suppression default: an app that
+                wants RunPaused on the wire registers a custom
+                ``EventMapper``. This is the supported DX path per #88.
+                """
+
+                class PauseMapper:
+                    def map(
+                        self, event: Event, ctx: MapperContext
+                    ) -> list[BaseEvent] | None:
+                        if not isinstance(event, RunPaused):
+                            return None
+                        return [
+                            CustomEvent(
+                                type=EventType.CUSTOM,
+                                name="run.paused",
+                                value={
+                                    "elapsed_seconds": event.elapsed_seconds,
+                                },
+                            )
+                        ]
+
+                @on(UserAsked)
+                def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hi"))
+
+                graph = EventGraph([reply], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="hi"),
+                    mappers=[PauseMapper()],
+                )
+
+                events: list[BaseEvent] = []
+                async for event in adapter.stream(_make_input(), deadline=0.0):
+                    events.append(event)
+
+                paused = [
+                    e
+                    for e in events
+                    if e.type == EventType.CUSTOM and e.name == "run.paused"
+                ]
+                assert len(paused) == 1, (
+                    f"expected 1 run.paused CustomEvent via the user "
+                    f"mapper, got {len(paused)}"
+                )
+                assert "elapsed_seconds" in paused[0].value
 
             async def it_emits_run_finished_as_the_last_event():
                 """The existing finalize path inside ``AGUIAdapter.stream``

@@ -417,10 +417,31 @@ async def run(input_data: RunAgentInput) -> StreamingResponse:
     )
 ```
 
-On the wire, `RunPaused` becomes `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` via the existing `FallbackMapper` — same vocabulary as HITL `Interrupted` events, discriminated by `value.kind`. A client UI that handles `name == "interrupted"` and branches on `value.kind` covers both pause kinds with one handler.
+`RunPaused` is **not surfaced on the AG-UI wire by default** (#88). The class deliberately does not implement `AGUISerializable`, so `FallbackMapper` skips it (one-time warning). The previous default — `CustomEvent(name="interrupted", value={"kind": "soft_timeout", …})` — collided with HITL `Interrupted` events on the same wire name and forced every client to branch on `value.kind`. Apps that want a pause signal on the wire register their own mapper and pick a wire shape that suits their frontend:
 
-!!! warning "Branch on `value.kind`, not just `name`"
-    `RunPaused` and HITL `Interrupted` share `name="interrupted"`. A client that ignores `value.kind` will treat a soft-timeout as a HITL pause (and may wait for human input that never arrives). For `RunPaused`, `value.kind == "soft_timeout"`; HITL payloads must emit their own discriminator (`InterruptedWithPayload` subclasses are responsible for that).
+```python
+from ag_ui.core import BaseEvent, CustomEvent, EventType
+from langgraph_events import Event, RunPaused
+from langgraph_events.agui import EventMapper, MapperContext
+
+
+class PauseMapper:
+    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+        if not isinstance(event, RunPaused):
+            return None
+        return [
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="run.paused",
+                value={"elapsed_seconds": event.elapsed_seconds},
+            )
+        ]
+
+
+adapter = AGUIAdapter(graph, seed_factory=..., mappers=[PauseMapper()])
+```
+
+For an inline pause notice in the message channel (no custom wire event needed), see the reducer recipe in [Control Flow → Surfacing the pause inline](control-flow.md#surfacing-the-pause-inline).
 
 Resume is implicit: the consumer's "Continue" button issues a new `/run` on the same `thread_id` (with a fresh deadline). LangGraph's checkpointer replays from the last completed node — no `Command(resume=...)` required. Position `deadline` strictly tighter than whichever outer hard cancellation the caller has (`asyncio.wait_for`, SAQ `job_timeout`, LangGraph's own `timeout=`) so the soft boundary fires first.
 

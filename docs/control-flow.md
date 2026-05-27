@@ -207,10 +207,40 @@ Unlike `MaxRoundsExceeded`, `RunPaused` is **not terminal across runs**: the rou
 
 Position `deadline` strictly tighter than whichever hard cancellation the caller already has (`asyncio.wait_for`, SAQ `job_timeout`, LangGraph's `timeout=`) so the soft boundary fires first and the wire-format finalize path runs cleanly. In-flight events from the round when the deadline fires are persisted in the event log but not dispatched — same drop-on-pause semantic as `MaxRoundsExceeded`. Handlers should produce events such that a clean round-boundary stop leaves recoverable state.
 
-On the AG-UI side, `RunPaused` is forwarded through the existing mapper chain as `CustomEvent(name="interrupted", value={"kind": "soft_timeout", "elapsed_seconds": …})` — same wire vocabulary as HITL pauses, discriminated by `value.kind` (matches the `InterruptedWithPayload` convention). See [AG-UI → Soft-timeout](agui.md).
+`RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
 
-!!! warning "`name="interrupted"` is shared — branch on `value.kind`"
-    Both `RunPaused` and `Interrupted` (HITL) surface on the wire as `CustomEvent(name="interrupted", ...)`. A client that handles `name == "interrupted"` and ignores `value.kind` will treat soft-timeouts as HITL pauses (and may wait for human input that never comes). Inspect `value.kind` — `"soft_timeout"` for this event; HITL payloads should set their own discriminator (`InterruptedWithPayload` subclasses are responsible for emitting one).
+### Surfacing the pause inline
+
+A `RunPaused` is just an event in the log. To turn it into a user-visible system message in the same channel as your chat history, register a custom reducer that handles both `MessageEvent` and `RunPaused`:
+
+```python
+from langchain_core.messages import BaseMessage, SystemMessage
+from langgraph.graph.message import add_messages
+from langgraph_events import Event, MessageEvent, Reducer, RunPaused
+
+def project(event: Event) -> list[BaseMessage]:
+    if isinstance(event, MessageEvent):
+        return event.as_messages()
+    if isinstance(event, RunPaused):
+        return [SystemMessage(
+            id=f"sys-paused-{event.elapsed_seconds:.6f}",
+            content=f"Paused after {round(event.elapsed_seconds)}s. "
+                    f"Send a follow-up to continue.",
+        )]
+    return []
+
+messages = Reducer(
+    name="messages",
+    event_type=(MessageEvent, RunPaused),
+    fn=project,
+    reducer=add_messages,
+    default=[],
+)
+```
+
+### AG-UI wire shape
+
+`RunPaused` is intentionally **not** surfaced on the AG-UI wire by default. There is no built-in mapping: `FallbackMapper` skips it (one-time warning) because the previous `CustomEvent(name="interrupted", value={"kind": "soft_timeout", …})` overload collided with HITL `Interrupted` events on the same wire name. Apps that want a pause signal on the wire register their own `EventMapper` — see [AG-UI → Custom Mappers](agui.md#custom-mappers).
 
 ## Field Matchers
 
