@@ -3250,19 +3250,9 @@ def describe_EventGraph():
             def when_many_parallel_branches_finish_after_the_deadline():
 
                 async def it_emits_RunPaused_exactly_once_per_run():
-                    """End-to-end contract pin for #88: a ``Scatter``
-                    fans out many concurrent async branches; the
-                    deadline expires while every branch is sleeping;
-                    the resulting run carries exactly one
-                    ``RunPaused``. The narrow state-machine
-                    discriminator lives in ``it_routes_late_fan_in_to_END``
-                    below — LangGraph's scheduler batches the fan-in
-                    so this end-to-end test does not by itself catch
-                    a regression where the router re-emits per
-                    invocation (the issue author noted the same gap
-                    in their own integration suite). Keep both: this
-                    one guards the user-visible contract, the unit
-                    test guards the state machine.
+                    """End-to-end pin: parallel work past the deadline
+                    yields exactly one ``RunPaused``. The state-machine
+                    discriminator is :func:`it_routes_late_fan_in_to_END`.
                     """
 
                     class FanOut(IntegrationEvent):
@@ -3274,19 +3264,32 @@ def describe_EventGraph():
                     class WorkDone(IntegrationEvent):
                         n: int = 0
 
+                    proceed = asyncio.Event()
+
                     @on(FanOut)
                     def split(event: FanOut) -> Scatter[Work]:
                         return Scatter([Work(n=i) for i in range(8)])
 
                     @on(Work)
                     async def do_work(event: Work) -> WorkDone:
-                        await asyncio.sleep(0.05)
+                        await proceed.wait()
                         return WorkDone(n=event.n)
 
                     graph = EventGraph([split, do_work])
-                    log = await graph.ainvoke(
-                        FanOut(), deadline=time.monotonic() + 0.005
-                    )
+                    deadline = time.monotonic() + 0.005
+
+                    async def release_after_deadline() -> None:
+                        remaining = deadline - time.monotonic()
+                        if remaining > 0:
+                            await asyncio.sleep(remaining + 0.002)
+                        assert time.monotonic() >= deadline
+                        proceed.set()
+
+                    releaser = asyncio.create_task(release_after_deadline())
+                    try:
+                        log = await graph.ainvoke(FanOut(), deadline=deadline)
+                    finally:
+                        await releaser
                     count = log.count(RunPaused)
                     assert count == 1, (
                         f"expected exactly one RunPaused per /run, got "
@@ -3344,9 +3347,12 @@ def describe_EventGraph():
                         config,
                     )
                     assert late.get("_pending") == []
-                    assert "events" not in late, (
+                    late_pauses = [
+                        e for e in late.get("events", []) if isinstance(e, RunPaused)
+                    ]
+                    assert late_pauses == [], (
                         f"late fan-in must not append another RunPaused; "
-                        f"got events={late.get('events')!r}"
+                        f"got {late_pauses!r}"
                     )
 
             def when_two_consecutive_runs_each_expire_their_deadline():
