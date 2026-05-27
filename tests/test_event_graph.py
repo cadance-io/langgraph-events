@@ -1,6 +1,7 @@
 """Integration tests for EventGraph — the full event-driven graph engine."""
 
 import asyncio
+import time
 import typing
 import warnings
 
@@ -3245,6 +3246,159 @@ def describe_EventGraph():
                     )
                     assert log2.latest(Ended) is not None
                     assert log2.latest(Ended).result == "second"
+
+            def when_many_parallel_branches_finish_after_the_deadline():
+
+                async def it_emits_RunPaused_exactly_once_per_run():
+                    """End-to-end pin: parallel work past the deadline
+                    yields exactly one ``RunPaused``. The state-machine
+                    discriminator is :func:`it_routes_late_fan_in_to_END`.
+                    """
+
+                    class FanOut(IntegrationEvent):
+                        pass
+
+                    class Work(IntegrationEvent):
+                        n: int = 0
+
+                    class WorkDone(IntegrationEvent):
+                        n: int = 0
+
+                    proceed = asyncio.Event()
+
+                    @on(FanOut)
+                    def split(event: FanOut) -> Scatter[Work]:
+                        return Scatter([Work(n=i) for i in range(8)])
+
+                    @on(Work)
+                    async def do_work(event: Work) -> WorkDone:
+                        await proceed.wait()
+                        return WorkDone(n=event.n)
+
+                    graph = EventGraph([split, do_work])
+                    deadline = time.monotonic() + 0.005
+
+                    async def release_after_deadline() -> None:
+                        remaining = deadline - time.monotonic()
+                        if remaining > 0:
+                            await asyncio.sleep(remaining + 0.002)
+                        assert time.monotonic() >= deadline
+                        proceed.set()
+
+                    releaser = asyncio.create_task(release_after_deadline())
+                    try:
+                        log = await graph.ainvoke(FanOut(), deadline=deadline)
+                    finally:
+                        await releaser
+                    count = log.count(RunPaused)
+                    assert count == 1, (
+                        f"expected exactly one RunPaused per /run, got "
+                        f"{count}: {log.filter(RunPaused)!r}"
+                    )
+
+            def when_the_router_is_re_entered_after_the_deadline():
+
+                def it_routes_late_fan_in_to_END():
+                    """Direct contract test for the once-per-pause
+                    state machine in ``make_router_node``. Once the
+                    router has emitted ``RunPaused`` in a run, any
+                    subsequent invocation while the deadline is still
+                    expired must return an empty ``_pending`` (so
+                    ``dispatch`` returns ``END``) and must not append
+                    another ``RunPaused`` to the events channel.
+                    """
+                    from langgraph_events._internal import (
+                        _DEADLINE_KEY,
+                        _DEADLINE_STARTED_AT_KEY,
+                        make_router_node,
+                    )
+
+                    router = make_router_node(max_rounds=100)
+                    now = time.monotonic()
+                    config: dict[str, typing.Any] = {
+                        "configurable": {
+                            _DEADLINE_KEY: now - 1,
+                            _DEADLINE_STARTED_AT_KEY: now - 2,
+                        }
+                    }
+                    state: dict[str, typing.Any] = {
+                        "events": [Started(data="seed")],
+                        "_cursor": 1,
+                        "_round": 1,
+                    }
+
+                    first = router(state, config)
+                    assert [e for e in first["events"] if isinstance(e, RunPaused)], (
+                        "first invocation past the deadline must emit"
+                    )
+
+                    late = router(
+                        {
+                            **state,
+                            "events": [
+                                *state["events"],
+                                *first["events"],
+                                Processed(data="late-fan-in"),
+                            ],
+                            "_cursor": first["_cursor"],
+                            "_round": first["_round"],
+                            "_run_paused_emitted": first["_run_paused_emitted"],
+                        },
+                        config,
+                    )
+                    assert late.get("_pending") == []
+                    late_pauses = [
+                        e for e in late.get("events", []) if isinstance(e, RunPaused)
+                    ]
+                    assert late_pauses == [], (
+                        f"late fan-in must not append another RunPaused; "
+                        f"got {late_pauses!r}"
+                    )
+
+            def when_two_consecutive_runs_each_expire_their_deadline():
+
+                def it_pauses_again_on_the_second_run():
+                    """The once-per-pause gate is scoped to a single
+                    ``/run``, not to the lifetime of the thread.  Seed
+                    must reset ``_run_paused_emitted`` so a subsequent
+                    ``/run`` on the same ``thread_id`` can pause again
+                    if its own deadline expires.  Without the reset,
+                    the second run would inherit a stuck flag and
+                    drain silently with no ``RunPaused`` event.
+                    """
+                    from langgraph.checkpoint.memory import MemorySaver
+
+                    @on(Started)
+                    def to_processed(event: Started) -> Processed:
+                        return Processed(data=event.data)
+
+                    @on(MessageReceived)
+                    def to_ended(event: MessageReceived) -> Ended:
+                        return Ended(result=event.text)
+
+                    graph = EventGraph(
+                        [to_processed, to_ended],
+                        checkpointer=MemorySaver(),
+                    )
+                    config = {"configurable": {"thread_id": "double-pause"}}
+
+                    log1 = graph.invoke(
+                        Started(data="first"), deadline=0.0, config=config
+                    )
+                    assert log1.count(RunPaused) == 1
+
+                    log2 = graph.invoke(
+                        MessageReceived(text="second"),
+                        deadline=0.0,
+                        config=config,
+                    )
+                    # log2 includes the events from log1 (checkpoint
+                    # restore), so filter to the new pause.
+                    pauses = log2.filter(RunPaused)
+                    assert len(pauses) == 2, (
+                        f"second /run must produce its own RunPaused; "
+                        f"got {len(pauses)} pause(s) in log2"
+                    )
 
         def describe_cancellation():
 

@@ -47,6 +47,8 @@ _BASE_FIELDS: dict[str, Any] = {
     "_cursor": int,
     "_pending": list[Event],
     "_round": int,
+    # Router-side gate: one RunPaused per /run regardless of fan-ins (#88).
+    "_run_paused_emitted": bool,
 }
 
 # Per-call deadline keys written into LangGraph ``configurable`` by the
@@ -112,6 +114,7 @@ def make_seed_node(
             "_cursor": len(all_events),
             "_pending": new_events,
             "_round": 0,
+            "_run_paused_emitted": False,
         }
         if reds:
             if prev_cursor == 0:
@@ -162,6 +165,15 @@ def make_router_node(
         configurable = (config or {}).get("configurable", {})
         deadline = configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
+            if state.get("_run_paused_emitted"):
+                # Late fan-ins past the deadline drain without
+                # re-emitting; in-flight events persist via
+                # operator.add. See #88.
+                return {
+                    "_cursor": len(state["events"]),
+                    "_pending": [],
+                    "_round": current_round,
+                }
             started_at = configurable[_DEADLINE_STARTED_AT_KEY]
             paused = RunPaused(  # type: ignore[call-arg]
                 elapsed_seconds=time.monotonic() - started_at,
@@ -175,6 +187,7 @@ def make_router_node(
                 "_pending": [paused],
                 "_round": current_round,
                 "events": [paused],
+                "_run_paused_emitted": True,
             }
         return {
             "_cursor": len(state["events"]),

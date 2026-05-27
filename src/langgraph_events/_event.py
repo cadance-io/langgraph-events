@@ -593,21 +593,15 @@ class RunPaused(SystemEvent):
     dispatched at the time the deadline fired are persisted in the event
     log but not dispatched — same semantic as :class:`MaxRoundsExceeded`.
 
-    AG-UI wire format: the ``agui_event_name`` / ``agui_dict`` pair makes
-    ``FallbackMapper`` emit ``CustomEvent(name="interrupted", value={"kind":
-    "soft_timeout", "elapsed_seconds": …})`` — same wire vocabulary as
-    HITL pauses, discriminated by ``value.kind`` (matches the documented
-    ``InterruptedWithPayload`` convention).
+    AG-UI wire format: ``RunPaused`` intentionally does **not** implement
+    the ``AGUISerializable`` protocol, so :class:`agui.FallbackMapper`
+    suppresses it (one-time warning, same as any non-serializable event).
+    Apps that want a wire signal register a custom ``EventMapper`` via
+    ``AGUIAdapter(mappers=[…])`` and choose the event name / payload that
+    fits their frontend — there is no default mapping, by design (#88).
     """
 
     elapsed_seconds: float = 0.0
-
-    @property
-    def agui_event_name(self) -> str:
-        return "interrupted"
-
-    def agui_dict(self) -> dict[str, Any]:
-        return {"kind": "soft_timeout", "elapsed_seconds": self.elapsed_seconds}
 
 
 class Interrupted(SystemEvent):

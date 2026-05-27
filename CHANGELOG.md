@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`RunPaused` is now emitted at most once per `/run`** (#88). Pre-fix, the router re-emitted `RunPaused` on every router invocation while `time.monotonic() >= deadline`, so any parallel handlers still in flight when the deadline expired could each fan-in and trigger another emission. Each instance carried a fresh `elapsed_seconds`, defeating id-based dedup in any reducer projecting `RunPaused` into a downstream channel (e.g. inline pause-notice messages accumulated one entry per emission instead of one per pause). The router now tracks a `_run_paused_emitted` flag on the state; late fan-ins past the deadline drain cleanly without re-emitting. The seed resets the flag for each fresh `/run` so subsequent runs on the same `thread_id` work normally.
+
+### Changed
+- **`RunPaused` no longer has a default AG-UI wire mapping** (breaking — #88). The class no longer implements `agui_event_name` / `agui_dict()`, so `FallbackMapper` skips it (one-time warning) instead of emitting `CustomEvent(name="interrupted", value={"kind": "soft_timeout", …})`. The previous default collided on the wire with HITL `Interrupted` events (same `name="interrupted"`, discriminated by `value.kind`) and forced every client to branch on the discriminator. Apps that want a pause signal on the wire register a custom mapper and choose the shape themselves:
+  ```python
+  from ag_ui.core import CustomEvent, EventType
+  from langgraph_events import RunPaused
+
+  class PauseMapper:
+      def map(self, event, ctx):
+          if not isinstance(event, RunPaused):
+              return None
+          return [CustomEvent(
+              type=EventType.CUSTOM,
+              name="run.paused",
+              value={"elapsed_seconds": event.elapsed_seconds},
+          )]
+
+  adapter = AGUIAdapter(graph, seed_factory=..., mappers=[PauseMapper()])
+  ```
+  For an inline message-channel pause notice, see the reducer recipe in `docs/control-flow.md#surfacing-the-pause-inline`.
+
 ## [0.11.0] - 2026-05-25
 
 ### Fixed
