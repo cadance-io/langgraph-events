@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-28
+
 ### Fixed
 - **`RunPaused` is now emitted at most once per `/run`** (#88). Pre-fix, the router re-emitted `RunPaused` on every router invocation while `time.monotonic() >= deadline`, so any parallel handlers still in flight when the deadline expired could each fan-in and trigger another emission. Each instance carried a fresh `elapsed_seconds`, defeating id-based dedup in any reducer projecting `RunPaused` into a downstream channel (e.g. inline pause-notice messages accumulated one entry per emission instead of one per pause). The router now tracks a `_run_paused_emitted` flag on the state; late fan-ins past the deadline drain cleanly without re-emitting. The seed resets the flag for each fresh `/run` so subsequent runs on the same `thread_id` work normally.
 
@@ -229,7 +231,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/cadance-io/langgraph-events/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/cadance-io/langgraph-events/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cadance-io/langgraph-events/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/cadance-io/langgraph-events/compare/v0.8.0...v0.9.0
