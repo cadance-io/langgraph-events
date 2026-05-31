@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from ag_ui.core import (
     BaseEvent,
@@ -38,6 +38,7 @@ from ._context import MapperContext
 from ._events import FrontendStateMutated
 from ._mappers import (
     FallbackMapper,
+    UnmappedEventError,
     build_messages_snapshot,
     build_state_snapshot,
     default_mappers,
@@ -83,6 +84,7 @@ class AGUIAdapter:
         mappers: list[EventMapper] | None = None,
         include_reducers: bool | list[str] = True,
         error_message: str | None = None,
+        on_unmapped: Literal["warn", "ignore", "raise"] = "warn",
     ) -> None:
         if resume_factory is not None and graph._checkpointer is None:
             raise ValueError(
@@ -104,10 +106,16 @@ class AGUIAdapter:
                 f"got {type(include_reducers).__name__}"
             )
 
+        if on_unmapped not in ("warn", "ignore", "raise"):
+            raise ValueError(
+                f"on_unmapped must be 'warn', 'ignore', or 'raise', got {on_unmapped!r}"
+            )
+
         self._graph = graph
         self._seed_factory = seed_factory
         self._resume_factory = resume_factory
         self._error_message = error_message
+        self._on_unmapped = on_unmapped
         self._seed_accepts_state = self._accepts_extra_positional(seed_factory)
         self._resume_accepts_state = (
             self._accepts_extra_positional(resume_factory)
@@ -136,10 +144,10 @@ class AGUIAdapter:
         )
 
         # Build mapper chain: built-ins → user mappers → fallback
-        chain: list[Any] = default_mappers()
+        chain: list[Any] = default_mappers(on_unmapped)
         if mappers:
             chain.extend(mappers)
-        chain.append(FallbackMapper())
+        chain.append(FallbackMapper(on_unmapped))
         self._mappers: list[EventMapper] = chain
 
     def _project_state(self, reducers: dict[str, Any]) -> dict[str, Any]:
@@ -747,6 +755,11 @@ class AGUIAdapter:
         try:
             async for agui_event in self._stream_event_source(input_data, ctx, config):
                 yield agui_event
+
+        except UnmappedEventError:
+            # on_unmapped="raise" is a strict CI gate — propagate instead of
+            # masking it as a RunErrorEvent.
+            raise
 
         except Exception as exc:
             logger.exception("EventGraph stream failed")

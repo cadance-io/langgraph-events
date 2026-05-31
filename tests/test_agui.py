@@ -32,6 +32,7 @@ from langgraph_events.agui import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
     MapperContext,
+    UnmappedEventError,
     build_langchain_tools,
     detect_new_tool_results,
 )
@@ -88,6 +89,10 @@ class ApprovalRequested(Interrupted):
 
     def agui_dict(self) -> dict[str, Any]:
         return {"draft": self.draft}
+
+
+class PlainInterrupt(Interrupted):
+    """An Interrupted subclass with no AG-UI mapping (no agui_dict())."""
 
 
 class _ReviewPayload(dict):
@@ -633,6 +638,108 @@ def describe_AGUIAdapter():
                 # Each class warned exactly once
                 assert len(nodict1_warnings) == 1
                 assert len(nodict2_warnings) == 1
+
+        def when_on_unmapped_policy():
+            async def it_ignore_suppresses_warning_but_still_emits_serializable():
+                @on(UserAsked)
+                def emit_plain(event: UserAsked) -> PlainEvent:
+                    return PlainEvent(value="hi")
+
+                @on(PlainEvent)
+                def emit_dict(event: PlainEvent) -> TaskCreated:
+                    return TaskCreated(title="ok")
+
+                graph = EventGraph(
+                    [emit_plain, emit_dict], reducers=[message_reducer()]
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    on_unmapped="ignore",
+                )
+                _warned_classes.discard(PlainEvent)
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    events = await _collect(adapter, _make_input())
+
+                assert not any("PlainEvent" in str(x.message) for x in w)
+                serialized = [
+                    e
+                    for e in events
+                    if e.type == EventType.CUSTOM and e.name == "TaskCreated"
+                ]
+                assert len(serialized) == 1
+                assert serialized[0].value == {"title": "ok"}
+
+            async def it_raise_raises_unmapped_event_error_naming_class():
+                @on(UserAsked)
+                def emit_plain(event: UserAsked) -> PlainEvent:
+                    return PlainEvent(value="hi")
+
+                graph = EventGraph([emit_plain], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    on_unmapped="raise",
+                )
+                with pytest.raises(UnmappedEventError, match="PlainEvent"):
+                    await _collect(adapter, _make_input())
+
+            def it_unmapped_event_error_is_a_typeerror():
+                assert issubclass(UnmappedEventError, TypeError)
+
+            async def it_applies_to_interrupted_mapper_ignore():
+                @on(UserAsked)
+                def ask(event: UserAsked) -> PlainInterrupt:
+                    return PlainInterrupt()
+
+                graph = EventGraph(
+                    [ask],
+                    checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    on_unmapped="ignore",
+                )
+                _warned_classes.discard(PlainInterrupt)
+                with warnings.catch_warnings(record=True) as w:
+                    warnings.simplefilter("always")
+                    events = await _collect(adapter, _make_input())
+
+                assert not any("PlainInterrupt" in str(x.message) for x in w)
+                # No "interrupted" custom event emitted for the dropped interrupt.
+                assert not any(
+                    e.type == EventType.CUSTOM and e.name == "interrupted"
+                    for e in events
+                )
+
+            async def it_applies_to_interrupted_mapper_raise():
+                @on(UserAsked)
+                def ask(event: UserAsked) -> PlainInterrupt:
+                    return PlainInterrupt()
+
+                graph = EventGraph(
+                    [ask],
+                    checkpointer=MemorySaver(),
+                    reducers=[message_reducer()],
+                )
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                    on_unmapped="raise",
+                )
+                with pytest.raises(UnmappedEventError, match="PlainInterrupt"):
+                    await _collect(adapter, _make_input())
+
+            def it_rejects_invalid_policy_value(simple_graph):
+                with pytest.raises(ValueError, match="on_unmapped"):
+                    AGUIAdapter(
+                        graph=simple_graph,
+                        seed_factory=lambda inp: UserAsked(question="go"),
+                        on_unmapped="silent",  # type: ignore[arg-type]
+                    )
 
         def when_include_reducers():
             async def it_emits_state_snapshot():
