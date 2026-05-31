@@ -12,6 +12,7 @@ from langgraph_events.agui._mappers import (
     FrontendToolCallRequestedMapper,
     InterruptedMapper,
     SkipInternalMapper,
+    UnmappedEventError,
 )
 from langgraph_events.agui._protocols import (
     AGUICustomEvent,
@@ -49,6 +50,7 @@ __all__ = [
     "ResumeFactory",
     "SeedFactory",
     "SkipInternalMapper",
+    "UnmappedEventError",
     "agui_messages_to_langchain",
     "build_langchain_tools",
     "create_starlette_response",

@@ -80,6 +80,22 @@ Mappers claim events in priority order; first non-`None` return wins. Unclaimed 
 
 Events without `agui_dict()` are skipped with a one-time warning.
 
+### Unmapped-event policy
+
+Most events in a real `EventGraph` are internal orchestration (`Command`s, routing/control-flow `DomainEvent`s) that have no AG-UI representation, so the default per-class warning often reads as noise. Control it with `on_unmapped`:
+
+```python
+AGUIAdapter(graph, seed_factory=..., on_unmapped="ignore")
+```
+
+| value | behavior |
+|---|---|
+| `"warn"` *(default)* | Once-per-class `UserWarning`, then drop. Non-breaking. |
+| `"ignore"` | Silently drop. The off-switch for apps that are mostly internal events. |
+| `"raise"` | Raise `UnmappedEventError` (a `TypeError` subclass) naming the offending class. Strict mode — turns the dev-lint into a hard CI gate. |
+
+The policy applies to both `FallbackMapper` and the non-serializable branch of `InterruptedMapper`. Serializable events (and `InterruptedWithPayload`) are unaffected — they still emit.
+
 Outside the chain, the adapter also emits:
 
 - `StateSnapshot` / `MessagesSnapshot` from `StreamFrame` reducer data (`MessagesSnapshot` requires `message_reducer()`).

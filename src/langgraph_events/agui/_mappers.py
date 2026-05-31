@@ -40,6 +40,18 @@ if TYPE_CHECKING:
 _warned_classes: set[type] = set()
 
 
+class UnmappedEventError(TypeError):
+    """Raised by ``AGUIAdapter(on_unmapped="raise")`` for an event that reaches
+    the fallback path without implementing ``AGUISerializable``."""
+
+    def __init__(self, cls: type) -> None:
+        super().__init__(
+            f"{cls.__name__} has no AG-UI mapping and does not implement "
+            f"agui_dict(). Implement AGUISerializable to serialize it, register "
+            f"a custom EventMapper, or pass on_unmapped='ignore' to drop it."
+        )
+
+
 def _warn_missing_agui_dict(cls: type) -> None:
     if cls not in _warned_classes:
         _warned_classes.add(cls)
@@ -49,6 +61,20 @@ def _warn_missing_agui_dict(cls: type) -> None:
             f"to include this event in the AG-UI stream.",
             stacklevel=3,
         )
+
+
+def _handle_unmapped(cls: type, on_unmapped: str) -> list[BaseEvent]:
+    """Apply the ``on_unmapped`` policy to an event with no AG-UI mapping.
+
+    ``"raise"`` raises ``UnmappedEventError``; ``"warn"`` emits the
+    once-per-class warning; ``"ignore"`` is silent. ``warn`` and ``ignore``
+    both drop the event by returning ``[]``.
+    """
+    if on_unmapped == "raise":
+        raise UnmappedEventError(cls)
+    if on_unmapped == "warn":
+        _warn_missing_agui_dict(cls)
+    return []
 
 
 def _langchain_to_agui_messages(
@@ -166,6 +192,9 @@ class InterruptedMapper:
     other ``Interrupted`` subclasses must implement ``AGUISerializable``.
     """
 
+    def __init__(self, on_unmapped: str = "warn") -> None:
+        self._on_unmapped = on_unmapped
+
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
         if not isinstance(event, Interrupted):
             return None
@@ -178,8 +207,7 @@ class InterruptedMapper:
                 )
             ]
         if not isinstance(event, AGUISerializable):
-            _warn_missing_agui_dict(type(event))
-            return []
+            return _handle_unmapped(type(event), self._on_unmapped)
         return [
             CustomEvent(
                 type=EventType.CUSTOM,
@@ -192,10 +220,12 @@ class InterruptedMapper:
 class FallbackMapper:
     """Map any unclaimed event to AG-UI CustomEvent."""
 
+    def __init__(self, on_unmapped: str = "warn") -> None:
+        self._on_unmapped = on_unmapped
+
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
         if not isinstance(event, AGUISerializable):
-            _warn_missing_agui_dict(type(event))
-            return []
+            return _handle_unmapped(type(event), self._on_unmapped)
         name = (
             event.agui_event_name
             if isinstance(event, AGUICustomEvent)
@@ -210,12 +240,12 @@ class FallbackMapper:
         ]
 
 
-def default_mappers() -> list[Any]:
+def default_mappers(on_unmapped: str = "warn") -> list[Any]:
     """Return the default mapper chain in priority order."""
     return [
         SkipInternalMapper(),
         FrontendToolCallRequestedMapper(),
-        InterruptedMapper(),
+        InterruptedMapper(on_unmapped),
         # FallbackMapper is always last — added by the adapter after user mappers
     ]
 
