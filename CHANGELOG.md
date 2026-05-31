@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-31
+
 ### Added
 - **`AGUIAdapter(on_unmapped=...)` policy for events with no AG-UI mapping** (#90). A keyword-only `on_unmapped: Literal["warn", "ignore", "raise"]` knob controls what happens when an event reaches `FallbackMapper` (or `InterruptedMapper`'s non-serializable branch) without implementing `AGUISerializable`. `"warn"` (default) keeps today's once-per-class `UserWarning` then drops — **non-breaking**. `"ignore"` silently drops, the off-switch for apps that are mostly internal orchestration events. `"raise"` raises the new `UnmappedEventError` (a `TypeError` subclass) naming the offending class, turning the dev-lint into a hard CI gate. The policy applies to both fallback sites; serializable events and `InterruptedWithPayload` are unaffected.
 
@@ -234,7 +236,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/cadance-io/langgraph-events/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/cadance-io/langgraph-events/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/cadance-io/langgraph-events/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/cadance-io/langgraph-events/compare/v0.9.0...v0.10.0
