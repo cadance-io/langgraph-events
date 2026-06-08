@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
+    from langgraph.types import StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
 
@@ -1099,6 +1100,18 @@ class EventGraph:
             return True
         return bool(self._compile().get_state(config).next)
 
+    async def _aresume_is_pending(self, kwargs: dict[str, Any]) -> bool:
+        """Async sibling of :meth:`_resume_is_pending`.
+
+        Reads the checkpoint via ``aget_state`` so the async resume entry
+        points (:meth:`aresume`/:meth:`astream_resume`) never drive an
+        async-only checkpointer synchronously from the running event loop.
+        """
+        config = kwargs.get("config")
+        if config is None:
+            return True
+        return bool((await self._compile().aget_state(config)).next)
+
     def _unresumable_message(self) -> str:
         return (
             "resume() called on a thread that is not awaiting input. The paused "
@@ -1107,20 +1120,20 @@ class EventGraph:
             "handler, or set EventGraph(on_unresumable='halt'|'warn')."
         )
 
-    def _unresumable_raise_or_warn(self, kwargs: dict[str, Any]) -> EventLog | None:
-        """Shared ``raise``/``warn`` arm of the ``on_unresumable`` policy.
-
-        ``raise`` raises; ``warn`` warns and returns the unchanged log; ``halt``
-        returns ``None`` so the (sync or async) caller appends the terminal
-        event itself. Keeps the policy ladder in one place across the sync and
-        async resume paths.
+    def _unresumable_short_circuits(self) -> bool:
+        """Apply the ``raise``/``warn`` arm of ``on_unresumable``; return whether
+        the caller should short-circuit (``True`` for ``warn`` — return the log
+        unchanged) rather than append a terminal event (``False`` for ``halt``).
+        ``raise`` raises. The state read is left to the caller so each path uses
+        the matching reader (the async path must ``await aget_state`` — an
+        async-only checkpointer rejects sync reads from the running loop).
         """
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message())
         if self._on_unresumable == "warn":
             warnings.warn(self._unresumable_message(), stacklevel=4)
-            return self.get_state(kwargs.get("config")).events
-        return None
+            return True
+        return False
 
     def _apply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
@@ -1132,10 +1145,9 @@ class EventGraph:
         ends observably; the thread is already inert (not pending), so
         ``update_state`` only records the event.
         """
-        log = self._unresumable_raise_or_warn(kwargs)
-        if log is not None:
-            return log
         config = kwargs.get("config")
+        if self._unresumable_short_circuits():
+            return self.get_state(config).events
         self._compile().update_state(
             cast("RunnableConfig", config),
             {"events": [self._unresumable_event(value)]},
@@ -1146,18 +1158,18 @@ class EventGraph:
     async def _aapply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
-        """Async sibling of :meth:`_apply_unresumable_policy` — ``halt`` uses
-        ``aupdate_state`` so async checkpointers aren't driven synchronously."""
-        log = self._unresumable_raise_or_warn(kwargs)
-        if log is not None:
-            return log
+        """Async sibling of :meth:`_apply_unresumable_policy` — every checkpoint
+        read/write uses the async API (``aget_state``/``aupdate_state``) so
+        async-only checkpointers aren't driven synchronously."""
         config = kwargs.get("config")
+        if self._unresumable_short_circuits():
+            return (await self.aget_state(config)).events
         await self._compile().aupdate_state(
             cast("RunnableConfig", config),
             {"events": [self._unresumable_event(value)]},
             as_node="__seed__",
         )
-        return self.get_state(config).events
+        return (await self.aget_state(config)).events
 
     @staticmethod
     def _unresumable_event(value: Event) -> Unresumable:
@@ -1183,15 +1195,16 @@ class EventGraph:
         awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("aresume")
-        if not self._resume_is_pending(kwargs):
+        if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
 
-    def get_state(self, config: Any) -> GraphState:
-        """Get event-level state of a checkpointed thread."""
-        self._require_checkpointer("get_state")
-        compiled = self._compile()
-        snapshot = compiled.get_state(config)
+    def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
+        """Build a :class:`GraphState` from a checkpoint snapshot.
+
+        Shared by the sync :meth:`get_state` and async :meth:`aget_state` so
+        the snapshot-to-state logic stays in one place across both paths.
+        """
         all_events = snapshot.values.get("events", [])
         log = EventLog(all_events)
         # Determine interrupt status from the snapshot.
@@ -1204,6 +1217,21 @@ class EventGraph:
             is_interrupted=is_interrupted,
             interrupted=log.latest(Interrupted) if is_interrupted else None,
         )
+
+    def get_state(self, config: Any) -> GraphState:
+        """Get event-level state of a checkpointed thread."""
+        self._require_checkpointer("get_state")
+        return self._graph_state(self._compile().get_state(config))
+
+    async def aget_state(self, config: Any) -> GraphState:
+        """Async version of :meth:`get_state`.
+
+        Reads the checkpoint via ``aget_state`` so async-only checkpointers
+        (e.g. ``AsyncPostgresSaver``) aren't driven synchronously from the
+        running event loop.
+        """
+        self._require_checkpointer("aget_state")
+        return self._graph_state(await self._compile().aget_state(config))
 
     # --- LLM token helpers ---
 
@@ -1632,7 +1660,7 @@ class EventGraph:
                 from LangGraph.
         """
         self._require_checkpointer("astream_resume")
-        if not self._resume_is_pending(kwargs):
+        if not await self._aresume_is_pending(kwargs):
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
             if self._on_unresumable == "halt":
