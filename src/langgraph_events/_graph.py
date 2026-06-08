@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
+    from langgraph.types import StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
 
@@ -1119,15 +1120,13 @@ class EventGraph:
             "handler, or set EventGraph(on_unresumable='halt'|'warn')."
         )
 
-    def _unresumable_raise_or_warn(self) -> bool:
-        """Shared ``raise``/``warn`` arm of the ``on_unresumable`` policy.
-
-        ``raise`` raises; ``warn`` warns and returns ``True`` so the (sync or
-        async) caller returns the unchanged log via the read method that suits
-        its path; ``halt`` returns ``False`` so the caller appends the terminal
-        event itself. The state read is deliberately left to the caller: the
-        async path must use ``aget_state`` (an async-only checkpointer rejects
-        sync reads from the running loop). Keeps the policy ladder in one place.
+    def _unresumable_short_circuits(self) -> bool:
+        """Apply the ``raise``/``warn`` arm of ``on_unresumable``; return whether
+        the caller should short-circuit (``True`` for ``warn`` — return the log
+        unchanged) rather than append a terminal event (``False`` for ``halt``).
+        ``raise`` raises. The state read is left to the caller so each path uses
+        the matching reader (the async path must ``await aget_state`` — an
+        async-only checkpointer rejects sync reads from the running loop).
         """
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message())
@@ -1147,7 +1146,7 @@ class EventGraph:
         ``update_state`` only records the event.
         """
         config = kwargs.get("config")
-        if self._unresumable_raise_or_warn():
+        if self._unresumable_short_circuits():
             return self.get_state(config).events
         self._compile().update_state(
             cast("RunnableConfig", config),
@@ -1163,7 +1162,7 @@ class EventGraph:
         read/write uses the async API (``aget_state``/``aupdate_state``) so
         async-only checkpointers aren't driven synchronously."""
         config = kwargs.get("config")
-        if self._unresumable_raise_or_warn():
+        if self._unresumable_short_circuits():
             return (await self.aget_state(config)).events
         await self._compile().aupdate_state(
             cast("RunnableConfig", config),
@@ -1200,7 +1199,7 @@ class EventGraph:
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
 
-    def _graph_state(self, snapshot: Any) -> GraphState:
+    def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
 
         Shared by the sync :meth:`get_state` and async :meth:`aget_state` so
