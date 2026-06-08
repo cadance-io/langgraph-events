@@ -35,6 +35,7 @@ from langgraph_events.serde.migrations.testing import (
     assert_all_baselined_handlers_cover,
     assert_all_baselined_resolve,
     assert_all_baselined_revive,
+    assert_resume_recovers,
     synthesize_legacy_payload,
 )
 
@@ -49,6 +50,7 @@ __all__ = [
     "assert_all_baselined_handlers_cover",
     "assert_all_baselined_resolve",
     "assert_all_baselined_revive",
+    "assert_resume_recovers",
     "backfill",
     "migrate_from",
     "replay_reducer",

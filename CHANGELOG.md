@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`assert_resume_recovers(before, after, *, seed, resume_with)` — handler-recovery test helper.** The behavioral analog of `assert_all_baselined_revive` for handlers: it invokes `before` to pause a thread, resumes `after` on the same checkpoint, and asserts a `Resumed` was emitted (real recovery, not a silent drop or `halt`), collapsing the hand-rolled interrupt→rebuild→resume dance into one call. Both graphs must share one checkpointer. Exported from `langgraph_events.serde` / `langgraph_events.serde.migrations`. The `docs/event-migrations.md` "Testing your migrations" chapter now covers **both** tracks — a "Handler coverage gate" and "Testing handler recovery" section sit alongside the event gates.
+
 ## [0.15.0] - 2026-06-08
 
 ### Added
