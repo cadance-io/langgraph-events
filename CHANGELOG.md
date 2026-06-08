@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-08
+
 ### Added
 - **`assert_all_baselined_resolve(serde, baseline_path)` — resolution-only coverage gate** (#92). A rename-aware reachability check that proves every baselined identity still resolves to a live `Event` class **without constructing** it (no `__init__`/`__post_init__`). It is the gate to reach for when a full-graph baseline contains events `assert_all_baselined_revive` can't placeholder-construct — anything with construction-time validation (e.g. agui's `FrontendToolCallRequested`, which rejects an empty `name` in `__post_init__`), framework `SystemEvents`, or module-level `IntegrationEvents`. Such a baseline now passes with no filtering, and still fails loudly when any identity is renamed/removed without a covering migration. `revive` remains the stronger constructability gate for placeholder-tolerant events. Exported from `langgraph_events.serde` and `langgraph_events.serde.migrations`. See [Event migrations](docs/event-migrations.md#coverage-gates).
 
@@ -242,7 +244,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/cadance-io/langgraph-events/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/cadance-io/langgraph-events/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/cadance-io/langgraph-events/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/cadance-io/langgraph-events/compare/v0.10.0...v0.11.0
