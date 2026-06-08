@@ -26,6 +26,7 @@ from langgraph_events.serde.migrations._core import (
     replay_reducer,
 )
 from langgraph_events.serde.migrations.detect import (
+    CoverageError,
     HandlerCoverageError,
     MigrationCoverageError,
 )
@@ -39,6 +40,7 @@ from langgraph_events.serde.migrations.testing import (
 
 __all__ = [
     "AddField",
+    "CoverageError",
     "HandlerCoverageError",
     "Migration",
     "MigrationCoverageError",

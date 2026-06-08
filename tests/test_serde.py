@@ -2384,7 +2384,8 @@ def describe_assert_all_baselined_handlers_cover():
                     assert_all_baselined_handlers_cover,
                 )
                 from langgraph_events.serde.migrations.detect import (
-                    MigrationCoverageError,
+                    CoverageError,
+                    HandlerCoverageError,
                     write_baseline,
                 )
 
@@ -2399,8 +2400,11 @@ def describe_assert_all_baselined_handlers_cover():
                 def submit(event: Started) -> None:
                     return None
 
-                with pytest.raises(MigrationCoverageError, match="place"):
+                with pytest.raises(HandlerCoverageError, match="place") as excinfo:
                     assert_all_baselined_handlers_cover(EventGraph([submit]), baseline)
+                # sibling of MigrationCoverageError under the shared base
+                assert isinstance(excinfo.value, CoverageError)
+                assert excinfo.value.uncovered == ("place",)
 
     def when_baseline_predates_handler_tracking():
         def it_loads_a_v1_baseline_and_passes(tmp_path: Any):

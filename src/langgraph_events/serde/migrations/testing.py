@@ -112,9 +112,10 @@ def assert_all_baselined_handlers_cover(
     either a live handler node or covered by an ``@on(previously=...)`` alias.
     A name that is neither means an interrupted checkpoint paused at that node
     would silently drop on resume after a rename/removal — so this raises
-    :class:`MigrationCoverageError` (an ``AssertionError``) naming the lost
-    handler(s). Takes the ``EventGraph`` (handler identity is a graph concern),
-    not the serde. A pre-v2 baseline records no handlers and passes trivially.
+    :class:`HandlerCoverageError` (a :class:`CoverageError`/``AssertionError``)
+    naming the lost handler(s). Takes the ``EventGraph`` (handler identity is a
+    graph concern), not the serde. A pre-v2 baseline records no handlers and
+    passes trivially.
     """
     baselined = _load_baseline_handlers(Path(baseline_path))
     reachable = {meta.name for meta in graph._handler_metas}

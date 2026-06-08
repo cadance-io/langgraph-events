@@ -86,6 +86,8 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 | Catch handler exceptions | `raises` on the `Command` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |
 | Stream LLM tokens | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
 | Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI](agui.md) |
+| Keep old checkpoints working after a rename | `@migrate_from` / `@on(previously=)` + coverage gates | [Event Migrations](event-migrations.md) |
+| Know what's safe to change on a live graph | — | [Checkpointer Evolution](checkpointer-evolution.md) |
 
 ## Where to go next
 

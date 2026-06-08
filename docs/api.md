@@ -33,7 +33,7 @@ Modifiers:
 - `*field_matchers` — [field dispatch](control-flow.md#field-matchers); `type` values do `isinstance`, `str` values do equality.
 - `raises=` — [declared exceptions](control-flow.md#handler-exceptions).
 - `invariants={InvariantClass: predicate}` — [preconditions](control-flow.md#invariants).
-- `name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. See [Handler renames](event-migrations.md#handler-renames).
+- `node_name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. Both are reserved (a field named `node_name`/`previously` can't be matched via `**field_matchers`). See [Handler renames](event-migrations.md#handler-renames).
 
 Returns enforced against the declared annotation, or the subscribed `Command.Outcomes` when unannotated.
 
@@ -164,8 +164,9 @@ Exported from `langgraph_events.serde` unless a different module is noted.
 | `replay_reducer` | Function | `replay_reducer(reducer, events)` — rebuild a reducer's channel value from its (already-migrated) event log when the projection/output shape changed. Thin wrapper over `BaseReducer.seed` |
 | `NamespaceAwareSerde.revivable_identities` | Method | Read-only `frozenset` of every revivable `(module, qualname)`. For custom coverage rules; `assert_all_baselined_cover` is the gate |
 | `assert_all_baselined_handlers_cover` | Function | `assert_all_baselined_handlers_cover(graph, baseline_path)` — handler analog: asserts every baselined handler node name is still live or covered by an `@on(previously=...)` alias. Takes the `EventGraph`. See [Handler renames](event-migrations.md#handler-renames) |
-| `MigrationCoverageError` | Exception | Raised by `assert_all_baselined_cover`; `AssertionError` subclass. `.uncovered` is the offending identity tuple |
-| `HandlerCoverageError` | Exception | Raised by `assert_all_baselined_handlers_cover`; `MigrationCoverageError` subclass. `.uncovered` is the offending handler node-name tuple |
+| `CoverageError` | Exception | `AssertionError` base for both coverage failures; `except CoverageError` catches event and handler gates alike |
+| `MigrationCoverageError` | Exception | Raised by the event gates (`assert_all_baselined_cover`/`_resolve`/`_revive`); `CoverageError` subclass. `.uncovered` is the offending `(module, qualname)` tuple |
+| `HandlerCoverageError` | Exception | Raised by `assert_all_baselined_handlers_cover`; `CoverageError` subclass (sibling of `MigrationCoverageError`). `.uncovered` is the offending handler node-name tuple |
 | `write_baseline` | Function (`…serde.migrations.detect`) | `write_baseline(graph, path, *, allow_removed=False)` — snapshots topology. Raises `BaselineRegressionError` rather than silently overwriting away identities the old baseline recorded; `allow_removed=True` for intentional deletes |
 | `detect_changes` | Function (`…serde.migrations.detect`) | `detect_changes(graph, baseline_path)` — diffs topology vs baseline into rename/ambiguous/removed buckets. Also runnable as the CI gate `python -m langgraph_events.serde.migrations <module:factory> <baseline>` |
 | `BaselineRegressionError` | Exception (`…serde.migrations.detect`) | Raised by `write_baseline`; `ValueError` subclass. `.removed` is the tuple of dropped identities |

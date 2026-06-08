@@ -465,7 +465,14 @@ def _build_service_registries(
 
 
 def _validate_on_unresumable(value: str) -> None:
-    """Reject an unknown ``on_unresumable`` policy at construction."""
+    """Reject an unknown ``on_unresumable`` policy at construction.
+
+    The value set intentionally diverges from ``AGUIAdapter(on_unmapped=...)``:
+    the default is ``"raise"`` (not ``"warn"``) because a non-resumable resume
+    is a real bug worth failing on, and the third option is ``"halt"`` (emit a
+    terminal event) rather than ``"ignore"`` (silently drop) — there is no
+    silent option here on purpose.
+    """
     if value not in ("raise", "halt", "warn"):
         raise ValueError(
             f"on_unresumable must be 'raise', 'halt', or 'warn', got {value!r}"
@@ -742,6 +749,16 @@ class EventGraph:
     def reducer_names(self) -> frozenset[str]:
         """The names of all registered reducers."""
         return frozenset(self._reducers.keys())
+
+    @property
+    def handler_names(self) -> frozenset[str]:
+        """Canonical graph-node name of every registered handler.
+
+        These are the names an interrupted checkpoint can pause at;
+        ``@on(previously=...)`` aliases are excluded (use them to *cover* a
+        renamed name, not to enumerate live handlers).
+        """
+        return frozenset(meta.name for meta in self._handler_metas)
 
     @property
     def compiled(self) -> CompiledStateGraph:
@@ -1090,32 +1107,61 @@ class EventGraph:
             "handler, or set EventGraph(on_unresumable='halt'|'warn')."
         )
 
-    def _apply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
-    ) -> EventLog:
-        """Apply ``on_unresumable`` for a resume that would be a no-op.
+    def _unresumable_raise_or_warn(self, kwargs: dict[str, Any]) -> EventLog | None:
+        """Shared ``raise``/``warn`` arm of the ``on_unresumable`` policy.
 
-        Called only when :meth:`_resume_is_pending` is ``False``. ``raise``
-        raises; ``warn`` emits a warning and returns the unchanged log;
-        ``halt`` finalizes the thread with a terminal ``Unresumable`` event.
-        Returns the log the caller should hand back.
+        ``raise`` raises; ``warn`` warns and returns the unchanged log; ``halt``
+        returns ``None`` so the (sync or async) caller appends the terminal
+        event itself. Keeps the policy ladder in one place across the sync and
+        async resume paths.
         """
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message())
-        config = kwargs.get("config")
         if self._on_unresumable == "warn":
-            warnings.warn(self._unresumable_message(), stacklevel=3)
-            return self.get_state(config).events
-        # halt: append a terminal Unresumable(Halted) so the abandoned thread
-        # ends observably instead of silently. The thread is already inert
-        # (not pending), so update_state only records the event.
-        event = Unresumable(resume_value=type(value).__name__)  # type: ignore[call-arg]
+            warnings.warn(self._unresumable_message(), stacklevel=4)
+            return self.get_state(kwargs.get("config")).events
+        return None
+
+    def _apply_unresumable_policy(
+        self, value: Event, kwargs: dict[str, Any]
+    ) -> EventLog:
+        """Sync ``on_unresumable`` for a resume that would be a no-op.
+
+        Called only when :meth:`_resume_is_pending` is ``False``. The ``halt``
+        arm appends a terminal ``Unresumable(Halted)`` so the abandoned thread
+        ends observably; the thread is already inert (not pending), so
+        ``update_state`` only records the event.
+        """
+        log = self._unresumable_raise_or_warn(kwargs)
+        if log is not None:
+            return log
+        config = kwargs.get("config")
         self._compile().update_state(
             cast("RunnableConfig", config),
-            {"events": [event]},
+            {"events": [self._unresumable_event(value)]},
             as_node="__seed__",
         )
         return self.get_state(config).events
+
+    async def _aapply_unresumable_policy(
+        self, value: Event, kwargs: dict[str, Any]
+    ) -> EventLog:
+        """Async sibling of :meth:`_apply_unresumable_policy` — ``halt`` uses
+        ``aupdate_state`` so async checkpointers aren't driven synchronously."""
+        log = self._unresumable_raise_or_warn(kwargs)
+        if log is not None:
+            return log
+        config = kwargs.get("config")
+        await self._compile().aupdate_state(
+            cast("RunnableConfig", config),
+            {"events": [self._unresumable_event(value)]},
+            as_node="__seed__",
+        )
+        return self.get_state(config).events
+
+    @staticmethod
+    def _unresumable_event(value: Event) -> Unresumable:
+        return Unresumable(resume_value=type(value).__name__)  # type: ignore[call-arg]
 
     def resume(self, value: Event, **kwargs: Any) -> EventLog:
         """Resume an interrupted graph with a domain event.
@@ -1138,7 +1184,7 @@ class EventGraph:
         """
         self._require_checkpointer("aresume")
         if not self._resume_is_pending(kwargs):
-            return self._apply_unresumable_policy(value, kwargs)
+            return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
 
     def get_state(self, config: Any) -> GraphState:
@@ -1587,19 +1633,12 @@ class EventGraph:
         """
         self._require_checkpointer("astream_resume")
         if not self._resume_is_pending(kwargs):
-            if self._on_unresumable == "raise":
-                raise UnresumableError(self._unresumable_message())
-            if self._on_unresumable == "warn":
-                warnings.warn(self._unresumable_message(), stacklevel=2)
-                return
-            # halt: append a terminal Unresumable(Halted) via the async path.
-            event = Unresumable(resume_value=type(value).__name__)  # type: ignore[call-arg]
-            await self._compile().aupdate_state(
-                cast("RunnableConfig", kwargs.get("config")),
-                {"events": [event]},
-                as_node="__seed__",
-            )
-            yield event
+            # raises for the 'raise' policy; warn/halt return a log to adapt
+            log = await self._aapply_unresumable_policy(value, kwargs)
+            if self._on_unresumable == "halt":
+                latest = log.latest(Unresumable)
+                if latest is not None:
+                    yield latest
             return
         async for item in self._astream_entry(
             LGCommand(resume=value),

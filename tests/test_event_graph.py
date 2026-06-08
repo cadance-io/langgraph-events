@@ -4576,6 +4576,18 @@ def describe_handler_evolution():
             assert "newer" in nodes
             assert "old_name" in nodes
 
+        def it_does_not_route_new_events_into_the_alias():
+            # The load-bearing invariant: the dispatcher only ever returns
+            # canonical node names, so an alias never fires for fresh work — it
+            # exists purely to catch resumes of in-flight checkpoints. A fresh
+            # invoke must run the handler exactly once, not once per alias.
+            @on(Started, previously="old_name")
+            def newer(event: Started) -> Ended:
+                return Ended(result="once")
+
+            log = EventGraph([newer]).invoke(Started(data="x"))
+            assert [e for e in log if isinstance(e, Ended)] == [Ended(result="once")]
+
     def when_an_alias_collides():
         def with_a_live_handler_name():
             def it_raises_at_build():

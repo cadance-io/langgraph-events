@@ -123,8 +123,7 @@ def _enumerate_handler_names(graph: EventGraph) -> Iterable[str]:
     These are the names an interrupted checkpoint can be paused at; the
     handler coverage gate asserts each is still live or alias-covered.
     """
-    for meta in graph._handler_metas:
-        yield meta.name
+    return graph.handler_names
 
 
 def _load_baseline(baseline_path: Path) -> set[tuple[str, str]]:
@@ -166,14 +165,22 @@ def _read_baseline(baseline_path: Path) -> dict[str, Any]:
     return raw
 
 
-class MigrationCoverageError(AssertionError):
-    """Raised when a baseline identity has no migration and no live class.
+class CoverageError(AssertionError):
+    """Base for baseline-coverage failures.
 
-    Subclasses ``AssertionError`` so the three coverage gates
-    (``assert_all_baselined_cover`` / ``_resolve`` / ``_revive``) all raise a
-    single catchable base, while this one keeps a structured ``uncovered``
-    tuple of offending ``(module, qualname)`` identities for custom CI
-    reporters.
+    Subclasses ``AssertionError`` so every coverage gate raises a single
+    catchable base (`except CoverageError`). Deliberately message-only — it
+    declares no ``uncovered`` attribute, so each concrete subclass is free to
+    expose its own correctly-typed payload without a Liskov violation.
+    """
+
+
+class MigrationCoverageError(CoverageError):
+    """Raised when a baselined event identity has no migration and no live class.
+
+    ``uncovered`` is the tuple of offending ``(module, qualname)`` identities
+    for custom CI reporters. Raised by ``assert_all_baselined_cover`` /
+    ``_resolve`` / ``_revive``.
     """
 
     def __init__(self, uncovered: tuple[tuple[str, str], ...]) -> None:
@@ -189,28 +196,25 @@ class MigrationCoverageError(AssertionError):
         )
 
 
-class HandlerCoverageError(MigrationCoverageError):
+class HandlerCoverageError(CoverageError):
     """Raised when a baselined handler node name is neither live on the graph
     nor covered by an ``@on(previously=...)`` alias.
 
-    Subclass of :class:`MigrationCoverageError` so both coverage gates catch
-    under one type; ``uncovered`` is the tuple of offending handler node names
-    (plain strings, not event identities).
+    Sibling of :class:`MigrationCoverageError` under :class:`CoverageError`;
+    ``uncovered`` is the tuple of offending handler node names (plain strings,
+    not event identities) — caught together via ``except CoverageError``.
     """
 
     def __init__(self, uncovered: tuple[str, ...]) -> None:
-        self.uncovered = uncovered  # type: ignore[assignment]
+        self.uncovered = uncovered
         joined = ", ".join(uncovered)
         plural = "" if len(uncovered) == 1 else "s"
         hint = uncovered[0] if uncovered else "old_name"
-        # Skip MigrationCoverageError.__init__ (event-shaped message); build a
-        # handler-appropriate one directly on the AssertionError base.
-        AssertionError.__init__(
-            self,
+        super().__init__(
             f"{len(uncovered)} baselined handler{plural} no longer resolve to a "
             f"live node: {joined}. For each: add @on(previously={hint!r}) to the "
             f"surviving handler, or regenerate the baseline if the handler is "
-            f"intentionally removed.",
+            f"intentionally removed."
         )
 
 

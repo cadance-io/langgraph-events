@@ -165,7 +165,7 @@ def _build_on_decorator(
     raises: type[Exception] | tuple[type[Exception], ...],
     invariants: dict[type[Invariant], Callable[..., bool]] | None,
     field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str],
-    name: str | None = None,
+    node_name: str | None = None,
     previous_names: tuple[str, ...] = (),
 ) -> Callable[[F], F]:
     """Validate arguments and return the decorator that stamps attributes."""
@@ -239,8 +239,8 @@ def _build_on_decorator(
             fn._raises = raises_tuple  # type: ignore[attr-defined]
         if invariants_tuple:
             fn._invariants = invariants_tuple  # type: ignore[attr-defined]
-        if name is not None:
-            fn._node_name = name  # type: ignore[attr-defined]
+        if node_name is not None:
+            fn._node_name = node_name  # type: ignore[attr-defined]
         if previous_names:
             fn._previous_names = previous_names  # type: ignore[attr-defined]
         return fn
@@ -252,7 +252,7 @@ def on(
     *event_types: Any,
     raises: type[Exception] | tuple[type[Exception], ...] = (),
     invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
-    name: str | None = None,
+    node_name: str | None = None,
     previously: str | tuple[str, ...] = (),
     **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
 ) -> Any:
@@ -287,16 +287,23 @@ def on(
     Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
     for ``isinstance`` match (works for Event, Exception, or Invariant
     subclasses); string values do equality match (e.g. a string event field).
+
+    ``node_name=`` pins the handler's graph-node identity (default: the
+    function name) so renaming the function never breaks an interrupted
+    checkpoint; ``previously=`` (str or tuple) declares historic node names to
+    keep resumable after a rename. Both are reserved keywords — a field named
+    ``node_name`` or ``previously`` cannot be matched positionally via
+    ``**field_matchers``.
     """
-    if name is not None and not isinstance(name, str):
-        raise TypeError(f"@on() name= must be a str, got {name!r}")
+    if node_name is not None and not isinstance(node_name, str):
+        raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")
     previous_names = (previously,) if isinstance(previously, str) else tuple(previously)
 
     no_modifiers = (
         raises == ()
         and invariants is None
         and not field_matchers
-        and name is None
+        and node_name is None
         and not previous_names
     )
     sole_arg_is_function = len(event_types) == 1 and (
@@ -315,14 +322,14 @@ def on(
                 raises,
                 invariants,
                 dict(field_matchers),
-                name,
+                node_name,
                 previous_names,
             )(fn)
 
         return inferring
 
     return _build_on_decorator(
-        event_types, raises, invariants, dict(field_matchers), name, previous_names
+        event_types, raises, invariants, dict(field_matchers), node_name, previous_names
     )
 
 

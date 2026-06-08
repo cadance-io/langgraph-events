@@ -715,19 +715,19 @@ def describe_return_hint_parsing():
 
 
 def describe_handler_identity():
-    # @on(name=) gives a handler a stable node identity decoupled from the
+    # @on(node_name=) gives a handler a stable node identity decoupled from the
     # Python function name; @on(previously=) records historic node names so a
     # rename keeps old interrupted checkpoints resumable via an alias node.
 
-    def when_name_is_explicit():
+    def when_node_name_is_explicit():
         def it_overrides_the_function_name():
-            @on(SampleEvent, name="submit")
+            @on(SampleEvent, node_name="submit")
             async def place(event: SampleEvent):
                 pass
 
             assert extract_handler_meta(place).name == "submit"
 
-    def when_name_is_omitted():
+    def when_node_name_is_omitted():
         def it_defaults_to_the_function_name():
             @on(SampleEvent)
             async def place(event: SampleEvent):
