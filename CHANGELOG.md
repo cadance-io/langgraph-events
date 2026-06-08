@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`aresume()` / `astream_resume()` no longer crash against async-only checkpointers** (#95). The `on_unresumable` resume-pending gate introduced in 0.15.0 read checkpoint state through the **synchronous** `get_state`, which `AsyncPostgresSaver` (and any async-only checkpointer) rejects from the running event loop — raising `asyncio.InvalidStateError` before any policy (`raise`/`warn`/`halt`) could run, and taking down every async resume (including the library's own `AGUIAdapter` SSE path). The async resume gate and the async `on_unresumable` policy arms now read and write checkpoint state exclusively through the async API (`aget_state`/`aupdate_state`), matching how `ainvoke()`-based flows already behave. The sync `resume()`/`stream_resume()` paths are unchanged.
+
+### Added
+- **`EventGraph.aget_state(config)` — async sibling of `get_state()`.** Reads event-level thread state through the async checkpointer API, so deployments on async-only checkpointers can inspect a thread's state and interrupt status from within the event loop without tripping `InvalidStateError`.
+
 ## [0.16.0] - 2026-06-08
 
 ### Added

@@ -13,6 +13,7 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
 )
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
@@ -35,6 +36,8 @@ from langgraph_events import (
     ScalarReducer,
     Scatter,
     SystemPromptSet,
+    Unresumable,
+    UnresumableError,
     aemit_custom,
     aemit_state_snapshot,
     emit_custom,
@@ -4812,6 +4815,159 @@ def describe_on_unresumable():
 
             with pytest.raises(UnresumableError):
                 asyncio.run(drain())
+
+
+class _AsyncOnlySaver(MemorySaver):
+    """Mimics ``AsyncPostgresSaver``: a synchronous checkpoint read from a
+    running event loop is rejected.
+
+    Async-only checkpointers raise ``InvalidStateError`` on sync checkpointer
+    access issued from the running loop; ``MemorySaver`` allows it, which is
+    why ``MemorySaver``-only suites miss the async-resume regression (#95).
+    The sync ``get_tuple`` is guarded so any sync ``get_state`` on the async
+    path trips it; ``aget_tuple`` is overridden to reach the in-memory store
+    *without* the guard, because a real async saver has a genuinely separate
+    async implementation (``MemorySaver``'s merely delegates to the now-guarded
+    sync method).
+    """
+
+    @staticmethod
+    def _reject_in_loop() -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return  # no running loop (sync setup) — allow
+        raise asyncio.InvalidStateError(
+            "Synchronous calls to AsyncPostgresSaver are only allowed from a "
+            "different thread."
+        )
+
+    def get_tuple(self, config):  # type: ignore[override]
+        self._reject_in_loop()
+        return super().get_tuple(config)
+
+    async def aget_tuple(self, config):  # type: ignore[override]
+        return super().get_tuple(config)  # unguarded async path
+
+
+def describe_async_only_checkpointer():
+    # #95: aresume()/astream_resume() must not drive an async-only checkpointer
+    # (e.g. AsyncPostgresSaver) synchronously. The resume-pending gate and the
+    # on_unresumable policy reads previously went through sync get_state, which
+    # such a checkpointer rejects from the running event loop.
+
+    async def _apaused(saver, tid):
+        """Pause a thread inside ``waiter`` via ainvoke; return its config."""
+
+        @on(Started)
+        def waiter(event: Started) -> _Pause:
+            return _Pause()
+
+        @on(_Go)
+        def go(event: _Go) -> None:
+            return None
+
+        cfg = {"configurable": {"thread_id": tid}}
+        await EventGraph([waiter, go], checkpointer=saver).ainvoke(
+            Started(data="x"), config=cfg
+        )
+        return cfg
+
+    def when_the_thread_is_genuinely_pending():
+        def without_sync_checkpointer_access():
+            @pytest.mark.asyncio
+            async def it_aresumes():
+                @on(Started)
+                def waiter(event: Started) -> _Pause:
+                    return _Pause()
+
+                @on(_Go)
+                def go(event: _Go) -> Ended:
+                    return Ended(result="went")
+
+                saver = _AsyncOnlySaver()
+                cfg = {"configurable": {"thread_id": "async-only-aresume"}}
+                graph = EventGraph([waiter, go], checkpointer=saver)
+                await graph.ainvoke(Started(data="x"), config=cfg)
+
+                log = await graph.aresume(_Go(), config=cfg)
+                assert log.latest(Resumed) is not None
+                assert log.latest(Ended) == Ended(result="went")
+
+            @pytest.mark.asyncio
+            async def it_astream_resumes():
+                @on(Started)
+                def waiter(event: Started) -> _Pause:
+                    return _Pause()
+
+                @on(_Go)
+                def go(event: _Go) -> Ended:
+                    return Ended(result="went")
+
+                saver = _AsyncOnlySaver()
+                cfg = {"configurable": {"thread_id": "async-only-astream"}}
+                graph = EventGraph([waiter, go], checkpointer=saver)
+                await graph.ainvoke(Started(data="x"), config=cfg)
+
+                events = [e async for e in graph.astream_resume(_Go(), config=cfg)]
+                assert any(isinstance(e, Ended) for e in events)
+
+    def when_the_thread_is_not_pending():
+        @pytest.mark.asyncio
+        async def it_aresume_raises_under_default_policy():
+            saver = _AsyncOnlySaver()
+            cfg = await _apaused(saver, "async-only-raise")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver)  # waiter removed
+            with pytest.raises(UnresumableError):
+                await v2.aresume(_Go(), config=cfg)
+
+        @pytest.mark.asyncio
+        async def it_aresume_warns_and_leaves_the_log_unchanged():
+            saver = _AsyncOnlySaver()
+            cfg = await _apaused(saver, "async-only-warn")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver, on_unresumable="warn")
+            with pytest.warns(UserWarning, match="not awaiting input"):
+                log = await v2.aresume(_Go(), config=cfg)
+
+            assert not any(isinstance(e, Halted) for e in log)
+
+        @pytest.mark.asyncio
+        async def it_aresume_halt_finalizes_the_thread_terminally():
+            saver = _AsyncOnlySaver()
+            cfg = await _apaused(saver, "async-only-halt")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver, on_unresumable="halt")
+            log = await v2.aresume(_Go(), config=cfg)
+
+            assert isinstance(log.latest(Unresumable), Halted)
+
+        @pytest.mark.asyncio
+        async def it_astream_resume_halt_yields_the_terminal_event():
+            saver = _AsyncOnlySaver()
+            cfg = await _apaused(saver, "async-only-astream-halt")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver, on_unresumable="halt")
+            events = [e async for e in v2.astream_resume(_Go(), config=cfg)]
+
+            assert any(isinstance(e, Unresumable) for e in events)
 
 
 def describe_assert_resume_recovers():
