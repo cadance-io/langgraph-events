@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -36,7 +36,10 @@ if TYPE_CHECKING:
 
 from langgraph_events.serde.migrations._core import RenameEvent
 
-BASELINE_VERSION = 1
+BASELINE_VERSION = 2
+# Readable versions: v1 had ``events`` only; v2 adds ``handlers`` (node names).
+# A v1 baseline still loads — its handler set is treated as empty.
+_SUPPORTED_BASELINE_VERSIONS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -107,8 +110,21 @@ def write_baseline(
         "events": [
             {"module": module, "qualname": qualname} for module, qualname in identities
         ],
+        "handlers": [
+            {"name": name} for name in sorted(_enumerate_handler_names(graph))
+        ],
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _enumerate_handler_names(graph: EventGraph) -> Iterable[str]:
+    """Yield the canonical node name of every handler registered on *graph*.
+
+    These are the names an interrupted checkpoint can be paused at; the
+    handler coverage gate asserts each is still live or alias-covered.
+    """
+    for meta in graph._handler_metas:
+        yield meta.name
 
 
 def _load_baseline(baseline_path: Path) -> set[tuple[str, str]]:
@@ -118,16 +134,36 @@ def _load_baseline(baseline_path: Path) -> set[tuple[str, str]]:
     :func:`detect_changes` and ``assert_all_baselined_cover`` so the
     version-bump error wording lives in exactly one place.
     """
-    raw = json.loads(baseline_path.read_text())
+    raw = _read_baseline(baseline_path)
+    return {(entry["module"], entry["qualname"]) for entry in raw["events"]}
+
+
+def _load_baseline_handlers(baseline_path: Path) -> set[str]:
+    """Parse a baseline file and return its handler node-name set.
+
+    Returns an empty set for a v1 baseline (which predates handler tracking),
+    so the handler coverage gate is a no-op against pre-v2 snapshots rather
+    than a spurious failure.
+    """
+    raw = _read_baseline(baseline_path)
+    return {entry["name"] for entry in raw.get("handlers", [])}
+
+
+def _read_baseline(baseline_path: Path) -> dict[str, Any]:
+    """Parse + version-check a baseline file. Raises ``ValueError`` on an
+    unsupported version. Single source of the version-bump error wording for
+    :func:`_load_baseline` and :func:`_load_baseline_handlers`.
+    """
+    raw: dict[str, Any] = json.loads(baseline_path.read_text())
     file_version = raw.get("version")
-    if file_version != BASELINE_VERSION:
+    if file_version not in _SUPPORTED_BASELINE_VERSIONS:
         raise ValueError(
             f"Unsupported baseline version {file_version!r} at "
-            f"{baseline_path}; this library reads baseline version "
-            f"{BASELINE_VERSION}. Regenerate the baseline with the "
+            f"{baseline_path}; this library reads baseline versions "
+            f"{_SUPPORTED_BASELINE_VERSIONS}. Regenerate the baseline with the "
             f"current version of langgraph-events."
         )
-    return {(entry["module"], entry["qualname"]) for entry in raw["events"]}
+    return raw
 
 
 class MigrationCoverageError(AssertionError):
@@ -150,6 +186,31 @@ class MigrationCoverageError(AssertionError):
             f"either add @migrate_from to the surviving class, append a "
             f"Migration to migrations=, or regenerate the baseline if the "
             f"identity is intentionally dropped."
+        )
+
+
+class HandlerCoverageError(MigrationCoverageError):
+    """Raised when a baselined handler node name is neither live on the graph
+    nor covered by an ``@on(previously=...)`` alias.
+
+    Subclass of :class:`MigrationCoverageError` so both coverage gates catch
+    under one type; ``uncovered`` is the tuple of offending handler node names
+    (plain strings, not event identities).
+    """
+
+    def __init__(self, uncovered: tuple[str, ...]) -> None:
+        self.uncovered = uncovered  # type: ignore[assignment]
+        joined = ", ".join(uncovered)
+        plural = "" if len(uncovered) == 1 else "s"
+        hint = uncovered[0] if uncovered else "old_name"
+        # Skip MigrationCoverageError.__init__ (event-shaped message); build a
+        # handler-appropriate one directly on the AssertionError base.
+        AssertionError.__init__(
+            self,
+            f"{len(uncovered)} baselined handler{plural} no longer resolve to a "
+            f"live node: {joined}. For each: add @on(previously={hint!r}) to the "
+            f"surviving handler, or regenerate the baseline if the handler is "
+            f"intentionally removed.",
         )
 
 

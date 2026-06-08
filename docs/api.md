@@ -33,6 +33,7 @@ Modifiers:
 - `*field_matchers` — [field dispatch](control-flow.md#field-matchers); `type` values do `isinstance`, `str` values do equality.
 - `raises=` — [declared exceptions](control-flow.md#handler-exceptions).
 - `invariants={InvariantClass: predicate}` — [preconditions](control-flow.md#invariants).
+- `name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. See [Handler renames](event-migrations.md#handler-renames).
 
 Returns enforced against the declared annotation, or the subscribed `Command.Outcomes` when unannotated.
 
@@ -40,7 +41,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 
 | Export | Type | Description |
 |---|---|---|
-| `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle`. `services=[...]` (type-keyed) or `services={...}` (name-keyed) injects project dependencies into handler params (see [Concepts › Signature injection](concepts.md#signature-injection)) |
+| `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle`. `services=[...]` (type-keyed) or `services={...}` (name-keyed) injects project dependencies into handler params (see [Concepts › Signature injection](concepts.md#signature-injection)). `on_unresumable="raise"\|"halt"\|"warn"` (default `"raise"`) governs `resume()` on a thread not awaiting input |
 | `EventGraph.from_namespaces()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers. With `checkpointer=MemorySaver()` auto-wires a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` decorator on those classes. Opt out by passing `MemorySaver(serde=<custom>)` — a user-supplied serde always wins |
 | `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog` |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
@@ -64,6 +65,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `Halted` | Event | Signal immediate termination; subclass for domain-specific halts |
 | `MaxRoundsExceeded` | Event | `Halted` subtype when `max_rounds` is exceeded |
 | `Cancelled` | Event | `Halted` subtype when an async handler is cancelled |
+| `Unresumable` | Event | `Halted` subtype emitted by `EventGraph(on_unresumable="halt")` when `resume()` hits a thread not awaiting input. `.resume_value` is the resume event's type name. See [Handler renames](event-migrations.md#handler-renames) |
 | `RunPaused` | Event | `SystemEvent` (not `Halted`) emitted by the router when a per-call `deadline=monotonic()+budget` expires between dispatch rounds. Emitted at most once per `/run` regardless of how many parallel handlers fan in past the deadline. Cursor is advanced past it so a fresh `/run` on the same `thread_id` continues normally. No default AG-UI wire mapping — register a custom `EventMapper` to surface it on the wire |
 | `Interrupted` | Base class | Subclass with typed fields to pause for human input. For frontend-discriminated payloads see `InterruptedWithPayload` in `langgraph_events.agui` |
 | `Resumed` | Event | Emitted on `resume()` with the dispatched event + `interrupted` backref |
@@ -112,6 +114,7 @@ from langgraph_events.stream import (
 | Export | Type | Description |
 |---|---|---|
 | `OrphanedEventWarning` | Warning | Issued at graph construction when a return type has no subscriber |
+| `UnresumableError` | RuntimeError subclass | Raised by `resume()` (default `EventGraph(on_unresumable="raise")`) when the thread is not awaiting input — paused handler renamed/removed, thread already finished, or double-resume. Declare `@on(previously=...)` to recover, or set `on_unresumable="halt"`/`"warn"`. See [Handler renames](event-migrations.md#handler-renames) |
 | `DomainPatternWarning` | Warning | A namespace has 2+ events fanning out to an identical target set — a missing shared abstraction |
 | `CommandChainWarning` | Warning | An inline `Command.handle()` emits another `Command` (a `chain`-causation edge) — prefer emitting a fact and reacting to it |
 
@@ -160,7 +163,9 @@ Exported from `langgraph_events.serde` unless a different module is noted.
 | `synthesize_legacy_payload` | Function | `synthesize_legacy_payload(module, qualname, kwargs)` — builds the `(format, bytes)` a prior release would have written. For pinning a specific drifted field shape; the loop gate above covers identity reachability |
 | `replay_reducer` | Function | `replay_reducer(reducer, events)` — rebuild a reducer's channel value from its (already-migrated) event log when the projection/output shape changed. Thin wrapper over `BaseReducer.seed` |
 | `NamespaceAwareSerde.revivable_identities` | Method | Read-only `frozenset` of every revivable `(module, qualname)`. For custom coverage rules; `assert_all_baselined_cover` is the gate |
+| `assert_all_baselined_handlers_cover` | Function | `assert_all_baselined_handlers_cover(graph, baseline_path)` — handler analog: asserts every baselined handler node name is still live or covered by an `@on(previously=...)` alias. Takes the `EventGraph`. See [Handler renames](event-migrations.md#handler-renames) |
 | `MigrationCoverageError` | Exception | Raised by `assert_all_baselined_cover`; `AssertionError` subclass. `.uncovered` is the offending identity tuple |
+| `HandlerCoverageError` | Exception | Raised by `assert_all_baselined_handlers_cover`; `MigrationCoverageError` subclass. `.uncovered` is the offending handler node-name tuple |
 | `write_baseline` | Function (`…serde.migrations.detect`) | `write_baseline(graph, path, *, allow_removed=False)` — snapshots topology. Raises `BaselineRegressionError` rather than silently overwriting away identities the old baseline recorded; `allow_removed=True` for intentional deletes |
 | `detect_changes` | Function (`…serde.migrations.detect`) | `detect_changes(graph, baseline_path)` — diffs topology vs baseline into rename/ambiguous/removed buckets. Also runnable as the CI gate `python -m langgraph_events.serde.migrations <module:factory> <baseline>` |
 | `BaselineRegressionError` | Exception (`…serde.migrations.detect`) | Raised by `write_baseline`; `ValueError` subclass. `.removed` is the tuple of dropped identities |

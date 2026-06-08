@@ -294,6 +294,26 @@ A failing test = dataclass `TypeError` on the missing field — exactly where yo
 3. **In CI**, the loop gate runs on every PR — catches accidentally-dropped migrations and classes that no longer construct. Add `synthesize_legacy_payload` entries only if a field's shape changed.
 4. **At release N+1 cutover**, re-run `write_baseline(graph, BASELINE)` in the same PR as the rename. Next removals are measured against the new baseline.
 
+## Handler renames
+
+Handlers evolve under the **same model as events**. A handler becomes a graph *node* keyed by its name; if a thread was interrupted (via `Interrupted`) inside a handler and you later rename or move it, the old node vanishes and the paused checkpoint can no longer resume. Declare the rename and old checkpoints keep working:
+
+| Concern | Events | Handlers |
+|---|---|---|
+| Declare prior identity → auto-recover | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` |
+| Prevent the break up front | (qualname *is* the identity) | `@on(name="stable_id")` — then rename the function freely |
+| Catch the undeclared case in CI | `assert_all_baselined_*` | `assert_all_baselined_handlers_cover(graph, BASELINE)` |
+
+```python
+# Renamed handler — declare the old node name so paused checkpoints resume:
+@on(Confirmed, previously="await_confirmation")
+def confirm(event: Confirmed) -> Approved: ...
+```
+
+- `@on(name=...)` pins a **stable node identity** decoupled from the Python function name — rename/move the function with zero checkpoint impact. `@on(previously=...)` registers an **alias node** for each historic name so an in-flight interrupted checkpoint re-enters the renamed handler.
+- `assert_all_baselined_handlers_cover(graph, BASELINE)` is the handler analog of the event gates: it asserts every handler node name in the baseline is still live or alias-covered, raising `HandlerCoverageError` (an `AssertionError`, so it catches alongside `MigrationCoverageError`) otherwise. `write_baseline` records handler node names (baseline v2; older v1 baselines still load).
+- **Runtime safety net:** if a handler is *removed* (or renamed without `previously=`) and a thread is still paused inside it, `resume()` would otherwise be a silent no-op. `EventGraph(on_unresumable=...)` governs this — default `"raise"` (`UnresumableError`), `"warn"` (warn + no-op), or `"halt"` (emit a terminal `Unresumable(Halted)` and finalize the thread). It fires on any `resume()` of a thread that isn't awaiting input — also catching resume of an already-finished thread or a double-resume.
+
 ## Reserved attributes
 
 Library-private; read directly if introspection needed (neither is MRO-inherited):

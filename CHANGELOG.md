@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Handler evolution — alias recovery + CI coverage gate.** Handlers now evolve under the same model as events. `@on(name="stable_id")` pins a **stable node identity** decoupled from the Python function name, so renaming/moving the function never breaks an interrupted checkpoint. `@on(previously="old_node")` (str or tuple) declares historic node names; the graph registers an **alias node** per name so a thread paused inside a renamed handler (via `Interrupted`) re-enters it transparently on `resume()`. `assert_all_baselined_handlers_cover(graph, baseline_path)` (exported from `langgraph_events.serde` / `langgraph_events.serde.migrations`) is the handler analog of the event coverage gates: it asserts every baselined handler node name is still live or alias-covered, raising the new `HandlerCoverageError` (a `MigrationCoverageError` subclass) otherwise. `write_baseline` now records handler node names — baseline files bump to **v2** while older **v1** baselines still load (their handler set is treated as empty). A colliding alias is rejected at graph build. See [Handler renames](docs/event-migrations.md#handler-renames).
+- **`EventGraph(on_unresumable=...)` — runtime resume policy.** `resume()` on a thread that is not awaiting input (paused handler renamed/removed, thread already finished, or a double-resume) no longer silently no-ops. `on_unresumable="raise"` (default) raises the new `UnresumableError`; `"warn"` emits a `UserWarning` and leaves the log unchanged; `"halt"` appends a terminal `Unresumable(Halted)` event and finalizes the thread. The trigger keys on the checkpoint having no scheduled work, so a legitimate `pre_seed`-before-resume (e.g. `AGUIAdapter`'s `FrontendStateMutated`) and a Phase-1 `@on(previously=...)` alias both resume normally. Applies to `resume`/`aresume`/`stream_resume`/`astream_resume`. `Unresumable` and `UnresumableError` are exported from `langgraph_events`.
+
+### Changed
+- **`resume()` raises on a non-resumable thread (behavior change).** Resuming a thread that is not awaiting input previously did nothing silently; it now raises `UnresumableError` by default. Opt into `EventGraph(on_unresumable="halt")` or `"warn"` to keep it non-fatal.
+
 ## [0.14.0] - 2026-06-08
 
 ### Added

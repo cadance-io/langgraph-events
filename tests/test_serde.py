@@ -2332,3 +2332,89 @@ def describe_backfill():
             assert revived.command_id == "legacy"
             assert revived.flag is False
             assert revived.note == "n"
+
+
+def describe_assert_all_baselined_handlers_cover():
+    # The handler analog of the event coverage gates: every handler node name
+    # the previous release wrote must still be live or covered by an
+    # @on(previously=...) alias, else an interrupted checkpoint paused at the
+    # old node would silently drop on resume.
+
+    def when_every_baselined_handler_is_live():
+        def it_passes_silently(tmp_path: Any):
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_handlers_cover,
+            )
+            from langgraph_events.serde.migrations.detect import write_baseline
+
+            @on(Started)
+            def place(event: Started) -> None:
+                return None
+
+            graph = EventGraph([place])
+            baseline = tmp_path / "b.json"
+            write_baseline(graph, baseline)
+
+            assert_all_baselined_handlers_cover(graph, baseline)
+
+    def when_a_handler_is_renamed():
+        def with_previously_declared():
+            def it_passes(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_handlers_cover,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                @on(Started)
+                def place(event: Started) -> None:
+                    return None
+
+                baseline = tmp_path / "b.json"
+                write_baseline(EventGraph([place]), baseline)
+
+                @on(Started, previously="place")
+                def submit(event: Started) -> None:
+                    return None
+
+                assert_all_baselined_handlers_cover(EventGraph([submit]), baseline)
+
+        def without_previously_declared():
+            def it_raises_naming_the_lost_handler(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_handlers_cover,
+                )
+                from langgraph_events.serde.migrations.detect import (
+                    MigrationCoverageError,
+                    write_baseline,
+                )
+
+                @on(Started)
+                def place(event: Started) -> None:
+                    return None
+
+                baseline = tmp_path / "b.json"
+                write_baseline(EventGraph([place]), baseline)
+
+                @on(Started)
+                def submit(event: Started) -> None:
+                    return None
+
+                with pytest.raises(MigrationCoverageError, match="place"):
+                    assert_all_baselined_handlers_cover(EventGraph([submit]), baseline)
+
+    def when_baseline_predates_handler_tracking():
+        def it_loads_a_v1_baseline_and_passes(tmp_path: Any):
+            import json
+
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_handlers_cover,
+            )
+
+            @on(Started)
+            def place(event: Started) -> None:
+                return None
+
+            baseline = tmp_path / "v1.json"
+            baseline.write_text(json.dumps({"version": 1, "events": []}))
+
+            assert_all_baselined_handlers_cover(EventGraph([place]), baseline)

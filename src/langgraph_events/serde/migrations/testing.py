@@ -17,6 +17,7 @@ import ormsgpack
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from langgraph_events import EventGraph
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
 
 # ``_option`` comes straight from its langgraph source (mypy treats
@@ -33,8 +34,10 @@ from langgraph_events.serde.migrations._core import (
     _resolve_rename,
 )
 from langgraph_events.serde.migrations.detect import (
+    HandlerCoverageError,
     MigrationCoverageError,
     _load_baseline,
+    _load_baseline_handlers,
 )
 
 
@@ -97,6 +100,30 @@ def assert_all_baselined_cover(
     missing = tuple(sorted(baseline - serde.revivable_identities()))
     if missing:
         raise MigrationCoverageError(missing)
+
+
+def assert_all_baselined_handlers_cover(
+    graph: EventGraph, baseline_path: Path | str
+) -> None:
+    """Assert every baselined handler node name is still reachable on *graph*.
+
+    The handler analog of :func:`assert_all_baselined_cover`: a static
+    set-membership check that every handler node name in *baseline_path* is
+    either a live handler node or covered by an ``@on(previously=...)`` alias.
+    A name that is neither means an interrupted checkpoint paused at that node
+    would silently drop on resume after a rename/removal — so this raises
+    :class:`MigrationCoverageError` (an ``AssertionError``) naming the lost
+    handler(s). Takes the ``EventGraph`` (handler identity is a graph concern),
+    not the serde. A pre-v2 baseline records no handlers and passes trivially.
+    """
+    baselined = _load_baseline_handlers(Path(baseline_path))
+    reachable = {meta.name for meta in graph._handler_metas}
+    reachable |= {
+        alias for meta in graph._handler_metas for alias in meta.previous_names
+    }
+    missing = tuple(sorted(baselined - reachable))
+    if missing:
+        raise HandlerCoverageError(missing)
 
 
 def _assert_baselined(
