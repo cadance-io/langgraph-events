@@ -77,4 +77,4 @@ Requires Python 3.10+.
 - **State:** [Reducers](reducers.md) — domain-scoped or graph-wide
 - **Streams:** [Streaming](streaming.md), [AG-UI Adapter](agui.md)
 - **Reference:** [API](api.md), [Patterns](patterns.md)
-- **Edge cases:** [Checkpointer Evolution](checkpointer-evolution.md)
+- **Evolving a deployed graph:** [Checkpointer Evolution](checkpointer-evolution.md) (what's safe to change) → [Event Migrations](event-migrations.md) (keep old checkpoints working after a rename)

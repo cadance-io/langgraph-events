@@ -29,6 +29,7 @@ from langgraph_events._event import (
     Scatter,
     SystemEvent,
     SystemPromptSet,
+    Unresumable,
     on_namespace_finalize,
 )
 from langgraph_events._event_log import EventLog
@@ -39,6 +40,7 @@ from langgraph_events._graph import (
     LLMToken,
     LLMToolCallChunk,
     OrphanedEventWarning,
+    UnresumableError,
 )
 from langgraph_events._handler import on
 from langgraph_events._namespace import NamespaceModel
@@ -119,6 +121,8 @@ __all__ = [
     "Scatter",
     "SystemEvent",
     "SystemPromptSet",
+    "Unresumable",
+    "UnresumableError",
     "aemit_custom",
     "aemit_state_snapshot",
     "emit_custom",

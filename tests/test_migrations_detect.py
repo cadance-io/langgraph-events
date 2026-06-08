@@ -143,7 +143,7 @@ def describe_write_baseline():
             write_baseline(graph, target)
             loaded = json.loads(target.read_text())
 
-            assert loaded["version"] == 1
+            assert loaded["version"] == 2
             identities = {(e["module"], e["qualname"]) for e in loaded["events"]}
             # Command outcomes nested inside Place are captured.
             assert (Order.__module__, "Order.Place.Placed") in identities

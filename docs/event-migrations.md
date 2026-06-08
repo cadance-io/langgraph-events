@@ -4,6 +4,21 @@ See also: [Checkpointer & graph evolution](checkpointer-evolution.md).
 
 `NamespaceAwareSerde` keys event identity by `(__module__, __qualname__)` so nested events with colliding leaf names round-trip distinctly. Migrations rewrite historic identities on read while preserving wire format — payloads from any prior library version remain readable both ways.
 
+## Two tracks, one model
+
+Renaming an **event class** and renaming a **handler** are the same problem at two layers, solved the same way — *declare the prior identity → auto-recover; a CI gate → catch the undeclared case*:
+
+| | Event class renamed/moved | Handler renamed/moved |
+|---|---|---|
+| **Declare** (recover after the fact) | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` |
+| **Prevent** (up front) | (qualname *is* the identity) | `@on(node_name="stable_id")` — then rename the function freely |
+| **Catch** in CI | `assert_all_baselined_cover` / `_resolve` / `_revive` | `assert_all_baselined_handlers_cover` |
+
+Event-class migrations come first below; the [handler track](#handler-renames) is at the end. **Mind the gate signatures: the event gates take the `serde`; the handler gate takes the `graph` — don't transpose them.**
+
+!!! note "The one invariant"
+    **Every rename = decorator *and* `write_baseline` regen in the same PR.** Adding the decorator without regenerating the baseline (or vice-versa) is a latent bug the gate won't catch until later.
+
 ## The minimum case: rename inside a namespace
 
 ```python
@@ -262,6 +277,9 @@ def test_baseline_coverage():
 
 `NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets are not included — they key on the post-rename identity).
 
+!!! tip "Which serde / graph do I pass the gate?"
+    In tests, construct a **standalone** `NamespaceAwareSerde(namespaces=(...))` for the event gates — it mirrors what `from_namespaces(..., checkpointer=...)` auto-wires; the gate does **not** need the graph's internal serde instance. The **handler** gate is different: it takes the `graph` (`assert_all_baselined_handlers_cover(graph, BASELINE)`), because handler identity is a graph-topology concern, not a serde one.
+
 ### `synthesize_legacy_payload` — pin a specific old field shape
 
 The gates above don't assert specific *old field values*. Reach for this only when a field's shape drifted — it builds the bytes a prior release would have written:
@@ -293,6 +311,41 @@ A failing test = dataclass `TypeError` on the missing field — exactly where yo
 2. **On the feature branch**, rename the event and add `@migrate_from("Persona.Persisted")` (plus `@backfill` if it gained a required field). The loop gate already covers the historic identity.
 3. **In CI**, the loop gate runs on every PR — catches accidentally-dropped migrations and classes that no longer construct. Add `synthesize_legacy_payload` entries only if a field's shape changed.
 4. **At release N+1 cutover**, re-run `write_baseline(graph, BASELINE)` in the same PR as the rename. Next removals are measured against the new baseline.
+
+## Handler renames
+
+Handlers evolve under the **same model as events**. A handler becomes a graph *node* keyed by its name; if a thread was interrupted (via `Interrupted`) inside a handler and you later rename or move it, the old node vanishes and the paused checkpoint can no longer resume. Declare the rename and old checkpoints keep working:
+
+| Concern | Events | Handlers |
+|---|---|---|
+| Declare prior identity → auto-recover | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` |
+| Prevent the break up front | (qualname *is* the identity) | `@on(node_name="stable_id")` — then rename the function freely |
+| Catch the undeclared case in CI | `assert_all_baselined_*` | `assert_all_baselined_handlers_cover(graph, BASELINE)` |
+
+```python
+# Renamed handler — declare the old node name so paused checkpoints resume:
+@on(Confirmed, previously="await_confirmation")
+def confirm(event: Confirmed) -> Approved: ...
+```
+
+- `@on(node_name=...)` pins a **stable node identity** decoupled from the Python function name — rename/move the function with zero checkpoint impact. `@on(previously=...)` registers an **alias node** for each historic name so an in-flight interrupted checkpoint re-enters the renamed handler.
+- `assert_all_baselined_handlers_cover(graph, BASELINE)` is the handler analog of the event gates (note: it takes the **graph**, not the serde): it asserts every handler node name in the baseline is still live or alias-covered, raising `HandlerCoverageError` otherwise (`HandlerCoverageError` and `MigrationCoverageError` are siblings under `CoverageError` — `except CoverageError` catches both). `write_baseline` records handler node names (baseline v2; older v1 baselines still load).
+- **Deploy order:** alias nodes are purely **additive**, so a handler rename is safe to ship in a **single release** — unlike an event rename, which needs the two-release `legacy_write` dance (below). The new release's graph carries both the new node and the alias, so old in-flight checkpoints resume against it.
+- **Runtime safety net.** If a handler is *removed* (or renamed without `previously=`) and a thread is still paused inside it, `resume()` would otherwise be a silent no-op. `EventGraph(on_unresumable=...)` governs this — it fires on any `resume()` of a thread that isn't awaiting input (also catching resume of an already-finished thread or a double-resume):
+    - **`raise`** (default) — `UnresumableError`. Use in dev/CI to fail fast on an undeclared rename.
+    - **`halt`** — emit a terminal `Unresumable(Halted)` and finalize the thread. Use in production for graceful, *observable* degradation (the thread ends in the log rather than hanging).
+    - **`warn`** — `UserWarning` + no-op (thread untouched). Use when you want a signal but to handle the thread yourself.
+
+    The CI handler gate catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
+
+### Renaming an event *and* a handler together
+
+The two tracks are independent — do both, in one PR:
+
+1. **Decorate both** — `@migrate_from("Old.Qualname")` on the renamed event class; `@on(previously="old_node")` on the renamed handler.
+2. **Regenerate the baseline once** — a single `write_baseline(graph, BASELINE)` captures both the event identities *and* the handler node names (baseline v2). Commit it in the same PR.
+3. **Run both gates in CI** — they're independent and both required: an event gate (`assert_all_baselined_revive(serde, BASELINE)`) **and** the handler gate (`assert_all_baselined_handlers_cover(graph, BASELINE)`). One does not cover the other.
+4. **Deploy** — the handler alias is single-release safe; the event rename follows the two-release `legacy_write` cadence, so the *event* side gates the rollout.
 
 ## Reserved attributes
 

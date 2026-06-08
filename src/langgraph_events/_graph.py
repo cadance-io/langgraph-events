@@ -8,7 +8,7 @@ import types
 import typing
 import warnings
 from collections.abc import Mapping as _Mapping
-from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
@@ -29,6 +29,7 @@ from langgraph_events._event import (
     Namespace,
     Scatter,
     SystemEvent,
+    Unresumable,
     _iter_nested_outcomes,
 )
 from langgraph_events._event_log import EventLog
@@ -64,6 +65,17 @@ if TYPE_CHECKING:
 
 class OrphanedEventWarning(UserWarning):
     """Issued when handler return types have no matching subscriber."""
+
+
+class UnresumableError(RuntimeError):
+    """Raised by ``resume()`` when the thread is not awaiting input.
+
+    Default behavior of ``EventGraph(on_unresumable="raise")``: the paused
+    handler was renamed/removed, the thread already completed, or it was
+    resumed twice — in every case the resume would have been a silent no-op.
+    Declare ``@on(previously=...)`` to recover a renamed handler, or set
+    ``on_unresumable="halt"``/``"warn"`` to handle it non-fatally.
+    """
 
 
 def _any_catcher_covers(
@@ -452,6 +464,46 @@ def _build_service_registries(
     return by_type, by_name
 
 
+def _validate_on_unresumable(value: str) -> None:
+    """Reject an unknown ``on_unresumable`` policy at construction.
+
+    The value set intentionally diverges from ``AGUIAdapter(on_unmapped=...)``:
+    the default is ``"raise"`` (not ``"warn"``) because a non-resumable resume
+    is a real bug worth failing on, and the third option is ``"halt"`` (emit a
+    terminal event) rather than ``"ignore"`` (silently drop) — there is no
+    silent option here on purpose.
+    """
+    if value not in ("raise", "halt", "warn"):
+        raise ValueError(
+            f"on_unresumable must be 'raise', 'halt', or 'warn', got {value!r}"
+        )
+
+
+def _validate_handler_aliases(metas: list[HandlerMeta]) -> None:
+    """Raise if any ``@on(previously=...)`` alias is unusable.
+
+    Each historic node name becomes a real graph node, so it must be unique
+    and must not shadow a live handler node — surfaced at build time.
+    """
+    live_names = {meta.name for meta in metas}
+    seen_aliases: set[str] = set()
+    for meta in metas:
+        for alias in meta.previous_names:
+            if alias in live_names:
+                raise ValueError(
+                    f"@on(previously={alias!r}) on handler {meta.name!r} "
+                    f"collides with a live handler node of the same name; "
+                    f"choose a distinct historic name."
+                )
+            if alias in seen_aliases:
+                raise ValueError(
+                    f"Duplicate handler alias {alias!r} (declared via "
+                    f"@on(previously=...)); each historic node name may map "
+                    f"to only one handler."
+                )
+            seen_aliases.add(alias)
+
+
 def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
     """Raise if a handler declares a param the framework cannot inject.
 
@@ -569,14 +621,17 @@ class EventGraph:
         checkpointer: Any = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
+        on_unresumable: Literal["raise", "halt", "warn"] = "raise",
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
+        _validate_on_unresumable(on_unresumable)
 
         handlers = _expand_command_handlers(handlers)
 
         self._max_rounds = max_rounds
         self._recursion_limit = recursion_limit
+        self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
@@ -624,6 +679,8 @@ class EventGraph:
             else:
                 seen_names[meta.name] = 1
             self._handler_metas.append(meta)
+
+        _validate_handler_aliases(self._handler_metas)
 
         self._return_info: dict[str, ReturnInfo] = {}
         self._return_contracts: dict[str, ReturnContract | None] = {}
@@ -694,6 +751,16 @@ class EventGraph:
         return frozenset(self._reducers.keys())
 
     @property
+    def handler_names(self) -> frozenset[str]:
+        """Canonical graph-node name of every registered handler.
+
+        These are the names an interrupted checkpoint can pause at;
+        ``@on(previously=...)`` aliases are excluded (use them to *cover* a
+        renamed name, not to enumerate live handlers).
+        """
+        return frozenset(meta.name for meta in self._handler_metas)
+
+    @property
     def compiled(self) -> CompiledStateGraph:
         """The underlying LangGraph ``CompiledStateGraph``.
 
@@ -748,6 +815,14 @@ class EventGraph:
             )
             graph.add_node(meta.name, cast("Any", handler_node))
             handler_names.append(meta.name)
+            # Register an alias node per historic name (@on(previously=...)) so an
+            # interrupted checkpoint paused at the old node re-enters the same
+            # handler on resume. The dispatcher only ever returns canonical
+            # names, so aliases never fire for new work — they exist purely to
+            # catch resumes of in-flight checkpoints.
+            for alias in meta.previous_names:
+                graph.add_node(alias, cast("Any", handler_node))
+                handler_names.append(alias)
 
         # --- edges ---
         graph.add_edge(START, "__seed__")
@@ -774,7 +849,9 @@ class EventGraph:
         if self._recursion_limit is not None:
             limit = self._recursion_limit
         else:
-            n_handlers = len(self._handler_metas)
+            n_handlers = len(self._handler_metas) + sum(
+                len(meta.previous_names) for meta in self._handler_metas
+            )
             needed = self._max_rounds * (n_handlers + 1) + 1
             existing = (self._compiled_graph.config or {}).get("recursion_limit", 25)
             limit = max(needed, existing)
@@ -1003,22 +1080,111 @@ class EventGraph:
         compiled = self._compile()
         await compiled.aupdate_state(config, values, as_node="__seed__")
 
+    def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
+        """Whether the thread has work to resume into.
+
+        Keyed on the checkpoint's ``next`` (scheduled nodes), not the
+        higher-level ``is_interrupted`` flag: a caller may ``pre_seed`` before
+        resuming (e.g. ``AGUIAdapter`` commits a ``FrontendStateMutated``),
+        which clears ``is_interrupted`` while the interrupt is still pending —
+        but ``next`` stays non-empty. ``next == ()`` means nothing is scheduled,
+        so ``resume()`` would be a silent no-op (paused handler gone, thread
+        already finished, or resumed twice). A Phase-1 ``@on(previously=...)``
+        alias keeps the node live, so a declared rename still reports ``True``.
+        If no ``config`` was passed, assume pending and let the normal path
+        surface any error.
+        """
+        config = kwargs.get("config")
+        if config is None:
+            return True
+        return bool(self._compile().get_state(config).next)
+
+    def _unresumable_message(self) -> str:
+        return (
+            "resume() called on a thread that is not awaiting input. The paused "
+            "handler may have been renamed/removed, or the thread already "
+            "completed. Declare @on(previously=...) to recover a renamed "
+            "handler, or set EventGraph(on_unresumable='halt'|'warn')."
+        )
+
+    def _unresumable_raise_or_warn(self, kwargs: dict[str, Any]) -> EventLog | None:
+        """Shared ``raise``/``warn`` arm of the ``on_unresumable`` policy.
+
+        ``raise`` raises; ``warn`` warns and returns the unchanged log; ``halt``
+        returns ``None`` so the (sync or async) caller appends the terminal
+        event itself. Keeps the policy ladder in one place across the sync and
+        async resume paths.
+        """
+        if self._on_unresumable == "raise":
+            raise UnresumableError(self._unresumable_message())
+        if self._on_unresumable == "warn":
+            warnings.warn(self._unresumable_message(), stacklevel=4)
+            return self.get_state(kwargs.get("config")).events
+        return None
+
+    def _apply_unresumable_policy(
+        self, value: Event, kwargs: dict[str, Any]
+    ) -> EventLog:
+        """Sync ``on_unresumable`` for a resume that would be a no-op.
+
+        Called only when :meth:`_resume_is_pending` is ``False``. The ``halt``
+        arm appends a terminal ``Unresumable(Halted)`` so the abandoned thread
+        ends observably; the thread is already inert (not pending), so
+        ``update_state`` only records the event.
+        """
+        log = self._unresumable_raise_or_warn(kwargs)
+        if log is not None:
+            return log
+        config = kwargs.get("config")
+        self._compile().update_state(
+            cast("RunnableConfig", config),
+            {"events": [self._unresumable_event(value)]},
+            as_node="__seed__",
+        )
+        return self.get_state(config).events
+
+    async def _aapply_unresumable_policy(
+        self, value: Event, kwargs: dict[str, Any]
+    ) -> EventLog:
+        """Async sibling of :meth:`_apply_unresumable_policy` — ``halt`` uses
+        ``aupdate_state`` so async checkpointers aren't driven synchronously."""
+        log = self._unresumable_raise_or_warn(kwargs)
+        if log is not None:
+            return log
+        config = kwargs.get("config")
+        await self._compile().aupdate_state(
+            cast("RunnableConfig", config),
+            {"events": [self._unresumable_event(value)]},
+            as_node="__seed__",
+        )
+        return self.get_state(config).events
+
+    @staticmethod
+    def _unresumable_event(value: Event) -> Unresumable:
+        return Unresumable(resume_value=type(value).__name__)  # type: ignore[call-arg]
+
     def resume(self, value: Event, **kwargs: Any) -> EventLog:
         """Resume an interrupted graph with a domain event.
 
         The event is auto-dispatched (handlers subscribed to its type fire),
-        then a ``Resumed`` event is created alongside it.
+        then a ``Resumed`` event is created alongside it. If the thread is not
+        awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("resume")
+        if not self._resume_is_pending(kwargs):
+            return self._apply_unresumable_policy(value, kwargs)
         return self._run(LGCommand(resume=value), **kwargs)
 
     async def aresume(self, value: Event, **kwargs: Any) -> EventLog:
         """Async version of resume().
 
         The event is auto-dispatched (handlers subscribed to its type fire),
-        then a ``Resumed`` event is created alongside it.
+        then a ``Resumed`` event is created alongside it. If the thread is not
+        awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("aresume")
+        if not self._resume_is_pending(kwargs):
+            return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
 
     def get_state(self, config: Any) -> GraphState:
@@ -1391,6 +1557,13 @@ class EventGraph:
                 a list of reducer names for selective inclusion.
         """
         self._require_checkpointer("stream_resume")
+        if not self._resume_is_pending(kwargs):
+            log = self._apply_unresumable_policy(value, kwargs)  # raises for raise
+            if self._on_unresumable == "halt":
+                latest = log.latest(Unresumable)
+                if latest is not None:
+                    yield latest
+            return
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
@@ -1459,6 +1632,14 @@ class EventGraph:
                 from LangGraph.
         """
         self._require_checkpointer("astream_resume")
+        if not self._resume_is_pending(kwargs):
+            # raises for the 'raise' policy; warn/halt return a log to adapt
+            log = await self._aapply_unresumable_policy(value, kwargs)
+            if self._on_unresumable == "halt":
+                latest = log.latest(Unresumable)
+                if latest is not None:
+                    yield latest
+            return
         async for item in self._astream_entry(
             LGCommand(resume=value),
             seeds or [],

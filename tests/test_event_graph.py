@@ -4559,3 +4559,253 @@ def describe_OrphanedEventWarning():
             with warnings.catch_warnings():
                 warnings.simplefilter("error", OrphanedEventWarning)
                 EventGraph([analyze])
+
+
+def describe_handler_evolution():
+    # @on(previously=) keeps an interrupted checkpoint resumable after the
+    # handler that paused it is renamed: the graph registers an alias node
+    # under the old name so LangGraph re-enters it on resume.
+
+    def when_previously_is_declared():
+        def it_registers_an_alias_node():
+            @on(Started, previously="old_name")
+            def newer(event: Started) -> Ended:
+                return Ended(result="x")
+
+            nodes = set(EventGraph([newer])._compile().get_graph().nodes)
+            assert "newer" in nodes
+            assert "old_name" in nodes
+
+        def it_does_not_route_new_events_into_the_alias():
+            # The load-bearing invariant: the dispatcher only ever returns
+            # canonical node names, so an alias never fires for fresh work — it
+            # exists purely to catch resumes of in-flight checkpoints. A fresh
+            # invoke must run the handler exactly once, not once per alias.
+            @on(Started, previously="old_name")
+            def newer(event: Started) -> Ended:
+                return Ended(result="once")
+
+            log = EventGraph([newer]).invoke(Started(data="x"))
+            assert [e for e in log if isinstance(e, Ended)] == [Ended(result="once")]
+
+    def when_an_alias_collides():
+        def with_a_live_handler_name():
+            def it_raises_at_build():
+                @on(Started)
+                def live(event: Started) -> Ended:
+                    return Ended(result="x")
+
+                @on(Ended, previously="live")
+                def other(event: Ended) -> None:
+                    return None
+
+                with pytest.raises(ValueError, match="collides"):
+                    EventGraph([live, other])
+
+    def when_a_paused_handler_is_renamed():
+        def with_previously_declared():
+            def it_resumes_the_old_checkpoint_via_the_alias():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                class ConfirmationRequested(Interrupted):
+                    data: str
+
+                class Confirmed(IntegrationEvent):
+                    pass
+
+                @on(Started)
+                def await_input(event: Started) -> ConfirmationRequested:
+                    return ConfirmationRequested(data=event.data)
+
+                @on(Confirmed)
+                def handle_confirm(event: Confirmed) -> Ended:
+                    return Ended(result="confirmed")
+
+                saver = MemorySaver()
+                config = {"configurable": {"thread_id": "evo-resume"}}
+                v1 = EventGraph([await_input, handle_confirm], checkpointer=saver)
+                v1.invoke(Started(data="test"), config=config)
+                assert v1.get_state(config).is_interrupted
+
+                # Rename the paused handler; declare its old node name as alias.
+                @on(Started, previously="await_input")
+                def gather_input(event: Started) -> ConfirmationRequested:
+                    return ConfirmationRequested(data=event.data)
+
+                v2 = EventGraph([gather_input, handle_confirm], checkpointer=saver)
+                log = v2.resume(Confirmed(), config=config)
+                assert log.latest(Ended) == Ended(result="confirmed")
+
+
+class _Pause(Interrupted):
+    pass
+
+
+class _Go(IntegrationEvent):
+    pass
+
+
+def describe_on_unresumable():
+    # resume() on a thread that is not awaiting input (paused handler removed,
+    # already-finished, or double-resume) is governed by
+    # EventGraph(on_unresumable=...). Default `raise` turns the old silent
+    # no-op into a clear error; `warn`/`halt` opt into non-fatal handling.
+
+    def _paused_thread(saver, tid):
+        from langgraph.checkpoint.memory import MemorySaver  # noqa: F401
+
+        @on(Started)
+        def waiter(event: Started) -> _Pause:
+            return _Pause()
+
+        @on(_Go)
+        def go(event: _Go) -> None:
+            return None
+
+        cfg = {"configurable": {"thread_id": tid}}
+        EventGraph([waiter, go], checkpointer=saver).invoke(
+            Started(data="x"), config=cfg
+        )
+        return cfg
+
+    def when_the_paused_handler_was_removed():
+        def with_default_policy():
+            def it_raises_unresumable_error():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                from langgraph_events import UnresumableError
+
+                saver = MemorySaver()
+                cfg = _paused_thread(saver, "unres-raise")
+
+                @on(_Go)
+                def go(event: _Go) -> None:
+                    return None
+
+                v2 = EventGraph([go], checkpointer=saver)  # waiter removed
+                with pytest.raises(UnresumableError):
+                    v2.resume(_Go(), config=cfg)
+
+    def when_the_thread_is_genuinely_interrupted():
+        def it_resumes_normally():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            @on(Started)
+            def waiter(event: Started) -> _Pause:
+                return _Pause()
+
+            @on(_Go)
+            def go(event: _Go) -> Ended:
+                return Ended(result="went")
+
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "unres-live"}}
+            graph = EventGraph([waiter, go], checkpointer=saver)
+            graph.invoke(Started(data="x"), config=cfg)
+            assert graph.get_state(cfg).is_interrupted
+
+            log = graph.resume(_Go(), config=cfg)
+            assert log.latest(Ended) == Ended(result="went")
+
+    def when_the_policy_value_is_invalid():
+        def it_raises_at_construction():
+            @on(Started)
+            def h(event: Started) -> None:
+                return None
+
+            with pytest.raises(ValueError, match="on_unresumable"):
+                EventGraph([h], on_unresumable="nope")  # type: ignore[arg-type]
+
+    def when_warn_policy():
+        def it_warns_and_leaves_the_log_unchanged():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events import Halted
+
+            saver = MemorySaver()
+            cfg = _paused_thread(saver, "unres-warn")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver, on_unresumable="warn")
+            with pytest.warns(UserWarning, match="not awaiting input"):
+                log = v2.resume(_Go(), config=cfg)
+
+            assert not any(isinstance(e, Halted) for e in log)
+
+    def when_halt_policy():
+        def it_finalizes_the_thread_terminally():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events import Halted, Unresumable
+
+            saver = MemorySaver()
+            cfg = _paused_thread(saver, "unres-halt")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver, on_unresumable="halt")
+            log = v2.resume(_Go(), config=cfg)
+
+            assert isinstance(log.latest(Unresumable), Unresumable)
+            assert isinstance(log.latest(Unresumable), Halted)
+            assert not v2.get_state(cfg).is_interrupted
+
+    def when_resumed_via_aresume():
+        def it_honors_the_policy():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events import UnresumableError
+
+            saver = MemorySaver()
+            cfg = _paused_thread(saver, "unres-aresume")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver)
+            with pytest.raises(UnresumableError):
+                asyncio.run(v2.aresume(_Go(), config=cfg))
+
+    def when_resumed_via_stream_resume():
+        def it_honors_the_policy():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events import UnresumableError
+
+            saver = MemorySaver()
+            cfg = _paused_thread(saver, "unres-stream")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver)
+            with pytest.raises(UnresumableError):
+                list(v2.stream_resume(_Go(), config=cfg))
+
+    def when_resumed_via_astream_resume():
+        def it_honors_the_policy():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events import UnresumableError
+
+            saver = MemorySaver()
+            cfg = _paused_thread(saver, "unres-astream")
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            v2 = EventGraph([go], checkpointer=saver)
+
+            async def drain():
+                return [x async for x in v2.astream_resume(_Go(), config=cfg)]
+
+            with pytest.raises(UnresumableError):
+                asyncio.run(drain())

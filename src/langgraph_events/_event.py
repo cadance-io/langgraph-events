@@ -575,6 +575,19 @@ class Cancelled(Halted):
     """
 
 
+class Unresumable(Halted):
+    """A ``resume()`` arrived for a thread that was not awaiting input.
+
+    Emitted (terminally) when ``EventGraph(on_unresumable="halt")`` handles a
+    resume that would otherwise be a silent no-op — the paused handler was
+    renamed/removed, the thread already completed, or it was resumed twice.
+    ``resume_value`` is the type name of the event the caller tried to resume
+    with, for diagnostics.
+    """
+
+    resume_value: str = ""
+
+
 class RunPaused(SystemEvent):
     """Soft pause emitted by the router when a per-run deadline expires.
 

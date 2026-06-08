@@ -25,9 +25,14 @@ from langgraph_events.serde.migrations._core import (
     migrate_from,
     replay_reducer,
 )
-from langgraph_events.serde.migrations.detect import MigrationCoverageError
+from langgraph_events.serde.migrations.detect import (
+    CoverageError,
+    HandlerCoverageError,
+    MigrationCoverageError,
+)
 from langgraph_events.serde.migrations.testing import (
     assert_all_baselined_cover,
+    assert_all_baselined_handlers_cover,
     assert_all_baselined_resolve,
     assert_all_baselined_revive,
     synthesize_legacy_payload,
@@ -35,10 +40,13 @@ from langgraph_events.serde.migrations.testing import (
 
 __all__ = [
     "AddField",
+    "CoverageError",
+    "HandlerCoverageError",
     "Migration",
     "MigrationCoverageError",
     "RenameEvent",
     "assert_all_baselined_cover",
+    "assert_all_baselined_handlers_cover",
     "assert_all_baselined_resolve",
     "assert_all_baselined_revive",
     "backfill",

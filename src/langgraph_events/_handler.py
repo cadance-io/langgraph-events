@@ -165,6 +165,8 @@ def _build_on_decorator(
     raises: type[Exception] | tuple[type[Exception], ...],
     invariants: dict[type[Invariant], Callable[..., bool]] | None,
     field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str],
+    node_name: str | None = None,
+    previous_names: tuple[str, ...] = (),
 ) -> Callable[[F], F]:
     """Validate arguments and return the decorator that stamps attributes."""
     for et in event_types:
@@ -237,6 +239,10 @@ def _build_on_decorator(
             fn._raises = raises_tuple  # type: ignore[attr-defined]
         if invariants_tuple:
             fn._invariants = invariants_tuple  # type: ignore[attr-defined]
+        if node_name is not None:
+            fn._node_name = node_name  # type: ignore[attr-defined]
+        if previous_names:
+            fn._previous_names = previous_names  # type: ignore[attr-defined]
         return fn
 
     return decorator
@@ -246,6 +252,8 @@ def on(
     *event_types: Any,
     raises: type[Exception] | tuple[type[Exception], ...] = (),
     invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
+    node_name: str | None = None,
+    previously: str | tuple[str, ...] = (),
     **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
 ) -> Any:
     """Subscribe a handler to one or more event types.
@@ -279,26 +287,50 @@ def on(
     Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
     for ``isinstance`` match (works for Event, Exception, or Invariant
     subclasses); string values do equality match (e.g. a string event field).
+
+    ``node_name=`` pins the handler's graph-node identity (default: the
+    function name) so renaming the function never breaks an interrupted
+    checkpoint; ``previously=`` (str or tuple) declares historic node names to
+    keep resumable after a rename. Both are reserved keywords — a field named
+    ``node_name`` or ``previously`` cannot be matched positionally via
+    ``**field_matchers``.
     """
-    no_modifiers = raises == () and invariants is None and not field_matchers
+    if node_name is not None and not isinstance(node_name, str):
+        raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")
+    previous_names = (previously,) if isinstance(previously, str) else tuple(previously)
+
+    no_modifiers = (
+        raises == ()
+        and invariants is None
+        and not field_matchers
+        and node_name is None
+        and not previous_names
+    )
     sole_arg_is_function = len(event_types) == 1 and (
         inspect.isfunction(event_types[0]) or inspect.ismethod(event_types[0])
     )
 
     if sole_arg_is_function and no_modifiers:
         fn = event_types[0]
-        return _build_on_decorator((_infer_event_type(fn),), (), None, {})(fn)
+        return _build_on_decorator((_infer_event_type(fn),), (), None, {}, None, ())(fn)
 
     if not event_types:
 
         def inferring(fn: F) -> F:
             return _build_on_decorator(
-                (_infer_event_type(fn),), raises, invariants, dict(field_matchers)
+                (_infer_event_type(fn),),
+                raises,
+                invariants,
+                dict(field_matchers),
+                node_name,
+                previous_names,
             )(fn)
 
         return inferring
 
-    return _build_on_decorator(event_types, raises, invariants, dict(field_matchers))
+    return _build_on_decorator(
+        event_types, raises, invariants, dict(field_matchers), node_name, previous_names
+    )
 
 
 @dataclass(frozen=True)
@@ -310,6 +342,10 @@ class HandlerMeta:
     event_types: tuple[type[Event], ...]
     log_param: str | None
     is_async: bool
+    # Historic node names this handler answered to, declared via
+    # ``@on(previously=...)``. The graph registers an alias node per name so an
+    # interrupted checkpoint paused at the old node still resumes after a rename.
+    previous_names: tuple[str, ...] = ()
     reducer_params: tuple[str, ...] = ()
     # Subset of ``reducer_params`` whose annotation rejects ``None`` — the
     # framework raises ``ReducerNotSetError`` if the channel value is ``None``
@@ -567,9 +603,10 @@ def extract_handler_meta(
         )
 
     return HandlerMeta(
-        name=fn.__name__,
+        name=getattr(fn, "_node_name", None) or fn.__name__,
         fn=fn,
         event_types=tuple(event_types),
+        previous_names=getattr(fn, "_previous_names", ()),
         log_param=log_param,
         is_async=asyncio.iscoroutinefunction(fn),
         reducer_params=reducer_params,

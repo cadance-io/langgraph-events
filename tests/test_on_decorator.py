@@ -712,3 +712,49 @@ def describe_return_hint_parsing():
                 )
                 assert all(item.filename == __file__ for item in w)
                 assert "-->|handler| ?" in graph.namespaces().mermaid()
+
+
+def describe_handler_identity():
+    # @on(node_name=) gives a handler a stable node identity decoupled from the
+    # Python function name; @on(previously=) records historic node names so a
+    # rename keeps old interrupted checkpoints resumable via an alias node.
+
+    def when_node_name_is_explicit():
+        def it_overrides_the_function_name():
+            @on(SampleEvent, node_name="submit")
+            async def place(event: SampleEvent):
+                pass
+
+            assert extract_handler_meta(place).name == "submit"
+
+    def when_node_name_is_omitted():
+        def it_defaults_to_the_function_name():
+            @on(SampleEvent)
+            async def place(event: SampleEvent):
+                pass
+
+            assert extract_handler_meta(place).name == "place"
+
+    def when_previously_is_a_single_name():
+        def it_records_one_alias():
+            @on(SampleEvent, previously="old_place")
+            async def place(event: SampleEvent):
+                pass
+
+            assert extract_handler_meta(place).previous_names == ("old_place",)
+
+    def when_previously_is_a_tuple():
+        def it_records_all_aliases():
+            @on(SampleEvent, previously=("a", "b"))
+            async def place(event: SampleEvent):
+                pass
+
+            assert extract_handler_meta(place).previous_names == ("a", "b")
+
+    def when_previously_is_omitted():
+        def it_defaults_to_empty():
+            @on(SampleEvent)
+            async def place(event: SampleEvent):
+                pass
+
+            assert extract_handler_meta(place).previous_names == ()
