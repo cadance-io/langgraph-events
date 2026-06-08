@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-06-08
+
 ### Fixed
 - **`aresume()` / `astream_resume()` no longer crash against async-only checkpointers** (#95). The `on_unresumable` resume-pending gate introduced in 0.15.0 read checkpoint state through the **synchronous** `get_state`, which `AsyncPostgresSaver` (and any async-only checkpointer) rejects from the running event loop — raising `asyncio.InvalidStateError` before any policy (`raise`/`warn`/`halt`) could run, and taking down every async resume (including the library's own `AGUIAdapter` SSE path). The async resume gate and the async `on_unresumable` policy arms now read and write checkpoint state exclusively through the async API (`aget_state`/`aupdate_state`), matching how `ainvoke()`-based flows already behave. The sync `resume()`/`stream_resume()` paths are unchanged.
 
@@ -264,7 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/cadance-io/langgraph-events/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/cadance-io/langgraph-events/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/cadance-io/langgraph-events/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/cadance-io/langgraph-events/compare/v0.13.0...v0.14.0
