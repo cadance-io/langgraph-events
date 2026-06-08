@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Lifecycle archetypes — compose a shared lifecycle across domains while keeping per-entity identity** (#98). A reusable archetype `Namespace` can define a lifecycle's behavior *once* (e.g. a persistence `Persist`/`Approve` loop); consuming domains **subclass** its commands to give them their own per-entity event identity and field types, and plug in per-entity operations through a `Policy` the namespace supplies. Three pieces make this work: (1) subclassing an archetype `Command` now inherits its inline handler — the framework rebinds a **distinct** handler function per subclass, so several domains' commands coexist as graph nodes instead of tripping the `_inline_command` collision guard (a subclass that declares its own public method still overrides the inherited handler). Because archetype handlers construct outcomes reflectively (`type(self).Outcome(...)`), each subclass emits its **own** event (`Persona.Persist.Persisted` ≠ `Story.Persist.Persisted`). (2) New `namespace_of(target)` resolves the `Namespace` that owns a `Command`/`DomainEvent` (class or instance) — the bridge an archetype handler uses to reach the consuming domain's `Policy` (`namespace_of(self).Policy`), and that reactions use to dispatch per-entity (`namespace_of(event).Approve(...)`). (3) `class Foo(Namespace, uses=[Archetype])` records the composition on `Foo.__uses__` for intent + introspection (validated; no copying or aliasing). See `docs/concepts.md` (Lifecycle archetypes) and `examples/persistable.py`.
+
 ## [0.18.0] - 2026-06-08
 
 ### Fixed

@@ -30,6 +30,7 @@ from langgraph_events._event import (
     SystemEvent,
     SystemPromptSet,
     Unresumable,
+    namespace_of,
     on_namespace_finalize,
 )
 from langgraph_events._event_log import EventLog
@@ -128,6 +129,7 @@ __all__ = [
     "emit_custom",
     "emit_state_snapshot",
     "message_reducer",
+    "namespace_of",
     "on",
     "on_namespace_finalize",
 ]

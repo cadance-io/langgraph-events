@@ -13,7 +13,7 @@ from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any, ClassVar
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from langchain_core.messages import BaseMessage, SystemMessage
 
@@ -104,6 +104,24 @@ def on_namespace_finalize(cls: type, callback: Callable[[type, type], None]) -> 
     _NAMESPACE_FINALIZE_CALLBACKS.setdefault(cls, []).append(callback)
 
 
+def namespace_of(target: type | Event) -> type[Namespace] | None:
+    """Return the ``Namespace`` class that owns *target* — a ``Command`` /
+    ``DomainEvent`` class or instance — or ``None`` if it carries no namespace
+    stamp or its namespace isn't registered.
+
+    The bridge for archetype composition: an archetype command's handler runs
+    on a subclass instance (``Foo.Persist``), and ``namespace_of(self)`` returns
+    the consuming namespace (``Foo``) so the handler can reach conventions the
+    namespace supplies — e.g. ``namespace_of(self).Policy`` — without touching
+    the private registry.
+    """
+    cls = target if isinstance(target, type) else type(target)
+    name = getattr(cls, "__namespace__", None)
+    if name is None:
+        return None
+    return _NAMESPACE_REGISTRY.get(name)
+
+
 def _iter_nested_events(container: type, *, recurse_commands: bool) -> list[type]:
     """Every ``Event`` subclass nested directly under *container*, in
     declaration order.
@@ -179,9 +197,16 @@ class Namespace:
 
     __namespace_name__: ClassVar[str]
     __reducers__: ClassVar[tuple[Any, ...]]
+    __uses__: ClassVar[tuple[type, ...]] = ()
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, *, uses: Sequence[type] = (), **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        for archetype in uses:
+            if not (isinstance(archetype, type) and issubclass(archetype, Namespace)):
+                raise TypeError(
+                    f"uses= entries must be Namespace subclasses, got {archetype!r}"
+                )
+        cls.__uses__ = tuple(uses)
         existing = _NAMESPACE_REGISTRY.get(cls.__name__)
         if existing is not None and existing is not cls:
             raise TypeError(
@@ -367,6 +392,67 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
         )
 
 
+def _find_inline_handler(cls: type[Command]) -> Any | None:
+    """Return the Command's sole public method (its inline handler), or ``None``.
+
+    A Command represents one intent and gets one handler. The handler method may
+    be named anything meaningful (``handle``, ``place``, ``buy``, ...); the sole
+    public method in the class body is picked up. Helpers must be underscore-
+    prefixed; dunders, nested DomainEvent classes, and properties don't count.
+    ``staticmethod`` / ``classmethod`` count toward the limit so they still
+    trigger the same rejection via ``_validate_handle_signature``.
+    """
+    public_methods = [
+        (name, attr)
+        for name, attr in cls.__dict__.items()
+        if not name.startswith("_")
+        and (inspect.isfunction(attr) or isinstance(attr, (staticmethod, classmethod)))
+    ]
+    if len(public_methods) > 1:
+        names = ", ".join(sorted(name for name, _ in public_methods))
+        raise TypeError(
+            f"Command {cls.__qualname__!r} declares more than one public "
+            f"method ({names}). A Command represents a single intent and "
+            f"may have at most one public method (its handler). Make "
+            f"helpers private with a leading underscore, or move them to "
+            f"a separate utility class."
+        )
+    if not public_methods:
+        return None
+    _, handle = public_methods[0]
+    _validate_handle_signature(cls, handle)
+    return handle
+
+
+def _rebind_inherited_handler(cls: type[Command]) -> None:
+    """Resolve the handler for a Command that inherits a stamped base command.
+
+    If the subclass declares its own public method, that overrides the archetype
+    handler. Otherwise the handler is inherited — give it a *distinct* clone so
+    each subclass is its own graph node: the graph binds each inline handler to
+    exactly one Command (``_inline_command`` guard), so several commands
+    subclassing one archetype command to compose a shared lifecycle would
+    otherwise share the parent's handler object and collide. The clone has the
+    same code/closure (identical behavior); the handler emits its outcome
+    reflectively (``type(self).Outcome``), so the clone yields the subclass's
+    own per-entity event.
+    """
+    own = _find_inline_handler(cls)
+    if own is not None:
+        cls.__command_handler__ = own
+        return
+    handler = cls.__command_handler__
+    if handler is None or not inspect.isfunction(handler):
+        return
+    cls.__command_handler__ = types.FunctionType(
+        handler.__code__,
+        handler.__globals__,
+        handler.__name__,
+        handler.__defaults__,
+        handler.__closure__,
+    )
+
+
 class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     """Imperative intent. Must be nested inside a ``Namespace`` subclass.
 
@@ -392,6 +478,7 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if _inherits_namespace(cls):
+            _rebind_inherited_handler(cls)
             return
         if not _is_nested_in_class(cls):
             raise TypeError(
@@ -399,35 +486,8 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                 f"subclass, e.g. "
                 f"class Order(Namespace): class {cls.__name__}(Command): ..."
             )
-        # A Command represents one intent and gets one handler. The handler
-        # method may be named anything meaningful (``handle``, ``place``,
-        # ``buy``, ...); the framework picks up the sole public method in
-        # the class body. Helpers must be underscore-prefixed; dunders,
-        # nested DomainEvent classes, and properties don't count.
-        # ``staticmethod`` / ``classmethod`` count toward the limit so they
-        # still trigger the same rejection as before via
-        # ``_validate_handle_signature``.
-        public_methods = [
-            (name, attr)
-            for name, attr in cls.__dict__.items()
-            if not name.startswith("_")
-            and (
-                inspect.isfunction(attr)
-                or isinstance(attr, (staticmethod, classmethod))
-            )
-        ]
-        if len(public_methods) > 1:
-            names = ", ".join(sorted(name for name, _ in public_methods))
-            raise TypeError(
-                f"Command {cls.__qualname__!r} declares more than one public "
-                f"method ({names}). A Command represents a single intent and "
-                f"may have at most one public method (its handler). Make "
-                f"helpers private with a leading underscore, or move them to "
-                f"a separate utility class."
-            )
-        if public_methods:
-            _, handle = public_methods[0]
-            _validate_handle_signature(cls, handle)
+        handle = _find_inline_handler(cls)
+        if handle is not None:
             cls.__command_handler__ = handle
 
 

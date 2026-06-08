@@ -89,6 +89,15 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 |---|---|---|
 | `on_namespace_finalize(cls, callback)` | Function | Schedule `callback(cls, namespace_cls)` to fire once `cls`'s enclosing `Namespace.__init_subclass__` finishes. Lets class decorators defer `typing.get_type_hints()` calls until forward references to siblings can resolve. Fires immediately if the enclosing Namespace has already finalized (e.g. when applied post-hoc to a bound class). |
 
+## Composition { #archetypes }
+
+| Export | Type | Description |
+|---|---|---|
+| `Namespace(..., uses=[Archetype])` | Class kwarg | Records that a namespace composes one or more archetype `Namespace`s (stored on `__uses__`) for intent + introspection. Validates each entry is a `Namespace`. Does not copy or alias members. |
+| `namespace_of(target)` | Function | Return the `Namespace` class that owns `target` (a `Command`/`DomainEvent` class or instance), or `None`. The bridge for [lifecycle archetypes](concepts.md#archetypes): an archetype handler running on a subclass instance calls `namespace_of(self).Policy` to reach the consuming domain's convention. |
+
+Subclassing an archetype `Command` inherits its `handle()` (the framework rebinds a distinct handler per subclass, so they coexist as graph nodes) while keeping per-entity event identity + field types. Archetype handlers must construct outcomes reflectively (`type(self).Outcome`). See [Concepts › Lifecycle archetypes](concepts.md#archetypes).
+
 ## Streaming & Frames
 
 | Export | Type | Description |

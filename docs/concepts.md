@@ -211,6 +211,39 @@ A `Namespace` is where related features attach:
 !!! note "On `Namespace`"
     `Namespace` is a namespace — for grouping. A richer construct (with identity and size discipline) may layer on top in a future release.
 
+## Lifecycle archetypes { #archetypes }
+
+When several domains share the *same* lifecycle (e.g. a persistence `Persist` → `Approve` loop across `Persona`, `Story`, `Scenario`) but each needs its **own** event identity and field types, define the behavior once in an **archetype** `Namespace` and **subclass** its commands per domain.
+
+```python
+class Persistable(Namespace):                       # archetype — behavior once
+    class Policy(Protocol):                          # the bridge: per-entity ops
+        def persist(self, candidate: object) -> str: ...
+
+    class Persist(Command):
+        candidate: object = None
+        def handle(self):
+            policy = namespace_of(self).Policy()     # resolve the consuming domain
+            return type(self).Persisted(entity_id=policy.persist(self.candidate))
+
+class Persona(Namespace, uses=[Persistable]):
+    class Persist(Persistable.Persist):              # inherit behavior…
+        candidate: PersonaCandidate = ...            # …override the field type
+        class Persisted(DomainEvent):                # …and keep your own event
+            entity_id: str = ""
+    class Policy:                                    # implement the bridge
+        def persist(self, candidate): return persona_store.create(candidate)
+```
+
+How it works:
+
+- **Inherit, don't copy.** Subclassing an archetype command reuses its handler — the framework rebinds a *distinct* handler per subclass, so two domains' commands coexist as graph nodes (no `_inline_command` collision). The handler emits its outcome **reflectively** (`type(self).Persisted`), so each subclass yields its own per-entity event. *Archetype handlers must construct outcomes reflectively* — never hard-name the archetype's event class.
+- **The Policy bridge.** Per-entity operations live behind a `Policy` the consuming namespace supplies; the archetype handler reaches it with [`namespace_of(self)`](api.md#archetypes) — `namespace_of(self).Policy`. The same bridge works in reactions: `namespace_of(event).Approve(...)`.
+- **`uses=[…]`** records the composition on the namespace (`Persona.__uses__`) for intent and introspection. It does not copy or alias members — you reference `Persistable.Persist` / your own `Persona.Persist` directly.
+- A subclass that declares its **own** handler overrides the inherited one.
+
+Worked example: [`examples/persistable.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/persistable.py).
+
 ## System events
 
 `SystemEvent` subclasses control runtime flow; subscribe like any event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed`, `HandlerRaised`, `InvariantViolated`. Full table in [API](api.md#system-events).
