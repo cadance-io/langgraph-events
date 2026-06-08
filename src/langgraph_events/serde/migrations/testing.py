@@ -9,6 +9,7 @@ users never import ``_option`` / ``EXT_NAMESPACE_AWARE_EVENT`` themselves.
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from langgraph_events import EventGraph
+    from langgraph_events._event_log import EventLog
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
 
 # ``_option`` comes straight from its langgraph source (mypy treats
@@ -27,7 +29,7 @@ if TYPE_CHECKING:
 # before the line below, so the actionable error is still preserved.
 from langgraph.checkpoint.serde.jsonplus import _option
 
-from langgraph_events._event import Event
+from langgraph_events._event import Event, Resumed
 from langgraph_events.serde._jsonplus import EXT_NAMESPACE_AWARE_EVENT
 from langgraph_events.serde.migrations._core import (
     _resolve_identity,
@@ -125,6 +127,52 @@ def assert_all_baselined_handlers_cover(
     missing = tuple(sorted(baselined - reachable))
     if missing:
         raise HandlerCoverageError(missing)
+
+
+def assert_resume_recovers(
+    before: EventGraph,
+    after: EventGraph,
+    *,
+    seed: Event | list[Event],
+    resume_with: Event,
+    thread_id: str | None = None,
+) -> EventLog:
+    """Assert a thread paused inside a handler on *before* resumes on *after*.
+
+    The behavioral handler analog of :func:`assert_all_baselined_revive`:
+    instead of a static name check it exercises the real interrupt→resume path.
+    Invokes *before* with *seed* (which must pause via an ``Interrupted``),
+    then resumes *after* with *resume_with* on the same checkpoint and asserts
+    recovery actually happened — a ``Resumed`` is emitted, which a silent drop
+    or a ``halt`` would not produce. Use it to prove an ``@on(previously=...)``
+    rename keeps old checkpoints resumable. Returns the post-resume log for
+    further assertions.
+
+    *before* and *after* must be constructed with the **same** checkpointer
+    instance so the paused checkpoint survives the rebuild.
+    """
+    if before._checkpointer is None or before._checkpointer is not after._checkpointer:
+        raise ValueError(
+            "assert_resume_recovers: `before` and `after` must share one "
+            "checkpointer instance so the paused checkpoint survives the "
+            "rename — e.g. EventGraph(..., checkpointer=saver) for both."
+        )
+    tid = thread_id or f"resume-recovers-{uuid.uuid4().hex}"
+    config = {"configurable": {"thread_id": tid}}
+    before.invoke(seed, config=config)
+    if not before.get_state(config).is_interrupted:
+        raise AssertionError(
+            "assert_resume_recovers: `seed` did not pause `before` — it must "
+            "trigger an Interrupted so there is a paused checkpoint to resume."
+        )
+    log = after.resume(resume_with, config=config)
+    if log.latest(Resumed) is None:
+        raise AssertionError(
+            "assert_resume_recovers: resume did not recover the paused thread "
+            "(no Resumed emitted) — the handler rename is not covered by "
+            "@on(previously=...)."
+        )
+    return log
 
 
 def _assert_baselined(

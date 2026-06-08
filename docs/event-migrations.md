@@ -280,6 +280,46 @@ def test_baseline_coverage():
 !!! tip "Which serde / graph do I pass the gate?"
     In tests, construct a **standalone** `NamespaceAwareSerde(namespaces=(...))` for the event gates — it mirrors what `from_namespaces(..., checkpointer=...)` auto-wires; the gate does **not** need the graph's internal serde instance. The **handler** gate is different: it takes the `graph` (`assert_all_baselined_handlers_cover(graph, BASELINE)`), because handler identity is a graph-topology concern, not a serde one.
 
+### Handler coverage gate
+
+[Handler migrations](#handler-renames) have their own gate, here alongside the event gates — same job, one layer up (the graph *nodes* a checkpoint pauses at):
+
+```python
+from langgraph_events.serde import assert_all_baselined_handlers_cover
+
+
+def test_handler_coverage():
+    assert_all_baselined_handlers_cover(build_graph(), BASELINE)
+```
+
+- Asserts every handler node name in the baseline is still a **live node** or covered by an `@on(previously=...)` alias — the static analog of event `cover`. Raises `HandlerCoverageError` (a `CoverageError`/`AssertionError`; `except CoverageError` catches the event gates too).
+- **Signature:** event gates take the `serde`; the handler gate (and `assert_resume_recovers` below) take the **graph**. Don't transpose them.
+- **One baseline covers both tracks.** A single `write_baseline(graph, BASELINE)` records event identities *and* handler node names (baseline v2; pre-v2 baselines still load with an empty handler set) — regenerate once, run both gates against it.
+
+### Testing handler recovery
+
+The gate above is static — it proves the alias *exists*. To prove a paused checkpoint actually *resumes* through the rename, `assert_resume_recovers` exercises the real interrupt→resume path (the behavioral handler analog of `revive`):
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph_events.serde import assert_resume_recovers
+
+
+def test_rename_keeps_checkpoints_resumable():
+    saver = MemorySaver()
+    before = EventGraph([await_input, handle_confirm], checkpointer=saver)
+    # `gather_input` is `await_input` renamed, with @on(previously="await_input")
+    after = EventGraph([gather_input, handle_confirm], checkpointer=saver)
+
+    assert_resume_recovers(
+        before, after, seed=Started(...), resume_with=Confirmed(),
+    )
+```
+
+That one call replaces the hand-rolled dance — *build a checkpointer → invoke `before` to interrupt → assert it paused → rebuild `after` → resume → assert it recovered*. It invokes `before` with `seed` (which must pause via `Interrupted`), resumes `after` with `resume_with` on the same checkpoint, and asserts a `Resumed` was emitted (a silent drop or a `halt` would not), returning the log for further assertions. `before` and `after` must share **one** checkpointer instance.
+
+**When to use which:** `assert_all_baselined_handlers_cover` is the zero-maintenance CI sweep (covers every baselined handler, no per-rename test code); `assert_resume_recovers` is the focused behavioral spot-check for a specific rename you want to prove end-to-end.
+
 ### `synthesize_legacy_payload` — pin a specific old field shape
 
 The gates above don't assert specific *old field values*. Reach for this only when a field's shape drifted — it builds the bytes a prior release would have written:
@@ -329,7 +369,7 @@ def confirm(event: Confirmed) -> Approved: ...
 ```
 
 - `@on(node_name=...)` pins a **stable node identity** decoupled from the Python function name — rename/move the function with zero checkpoint impact. `@on(previously=...)` registers an **alias node** for each historic name so an in-flight interrupted checkpoint re-enters the renamed handler.
-- `assert_all_baselined_handlers_cover(graph, BASELINE)` is the handler analog of the event gates (note: it takes the **graph**, not the serde): it asserts every handler node name in the baseline is still live or alias-covered, raising `HandlerCoverageError` otherwise (`HandlerCoverageError` and `MigrationCoverageError` are siblings under `CoverageError` — `except CoverageError` catches both). `write_baseline` records handler node names (baseline v2; older v1 baselines still load).
+- **Testing:** prove coverage and recovery with `assert_all_baselined_handlers_cover` and `assert_resume_recovers` — see [Testing your migrations](#handler-coverage-gate).
 - **Deploy order:** alias nodes are purely **additive**, so a handler rename is safe to ship in a **single release** — unlike an event rename, which needs the two-release `legacy_write` dance (below). The new release's graph carries both the new node and the alias, so old in-flight checkpoints resume against it.
 - **Runtime safety net.** If a handler is *removed* (or renamed without `previously=`) and a thread is still paused inside it, `resume()` would otherwise be a silent no-op. `EventGraph(on_unresumable=...)` governs this — it fires on any `resume()` of a thread that isn't awaiting input (also catching resume of an already-finished thread or a double-resume):
     - **`raise`** (default) — `UnresumableError`. Use in dev/CI to fail fast on an undeclared rename.

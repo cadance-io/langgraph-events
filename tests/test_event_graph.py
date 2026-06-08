@@ -4605,7 +4605,11 @@ def describe_handler_evolution():
     def when_a_paused_handler_is_renamed():
         def with_previously_declared():
             def it_resumes_the_old_checkpoint_via_the_alias():
+                # Expressed through the assert_resume_recovers helper, which
+                # collapses the invoke -> assert-interrupted -> resume dance.
                 from langgraph.checkpoint.memory import MemorySaver
+
+                from langgraph_events.serde import assert_resume_recovers
 
                 class ConfirmationRequested(Interrupted):
                     data: str
@@ -4622,18 +4626,17 @@ def describe_handler_evolution():
                     return Ended(result="confirmed")
 
                 saver = MemorySaver()
-                config = {"configurable": {"thread_id": "evo-resume"}}
-                v1 = EventGraph([await_input, handle_confirm], checkpointer=saver)
-                v1.invoke(Started(data="test"), config=config)
-                assert v1.get_state(config).is_interrupted
+                before = EventGraph([await_input, handle_confirm], checkpointer=saver)
 
                 # Rename the paused handler; declare its old node name as alias.
                 @on(Started, previously="await_input")
                 def gather_input(event: Started) -> ConfirmationRequested:
                     return ConfirmationRequested(data=event.data)
 
-                v2 = EventGraph([gather_input, handle_confirm], checkpointer=saver)
-                log = v2.resume(Confirmed(), config=config)
+                after = EventGraph([gather_input, handle_confirm], checkpointer=saver)
+                log = assert_resume_recovers(
+                    before, after, seed=Started(data="test"), resume_with=Confirmed()
+                )
                 assert log.latest(Ended) == Ended(result="confirmed")
 
 
@@ -4809,3 +4812,110 @@ def describe_on_unresumable():
 
             with pytest.raises(UnresumableError):
                 asyncio.run(drain())
+
+
+def describe_assert_resume_recovers():
+    # Convenience helper: collapses the interrupt -> rebuild -> resume recovery
+    # proof for an @on(previously=) rename into one assertion — the handler
+    # analog of assert_all_baselined_revive.
+
+    def when_a_renamed_handler_declares_previously():
+        def it_returns_the_post_resume_log():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events.serde import assert_resume_recovers
+
+            saver = MemorySaver()
+
+            @on(Started)
+            def await_input(event: Started) -> _Pause:
+                return _Pause()
+
+            @on(_Go)
+            def go(event: _Go) -> Ended:
+                return Ended(result="went")
+
+            before = EventGraph([await_input, go], checkpointer=saver)
+
+            @on(Started, previously="await_input")
+            def gather(event: Started) -> _Pause:
+                return _Pause()
+
+            after = EventGraph([gather, go], checkpointer=saver)
+
+            log = assert_resume_recovers(
+                before, after, seed=Started(data="x"), resume_with=_Go()
+            )
+            assert log.latest(Ended) == Ended(result="went")
+
+    def when_the_rename_is_undeclared():
+        def it_propagates_unresumable_error():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events import UnresumableError
+            from langgraph_events.serde import assert_resume_recovers
+
+            saver = MemorySaver()
+
+            @on(Started)
+            def await_input(event: Started) -> _Pause:
+                return _Pause()
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            before = EventGraph([await_input, go], checkpointer=saver)
+
+            @on(Started)  # renamed, NO previously=
+            def gather(event: Started) -> _Pause:
+                return _Pause()
+
+            after = EventGraph([gather, go], checkpointer=saver)
+
+            with pytest.raises(UnresumableError):
+                assert_resume_recovers(
+                    before, after, seed=Started(data="x"), resume_with=_Go()
+                )
+
+    def when_the_seed_does_not_interrupt():
+        def it_raises_a_precondition_error():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events.serde import assert_resume_recovers
+
+            saver = MemorySaver()
+
+            @on(Started)
+            def noop(event: Started) -> None:
+                return None
+
+            @on(_Go)
+            def go(event: _Go) -> None:
+                return None
+
+            before = EventGraph([noop, go], checkpointer=saver)
+            after = EventGraph([noop, go], checkpointer=saver)
+
+            with pytest.raises(AssertionError, match="did not pause"):
+                assert_resume_recovers(
+                    before, after, seed=Started(data="x"), resume_with=_Go()
+                )
+
+    def when_the_graphs_do_not_share_a_checkpointer():
+        def it_raises_value_error():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            from langgraph_events.serde import assert_resume_recovers
+
+            @on(Started)
+            def await_input(event: Started) -> _Pause:
+                return _Pause()
+
+            before = EventGraph([await_input], checkpointer=MemorySaver())
+            after = EventGraph([await_input], checkpointer=MemorySaver())
+
+            with pytest.raises(ValueError, match="checkpointer"):
+                assert_resume_recovers(
+                    before, after, seed=Started(data="x"), resume_with=_Go()
+                )
