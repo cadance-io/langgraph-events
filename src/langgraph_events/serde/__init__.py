@@ -24,6 +24,9 @@ see :mod:`langgraph_events.serde.migrations` and ``docs/event-migrations.md``.
 from langgraph_events.serde._jsonplus import NamespaceAwareSerde
 from langgraph_events.serde.migrations import (
     Migration,
+    MigrationCoverageError,
+    assert_all_baselined_cover,
+    assert_all_baselined_resolve,
     assert_all_baselined_revive,
     backfill,
     migrate_from,
@@ -38,7 +41,10 @@ from langgraph_events.serde.migrations import (
 # composite multi-op Migration — keeping the top-level surface small.
 __all__ = [
     "Migration",
+    "MigrationCoverageError",
     "NamespaceAwareSerde",
+    "assert_all_baselined_cover",
+    "assert_all_baselined_resolve",
     "assert_all_baselined_revive",
     "backfill",
     "migrate_from",

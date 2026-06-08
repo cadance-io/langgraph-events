@@ -22,7 +22,6 @@ from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from pathlib import Path
 
     from langgraph_events.serde.migrations._core import AddField, Migration
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -72,10 +71,6 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
     _collect_decorated_migrations,
     _flatten_and_validate,
     _resolve_identity,
-)
-from langgraph_events.serde.migrations.detect import (  # noqa: E402
-    MigrationCoverageError,
-    _load_baseline,
 )
 
 
@@ -267,20 +262,6 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         identities.
         """
         return self._live_identities | frozenset(self._rename_table.keys())
-
-    def assert_covers(self, baseline_path: Path) -> None:
-        """Raise :class:`MigrationCoverageError` if any identity in
-        *baseline_path* is neither currently live in this serde's
-        ``namespaces=`` nor covered by a rename migration.
-
-        Construct the serde the same way the runtime does — this verifies
-        the production migration table covers every event the production
-        cluster could hand it on the next read.
-        """
-        baseline = _load_baseline(baseline_path)
-        missing = tuple(sorted(baseline - self.revivable_identities()))
-        if missing:
-            raise MigrationCoverageError(missing)
 
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):

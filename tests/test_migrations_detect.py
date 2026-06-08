@@ -155,8 +155,8 @@ def describe_write_baseline():
 def describe_write_baseline_regression_guard():
     # The prose rule "commit the baseline alongside the migration, never
     # after" is now enforced: silently overwriting away an identity the
-    # old baseline recorded would make assert_covers/detect_changes blind
-    # to a forgotten migration forever.
+    # old baseline recorded would make assert_all_baselined_cover/
+    # detect_changes blind to a forgotten migration forever.
 
     def when_an_existing_identity_is_gone_from_the_graph():
         def it_raises_naming_the_dropped_identity(tmp_path: Path):
@@ -285,8 +285,8 @@ def describe_write_baseline_regression_guard():
 
 def describe_load_baseline():
     # ``_load_baseline`` is the shared parse+version-check extracted from
-    # ``detect_changes`` so ``NamespaceAwareSerde.assert_covers`` reuses the
-    # exact same error wording on a version bump instead of duplicating it.
+    # ``detect_changes`` so ``assert_all_baselined_cover`` reuses the exact
+    # same error wording on a version bump instead of duplicating it.
 
     def when_version_matches():
         def it_returns_the_identity_set(tmp_path: Path):

@@ -90,11 +90,11 @@ def write_baseline(
     Refuses to silently regress: if *path* already exists and the new
     snapshot would drop identities the old one recorded, raise
     :class:`BaselineRegressionError` — overwriting them away would make
-    :func:`detect_changes` / ``assert_covers`` permanently blind to a
-    forgotten migration for those identities. Pass ``allow_removed=True``
+    :func:`detect_changes` / ``assert_all_baselined_cover`` permanently blind
+    to a forgotten migration for those identities. Pass ``allow_removed=True``
     to overwrite anyway (intentional deletes). This compares baseline ↔
-    topology only; it never inspects the serde or migration table —
-    coverage stays with ``assert_covers`` / ``assert_all_baselined_revive``.
+    topology only; it never inspects the serde or migration table — coverage
+    stays with ``assert_all_baselined_cover`` / ``assert_all_baselined_revive``.
     """
     current = set(_enumerate_identities(graph))
     if path.exists() and not allow_removed:
@@ -115,7 +115,7 @@ def _load_baseline(baseline_path: Path) -> set[tuple[str, str]]:
     """Parse a baseline file and return its ``(module, qualname)`` set.
 
     Raises ``ValueError`` on an unsupported version. Shared by
-    :func:`detect_changes` and ``NamespaceAwareSerde.assert_covers`` so the
+    :func:`detect_changes` and ``assert_all_baselined_cover`` so the
     version-bump error wording lives in exactly one place.
     """
     raw = json.loads(baseline_path.read_text())
@@ -130,11 +130,14 @@ def _load_baseline(baseline_path: Path) -> set[tuple[str, str]]:
     return {(entry["module"], entry["qualname"]) for entry in raw["events"]}
 
 
-class MigrationCoverageError(ValueError):
+class MigrationCoverageError(AssertionError):
     """Raised when a baseline identity has no migration and no live class.
 
-    Attribute ``uncovered`` is the tuple of offending ``(module, qualname)``
-    identities so a custom CI reporter can format them however it wants.
+    Subclasses ``AssertionError`` so the three coverage gates
+    (``assert_all_baselined_cover`` / ``_resolve`` / ``_revive``) all raise a
+    single catchable base, while this one keeps a structured ``uncovered``
+    tuple of offending ``(module, qualname)`` identities for custom CI
+    reporters.
     """
 
     def __init__(self, uncovered: tuple[tuple[str, str], ...]) -> None:
@@ -154,8 +157,9 @@ class BaselineRegressionError(ValueError):
     """Raised when :func:`write_baseline` would erase identities the
     existing baseline recorded.
 
-    Overwriting them away makes :func:`detect_changes` / ``assert_covers``
-    blind to a forgotten migration for those identities. Attribute
+    Overwriting them away makes :func:`detect_changes` /
+    ``assert_all_baselined_cover`` blind to a forgotten migration for those
+    identities. Attribute
     ``removed`` is the tuple of dropped ``(module, qualname)`` identities
     so a custom CI reporter can format them however it wants.
     """

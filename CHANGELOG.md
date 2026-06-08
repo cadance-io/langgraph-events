@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`assert_all_baselined_resolve(serde, baseline_path)` — resolution-only coverage gate** (#92). A rename-aware reachability check that proves every baselined identity still resolves to a live `Event` class **without constructing** it (no `__init__`/`__post_init__`). It is the gate to reach for when a full-graph baseline contains events `assert_all_baselined_revive` can't placeholder-construct — anything with construction-time validation (e.g. agui's `FrontendToolCallRequested`, which rejects an empty `name` in `__post_init__`), framework `SystemEvents`, or module-level `IntegrationEvents`. Such a baseline now passes with no filtering, and still fails loudly when any identity is renamed/removed without a covering migration. `revive` remains the stronger constructability gate for placeholder-tolerant events. Exported from `langgraph_events.serde` and `langgraph_events.serde.migrations`. See [Event migrations](docs/event-migrations.md#coverage-gates).
+
+### Changed
+- **Coverage gates unified into one free-function family (breaking)** (#92). The three baseline-coverage checks now share one signature — `gate(serde, baseline_path)` — and one error base. `NamespaceAwareSerde.assert_covers(baseline_path)` is **removed**; use `assert_all_baselined_cover(serde, baseline_path)` (exported from `langgraph_events.serde` / `langgraph_events.serde.migrations`), which has the identical set-membership semantics. `MigrationCoverageError` now subclasses **`AssertionError`** (was `ValueError`) so all three gates raise a single catchable base, while it keeps its structured `.uncovered` tuple. `revivable_identities()` is unchanged. **Migration**: replace `serde.assert_covers(BASELINE)` with `assert_all_baselined_cover(serde, BASELINE)`; if you caught `MigrationCoverageError` as a `ValueError`, catch `AssertionError` (or the class itself) instead.
+
 ## [0.13.0] - 2026-05-31
 
 ### Added

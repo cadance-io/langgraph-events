@@ -124,6 +124,27 @@ class DecoReorg(Namespace):
             return DecoReorg.Persist.Persisted(note=self.note)
 
 
+# Fixture for the resolution-only gate. ``name`` is required and
+# ``__post_init__`` rejects an empty/None value — mirrors agui's
+# ``FrontendToolCallRequested``. ``assert_all_baselined_revive`` constructs the
+# live class with a ``None`` placeholder and trips this validation, whereas
+# ``assert_all_baselined_resolve`` only resolves the identity and passes.
+class ValidatedReorg(Namespace):
+    class Persist(Command):
+        name: str = "x"
+
+        @migrate_from("ValidatedReorg.Persisted")
+        class Persisted(DomainEvent):
+            name: str
+
+            def __post_init__(self) -> None:
+                if not self.name:
+                    raise ValueError("name must be non-empty")
+
+        def handle(self) -> ValidatedReorg.Persist.Persisted:
+            return ValidatedReorg.Persist.Persisted(name=self.name)
+
+
 class DecoMulti(Namespace):
     class Persist(Command):
         note: str = ""
@@ -1831,51 +1852,73 @@ def describe_NamespaceAwareSerde():
             assert isinstance(revived, DecoReorg.Persist.Persisted)
             assert revived.note == "from-legacy"
 
-    def describe_assert_covers():
+    def describe_assert_all_baselined_cover():
         # The CI gate: every identity the previous release wrote must be
         # either still live in this serde's namespaces or covered by a
         # rename migration, else the next production read of that payload
-        # would fail. Raising is the right verb — it's a pytest assertion.
+        # would fail. Weakest of the three gates — a set-membership check
+        # that neither resolves nor constructs.
 
         def when_baseline_identity_has_no_migration():
             def it_raises_naming_the_uncovered_identity(tmp_path: Any):
-                from langgraph_events.serde.migrations.detect import (
+                from langgraph_events.serde.migrations import (
                     MigrationCoverageError,
+                    assert_all_baselined_cover,
                 )
 
                 serde = NamespaceAwareSerde()
                 baseline = _baseline_file(tmp_path, ("ghost.mod", "Ghost.Gone"))
 
                 with pytest.raises(MigrationCoverageError) as excinfo:
-                    serde.assert_covers(baseline)
+                    assert_all_baselined_cover(serde, baseline)
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
 
+        def when_unifying_the_gate_error_base():
+            def it_is_an_assertion_error_subclass():
+                # Unified error base: every gate raises AssertionError so
+                # callers catch them uniformly, while cover keeps its
+                # structured ``.uncovered`` tuple.
+                from langgraph_events.serde.migrations import (
+                    MigrationCoverageError,
+                )
+
+                assert issubclass(MigrationCoverageError, AssertionError)
+
         def when_baseline_identity_has_a_decorator_migration():
             def it_passes_silently(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_cover,
+                )
+
                 serde = NamespaceAwareSerde(namespaces=[DecoReorg])
                 baseline = _baseline_file(
                     tmp_path, (DecoReorg.__module__, "DecoReorg.Persisted")
                 )
 
-                serde.assert_covers(baseline)
+                assert_all_baselined_cover(serde, baseline)
 
         def when_baseline_identity_is_still_live():
             def it_passes_silently(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_cover,
+                )
+
                 serde = NamespaceAwareSerde(namespaces=[DecoReorg])
                 baseline = _baseline_file(
                     tmp_path,
                     (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
                 )
 
-                serde.assert_covers(baseline)
+                assert_all_baselined_cover(serde, baseline)
 
         def when_baseline_identity_has_a_hand_authored_migration():
             def it_passes_silently(tmp_path: Any):
                 from langgraph_events.serde.migrations import (
                     Migration,
                     RenameEvent,
+                    assert_all_baselined_cover,
                 )
 
                 serde = NamespaceAwareSerde(
@@ -1897,11 +1940,11 @@ def describe_NamespaceAwareSerde():
                     tmp_path, ("legacy.persona", "Legacy.Approved")
                 )
 
-                serde.assert_covers(baseline)
+                assert_all_baselined_cover(serde, baseline)
 
     def describe_assert_all_baselined_revive():
-        # Stronger than assert_covers: instead of a set-membership check,
-        # it pushes a synthesized legacy payload for every baselined
+        # Stronger than assert_all_baselined_cover: instead of a set-membership
+        # check, it pushes a synthesized legacy payload for every baselined
         # identity through the real ext-hook and asserts it revives to an
         # Event. Zero per-event maintenance — a new @migrate_from plus a
         # regenerated baseline is covered with no new test code.
@@ -1957,6 +2000,82 @@ def describe_NamespaceAwareSerde():
                 )
 
                 assert_all_baselined_revive(serde, baseline)
+
+    def describe_assert_all_baselined_resolve():
+        # Resolution-only gate: proves every baselined identity still resolves
+        # to a live Event class (rename-aware import walk) without constructing
+        # it. Catches renames/removals that ``cover`` (namespace-walk-scoped)
+        # misses, with none of the construction-time validation false positives
+        # that trip ``revive``.
+
+        def when_baseline_identity_is_still_live():
+            def it_passes_silently(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                )
+
+                assert_all_baselined_resolve(serde, baseline)
+
+        def when_a_rename_is_covered_by_migrate_from():
+            def it_resolves_through_the_rename(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (DecoReorg.__module__, "DecoReorg.Persisted"),
+                )
+
+                assert_all_baselined_resolve(serde, baseline)
+
+        def when_a_live_event_has_construction_time_validation():
+            def it_passes_where_revive_trips(tmp_path: Any):
+                # ValidatedReorg.Persist.Persisted rejects an empty/None
+                # ``name`` in __post_init__. ``revive`` builds it with a None
+                # placeholder and raises; ``resolve`` never constructs, so the
+                # identity is proven reachable with no false positive.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[ValidatedReorg])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (ValidatedReorg.__module__, "ValidatedReorg.Persist.Persisted"),
+                )
+
+                with pytest.raises(AssertionError):
+                    assert_all_baselined_revive(serde, baseline)
+
+                assert_all_baselined_resolve(serde, baseline)
+
+        def when_a_baselined_identity_no_longer_resolves():
+            def it_raises_naming_the_missing_identity(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                    ("ghost.mod", "Ghost.Gone"),
+                )
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_resolve(serde, baseline)
+
+                assert "Ghost.Gone" in str(excinfo.value)
+                assert "DecoReorg.Persist.Persisted" not in str(excinfo.value)
 
 
 def describe_public_serde_surface():

@@ -525,9 +525,9 @@ def _collect_decorated_migrations(
 
     The third element is the frozenset of every live ``(module, qualname)``
     the namespace walk reached — events that revive directly with no
-    migration. ``NamespaceAwareSerde`` stores it for ``assert_covers`` /
-    ``revivable_identities``; the walk already happens here so the set is
-    free.
+    migration. ``NamespaceAwareSerde`` stores it for
+    ``assert_all_baselined_cover`` / ``revivable_identities``; the walk
+    already happens here so the set is free.
     """
     out: list[Migration] = []
     oldest_historic: dict[tuple[str, str], tuple[str, str]] = {}

@@ -222,36 +222,49 @@ Workflow:
 2. Author the migration (`@migrate_from` / `@backfill` on the surviving class, or hand-authored `Migration`).
 3. Run `write_baseline(graph, "migrations/baseline.json")` and commit the regenerated JSON in the same PR.
 
-For intentional deletes (no replacement), pass `allow_removed=True`. The guard compares baseline ↔ topology only; *coverage* (does a migration exist?) is `assert_covers` / `assert_all_baselined_revive`'s job. The baseline file is versioned — a stale snapshot raises `ValueError`.
+For intentional deletes (no replacement), pass `allow_removed=True`. The guard compares baseline ↔ topology only; *coverage* (does a migration exist?) is the [coverage gates](#coverage-gates)' job. The baseline file is versioned — a stale snapshot raises `ValueError`.
 
 ## Testing your migrations
 
-Run coverage tests on every PR; three patterns: `assert_all_baselined_revive`, `synthesize_legacy_payload`, `assert_covers`.
+### Coverage gates
 
-### `assert_all_baselined_revive` — zero-maintenance gate
+Three free functions assert that every identity in a committed baseline still holds up, at increasing strictness. All share one signature — `gate(serde, baseline_path)` — and raise `AssertionError`:
 
-Walks every baselined identity, pushes a synthesized legacy payload through the real read path, asserts it revives.
+| Gate | Per identity it… | Constructs? | Scope |
+|---|---|---|---|
+| `assert_all_baselined_cover` | is in `revivable_identities()` (set membership) | no | namespace-walk ∪ rename table |
+| `assert_all_baselined_resolve` | imports to a live `Event` (rename-aware) | no | every identity in the baseline |
+| `assert_all_baselined_revive` | revives through the real read path | yes | every identity in the baseline |
 
 ```python
 from pathlib import Path
-from langgraph_events.serde import NamespaceAwareSerde, assert_all_baselined_revive
+from langgraph_events.serde import (
+    NamespaceAwareSerde,
+    assert_all_baselined_cover,
+    assert_all_baselined_resolve,
+    assert_all_baselined_revive,
+)
 from cadance.namespaces import Persona
 
 BASELINE = Path(__file__).parent / "migrations" / "baseline.json"
 
 
-def test_every_baselined_identity_revives():
+def test_baseline_coverage():
     serde = NamespaceAwareSerde(namespaces=(Persona,))
-    assert_all_baselined_revive(serde, BASELINE)
+    assert_all_baselined_revive(serde, BASELINE)  # or _resolve / _cover
 ```
 
-- Proves identity reachability + constructability for every baselined `(module, qualname)`.
-- Fills required fields with placeholders — does NOT assert specific old field values (use `synthesize_legacy_payload` for that).
-- A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
+**Which one?**
+
+- **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
+- **`resolve`** — when the baseline contains events `revive` can't placeholder-construct: anything with construction-time validation (`__post_init__`), framework `SystemEvents`, or module-level `IntegrationEvents`. Proves the identity still resolves without ever calling `__init__`/`__post_init__`, so a full-graph baseline passes with no filtering and still fails loudly on an uncovered rename/removal.
+- **`cover`** — the fast set-membership smoke check. Namespace-walk-scoped, so it misses module-level identities a full-graph baseline emits — use `resolve` for those. Raises `MigrationCoverageError` (an `AssertionError`) whose `.uncovered` lists the offending identities.
+
+`NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets are not included — they key on the post-rename identity).
 
 ### `synthesize_legacy_payload` — pin a specific old field shape
 
-Reach for this only when a field's *shape* drifted. Builds the bytes a prior release would have written:
+The gates above don't assert specific *old field values*. Reach for this only when a field's shape drifted — it builds the bytes a prior release would have written:
 
 ```python
 import pytest
@@ -272,22 +285,7 @@ def test_revives_release_N_payloads(module, qualname, kwargs, expected_cls):
     assert isinstance(revived, expected_cls)
 ```
 
-- Pin only when a field's shape genuinely changed (not for plain renames).
-- Failing test = dataclass `TypeError` on the missing field — exactly where you want a field-shape regression caught.
-
-### `assert_covers` — every baselined identity reachable?
-
-`NamespaceAwareSerde.assert_covers(baseline_path)` raises `MigrationCoverageError` if any baselined identity is neither live nor covered by a rename migration:
-
-```python
-def test_covers_every_baselined_identity():
-    serde = NamespaceAwareSerde(namespaces=(Persona,))
-    serde.assert_covers(BASELINE)
-```
-
-- `MigrationCoverageError` extends `ValueError`; `.uncovered` is the tuple of offending identities.
-- Catches accidentally-removed `@migrate_from` before bytes reach production.
-- `revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules. `AddField` targets are not included (they key on post-rename identity).
+A failing test = dataclass `TypeError` on the missing field — exactly where you want a field-shape regression caught.
 
 ### Release N → N+1 walkthrough
 
