@@ -19,6 +19,8 @@ import warnings
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
+from langgraph_events._identity import command_identity
+
 if TYPE_CHECKING:
     from langgraph_events._event import Event
     from langgraph_events._namespace._model import NamespaceModel
@@ -50,7 +52,7 @@ class CommandChainWarning(UserWarning):
 
 def _qualname(cls: type) -> str:
     """Return ``cls.__qualname__`` with ``<locals>.`` strip-out for cleanliness."""
-    return cls.__qualname__.replace("<locals>.", "")
+    return command_identity(cls)
 
 
 def emit_command_chain_warnings(model: NamespaceModel) -> None:

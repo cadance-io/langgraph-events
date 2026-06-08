@@ -2406,6 +2406,43 @@ def describe_assert_all_baselined_handlers_cover():
                 assert isinstance(excinfo.value, CoverageError)
                 assert excinfo.value.uncovered == ("place",)
 
+    def when_baseline_recorded_old_positional_inline_command_names():
+        # Pre-#97 baselines recorded inline command handlers by their
+        # positional ``handle``/``handle_2`` names. After the fix those nodes
+        # are keyed by the command qualname, so the old names no longer
+        # resolve — the gate must fire, forcing a one-time baseline rebuild.
+
+        def it_raises_until_the_baseline_is_regenerated(tmp_path: Any):
+            import json
+
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_handlers_cover,
+            )
+            from langgraph_events.serde.migrations.detect import (
+                HandlerCoverageError,
+                write_baseline,
+            )
+
+            graph = EventGraph([Persona.Approve, Story.Approve])
+            baseline = tmp_path / "b.json"
+            baseline.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "events": [],
+                        "handlers": [{"name": "handle"}, {"name": "handle_2"}],
+                    }
+                )
+            )
+
+            with pytest.raises(HandlerCoverageError) as excinfo:
+                assert_all_baselined_handlers_cover(graph, baseline)
+            assert excinfo.value.uncovered == ("handle", "handle_2")
+
+            # The documented one-time migration: regenerate the baseline.
+            write_baseline(graph, baseline)
+            assert_all_baselined_handlers_cover(graph, baseline)
+
     def when_baseline_predates_handler_tracking():
         def it_loads_a_v1_baseline_and_passes(tmp_path: Any):
             import json

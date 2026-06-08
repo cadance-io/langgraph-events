@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Inline `Command.handle()` nodes now have a stable, order-independent checkpoint identity** (#97). Inline command handlers were registered as graph nodes named after the method (`handle`) and then de-duplicated **positionally** (`handle`, `handle_2`, …) by their order in `EventGraph(handlers=[...])`. Because several `Command.handle()` methods are real pause points (they return `Interrupted` / AG-UI `FrontendToolCallRequested`), a checkpoint could pause *inside* one of these positionally-named nodes — so reordering `handlers=[...]` silently remapped which command each `handle_N` dispatched to, with nothing in the baseline/coverage tooling able to detect it (the baseline stores a reorder-invariant sorted set of names). Inline command-handler nodes are now keyed by the command's `__qualname__` (e.g. `Order.Place`) — the same stable identity used elsewhere for command privacy and return contracts — so the node a paused checkpoint resumes into never depends on registration order. `graph.handler_names`, the resume gate, and `write_baseline`'s `handlers` list all record these qualname identities. The human-readable handler label shown in choreography / mermaid / `HandlerRaised`/`InvariantViolated` diagnostics is unchanged (still the method name).
+
+### Changed
+- **Inline command handler baselines must be regenerated once after upgrading** (#97). A pre-#97 baseline recorded inline command handlers by their positional `handle`/`handle_N` names, which no longer resolve to a live node — so `assert_all_baselined_handlers_cover` will (correctly) raise `HandlerCoverageError` until you run `write_baseline(graph, BASELINE)` to re-record the qualname identities. A checkpoint that was paused inside an inline command handler under the old positional name before the upgrade will not resume afterward (the old name was order-dependent and cannot be reconstructed safely); recover a specific in-flight checkpoint by adding `@on(previously="handle_N")` to that command's handler, or set `EventGraph(on_unresumable="halt"|"warn")` to degrade gracefully.
+
 ## [0.17.0] - 2026-06-08
 
 ### Fixed

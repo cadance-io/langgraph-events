@@ -98,6 +98,20 @@ class WithLog(Namespace):
             return WithLog.Cmd.Done(observed_count=len(log))
 
 
+# Module-level domain whose inline handler method is named something other
+# than ``handle`` — exercises that node identity comes from the command
+# qualname, not the method ``__name__``.
+class Bazaar(Namespace):
+    class Sell(Command):
+        item: str = ""
+
+        class Sold(DomainEvent):
+            item: str = ""
+
+        def sell(self) -> Bazaar.Sell.Sold:
+            return Bazaar.Sell.Sold(item=self.item)
+
+
 # Module-level domains for inline-outcome-coverage tests. These can't live
 # inside describe_/when_ blocks because Python can't resolve forward refs on
 # handle's return annotation from a nested function scope.
@@ -431,6 +445,76 @@ def describe_Command_handle():
                 graph = EventGraph([Shop.Buy, react])
                 log = graph.invoke(Shop.Buy(item="pear"))
                 assert log.has(Shop.Buy.Bought)
+
+    def describe_inline_handler_node_identity():
+        # An inline command handler's graph-node name must be a stable,
+        # order-independent identity derived from the command's __qualname__
+        # — not the method __name__ (``handle``) deduplicated positionally
+        # (``handle``, ``handle_2``) by registration order. See issue #97.
+
+        def _name_to_command(graph: EventGraph) -> dict[str, type]:
+            return {
+                meta.node_name: meta.fn._inline_command for meta in graph._handler_metas
+            }
+
+        def when_command_registered():
+
+            def it_names_node_after_the_command_qualname():
+                graph = EventGraph([Shop3.CmdA])
+                assert graph.handler_names == frozenset({"Shop3.CmdA"})
+
+        def when_two_command_handlers_share_a_method_name():
+            # CmdA and CmdB both define ``handle``; under the old scheme they
+            # collapsed to ``handle``/``handle_2`` by list position.
+
+            def it_assigns_qualname_node_names_regardless_of_order():
+                ab = EventGraph([Shop3.CmdA, Shop3.CmdB]).handler_names
+                ba = EventGraph([Shop3.CmdB, Shop3.CmdA]).handler_names
+                assert ab == ba == frozenset({"Shop3.CmdA", "Shop3.CmdB"})
+
+            def it_keeps_the_name_to_command_mapping_stable_under_reorder():
+                ab = _name_to_command(EventGraph([Shop3.CmdA, Shop3.CmdB]))
+                ba = _name_to_command(EventGraph([Shop3.CmdB, Shop3.CmdA]))
+                assert ab == ba
+                assert ab == {
+                    "Shop3.CmdA": Shop3.CmdA,
+                    "Shop3.CmdB": Shop3.CmdB,
+                }
+
+            def it_never_produces_a_positional_handle_node():
+                names = EventGraph([Shop3.CmdA, Shop3.CmdB]).handler_names
+                assert not any("handle" in name for name in names)
+                assert not any(name.endswith("_2") for name in names)
+
+            def it_dispatches_to_the_correct_command_under_each_order():
+                for handlers in ([Shop3.CmdA, Shop3.CmdB], [Shop3.CmdB, Shop3.CmdA]):
+                    graph = EventGraph(handlers)
+                    assert graph.invoke(Shop3.CmdA()).has(Shop3.CmdA.DoneA)
+                    assert graph.invoke(Shop3.CmdB()).has(Shop3.CmdB.DoneB)
+
+        def when_handler_method_has_a_custom_name():
+
+            def it_still_uses_the_command_qualname():
+                graph = EventGraph([Bazaar.Sell])
+                assert graph.handler_names == frozenset({"Bazaar.Sell"})
+
+        def when_built_via_from_namespaces():
+
+            def it_also_uses_qualname_node_names():
+                graph = EventGraph.from_namespaces(Shop3)
+                assert graph.handler_names == frozenset({"Shop3.CmdA", "Shop3.CmdB"})
+
+        def when_two_handlers_resolve_to_the_same_node_name():
+            # node_name uniqueness is the invariant checkpoints depend on. The
+            # old positional dedup guaranteed it structurally; the qualname
+            # scheme must guard it explicitly — otherwise the collision only
+            # surfaces as an opaque LangGraph "node already present" error at
+            # compile, instead of a clear framework error at construction.
+
+            def it_raises_a_clear_error_at_construction():
+                with pytest.raises(ValueError, match=r"Shop3\.CmdA") as excinfo:
+                    EventGraph([Shop3.CmdA, Shop3.CmdA])
+                assert "node" in str(excinfo.value).lower()
 
     def describe_service_injection():
 
