@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-06-08
+
 ### Fixed
 - **Inline `Command.handle()` nodes now have a stable, order-independent checkpoint identity** (#97). Inline command handlers were registered as graph nodes named after the method (`handle`) and then de-duplicated **positionally** (`handle`, `handle_2`, …) by their order in `EventGraph(handlers=[...])`. Because several `Command.handle()` methods are real pause points (they return `Interrupted` / AG-UI `FrontendToolCallRequested`), a checkpoint could pause *inside* one of these positionally-named nodes — so reordering `handlers=[...]` silently remapped which command each `handle_N` dispatched to, with nothing in the baseline/coverage tooling able to detect it (the baseline stores a reorder-invariant sorted set of names). Inline command-handler nodes are now keyed by the command's `__qualname__` (e.g. `Order.Place`) — the same stable identity used elsewhere for command privacy and return contracts — so the node a paused checkpoint resumes into never depends on registration order. `graph.handler_names`, the resume gate, and `write_baseline`'s `handlers` list all record these qualname identities. The human-readable handler label shown in choreography / mermaid / `HandlerRaised`/`InvariantViolated` diagnostics is unchanged (still the method name).
 
@@ -272,7 +274,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/cadance-io/langgraph-events/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/cadance-io/langgraph-events/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/cadance-io/langgraph-events/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/cadance-io/langgraph-events/compare/v0.14.0...v0.15.0
