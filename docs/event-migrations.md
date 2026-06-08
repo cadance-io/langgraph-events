@@ -378,6 +378,13 @@ def confirm(event: Confirmed) -> Approved: ...
 
     The CI handler gate catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
 
+### Inline command handlers are keyed by the command qualname
+
+An inline `Command.handle()` handler's node identity is the **command's `__qualname__`** (e.g. `Order.Place`), not the method name — so it is stable and order-independent. Reordering the `handlers=[...]` list is safe, and you do **not** need `@on(node_name=...)` to pin it (that pin is for standalone `@on` functions, whose identity is otherwise the function name).
+
+!!! note "Upgrading a baseline recorded before this fix (#97)"
+    Earlier releases recorded inline command handlers by positional names (`handle`, `handle_2`, …). After upgrading, those names no longer resolve, so `assert_all_baselined_handlers_cover` will raise `HandlerCoverageError` until you **regenerate the baseline once** with `write_baseline(graph, BASELINE)`. This firing is expected — it is the gate doing its job. A checkpoint paused inside an inline command handler *before* the upgrade cannot resume afterward (the old positional name was order-dependent and can't be reconstructed); recover a specific one with `@on(previously="handle_N")` on that command's handler, or set `on_unresumable="halt"/"warn"`.
+
 ### Renaming an event *and* a handler together
 
 The two tracks are independent — do both, in one PR:

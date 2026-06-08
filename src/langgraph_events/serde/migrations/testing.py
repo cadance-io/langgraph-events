@@ -120,7 +120,7 @@ def assert_all_baselined_handlers_cover(
     passes trivially.
     """
     baselined = _load_baseline_handlers(Path(baseline_path))
-    reachable = {meta.name for meta in graph._handler_metas}
+    reachable = {meta.node_name for meta in graph._handler_metas}
     reachable |= {
         alias for meta in graph._handler_metas for alias in meta.previous_names
     }

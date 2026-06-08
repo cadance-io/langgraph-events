@@ -480,13 +480,44 @@ def _validate_on_unresumable(value: str) -> None:
         )
 
 
+def _validate_handler_metas(metas: list[HandlerMeta]) -> None:
+    """Run all build-time handler-identity checks (node names, then aliases)."""
+    _validate_node_names(metas)
+    _validate_handler_aliases(metas)
+
+
+def _validate_node_names(metas: list[HandlerMeta]) -> None:
+    """Raise if two handlers resolve to the same graph-node identity.
+
+    ``node_name`` uniqueness is the invariant interrupted checkpoints depend on:
+    a paused thread resumes into the node of that name, so two handlers sharing
+    one is a silent mis-dispatch. Display-name collisions are deduplicated
+    positionally, but ``node_name`` is not (an inline command's qualname or an
+    ``@on(node_name=...)`` pin is taken as-is) — so guard it explicitly and fail
+    at build time with a clear message rather than an opaque LangGraph
+    ``add_node`` error at compile. The usual trigger is the same command (or two
+    handlers pinned to the same name) registered twice in ``handlers=[...]``.
+    """
+    seen: dict[str, HandlerMeta] = {}
+    for meta in metas:
+        prior = seen.get(meta.node_name)
+        if prior is not None:
+            raise ValueError(
+                f"Handlers {prior.name!r} and {meta.name!r} both resolve to "
+                f"graph node {meta.node_name!r}; node identity must be unique. "
+                f"Register each command/handler once, or give one a distinct "
+                f"@on(node_name=...)."
+            )
+        seen[meta.node_name] = meta
+
+
 def _validate_handler_aliases(metas: list[HandlerMeta]) -> None:
     """Raise if any ``@on(previously=...)`` alias is unusable.
 
     Each historic node name becomes a real graph node, so it must be unique
     and must not shadow a live handler node — surfaced at build time.
     """
-    live_names = {meta.name for meta in metas}
+    live_names = {meta.node_name for meta in metas}
     seen_aliases: set[str] = set()
     for meta in metas:
         for alias in meta.previous_names:
@@ -548,6 +579,24 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
             f"a matching instance via EventGraph(services=[...]); for state, "
             f"register a Reducer; otherwise remove the parameter."
         )
+
+
+def _dedup_handler_name(meta: HandlerMeta, count: int) -> HandlerMeta:
+    """Suffix a colliding display name positionally (``handle`` → ``handle_2``).
+
+    The stable ``node_name`` (graph / checkpoint identity) follows the
+    deduplicated name for ordinary handlers, but an inline ``Command.handle()``
+    handler keeps its command-qualname ``node_name`` untouched — so reordering
+    ``handlers=[...]`` never remaps which command a paused checkpoint resumes
+    into. See issue #97.
+    """
+    deduped = f"{meta.name}_{count}"
+    # An inline command (or an @on(node_name=...) pin) owns an identity distinct
+    # from its display name — keep it; an ordinary handler's identity *is* its
+    # name, so it follows the dedup suffix.
+    has_stable_identity = meta.node_name != meta.name
+    node_name = meta.node_name if has_stable_identity else deduped
+    return dataclasses.replace(meta, name=deduped, node_name=node_name)
 
 
 def _expand_command_handlers(
@@ -669,19 +718,16 @@ class EventGraph:
                 service_names=service_names,
             )
             _verify_no_unclaimed_params(meta)
-            # Deduplicate node names — preserve all other meta fields
-            # (raises, field_matchers, field_inject_params, ...) so the second
-            # copy behaves identically to the first.
+            # Deduplicate colliding display names positionally; see
+            # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:
                 seen_names[meta.name] += 1
-                meta = dataclasses.replace(
-                    meta, name=f"{meta.name}_{seen_names[meta.name]}"
-                )
+                meta = _dedup_handler_name(meta, seen_names[meta.name])
             else:
                 seen_names[meta.name] = 1
             self._handler_metas.append(meta)
 
-        _validate_handler_aliases(self._handler_metas)
+        _validate_handler_metas(self._handler_metas)
 
         self._return_info: dict[str, ReturnInfo] = {}
         self._return_contracts: dict[str, ReturnContract | None] = {}
@@ -757,9 +803,11 @@ class EventGraph:
 
         These are the names an interrupted checkpoint can pause at;
         ``@on(previously=...)`` aliases are excluded (use them to *cover* a
-        renamed name, not to enumerate live handlers).
+        renamed name, not to enumerate live handlers). For inline
+        ``Command.handle()`` handlers this is the command's ``__qualname__``
+        (stable, order-independent), not the method name.
         """
-        return frozenset(meta.name for meta in self._handler_metas)
+        return frozenset(meta.node_name for meta in self._handler_metas)
 
     @property
     def compiled(self) -> CompiledStateGraph:
@@ -814,8 +862,8 @@ class EventGraph:
                 services_by_type=self._services_by_type or None,
                 services_by_name=self._services_by_name or None,
             )
-            graph.add_node(meta.name, cast("Any", handler_node))
-            handler_names.append(meta.name)
+            graph.add_node(meta.node_name, cast("Any", handler_node))
+            handler_names.append(meta.node_name)
             # Register an alias node per historic name (@on(previously=...)) so an
             # interrupted checkpoint paused at the old node re-enters the same
             # handler on resume. The dispatcher only ever returns canonical

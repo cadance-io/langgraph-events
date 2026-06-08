@@ -14,6 +14,7 @@ from langgraph_events._event import Event, Invariant
 from langgraph_events._event_log import (
     EventLog,
 )
+from langgraph_events._identity import command_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -342,6 +343,13 @@ class HandlerMeta:
     event_types: tuple[type[Event], ...]
     log_param: str | None
     is_async: bool
+    # Stable graph-node / checkpoint identity. Equals ``name`` for ordinary
+    # handlers, but for inline ``Command.handle()`` handlers it is the command's
+    # ``__qualname__`` (e.g. ``Order.Place``) so the node a paused checkpoint
+    # resumes into never depends on ``handlers=[...]`` order. ``name`` stays the
+    # human-readable handler label used in choreography/mermaid/diagnostics.
+    # Required — always populated by ``extract_handler_meta``; never empty.
+    node_name: str
     # Historic node names this handler answered to, declared via
     # ``@on(previously=...)``. The graph registers an alias node per name so an
     # interrupted checkpoint paused at the old node still resumes after a rename.
@@ -602,8 +610,18 @@ def extract_handler_meta(
             ),
         )
 
+    name = getattr(fn, "_node_name", None) or fn.__name__
+    # Inline command handlers route by their command's qualname (stable,
+    # order-independent); every other handler routes by its own name. The
+    # qualname intentionally wins over any ``_node_name`` here — inline handlers
+    # never carry one today (``_expand_command_handlers`` calls bare ``on(h)``),
+    # but were that to change, command identity must stay the resume identity.
+    inline_command = getattr(fn, "_inline_command", None)
+    node_name = command_identity(inline_command) if inline_command is not None else name
+
     return HandlerMeta(
-        name=getattr(fn, "_node_name", None) or fn.__name__,
+        name=name,
+        node_name=node_name,
         fn=fn,
         event_types=tuple(event_types),
         previous_names=getattr(fn, "_previous_names", ()),

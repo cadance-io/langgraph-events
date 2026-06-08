@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import Command, DomainEvent
+from langgraph_events._identity import command_identity
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -75,7 +76,7 @@ def enforce_command_privacy(
 
 
 def _qualname(cls: type) -> str:
-    return cls.__qualname__.replace("<locals>.", "")
+    return command_identity(cls)
 
 
 def _unnested_outcome_msg(

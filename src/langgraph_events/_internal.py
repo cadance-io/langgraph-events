@@ -218,13 +218,15 @@ def make_dispatch(
         if any(isinstance(e, Halted) for e in pending):
             return END
 
-        # Find handlers whose event_types match any pending event
+        # Find handlers whose event_types match any pending event. Route by
+        # ``node_name`` (the registered graph node), which for inline command
+        # handlers is the command qualname rather than the method name.
         matched: list[str] = []
         seen: set[str] = set()
         for meta in handler_metas:
-            if meta.name not in seen and any(meta.matches(e) for e in pending):
-                seen.add(meta.name)
-                matched.append(meta.name)
+            if meta.node_name not in seen and any(meta.matches(e) for e in pending):
+                seen.add(meta.node_name)
+                matched.append(meta.node_name)
 
         if not matched:
             return END
