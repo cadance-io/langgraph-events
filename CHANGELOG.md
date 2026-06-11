@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Origin-scoped backfill — `@migrate_from(..., backfill={field: default})`** (#101). When N event classes collapse into one surviving class, each origin can now pin its own value for a required field the old payloads never carried (e.g. a discriminator), applied before the rename. Precedence: payload value > origin fill > class-global `@backfill`. Hand-authored `AddField` keyed on a historic identity is now accepted and origin-scoped — the escape hatch for per-origin `default_factory`. See the ["Consolidating N classes into one"](docs/event-migrations.md#consolidating-n-classes-into-one) recipe.
+- **New validation guards** (all before first production read): duplicate `(identity, field)` fills and fill field names that don't exist on the live class raise at serde construction; a duplicated origin qualname, an empty/mutable `backfill=` value, and `backfill=` on a multi-qualname chain raise at decoration; `legacy_write=True` with origin-scoped fills raises at construction (consolidations cannot ride legacy writes).
+
+### Changed
+- **`assert_all_baselined_revive` now exercises back-fills instead of masking them with placeholders.** Fields covered by an `AddField` get the real injected value instead of a `None` placeholder — a broken fill fails in CI, and `__post_init__` validation on a back-filled field now passes the gate (previously it needed `assert_all_baselined_resolve`).
+
 ## [0.18.0] - 2026-06-08
 
 ### Fixed

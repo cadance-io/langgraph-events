@@ -63,15 +63,21 @@ def synthesize_legacy_payload(
     return ("msgpack", outer)
 
 
-def _required_field_placeholders(module: str, qualname: str) -> dict[str, Any]:
+def _required_field_placeholders(
+    module: str, qualname: str, *, skip: frozenset[str] = frozenset()
+) -> dict[str, Any]:
     """``{name: None}`` for every required (no-default) field of the live
-    class at ``(module, qualname)``.
+    class at ``(module, qualname)``, except those in *skip*.
 
-    Events are frozen dataclasses with no construction-time validation, so
-    ``None`` is a sufficient placeholder — the helper only proves the
-    identity reaches a constructible live class, not field semantics. An
-    unresolvable target yields ``{}`` so ``loads_typed`` surfaces the real
-    coverage failure rather than a synthetic ``TypeError``.
+    The helper only proves the identity reaches a constructible live
+    class, not field semantics — ``None`` placeholders suffice unless the
+    class validates in ``__post_init__`` (those need the resolve gate, or
+    a back-fill covering the validated field). An unresolvable target
+    yields ``{}`` so ``loads_typed`` surfaces the real coverage failure
+    rather than a synthetic ``TypeError``. *skip* names fields the
+    migration table back-fills itself: a placeholder there would mask the
+    fill (``setdefault`` never overwrites), so the gate leaves them to the
+    read path and actually exercises the injection.
     """
     try:
         obj = _resolve_identity(module, qualname)
@@ -82,7 +88,9 @@ def _required_field_placeholders(module: str, qualname: str) -> dict[str, Any]:
     return {
         f.name: None
         for f in dataclasses.fields(obj)
-        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+        if f.name not in skip
+        and f.default is dataclasses.MISSING
+        and f.default_factory is dataclasses.MISSING
     }
 
 
@@ -222,12 +230,24 @@ def _revive_check(serde: NamespaceAwareSerde, module: str, qualname: str) -> str
 
     Resolve the historic identity to its live target via the same rule the
     read path uses, so required-field placeholder kwargs match the class
-    actually built.
+    actually built. Fields the migration table back-fills — origin-scoped
+    (keyed on the baselined identity) or class-global (keyed on the
+    resolved target) — get no placeholder, so the gate proves the fills
+    actually inject.
     """
     target_module, target_qualname = _resolve_rename(
         module, qualname, serde._rename_table
     )
-    kwargs = _required_field_placeholders(target_module, target_qualname)
+    backfilled = frozenset(
+        op.field
+        for op in (
+            *serde._origin_addfield_table.get((module, qualname), ()),
+            *serde._addfield_table.get((target_module, target_qualname), ()),
+        )
+    )
+    kwargs = _required_field_placeholders(
+        target_module, target_qualname, skip=backfilled
+    )
     try:
         revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))
     except Exception as exc:  # report every failure, don't abort the sweep
@@ -246,11 +266,22 @@ def assert_all_baselined_revive(
     each baselined identity through the real ext-hook and asserts it revives
     to an ``Event``. Required fields of the resolved live class are filled
     with placeholders so a healthy migration table is never flagged for
-    normal required-field classes — explicit kwargs are only needed for
-    genuine field-shape-drift checks (use :func:`synthesize_legacy_payload`
-    directly there). Events with construction-time validation
-    (``__post_init__``) that reject placeholders need
-    :func:`assert_all_baselined_resolve` instead.
+    normal required-field classes — except fields the table itself
+    back-fills (origin-scoped or class-global), which get no placeholder so
+    the gate proves the injection actually happens. Explicit kwargs are only
+    needed for genuine field-shape-drift checks (use
+    :func:`synthesize_legacy_payload` directly there). Events whose
+    ``__post_init__`` rejects placeholders on NON-back-filled fields need
+    :func:`assert_all_baselined_resolve` instead; validation on a
+    back-filled field sees the real injected value and passes here.
+
+    Blind spot: an origin-scoped fill keyed mid-chain leaves EARLIER eras
+    placeholder-masked — their baselined identities have no applicable
+    fill, so the field falls back to a ``None`` placeholder and the gate
+    passes, while a real payload from that era (which never carried the
+    field) raises at read. Cover "every era" with class-global
+    :func:`~langgraph_events.serde.migrations.backfill`, or pin the
+    specific era with :func:`synthesize_legacy_payload`.
 
     Zero per-event maintenance: a new ``@migrate_from`` plus a regenerated
     baseline is covered with no new test code. Raises ``AssertionError``

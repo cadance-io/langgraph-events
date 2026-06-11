@@ -307,6 +307,123 @@ class DecoBackfillBadDefault(Namespace):
         note: str = ""
 
 
+# Fixture for origin-scoped backfill (#101): three per-entity classes
+# collapsed into one shared class with a required ``entity_type``
+# discriminator the old payloads never carried. ``backfill=`` on each
+# ``@migrate_from`` pins the value for payloads that originated under THAT
+# qualname — a class-global ``@backfill`` could only inject one value for
+# all three origins.
+class DecoFanIn(Namespace):
+    @migrate_from("PersonaOld.Approve.Approved", backfill={"entity_type": "persona"})
+    @migrate_from("StoryOld.Approve.Approved", backfill={"entity_type": "story"})
+    @migrate_from("ScenarioOld.Approve.Approved", backfill={"entity_type": "scenario"})
+    class Approved(DomainEvent):
+        entity_type: str
+        entity_id: str = ""
+
+
+# An origin without a scoped fill falls back to the class-global @backfill
+# — scoped fills override the fallback only for THEIR origin.
+class DecoFanInFallback(Namespace):
+    @backfill("entity_type", default="unknown")
+    @migrate_from("PersonaOldFB.Approved", backfill={"entity_type": "persona"})
+    @migrate_from("LegacyOldFB.Approved")
+    class Approved(DomainEvent):
+        entity_type: str
+        entity_id: str = ""
+
+
+# Origin-scoped fills must not leak through MRO: Child does NOT redeclare
+# the decorator and must not re-emit Parent's origin AddField (which the
+# duplicate-fill guard would reject at serde construction).
+class OriginBackfillSubLeak(Namespace):
+    @migrate_from("OriginBackfillSubLeak.OldParent", backfill={"command_id": "legacy"})
+    class Parent(DomainEvent):
+        command_id: str
+        note: str = ""
+
+    class Child(Parent):
+        extra: str = ""
+
+
+# A back-fill naming a field the live class doesn't have must fail at
+# serde construction, not as a TypeError at first production read.
+class DecoFanInTypoField(Namespace):
+    @migrate_from("TypoOld.Approved", backfill={"entity_typ": "persona"})
+    class Approved(DomainEvent):
+        entity_type: str
+        entity_id: str = ""
+
+
+# Same guard for the class-global decorator — the gap predates origin
+# scoping but the fix covers both forms through one AddField check.
+class DecoBackfillTypoField(Namespace):
+    @backfill("command_idd", default="legacy")
+    class Persisted(DomainEvent):
+        command_id: str
+        note: str = ""
+
+
+# Fixture proving the revive gate exercises origin fills instead of
+# masking them with ``None`` placeholders: ``__post_init__`` rejects
+# anything but a real discriminator, so the gate only passes if the
+# origin-scoped value actually flows through the read path.
+class ValidatedFanIn(Namespace):
+    @migrate_from("ValidatedFanInOld.Approved", backfill={"entity_type": "persona"})
+    class Approved(DomainEvent):
+        entity_type: str
+
+        def __post_init__(self) -> None:
+            if self.entity_type not in ("persona", "story", "scenario"):
+                raise ValueError(f"bad entity_type: {self.entity_type!r}")
+
+
+# Class-global analog of ValidatedFanIn: __post_init__ validation on a
+# class-globally back-filled field must pass the revive gate (the fill's
+# real value is injected, not a None placeholder).
+class ValidatedGlobalBackfill(Namespace):
+    @backfill("entity_type", default="persona")
+    class Approved(DomainEvent):
+        entity_type: str
+
+        def __post_init__(self) -> None:
+            if self.entity_type not in ("persona", "story", "scenario"):
+                raise ValueError(f"bad entity_type: {self.entity_type!r}")
+
+
+# Negative twin: a fill whose value violates construction-time validation
+# must FAIL the gate — the placeholder skip exists precisely so a broken
+# fill cannot hide behind a None placeholder.
+class ValidatedBadFill(Namespace):
+    @backfill("entity_type", default="bogus")
+    class Approved(DomainEvent):
+        entity_type: str
+
+        def __post_init__(self) -> None:
+            if self.entity_type not in ("persona", "story", "scenario"):
+                raise ValueError(f"bad entity_type: {self.entity_type!r}")
+
+
+# Fixture for the raw-form tests: a temporal chain whose NEWER historic
+# identity carries a hand-authored origin-keyed AddField. Payloads from
+# the OLDER era must not pick it up — origin scoping is an exact match,
+# not chain-aware.
+class ChainScoped(Namespace):
+    @migrate_from("ChainScoped.Old", "ChainScoped.New")
+    class Persisted(DomainEvent):
+        source: str = ""
+
+
+# Fixture for the per-origin default_factory escape hatch: ``tags`` is
+# required and list-typed, which ``backfill=`` (immutable values only)
+# cannot express — the raw AddField keyed on the historic identity can.
+class FactoryScoped(Namespace):
+    @migrate_from("FactoryScoped.Old")
+    class Persisted(DomainEvent):
+        tags: list[str]
+        note: str = ""
+
+
 # Namespace whose nested ``Reviewed`` is an ``Interrupted`` subclass. This is
 # the shape that hits #60 — handlers return ``Review.Ask.Reviewed(...)`` and
 # LangGraph wraps it in ``langgraph.types.Interrupt(value=..., id=...)`` for
@@ -1615,7 +1732,7 @@ def describe_NamespaceAwareSerde():
                     ),
                 ]
 
-                with pytest.raises(ValueError, match=r"does not resolve"):
+                with pytest.raises(ValueError, match=r"neither resolves"):
                     NamespaceAwareSerde(migrations=migrations)
 
         def when_addfield_default_is_a_mutable_scalar():
@@ -2332,6 +2449,325 @@ def describe_backfill():
             assert revived.command_id == "legacy"
             assert revived.flag is False
             assert revived.note == "n"
+
+
+def describe_origin_scoped_backfill():
+    # ``backfill=`` on @migrate_from scopes a field default to payloads
+    # that originated under THAT decorator's historic qualname — the
+    # fan-in case (#101) where N classes collapse into one and a
+    # class-global @backfill could not tell the origins apart.
+
+    def when_collapsed_origins_pin_their_own_discriminator():
+        def it_injects_a_distinct_default_per_origin():
+            serde = NamespaceAwareSerde(namespaces=[DecoFanIn])
+
+            for origin, expected in [
+                ("PersonaOld.Approve.Approved", "persona"),
+                ("StoryOld.Approve.Approved", "story"),
+                ("ScenarioOld.Approve.Approved", "scenario"),
+            ]:
+                revived = serde.loads_typed(
+                    synthesize_legacy_payload(
+                        DecoFanIn.__module__, origin, {"entity_id": "e-1"}
+                    )
+                )
+
+                assert isinstance(revived, DecoFanIn.Approved)
+                assert revived.entity_type == expected
+                assert revived.entity_id == "e-1"
+
+    def when_the_payload_carries_an_explicit_value():
+        def it_is_preserved_over_the_origin_fill():
+            serde = NamespaceAwareSerde(namespaces=[DecoFanIn])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    DecoFanIn.__module__,
+                    "PersonaOld.Approve.Approved",
+                    {"entity_id": "e-1", "entity_type": "story"},
+                )
+            )
+
+            assert revived.entity_type == "story"
+
+    def when_an_origin_has_no_scoped_fill():
+        def it_falls_back_to_the_class_global_backfill():
+            serde = NamespaceAwareSerde(namespaces=[DecoFanInFallback])
+
+            scoped = serde.loads_typed(
+                synthesize_legacy_payload(
+                    DecoFanInFallback.__module__, "PersonaOldFB.Approved", {}
+                )
+            )
+            unscoped = serde.loads_typed(
+                synthesize_legacy_payload(
+                    DecoFanInFallback.__module__, "LegacyOldFB.Approved", {}
+                )
+            )
+
+            assert scoped.entity_type == "persona"
+            assert unscoped.entity_type == "unknown"
+
+    def when_a_subclass_inherits_an_origin_backfilled_parent():
+        def it_does_not_emit_a_fill_for_the_subclass():
+            # Mirrors the @migrate_from / @backfill SubLeak guards: the
+            # marker must not leak through MRO. A leak would re-emit
+            # Parent's origin AddField for Child and trip the
+            # duplicate-fill guard at construction.
+            serde = NamespaceAwareSerde(namespaces=[OriginBackfillSubLeak])
+
+            assert list(serde._origin_addfield_table) == [
+                (OriginBackfillSubLeak.__module__, "OriginBackfillSubLeak.OldParent")
+            ]
+
+    def when_the_scoped_value_is_mutable():
+        def it_is_rejected_at_decoration_steering_to_the_raw_escape_hatch():
+            # The error must fire at decoration (the decorator holds the
+            # dict in its hand) and steer to the escape hatch that exists
+            # for the dict form — Migration.add_field keyed on the historic
+            # identity — not to AddField's `default_factory=` kwarg, which
+            # backfill={...} has no way to spell.
+            with pytest.raises(ValueError, match=r"Migration\.add_field"):
+
+                @migrate_from("BadValueOld.Approved", backfill={"tags": []})
+                class Bad(DomainEvent):
+                    tags: tuple[str, ...] = ()
+
+    def when_stacked_decorators_repeat_an_origin():
+        def it_is_rejected_at_decoration_time():
+            # Without this guard the duplicate produces a chain
+            # Old → Old → current whose "Duplicate rename source" error
+            # names the same auto-migration twice with one arrow pointing
+            # the origin at itself — chain vocabulary for what is an
+            # origin duplication.
+            with pytest.raises(ValueError, match=r"[Dd]uplicate origin"):
+
+                class DupHolder(Namespace):
+                    @migrate_from("DupOld.Approved")
+                    @migrate_from("DupOld.Approved")
+                    class Dup(DomainEvent):
+                        note: str = ""
+
+        def it_is_rejected_in_the_multi_arg_form_too():
+            with pytest.raises(ValueError, match=r"[Dd]uplicate origin"):
+
+                class DupArgsHolder(Namespace):
+                    @migrate_from("DupOld.A", "DupOld.A")
+                    class DupArgs(DomainEvent):
+                        note: str = ""
+
+    def when_a_fill_names_an_unknown_field():
+        def it_is_rejected_at_serde_construction():
+            # A typo'd field name would otherwise surface as a dataclass
+            # TypeError at first production read — the worst possible time.
+            with pytest.raises(ValueError, match="entity_typ"):
+                NamespaceAwareSerde(namespaces=[DecoFanInTypoField])
+
+        def it_guards_the_class_global_decorator_too():
+            with pytest.raises(ValueError, match="command_idd"):
+                NamespaceAwareSerde(namespaces=[DecoBackfillTypoField])
+
+    def when_legacy_write_meets_origin_scoped_fills():
+        def it_is_rejected_at_serde_construction():
+            # legacy_write relabels EVERY instance under the oldest
+            # historic identity — persona, story, and scenario alike —
+            # exactly the failure the docs admonition forbids. Enforce it
+            # at construction instead of documenting around it.
+            with pytest.raises(ValueError, match="legacy_write"):
+                NamespaceAwareSerde(namespaces=[DecoFanIn], legacy_write=True)
+
+    def when_backfill_is_an_empty_dict():
+        def it_is_rejected_at_decoration_time():
+            # backfill={} previously passed the `is not None` chain guard
+            # and was then silently dropped — the two guards disagreed
+            # about whether an empty dict counts.
+            with pytest.raises(ValueError, match="at least one field"):
+
+                @migrate_from("EmptyOld.Approved", backfill={})
+                class Empty(DomainEvent):
+                    note: str = ""
+
+    def when_a_raw_AddField_targets_a_historic_identity():
+        def it_applies_before_the_rename():
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[ChainScoped],
+                migrations=[
+                    Migration.add_field(
+                        name="new-era-fill",
+                        module=ChainScoped.__module__,
+                        qualname="ChainScoped.New",
+                        field="source",
+                        default="new-era",
+                    )
+                ],
+            )
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(ChainScoped.__module__, "ChainScoped.New", {})
+            )
+
+            assert isinstance(revived, ChainScoped.Persisted)
+            assert revived.source == "new-era"
+
+        def it_does_not_cascade_to_earlier_chain_members():
+            # Exact-origin contract: on the chain Old → New → current, a
+            # fill keyed on New must not apply to payloads written under
+            # Old. "Every era" is class-global @backfill's job.
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[ChainScoped],
+                migrations=[
+                    Migration.add_field(
+                        name="new-era-fill",
+                        module=ChainScoped.__module__,
+                        qualname="ChainScoped.New",
+                        field="source",
+                        default="new-era",
+                    )
+                ],
+            )
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(ChainScoped.__module__, "ChainScoped.Old", {})
+            )
+
+            assert revived.source == ""
+
+        def it_supports_a_per_origin_default_factory():
+            # The escape hatch backfill= (immutable values only) points to:
+            # a hand-authored AddField keyed on the historic identity with
+            # a default_factory, fresh instance per read.
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[FactoryScoped],
+                migrations=[
+                    Migration.add_field(
+                        name="origin-tags",
+                        module=FactoryScoped.__module__,
+                        qualname="FactoryScoped.Old",
+                        field="tags",
+                        default_factory=lambda: ["legacy"],
+                    )
+                ],
+            )
+            payload = synthesize_legacy_payload(
+                FactoryScoped.__module__, "FactoryScoped.Old", {"note": "n"}
+            )
+
+            first = serde.loads_typed(payload)
+            second = serde.loads_typed(payload)
+
+            assert first.tags == ["legacy"]
+            assert first.tags is not second.tags
+
+    def when_a_baseline_contains_collapsed_origins():
+        def it_passes_the_resolve_and_revive_gates(tmp_path: Any):
+            # The acceptance sketch from #101: a prior release's baseline
+            # still lists the three per-entity identities; both gates must
+            # pass with zero per-event test code.
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_resolve,
+                assert_all_baselined_revive,
+            )
+
+            serde = NamespaceAwareSerde(namespaces=[DecoFanIn])
+            baseline = _baseline_file(
+                tmp_path,
+                (DecoFanIn.__module__, "PersonaOld.Approve.Approved"),
+                (DecoFanIn.__module__, "StoryOld.Approve.Approved"),
+                (DecoFanIn.__module__, "ScenarioOld.Approve.Approved"),
+            )
+
+            assert_all_baselined_resolve(serde, baseline)
+            assert_all_baselined_revive(serde, baseline)
+
+        def it_exercises_the_origin_fill_instead_of_a_placeholder(tmp_path: Any):
+            # ValidatedFanIn's __post_init__ rejects a None discriminator —
+            # the gate must let the origin-scoped fill supply the value
+            # rather than masking it with a required-field placeholder
+            # (which would both hide a broken fill and spuriously fail
+            # validated classes whose backfill is perfectly healthy).
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_revive,
+            )
+
+            serde = NamespaceAwareSerde(namespaces=[ValidatedFanIn])
+            baseline = _baseline_file(
+                tmp_path,
+                (ValidatedFanIn.__module__, "ValidatedFanInOld.Approved"),
+            )
+
+            assert_all_baselined_revive(serde, baseline)
+
+        def it_exercises_class_global_fills_the_same_way(tmp_path: Any):
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_revive,
+            )
+
+            serde = NamespaceAwareSerde(namespaces=[ValidatedGlobalBackfill])
+            baseline = _baseline_file(
+                tmp_path,
+                (
+                    ValidatedGlobalBackfill.__module__,
+                    "ValidatedGlobalBackfill.Approved",
+                ),
+            )
+
+            assert_all_baselined_revive(serde, baseline)
+
+    def when_the_fill_value_is_broken():
+        def it_fails_the_revive_gate_loudly(tmp_path: Any):
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_revive,
+            )
+
+            serde = NamespaceAwareSerde(namespaces=[ValidatedBadFill])
+            baseline = _baseline_file(
+                tmp_path,
+                (ValidatedBadFill.__module__, "ValidatedBadFill.Approved"),
+            )
+
+            # The sweep names the offending identity; the inner
+            # ``__post_init__`` text is swallowed by ormsgpack's generic
+            # "ext_hook failed" (pre-existing diagnostic limitation).
+            with pytest.raises(AssertionError, match=r"ValidatedBadFill\.Approved"):
+                assert_all_baselined_revive(serde, baseline)
+
+    def when_two_fills_target_the_same_origin_field():
+        def it_is_rejected_at_serde_construction():
+            # Without a guard the first op silently wins. Reachable via a
+            # decorator fill colliding with a hand-authored one (stacked
+            # duplicate decorators are caught earlier, at decoration).
+            # Mirrors the duplicate-rename-source diagnostic. Note an
+            # edited-qualname/un-edited-VALUE slip is undetectable by
+            # design — values carry no intent to compare against.
+            from langgraph_events.serde.migrations import Migration
+
+            conflicting = Migration.add_field(
+                name="conflicting-fill",
+                module=DecoFanIn.__module__,
+                qualname="PersonaOld.Approve.Approved",
+                field="entity_type",
+                default="story",
+            )
+
+            with pytest.raises(ValueError, match="Duplicate AddField"):
+                NamespaceAwareSerde(namespaces=[DecoFanIn], migrations=[conflicting])
+
+    def when_backfill_rides_a_multi_qualname_chain_decorator():
+        def it_is_rejected_at_decoration_time():
+            # ``@migrate_from("A", "B")`` declares a temporal chain — a
+            # back-fill attached to it is ambiguous about which origin it
+            # belongs to. Scoped fills are one decorator per origin.
+            with pytest.raises(ValueError, match="exactly one historic"):
+
+                @migrate_from("Chain.A", "Chain.B", backfill={"x": 1})
+                class Ambiguous(DomainEvent):
+                    x: int
 
 
 def describe_assert_all_baselined_handlers_cover():
