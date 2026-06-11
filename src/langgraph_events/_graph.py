@@ -37,8 +37,10 @@ from langgraph_events._handler import (
     HandlerMeta,
     _resolve_type_hints,
     extract_handler_meta,
+    normalize_previous_names,
     on,
 )
+from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _BASE_FIELDS,
     _inject_deadline_keys,
@@ -518,22 +520,24 @@ def _validate_handler_aliases(metas: list[HandlerMeta]) -> None:
     and must not shadow a live handler node — surfaced at build time.
     """
     live_names = {meta.node_name for meta in metas}
-    seen_aliases: set[str] = set()
+    claimed: dict[str, str] = {}
     for meta in metas:
         for alias in meta.previous_names:
             if alias in live_names:
                 raise ValueError(
-                    f"@on(previously={alias!r}) on handler {meta.name!r} "
-                    f"collides with a live handler node of the same name; "
-                    f"choose a distinct historic name."
+                    f"Handler {meta.node_name!r} declares "
+                    f"previously={alias!r}, which collides with a live "
+                    f"handler node of the same name; choose a distinct "
+                    f"historic name."
                 )
-            if alias in seen_aliases:
+            first = claimed.get(alias)
+            if first is not None:
                 raise ValueError(
-                    f"Duplicate handler alias {alias!r} (declared via "
-                    f"@on(previously=...)); each historic node name may map "
-                    f"to only one handler."
+                    f"Historic node name {alias!r} is declared as previously= "
+                    f"by both {first!r} and {meta.node_name!r}; each historic "
+                    f"node name may map to only one handler."
                 )
-            seen_aliases.add(alias)
+            claimed[alias] = meta.node_name
 
 
 def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
@@ -640,7 +644,10 @@ def _expand_command_handlers(
             # identity* claim, not inheritable behavior like raises/invariants
             # — a subclass must not capture its parent's checkpoints (nor trip
             # duplicate-alias validation when both are registered).
-            cmd_previously = h.__dict__.get("previously", ())
+            cmd_previously = normalize_previous_names(
+                h.__dict__.get("previously", ()),
+                owner=f"Command {command_identity(h)!r}:",
+            )
             on(
                 h,
                 raises=cmd_raises,

@@ -484,6 +484,24 @@ def describe_Command_handle():
                 assert "save" in first
                 assert first == second
 
+        def when_the_declaration_is_removed_between_builds():
+            def it_drops_the_alias_on_the_next_build():
+                # Each build must reflect the class's current declaration — a
+                # stale stamp from an earlier build must not keep a deleted
+                # alias alive.
+                class _Era(Namespace):
+                    class Cmd(Command):
+                        previously: ClassVar = ("first_era",)
+
+                        def handle(self) -> None:
+                            return None
+
+                first = set(EventGraph([_Era.Cmd])._compile().get_graph().nodes)
+                assert "first_era" in first
+                del _Era.Cmd.previously
+                second = set(EventGraph([_Era.Cmd])._compile().get_graph().nodes)
+                assert "first_era" not in second
+
         def when_a_paused_reactor_becomes_an_inline_command():
             def it_resumes_the_old_checkpoint_via_the_alias():
                 # The acceptance scenario from #103: a reactor node paused a
@@ -544,6 +562,60 @@ def describe_Command_handle():
 
                     with pytest.raises(ValueError, match="collides"):
                         EventGraph([_Clash.Cmd, live])
+
+                def it_names_the_command_node_in_the_error():
+                    # The error must identify the claimant by its checkpoint
+                    # identity (the command qualname), not the method name
+                    # ('handle'), which several commands share.
+                    class _Clash2(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("live_node2",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    @on(_VaultGo, node_name="live_node2")
+                    def live(event: _VaultGo) -> None:
+                        return None
+
+                    with pytest.raises(ValueError, match=r"_Clash2\.Cmd"):
+                        EventGraph([_Clash2.Cmd, live])
+
+            def with_another_handler_claiming_the_same_alias():
+                def it_names_both_claimants():
+                    class _DupA(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("shared_old",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    class _DupB(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("shared_old",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    with pytest.raises(ValueError) as excinfo:
+                        EventGraph([_DupA.Cmd, _DupB.Cmd])
+                    assert "_DupA.Cmd" in str(excinfo.value)
+                    assert "_DupB.Cmd" in str(excinfo.value)
+
+        def when_previously_is_an_invalid_value():
+            def it_names_the_command_in_the_error():
+                # The user wrote a class attribute, not @on() — the error
+                # must point at the command, not the decorator they never
+                # called.
+                class _BadVal(Namespace):
+                    class Cmd(Command):
+                        previously: ClassVar = 123
+
+                        def handle(self) -> None:
+                            return None
+
+                with pytest.raises(TypeError, match=r"_BadVal\.Cmd"):
+                    EventGraph([_BadVal.Cmd])
 
         def when_previously_is_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():

@@ -775,3 +775,21 @@ def describe_handler_identity():
         def it_raises_TypeError_at_decoration():
             with pytest.raises(TypeError, match="previously"):
                 on(SampleEvent, previously=("",))
+
+    def when_previously_contains_a_whitespace_string():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=("   ",))
+
+    def when_previously_is_a_generator():
+        def it_raises_TypeError_at_decoration():
+            # A generator would be exhausted on the first read and silently
+            # yield no aliases on any later one — only reorderable,
+            # re-readable sequences are accepted.
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=(name for name in ("old",)))
+
+    def when_previously_is_a_dict():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously={"old": "oops"})

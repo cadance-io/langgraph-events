@@ -2770,6 +2770,78 @@ def describe_origin_scoped_backfill():
                     x: int
 
 
+# Module-level fixtures for the renamed-inline-command resume test (#103).
+# ``OldLocker`` plays the previous release's class; the test deletes it
+# mid-flight (a rename means the old definition is gone) and restores it
+# afterwards.
+class _RelockPause(Interrupted):
+    pass
+
+
+class _RelockGo(IntegrationEvent):
+    pass
+
+
+class OldLocker(Namespace):
+    class Persist(Command):
+        def handle(self) -> _RelockPause:
+            return _RelockPause()
+
+
+class Locker(Namespace):
+    @migrate_from("OldLocker.Persist")
+    class Persist(Command):
+        previously: ClassVar = ("OldLocker.Persist",)
+
+        def handle(self) -> _RelockPause:
+            return _RelockPause()
+
+
+def describe_renamed_inline_command_resume():
+    # Renaming a command class is BOTH renames at once: the node identity in
+    # snapshot.next and the event class of the checkpointed payload. The
+    # alias node dispatches by isinstance against the new class, so resume
+    # only recovers when previously= (node) and @migrate_from (payload, via
+    # a namespace-aware serde) are declared together — the docs warning in
+    # event-migrations.md, enforced here.
+
+    def when_the_command_class_itself_is_renamed():
+        def with_both_rename_tracks_declared():
+            def it_resumes_a_checkpoint_paused_under_the_old_class():
+                import sys
+
+                from langgraph_events._event import _NAMESPACE_REGISTRY
+
+                @on(_RelockGo)
+                def go(event: _RelockGo) -> None:
+                    return None
+
+                saver = MemorySaver(serde=NamespaceAwareSerde())
+                before = EventGraph([OldLocker.Persist, go], checkpointer=saver)
+                cfg = {"configurable": {"thread_id": "relock-1"}}
+                before.invoke(OldLocker.Persist(), config=cfg)
+                assert before.get_state(cfg).is_interrupted
+
+                mod = sys.modules[OldLocker.__module__]
+                old_ns = OldLocker
+                try:
+                    # The new release: the old class definition is gone, the
+                    # surviving class declares both rename tracks.
+                    delattr(mod, "OldLocker")
+                    _NAMESPACE_REGISTRY.pop("OldLocker", None)
+                    saver.serde = NamespaceAwareSerde(namespaces=[Locker])
+                    after = EventGraph([Locker.Persist, go], checkpointer=saver)
+
+                    log = after.resume(_RelockGo(), config=cfg)
+
+                    assert log.has(Resumed)
+                    # The checkpointed payload revived as the renamed class.
+                    assert log.has(Locker.Persist)
+                finally:
+                    mod.OldLocker = old_ns
+                    _NAMESPACE_REGISTRY["OldLocker"] = old_ns
+
+
 def describe_assert_all_baselined_handlers_cover():
     # The handler analog of the event coverage gates: every handler node name
     # the previous release wrote must still be live or covered by an
