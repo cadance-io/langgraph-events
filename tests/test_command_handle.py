@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import textwrap
 from typing import ClassVar
+from typing import ClassVar as CV  # noqa: N817 — alias spelling is under test
 
 import pytest
 
@@ -456,6 +458,63 @@ def describe_Command_handle():
                 log = graph.invoke(_InlineRaises.Cmd())
                 assert log.has(HandlerRaised)
 
+        def when_raises_is_declared_as_a_dataclass_field():
+            def it_rejects_at_class_creation():
+                # An annotated (non-ClassVar) ``raises`` would silently
+                # become a frozen dataclass field serializing exception
+                # classes into every checkpoint payload while exception
+                # routing kept working (same hazard as ``previously``).
+                with pytest.raises(TypeError, match=r"'raises'.*ClassVar"):
+
+                    class _BadRaises(Namespace):
+                        class Cmd(Command):
+                            raises: tuple[type, ...] = (ValueError,)
+
+                            def handle(self) -> None:
+                                return None
+
+        def when_invariants_is_declared_as_a_dataclass_field():
+            def it_rejects_at_class_creation_steering_to_classvar():
+                # Without the guard this dies inside dataclasses with a
+                # mutable-default ValueError whose advice (use
+                # default_factory) is actively harmful here: a factory
+                # field has no class attribute, so invariant enforcement
+                # would silently vanish.
+                with pytest.raises(TypeError, match=r"'invariants'.*ClassVar"):
+
+                    class _BadInv(Namespace):
+                        class Cmd(Command):
+                            invariants: dict = {}  # noqa: RUF012
+
+                            def handle(self) -> None:
+                                return None
+
+            def when_the_module_evaluates_annotations_eagerly():
+                def it_rejects_before_dataclass_processing():
+                    # Without ``from __future__ import annotations`` the
+                    # annotation is a real type object, so the guard judges
+                    # it directly — the error must not arrive as a chained
+                    # translation of dataclasses' mutable-default ValueError.
+                    src = textwrap.dedent(
+                        """
+                        class _EagerAnn(Namespace):
+                            class Cmd(Command):
+                                invariants: dict = {}
+
+                                def handle(self) -> None:
+                                    return None
+                        """
+                    )
+                    # dont_inherit: without it the exec'd code inherits this
+                    # module's deferred-annotations future flag.
+                    code = compile(src, "<eager>", "exec", dont_inherit=True)
+                    ns = {"Namespace": Namespace, "Command": Command}
+                    with pytest.raises(
+                        TypeError, match=r"'invariants'.*ClassVar"
+                    ) as excinfo:
+                        exec(code, ns)  # noqa: S102
+                    assert excinfo.value.__cause__ is None
+
     def describe_previously_class_attribute():
         # ``previously`` mirrors ``raises``/``invariants`` as a class-level
         # modifier (inline handlers have no decorator slot): it declares the
@@ -616,6 +675,22 @@ def describe_Command_handle():
 
                 with pytest.raises(TypeError, match=r"_BadVal\.Cmd"):
                     EventGraph([_BadVal.Cmd])
+
+        def when_classvar_is_imported_under_a_module_level_alias():
+            def it_accepts_the_aliased_annotation():
+                # dataclasses resolves PEP 563 string annotations through
+                # the module globals, so ``CV`` is a working ClassVar
+                # spelling — the reserved-modifier guard must not
+                # second-guess dataclasses and reject it.
+                class _Aliased(Namespace):
+                    class Cmd(Command):
+                        previously: CV = ("legacy_aliased",)
+
+                        def handle(self) -> None:
+                            return None
+
+                (meta,) = EventGraph([_Aliased.Cmd])._handler_metas
+                assert meta.previous_names == ("legacy_aliased",)
 
         def when_previously_is_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():
