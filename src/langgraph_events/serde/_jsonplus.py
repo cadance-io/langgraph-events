@@ -257,6 +257,20 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._addfield_table,
             self._origin_addfield_table,
         ) = _flatten_and_validate(all_migrations)
+        # Origin-scoped fills are the fan-in signal, and a fan-in cannot
+        # ride legacy_write: writes would relabel EVERY instance under the
+        # oldest historic identity, collapsing the per-origin distinction
+        # the fills exist to preserve — and the old releases' classes do
+        # not accept the back-filled field anyway.
+        if legacy_write and self._origin_addfield_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with origin-scoped "
+                "back-fills (migrate_from(backfill=...) or AddField keyed "
+                "on a historic identity). Drain in-flight threads before "
+                "the consolidation cutover, or drop legacy_write and accept "
+                "read-only compatibility. See 'Consolidating N classes into "
+                "one' in docs/event-migrations.md."
+            )
         self._live_identities = live
         self._legacy_write = legacy_write
         self._encode_default = _make_default(legacy_write, oldest_historic)
@@ -267,10 +281,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         rename migration (``@migrate_from`` decorators in ``namespaces=``
         and hand-authored ``migrations=``).
 
-        Read-only view. AddField targets add no NEW revivable identities:
-        post-rename fills key on currently-live classes (already in the
-        live set) and origin-scoped fills key on rename sources (already
-        in the rename table).
+        Read-only view. AddField targets are not added: a fill modifies
+        kwargs for an identity revived by other means (a live class or a
+        rename), it does not make an identity revivable by itself.
         """
         return self._live_identities | frozenset(self._rename_table.keys())
 

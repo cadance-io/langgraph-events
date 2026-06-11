@@ -346,12 +346,22 @@ class OriginBackfillSubLeak(Namespace):
         extra: str = ""
 
 
-# A mutable origin-scoped value must be rejected by the SAME guard that
-# rejects AddField(default=[]) — not a forked rule.
-class DecoFanInBadValue(Namespace):
-    @migrate_from("BadValueOld.Approved", backfill={"tags": []})
+# A back-fill naming a field the live class doesn't have must fail at
+# serde construction, not as a TypeError at first production read.
+class DecoFanInTypoField(Namespace):
+    @migrate_from("TypoOld.Approved", backfill={"entity_typ": "persona"})
     class Approved(DomainEvent):
-        tags: tuple[str, ...] = ()
+        entity_type: str
+        entity_id: str = ""
+
+
+# Same guard for the class-global decorator — the gap predates origin
+# scoping but the fix covers both forms through one AddField check.
+class DecoBackfillTypoField(Namespace):
+    @backfill("command_idd", default="legacy")
+    class Persisted(DomainEvent):
+        command_id: str
+        note: str = ""
 
 
 # Fixture proving the revive gate exercises origin fills instead of
@@ -360,6 +370,32 @@ class DecoFanInBadValue(Namespace):
 # origin-scoped value actually flows through the read path.
 class ValidatedFanIn(Namespace):
     @migrate_from("ValidatedFanInOld.Approved", backfill={"entity_type": "persona"})
+    class Approved(DomainEvent):
+        entity_type: str
+
+        def __post_init__(self) -> None:
+            if self.entity_type not in ("persona", "story", "scenario"):
+                raise ValueError(f"bad entity_type: {self.entity_type!r}")
+
+
+# Class-global analog of ValidatedFanIn: __post_init__ validation on a
+# class-globally back-filled field must pass the revive gate (the fill's
+# real value is injected, not a None placeholder).
+class ValidatedGlobalBackfill(Namespace):
+    @backfill("entity_type", default="persona")
+    class Approved(DomainEvent):
+        entity_type: str
+
+        def __post_init__(self) -> None:
+            if self.entity_type not in ("persona", "story", "scenario"):
+                raise ValueError(f"bad entity_type: {self.entity_type!r}")
+
+
+# Negative twin: a fill whose value violates construction-time validation
+# must FAIL the gate — the placeholder skip exists precisely so a broken
+# fill cannot hide behind a None placeholder.
+class ValidatedBadFill(Namespace):
+    @backfill("entity_type", default="bogus")
     class Approved(DomainEvent):
         entity_type: str
 
@@ -2485,9 +2521,71 @@ def describe_origin_scoped_backfill():
             ]
 
     def when_the_scoped_value_is_mutable():
-        def it_is_rejected_by_the_shared_AddField_guard():
-            with pytest.raises(ValueError, match="mutable"):
-                NamespaceAwareSerde(namespaces=[DecoFanInBadValue])
+        def it_is_rejected_at_decoration_steering_to_the_raw_escape_hatch():
+            # The error must fire at decoration (the decorator holds the
+            # dict in its hand) and steer to the escape hatch that exists
+            # for the dict form — Migration.add_field keyed on the historic
+            # identity — not to AddField's `default_factory=` kwarg, which
+            # backfill={...} has no way to spell.
+            with pytest.raises(ValueError, match=r"Migration\.add_field"):
+
+                @migrate_from("BadValueOld.Approved", backfill={"tags": []})
+                class Bad(DomainEvent):
+                    tags: tuple[str, ...] = ()
+
+    def when_stacked_decorators_repeat_an_origin():
+        def it_is_rejected_at_decoration_time():
+            # Without this guard the duplicate produces a chain
+            # Old → Old → current whose "Duplicate rename source" error
+            # names the same auto-migration twice with one arrow pointing
+            # the origin at itself — chain vocabulary for what is an
+            # origin duplication.
+            with pytest.raises(ValueError, match=r"[Dd]uplicate origin"):
+
+                class DupHolder(Namespace):
+                    @migrate_from("DupOld.Approved")
+                    @migrate_from("DupOld.Approved")
+                    class Dup(DomainEvent):
+                        note: str = ""
+
+        def it_is_rejected_in_the_multi_arg_form_too():
+            with pytest.raises(ValueError, match=r"[Dd]uplicate origin"):
+
+                class DupArgsHolder(Namespace):
+                    @migrate_from("DupOld.A", "DupOld.A")
+                    class DupArgs(DomainEvent):
+                        note: str = ""
+
+    def when_a_fill_names_an_unknown_field():
+        def it_is_rejected_at_serde_construction():
+            # A typo'd field name would otherwise surface as a dataclass
+            # TypeError at first production read — the worst possible time.
+            with pytest.raises(ValueError, match="entity_typ"):
+                NamespaceAwareSerde(namespaces=[DecoFanInTypoField])
+
+        def it_guards_the_class_global_decorator_too():
+            with pytest.raises(ValueError, match="command_idd"):
+                NamespaceAwareSerde(namespaces=[DecoBackfillTypoField])
+
+    def when_legacy_write_meets_origin_scoped_fills():
+        def it_is_rejected_at_serde_construction():
+            # legacy_write relabels EVERY instance under the oldest
+            # historic identity — persona, story, and scenario alike —
+            # exactly the failure the docs admonition forbids. Enforce it
+            # at construction instead of documenting around it.
+            with pytest.raises(ValueError, match="legacy_write"):
+                NamespaceAwareSerde(namespaces=[DecoFanIn], legacy_write=True)
+
+    def when_backfill_is_an_empty_dict():
+        def it_is_rejected_at_decoration_time():
+            # backfill={} previously passed the `is not None` chain guard
+            # and was then silently dropped — the two guards disagreed
+            # about whether an empty dict counts.
+            with pytest.raises(ValueError, match="at least one field"):
+
+                @migrate_from("EmptyOld.Approved", backfill={})
+                class Empty(DomainEvent):
+                    note: str = ""
 
     def when_a_raw_AddField_targets_a_historic_identity():
         def it_applies_before_the_rename():
@@ -2605,12 +2703,48 @@ def describe_origin_scoped_backfill():
 
             assert_all_baselined_revive(serde, baseline)
 
+        def it_exercises_class_global_fills_the_same_way(tmp_path: Any):
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_revive,
+            )
+
+            serde = NamespaceAwareSerde(namespaces=[ValidatedGlobalBackfill])
+            baseline = _baseline_file(
+                tmp_path,
+                (
+                    ValidatedGlobalBackfill.__module__,
+                    "ValidatedGlobalBackfill.Approved",
+                ),
+            )
+
+            assert_all_baselined_revive(serde, baseline)
+
+    def when_the_fill_value_is_broken():
+        def it_fails_the_revive_gate_loudly(tmp_path: Any):
+            from langgraph_events.serde.migrations import (
+                assert_all_baselined_revive,
+            )
+
+            serde = NamespaceAwareSerde(namespaces=[ValidatedBadFill])
+            baseline = _baseline_file(
+                tmp_path,
+                (ValidatedBadFill.__module__, "ValidatedBadFill.Approved"),
+            )
+
+            # The sweep names the offending identity; the inner
+            # ``__post_init__`` text is swallowed by ormsgpack's generic
+            # "ext_hook failed" (pre-existing diagnostic limitation).
+            with pytest.raises(AssertionError, match=r"ValidatedBadFill\.Approved"):
+                assert_all_baselined_revive(serde, baseline)
+
     def when_two_fills_target_the_same_origin_field():
         def it_is_rejected_at_serde_construction():
-            # Without a guard the first op silently wins — with per-origin
-            # fills a copy-paste slip (two decorators, one un-edited value)
-            # would revive payloads with the wrong discriminator. Mirrors
-            # the duplicate-rename-source diagnostic.
+            # Without a guard the first op silently wins. Reachable via a
+            # decorator fill colliding with a hand-authored one (stacked
+            # duplicate decorators are caught earlier, at decoration).
+            # Mirrors the duplicate-rename-source diagnostic. Note an
+            # edited-qualname/un-edited-VALUE slip is undetectable by
+            # design — values carry no intent to compare against.
             from langgraph_events.serde.migrations import Migration
 
             conflicting = Migration.add_field(

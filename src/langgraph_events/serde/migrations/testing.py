@@ -69,14 +69,15 @@ def _required_field_placeholders(
     """``{name: None}`` for every required (no-default) field of the live
     class at ``(module, qualname)``, except those in *skip*.
 
-    Events are frozen dataclasses with no construction-time validation, so
-    ``None`` is a sufficient placeholder — the helper only proves the
-    identity reaches a constructible live class, not field semantics. An
-    unresolvable target yields ``{}`` so ``loads_typed`` surfaces the real
-    coverage failure rather than a synthetic ``TypeError``. *skip* names
-    fields the migration table back-fills itself: a placeholder there would
-    mask the fill (``setdefault`` never overwrites), so the gate leaves
-    them to the read path and actually exercises the injection.
+    The helper only proves the identity reaches a constructible live
+    class, not field semantics — ``None`` placeholders suffice unless the
+    class validates in ``__post_init__`` (those need the resolve gate, or
+    a back-fill covering the validated field). An unresolvable target
+    yields ``{}`` so ``loads_typed`` surfaces the real coverage failure
+    rather than a synthetic ``TypeError``. *skip* names fields the
+    migration table back-fills itself: a placeholder there would mask the
+    fill (``setdefault`` never overwrites), so the gate leaves them to the
+    read path and actually exercises the injection.
     """
     try:
         obj = _resolve_identity(module, qualname)
@@ -273,6 +274,14 @@ def assert_all_baselined_revive(
     ``__post_init__`` rejects placeholders on NON-back-filled fields need
     :func:`assert_all_baselined_resolve` instead; validation on a
     back-filled field sees the real injected value and passes here.
+
+    Blind spot: an origin-scoped fill keyed mid-chain leaves EARLIER eras
+    placeholder-masked — their baselined identities have no applicable
+    fill, so the field falls back to a ``None`` placeholder and the gate
+    passes, while a real payload from that era (which never carried the
+    field) raises at read. Cover "every era" with class-global
+    :func:`~langgraph_events.serde.migrations.backfill`, or pin the
+    specific era with :func:`synthesize_legacy_payload`.
 
     Zero per-event maintenance: a new ``@migrate_from`` plus a regenerated
     baseline is covered with no new test code. Raises ``AssertionError``

@@ -108,13 +108,21 @@ class EntityLifecycle(Namespace):
             entity_id: str
 ```
 
-- **Precedence:** explicit payload value > origin-scoped fill > class-global `@backfill` (which acts as the fallback for origins without a scoped entry).
-- **Exact-origin contract:** a fill applies only to payloads written under *that* qualname. On a temporal chain (`@migrate_from("A", "B")`) a fill keyed on `B` does **not** apply to `A`-era payloads — "every era" is class-global `@backfill`'s job. Accordingly, `backfill=` requires exactly one qualname per decorator; the multi-arg chain form rejects it.
-- **Mutable values** are rejected by the shared `AddField` guard. For a per-origin `default_factory`, hand-author `Migration.add_field(module=..., qualname="<historic>", field=..., default_factory=...)` — an `AddField` keyed on a historic identity is applied *before* the rename, only to that origin.
-- Two fills for the same `(origin, field)` raise at serde construction — a copy-paste slip would otherwise revive payloads with the wrong discriminator.
+Shipping a consolidation is three moves in one PR:
 
-!!! warning "Consolidations cannot ride `legacy_write`"
-    The two-release rename dance (below) does not work for a fan-in: the old classes don't accept the new discriminator kwarg, and `legacy_write` relabels **every** instance under the *oldest* historic identity — persona, story, and scenario alike. Drain in-flight threads before cutover, or accept read-only compatibility (old payloads revive; old pods cannot read new ones).
+1. **Delete the old class definitions** — a `@migrate_from` whose historic identity still resolves to a live class is rejected at serde construction ("resolves to a currently-live class"); that error is the library telling you step 1 isn't done, not that the migration is wrong.
+2. **Decorate the surviving class** as above.
+3. **Regenerate the baseline** (`write_baseline`) in the same PR — the [one invariant](#two-tracks-one-model).
+
+Semantics:
+
+- **Precedence:** explicit payload value > origin-scoped fill > class-global `@backfill` (which acts as the fallback for origins without a scoped entry).
+- **Exact-origin contract:** a fill applies only to payloads written under *that* qualname. On a temporal chain (`@migrate_from("A", "B")`) a fill keyed on `B` does **not** apply to `A`-era payloads — "every era" is class-global `@backfill`'s job. Accordingly, `backfill=` requires exactly one qualname per decorator; the multi-arg chain form rejects it. Note the [revive gate](#coverage-gates) cannot catch a mid-chain fill that should have been class-global: earlier eras get placeholder-filled and pass, while a real payload from that era fails at read.
+- **Mutable values** are rejected at decoration. For a per-origin `default_factory`, hand-author `Migration.add_field(module=..., qualname="<historic>", field=..., default_factory=...)` — an `AddField` keyed on a historic identity is applied *before* the rename, only to that origin.
+- Two fills for the same `(origin, field)` raise at serde construction (reachable when a decorator fill collides with a hand-authored one; a duplicated origin *qualname* is caught even earlier, at decoration).
+
+!!! warning "Consolidations cannot ride `legacy_write` (enforced)"
+    The two-release rename dance (below) does not work for a fan-in: the old classes don't accept the new discriminator kwarg, and `legacy_write` relabels **every** instance under the *oldest* historic identity — persona, story, and scenario alike. `NamespaceAwareSerde(..., legacy_write=True)` therefore **raises at construction** when origin-scoped fills are present. Drain in-flight threads before cutover, or accept read-only compatibility (old payloads revive; old pods cannot read new ones).
 
 ### Hand-authored escape hatch
 
@@ -438,9 +446,12 @@ Errors raised at serde construction (not at first production read):
 - `old_qualname` shadowing a currently-live class — `ValueError`
 - Cycles (`A→B` then `B→A`) — `ValueError`
 - `AddField` targets that neither resolve to a live class nor match a rename-covered historic identity — `ValueError`
-- `AddField(default=<mutable>)` — `ValueError` (steers to `default_factory`); `@backfill` and `migrate_from(backfill=...)` funnel into `AddField`, same guard
+- A fill naming a field the live class doesn't have — `ValueError` (typo caught at construction, not at first read)
+- `AddField(default=<mutable>)` — `ValueError` (steers to `default_factory`); `@backfill` funnels into `AddField`, same guard
 - Two fills on the same `(identity, field)` pair — `ValueError` naming both migrations
-- `migrate_from(backfill=...)` with a multi-qualname chain — `ValueError` (at decoration, even earlier)
+- `legacy_write=True` combined with origin-scoped fills — `ValueError` (consolidations cannot ride legacy writes)
+- `migrate_from(backfill=...)` with a multi-qualname chain, an empty dict, or a mutable value (steers to the `Migration.add_field` escape hatch) — `ValueError` at decoration, even earlier
+- A duplicated origin qualname across stacked `@migrate_from` decorators (or within one multi-arg call) — `ValueError` at decoration
 - Unknown `Operation` type in `Migration.operations` — `TypeError`
 
 A misspelled `@migrate_from("Persona.Persistedd")` fails at construction, not at first checkpoint load in production.
