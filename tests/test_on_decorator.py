@@ -758,3 +758,20 @@ def describe_handler_identity():
                 pass
 
             assert extract_handler_meta(place).previous_names == ()
+
+    def when_previously_contains_a_non_string():
+        def it_raises_TypeError_at_decoration():
+            # Without the guard a non-str alias flows into LangGraph's
+            # add_node and dies there with a baffling message.
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=(SampleEvent,))
+
+    def when_previously_is_not_iterable():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=123)
+
+    def when_previously_contains_an_empty_string():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=("",))

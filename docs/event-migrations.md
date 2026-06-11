@@ -393,7 +393,7 @@ Handlers evolve under the **same model as events**. A handler becomes a graph *n
 
 | Concern | Events | Handlers |
 |---|---|---|
-| Declare prior identity → auto-recover | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` |
+| Declare prior identity → auto-recover | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` / `previously: ClassVar = (...)` on a `Command` |
 | Prevent the break up front | (qualname *is* the identity) | `@on(node_name="stable_id")` — then rename the function freely |
 | Catch the undeclared case in CI | `assert_all_baselined_*` | `assert_all_baselined_handlers_cover(graph, BASELINE)` |
 
@@ -401,6 +401,12 @@ Handlers evolve under the **same model as events**. A handler becomes a graph *n
 # Renamed handler — declare the old node name so paused checkpoints resume:
 @on(Confirmed, previously="await_confirmation")
 def confirm(event: Confirmed) -> Approved: ...
+
+# Inline Command nodes have no decorator slot — declare it as a class
+# attribute, mirroring raises/invariants:
+class Persist(Command):
+    previously: ClassVar = ("Persona.Persist", "Story.Persist")
+    ...
 ```
 
 - `@on(node_name=...)` pins a **stable node identity** decoupled from the Python function name — rename/move the function with zero checkpoint impact. `@on(previously=...)` registers an **alias node** for each historic name so an in-flight interrupted checkpoint re-enters the renamed handler.
@@ -417,8 +423,20 @@ def confirm(event: Confirmed) -> Approved: ...
 
 An inline `Command.handle()` handler's node identity is the **command's `__qualname__`** (e.g. `Order.Place`), not the method name — so it is stable and order-independent. Reordering the `handlers=[...]` list is safe, and you do **not** need `@on(node_name=...)` to pin it (that pin is for standalone `@on` functions, whose identity is otherwise the function name).
 
+Renaming the command class therefore *is* a node rename. Declare the historic node names as a `previously` class attribute (`ClassVar`, like `raises`/`invariants` — inline handlers have no decorator slot):
+
+```python
+class Persist(Command):
+    previously: ClassVar = ("Persona.Persist", "Story.Persist", "save")
+    ...
+```
+
+The lists often rhyme with a `@migrate_from` stack on the same class, but they answer different questions: `@migrate_from` revives the old payload **bytes**; `previously` revives the old checkpoint **pointer** (the node name in `snapshot.next`). Each may carry entries the other can't — a node-only era (a reactor the command replaced, a pre-#97 `handle_N`) has no serde identity, and a module-only move has no node rename. The handler gate catches a missing `previously`; the event gates catch a missing `@migrate_from`.
+
+`previously` is deliberately **not inherited** by `Command` subclasses — a historic node name identifies exactly one class — and declaring it as an annotated field (`previously: tuple = ...` without `ClassVar`) is rejected at class creation, since it would otherwise leak into every serialized payload.
+
 !!! note "Upgrading a baseline recorded before this fix (#97)"
-    Earlier releases recorded inline command handlers by positional names (`handle`, `handle_2`, …). After upgrading, those names no longer resolve, so `assert_all_baselined_handlers_cover` will raise `HandlerCoverageError` until you **regenerate the baseline once** with `write_baseline(graph, BASELINE)`. This firing is expected — it is the gate doing its job. A checkpoint paused inside an inline command handler *before* the upgrade cannot resume afterward (the old positional name was order-dependent and can't be reconstructed); recover a specific one with `@on(previously="handle_N")` on that command's handler, or set `on_unresumable="halt"/"warn"`.
+    Earlier releases recorded inline command handlers by positional names (`handle`, `handle_2`, …). After upgrading, those names no longer resolve, so `assert_all_baselined_handlers_cover` will raise `HandlerCoverageError` until you **regenerate the baseline once** with `write_baseline(graph, BASELINE)`. This firing is expected — it is the gate doing its job. A checkpoint paused inside an inline command handler *before* the upgrade cannot resume afterward (the old positional name was order-dependent and can't be reconstructed); recover a specific one with `previously: ClassVar = ("handle_N",)` on that command class, or set `on_unresumable="halt"/"warn"`.
 
 ### Renaming an event *and* a handler together
 
@@ -428,6 +446,9 @@ The two tracks are independent — do both, in one PR:
 2. **Regenerate the baseline once** — a single `write_baseline(graph, BASELINE)` captures both the event identities *and* the handler node names (baseline v2). Commit it in the same PR.
 3. **Run both gates in CI** — they're independent and both required: an event gate (`assert_all_baselined_revive(serde, BASELINE)`) **and** the handler gate (`assert_all_baselined_handlers_cover(graph, BASELINE)`). One does not cover the other.
 4. **Deploy** — the handler alias is single-release safe; the event rename follows the two-release `legacy_write` cadence, so the *event* side gates the rollout.
+
+!!! warning "Renaming an inline Command is always both renames at once"
+    The command class is simultaneously the node identity *and* the event class of the payload sitting in the paused checkpoint. The alias node dispatches by `isinstance` against the **new** class, so `previously` alone is not enough: the checkpointed command payload must also revive *as* the new class — `@migrate_from` on the command plus a namespace-aware serde on the checkpointer (`from_namespaces(..., checkpointer=...)` wires it automatically). With the default LangGraph serializer the alias node re-enters but sees no matching event and the resume silently no-ops.
 
 ## Reserved attributes
 

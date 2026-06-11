@@ -294,11 +294,26 @@ def on(
     checkpoint; ``previously=`` (str or tuple) declares historic node names to
     keep resumable after a rename. Both are reserved keywords — a field named
     ``node_name`` or ``previously`` cannot be matched positionally via
-    ``**field_matchers``.
+    ``**field_matchers``. Inline ``Command`` handlers declare historic node
+    names as a class attribute instead: ``previously: ClassVar = (...)``.
     """
     if node_name is not None and not isinstance(node_name, str):
         raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")
-    previous_names = (previously,) if isinstance(previously, str) else tuple(previously)
+    if isinstance(previously, str):
+        previous_names: tuple[str, ...] = (previously,)
+    else:
+        try:
+            previous_names = tuple(previously)
+        except TypeError:
+            raise TypeError(
+                f"@on() previously= must be a str or an iterable of str, "
+                f"got {previously!r}"
+            ) from None
+    for alias in previous_names:
+        if not isinstance(alias, str) or not alias:
+            raise TypeError(
+                f"@on() previously= node names must be non-empty str, got {alias!r}"
+            )
 
     no_modifiers = (
         raises == ()

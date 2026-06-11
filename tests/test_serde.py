@@ -5,7 +5,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import warnings
-from typing import Any
+from typing import Any, ClassVar
 
 import ormsgpack
 import pytest
@@ -2841,6 +2841,61 @@ def describe_assert_all_baselined_handlers_cover():
                 # sibling of MigrationCoverageError under the shared base
                 assert isinstance(excinfo.value, CoverageError)
                 assert excinfo.value.uncovered == ("place",)
+
+    def when_a_reactor_is_replaced_by_an_inline_command():
+        # The command's ``previously`` class attribute feeds the same
+        # HandlerMeta.previous_names the gate unions into its reachable set.
+        def with_previously_declared():
+            def it_passes(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_handlers_cover,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                class _Replat(Namespace):
+                    class Persist(Command):
+                        previously: ClassVar = ("persist",)
+
+                        def handle(self) -> None:
+                            return None
+
+                @on(Started, node_name="persist")
+                def persist_reactor(event: Started) -> None:
+                    return None
+
+                baseline = tmp_path / "b.json"
+                write_baseline(EventGraph([persist_reactor]), baseline)
+
+                assert_all_baselined_handlers_cover(
+                    EventGraph([_Replat.Persist]), baseline
+                )
+
+        def without_previously_declared():
+            def it_raises_naming_the_lost_handler(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_handlers_cover,
+                )
+                from langgraph_events.serde.migrations.detect import (
+                    HandlerCoverageError,
+                    write_baseline,
+                )
+
+                class _Replat2(Namespace):
+                    class Persist(Command):
+                        def handle(self) -> None:
+                            return None
+
+                @on(Started, node_name="persist")
+                def persist_reactor(event: Started) -> None:
+                    return None
+
+                baseline = tmp_path / "b.json"
+                write_baseline(EventGraph([persist_reactor]), baseline)
+
+                with pytest.raises(HandlerCoverageError, match="persist"):
+                    assert_all_baselined_handlers_cover(
+                        EventGraph([_Replat2.Persist]), baseline
+                    )
 
     def when_baseline_recorded_old_positional_inline_command_names():
         # Pre-#97 baselines recorded inline command handlers by their

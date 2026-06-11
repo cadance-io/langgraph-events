@@ -604,12 +604,15 @@ def _expand_command_handlers(
 ) -> list[Callable[..., Any]]:
     """Replace ``Command`` subclasses with their inline handler functions.
 
-    Each substituted function is stamped via ``on(cls, raises=..., invariants=...)
-    (fn)`` so that ``extract_handler_meta`` sees it like any other
-    ``@on``-subscribed handler. ``raises``/``invariants`` are read from
-    class-level attributes on the Command (since inline handlers have no
-    decorator slot for them). Raises ``TypeError`` if a Command subclass has
-    no inline handler.
+    Each substituted function is stamped via ``on(cls, raises=...,
+    invariants=..., previously=...)(fn)`` so that ``extract_handler_meta``
+    sees it like any other ``@on``-subscribed handler.
+    ``raises``/``invariants``/``previously`` are read from class-level
+    attributes on the Command (since inline handlers have no decorator slot
+    for them); ``previously`` is read from the class's own ``__dict__`` —
+    historic node identities, unlike behavioral contracts, must not be
+    MRO-inherited. Raises ``TypeError`` if a Command subclass has no inline
+    handler.
     """
     expanded: list[Callable[..., Any]] = []
     for h in handlers:
@@ -633,7 +636,17 @@ def _expand_command_handlers(
                 )
             cmd_raises = getattr(h, "raises", ())
             cmd_invariants = getattr(h, "invariants", None)
-            on(h, raises=cmd_raises, invariants=cmd_invariants)(fn)
+            # Own-class read on purpose: ``previously`` is a historic *node
+            # identity* claim, not inheritable behavior like raises/invariants
+            # — a subclass must not capture its parent's checkpoints (nor trip
+            # duplicate-alias validation when both are registered).
+            cmd_previously = h.__dict__.get("previously", ())
+            on(
+                h,
+                raises=cmd_raises,
+                invariants=cmd_invariants,
+                previously=cmd_previously,
+            )(fn)
             fn._inline_command = h
             expanded.append(fn)
         else:
