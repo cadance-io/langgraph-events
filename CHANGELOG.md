@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-06-11
+
 ### Added
 - **Inline `Command` nodes can declare historic node names — `previously: ClassVar = (...)`** (#103). Mirrors the existing `raises`/`invariants` class-level modifiers: `_expand_command_handlers` now forwards the attribute into the same alias machinery as `@on(previously=...)`, so a checkpoint paused under a renamed command node (e.g. the `Persona/Story/Scenario.Persist` → `EntityLifecycle.Persist` consolidation) resumes instead of degrading per `on_unresumable`. Deliberately **not** MRO-inherited — a historic node name identifies exactly one class; a subclass must not capture its parent's checkpoints. The handler coverage gate picks the aliases up automatically. Note: renaming a command class is *both* renames at once — pair `previously` with `@migrate_from` and a namespace-aware serde so the checkpointed payload revives as the new class (see the new docs warning).
 - **New validation guards** (fail early, never at first production read): `@on(previously=...)` accepts only a str or sequence of non-empty str — non-string/whitespace names (previously died as a baffling LangGraph `add_node`/compile error) and exhaustible iterables like generators (silently empty on the second graph build) are rejected at decoration, with the error voiced as the spelling the user wrote (`@on()` vs `Command 'X'`); alias collision/duplicate errors now name the claimant by its checkpoint identity (command qualname), naming both claimants for a duplicate; declaring `previously` as an annotated dataclass field on a `Command` (missing `ClassVar`) raises at class creation — it would otherwise silently serialize into every checkpoint payload while aliasing appeared to work.
@@ -290,7 +292,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/cadance-io/langgraph-events/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/cadance-io/langgraph-events/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/cadance-io/langgraph-events/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/cadance-io/langgraph-events/compare/v0.16.0...v0.17.0
