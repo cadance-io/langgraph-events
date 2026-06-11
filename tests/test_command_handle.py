@@ -12,6 +12,8 @@ from langgraph_events import (
     DomainEvent,
     EventGraph,
     EventLog,
+    IntegrationEvent,
+    Interrupted,
     Namespace,
     Reducer,
     Scatter,
@@ -242,6 +244,57 @@ class WithAsyncService(Namespace):
             return WithAsyncService.Cmd.Done(value=chat_model.value)
 
 
+# Module-level domain for the ``previously`` class-attribute tests (#103): a
+# reactor node named ``save`` was replaced by an inline Command; the old node
+# name stays resumable via the class attribute.
+class _VaultPause(Interrupted):
+    pass
+
+
+class _VaultGo(IntegrationEvent):
+    pass
+
+
+class Vault(Namespace):
+    class Persist(Command):
+        previously: ClassVar = ("save",)
+
+        class Saved(DomainEvent):
+            pass
+
+        def handle(self) -> Vault.Persist.Saved:
+            return Vault.Persist.Saved()
+
+
+# A pausing command for the resume-recovery test: the reactor it replaced
+# returned the same Interrupted, so the resumed checkpoint re-enters the
+# alias node, re-pauses, and consumes the resume value.
+class Vault2(Namespace):
+    class Approve(Command):
+        previously: ClassVar = ("await_approval",)
+
+        def handle(self) -> _VaultPause:
+            return _VaultPause()
+
+
+# Parent/Child pair: ``previously`` is a historic node-identity claim and must
+# NOT be inherited (contrast with ``invariants``/``raises``, which are
+# behavioral contracts and do inherit).
+class _Lineage(Namespace):
+    class Parent(Command):
+        previously: ClassVar = ("legacy_save",)
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _Lineage.Parent.Done:
+            return _Lineage.Parent.Done()
+
+    class Child(Parent):
+        def handle(self) -> _Lineage.Parent.Done:
+            return _Lineage.Parent.Done()
+
+
 def describe_Command_handle():
 
     def describe_class_creation():
@@ -402,6 +455,194 @@ def describe_Command_handle():
                 graph = EventGraph([_InlineRaises.Cmd, catch])
                 log = graph.invoke(_InlineRaises.Cmd())
                 assert log.has(HandlerRaised)
+
+    def describe_previously_class_attribute():
+        # ``previously`` mirrors ``raises``/``invariants`` as a class-level
+        # modifier (inline handlers have no decorator slot): it declares the
+        # command node's historic names so checkpoints paused under an old
+        # name resume into the renamed command. See issue #103.
+
+        def when_previously_set_as_class_attribute():
+            def it_registers_an_alias_node():
+                nodes = set(EventGraph([Vault.Persist])._compile().get_graph().nodes)
+                assert "Vault.Persist" in nodes
+                assert "save" in nodes
+
+            def it_does_not_route_new_events_into_the_alias():
+                # Same load-bearing invariant as the reactor form: the
+                # dispatcher only returns canonical names, so a fresh invoke
+                # runs the handler exactly once, not once per alias.
+                log = EventGraph([Vault.Persist]).invoke(Vault.Persist())
+                assert len([e for e in log if isinstance(e, Vault.Persist.Saved)]) == 1
+
+            def it_registers_aliases_idempotently_across_builds():
+                # _expand_command_handlers re-stamps the same handler function
+                # on every EventGraph construction; the constant class-attr
+                # value makes that idempotent.
+                first = set(EventGraph([Vault.Persist])._compile().get_graph().nodes)
+                second = set(EventGraph([Vault.Persist])._compile().get_graph().nodes)
+                assert "save" in first
+                assert first == second
+
+        def when_the_declaration_is_removed_between_builds():
+            def it_drops_the_alias_on_the_next_build():
+                # Each build must reflect the class's current declaration — a
+                # stale stamp from an earlier build must not keep a deleted
+                # alias alive.
+                class _Era(Namespace):
+                    class Cmd(Command):
+                        previously: ClassVar = ("first_era",)
+
+                        def handle(self) -> None:
+                            return None
+
+                first = set(EventGraph([_Era.Cmd])._compile().get_graph().nodes)
+                assert "first_era" in first
+                del _Era.Cmd.previously
+                second = set(EventGraph([_Era.Cmd])._compile().get_graph().nodes)
+                assert "first_era" not in second
+
+        def when_a_paused_reactor_becomes_an_inline_command():
+            def it_resumes_the_old_checkpoint_via_the_alias():
+                # The acceptance scenario from #103: a reactor node paused a
+                # thread, the reactor was replaced by an inline Command, and
+                # the checkpoint's snapshot.next still holds the old node
+                # name. previously= keeps it resumable.
+                from langgraph.checkpoint.memory import MemorySaver
+
+                from langgraph_events.serde import (
+                    NamespaceAwareSerde,
+                    assert_resume_recovers,
+                )
+
+                @on(Vault2.Approve, node_name="await_approval")
+                def approve_reactor(event: Vault2.Approve) -> _VaultPause:
+                    return _VaultPause()
+
+                @on(_VaultGo)
+                def go(event: _VaultGo) -> None:
+                    return None
+
+                # Command events ride inside the checkpoint payload, so the
+                # paused thread only revives through a namespace-aware serde
+                # (LangGraph's default serializer can't reconstruct nested
+                # classes).
+                saver = MemorySaver(serde=NamespaceAwareSerde())
+                before = EventGraph([approve_reactor, go], checkpointer=saver)
+                after = EventGraph([Vault2.Approve, go], checkpointer=saver)
+                assert_resume_recovers(
+                    before, after, seed=Vault2.Approve(), resume_with=_VaultGo()
+                )
+
+        def when_previously_is_a_bare_string():
+            def it_normalizes_to_a_single_alias():
+                class _Solo(Namespace):
+                    class Cmd(Command):
+                        previously: ClassVar = "old_solo"
+
+                        def handle(self) -> None:
+                            return None
+
+                nodes = set(EventGraph([_Solo.Cmd])._compile().get_graph().nodes)
+                assert "old_solo" in nodes
+
+        def when_an_alias_collides():
+            def with_a_live_handler_name():
+                def it_raises_at_build():
+                    class _Clash(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("live_node",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    @on(_VaultGo, node_name="live_node")
+                    def live(event: _VaultGo) -> None:
+                        return None
+
+                    with pytest.raises(ValueError, match="collides"):
+                        EventGraph([_Clash.Cmd, live])
+
+                def it_names_the_command_node_in_the_error():
+                    # The error must identify the claimant by its checkpoint
+                    # identity (the command qualname), not the method name
+                    # ('handle'), which several commands share.
+                    class _Clash2(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("live_node2",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    @on(_VaultGo, node_name="live_node2")
+                    def live(event: _VaultGo) -> None:
+                        return None
+
+                    with pytest.raises(ValueError, match=r"_Clash2\.Cmd"):
+                        EventGraph([_Clash2.Cmd, live])
+
+            def with_another_handler_claiming_the_same_alias():
+                def it_names_both_claimants():
+                    class _DupA(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("shared_old",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    class _DupB(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("shared_old",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    with pytest.raises(ValueError) as excinfo:
+                        EventGraph([_DupA.Cmd, _DupB.Cmd])
+                    assert "_DupA.Cmd" in str(excinfo.value)
+                    assert "_DupB.Cmd" in str(excinfo.value)
+
+        def when_previously_is_an_invalid_value():
+            def it_names_the_command_in_the_error():
+                # The user wrote a class attribute, not @on() — the error
+                # must point at the command, not the decorator they never
+                # called.
+                class _BadVal(Namespace):
+                    class Cmd(Command):
+                        previously: ClassVar = 123
+
+                        def handle(self) -> None:
+                            return None
+
+                with pytest.raises(TypeError, match=r"_BadVal\.Cmd"):
+                    EventGraph([_BadVal.Cmd])
+
+        def when_previously_is_declared_as_a_dataclass_field():
+            def it_rejects_at_class_creation():
+                # An annotated (non-ClassVar) ``previously`` would silently
+                # become a frozen dataclass field serialized into every
+                # checkpoint payload while aliasing still appears to work.
+                with pytest.raises(TypeError, match="ClassVar"):
+
+                    class _Bad(Namespace):
+                        class Cmd(Command):
+                            previously: tuple[str, ...] = ("x",)
+
+                            def handle(self) -> None:
+                                return None
+
+        def when_a_parent_command_declares_previously():
+            # A historic node name belongs to exactly one class. Were the
+            # attribute read through the MRO, Child would claim Parent's
+            # checkpoints — and registering both would trip the
+            # duplicate-alias build error for code the user never wrote.
+            def it_is_not_inherited_by_a_subclass():
+                metas = EventGraph([_Lineage.Parent, _Lineage.Child])._handler_metas
+                aliases = {m.node_name: m.previous_names for m in metas}
+                assert aliases == {
+                    "_Lineage.Parent": ("legacy_save",),
+                    "_Lineage.Child": (),
+                }
 
     def describe_EventGraph_registration():
 

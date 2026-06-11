@@ -27,7 +27,7 @@ Existing threads survive graph modifications via graceful degradation — no cra
 
 ## Best Practices
 
-- Renaming a handler with active interrupted threads is safe **if** you declare `@on(previously=...)` (or pin `@on(node_name=...)` up front); the handler coverage gate flags an undeclared rename in CI.
+- Renaming a handler with active interrupted threads is safe **if** you declare `@on(previously=...)` — for an inline `Command`, the `previously: ClassVar = (...)` class attribute — (or pin `@on(node_name=...)` up front); the handler coverage gate flags an undeclared rename in CI.
 - Treat reducer addition as a fresh start; for full history, use a new thread.
 - Prefer additive changes (add handlers/events; removal is safe only with no in-flight threads).
 - Use a new `thread_id` after structural changes to avoid all edge cases.

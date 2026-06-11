@@ -391,6 +391,17 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        # ``previously`` is a reserved class-level modifier (historic node
+        # names). An annotated non-ClassVar declaration would silently become
+        # a frozen dataclass field serialized into every checkpoint payload
+        # while aliasing still appears to work — reject it at class creation.
+        if any(f.name == "previously" for f in dc_fields(cls)):  # type: ignore[arg-type]
+            raise TypeError(
+                f"Command {cls.__qualname__!r}: 'previously' is a reserved "
+                f"class-level modifier, not an event field. Annotate it as "
+                f"ClassVar (previously: ClassVar = (...)) or drop the "
+                f"annotation."
+            )
         if _inherits_namespace(cls):
             return
         if not _is_nested_in_class(cls):

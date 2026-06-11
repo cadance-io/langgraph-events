@@ -7,6 +7,7 @@ import inspect
 import types
 import typing
 import warnings
+from collections import abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -161,6 +162,32 @@ def _infer_event_type(fn: Any) -> type[Event]:
     return event_type
 
 
+def normalize_previous_names(previously: Any, *, owner: str) -> tuple[str, ...]:
+    """Validate and normalise a ``previously=`` value into an alias tuple.
+
+    *owner* prefixes error messages with the declaration site's voice —
+    ``"@on()"`` for the decorator, ``"Command 'X'"`` for the class attribute —
+    so the user is pointed at the spelling they actually wrote. Only ``str``
+    and re-readable sequences are accepted: a generator would be exhausted on
+    the first graph build and silently yield no aliases on the next.
+    """
+    if isinstance(previously, str):
+        previous_names: tuple[str, ...] = (previously,)
+    elif isinstance(previously, abc.Sequence):
+        previous_names = tuple(previously)
+    else:
+        raise TypeError(
+            f"{owner} previously= must be a str or a sequence of str, "
+            f"got {previously!r}"
+        )
+    for alias in previous_names:
+        if not isinstance(alias, str) or not alias.strip():
+            raise TypeError(
+                f"{owner} previously= node names must be non-empty str, got {alias!r}"
+            )
+    return previous_names
+
+
 def _build_on_decorator(
     event_types: tuple[type[Event], ...],
     raises: type[Exception] | tuple[type[Exception], ...],
@@ -242,8 +269,11 @@ def _build_on_decorator(
             fn._invariants = invariants_tuple  # type: ignore[attr-defined]
         if node_name is not None:
             fn._node_name = node_name  # type: ignore[attr-defined]
-        if previous_names:
-            fn._previous_names = previous_names  # type: ignore[attr-defined]
+        # Unconditional: inline command handlers are re-stamped on every
+        # EventGraph build, and each build must reflect the class's *current*
+        # ``previously`` declaration — a conditional stamp would let a stale
+        # value from an earlier build keep a removed alias alive.
+        fn._previous_names = previous_names  # type: ignore[attr-defined]
         return fn
 
     return decorator
@@ -294,11 +324,12 @@ def on(
     checkpoint; ``previously=`` (str or tuple) declares historic node names to
     keep resumable after a rename. Both are reserved keywords — a field named
     ``node_name`` or ``previously`` cannot be matched positionally via
-    ``**field_matchers``.
+    ``**field_matchers``. Inline ``Command`` handlers declare historic node
+    names as a class attribute instead: ``previously: ClassVar = (...)``.
     """
     if node_name is not None and not isinstance(node_name, str):
         raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")
-    previous_names = (previously,) if isinstance(previously, str) else tuple(previously)
+    previous_names = normalize_previous_names(previously, owner="@on()")
 
     no_modifiers = (
         raises == ()
@@ -613,9 +644,10 @@ def extract_handler_meta(
     name = getattr(fn, "_node_name", None) or fn.__name__
     # Inline command handlers route by their command's qualname (stable,
     # order-independent); every other handler routes by its own name. The
-    # qualname intentionally wins over any ``_node_name`` here — inline handlers
-    # never carry one today (``_expand_command_handlers`` calls bare ``on(h)``),
-    # but were that to change, command identity must stay the resume identity.
+    # qualname intentionally wins over any ``_node_name`` here — inline
+    # handlers never carry one today (``_expand_command_handlers`` forwards
+    # raises/invariants/previously but no ``node_name``), but were that to
+    # change, command identity must stay the resume identity.
     inline_command = getattr(fn, "_inline_command", None)
     node_name = command_identity(inline_command) if inline_command is not None else name
 

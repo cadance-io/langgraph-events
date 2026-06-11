@@ -758,3 +758,38 @@ def describe_handler_identity():
                 pass
 
             assert extract_handler_meta(place).previous_names == ()
+
+    def when_previously_contains_a_non_string():
+        def it_raises_TypeError_at_decoration():
+            # Without the guard a non-str alias flows into LangGraph's
+            # add_node and dies there with a baffling message.
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=(SampleEvent,))
+
+    def when_previously_is_not_iterable():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=123)
+
+    def when_previously_contains_an_empty_string():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=("",))
+
+    def when_previously_contains_a_whitespace_string():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=("   ",))
+
+    def when_previously_is_a_generator():
+        def it_raises_TypeError_at_decoration():
+            # A generator would be exhausted on the first read and silently
+            # yield no aliases on any later one — only reorderable,
+            # re-readable sequences are accepted.
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously=(name for name in ("old",)))
+
+    def when_previously_is_a_dict():
+        def it_raises_TypeError_at_decoration():
+            with pytest.raises(TypeError, match="previously"):
+                on(SampleEvent, previously={"old": "oops"})
