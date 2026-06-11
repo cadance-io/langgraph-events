@@ -474,13 +474,17 @@ def describe_Command_handle():
                                 return None
 
         def when_invariants_is_declared_as_a_dataclass_field():
-            def it_rejects_at_class_creation_steering_to_classvar():
+            def it_rejects_at_class_creation():
                 # Without the guard this dies inside dataclasses with a
                 # mutable-default ValueError whose advice (use
                 # default_factory) is actively harmful here: a factory
                 # field has no class attribute, so invariant enforcement
-                # would silently vanish.
-                with pytest.raises(TypeError, match=r"'invariants'.*ClassVar"):
+                # would silently vanish. That stdlib error must also not
+                # surface as a chained cause — it would display the very
+                # advice the guard exists to override.
+                with pytest.raises(
+                    TypeError, match=r"'invariants'.*ClassVar"
+                ) as excinfo:
 
                     class _BadInv(Namespace):
                         class Cmd(Command):
@@ -488,6 +492,8 @@ def describe_Command_handle():
 
                             def handle(self) -> None:
                                 return None
+
+                assert excinfo.value.__cause__ is None
 
             def when_the_module_evaluates_annotations_eagerly():
                 def it_rejects_before_dataclass_processing():

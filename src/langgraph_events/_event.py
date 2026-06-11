@@ -429,10 +429,11 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
             # default_factory") that would silently disable the modifier
             # (factory fields have no class attribute to read). Translate
             # when the error provably concerns a reserved name; otherwise
-            # re-raise untouched.
+            # re-raise untouched. ``from None``: chaining would display the
+            # very default_factory advice the guard exists to override.
             for name in _RESERVED_MODIFIERS:
                 if name in own_annotations and f"field {name} " in str(exc):
-                    raise _reserved_modifier_error(cls, name) from exc
+                    raise _reserved_modifier_error(cls, name) from None
             raise
         # ``previously``/``raises``/``invariants`` are reserved class-level
         # modifiers. An annotated non-ClassVar declaration would silently

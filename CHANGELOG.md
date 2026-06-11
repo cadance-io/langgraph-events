@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **The reserved-modifier guard now covers all three `Command` class-level modifiers** (#105). Declaring `raises` or `invariants` as an annotated dataclass field (missing `ClassVar`) raises at class creation with the same `ClassVar`-steering message as `previously`: an annotated `raises: tuple = (...)` silently became a frozen field serializing exception classes into every checkpoint payload while routing kept working, and `invariants: dict = {...}` died inside dataclasses with advice ("use `default_factory`") that would silently disable invariant enforcement — a factory field has no class attribute for the framework to read. PEP 563 string annotations are judged by dataclasses' own ClassVar resolution, never a framework heuristic, so working spellings (including module-level `ClassVar` aliases) are unaffected. Breaking edge (pathological): a Command declaring a genuine event *field* named `raises`/`invariants` now errors at class creation — such a field already silently collided with the modifier reads.
+- **The reserved-modifier guard now covers all three `Command` class-level modifiers** (#105). Declaring `raises` or `invariants` as an annotated dataclass field (missing `ClassVar`) raises at class creation with the same `ClassVar`-steering message as `previously`: an annotated `raises: tuple = (...)` silently became a frozen field serializing exception classes into every checkpoint payload while routing kept working, and `invariants: dict = {...}` died inside dataclasses with advice ("use `default_factory`") that would silently disable invariant enforcement — a factory field has no class attribute for the framework to read. PEP 563 string annotations are judged by dataclasses' own ClassVar resolution, never a framework heuristic, so working spellings (including module-level `ClassVar` aliases) are unaffected.
+
+### Changed
+- **Breaking (pathological):** a Command declaring a genuine event *field* named `raises` or `invariants` now errors at class creation (#105) — such a field already silently collided with the modifier reads, so no working class is affected.
 
 ## [0.20.0] - 2026-06-11
 
