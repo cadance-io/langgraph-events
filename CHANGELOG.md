@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Origin-scoped backfill — `@migrate_from(..., backfill={field: default})`** (#101). When N event classes collapse into one surviving class via stacked `@migrate_from` (the consolidation move), a required discriminator's correct value is determined by **which historic identity** each payload was written under — something class-global `@backfill` (one zero-arg default for every origin) could not express, forcing per-origin revival-shim subclasses whose identities leak into the baseline. `backfill=` on each `@migrate_from` now pins fills to payloads originating under *that* decorator's qualname, applied **before** the rename. Precedence: explicit payload value > origin-scoped fill > class-global `@backfill` (the fallback for unscoped origins). Exact-origin contract: a fill keyed on a mid-chain identity does not cascade to earlier eras; accordingly `backfill=` requires exactly one qualname per decorator (the multi-arg chain form raises at decoration). Hand-authored `Migration.add_field` / raw `AddField` keyed on a historic identity is now accepted (previously a construction error) and is origin-scoped too — the escape hatch for per-origin `default_factory`. New construction-time guard: two fills on the same `(identity, field)` raise a `ValueError` naming both migrations (previously the first silently won). See the new ["Consolidating N classes into one"](docs/event-migrations.md#consolidating-n-classes-into-one) recipe — including why consolidations cannot ride `legacy_write`.
+
+### Changed
+- **`assert_all_baselined_revive` now exercises back-fills instead of masking them with placeholders.** Required fields covered by an `AddField` (origin-scoped or class-global) no longer receive a `None` placeholder — the gate lets the real fill inject, so a broken or missing back-fill fails in CI, and `__post_init__` validation on a back-filled field now passes the gate (previously it needed `assert_all_baselined_resolve`).
+
 ## [0.18.0] - 2026-06-08
 
 ### Fixed

@@ -45,9 +45,13 @@ class AddField:
     """Inject a dataclass ``field`` into kwargs for events with this identity.
 
     Scoped to a specific event identity (``module`` + ``qualname``) so it
-    doesn't touch unrelated payloads. Applies AFTER any matching
-    :class:`RenameEvent` — so ``module``/``qualname`` should name the
-    CURRENT (post-rename) class.
+    doesn't touch unrelated payloads. The identity decides WHEN it runs:
+    name the CURRENT (live) class and it applies AFTER any matching
+    :class:`RenameEvent` — the common "class gained a required field"
+    case. Name a HISTORIC identity covered by a rename and it applies
+    BEFORE the rename, only to payloads written under that exact origin —
+    the fan-in case where collapsed origins each pin their own value
+    (see ``migrate_from(backfill=...)`` for the decorator form).
 
     Use ``default`` for immutable values (``str``, ``int``, ``None``,
     tuples). Use ``default_factory`` for anything that could be mutated
@@ -153,11 +157,13 @@ class Migration:
         """Single-op add-field sugar.
 
         ``name`` labels the migration; ``field`` is the dataclass field
-        being added. The target identity is the live (post-rename) class,
-        so pass it as ``target=<class>`` for refactor-safety;
-        ``module``/``qualname`` remain for the case where the class can't
-        be imported at authoring time. Same convention as :class:`AddField`
-        — moving between the sugar and the raw form needs no kwarg rename.
+        being added. For the common post-rename fill the target is the
+        live class — pass it as ``target=<class>`` for refactor-safety.
+        ``module``/``qualname`` remain for a class that can't be imported
+        at authoring time, and for the origin-scoped fill keyed on a
+        HISTORIC identity (that class is gone — strings are the only
+        spelling). Same convention as :class:`AddField` — moving between
+        the sugar and the raw form needs no kwarg rename.
         """
         module, qualname = _target_identity(
             "Migration.add_field",
@@ -220,13 +226,15 @@ def _flatten_and_validate(
 ) -> tuple[
     dict[tuple[str, str], tuple[str, str]],
     dict[tuple[str, str], tuple[AddField, ...]],
+    dict[tuple[str, str], tuple[AddField, ...]],
 ]:
     """Collapse all operations into per-purpose lookup tables.
 
     Rename ops fold into a direct historic→final map (chain ``A→B→C``
     becomes ``A→C`` and ``B→C``) so reads do a single dict lookup
     regardless of chain depth. AddField ops are bucketed by their target
-    identity (post-rename).
+    identity: a target that is a rename source goes into the origin table
+    (applied pre-rename), a live target into the post-rename table.
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
@@ -241,7 +249,8 @@ def _flatten_and_validate(
     # Remember which migration each edge came from so the duplicate-source
     # diagnostic can name the conflicting migrations, not just their targets.
     edge_origin: dict[tuple[str, str], str] = {}
-    addfield_ops: list[AddField] = []
+    # AddField ops carry their migration's name for the same reason.
+    addfield_ops: list[tuple[AddField, str]] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -260,7 +269,7 @@ def _flatten_and_validate(
                 rename_edges[old_key] = new_key
                 edge_origin[old_key] = migration.name
             elif isinstance(op, AddField):
-                addfield_ops.append(op)
+                addfield_ops.append((op, migration.name))
             else:
                 # ``Operation`` is closed by design (RenameEvent | AddField).
                 # Silently ignoring an unknown type hides authoring errors —
@@ -276,18 +285,49 @@ def _flatten_and_validate(
         rename_table[start] = _resolve_chain_terminus(start, rename_edges)
 
     addfield_table: dict[tuple[str, str], list[AddField]] = {}
-    for op in addfield_ops:
+    origin_addfield_table: dict[tuple[str, str], list[AddField]] = {}
+    # (identity, field) → migration name, for the duplicate-fill diagnostic.
+    fill_origin: dict[tuple[tuple[str, str], str], str] = {}
+    for op, migration_name in addfield_ops:
         target = (op.module, op.qualname)
-        if not _resolves(*target):
+        # Rename-table membership decides the bucket BEFORE the import
+        # probe: a rename source can never resolve live (the chain walk
+        # rejects shadowing), so the buckets are disjoint by construction.
+        if target in rename_table:
+            bucket = origin_addfield_table
+        elif _resolves(*target):
+            bucket = addfield_table
+        else:
             raise ValueError(
-                f"AddField target {op.module}:{op.qualname!r} does not "
-                f"resolve to a currently importable class. Either the "
-                f"target was deleted after the migration was authored, "
-                f"or the module/qualname has a typo."
+                f"AddField target {op.module}:{op.qualname!r} neither "
+                f"resolves to a currently importable class nor matches a "
+                f"historic identity covered by a rename migration. Either "
+                f"the target was deleted after the migration was authored, "
+                f"the module/qualname has a typo, or the historic identity "
+                f"is missing its @migrate_from / RenameEvent."
             )
-        addfield_table.setdefault(target, []).append(op)
+        # The read path applies the FIRST fill for a field and silently
+        # skips the rest (``setdefault``) — a second fill on the same
+        # (identity, field) is always an authoring mistake, and with
+        # origin-scoped fills a likely copy-paste one. Same philosophy as
+        # the duplicate-rename-source guard above.
+        if (key := (target, op.field)) in fill_origin:
+            first_label = _migration_label(fill_origin[key])
+            second_label = _migration_label(migration_name)
+            raise ValueError(
+                f"Duplicate AddField: {op.module}:{op.qualname!r} field "
+                f"{op.field!r} is filled by both {first_label} and "
+                f"{second_label}. Each (identity, field) pair may carry "
+                f"at most one back-fill."
+            )
+        fill_origin[key] = migration_name
+        bucket.setdefault(target, []).append(op)
 
-    return rename_table, {k: tuple(v) for k, v in addfield_table.items()}
+    return (
+        rename_table,
+        {k: tuple(v) for k, v in addfield_table.items()},
+        {k: tuple(v) for k, v in origin_addfield_table.items()},
+    )
 
 
 def _resolve_chain_terminus(
@@ -383,37 +423,58 @@ def _resolve_rename(
     return rename_table.get((module, qualname), (module, qualname))
 
 
+def _inject_addfields(
+    ops: tuple[AddField, ...],
+    kwargs: dict[str, Any],
+) -> None:
+    """Inject each op's default into *kwargs* in place, never overwriting.
+
+    ``setdefault`` is idempotent — a value already present is preserved.
+    Mutable defaults go through ``default_factory`` so each migrated
+    payload gets its own instance; the ``not in`` guard keeps the factory
+    from firing when the field is already supplied.
+    """
+    for op in ops:
+        if op.default_factory is not None:
+            if op.field not in kwargs:
+                kwargs[op.field] = op.default_factory()
+        else:
+            kwargs.setdefault(op.field, op.default)
+
+
 def _apply_identity_migrations(
     module: str,
     qualname: str,
     kwargs: dict[str, Any],
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
+    origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
 ) -> tuple[str, str]:
-    """Resolve *module*/*qualname* through the rename table, then inject
-    AddField defaults into *kwargs* in place. Returns the post-rename
-    identity.
+    """Inject origin-scoped AddField defaults keyed on the PRE-rename
+    identity, resolve *module*/*qualname* through the rename table, then
+    inject post-rename AddField defaults — all into *kwargs* in place.
+    Returns the post-rename identity.
 
-    AddField is keyed on the POST-rename identity so renames and field
-    additions compose cleanly. ``setdefault`` is idempotent — a value
-    already present is preserved. Mutable defaults go through
-    ``default_factory`` so each migrated payload gets its own instance.
+    Origin fills run first so the precedence is: explicit payload value >
+    origin-scoped fill > class-global fill (``setdefault`` never
+    overwrites). An op lives in exactly one table — origin keys are rename
+    sources, post keys are live identities, disjoint by validation — so no
+    op is ever applied twice.
     """
+    _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
     module, qualname = _resolve_rename(module, qualname, rename_table)
-    for op in addfield_table.get((module, qualname), ()):
-        if op.default_factory is not None:
-            if op.field not in kwargs:
-                kwargs[op.field] = op.default_factory()
-        else:
-            kwargs.setdefault(op.field, op.default)
+    _inject_addfields(addfield_table.get((module, qualname), ()), kwargs)
     return module, qualname
 
 
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"
+_ORIGIN_BACKFILL_ATTR = "__lge_origin_backfill__"
 
 
 def migrate_from(
-    *old_qualnames: str, in_module: str | None = None
+    *old_qualnames: str,
+    in_module: str | None = None,
+    backfill: dict[str, Any] | None = None,
 ) -> Callable[[type], type]:
     """Mark that this ``Event`` class formerly lived at ``old_qualnames``.
 
@@ -422,13 +483,35 @@ def migrate_from(
     and applies to all historic qualnames. Use the manual :class:`Migration`
     list directly for cross-module relocations or per-step module changes.
 
-    Metadata is stashed on the class as ``__lge_migrate_from__``.
+    ``backfill`` maps field names to defaults injected ONLY into payloads
+    that were written under this decorator's historic qualname — the
+    fan-in case where N classes collapse into one and each origin pins a
+    different value for a discriminator the old payloads never carried.
+    Requires exactly one historic qualname per decorator (a multi-qualname
+    chain is ambiguous about which origin the fill belongs to). A fill for
+    payloads from *every* era is class-global :func:`backfill`'s job; an
+    explicit value in the payload always wins, and a class-global fill
+    covers origins without a scoped entry. Mutable values are rejected by
+    the shared :class:`AddField` guard — for a per-origin
+    ``default_factory`` hand-author ``Migration.add_field`` keyed on the
+    historic identity.
+
+    Metadata is stashed on the class as ``__lge_migrate_from__`` (and
+    ``__lge_origin_backfill__`` for the per-origin fills).
     :class:`NamespaceAwareSerde` walks ``_NAMESPACE_REGISTRY`` at
     construction and assembles a :class:`Migration` per decorated class
     automatically — no separate collection step is required.
     """
     if not old_qualnames:
         raise ValueError("@migrate_from requires at least one historic qualname.")
+    if backfill is not None and len(old_qualnames) != 1:
+        raise ValueError(
+            "@migrate_from(backfill=...) requires exactly one historic "
+            "qualname per decorator — a multi-qualname chain is ambiguous "
+            "about which origin the back-fill belongs to. Stack one "
+            "decorator per origin, or use class-global @backfill for a "
+            "fill that applies to every era."
+        )
 
     def _wrap(cls: type) -> type:
         module = in_module if in_module is not None else cls.__module__
@@ -443,6 +526,10 @@ def migrate_from(
         # ``history`` (from the outer one). Aligns stacked decorators with
         # the multi-arg form ``@migrate_from("A", "B")`` where A is oldest.
         setattr(cls, _MIGRATE_FROM_ATTR, existing + history)
+        if backfill:
+            existing_fills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
+            entry = ((module, old_qualnames[0]), dict(backfill))
+            setattr(cls, _ORIGIN_BACKFILL_ATTR, (*existing_fills, entry))
         return cls
 
     return _wrap
@@ -477,7 +564,10 @@ def backfill(
     ``@migrate_from`` — so no ``migrations=`` list is required. Stacked
     decorators accumulate. Composes with ``@migrate_from`` on the same
     class: the rename is applied first, then the back-fill on the
-    resulting (current) identity.
+    resulting (current) identity — so the fill is CLASS-GLOBAL, one value
+    for payloads from every origin and era. When collapsed origins each
+    need their own value, use ``migrate_from(backfill=...)`` instead; a
+    class-global fill then acts as the fallback for unscoped origins.
     """
 
     def _wrap(cls: type) -> type:
@@ -540,7 +630,8 @@ def _collect_decorated_migrations(
             # through MRO when a subclass inherits from a decorated parent.
             history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
             backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
-            if not history and not backfills:
+            origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
+            if not history and not backfills and not origin_backfills:
                 continue
             ops: list[Operation] = []
             if history:
@@ -555,10 +646,10 @@ def _collect_decorated_migrations(
                             new_qualname=new_qn,
                         )
                     )
-            # AddField keys on the CURRENT identity — the same identity the
-            # rename chain (if any) resolves to — so renames and back-fills
-            # on one class compose with no extra logic. ``AddField`` runs
-            # its own ``__post_init__`` validation (mutable-default guard).
+            # Class-global AddField keys on the CURRENT identity — the same
+            # identity the rename chain (if any) resolves to — so renames and
+            # back-fills on one class compose with no extra logic. ``AddField``
+            # runs its own ``__post_init__`` validation (mutable-default guard).
             for bf in backfills:
                 ops.append(
                     AddField(
@@ -569,6 +660,19 @@ def _collect_decorated_migrations(
                         default_factory=bf["default_factory"],
                     )
                 )
+            # Origin-scoped fills key on the HISTORIC identity the decorator
+            # was declared with — applied before the rename on the read path,
+            # so each collapsed origin can pin its own value.
+            for (origin_module, origin_qualname), fields in origin_backfills:
+                for field_name, default in fields.items():
+                    ops.append(
+                        AddField(
+                            module=origin_module,
+                            qualname=origin_qualname,
+                            field=field_name,
+                            default=default,
+                        )
+                    )
             out.append(
                 Migration(
                     name=f"{cls.__module__}:{cls.__qualname__}",

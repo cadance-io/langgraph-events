@@ -145,6 +145,7 @@ def _make_ext_hook(
     fallback: Callable[[int, bytes], Any],
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
+    origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -196,7 +197,12 @@ def _make_ext_hook(
         # defaults — shared with the baseline test helper so the read-side
         # migration rule lives in exactly one place.
         module_name, qualname = _apply_identity_migrations(
-            module_name, qualname, kwargs, rename_table, addfield_table
+            module_name,
+            qualname,
+            kwargs,
+            rename_table,
+            addfield_table,
+            origin_addfield_table,
         )
         try:
             return _resolve_identity(module_name, qualname)(**kwargs)
@@ -246,7 +252,11 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         # naming the auto-collected one).
         decorated, oldest_historic, live = _collect_decorated_migrations(namespaces)
         all_migrations = (*decorated, *migrations)
-        self._rename_table, self._addfield_table = _flatten_and_validate(all_migrations)
+        (
+            self._rename_table,
+            self._addfield_table,
+            self._origin_addfield_table,
+        ) = _flatten_and_validate(all_migrations)
         self._live_identities = live
         self._legacy_write = legacy_write
         self._encode_default = _make_default(legacy_write, oldest_historic)
@@ -257,9 +267,10 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         rename migration (``@migrate_from`` decorators in ``namespaces=``
         and hand-authored ``migrations=``).
 
-        Read-only view. AddField targets are NOT included: they key on the
-        post-rename (currently-live) identity and add no new revivable
-        identities.
+        Read-only view. AddField targets add no NEW revivable identities:
+        post-rename fills key on currently-live classes (already in the
+        live set) and origin-scoped fills key on rename sources (already
+        in the rename table).
         """
         return self._live_identities | frozenset(self._rename_table.keys())
 
@@ -295,6 +306,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._unpack_ext_hook,
                     self._rename_table,
                     self._addfield_table,
+                    self._origin_addfield_table,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )

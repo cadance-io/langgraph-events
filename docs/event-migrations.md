@@ -90,6 +90,32 @@ class Persona(Namespace):
 - Stacked `@backfill` accumulate (one per added field).
 - `default`/`default_factory` follow the `AddField` convention; mutable `default=[]` raises `ValueError` at construction (use `default_factory=list`).
 
+## Consolidating N classes into one
+
+When several per-entity classes collapse into ONE shared class with a required discriminator, the correct value for each old payload is determined by **which historic identity** it was written under — something a class-global `@backfill` (one value for everyone) cannot express. Pin it per origin with `backfill=` on each `@migrate_from`:
+
+```python
+class EntityLifecycle(Namespace):
+    class Approve(Command):
+        @migrate_from("Persona.Approve.Approved", in_module="app.namespaces.persona",
+                      backfill={"entity_type": "persona"})
+        @migrate_from("Story.Approve.Approved", in_module="app.namespaces.story",
+                      backfill={"entity_type": "story"})
+        @migrate_from("Scenario.Approve.Approved", in_module="app.namespaces.scenario",
+                      backfill={"entity_type": "scenario"})
+        class Approved(DomainEvent):
+            entity_type: str   # required — old payloads never carried it
+            entity_id: str
+```
+
+- **Precedence:** explicit payload value > origin-scoped fill > class-global `@backfill` (which acts as the fallback for origins without a scoped entry).
+- **Exact-origin contract:** a fill applies only to payloads written under *that* qualname. On a temporal chain (`@migrate_from("A", "B")`) a fill keyed on `B` does **not** apply to `A`-era payloads — "every era" is class-global `@backfill`'s job. Accordingly, `backfill=` requires exactly one qualname per decorator; the multi-arg chain form rejects it.
+- **Mutable values** are rejected by the shared `AddField` guard. For a per-origin `default_factory`, hand-author `Migration.add_field(module=..., qualname="<historic>", field=..., default_factory=...)` — an `AddField` keyed on a historic identity is applied *before* the rename, only to that origin.
+- Two fills for the same `(origin, field)` raise at serde construction — a copy-paste slip would otherwise revive payloads with the wrong discriminator.
+
+!!! warning "Consolidations cannot ride `legacy_write`"
+    The two-release rename dance (below) does not work for a fan-in: the old classes don't accept the new discriminator kwarg, and `legacy_write` relabels **every** instance under the *oldest* historic identity — persona, story, and scenario alike. Drain in-flight threads before cutover, or accept read-only compatibility (old payloads revive; old pods cannot read new ones).
+
 ### Hand-authored escape hatch
 
 For cross-module relocations or composite operations, drop to `langgraph_events.serde.migrations`:
@@ -98,6 +124,7 @@ For cross-module relocations or composite operations, drop to `langgraph_events.
 |---|---|
 | Single rename | `Migration.rename(to=Class, ...)` |
 | Add field | `Migration.add_field(target=Class, field=..., default=...)` |
+| Origin-scoped add field | `Migration.add_field(module=..., qualname="<historic>", field=..., default=...)` |
 | Cross-module rename | `Migration(name=..., operations=(RenameEvent(...),))` |
 | Multiple ops | `Migration(name=..., operations=(op1, op2, ...))` |
 
@@ -271,11 +298,11 @@ def test_baseline_coverage():
 
 **Which one?**
 
-- **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
-- **`resolve`** — when the baseline contains events `revive` can't placeholder-construct: anything with construction-time validation (`__post_init__`), framework `SystemEvents`, or module-level `IntegrationEvents`. Proves the identity still resolves without ever calling `__init__`/`__post_init__`, so a full-graph baseline passes with no filtering and still fails loudly on an uncovered rename/removal.
+- **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders — except fields the migration table back-fills, which get the *real* injected value so a broken fill fails the gate. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
+- **`resolve`** — when the baseline contains events `revive` can't placeholder-construct: construction-time validation (`__post_init__`) on non-back-filled fields, framework `SystemEvents`, or module-level `IntegrationEvents`. Proves the identity still resolves without ever calling `__init__`/`__post_init__`, so a full-graph baseline passes with no filtering and still fails loudly on an uncovered rename/removal.
 - **`cover`** — the fast set-membership smoke check. Namespace-walk-scoped, so it misses module-level identities a full-graph baseline emits — use `resolve` for those. Raises `MigrationCoverageError` (an `AssertionError`) whose `.uncovered` lists the offending identities.
 
-`NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets are not included — they key on the post-rename identity).
+`NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets add no extra identities — post-rename fills key on live classes, origin-scoped fills on rename sources already in the set).
 
 !!! tip "Which serde / graph do I pass the gate?"
     In tests, construct a **standalone** `NamespaceAwareSerde(namespaces=(...))` for the event gates — it mirrors what `from_namespaces(..., checkpointer=...)` auto-wires; the gate does **not** need the graph's internal serde instance. The **handler** gate is different: it takes the `graph` (`assert_all_baselined_handlers_cover(graph, BASELINE)`), because handler identity is a graph-topology concern, not a serde one.
@@ -400,6 +427,7 @@ Library-private; read directly if introspection needed (neither is MRO-inherited
 
 - `__lge_migrate_from__` — set by `@migrate_from`; tuple of `(module, qualname)` pairs, oldest first.
 - `__lge_backfill__` — set by `@backfill`; accumulated field/default entries.
+- `__lge_origin_backfill__` — set by `@migrate_from(backfill=...)`; accumulated `((module, qualname), {field: default})` entries.
 
 ## Validation guarantees
 
@@ -409,8 +437,10 @@ Errors raised at serde construction (not at first production read):
 - Dead-end chains (migration target doesn't resolve to an importable class) — `ValueError`
 - `old_qualname` shadowing a currently-live class — `ValueError`
 - Cycles (`A→B` then `B→A`) — `ValueError`
-- `AddField` targets that don't resolve — `ValueError`
-- `AddField(default=<mutable>)` — `ValueError` (steers to `default_factory`); `@backfill` funnels into `AddField`, same guard
+- `AddField` targets that neither resolve to a live class nor match a rename-covered historic identity — `ValueError`
+- `AddField(default=<mutable>)` — `ValueError` (steers to `default_factory`); `@backfill` and `migrate_from(backfill=...)` funnel into `AddField`, same guard
+- Two fills on the same `(identity, field)` pair — `ValueError` naming both migrations
+- `migrate_from(backfill=...)` with a multi-qualname chain — `ValueError` (at decoration, even earlier)
 - Unknown `Operation` type in `Migration.operations` — `TypeError`
 
 A misspelled `@migrate_from("Persona.Persistedd")` fails at construction, not at first checkpoint load in production.
