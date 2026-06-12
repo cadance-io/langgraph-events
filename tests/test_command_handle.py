@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import textwrap
 from typing import ClassVar
+from typing import ClassVar as CV  # noqa: N817 — alias spelling is under test
 
 import pytest
 
@@ -456,6 +458,69 @@ def describe_Command_handle():
                 log = graph.invoke(_InlineRaises.Cmd())
                 assert log.has(HandlerRaised)
 
+        def when_raises_is_declared_as_a_dataclass_field():
+            def it_rejects_at_class_creation():
+                # An annotated (non-ClassVar) ``raises`` would silently
+                # become a frozen dataclass field serializing exception
+                # classes into every checkpoint payload while exception
+                # routing kept working (same hazard as ``previously``).
+                with pytest.raises(TypeError, match=r"'raises'.*ClassVar"):
+
+                    class _BadRaises(Namespace):
+                        class Cmd(Command):
+                            raises: tuple[type, ...] = (ValueError,)
+
+                            def handle(self) -> None:
+                                return None
+
+        def when_invariants_is_declared_as_a_dataclass_field():
+            def it_rejects_at_class_creation():
+                # Without the guard this dies inside dataclasses with a
+                # mutable-default ValueError whose advice (use
+                # default_factory) is actively harmful here: a factory
+                # field has no class attribute, so invariant enforcement
+                # would silently vanish. That stdlib error must also not
+                # surface as a chained cause — it would display the very
+                # advice the guard exists to override.
+                with pytest.raises(
+                    TypeError, match=r"'invariants'.*ClassVar"
+                ) as excinfo:
+
+                    class _BadInv(Namespace):
+                        class Cmd(Command):
+                            invariants: dict = {}  # noqa: RUF012
+
+                            def handle(self) -> None:
+                                return None
+
+                assert excinfo.value.__cause__ is None
+
+            def when_the_module_evaluates_annotations_eagerly():
+                def it_rejects_before_dataclass_processing():
+                    # Without ``from __future__ import annotations`` the
+                    # annotation is a real type object, so the guard judges
+                    # it directly — the error must not arrive as a chained
+                    # translation of dataclasses' mutable-default ValueError.
+                    src = textwrap.dedent(
+                        """
+                        class _EagerAnn(Namespace):
+                            class Cmd(Command):
+                                invariants: dict = {}
+
+                                def handle(self) -> None:
+                                    return None
+                        """
+                    )
+                    # dont_inherit: without it the exec'd code inherits this
+                    # module's deferred-annotations future flag.
+                    code = compile(src, "<eager>", "exec", dont_inherit=True)
+                    ns = {"Namespace": Namespace, "Command": Command}
+                    with pytest.raises(
+                        TypeError, match=r"'invariants'.*ClassVar"
+                    ) as excinfo:
+                        exec(code, ns)  # noqa: S102
+                    assert excinfo.value.__cause__ is None
+
     def describe_previously_class_attribute():
         # ``previously`` mirrors ``raises``/``invariants`` as a class-level
         # modifier (inline handlers have no decorator slot): it declares the
@@ -602,6 +667,48 @@ def describe_Command_handle():
                     assert "_DupA.Cmd" in str(excinfo.value)
                     assert "_DupB.Cmd" in str(excinfo.value)
 
+            def with_a_reserved_framework_node():
+                # ``__seed__``/``__router__`` are the framework's own pregel
+                # nodes — they can never have been a historic handler name.
+                # Without validation the alias dies in LangGraph add_node/
+                # compile with an opaque duplicate-node error.
+                def it_rejects_the_command_alias_at_build():
+                    class _ReservedAlias(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("__seed__",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    with pytest.raises(ValueError, match="reserved") as excinfo:
+                        EventGraph([_ReservedAlias.Cmd])
+                    assert "_ReservedAlias.Cmd" in str(excinfo.value)
+                    assert "__seed__" in str(excinfo.value)
+
+                def it_rejects_the_decorator_alias_at_build():
+                    @on(_VaultGo, previously="__router__")
+                    def react(event: _VaultGo) -> None:
+                        return None
+
+                    with pytest.raises(ValueError, match="reserved") as excinfo:
+                        EventGraph([react])
+                    assert "__router__" in str(excinfo.value)
+
+                def it_rejects_langgraph_reserved_endpoints_too():
+                    # LangGraph rejects __start__/__end__ in add_node itself,
+                    # but only at first compile/invoke and without naming
+                    # the declaration that smuggled the name in.
+                    class _ReservedStart(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("__start__",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    with pytest.raises(ValueError, match="reserved") as excinfo:
+                        EventGraph([_ReservedStart.Cmd])
+                    assert "_ReservedStart.Cmd" in str(excinfo.value)
+
         def when_previously_is_an_invalid_value():
             def it_names_the_command_in_the_error():
                 # The user wrote a class attribute, not @on() — the error
@@ -616,6 +723,22 @@ def describe_Command_handle():
 
                 with pytest.raises(TypeError, match=r"_BadVal\.Cmd"):
                     EventGraph([_BadVal.Cmd])
+
+        def when_classvar_is_imported_under_a_module_level_alias():
+            def it_accepts_the_aliased_annotation():
+                # dataclasses resolves PEP 563 string annotations through
+                # the module globals, so ``CV`` is a working ClassVar
+                # spelling — the reserved-modifier guard must not
+                # second-guess dataclasses and reject it.
+                class _Aliased(Namespace):
+                    class Cmd(Command):
+                        previously: CV = ("legacy_aliased",)
+
+                        def handle(self) -> None:
+                            return None
+
+                (meta,) = EventGraph([_Aliased.Cmd])._handler_metas
+                assert meta.previous_names == ("legacy_aliased",)
 
         def when_previously_is_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():
@@ -726,6 +849,22 @@ def describe_Command_handle():
                 names = EventGraph([Shop3.CmdA, Shop3.CmdB]).handler_names
                 assert not any("handle" in name for name in names)
                 assert not any(name.endswith("_2") for name in names)
+
+        def when_a_handler_resolves_to_a_reserved_framework_node():
+            def it_rejects_at_build_naming_the_function():
+                # Reachable via an explicit @on(node_name=...) pin or a
+                # function literally named after the reserved node — in
+                # both cases the node name IS the reserved string, so the
+                # error must name the claimant by the function the user
+                # wrote, not echo the node name as the handler identity.
+                @on(_VaultGo, node_name="__seed__")
+                def react(event: _VaultGo) -> None:
+                    return None
+
+                with pytest.raises(ValueError, match="reserved") as excinfo:
+                    EventGraph([react])
+                assert "__seed__" in str(excinfo.value)
+                assert "react" in str(excinfo.value)
 
             def it_dispatches_to_the_correct_command_under_each_order():
                 for handlers in ([Shop3.CmdA, Shop3.CmdB], [Shop3.CmdB, Shop3.CmdA]):

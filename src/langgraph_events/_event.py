@@ -367,6 +367,19 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
         )
 
 
+_RESERVED_MODIFIERS = ("previously", "raises", "invariants")
+"""Class-level modifier names on ``Command`` that must never become
+dataclass fields — they configure the framework, not the event payload."""
+
+
+def _reserved_modifier_error(cls: type, name: str) -> TypeError:
+    return TypeError(
+        f"Command {cls.__qualname__!r}: {name!r} is a reserved "
+        f"class-level modifier, not an event field. Annotate it as "
+        f"ClassVar ({name}: ClassVar = ...) or drop the annotation."
+    )
+
+
 class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     """Imperative intent. Must be nested inside a ``Namespace`` subclass.
 
@@ -390,18 +403,48 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     __command_handler__: ClassVar[Any] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
-        super().__init_subclass__(**kwargs)
-        # ``previously`` is a reserved class-level modifier (historic node
-        # names). An annotated non-ClassVar declaration would silently become
-        # a frozen dataclass field serialized into every checkpoint payload
-        # while aliasing still appears to work — reject it at class creation.
-        if any(f.name == "previously" for f in dc_fields(cls)):  # type: ignore[arg-type]
-            raise TypeError(
-                f"Command {cls.__qualname__!r}: 'previously' is a reserved "
-                f"class-level modifier, not an event field. Annotate it as "
-                f"ClassVar (previously: ClassVar = (...)) or drop the "
-                f"annotation."
-            )
+        own_annotations = cls.__dict__.get("__annotations__", {})
+        # Real (non-string) annotations can be judged directly and rejected
+        # before any dataclass processing. PEP 563 string annotations are
+        # deliberately NOT judged here — dataclasses resolves them through
+        # the module globals (handling e.g. module-level ClassVar aliases),
+        # and a framework-side heuristic would risk rejecting spellings
+        # dataclasses correctly accepts; those fall through to the
+        # translation / dc_fields checks below, where dataclasses' own
+        # verdict decides.
+        for name in _RESERVED_MODIFIERS:
+            ann = own_annotations.get(name)
+            if ann is None or isinstance(ann, str):
+                continue
+            if ann is ClassVar or typing.get_origin(ann) is ClassVar:
+                continue
+            raise _reserved_modifier_error(cls, name)
+        try:
+            super().__init_subclass__(**kwargs)
+        except ValueError as exc:
+            # ``Event.__init_subclass__`` applies ``dataclass(frozen=True)``,
+            # so an annotated reserved modifier with a mutable default (e.g.
+            # ``invariants: dict = {...}``) dies in there — before the
+            # dc_fields guard below could run — with stdlib advice ("use
+            # default_factory") that would silently disable the modifier
+            # (factory fields have no class attribute to read). Translate
+            # when the error provably concerns a reserved name; otherwise
+            # re-raise untouched. ``from None``: chaining would display the
+            # very default_factory advice the guard exists to override.
+            for name in _RESERVED_MODIFIERS:
+                if name in own_annotations and f"field {name} " in str(exc):
+                    raise _reserved_modifier_error(cls, name) from None
+            raise
+        # ``previously``/``raises``/``invariants`` are reserved class-level
+        # modifiers. An annotated non-ClassVar declaration would silently
+        # become a frozen dataclass field serialized into every checkpoint
+        # payload while the modifier still appears to work — reject it at
+        # class creation. dc_fields reflects dataclasses' own ClassVar
+        # verdict, so legitimate spellings (incl. module-level ClassVar
+        # aliases under PEP 563) never trip this.
+        for name in _RESERVED_MODIFIERS:
+            if any(f.name == name for f in dc_fields(cls)):  # type: ignore[arg-type]
+                raise _reserved_modifier_error(cls, name)
         if _inherits_namespace(cls):
             return
         if not _is_nested_in_class(cls):

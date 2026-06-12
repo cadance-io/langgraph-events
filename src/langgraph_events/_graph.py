@@ -482,6 +482,16 @@ def _validate_on_unresumable(value: str) -> None:
         )
 
 
+_RESERVED_NODE_NAMES = frozenset({"__seed__", "__router__", "__start__", "__end__"})
+"""Graph-node names no handler or ``previously=`` alias may claim: the
+framework's own pregel nodes (``__seed__``/``__router__``, registered in the
+graph build) and LangGraph's reserved endpoints (``__start__``/``__end__``).
+Without this check the collision surfaces only at first compile/invoke —
+as an opaque "node already present" for the framework pair, and as a
+claimant-less "reserved" error for LangGraph's — never naming the
+declaration that smuggled the name in."""
+
+
 def _validate_handler_metas(metas: list[HandlerMeta]) -> None:
     """Run all build-time handler-identity checks (node names, then aliases)."""
     _validate_node_names(metas)
@@ -502,6 +512,16 @@ def _validate_node_names(metas: list[HandlerMeta]) -> None:
     """
     seen: dict[str, HandlerMeta] = {}
     for meta in metas:
+        if meta.node_name in _RESERVED_NODE_NAMES:
+            # Reachable via an explicit @on(node_name=...) pin or a function
+            # literally named after the reserved node (node names come from
+            # fn.__name__) — so name the claimant by its qualname; the node
+            # name itself IS the reserved string and would point at nothing.
+            raise ValueError(
+                f"Handler {meta.fn.__qualname__!r} resolves to graph node "
+                f"{meta.node_name!r}, which is reserved for framework graph "
+                f"nodes; choose another name."
+            )
         prior = seen.get(meta.node_name)
         if prior is not None:
             raise ValueError(
@@ -523,6 +543,13 @@ def _validate_handler_aliases(metas: list[HandlerMeta]) -> None:
     claimed: dict[str, str] = {}
     for meta in metas:
         for alias in meta.previous_names:
+            if alias in _RESERVED_NODE_NAMES:
+                raise ValueError(
+                    f"Handler {meta.node_name!r} declares "
+                    f"previously={alias!r}, which is reserved for the "
+                    f"framework's own graph nodes and can never have been "
+                    f"a historic handler name; remove it."
+                )
             if alias in live_names:
                 raise ValueError(
                     f"Handler {meta.node_name!r} declares "
