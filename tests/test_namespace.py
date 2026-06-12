@@ -118,10 +118,18 @@ def recover_sync(event: HandlerRaised) -> None:
     return None
 
 
+# Inline-command scatter fixture (#107): scatter edges elide the handler
+# name like solid edges; the purple scatter linkStyle identifies them.
+class _FanJobs(Namespace):
+    class Burst(Command):
+        def handle(self) -> Scatter[_Item]:
+            return Scatter([_Item()])
+
+
 # Unannotated inline handler (#107): renders an unknown "?" target.
 class _Untyped(Namespace):
     class Probe(Command):
-        def handle(self):  # type: ignore[no-untyped-def]
+        def handle(self):
             return None
 
 
@@ -978,6 +986,11 @@ def describe_mermaid_renderer():
             def it_keeps_the_name_for_an_external_command_handler():
                 output = EventGraph([run_job]).namespaces().mermaid()
                 assert "Run -->|run_job| Finished" in output
+
+            def it_elides_the_name_on_scatter_edges():
+                output = EventGraph([_FanJobs.Burst]).namespaces().mermaid()
+                assert "Burst -.-> _Item" in output
+                assert "|handle" not in output
 
             def it_elides_the_name_on_unannotated_unknown_target_edges():
                 output = EventGraph([_Untyped.Probe]).namespaces().mermaid()
