@@ -667,6 +667,46 @@ def describe_Command_handle():
                     assert "_DupA.Cmd" in str(excinfo.value)
                     assert "_DupB.Cmd" in str(excinfo.value)
 
+            def with_a_reserved_framework_node():
+                # ``__seed__``/``__router__`` are the framework's own pregel
+                # nodes — they can never have been a historic handler name.
+                # Without validation the alias dies in LangGraph add_node/
+                # compile with an opaque duplicate-node error.
+                def it_rejects_the_command_alias_at_build():
+                    class _ReservedAlias(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("__seed__",)
+
+                            def handle(self) -> None:
+                                return None
+
+                    with pytest.raises(ValueError, match="reserved") as excinfo:
+                        EventGraph([_ReservedAlias.Cmd])
+                    assert "_ReservedAlias.Cmd" in str(excinfo.value)
+                    assert "__seed__" in str(excinfo.value)
+
+                def it_rejects_the_decorator_alias_at_build():
+                    @on(_VaultGo, previously="__router__")
+                    def react(event: _VaultGo) -> None:
+                        return None
+
+                    with pytest.raises(ValueError, match="reserved") as excinfo:
+                        EventGraph([react])
+                    assert "__router__" in str(excinfo.value)
+
+                def it_rejects_a_node_name_pin_at_build():
+                    # Same gap through the other door: an explicit
+                    # @on(node_name=...) pin is the only way a live handler
+                    # node can claim a reserved name (qualname-derived names
+                    # can never be dunders).
+                    @on(_VaultGo, node_name="__seed__")
+                    def react(event: _VaultGo) -> None:
+                        return None
+
+                    with pytest.raises(ValueError, match="reserved") as excinfo:
+                        EventGraph([react])
+                    assert "__seed__" in str(excinfo.value)
+
         def when_previously_is_an_invalid_value():
             def it_names_the_command_in_the_error():
                 # The user wrote a class attribute, not @on() — the error

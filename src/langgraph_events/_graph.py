@@ -482,6 +482,15 @@ def _validate_on_unresumable(value: str) -> None:
         )
 
 
+_RESERVED_NODE_NAMES = frozenset({"__seed__", "__router__"})
+"""The framework's own pregel nodes (registered in the graph build).
+Handler node names and ``previously=`` aliases must not claim them — the
+collision would otherwise surface only at first compile/invoke as an opaque
+LangGraph "node already present" error. LangGraph's ``__start__``/``__end__``
+are deliberately absent: ``add_node`` rejects those itself with a clear
+"reserved" message."""
+
+
 def _validate_handler_metas(metas: list[HandlerMeta]) -> None:
     """Run all build-time handler-identity checks (node names, then aliases)."""
     _validate_node_names(metas)
@@ -502,6 +511,14 @@ def _validate_node_names(metas: list[HandlerMeta]) -> None:
     """
     seen: dict[str, HandlerMeta] = {}
     for meta in metas:
+        if meta.node_name in _RESERVED_NODE_NAMES:
+            # Only reachable via an explicit @on(node_name=...) pin —
+            # qualname-derived node names can never be dunders.
+            raise ValueError(
+                f"Handler {meta.name!r} pins node_name={meta.node_name!r}, "
+                f"which is reserved for the framework's own graph nodes; "
+                f"choose another name."
+            )
         prior = seen.get(meta.node_name)
         if prior is not None:
             raise ValueError(
@@ -523,6 +540,13 @@ def _validate_handler_aliases(metas: list[HandlerMeta]) -> None:
     claimed: dict[str, str] = {}
     for meta in metas:
         for alias in meta.previous_names:
+            if alias in _RESERVED_NODE_NAMES:
+                raise ValueError(
+                    f"Handler {meta.node_name!r} declares "
+                    f"previously={alias!r}, which is reserved for the "
+                    f"framework's own graph nodes and can never have been "
+                    f"a historic handler name; remove it."
+                )
             if alias in live_names:
                 raise ValueError(
                     f"Handler {meta.node_name!r} declares "
