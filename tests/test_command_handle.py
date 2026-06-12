@@ -694,18 +694,20 @@ def describe_Command_handle():
                         EventGraph([react])
                     assert "__router__" in str(excinfo.value)
 
-                def it_rejects_a_node_name_pin_at_build():
-                    # Same gap through the other door: an explicit
-                    # @on(node_name=...) pin is the only way a live handler
-                    # node can claim a reserved name (qualname-derived names
-                    # can never be dunders).
-                    @on(_VaultGo, node_name="__seed__")
-                    def react(event: _VaultGo) -> None:
-                        return None
+                def it_rejects_langgraph_reserved_endpoints_too():
+                    # LangGraph rejects __start__/__end__ in add_node itself,
+                    # but only at first compile/invoke and without naming
+                    # the declaration that smuggled the name in.
+                    class _ReservedStart(Namespace):
+                        class Cmd(Command):
+                            previously: ClassVar = ("__start__",)
+
+                            def handle(self) -> None:
+                                return None
 
                     with pytest.raises(ValueError, match="reserved") as excinfo:
-                        EventGraph([react])
-                    assert "__seed__" in str(excinfo.value)
+                        EventGraph([_ReservedStart.Cmd])
+                    assert "_ReservedStart.Cmd" in str(excinfo.value)
 
         def when_previously_is_an_invalid_value():
             def it_names_the_command_in_the_error():
@@ -847,6 +849,22 @@ def describe_Command_handle():
                 names = EventGraph([Shop3.CmdA, Shop3.CmdB]).handler_names
                 assert not any("handle" in name for name in names)
                 assert not any(name.endswith("_2") for name in names)
+
+        def when_a_handler_resolves_to_a_reserved_framework_node():
+            def it_rejects_at_build_naming_the_function():
+                # Reachable via an explicit @on(node_name=...) pin or a
+                # function literally named after the reserved node — in
+                # both cases the node name IS the reserved string, so the
+                # error must name the claimant by the function the user
+                # wrote, not echo the node name as the handler identity.
+                @on(_VaultGo, node_name="__seed__")
+                def react(event: _VaultGo) -> None:
+                    return None
+
+                with pytest.raises(ValueError, match="reserved") as excinfo:
+                    EventGraph([react])
+                assert "__seed__" in str(excinfo.value)
+                assert "react" in str(excinfo.value)
 
             def it_dispatches_to_the_correct_command_under_each_order():
                 for handlers in ([Shop3.CmdA, Shop3.CmdB], [Shop3.CmdB, Shop3.CmdA]):

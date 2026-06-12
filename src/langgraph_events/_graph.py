@@ -482,13 +482,14 @@ def _validate_on_unresumable(value: str) -> None:
         )
 
 
-_RESERVED_NODE_NAMES = frozenset({"__seed__", "__router__"})
-"""The framework's own pregel nodes (registered in the graph build).
-Handler node names and ``previously=`` aliases must not claim them — the
-collision would otherwise surface only at first compile/invoke as an opaque
-LangGraph "node already present" error. LangGraph's ``__start__``/``__end__``
-are deliberately absent: ``add_node`` rejects those itself with a clear
-"reserved" message."""
+_RESERVED_NODE_NAMES = frozenset({"__seed__", "__router__", "__start__", "__end__"})
+"""Graph-node names no handler or ``previously=`` alias may claim: the
+framework's own pregel nodes (``__seed__``/``__router__``, registered in the
+graph build) and LangGraph's reserved endpoints (``__start__``/``__end__``).
+Without this check the collision surfaces only at first compile/invoke —
+as an opaque "node already present" for the framework pair, and as a
+claimant-less "reserved" error for LangGraph's — never naming the
+declaration that smuggled the name in."""
 
 
 def _validate_handler_metas(metas: list[HandlerMeta]) -> None:
@@ -512,12 +513,14 @@ def _validate_node_names(metas: list[HandlerMeta]) -> None:
     seen: dict[str, HandlerMeta] = {}
     for meta in metas:
         if meta.node_name in _RESERVED_NODE_NAMES:
-            # Only reachable via an explicit @on(node_name=...) pin —
-            # qualname-derived node names can never be dunders.
+            # Reachable via an explicit @on(node_name=...) pin or a function
+            # literally named after the reserved node (node names come from
+            # fn.__name__) — so name the claimant by its qualname; the node
+            # name itself IS the reserved string and would point at nothing.
             raise ValueError(
-                f"Handler {meta.name!r} pins node_name={meta.node_name!r}, "
-                f"which is reserved for the framework's own graph nodes; "
-                f"choose another name."
+                f"Handler {meta.fn.__qualname__!r} resolves to graph node "
+                f"{meta.node_name!r}, which is reserved for framework graph "
+                f"nodes; choose another name."
             )
         prior = seen.get(meta.node_name)
         if prior is not None:
