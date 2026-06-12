@@ -24,13 +24,13 @@ graph LR
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
     _seed_[ ]:::entry ==> Command
-    Command -->|handler| DomainEvent
-    Command -.->|"handler (raises)"| SystemEvent
+    Command --> DomainEvent
+    Command -.->|"(raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
-    Command -->|"handler [chain]"| Command
+    Command -->|"[chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
@@ -65,8 +65,8 @@ graph LR
     ToolsExecuted[/ToolsExecuted/]:::intg
     _e0_[ ]:::entry ==> Send
     _e1_[ ]:::entry ==> ToolsExecuted
-    Send -->|handle| Sent
-    Send -->|handle| Blocked
+    Send --> Sent
+    Send --> Blocked
     Sent -->|call_llm| LLMResponded
     ToolsExecuted -->|call_llm| LLMResponded
     LLMResponded -->|finalize_answer| AnswerProduced

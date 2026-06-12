@@ -275,12 +275,19 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     for name, r in reactions:
         subs = _reaction_subscribes(r)
         re_edges = edges_by_reaction.get(name, [])
+        # Inline command handlers (Policies have no ``inline`` field): the
+        # edge's source node already IS the command, so the handler display
+        # name (``handle``, positional ``handle_2``, …) is elided from edge
+        # labels — only causation tags remain (#107). External @on(Command)
+        # handlers and reactors keep their meaningful function names.
+        inline = getattr(r, "inline", False)
 
         # Raises edges first so a side-effect handler with only a raises
         # declaration still contributes a real edge to the graph.
         for e in (x for x in re_edges if x.kind == "raises"):
             src, tgt = _record(e.source, e.target)
-            edges.append(_FlowEdge(src, tgt, "-.->", f"{name} (raises)", "raises"))
+            label: str | None = "(raises)" if inline else f"{name} (raises)"
+            edges.append(_FlowEdge(src, tgt, "-.->", label, "raises"))
 
         solid_edges = [e for e in re_edges if e.kind == "solid"]
         scatter_edges = [e for e in re_edges if e.kind == "scatter"]
@@ -297,7 +304,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 # Unannotated handler with no known target → show "?" target.
                 for src_type in subs:
                     src, _tgt = _record(src_type, None)
-                    edges.append(_FlowEdge(src, "?", "-->", name, "solid"))
+                    label = None if inline else name
+                    edges.append(_FlowEdge(src, "?", "-->", label, "solid"))
                 continue
 
         inv_cls = pinned_reactor_invariant.get(name)
@@ -333,7 +341,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 continue
             src, tgt = _record(e.source, e.target)
             ctag, csuf = _causation_override(e)
-            edges.append(_FlowEdge(src, tgt, "-->", f"{name}{csuf}", ctag or "solid"))
+            label = (csuf.lstrip() or None) if inline else f"{name}{csuf}"
+            edges.append(_FlowEdge(src, tgt, "-->", label, ctag or "solid"))
         for e in scatter_edges:
             if inv_cls is not None:
                 referenced.add(e.target)
@@ -362,9 +371,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 continue
             src, tgt = _record(e.source, e.target)
             ctag, csuf = _causation_override(e)
-            edges.append(
-                _FlowEdge(src, tgt, "-.->", f"{name}{csuf}", ctag or "scatter")
-            )
+            label = (csuf.lstrip() or None) if inline else f"{name}{csuf}"
+            edges.append(_FlowEdge(src, tgt, "-.->", label, ctag or "scatter"))
 
     # Framework Interrupted → Resumed edge.
     for e in (x for x in d.edges if x.kind == "framework"):

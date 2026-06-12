@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Breaking (pathological):** a Command declaring a genuine event *field* named `raises` or `invariants` now errors at class creation (#105) — such a field already silently collided with the modifier reads, so no working class is affected.
+- **Mermaid choreography: inline-command edge labels elided** (#107). Edges sourced from an inline `Command.handle()` no longer carry the handler's display name (`handle`, positional `handle_2`, …, or a meaningful method name like `place`) — the source node already *is* the command, and the positional dedup suffix churned snapshots when commands were reordered. Causation/raises markers remain (`-->|"[chain]"|`, `-.->|"(raises)"|`); free `@on(...)` reactors and external `@on(SomeCommand)` handlers keep their function names. Render-only: node identity and resume keys are untouched. Downstream mermaid snapshot/drift checks need a one-time regeneration.
 
 ## [0.20.0] - 2026-06-11
 

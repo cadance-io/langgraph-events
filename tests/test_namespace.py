@@ -80,6 +80,66 @@ def notify(event: Order.Shipped) -> None:
     return None
 
 
+# Inline-command chain fixture (#107): Start chains into Compact (both
+# handlers named ``handle``, so without label elision the second would
+# render as the positional ``handle_2``).
+class _ChainJobs(Namespace):
+    class Start(Command):
+        def handle(self) -> _ChainJobs.Compact:
+            return _ChainJobs.Compact()
+
+    class Compact(Command):
+        class Compacted(DomainEvent):
+            pass
+
+        def handle(self) -> _ChainJobs.Compact.Compacted:
+            return _ChainJobs.Compact.Compacted()
+
+
+# Inline-command raises fixture (#107): the raises edge keeps only the
+# ``(raises)`` marker, not the handler display name.
+class _SyncError(Exception):
+    pass
+
+
+class _FlakyJobs(Namespace):
+    class Sync(Command):
+        raises: ClassVar = (_SyncError,)
+
+        class Synced(DomainEvent):
+            pass
+
+        def handle(self) -> _FlakyJobs.Sync.Synced:
+            return _FlakyJobs.Sync.Synced()
+
+
+@on(HandlerRaised, exception=_SyncError)
+def recover_sync(event: HandlerRaised) -> None:
+    return None
+
+
+# Unannotated inline handler (#107): renders an unknown "?" target.
+class _Untyped(Namespace):
+    class Probe(Command):
+        def handle(self):  # type: ignore[no-untyped-def]
+            return None
+
+
+# External command handling (#107): a free @on(Command) function is
+# ``inline=False`` and keeps its meaningful name on the edge label.
+class _ExtJobs(Namespace):
+    class Run(Command):
+        pass
+
+    class Finished(DomainEvent):
+        pass
+
+
+@on(_ExtJobs.Run)
+def run_job(event: _ExtJobs.Run) -> _ExtJobs.Finished:
+    return _ExtJobs.Finished()
+
+
 # ---------------------------------------------------------------------------
 # Per-namespace invariant fixtures.
 #
@@ -894,7 +954,42 @@ def describe_mermaid_renderer():
 
             output = EventGraph([place]).namespaces().mermaid()
             assert "graph LR" in output
-            assert "Place -->|place| Placed" in output
+            assert "Place --> Placed" in output
+
+        def when_the_handler_is_an_inline_command_method():
+            # The edge's source node already IS the command, so the inline
+            # method's display name (``handle``/``handle_2``/``place``) is
+            # noise — and the positional dedup suffix churns snapshots when
+            # commands are reordered. Elided to the causation tag (#107).
+            def it_elides_the_handler_name_from_edge_labels():
+                output = EventGraph([place]).namespaces().mermaid()
+                assert "Place --> Placed" in output
+                assert "|place|" not in output
+
+            def it_keeps_only_the_causation_tag_on_chain_edges():
+                output = (
+                    EventGraph([_ChainJobs.Start, _ChainJobs.Compact])
+                    .namespaces()
+                    .mermaid()
+                )
+                assert 'Start -->|"[chain]"| Compact' in output
+                assert "|handle" not in output
+
+            def it_keeps_the_name_for_an_external_command_handler():
+                output = EventGraph([run_job]).namespaces().mermaid()
+                assert "Run -->|run_job| Finished" in output
+
+            def it_elides_the_name_on_unannotated_unknown_target_edges():
+                output = EventGraph([_Untyped.Probe]).namespaces().mermaid()
+                assert "Probe --> ?" in output
+                assert "|handle" not in output
+
+            def it_keeps_only_the_raises_marker_on_raises_edges():
+                output = (
+                    EventGraph([_FlakyJobs.Sync, recover_sync]).namespaces().mermaid()
+                )
+                assert 'Sync -.->|"(raises)"| HandlerRaised' in output
+                assert "|handle" not in output
 
         def it_uses_thick_entry_edges_for_seed_events():
 
@@ -992,8 +1087,8 @@ def describe_mermaid_renderer():
             # …and the edges reference those qualname IDs. The command
             # names (`Build`, `Spawn`) are unique so they stay bare —
             # only `Created` actually collides.
-            assert "Build -->|build_foo| _Foo_Build_Created" in output
-            assert "Spawn -->|spawn_bar| _Bar_Spawn_Created" in output
+            assert "Build --> _Foo_Build_Created" in output
+            assert "Spawn --> _Bar_Spawn_Created" in output
             # Sanity: the legacy collapsed form must NOT be emitted.
             assert "--> Created\n" not in output
             # Exactly two `(Created)` occurrences — one per colliding class,
