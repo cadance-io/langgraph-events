@@ -1370,8 +1370,10 @@ def describe_reactor_hubs():
 
 def describe_json_and_to_dict():
     def it_stamps_schema_version():
+        # Bumped to "3" when the per-command ``handlers`` field changed
+        # meaning (inline handler names elided — #108).
         payload = EventGraph([place]).namespaces().to_dict()
-        assert payload["schema_version"] == "2"
+        assert payload["schema_version"] == "3"
 
     def it_returns_json_serializable_dict():
 
