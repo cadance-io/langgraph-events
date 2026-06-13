@@ -560,8 +560,15 @@ def _build_domain_model(  # noqa: PLR0912
                 has_annotation=info.has_annotation,
             )
             command_handlers.append(ch)
-            for cmd in cmds:
-                command_to_handler_names.setdefault(cmd, []).append(meta.name)
+            # Inline handler names carry no value on the command
+            # back-reference: the command IS the handler's identity, and
+            # the positional dedup suffix (handle_2, …) only churns. The
+            # fact that the command has an inline handler stays recoverable
+            # from ``command_handlers`` (inline=True). External handler
+            # names are real information and are listed. See #108.
+            if not ch.inline:
+                for cmd in cmds:
+                    command_to_handler_names.setdefault(cmd, []).append(meta.name)
         else:
             policy = NamespaceModel.Policy(
                 name=meta.name,

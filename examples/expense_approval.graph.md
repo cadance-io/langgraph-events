@@ -24,13 +24,13 @@ graph LR
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
     _seed_[ ]:::entry ==> Command
-    Command -->|handler| DomainEvent
-    Command -.->|"handler (raises)"| SystemEvent
+    Command --> DomainEvent
+    Command -.->|"(raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
-    Command -->|"handler [chain]"| Command
+    Command -->|"[chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
@@ -67,10 +67,10 @@ graph LR
     ApprovalRequired([ApprovalRequired]):::syst
     _e0_[ ]:::entry ==> Reject
     _e1_[ ]:::entry ==> Submit
-    Submit -->|submit| Submitted
-    Submit -->|submit| Invalidated
-    Approve -->|approve| Approved
-    Reject -->|reject| Rejected
+    Submit --> Submitted
+    Submit --> Invalidated
+    Approve --> Approved
+    Reject --> Rejected
     Submitted -->|"check_policy [orchestrate]"| Approve
     Submitted -->|check_policy| ApprovalRequired
     linkStyle 6 stroke:#0369a1,stroke-width:3px
@@ -81,12 +81,12 @@ graph LR
 ```text
 Namespaces:
   Expense
-    Command: Submit  (handlers: submit)
+    Command: Submit
       → Submitted
       → Invalidated
-    Command: Approve  (handlers: approve)
+    Command: Approve
       → Approved
-    Command: Reject  (handlers: reject)
+    Command: Reject
       → Rejected
 System events:
   ApprovalRequired

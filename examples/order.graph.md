@@ -24,13 +24,13 @@ graph LR
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
     _seed_[ ]:::entry ==> Command
-    Command -->|handler| DomainEvent
-    Command -.->|"handler (raises)"| SystemEvent
+    Command --> DomainEvent
+    Command -.->|"(raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
-    Command -->|"handler [chain]"| Command
+    Command -->|"[chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
@@ -66,8 +66,8 @@ graph LR
     end
     _e0_[ ]:::entry ==> Place
     _e1_[ ]:::entry ==> Ship
-    Place -->|place| Placed
-    Ship -->|ship| Shipped
+    Place --> Placed
+    Ship --> Shipped
     CustomerNotBanned -.->|explain_banned| Rejected
     OrderTotalWithinLimit -.->|explain_over_limit| Rejected
     Place -.->|invariant| CustomerNotBanned
@@ -80,9 +80,9 @@ graph LR
 ```text
 Namespaces:
   Order
-    Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+    Command: Place  (invariant: CustomerNotBanned, OrderTotalWithinLimit)
       → Placed
-    Command: Ship  (handlers: ship)
+    Command: Ship
       → Shipped
     Event: Rejected
 System events:

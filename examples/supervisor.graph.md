@@ -24,13 +24,13 @@ graph LR
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
     _seed_[ ]:::entry ==> Command
-    Command -->|handler| DomainEvent
-    Command -.->|"handler (raises)"| SystemEvent
+    Command --> DomainEvent
+    Command -.->|"(raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
-    Command -->|"handler [chain]"| Command
+    Command -->|"[chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
@@ -73,8 +73,8 @@ graph LR
     Produced -->|"supervisor [orchestrate]"| Research
     Produced -->|"supervisor [orchestrate]"| Code
     Produced -->|supervisor| Finalized
-    Research -->|handle| Completed
-    Code -->|handle_2| Produced
+    Research --> Completed
+    Code --> Produced
 %% Side-effect handlers: audit_trail (Auditable)
     linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
 ```
@@ -85,9 +85,9 @@ graph LR
 Namespaces:
   Task
     Command: Run  (handlers: supervisor)
-    Command: Research  (handlers: handle)
+    Command: Research
       → Completed
-    Command: Code  (handlers: handle_2)
+    Command: Code
       → Produced
     Event: Finalized
 Policies:

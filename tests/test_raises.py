@@ -1,15 +1,21 @@
 """Tests for declared handler exceptions via ``raises=`` + ``HandlerRaised``."""
 
+from __future__ import annotations
+
 import asyncio
+from typing import ClassVar
 
 import pytest
 from conftest import Ended, Started
 
 from langgraph_events import (
     Cancelled,
+    Command,
+    DomainEvent,
     EventGraph,
     HandlerRaised,
     IntegrationEvent,
+    Namespace,
     emit_custom,
     on,
 )
@@ -37,6 +43,17 @@ class FallbackRan(IntegrationEvent):
     reason: str = ""
 
 
+class _UncoveredInline(Namespace):
+    class Sync(Command):
+        raises: ClassVar = (DomainError,)
+
+        class Synced(DomainEvent):
+            pass
+
+        def handle(self) -> _UncoveredInline.Sync.Synced:
+            raise DomainError("boom")
+
+
 def describe_raises():
 
     def describe_compile_time_coverage():
@@ -52,6 +69,17 @@ def describe_raises():
 
                     with pytest.raises(TypeError, match=r"DomainError.*no handler"):
                         EventGraph([raiser])
+
+            def with_no_catcher_for_an_inline_command():
+
+                def it_names_the_command_not_the_method():
+                    # An inline handler is named by its command, not its
+                    # method (`handle`/positional `handle_2`). The coverage
+                    # error must identify the claimant the user can find. #108
+                    with pytest.raises(TypeError) as excinfo:
+                        EventGraph([_UncoveredInline.Sync])
+                    assert "_UncoveredInline.Sync" in str(excinfo.value)
+                    assert "Handler 'handle'" not in str(excinfo.value)
 
             def with_matching_catcher():
 

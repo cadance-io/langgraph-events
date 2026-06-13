@@ -24,13 +24,13 @@ graph LR
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
     _seed_[ ]:::entry ==> Command
-    Command -->|handler| DomainEvent
-    Command -.->|"handler (raises)"| SystemEvent
+    Command --> DomainEvent
+    Command -.->|"(raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
-    Command -->|"handler [chain]"| Command
+    Command -->|"[chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
@@ -61,8 +61,8 @@ graph LR
         GaveUp([GaveUp]):::halt
     end
     HandlerRaised([HandlerRaised]):::syst
-    Ask -.->|"handle (raises)"| HandlerRaised
-    Ask -->|handle| Answered
+    Ask -.->|"(raises)"| HandlerRaised
+    Ask --> Answered
     HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
     HandlerRaised -->|"backoff_and_retry [orchestrate]"| Ask
     HandlerRaised -->|give_up| GaveUp
@@ -75,7 +75,7 @@ graph LR
 ```text
 Namespaces:
   Question
-    Command: Ask  (handlers: handle; raises RateLimitError)
+    Command: Ask  (raises RateLimitError)
       → Answered
     Event: GaveUp  [Halted]
 System events:

@@ -36,13 +36,13 @@ graph LR
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
     _seed_[ ]:::entry ==> Command
-    Command -->|handler| DomainEvent
-    Command -.->|"handler (raises)"| SystemEvent
+    Command --> DomainEvent
+    Command -.->|"(raises)"| SystemEvent
     Command -.->|scatter| IntegrationEvent
     Command -.- Halted
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
-    Command -->|"handler [chain]"| Command
+    Command -->|"[chain]"| Command
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
@@ -84,8 +84,8 @@ graph LR
         end
         _e0_[ ]:::entry ==> Place
         _e1_[ ]:::entry ==> Ship
-        Place -->|place| Placed
-        Ship -->|ship| Shipped
+        Place --> Placed
+        Ship --> Shipped
         CustomerNotBanned -.->|explain_banned| Rejected
         OrderTotalWithinLimit -.->|explain_over_limit| Rejected
         Place -.->|invariant| CustomerNotBanned
@@ -98,9 +98,9 @@ graph LR
     ```text
     Namespaces:
       Order
-        Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+        Command: Place  (invariant: CustomerNotBanned, OrderTotalWithinLimit)
           → Placed
-        Command: Ship  (handlers: ship)
+        Command: Ship
           → Shipped
         Event: Rejected
     System events:
@@ -152,10 +152,10 @@ graph LR
         ApprovalRequired([ApprovalRequired]):::syst
         _e0_[ ]:::entry ==> Reject
         _e1_[ ]:::entry ==> Submit
-        Submit -->|submit| Submitted
-        Submit -->|submit| Invalidated
-        Approve -->|approve| Approved
-        Reject -->|reject| Rejected
+        Submit --> Submitted
+        Submit --> Invalidated
+        Approve --> Approved
+        Reject --> Rejected
         Submitted -->|"check_policy [orchestrate]"| Approve
         Submitted -->|check_policy| ApprovalRequired
         linkStyle 6 stroke:#0369a1,stroke-width:3px
@@ -166,12 +166,12 @@ graph LR
     ```text
     Namespaces:
       Expense
-        Command: Submit  (handlers: submit)
+        Command: Submit
           → Submitted
           → Invalidated
-        Command: Approve  (handlers: approve)
+        Command: Approve
           → Approved
-        Command: Reject  (handlers: reject)
+        Command: Reject
           → Rejected
     System events:
       ApprovalRequired
@@ -220,8 +220,8 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         ToolsExecuted[/ToolsExecuted/]:::intg
         _e0_[ ]:::entry ==> Send
         _e1_[ ]:::entry ==> ToolsExecuted
-        Send -->|handle| Sent
-        Send -->|handle| Blocked
+        Send --> Sent
+        Send --> Blocked
         Sent -->|call_llm| LLMResponded
         ToolsExecuted -->|call_llm| LLMResponded
         LLMResponded -->|finalize_answer| AnswerProduced
@@ -233,7 +233,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Conversation
-        Command: Send  (handlers: handle)
+        Command: Send
           → Sent
           → Blocked
     Integration events:
@@ -288,8 +288,8 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Produced -->|"supervisor [orchestrate]"| Research
         Produced -->|"supervisor [orchestrate]"| Code
         Produced -->|supervisor| Finalized
-        Research -->|handle| Completed
-        Code -->|handle_2| Produced
+        Research --> Completed
+        Code --> Produced
     %% Side-effect handlers: audit_trail (Auditable)
         linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
     ```
@@ -300,9 +300,9 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     Namespaces:
       Task
         Command: Run  (handlers: supervisor)
-        Command: Research  (handlers: handle)
+        Command: Research
           → Completed
-        Command: Code  (handlers: handle_2)
+        Command: Code
           → Produced
         Event: Finalized
     Policies:
@@ -400,7 +400,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
             Process{{Process}}:::cmd
         end
         _e0_[ ]:::entry ==> Process
-        Process -->|handle| Classified
+        Process --> Classified
         Classified -->|gate| Blocked
         Classified -->|gate| Approved
         Approved -->|analyze| Analyzed
@@ -411,7 +411,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Content
-        Command: Process  (handlers: handle)
+        Command: Process
           → Classified
         Event: Blocked  [Halted]
         Event: Approved
@@ -451,8 +451,8 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
             GaveUp([GaveUp]):::halt
         end
         HandlerRaised([HandlerRaised]):::syst
-        Ask -.->|"handle (raises)"| HandlerRaised
-        Ask -->|handle| Answered
+        Ask -.->|"(raises)"| HandlerRaised
+        Ask --> Answered
         HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
         HandlerRaised -->|"backoff_and_retry [orchestrate]"| Ask
         HandlerRaised -->|give_up| GaveUp
@@ -465,7 +465,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Question
-        Command: Ask  (handlers: handle; raises RateLimitError)
+        Command: Ask  (raises RateLimitError)
           → Answered
         Event: GaveUp  [Halted]
     System events:

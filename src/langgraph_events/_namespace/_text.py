@@ -117,11 +117,16 @@ def render_text_choreography(d: NamespaceModel) -> str:
             lines.append(f"  {p.name}  ({flow}){tail}")
     notable = [e for e in d.edges if e.causation in ("orchestrate", "chain")]
     if notable:
+        # Inline handler names carry no value (#108): the source command
+        # already names the handler, so ``via handle`` is noise. Drop it
+        # for inline edges; external reactors keep their meaningful name.
+        inline_via = {ch.name for ch in d.command_handlers if ch.inline}
         lines.append("Causal notes:")
         for e in notable:
+            via = "" if e.via in inline_via else f"via {e.via}  "
             lines.append(
                 f"  {_event_label(e.source)} → {_event_label(e.target)}  "
-                f"via {e.via}  [{e.causation}]"
+                f"{via}[{e.causation}]"
             )
     framework = [e for e in d.edges if e.kind == "framework"]
     if framework:

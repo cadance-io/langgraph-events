@@ -6,11 +6,15 @@ from typing import Any
 
 from langgraph_events._namespace._model import NamespaceModel
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 """Top-level ``schema_version`` string stamped on ``to_dict()`` output.
 
 Bumped when fields are removed, renamed, or change meaning. Additions
 don't bump. Consumers should treat an unexpected major as opaque data.
+
+- "3" (#108): per-command ``handlers`` lists external handler names only;
+  an inline-handled command reports ``[]`` (the inline handler stays in
+  the top-level ``command_handlers`` with ``inline: true``).
 """
 
 
