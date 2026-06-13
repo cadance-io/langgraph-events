@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-13
+
 ### Added
 - **The reserved-modifier guard now covers all three `Command` class-level modifiers** (#105). Declaring `raises` or `invariants` as an annotated dataclass field (missing `ClassVar`) raises at class creation with the same `ClassVar`-steering message as `previously`: an annotated `raises: tuple = (...)` silently became a frozen field serializing exception classes into every checkpoint payload while routing kept working, and `invariants: dict = {...}` died inside dataclasses with advice ("use `default_factory`") that would silently disable invariant enforcement — a factory field has no class attribute for the framework to read. PEP 563 string annotations are judged by dataclasses' own ClassVar resolution, never a framework heuristic, so working spellings (including module-level `ClassVar` aliases) are unaffected.
 - **Reserved-node collisions rejected at build** (#105). A `previously=` alias or a handler node name (an explicit `@on(node_name=...)` pin, or a function literally named after the node) claiming a reserved graph node — the framework's `__seed__`/`__router__` or LangGraph's `__start__`/`__end__` — now fails at `EventGraph(...)` construction with a framework message naming the claimant. Before, all four built cleanly and died at first compile/invoke with an error that never named the declaration that smuggled the name in (``Node `__seed__` already present.``).
@@ -300,7 +302,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/cadance-io/langgraph-events/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/cadance-io/langgraph-events/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/cadance-io/langgraph-events/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/cadance-io/langgraph-events/compare/v0.17.0...v0.18.0
