@@ -81,12 +81,12 @@ graph LR
 ```text
 Namespaces:
   Expense
-    Command: Submit  (handlers: submit)
+    Command: Submit
       → Submitted
       → Invalidated
-    Command: Approve  (handlers: approve)
+    Command: Approve
       → Approved
-    Command: Reject  (handlers: reject)
+    Command: Reject
       → Rejected
 System events:
   ApprovalRequired

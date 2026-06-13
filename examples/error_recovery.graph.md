@@ -75,7 +75,7 @@ graph LR
 ```text
 Namespaces:
   Question
-    Command: Ask  (handlers: handle; raises RateLimitError)
+    Command: Ask  (raises RateLimitError)
       → Answered
     Event: GaveUp  [Halted]
 System events:

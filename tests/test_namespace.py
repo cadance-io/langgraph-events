@@ -102,6 +102,10 @@ class _SyncError(Exception):
     pass
 
 
+class _FlushError(Exception):
+    pass
+
+
 class _FlakyJobs(Namespace):
     class Sync(Command):
         raises: ClassVar = (_SyncError,)
@@ -112,8 +116,19 @@ class _FlakyJobs(Namespace):
         def handle(self) -> _FlakyJobs.Sync.Synced:
             return _FlakyJobs.Sync.Synced()
 
+    # Two raises types → without dedup, two identical "(raises)" edges now
+    # that the handler name no longer distinguishes them (#108).
+    class Flush(Command):
+        raises: ClassVar = (_SyncError, _FlushError)
 
-@on(HandlerRaised, exception=_SyncError)
+        class Flushed(DomainEvent):
+            pass
+
+        def handle(self) -> _FlakyJobs.Flush.Flushed:
+            return _FlakyJobs.Flush.Flushed()
+
+
+@on(HandlerRaised)
 def recover_sync(event: HandlerRaised) -> None:
     return None
 
@@ -124,6 +139,14 @@ class _FanJobs(Namespace):
     class Burst(Command):
         def handle(self) -> Scatter[_Item]:
             return Scatter([_Item()])
+
+
+# Inline side-effect fixture (#108): an inline ``-> None`` handler lands in
+# the mermaid footer; it must be listed by command, not by the handler name.
+class _SinkJobs(Namespace):
+    class Sink(Command):
+        def handle(self) -> None:
+            return None
 
 
 # Unannotated inline handler (#107): renders an unknown "?" target.
@@ -521,6 +544,24 @@ def hub_two_targets(event: _HubTwo.HubTrigger) -> _HubTwo.T1 | _HubTwo.T2:
     return _HubTwo.T1()
 
 
+# Inline-command hub fixture (#108): a wide inline fanout still earns a hub
+# (the one-rope layout win), but rendered as an anonymous dot keyed by the
+# command qualname — no churny ``handle`` in the label or node id.
+class _HubInline(Namespace):
+    class Fan(Command):
+        class O1(DomainEvent):
+            pass
+
+        class O2(DomainEvent):
+            pass
+
+        class O3(DomainEvent):
+            pass
+
+        def handle(self) -> _HubInline.Fan.O1 | _HubInline.Fan.O2 | _HubInline.Fan.O3:
+            return _HubInline.Fan.O1()
+
+
 class _HubScatter(Namespace):
     class ScatterTrigger(Command):
         class Done(DomainEvent):
@@ -708,10 +749,23 @@ def describe_reactions_classification():
 
 
 def describe_command_handler_back_reference():
-    def it_lists_handler_names_on_each_command():
+    def when_the_command_is_handled_inline():
+        # An inline handler's name carries no value — the command IS its
+        # identity (#108). It's listed in the top-level command_handlers
+        # with inline=True, but not echoed on the command back-reference.
+        def it_omits_the_inline_handler_name():
+            d = EventGraph([place]).namespaces()
+            assert d.namespaces["Order"].commands["Place"].handlers == ()
 
-        d = EventGraph([place]).namespaces()
-        assert d.namespaces["Order"].commands["Place"].handlers == ("place",)
+        def it_still_records_the_inline_handler_in_command_handlers():
+            d = EventGraph([place]).namespaces()
+            inline = [ch for ch in d.command_handlers if ch.inline]
+            assert any(Order.Place in ch.commands for ch in inline)
+
+    def when_the_command_is_handled_externally():
+        def it_keeps_the_external_handler_name():
+            d = EventGraph([run_job]).namespaces()
+            assert d.namespaces["_ExtJobs"].commands["Run"].handlers == ("run_job",)
 
 
 def describe_edges():
@@ -914,10 +968,22 @@ def describe_text_renderer():
             assert "Halted" in text
 
     def when_view_choreography():
-        def it_shows_handler_name_under_command():
-
+        def it_omits_the_inline_handler_name_under_the_command():
+            # The inline handler name is redundant with the command (#108).
             text = EventGraph([place]).namespaces().text()
-            assert "(handlers: place)" in text
+            assert "Command: Place" in text
+            assert "handlers:" not in text
+
+        def it_keeps_an_external_handler_name_under_the_command():
+            text = EventGraph([run_job]).namespaces().text()
+            assert "(handlers: run_job)" in text
+
+        def it_drops_via_on_inline_chain_causal_notes():
+            text = (
+                EventGraph([_ChainJobs.Start, _ChainJobs.Compact]).namespaces().text()
+            )
+            assert "Start → Compact  [chain]" in text
+            assert "via handle" not in text
 
         def it_lists_policies_separately():
 
@@ -987,6 +1053,11 @@ def describe_mermaid_renderer():
                 output = EventGraph([run_job]).namespaces().mermaid()
                 assert "Run -->|run_job| Finished" in output
 
+            def it_lists_an_inline_side_effect_command_by_name_in_the_footer():
+                output = EventGraph([_SinkJobs.Sink]).namespaces().mermaid()
+                assert "%% Side-effect handlers: Sink" in output
+                assert "handle (" not in output
+
             def it_elides_the_name_on_scatter_edges():
                 output = EventGraph([_FanJobs.Burst]).namespaces().mermaid()
                 assert "Burst -.-> _Item" in output
@@ -1003,6 +1074,12 @@ def describe_mermaid_renderer():
                 )
                 assert 'Sync -.->|"(raises)"| HandlerRaised' in output
                 assert "|handle" not in output
+
+            def it_emits_one_raises_edge_per_target_not_per_exception():
+                output = (
+                    EventGraph([_FlakyJobs.Flush, recover_sync]).namespaces().mermaid()
+                )
+                assert output.count('Flush -.->|"(raises)"| HandlerRaised') == 1
 
         def it_uses_thick_entry_edges_for_seed_events():
 
@@ -1212,6 +1289,30 @@ def describe_reactor_hubs():
             output = EventGraph([hub_four]).namespaces().mermaid(reactor_hub_min=3)
             assert "classDef hub" in output
 
+    def when_the_hub_handler_is_an_inline_command():
+        def it_renders_an_anonymous_hub_keyed_by_command_qualname():
+            output = (
+                EventGraph([_HubInline.Fan]).namespaces().mermaid(reactor_hub_min=3)
+            )
+            # Hub id is the command node id alone — no handler display name.
+            assert "_hub_Fan(" in output
+            assert "_hub_Fan_handle" not in output
+            # Source dispatches into the hub, which fans out to each outcome.
+            assert "Fan --> _hub_Fan" in output
+            assert "_hub_Fan --> O1" in output
+            assert "_hub_Fan --> O2" in output
+            assert "_hub_Fan --> O3" in output
+            # No handler name anywhere on hub or edges.
+            assert "handle" not in output
+
+        def when_rendered_repeatedly():
+            def it_is_stable_and_carries_no_positional_suffix():
+                # The hub id must not depend on a positional dedup suffix.
+                a = EventGraph([_HubInline.Fan]).namespaces().mermaid(reactor_hub_min=3)
+                b = EventGraph([_HubInline.Fan]).namespaces().mermaid(reactor_hub_min=3)
+                assert a == b
+                assert "_2" not in a
+
     def when_handler_has_below_threshold_targets():
         def it_does_not_emit_a_hub():
             output = (
@@ -1283,6 +1384,19 @@ def describe_json_and_to_dict():
             "Place"
         )
         assert any(ch["name"] == "place" for ch in reparsed["command_handlers"])
+
+    def it_omits_inline_handler_names_from_command_handlers_field():
+        # The per-command ``handlers`` list elides inline names (#108); the
+        # fact stays recoverable from the top-level command_handlers entry.
+        payload = EventGraph([place]).namespaces().to_dict()
+        assert payload["namespaces"]["Order"]["commands"]["Place"]["handlers"] == []
+        inline = [ch for ch in payload["command_handlers"] if ch["inline"]]
+        assert any("Place" in c for ch in inline for c in ch["commands"])
+
+    def it_keeps_external_handler_names_in_command_handlers_field():
+        payload = EventGraph([run_job]).namespaces().to_dict()
+        run = payload["namespaces"]["_ExtJobs"]["commands"]["Run"]
+        assert run["handlers"] == ["run_job"]
 
     def it_encodes_event_types_as_qualnames():
 

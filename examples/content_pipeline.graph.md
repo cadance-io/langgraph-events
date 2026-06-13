@@ -74,7 +74,7 @@ graph LR
 ```text
 Namespaces:
   Content
-    Command: Process  (handlers: handle)
+    Command: Process
       → Classified
     Event: Blocked  [Halted]
     Event: Approved

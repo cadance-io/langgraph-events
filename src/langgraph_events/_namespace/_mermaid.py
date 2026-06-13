@@ -232,15 +232,26 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             if pinned_reactor_invariant.get(e.via) is not None:
                 continue
             pair_count[(e.source, e.via)] += 1
+        inline_via = {ch.name for ch in d.command_handlers if ch.inline}
         for (source_cls, handler_name), count in pair_count.items():
             if count < reactor_hub_min:
                 continue
             src_id = node_id[source_cls]
-            new_hub_id = f"_hub_{src_id}_{handler_name}"
+            # An inline command's hub still earns its concentration (one rope
+            # out of the command, then the fanout), but the handler name is
+            # redundant noise and its positional suffix churns the node id.
+            # Key the id on the command alone and render an anonymous dot;
+            # reactor hubs keep their meaningful function-name label. See #108.
+            if handler_name in inline_via:
+                new_hub_id = f"_hub_{src_id}"
+                hub_label = " "
+            else:
+                new_hub_id = f"_hub_{src_id}_{handler_name}"
+                hub_label = handler_name
             hubs[(source_cls, handler_name)] = new_hub_id
             ns = getattr(source_cls, "__namespace__", None)
             if ns is not None:
-                hub_in_namespace[ns].append((new_hub_id, handler_name))
+                hub_in_namespace[ns].append((new_hub_id, hub_label))
 
     # Tracks hubs whose ``Source → Hub`` connector has already been emitted
     # — we emit one such edge per hub regardless of how many targets it has.
@@ -283,9 +294,16 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         inline = getattr(r, "inline", False)
 
         # Raises edges first so a side-effect handler with only a raises
-        # declaration still contributes a real edge to the graph.
+        # declaration still contributes a real edge to the graph. All of a
+        # handler's raises edges point at the same HandlerRaised target with
+        # the same label, so dedupe per (src, tgt) — ``raises=(E1, E2)`` is
+        # one visual edge, not a stack of identical arrows.
+        seen_raises: set[tuple[str, str]] = set()
         for e in (x for x in re_edges if x.kind == "raises"):
             src, tgt = _record(e.source, e.target)
+            if (src, tgt) in seen_raises:
+                continue
+            seen_raises.add((src, tgt))
             label: str | None = "(raises)" if inline else f"{name} (raises)"
             edges.append(_FlowEdge(src, tgt, "-.->", label, "raises"))
 
@@ -298,7 +316,11 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         if not solid_edges and not scatter_edges:
             if has_annotation and side_effect:
                 subs_label = ", ".join(_event_label(t) for t in subs)
-                side_effect_entries.append(f"{name} ({subs_label})")
+                # An inline side-effect handler's name is redundant with its
+                # command (which is exactly its ``subs``) — list the command
+                # alone; external reactors keep ``name (subscribed events)``.
+                entry = subs_label if inline else f"{name} ({subs_label})"
+                side_effect_entries.append(entry)
                 continue
             if not has_annotation:
                 # Unannotated handler with no known target → show "?" target.

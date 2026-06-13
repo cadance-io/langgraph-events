@@ -997,8 +997,13 @@ class EventGraph:
             for exc_type in meta.raises:
                 if not _any_catcher_covers(catchers, exc_type):
                     declared = ", ".join(t.__name__ for t in meta.raises)
+                    # Name an inline handler by its command identity (node
+                    # name = command qualname); the method name (`handle`,
+                    # positional `handle_2`) doesn't help the user find it.
+                    is_inline = getattr(meta.fn, "_inline_command", None) is not None
+                    claimant = meta.node_name if is_inline else meta.name
                     raise TypeError(
-                        f"Handler {meta.name!r} declares raises=({declared}), "
+                        f"Handler {claimant!r} declares raises=({declared}), "
                         f"but no handler subscribes to catch {exc_type.__name__}. "
                         f"Add a handler decorated with "
                         f"@on(HandlerRaised, exception={exc_type.__name__}) "

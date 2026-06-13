@@ -78,7 +78,7 @@ graph LR
 ```text
 Namespaces:
   Conversation
-    Command: Send  (handlers: handle)
+    Command: Send
       → Sent
       → Blocked
 Integration events:

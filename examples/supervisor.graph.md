@@ -85,9 +85,9 @@ graph LR
 Namespaces:
   Task
     Command: Run  (handlers: supervisor)
-    Command: Research  (handlers: handle)
+    Command: Research
       → Completed
-    Command: Code  (handlers: handle_2)
+    Command: Code
       → Produced
     Event: Finalized
 Policies:

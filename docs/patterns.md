@@ -98,9 +98,9 @@ graph LR
     ```text
     Namespaces:
       Order
-        Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+        Command: Place  (invariant: CustomerNotBanned, OrderTotalWithinLimit)
           → Placed
-        Command: Ship  (handlers: ship)
+        Command: Ship
           → Shipped
         Event: Rejected
     System events:
@@ -166,12 +166,12 @@ graph LR
     ```text
     Namespaces:
       Expense
-        Command: Submit  (handlers: submit)
+        Command: Submit
           → Submitted
           → Invalidated
-        Command: Approve  (handlers: approve)
+        Command: Approve
           → Approved
-        Command: Reject  (handlers: reject)
+        Command: Reject
           → Rejected
     System events:
       ApprovalRequired
@@ -233,7 +233,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Conversation
-        Command: Send  (handlers: handle)
+        Command: Send
           → Sent
           → Blocked
     Integration events:
@@ -300,9 +300,9 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     Namespaces:
       Task
         Command: Run  (handlers: supervisor)
-        Command: Research  (handlers: handle)
+        Command: Research
           → Completed
-        Command: Code  (handlers: handle_2)
+        Command: Code
           → Produced
         Event: Finalized
     Policies:
@@ -411,7 +411,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Content
-        Command: Process  (handlers: handle)
+        Command: Process
           → Classified
         Event: Blocked  [Halted]
         Event: Approved
@@ -465,7 +465,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Question
-        Command: Ask  (handlers: handle; raises RateLimitError)
+        Command: Ask  (raises RateLimitError)
           → Answered
         Event: GaveUp  [Halted]
     System events:

@@ -80,9 +80,9 @@ graph LR
 ```text
 Namespaces:
   Order
-    Command: Place  (handlers: place; invariant: CustomerNotBanned, OrderTotalWithinLimit)
+    Command: Place  (invariant: CustomerNotBanned, OrderTotalWithinLimit)
       → Placed
-    Command: Ship  (handlers: ship)
+    Command: Ship
       → Shipped
     Event: Rejected
 System events:
