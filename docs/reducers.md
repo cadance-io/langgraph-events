@@ -107,6 +107,33 @@ def permissive(event: TaskReceived, strategy: str | None) -> Completed:
     - Opt out by widening the annotation: `str | None`, `Optional[str]`, `Any`, `object`, or no annotation.
     - Forward-ref failures: framework emits `UserWarning` and falls back to permissive mode. Annotate against importable types so the assertion sticks.
 
+## `FoldReducer`
+
+Accumulator whose next value depends on the **prior** state — a left-fold, where `Reducer` appends and `ScalarReducer` takes the last write. Use it for counters, merging dicts, or re-derived cursors. Each event owns its transition via `fold(self, state)` (the same polymorphic style as `MessageEvent.as_messages()`); supply only `name`, `event_type`, and a `default_factory`.
+
+```python
+from langgraph_events import FoldReducer, RESET
+
+
+class Incremented(IntegrationEvent):
+    by: int = 1
+    def fold(self, state): return {"n": state["n"] + self.by}
+
+class Reset(IntegrationEvent):
+    def fold(self, state): return RESET   # clears the channel
+
+
+counter = FoldReducer(
+    name="counter",
+    event_type=(Incremented, Reset),
+    default_factory=lambda: {"n": 0},
+)
+```
+
+`fold` returns: the new state (any value, including `None`); `RESET` to clear the channel back to `default_factory()`; or `SKIP` to leave it unchanged. Pass an explicit `fold=lambda state, event: ...` for events that don't carry a `fold` method. The fold state may be any type — including a `list`. Like `ScalarReducer`, a non-`None` handler annotation opts into the [`ReducerNotSetError`](#scalar-reducer-required) assertion.
+
+For genuinely bespoke channels, subclass the public `BaseReducer` directly.
+
 ## `message_reducer`
 
 Built-in reducer for LangChain messages — projects `MessageEvent.as_messages()` into the `messages` channel using `add_messages` for id-based dedup.

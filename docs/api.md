@@ -80,7 +80,10 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 |---|---|---|
 | `Reducer` | Class | List accumulator; declare as `Namespace` class attribute or pass via `reducers=` |
 | `ScalarReducer` | Class | Last-write-wins for a single value; `None` is valid |
-| `SKIP` | Sentinel | Return from `ScalarReducer.fn` to leave the value unchanged |
+| `FoldReducer` | Class | Folds each event into accumulating state via `fold(self, state)`; next value depends on the prior |
+| `BaseReducer` | Class | Abstract base for custom reducers — subclass for bespoke channels |
+| `SKIP` | Sentinel | Return from `ScalarReducer.fn` (or a `FoldReducer.fold`) to leave the value unchanged |
+| `RESET` | Sentinel | Return from a `FoldReducer.fold` to clear the channel back to `default_factory()` |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |
 
 ## Lifecycle Hooks

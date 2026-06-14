@@ -50,7 +50,10 @@ from langgraph_events._namespace._smells import (
     DomainPatternWarning,
 )
 from langgraph_events._reducer import (
+    RESET,
     SKIP,
+    BaseReducer,
+    FoldReducer,
     Reducer,
     ReducerNotSetError,
     ScalarReducer,
@@ -87,9 +90,11 @@ def __getattr__(name: str) -> Any:
 
 
 __all__ = [
+    "RESET",
     "SKIP",
     "STATE_SNAPSHOT_EVENT_NAME",
     "Auditable",
+    "BaseReducer",
     "Cancelled",
     "Command",
     "CommandChainWarning",
@@ -98,6 +103,7 @@ __all__ = [
     "DomainPatternWarning",
     "EventGraph",
     "EventLog",
+    "FoldReducer",
     "GraphState",
     "Halted",
     "HandlerRaised",

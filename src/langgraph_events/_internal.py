@@ -289,8 +289,9 @@ def _make_reducer_not_set_error(
     the annotation suggestion.
     """
     if r is not None and r.event_type is not Event:
+        type_name = getattr(r.event_type, "__name__", str(r.event_type))
         event_hint = (
-            f"Ensure an event of type {r.event_type.__name__} has been "
+            f"Ensure an event of type {type_name} has been "
             f"processed before this handler runs, or "
         )
     else:

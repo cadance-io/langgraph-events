@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from langchain_core.messages import BaseMessage
 
     from langgraph_events._event import Event, Namespace
-    from langgraph_events._types import ReducerFn
+    from langgraph_events._types import EventTypeSpec, ReducerFn
 
 
 class ReducerNotSetError(ValueError):
@@ -45,6 +45,25 @@ Use this to distinguish "set to None" from "don't update".
 """
 
 
+class _ResetType:
+    """Sentinel returned from a ``FoldReducer.fold`` to clear the channel."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "RESET"
+
+
+RESET = _ResetType()
+"""Return from a ``FoldReducer.fold`` to reset the channel.
+
+When ``fold`` returns ``RESET``, the channel is cleared back to a fresh
+``default_factory()`` value before any subsequent events fold onto it.
+Use this so a reset event need not know the empty state's shape — and so
+``None`` stays available as a legitimate stored state value.
+"""
+
+
 def _last_write_wins(existing: Any, new: Any) -> Any:
     """Binary operator that always takes the newer value."""
     return new
@@ -71,7 +90,7 @@ class BaseReducer(ABC):
     """
 
     name: str
-    event_type: type
+    event_type: EventTypeSpec
     namespace: type[Namespace] | None
 
     def __set_name__(self, owner: type, name: str) -> None:
@@ -142,7 +161,7 @@ class Reducer(BaseReducer):
     """
 
     name: str = ""
-    event_type: type = field(kw_only=True)
+    event_type: EventTypeSpec = field(kw_only=True)
     fn: Callable[[Any], list[Any]] = field(kw_only=True)
     reducer: ReducerFn = field(kw_only=True, default=operator.add)
     default: list[Any] = field(kw_only=True, default_factory=list)
@@ -218,7 +237,7 @@ class ScalarReducer(BaseReducer):
     """
 
     name: str = ""
-    event_type: type = field(kw_only=True)
+    event_type: EventTypeSpec = field(kw_only=True)
     fn: Callable[[Any], Any] = field(kw_only=True)
     default: Any = field(kw_only=True, default=None)
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
@@ -249,6 +268,109 @@ class ScalarReducer(BaseReducer):
     def seed(self, events: list[Event]) -> Any:
         result = self.collect(events)
         return result if self.has_contributions(result) else self.default
+
+
+@dataclass(frozen=True)
+class _Contributions:
+    """Private wrapper for a ``FoldReducer``'s collected events.
+
+    The fold-merge needs to tell a list of contribution events (normal
+    execution / streaming) apart from a pre-folded state written directly
+    through the channel via ``update_state`` / ``pre_seed``.  Wrapping the
+    events in a nominal type the user can never produce makes that
+    distinction unambiguous — so the fold state may be *anything*, including
+    a ``list``.
+    """
+
+    events: list[Event]
+
+
+@dataclass
+class FoldReducer(BaseReducer):
+    """Folds each matching event into a single accumulating state object.
+
+    Where :class:`Reducer` appends and :class:`ScalarReducer` takes the last
+    write, ``FoldReducer`` computes the next value from the *prior* state and
+    the event — a left-fold.  Use it for counters, merging dicts, re-derived
+    cursors, or any channel whose update depends on what came before.
+
+    Each event owns its transition through ``fold(self, state)`` (mirroring
+    :meth:`MessageEvent.as_messages`), so callers usually supply only the
+    channel name, the event type(s), and a ``default_factory``::
+
+        counter = FoldReducer(
+            name="counter",
+            event_type=(Incremented, Reset),
+            default_factory=lambda: {"n": 0},
+        )
+        # Incremented.fold(self, state) -> {"n": state["n"] + 1}
+        # Reset.fold(self, state) -> RESET   # clears the channel
+
+    A ``fold`` returning :data:`RESET` clears the channel back to
+    ``default_factory()``; returning :data:`SKIP` leaves it unchanged; any
+    other value — including ``None`` — becomes the new state.  Pass an
+    explicit ``fold=`` to support events that don't carry a ``fold`` method.
+
+    As with :class:`ScalarReducer`, a handler's parameter annotation declares
+    whether the injected value may be ``None``; widen to ``... | None`` /
+    ``Any`` to allow it, or :class:`ReducerNotSetError` is raised at injection
+    when the channel is unset.
+    """
+
+    name: str = ""
+    event_type: EventTypeSpec = field(kw_only=True)
+    default_factory: Callable[[], Any] = field(kw_only=True)
+    fold: Callable[[Any, Any], Any] = field(
+        kw_only=True, default=lambda state, event: event.fold(state)
+    )
+    namespace: type[Namespace] | None = field(kw_only=True, default=None)
+
+    @property
+    def reducer(self) -> Callable[[Any, Any], Any]:
+        # Exposed for the streaming shadow path, which folds per event via
+        # ``getattr(r, "reducer")``.
+        return self._merge
+
+    def state_annotation(self) -> Any:
+        return Annotated[Any, self._merge]
+
+    @property
+    def empty(self) -> Any:
+        return self.default_factory()
+
+    def collect(self, events: list[Event]) -> Any:
+        return _Contributions(
+            [
+                event
+                for event in events
+                if isinstance(event, self.event_type)
+                and _matches_namespace(event, self.namespace)
+            ]
+        )
+
+    def has_contributions(self, result: Any) -> bool:
+        return bool(result.events)
+
+    def output_type(self) -> Any:
+        return Any
+
+    def seed(self, events: list[Event]) -> Any:
+        return self._fold_events(self.default_factory(), self.collect(events).events)
+
+    def _merge(self, current: Any, update: Any) -> Any:
+        if isinstance(update, _Contributions):
+            return self._fold_events(current, update.events)
+        # A pre-folded state written directly through the channel
+        # (update_state / pre_seed) — replace.
+        return update
+
+    def _fold_events(self, state: Any, events: list[Event]) -> Any:
+        for event in events:
+            result = self.fold(state, event)
+            if result is SKIP:
+                continue
+            state = self.default_factory() if result is RESET else result
+        return state
 
 
 def message_reducer(
