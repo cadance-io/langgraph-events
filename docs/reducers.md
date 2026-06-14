@@ -132,6 +132,24 @@ counter = FoldReducer(
 
 `fold` returns: the new state (any value, including `None`); `RESET` to clear the channel back to `default_factory()`; or `SKIP` to leave it unchanged. Pass an explicit `fold=lambda state, event: ...` for events that don't carry a `fold` method. The fold state may be any type — including a `list`. Like `ScalarReducer`, a non-`None` handler annotation opts into the [`ReducerNotSetError`](#scalar-reducer-required) assertion.
 
+### Typing { #fold-typing }
+
+`FoldReducer` is generic over its state type `S`, inferred from `default_factory`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`):
+
+```python
+counter = FoldReducer(default_factory=lambda: {"n": 0}, event_type=(Incremented, Reset), name="counter")
+reveal_type(counter.empty)   # dict[str, int]
+```
+
+The event arg is typed against `Foldable` — a `@runtime_checkable` Protocol satisfied **structurally** (your event just needs a `fold` method; do **not** inherit `Foldable` — it would clash with the event metaclass). An explicit `fold=` function should annotate its event param as `Foldable` (or leave it inferred):
+
+```python
+def step(state: dict[str, int], event: Foldable) -> dict[str, int]:
+    return event.fold(state)
+```
+
+To have mypy flag a `default_factory`/`fold` state-shape disagreement, pin the state type: `FoldReducer[dict[str, int]](...)`. (Without a pin, mypy widens `S` to the join of the two and won't catch the mismatch.) The generic does not propagate to handler params — those are injected by name at runtime.
+
 For genuinely bespoke channels, subclass the public `BaseReducer` directly.
 
 ## `message_reducer`

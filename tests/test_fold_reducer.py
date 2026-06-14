@@ -188,6 +188,24 @@ def describe_RESET_sentinel():
             assert repr(RESET) == "RESET"
 
 
+def describe_Foldable():
+
+    def when_event_has_a_fold_method():
+
+        def it_is_a_Foldable_instance():
+            from langgraph_events import Foldable
+
+            # Structural: Incremented never inherits Foldable, it just has fold.
+            assert isinstance(Incremented(by=1), Foldable)
+
+    def when_event_lacks_a_fold_method():
+
+        def it_is_not_a_Foldable_instance():
+            from langgraph_events import Foldable
+
+            assert not isinstance(Started(data="x"), Foldable)
+
+
 class Logged(IntegrationEvent):
     line: str = ""
 

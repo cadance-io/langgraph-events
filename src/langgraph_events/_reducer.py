@@ -5,7 +5,16 @@ from __future__ import annotations
 import operator
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Generic,
+    Protocol,
+    TypeVar,
+    cast,
+    runtime_checkable,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -270,6 +279,24 @@ class ScalarReducer(BaseReducer):
         return result if self.has_contributions(result) else self.default
 
 
+S = TypeVar("S")
+"""The accumulating state type a ``FoldReducer`` folds events into."""
+
+
+@runtime_checkable
+class Foldable(Protocol):
+    """An event that knows how to fold itself into accumulating state.
+
+    Structural, not nominal: an event satisfies ``Foldable`` simply by
+    *having* a ``fold(self, state)`` method — it must **not** inherit from
+    ``Foldable`` (that would clash with the event metaclass, and isn't
+    needed). Used to type :class:`FoldReducer`'s default ``fold`` (which
+    calls ``event.fold(state)``) without falling back to ``Any``.
+    """
+
+    def fold(self, state: Any) -> Any: ...
+
+
 @dataclass(frozen=True)
 class _Contributions:
     """Private wrapper for a ``FoldReducer``'s collected events.
@@ -286,7 +313,7 @@ class _Contributions:
 
 
 @dataclass
-class FoldReducer(BaseReducer):
+class FoldReducer(BaseReducer, Generic[S]):
     """Folds each matching event into a single accumulating state object.
 
     Where :class:`Reducer` appends and :class:`ScalarReducer` takes the last
@@ -319,26 +346,30 @@ class FoldReducer(BaseReducer):
 
     name: str = ""
     event_type: EventTypeSpec = field(kw_only=True)
-    default_factory: Callable[[], Any] = field(kw_only=True)
-    fold: Callable[[Any, Any], Any] = field(
+    default_factory: Callable[[], S] = field(kw_only=True)
+    fold: Callable[[S, Foldable], S | _ResetType | _SkipType] = field(
         kw_only=True, default=lambda state, event: event.fold(state)
     )
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
 
     @property
-    def reducer(self) -> Callable[[Any, Any], Any]:
+    def reducer(self) -> Callable[[S, _Contributions | S], S]:
         # Exposed for the streaming shadow path, which folds per event via
         # ``getattr(r, "reducer")``.
         return self._merge
 
     def state_annotation(self) -> Any:
+        # Stays ``Any`` on purpose: LangGraph's BinaryOperatorAggregate calls
+        # ``Any()`` (which raises) so the channel starts MISSING and the first
+        # write is set directly, matching ScalarReducer. A concrete ``S`` whose
+        # ``S()`` succeeds (e.g. ``dict``) would break that first-write path.
         return Annotated[Any, self._merge]
 
     @property
-    def empty(self) -> Any:
+    def empty(self) -> S:
         return self.default_factory()
 
-    def collect(self, events: list[Event]) -> Any:
+    def collect(self, events: list[Event]) -> _Contributions:
         return _Contributions(
             [
                 event
@@ -354,22 +385,28 @@ class FoldReducer(BaseReducer):
     def output_type(self) -> Any:
         return Any
 
-    def seed(self, events: list[Event]) -> Any:
+    def seed(self, events: list[Event]) -> S:
         return self._fold_events(self.default_factory(), self.collect(events).events)
 
-    def _merge(self, current: Any, update: Any) -> Any:
+    def _merge(self, current: S, update: _Contributions | S) -> S:
         if isinstance(update, _Contributions):
             return self._fold_events(current, update.events)
         # A pre-folded state written directly through the channel
         # (update_state / pre_seed) — replace.
         return update
 
-    def _fold_events(self, state: Any, events: list[Event]) -> Any:
+    def _fold_events(self, state: S, events: list[Event]) -> S:
         for event in events:
-            result = self.fold(state, event)
-            if result is SKIP:
+            # ``collect``'s event_type filter guarantees every event here is
+            # Foldable at runtime; the cast bridges the Event-typed internal
+            # stream to ``fold``'s ``Foldable`` parameter.
+            result = self.fold(state, cast("Foldable", event))
+            # isinstance (not ``is``) so mypy narrows the result to ``S`` in
+            # the else branch — SKIP/RESET are the sole instances of their
+            # private types, so this is identity-equivalent in practice.
+            if isinstance(result, _SkipType):
                 continue
-            state = self.default_factory() if result is RESET else result
+            state = self.default_factory() if isinstance(result, _ResetType) else result
         return state
 
 
