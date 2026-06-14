@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-14
+
 ### Added
 - **`FoldReducer` — a third built-in channel shape for accumulating state** (#111). Where `Reducer` appends and `ScalarReducer` takes the last write — both projecting an event in isolation — `FoldReducer` left-folds each matching event into a single state object whose next value depends on the prior state (counters, merging dicts, re-derived cursors). Each event owns its transition through `fold(self, state)` (mirroring `MessageEvent.as_messages()`), so callers supply only the channel `name`, the `event_type(s)`, and a `default_factory`; pass an explicit `fold=` for events that don't carry the method. A `fold` returning the new `RESET` sentinel clears the channel back to `default_factory()`, `SKIP` leaves it unchanged, and any other value — including `None` — becomes the new state. The base handles the streaming path, the channel-merge path (including the contributions-vs-pre-folded-state duality on `update_state`/replay, via a private wrapper so the fold state may itself be a `list`), and seed/replay — removing ~60 lines of error-prone per-channel `BaseReducer` plumbing. `FoldReducer` is **generic over its state type `S`** (inferred from `default_factory`), so `reducer.empty`/`reducer.seed(...)` are typed rather than `Any`; pin `FoldReducer[StateType](...)` to have mypy flag a `default_factory`/`fold` shape disagreement.
 - **`BaseReducer` is now public** (#111). Bespoke reducers must subclass it; it was previously reachable only via the private `langgraph_events._reducer`. Exported alongside the existing `Reducer`/`ScalarReducer`.
@@ -310,7 +312,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/cadance-io/langgraph-events/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/cadance-io/langgraph-events/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/cadance-io/langgraph-events/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/cadance-io/langgraph-events/compare/v0.18.0...v0.19.0
