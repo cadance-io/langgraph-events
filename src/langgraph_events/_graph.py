@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from langgraph.types import StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reflection import Reflection
 
 
 class OrphanedEventWarning(UserWarning):
@@ -838,6 +839,17 @@ class EventGraph:
         :meth:`NamespaceModel.json`, or read the data attributes directly.
         """
         return NamespaceModel._build(self._handler_metas, self._return_info)
+
+    def reflect(self, log: EventLog) -> Reflection:
+        """Return a :class:`Reflection` — deterministic query surface over *log*.
+
+        Bundles the log with this graph's namespace model and reducers so an
+        agent (or code) can query facts about a run: listings, field dumps,
+        static topology, reducer projections, and verdict-free evidence joins.
+        """
+        from langgraph_events._reflection import Reflection  # noqa: PLC0415
+
+        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
 
     @property
     def reducer_names(self) -> frozenset[str]:

@@ -60,6 +60,7 @@ from langgraph_events._reducer import (
     ScalarReducer,
     message_reducer,
 )
+from langgraph_events._reflection import Reflection
 from langgraph_events._types import (
     HandlerReturn,  # noqa: F401 (importable but not promoted)
 )
@@ -123,6 +124,7 @@ __all__ = [
     "OrphanedEventWarning",
     "Reducer",
     "ReducerNotSetError",
+    "Reflection",
     "Resumed",
     "RunPaused",
     "ScalarReducer",
