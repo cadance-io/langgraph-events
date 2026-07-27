@@ -129,12 +129,10 @@ def diagnose(run: Reflection) -> None:
     """Scripted ReAct trace: why was the order cancelled?"""
     tool = run.tool()
 
-    def call(**kwargs: object) -> str:
+    def call(**kwargs: object) -> None:
         print(f">>> query_log({', '.join(f'{k}={v!r}' for k, v in kwargs.items())})")
-        out = tool.run(**kwargs)  # type: ignore[arg-type]
-        print(out)
+        print(tool.run(**kwargs))  # type: ignore[arg-type]
         print()
-        return out
 
     print("=== agent diagnosis: why was order A-1 cancelled? ===\n")
     call(op="overview")  # 1. shape of the run — spot the anomaly

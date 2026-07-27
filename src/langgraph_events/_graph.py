@@ -581,14 +581,7 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
     sig = inspect.signature(meta.fn)
     first_param = next(iter(sig.parameters), None)
     claimed: set[str | None] = {first_param, "self"}
-    if meta.log_param:
-        claimed.add(meta.log_param)
-    if meta.reflection_param:
-        claimed.add(meta.reflection_param)
-    if meta.config_param:
-        claimed.add(meta.config_param)
-    if meta.store_param:
-        claimed.add(meta.store_param)
+    claimed.update(meta.framework_params)
     claimed.update(meta.reducer_params)
     claimed.update(meta.field_inject_params)
     claimed.update(name for name, _ in meta.service_params)

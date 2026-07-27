@@ -1,9 +1,9 @@
 """QueryTool — the event log's query surface packaged as one LLM tool.
 
 Framework-agnostic: a frozen dataclass whose shape maps 1:1 onto an Anthropic
-tool dict or LangChain's ``StructuredTool.from_function``. Every op is a
-one-line delegation to a public ``Reflection`` or ``EventLog`` query — the
-tool never grows logic of its own.
+tool dict or LangChain's ``StructuredTool.from_function``. Every op delegates
+to a public ``Reflection`` query or an index-preserving mirror of an
+``EventLog`` query — the tool never grows semantics of its own.
 """
 
 from __future__ import annotations
@@ -13,11 +13,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._event import (
+    _NAMESPACE_REGISTRY,
     Command,
     DomainEvent,
     Event,
     IntegrationEvent,
     SystemEvent,
+    _iter_nested_events,
 )
 from langgraph_events._reflection._text import event_line
 
@@ -53,49 +55,28 @@ class QueryTool:
     run: Callable[..., str]
 
 
-def _walk_namespace_events(namespace_cls: type) -> list[type[Event]]:
-    """Every Event class nested (at any depth) in a Namespace class."""
-    found: list[type[Event]] = []
-    visited: set[type] = set()
-    stack = [namespace_cls]
-    while stack:
-        container = stack.pop()
-        if container in visited:
-            continue
-        visited.add(container)
-        for attr in vars(container).values():
-            if (
-                isinstance(attr, type)
-                and issubclass(attr, Event)
-                and attr not in visited
-            ):
-                found.append(attr)
-                stack.append(attr)
-    return found
-
-
 def _model_classes(model: NamespaceModel, log: EventLog) -> list[type[Event]]:
-    from langgraph_events._event import _NAMESPACE_REGISTRY  # noqa: PLC0415
-
+    """Every event class queryable by name: registered namespaces (walked via
+    the framework's blessed nested-event iterator), model-only namespaces,
+    integration/system events, and anything present in the log."""
     classes: list[type[Event]] = []
     for name, namespace in model.namespaces.items():
         registered = _NAMESPACE_REGISTRY.get(name)
         if registered is not None:
-            classes.extend(_walk_namespace_events(registered))
-        for command in namespace.commands.values():
-            classes.append(command.cls)
-            classes.extend(command.outcomes)
-        classes.extend(namespace.events)
+            classes.extend(_iter_nested_events(registered, recurse_commands=True))
+        else:
+            for command in namespace.commands.values():
+                classes.append(command.cls)
+                classes.extend(command.outcomes)
+            classes.extend(namespace.events)
     classes.extend(model.integration_events)
     classes.extend(model.system_events)
     classes.extend(type(e) for e in log)
-    seen: set[type[Event]] = set()
-    return [c for c in classes if not (c in seen or seen.add(c))]  # type: ignore[func-returns-value]
+    return list(dict.fromkeys(classes))
 
 
-def _type_vocabulary(model: NamespaceModel, log: EventLog) -> dict[str, type[Event]]:
+def _type_vocabulary(classes: list[type[Event]]) -> dict[str, type[Event]]:
     """Name → class map: qualified names always, simple names when unique."""
-    classes = _model_classes(model, log)
     mapping: dict[str, type[Event]] = {}
     for cls in classes:
         namespace = getattr(cls, "__namespace__", None)
@@ -112,21 +93,31 @@ def _type_vocabulary(model: NamespaceModel, log: EventLog) -> dict[str, type[Eve
     return mapping
 
 
-def _vocabulary_section(model: NamespaceModel) -> str:
+def _vocabulary_section(
+    classes: list[type[Event]], vocabulary: dict[str, type[Event]]
+) -> str:
+    """Advertise exactly the names the vocabulary accepts, grouped."""
+
+    def canonical(cls: type[Event]) -> str:
+        simple = cls.__name__
+        if vocabulary.get(simple) is cls:
+            return simple
+        namespace = getattr(cls, "__namespace__", None)
+        return f"{namespace}.{simple}" if namespace else simple
+
+    groups: dict[str, list[str]] = {}
+    for cls in classes:
+        group = getattr(cls, "__namespace__", None)
+        if group is None:
+            if issubclass(cls, IntegrationEvent):
+                group = "integration"
+            elif issubclass(cls, SystemEvent):
+                group = "system"
+            else:
+                group = "other"
+        groups.setdefault(group, []).append(canonical(cls))
     lines = ["event types (grouped by namespace):"]
-    for name, namespace in model.namespaces.items():
-        names: list[str] = []
-        for command in namespace.commands.values():
-            names.append(command.cls.__name__)
-            names.extend(o.__name__ for o in command.outcomes)
-        names.extend(e.__name__ for e in namespace.events)
-        lines.append(f"  {name}: {', '.join(names)}")
-    if model.integration_events:
-        lines.append(
-            "  integration: " + ", ".join(e.__name__ for e in model.integration_events)
-        )
-    if model.system_events:
-        lines.append("  system: " + ", ".join(e.__name__ for e in model.system_events))
+    lines.extend(f"  {group}: {', '.join(names)}" for group, names in groups.items())
     lines.append(
         "base kinds (match whole categories): "
         + ", ".join(b.__name__ for b in _BASE_KINDS)
@@ -162,32 +153,32 @@ def _listing(pairs: list[tuple[int, Event]], limit: int) -> str:
     return "\n".join(lines) if lines else "no matching events"
 
 
-def _match_pairs(log: EventLog, event_type: type[Event]) -> list[tuple[int, Event]]:
-    return [(i, e) for i, e in enumerate(log) if isinstance(e, event_type)]
-
-
 def _run_type_op(  # noqa: PLR0911 — flat op dispatch, one return per op
     op: str, log: EventLog, event_type: type[Event], limit: int
 ) -> str:
+    events = log.events
     if op in ("filter", "select"):
-        return _listing(_match_pairs(log, event_type), limit)
+        pairs = [(i, e) for i, e in enumerate(events) if isinstance(e, event_type)]
+        return _listing(pairs, limit)
     if op == "count":
         return str(log.count(event_type))
     if op == "has":
         return "true" if log.has(event_type) else "false"
-    if op in ("latest", "first"):
-        pairs = _match_pairs(log, event_type)
-        if not pairs:
-            return f"no {event_type.__name__} events in this log"
-        index, event = pairs[-1] if op == "latest" else pairs[0]
-        return event_line(index, event)
-    # after / before — anchored on the first match, root indices preserved
-    pairs = _match_pairs(log, event_type)
-    if not pairs:
+    if op == "latest":
+        for i in range(len(events) - 1, -1, -1):
+            if isinstance(events[i], event_type):
+                return event_line(i, events[i])
         return f"no {event_type.__name__} events in this log"
-    anchor = pairs[0][0]
-    all_pairs = list(enumerate(log))
-    segment = all_pairs[anchor + 1 :] if op == "after" else all_pairs[:anchor]
+    anchor = next((i for i, e in enumerate(events) if isinstance(e, event_type)), None)
+    if anchor is None:
+        return f"no {event_type.__name__} events in this log"
+    if op == "first":
+        return event_line(anchor, events[anchor])
+    # after / before — anchored on the first match, root indices preserved
+    if op == "after":
+        segment = list(enumerate(events[anchor + 1 :], start=anchor + 1))
+    else:
+        segment = list(enumerate(events[:anchor]))
     return _listing(segment, limit)
 
 
@@ -200,7 +191,8 @@ def _render_state(state: dict[str, Any]) -> str:
 def build_tool(reflection: Reflection) -> QueryTool:
     """Build the query_log tool over *reflection*."""
     log = reflection.log
-    vocabulary = _type_vocabulary(reflection._model, log)
+    classes = _model_classes(reflection._model, log)
+    vocabulary = _type_vocabulary(classes)
 
     def run(  # noqa: PLR0911 — flat op dispatch, one return per op
         *,
@@ -238,16 +230,10 @@ def build_tool(reflection: Reflection) -> QueryTool:
             if op == "state":
                 return _render_state(reflection.state())
             return reflection.schema()
-        except IndexError:
-            n = len(log)
-            return (
-                f"error: index {index} out of range "
-                f"(log has {n} events, valid: 0..{n - 1})"
-            )
-        except (ValueError, KeyError) as exc:
+        except (IndexError, ValueError, KeyError) as exc:
             return f"error: {exc}"
 
-    description = _DESCRIPTION_HEADER + _vocabulary_section(reflection._model)
+    description = _DESCRIPTION_HEADER + _vocabulary_section(classes, vocabulary)
     parameters = {
         "type": "object",
         "properties": {

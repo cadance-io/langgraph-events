@@ -436,6 +436,24 @@ class HandlerMeta:
         """Backward-compatible property."""
         return self.log_param is not None
 
+    @property
+    def framework_params(self) -> tuple[str, ...]:
+        """Param names claimed by framework injectables (log/reflection/config/store).
+
+        The one place that knows the full injectable set — claim/consume
+        bookkeeping iterates this instead of hand-listing each field.
+        """
+        return tuple(
+            p
+            for p in (
+                self.log_param,
+                self.reflection_param,
+                self.config_param,
+                self.store_param,
+            )
+            if p
+        )
+
 
 def _warn_on_unknown_reducer_params(
     fn: Callable[..., Any],
@@ -528,32 +546,31 @@ def _detect_service_params(
     return tuple(detected)
 
 
-def _detect_framework_params(
-    hints: dict[str, Any],
-) -> tuple[str | None, str | None, str | None, str | None]:
+def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
     """Find params annotated with framework injectables, by exact type hint.
 
-    Returns ``(log_param, reflection_param, config_param, store_param)``.
+    Returns a dict keyed by the ``HandlerMeta`` field names
+    (``log_param`` / ``reflection_param`` / ``config_param`` / ``store_param``)
+    so callers splat it straight into the constructor — no positional slots
+    to miswire. First matching param wins for each injectable.
     """
     from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
     from langgraph.store.base import BaseStore  # noqa: PLC0415
 
     from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
-    log_param: str | None = None
-    reflection_param: str | None = None
-    config_param: str | None = None
-    store_param: str | None = None
+    hint_to_field = {
+        EventLog: "log_param",
+        Reflection: "reflection_param",
+        RunnableConfig: "config_param",
+        BaseStore: "store_param",
+    }
+    detected: dict[str, str | None] = dict.fromkeys(hint_to_field.values())
     for param_name, hint in hints.items():
-        if hint is EventLog:
-            log_param = log_param or param_name
-        elif hint is Reflection:
-            reflection_param = reflection_param or param_name
-        elif hint is RunnableConfig:
-            config_param = param_name
-        elif hint is BaseStore:
-            store_param = param_name
-    return log_param, reflection_param, config_param, store_param
+        field = hint_to_field.get(hint)
+        if field is not None and detected[field] is None:
+            detected[field] = param_name
+    return detected
 
 
 def extract_handler_meta(
@@ -592,9 +609,7 @@ def extract_handler_meta(
         )
         hints = {}
 
-    log_param, reflection_param, config_param, store_param = _detect_framework_params(
-        hints
-    )
+    framework_params = _detect_framework_params(hints)
 
     # Detect reducer parameters by name match
     sig = inspect.signature(fn)
@@ -630,14 +645,7 @@ def extract_handler_meta(
     # already consumed; the rest are candidates for service injection.
     first_param = next(iter(sig.parameters), None)
     consumed_for_services: set[str | None] = {first_param, "self"}
-    if log_param:
-        consumed_for_services.add(log_param)
-    if reflection_param:
-        consumed_for_services.add(reflection_param)
-    if config_param:
-        consumed_for_services.add(config_param)
-    if store_param:
-        consumed_for_services.add(store_param)
+    consumed_for_services.update(p for p in framework_params.values() if p)
     consumed_for_services.update(reducer_params)
     consumed_for_services.update(raw_field_matchers.keys())
     service_params = _detect_service_params(
@@ -675,13 +683,13 @@ def extract_handler_meta(
         fn=fn,
         event_types=tuple(event_types),
         previous_names=getattr(fn, "_previous_names", ()),
-        log_param=log_param,
-        reflection_param=reflection_param,
+        log_param=framework_params["log_param"],
+        reflection_param=framework_params["reflection_param"],
+        config_param=framework_params["config_param"],
+        store_param=framework_params["store_param"],
         is_async=asyncio.iscoroutinefunction(fn),
         reducer_params=reducer_params,
         required_reducer_params=required_reducer_params,
-        config_param=config_param,
-        store_param=store_param,
         field_matchers=field_matchers,
         field_inject_params=field_inject_params,
         raises=raises,

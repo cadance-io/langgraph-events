@@ -86,10 +86,12 @@ def _forward_edge_lines(
 
 
 def render_evidence(index: int, log: EventLog, model: NamespaceModel) -> str:
-    """Render every deterministic fact bearing on how ``log[index]`` came to be."""
+    """Render every deterministic fact bearing on how ``log[index]`` came to be.
+
+    *index* must be canonical (0-based, in range) — callers go through
+    ``Reflection._resolve_index``.
+    """
     event = log[index]
-    if index < 0:
-        index = len(log) + index
     lines = [f"evidence for {event_line(index, event)}"]
 
     explicit = _explicit_link_lines(index, event, log)

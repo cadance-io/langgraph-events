@@ -56,11 +56,12 @@ def run_status(log: EventLog) -> str:
     """Derive the run's terminal status from the log — a fact, not a judgment."""
     if log.has(Halted):
         return "halted"
-    interrupted = log.latest(Interrupted)
-    if interrupted is not None:
-        events = log.events
-        after_interrupt = events[events.index(interrupted) :]
-        if not any(isinstance(e, Resumed) for e in after_interrupt):
+    # Scanning backward, an Interrupted seen before any Resumed is the latest
+    # interrupt with no resume — the run is still waiting on input.
+    for event in reversed(log.events):
+        if isinstance(event, Resumed):
+            break
+        if isinstance(event, Interrupted):
             return "interrupted"
     if log and isinstance(log[-1], RunPaused):
         return "paused"
@@ -126,10 +127,12 @@ def render_overview(log: EventLog, model: NamespaceModel) -> str:
 
 
 def render_event_detail(index: int, log: EventLog) -> str:
-    """The get op: one event, every field on its own line, plus taxonomy facts."""
+    """The get op: one event, every field on its own line, plus taxonomy facts.
+
+    *index* must be canonical (0-based, in range) — callers go through
+    ``Reflection._resolve_index``.
+    """
     event = log[index]
-    if index < 0:
-        index = len(log) + index
     lines = [f"#{index} {type(event).__name__}"]
     for f in dataclasses.fields(event):  # type: ignore[arg-type]
         lines.append(f"  {f.name}: {getattr(event, f.name)!r}")
