@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Reflection** — a deterministic, agent-harnessable query surface over the
+  event log. `graph.reflect(log)` returns a `Reflection` bundling the run's
+  `EventLog` with the graph's `NamespaceModel` and reducers: `context()`
+  (bounded prompt card), `overview()`, `event(i)`, `evidence(i)` (verdict-free
+  join of explicit links, owning command, static-edge candidates, forward
+  face), `schema()`, `state()` (reducer projections — the long-promised
+  `reduced_state`), and `.log`. Facts only; correlation is the querying
+  agent's job.
+- **`query_log` tool** — `Reflection.tool()` returns a framework-agnostic
+  `QueryTool` (one dispatch tool for ReAct loops) mirroring `EventLog`'s query
+  functions (`filter`/`select`/`latest`/`first`/`has`/`count`/`after`/`before`)
+  plus `overview`/`list`/`get`/`evidence`/`state`/`schema`. Event types are
+  addressed by name; the description embeds the vocabulary grouped by
+  namespace; errors return guidance strings the agent can self-correct from.
+- **`Reflection` handler injection** — annotate a handler parameter with
+  `Reflection` to receive an enriched mid-dispatch snapshot, mirroring
+  `EventLog` injection.
+- `examples/reflection_agent.py` — an offline ReAct-style diagnosis loop
+  ("why was this order cancelled?") driven entirely through `query_log`.
+
+### Changed
+
+- `EventGraph.namespaces()` now builds the `NamespaceModel` once and caches
+  it (handler metadata is immutable after construction); repeated calls no
+  longer rebuild or re-emit pattern warnings.
+
 ## [0.22.0] - 2026-06-14
 
 ### Added

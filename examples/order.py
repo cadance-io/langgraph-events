@@ -19,7 +19,8 @@ Demonstrates the DDD-aligned taxonomy end-to-end:
   invariant class's failures. Recovery reactors emit namespace-level events
   (``Order.Rejected``), never Command-private outcomes.
 - ``ScalarReducer`` as an domain class attribute — auto-named,
-  auto-scoped to the domain's events, surfaced via ``log.reduced_state``.
+  auto-scoped to the domain's events, surfaced via
+  ``graph.reflect(log).state()``.
 - ``EventGraph.from_namespaces`` — auto-registers inline handlers and mixes
   them with extra external handlers.
 
@@ -64,7 +65,8 @@ class Order(Namespace):
     # ScalarReducer as a declarative class attribute. Auto-named
     # ``current_status``, auto-scoped to the domain's events. Picks a
     # status label from each event's class name; ``SKIP`` for events that
-    # don't change status. Surfaced via ``log.reduced_state["current_status"]``.
+    # don't change status. Surfaced via
+    # ``graph.reflect(log).state()["current_status"]``.
     current_status = ScalarReducer(
         event_type=Event,
         fn=lambda e: {

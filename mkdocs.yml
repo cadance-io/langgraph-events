@@ -13,6 +13,7 @@ nav:
   - Concepts: concepts.md
   - Control Flow: control-flow.md
   - Reducers: reducers.md
+  - Reflection: reflection.md
   - Streaming: streaming.md
   - Patterns: patterns.md
   - API Reference: api.md

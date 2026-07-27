@@ -55,6 +55,9 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |
 | `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
+| `EventGraph.reflect(log)` | Method | Deterministic query surface over a run — returns a `Reflection` (see [Reflection](reflection.md)) |
+| `Reflection` | Class | Facts-only read-model: `context()`, `tool()`, `overview()`, `event(i)`, `evidence(i)`, `schema()`, `state()`, `.log`. Injectable into handlers by parameter annotation, like `EventLog` |
+| `QueryTool` | Frozen dataclass | The `query_log` LLM tool: `name` / `description` / `parameters` (JSON Schema) / `run(...) -> str`. Maps 1:1 to Anthropic / LangChain tool shapes |
 | `EventLog` | Class | Immutable query container (see [Concepts](concepts.md#eventlog)) |
 | `GraphState` | NamedTuple | `(events, is_interrupted, interrupted)` |
 
