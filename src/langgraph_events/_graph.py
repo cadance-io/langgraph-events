@@ -583,6 +583,8 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
     claimed: set[str | None] = {first_param, "self"}
     if meta.log_param:
         claimed.add(meta.log_param)
+    if meta.reflection_param:
+        claimed.add(meta.reflection_param)
     if meta.config_param:
         claimed.add(meta.config_param)
     if meta.store_param:
@@ -708,6 +710,9 @@ class EventGraph:
             UserMessageReceived(message=HumanMessage(content="Hi")),
         ])
     """
+
+    # Lazily built by namespaces(); class-level default keeps __init__ lean.
+    _namespaces_cache: NamespaceModel | None = None
 
     def __init__(
         self,
@@ -837,8 +842,15 @@ class EventGraph:
         Render it via :meth:`NamespaceModel.text`, :meth:`NamespaceModel.mermaid`
         (with ``view="structure"`` or ``view="choreography"``),
         :meth:`NamespaceModel.json`, or read the data attributes directly.
+
+        Built once and cached — handler metadata is immutable after
+        construction, and per-dispatch ``Reflection`` injection reads it.
         """
-        return NamespaceModel._build(self._handler_metas, self._return_info)
+        if self._namespaces_cache is None:  # class-level default; set per instance
+            self._namespaces_cache = NamespaceModel._build(
+                self._handler_metas, self._return_info
+            )
+        return self._namespaces_cache
 
     def reflect(self, log: EventLog) -> Reflection:
         """Return a :class:`Reflection` — deterministic query surface over *log*.
@@ -920,6 +932,7 @@ class EventGraph:
                 return_contract=self._return_contracts.get(meta.name),
                 services_by_type=self._services_by_type or None,
                 services_by_name=self._services_by_name or None,
+                model_provider=self.namespaces,
             )
             graph.add_node(meta.node_name, cast("Any", handler_node))
             handler_names.append(meta.node_name)

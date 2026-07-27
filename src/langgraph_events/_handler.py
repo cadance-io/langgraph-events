@@ -385,6 +385,9 @@ class HandlerMeta:
     # ``@on(previously=...)``. The graph registers an alias node per name so an
     # interrupted checkpoint paused at the old node still resumes after a rename.
     previous_names: tuple[str, ...] = ()
+    # Parameter annotated with ``Reflection`` — injected as an enriched,
+    # mid-dispatch snapshot (log-so-far + namespace model + reducers).
+    reflection_param: str | None = None
     reducer_params: tuple[str, ...] = ()
     # Subset of ``reducer_params`` whose annotation rejects ``None`` — the
     # framework raises ``ReducerNotSetError`` if the channel value is ``None``
@@ -525,6 +528,34 @@ def _detect_service_params(
     return tuple(detected)
 
 
+def _detect_framework_params(
+    hints: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Find params annotated with framework injectables, by exact type hint.
+
+    Returns ``(log_param, reflection_param, config_param, store_param)``.
+    """
+    from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
+    from langgraph.store.base import BaseStore  # noqa: PLC0415
+
+    from langgraph_events._reflection import Reflection  # noqa: PLC0415
+
+    log_param: str | None = None
+    reflection_param: str | None = None
+    config_param: str | None = None
+    store_param: str | None = None
+    for param_name, hint in hints.items():
+        if hint is EventLog:
+            log_param = log_param or param_name
+        elif hint is Reflection:
+            reflection_param = reflection_param or param_name
+        elif hint is RunnableConfig:
+            config_param = param_name
+        elif hint is BaseStore:
+            store_param = param_name
+    return log_param, reflection_param, config_param, store_param
+
+
 def extract_handler_meta(
     fn: Callable[..., Any],
     reducer_names: frozenset[str] = frozenset(),
@@ -561,24 +592,9 @@ def extract_handler_meta(
         )
         hints = {}
 
-    # Find the actual parameter name annotated with EventLog
-    log_param: str | None = None
-    for param_name, hint in hints.items():
-        if hint is EventLog:
-            log_param = param_name
-            break
-
-    # Detect config and store parameters by type hint
-    from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
-    from langgraph.store.base import BaseStore  # noqa: PLC0415
-
-    config_param: str | None = None
-    store_param: str | None = None
-    for param_name, hint in hints.items():
-        if hint is RunnableConfig:
-            config_param = param_name
-        elif hint is BaseStore:
-            store_param = param_name
+    log_param, reflection_param, config_param, store_param = _detect_framework_params(
+        hints
+    )
 
     # Detect reducer parameters by name match
     sig = inspect.signature(fn)
@@ -616,6 +632,8 @@ def extract_handler_meta(
     consumed_for_services: set[str | None] = {first_param, "self"}
     if log_param:
         consumed_for_services.add(log_param)
+    if reflection_param:
+        consumed_for_services.add(reflection_param)
     if config_param:
         consumed_for_services.add(config_param)
     if store_param:
@@ -658,6 +676,7 @@ def extract_handler_meta(
         event_types=tuple(event_types),
         previous_names=getattr(fn, "_previous_names", ()),
         log_param=log_param,
+        reflection_param=reflection_param,
         is_async=asyncio.iscoroutinefunction(fn),
         reducer_params=reducer_params,
         required_reducer_params=required_reducer_params,

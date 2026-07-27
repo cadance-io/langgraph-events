@@ -13,8 +13,11 @@ from collections.abc import Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
+    from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
 
 from langgraph.graph import END
@@ -243,11 +246,18 @@ def _build_inject(
     config: RunnableConfig | None = None,
     services_by_type: dict[type, Any] | None = None,
     services_by_name: dict[str, Any] | None = None,
+    model_provider: Callable[[], NamespaceModel] | None = None,
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
     if meta.log_param:
         inject[meta.log_param] = EventLog(state["events"])
+    if meta.reflection_param and model_provider is not None:
+        from langgraph_events._reflection import Reflection  # noqa: PLC0415
+
+        inject[meta.reflection_param] = Reflection(
+            EventLog(state["events"]), model=model_provider(), reducers=reducers
+        )
     for param_name in meta.reducer_params:
         r = reducers.get(param_name)
         value = state.get(param_name, r.empty if r else [])
@@ -522,6 +532,7 @@ def make_handler_node(
     return_contract: Any = None,
     services_by_type: dict[type, Any] | None = None,
     services_by_name: dict[str, Any] | None = None,
+    model_provider: Callable[[], NamespaceModel] | None = None,
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
@@ -549,7 +560,9 @@ def make_handler_node(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[Event], dict[str, Any]]:
         matching = [e for e in state["_pending"] if meta.matches(e)]
-        inject = _build_inject(meta, state, reds, config, svcs_by_type, svcs_by_name)
+        inject = _build_inject(
+            meta, state, reds, config, svcs_by_type, svcs_by_name, model_provider
+        )
         return matching, inject
 
     def _finalize(new_events: list[Event]) -> StateDict:
