@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from langgraph_events._event_log import EventLog
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reflection._tool import QueryTool
 
 
 class Reflection:
@@ -39,6 +40,12 @@ class Reflection:
     def log(self) -> EventLog:
         """The underlying event log, with its full query surface."""
         return self._log
+
+    def tool(self) -> QueryTool:
+        """The ``query_log`` tool — this surface packaged for an LLM agent."""
+        from langgraph_events._reflection import _tool  # noqa: PLC0415
+
+        return _tool.build_tool(self)
 
     def context(self, *, tail: int = 5) -> str:
         """A bounded context card for a prompt: run shape + recent events."""
