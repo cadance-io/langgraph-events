@@ -1,5 +1,9 @@
 site_name: langgraph-events
 site_description: Event-driven abstraction for LangGraph
+# Internal design specs live under docs/superpowers/ for the dev workflow;
+# they are not part of the published site.
+exclude_docs: |
+  superpowers/
 site_url: https://cadance-io.github.io/langgraph-events/
 repo_url: https://github.com/cadance-io/langgraph-events
 repo_name: cadance-io/langgraph-events

@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import re
 
-from conftest import Order
+from conftest import Order, Started
 
-from langgraph_events import EventGraph
+from langgraph_events import Command, DomainEvent, EventGraph, EventLog, Namespace
+
+
+class Warehouse(Namespace):
+    class Stock(Command):
+        class Updated(DomainEvent):
+            sku: str = ""
+
+        def stock(self) -> Warehouse.Stock.Updated:
+            return Warehouse.Stock.Updated(sku="s1")
+
+
+class Catalog(Namespace):
+    class Refresh(Command):
+        class Updated(DomainEvent):
+            page: int = 0
+
+        def refresh(self) -> Catalog.Refresh.Updated:
+            return Catalog.Refresh.Updated(page=1)
 
 
 def _tool_and_reflection(seed=None):
@@ -78,6 +96,42 @@ def describe_tool():
             tool, _ = _tool_and_reflection()
 
             assert tool.run(op="count", type="DomainEvent") == "1"
+
+        def it_mirrors_first_as_a_single_line():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="first", type="Place").startswith("#0 Place")
+
+        def it_mirrors_before_preserving_root_indices():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="before", type="Placed")
+
+            assert "#0 Place" in out
+            assert "#1" not in out
+
+        def it_treats_select_like_filter():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="select", type="Placed") == tool.run(
+                op="filter", type="Placed"
+            )
+
+        def it_reports_a_miss_by_type_name():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="latest", type="Shipped") == (
+                "no Shipped events in this log"
+            )
+
+    def when_the_list_op_receives_an_offset():
+        def it_pages_from_the_offset():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="list", index=1)
+
+            assert "#1 Placed" in out
+            assert "#0" not in out
 
     def when_a_listing_exceeds_the_limit():
         def it_caps_and_reports_the_remainder():
@@ -190,6 +244,68 @@ def describe_tool():
             tool, _ = _tool_and_reflection()
 
             assert tool.run(op="filter", type="Place", limit=0).startswith("error:")
+
+        def it_coerces_string_limits():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="filter", type="Place", limit="1") == tool.run(
+                op="filter", type="Place", limit=1
+            )
+
+    def when_required_arguments_are_missing():
+        def it_returns_guidance_for_a_missing_type():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="filter")
+
+            assert out.startswith("error:")
+            assert "type" in out
+
+        def it_returns_guidance_for_a_missing_index():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="evidence")
+
+            assert out.startswith("error:")
+            assert "index" in out
+
+    def when_no_reducers_are_registered():
+        def it_says_so_for_the_state_op():
+            graph = EventGraph([Warehouse.Stock])
+            reflection = graph.reflect(graph.invoke(Warehouse.Stock()))
+
+            assert reflection.tool().run(op="state") == "no reducers registered"
+
+    def when_simple_names_collide_across_namespaces():
+        def it_resolves_qualified_names():
+            graph = EventGraph([Warehouse.Stock, Catalog.Refresh])
+            reflection = graph.reflect(graph.invoke(Warehouse.Stock()))
+
+            assert reflection.tool().run(op="count", type="Warehouse.Updated") == "1"
+
+        def it_rejects_the_ambiguous_simple_name():
+            graph = EventGraph([Warehouse.Stock, Catalog.Refresh])
+            reflection = graph.reflect(graph.invoke(Warehouse.Stock()))
+
+            out = reflection.tool().run(op="count", type="Updated")
+
+            assert out.startswith("error: unknown type")
+
+        def it_advertises_the_qualified_names():
+            graph = EventGraph([Warehouse.Stock, Catalog.Refresh])
+            reflection = graph.reflect(graph.invoke(Warehouse.Stock()))
+
+            description = reflection.tool().description
+
+            assert "Warehouse.Updated" in description
+            assert "Catalog.Updated" in description
+
+    def when_the_log_holds_types_outside_the_model():
+        def it_still_resolves_them_by_name():
+            graph = EventGraph([Order.Place])
+            log = EventLog([Started(data="stray")])
+
+            assert graph.reflect(log).tool().run(op="count", type="Started") == "1"
 
         def it_returns_guidance_for_unknown_arguments():
             tool, _ = _tool_and_reflection()

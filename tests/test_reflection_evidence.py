@@ -113,6 +113,17 @@ def describe_evidence():
             assert "CustomerNotified" in text
             assert "#2" in text
 
+        def it_reports_edges_whose_targets_never_fired():
+            graph = EventGraph([Fulfillment.Ship, notify_customer])
+            log = EventLog(
+                [Fulfillment.Ship(order_id="o1"), Fulfillment.Ship.Dispatched()]
+            )
+            reflection = graph.reflect(log)
+
+            text = reflection.evidence(1)
+
+            assert "CustomerNotified: none in this log" in text
+
     def when_the_event_is_a_seed():
         def it_reports_no_backward_evidence():
             graph = EventGraph([Fulfillment.Ship, notify_customer])
