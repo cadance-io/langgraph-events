@@ -75,6 +75,7 @@ Requires Python 3.10+.
 - **Start:** [Getting Started](getting-started.md) → [Core Concepts](concepts.md)
 - **Dispatch patterns:** [Control Flow](control-flow.md) — fan-out, HITL, exceptions, invariants
 - **State:** [Reducers](reducers.md) — domain-scoped or graph-wide
+- **Agents over the log:** [Reflection](reflection.md) — `graph.reflect(log)` + the `query_log` tool: an LLM queries the run's facts lazily instead of holding the log in context
 - **Streams:** [Streaming](streaming.md), [AG-UI Adapter](agui.md)
 - **Reference:** [API](api.md), [Patterns](patterns.md)
 - **Evolving a deployed graph:** [Checkpointer Evolution](checkpointer-evolution.md) (what's safe to change) → [Event Migrations](event-migrations.md) (keep old checkpoints working after a rename)

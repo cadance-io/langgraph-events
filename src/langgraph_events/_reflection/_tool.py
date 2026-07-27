@@ -261,7 +261,9 @@ def build_tool(reflection: Reflection, *, model: NamespaceModel) -> QueryTool:
             return reflection.overview()
         if op == "state":
             return _render_state(reflection.state())
-        return reflection.schema()
+        if op == "schema":
+            return reflection.schema()
+        raise AssertionError(f"op {op!r} is in _OPS but has no dispatch branch")
 
     description = _DESCRIPTION_HEADER + _vocabulary_section(classes, vocabulary)
     parameters = {

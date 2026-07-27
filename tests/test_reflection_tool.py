@@ -188,22 +188,15 @@ def describe_tool():
 
     def when_driven_across_every_op():
         def it_returns_a_string_from_every_op():
+            from langgraph_events._reflection._tool import _INDEX_OPS, _TYPE_OPS
+
             tool, _ = _tool_and_reflection()
 
             for op in tool.parameters["properties"]["op"]["enum"]:
                 kwargs = {"op": op}
-                if op in {
-                    "filter",
-                    "select",
-                    "latest",
-                    "first",
-                    "has",
-                    "count",
-                    "after",
-                    "before",
-                }:
+                if op in _TYPE_OPS:
                     kwargs["type"] = "Place"
-                if op in {"get", "evidence"}:
+                if op in _INDEX_OPS:
                     kwargs["index"] = 0
 
                 assert isinstance(tool.run(**kwargs), str), op
@@ -222,6 +215,33 @@ def describe_tool():
 
             for op in tool.parameters["properties"]["op"]["enum"]:
                 assert op in tool.description, op
+
+    def when_checking_the_docs_page():
+        def it_documents_every_op_in_the_table():
+            from pathlib import Path
+
+            from langgraph_events._reflection._tool import _OPS
+
+            docs = (
+                Path(__file__).resolve().parents[1] / "docs" / "reflection.md"
+            ).read_text()
+
+            for op in _OPS:
+                assert f"`{op}`" in docs, op
+
+    def when_wrapped_for_langchain():
+        def it_runs_via_structured_tool():
+            from langchain_core.tools import StructuredTool
+
+            tool, reflection = _tool_and_reflection()
+            lc_tool = StructuredTool.from_function(
+                func=tool.run,
+                name=tool.name,
+                description=tool.description,
+                args_schema=tool.parameters,
+            )
+
+            assert lc_tool.invoke({"op": "overview"}) == reflection.overview()
 
     def when_built_twice():
         def it_returns_the_cached_tool():
