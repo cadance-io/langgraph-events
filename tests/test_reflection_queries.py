@@ -77,6 +77,15 @@ def describe_overview():
 
             assert "Stopped(reason='boom')" in reflection.overview()
 
+    def when_anomalies_flood_the_log():
+        def it_caps_the_anomaly_listing():
+            from langgraph_events import EventLog
+
+            graph = EventGraph([Order.Place])
+            log = EventLog([Stopped(reason=str(i)) for i in range(8)])
+
+            assert "and 3 more" in graph.reflect(log).overview()
+
 
 def describe_context():
     def it_shows_only_the_last_tail_events():
@@ -117,7 +126,21 @@ def describe_schema():
         assert "Placed" in text
 
 
+def describe_namespaces_cache():
+    def it_reuses_a_cached_namespace_model_across_calls():
+        graph = EventGraph([Order.Place])
+
+        assert graph.namespaces() is graph.namespaces()
+
+
 def describe_event():
+    def when_addressed_by_instance():
+        def it_resolves_like_an_index():
+            graph = EventGraph([Order.Place])
+            reflection = graph.reflect(graph.invoke(Order.Place(customer_id="c1")))
+
+            assert reflection.event(reflection.log[1]) == reflection.event(1)
+
     def when_the_index_is_valid():
         def it_dumps_the_full_event_detail():
             graph = EventGraph([Order.Place])

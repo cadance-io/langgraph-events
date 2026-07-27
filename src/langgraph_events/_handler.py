@@ -551,8 +551,8 @@ def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
 
     Returns a dict keyed by the ``HandlerMeta`` field names
     (``log_param`` / ``reflection_param`` / ``config_param`` / ``store_param``)
-    so callers splat it straight into the constructor — no positional slots
-    to miswire. First matching param wins for each injectable.
+    so call sites read each key by name — no positional slots to miswire.
+    First matching param wins for each injectable.
     """
     from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
     from langgraph.store.base import BaseStore  # noqa: PLC0415

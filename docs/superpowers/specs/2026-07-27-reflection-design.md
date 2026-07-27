@@ -106,8 +106,10 @@ class QueryTool:
     run: Callable[..., str]
 ```
 
-Written invariant: **every tool op is a one-line delegation to a public `Reflection`
-method or an `EventLog` method** — the tool never grows logic of its own.
+Written invariant: **every tool op delegates to a public `Reflection` query or
+is an index-preserving mirror of an `EventLog` query** — the tool never grows
+*semantics* of its own. (The native ops re-derive listings with root indices
+because `EventLog` returns index-less results; the semantics stay `EventLog`'s.)
 
 Module layout (house `_namespace/` convention — model + sibling renderers):
 

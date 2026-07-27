@@ -50,7 +50,7 @@ class Reflection:
         Built once per Reflection (log and model are immutable) and cached.
         """
         if self._tool is None:
-            self._tool = _tool.build_tool(self)
+            self._tool = _tool.build_tool(self, model=self._model)
         return self._tool
 
     def context(self, *, tail: int = 5) -> str:
@@ -61,9 +61,9 @@ class Reflection:
         """Totals, counts by kind/namespace, seeds, anomalies, run status."""
         return _text.render_overview(self._log, self._model)
 
-    def event(self, index: int) -> str:
+    def event(self, event: Event | int) -> str:
         """Full-field dump of one event, plus kind/namespace/owning command."""
-        return _text.render_event_detail(self._resolve_index(index), self._log)
+        return _text.render_event_detail(self._resolve_index(event), self._log)
 
     def evidence(self, event: Event | int) -> str:
         """Every deterministic fact bearing on how one event came to be.
@@ -101,7 +101,8 @@ class Reflection:
             if not -n <= event < n:
                 raise IndexError(
                     f"index {event} out of range "
-                    f"(log has {n} events, valid: 0..{n - 1})"
+                    f"(log has {n} events, valid: 0..{n - 1}, "
+                    f"negatives count from the end)"
                 )
             return event + n if event < 0 else event
         index = _evidence.find_index(self._log, event)

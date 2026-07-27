@@ -161,3 +161,73 @@ def describe_tool():
             index = int(re.search(r"#(\d+)", listing).group(1))
 
             assert tool.run(op="evidence", index=index).startswith("evidence for #1")
+
+    def when_inspecting_the_description():
+        def it_lists_every_op():
+            tool, _ = _tool_and_reflection()
+
+            for op in tool.parameters["properties"]["op"]["enum"]:
+                assert op in tool.description, op
+
+    def when_built_twice():
+        def it_returns_the_cached_tool():
+            _, reflection = _tool_and_reflection()
+
+            assert reflection.tool() is reflection.tool()
+
+    def when_arguments_arrive_malformed():
+        def it_coerces_string_integers():
+            tool, reflection = _tool_and_reflection()
+
+            assert tool.run(op="get", index="1") == reflection.event(1)
+
+        def it_returns_guidance_for_a_non_integer_index():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="get", index="abc").startswith("error:")
+
+        def it_returns_guidance_for_a_non_positive_limit():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="filter", type="Place", limit=0).startswith("error:")
+
+        def it_returns_guidance_for_unknown_arguments():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="overview", offset=2).startswith("error:")
+
+        def it_truncates_the_echoed_unknown_type():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="filter", type="x" * 100_000)
+
+            assert len(out) < 5_000
+
+    def when_nothing_follows_the_anchor():
+        def it_names_the_anchor_instead_of_claiming_no_match():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="after", type="Placed")
+
+            assert "no events after" in out
+            assert "#1" in out
+
+    def when_a_reducer_is_buggy():
+        def it_propagates_the_bug_instead_of_returning_guidance():
+            import pytest
+
+            from langgraph_events import Event, Reflection, ScalarReducer
+
+            def _boom(event: Event) -> str:
+                raise ValueError("reducer bug")
+
+            graph = EventGraph([Order.Place])
+            log = graph.invoke(Order.Place(customer_id="c1"))
+            reflection = Reflection(
+                log,
+                model=graph.namespaces(),
+                reducers={"boom": ScalarReducer(event_type=Event, fn=_boom)},
+            )
+
+            with pytest.raises(ValueError, match="reducer bug"):
+                reflection.tool().run(op="state")

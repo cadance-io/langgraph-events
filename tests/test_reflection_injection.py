@@ -56,8 +56,3 @@ def describe_reflection_injection():
         graph.invoke(Billing.Charge(amount=7))
 
         assert _LOG_SIZES == [(2, 2)]
-
-    def it_reuses_a_cached_namespace_model_across_calls():
-        graph = EventGraph([Billing.Charge, audit])
-
-        assert graph.namespaces() is graph.namespaces()

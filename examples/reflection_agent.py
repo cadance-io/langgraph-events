@@ -26,6 +26,8 @@ Usage:
 
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph_events import (
     Command,
     DomainEvent,
@@ -129,9 +131,9 @@ def diagnose(run: Reflection) -> None:
     """Scripted ReAct trace: why was the order cancelled?"""
     tool = run.tool()
 
-    def call(**kwargs: object) -> None:
+    def call(**kwargs: Any) -> None:
         print(f">>> query_log({', '.join(f'{k}={v!r}' for k, v in kwargs.items())})")
-        print(tool.run(**kwargs))  # type: ignore[arg-type]
+        print(tool.run(**kwargs))
         print()
 
     print("=== agent diagnosis: why was order A-1 cancelled? ===\n")

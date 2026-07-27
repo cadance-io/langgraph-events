@@ -32,7 +32,9 @@ def brief_agent(event: Sales.Cancel.Cancelled, run: Reflection) -> None:
 
 An injected `Reflection` is a mid-dispatch snapshot — like an injected
 `EventLog`, it reflects the events appended so far and should not be stored
-beyond the handler call.
+beyond the handler call. The same goes for `run.tool()`: the tool closes
+over that snapshot, so an agent framework that retains tool objects across
+turns silently pins stale data.
 
 `run.log` exposes the raw `EventLog` with its full Python query surface
 (`filter`/`select`/`latest`/`after`/…). `Reflection` deliberately does not
@@ -41,7 +43,7 @@ position in the root log, with no exceptions.
 
 ## The context card
 
-`run.context(tail=5)` returns a small, bounded text block for a prompt: the
+`run.context(tail=3)` returns a small, bounded text block for a prompt: the
 run's size and status, any anomalies, and the last few events as
 `#index EventName(...)` lines — an invitation to drill in with the tool:
 
@@ -141,6 +143,19 @@ answer to "what's the derived state now".
     Projections use `BaseReducer.seed()`, which does not run a `Reducer`'s
     custom merge fn. For `message_reducer` (add_messages dedup semantics)
     the projection can differ from the live channel value.
+
+## Trust and exposure
+
+Tool outputs are built from **event field values — untrusted runtime data**.
+If your events carry end-user content, that content reaches the querying
+agent's context verbatim (bounded per value: 40 chars in listings, 2000 in
+`get`/`state`). Treat `query_log` results as data, never as instructions,
+in your agent's system prompt. Be aware of the exposure scope: `get` and
+`state` return full field values (including anything sensitive an event or
+exception carries — e.g. `HandlerRaised.exception` often reprs connection
+strings), and `schema` reveals handler names and topology. There is no
+redaction hook yet; if your events hold secrets or PII, don't hand this
+tool to an agent whose transcript you wouldn't show those values to.
 
 ## Design notes
 

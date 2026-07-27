@@ -237,7 +237,7 @@ def make_dispatch(
     return dispatch
 
 
-def _build_inject(
+def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     meta: HandlerMeta,
     state: StateDict,
     reducers: dict[str, BaseReducer],
@@ -249,19 +249,16 @@ def _build_inject(
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
-    log_view = (
-        EventLog(state["events"]) if meta.log_param or meta.reflection_param else None
-    )
-    if meta.log_param:
-        inject[meta.log_param] = log_view
-    if meta.reflection_param:
-        from langgraph_events._reflection import Reflection  # noqa: PLC0415
+    if meta.log_param or meta.reflection_param:
+        log_view = EventLog(state["events"])
+        if meta.log_param:
+            inject[meta.log_param] = log_view
+        if meta.reflection_param:
+            from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
-        inject[meta.reflection_param] = Reflection(
-            log_view,  # type: ignore[arg-type]
-            model=model_provider(),
-            reducers=reducers,
-        )
+            inject[meta.reflection_param] = Reflection(
+                log_view, model=model_provider(), reducers=reducers
+            )
     for param_name in meta.reducer_params:
         r = reducers.get(param_name)
         value = state.get(param_name, r.empty if r else [])

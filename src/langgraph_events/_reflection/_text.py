@@ -6,35 +6,48 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import (
+    _ANOMALY_EVENT_TYPES,
     Command,
     DomainEvent,
     Event,
     Halted,
-    HandlerRaised,
     IntegrationEvent,
     Interrupted,
-    InvariantViolated,
     Resumed,
     RunPaused,
     SystemEvent,
 )
 
 if TYPE_CHECKING:
+    from typing import Any
+
     from langgraph_events._event_log import EventLog
     from langgraph_events._namespace import NamespaceModel
 
 _MAX_VALUE_LEN = 40
+# Drill-down ops (get/state) show much more than listings, but still bound
+# each value: event fields carry untrusted runtime data, and an unbounded
+# repr is both a prompt-injection amplifier and a context flood.
+_MAX_DETAIL_VALUE_LEN = 2000
+_MAX_ANOMALY_LINES = 5
 
-_ANOMALY_TYPES = (HandlerRaised, InvariantViolated, Halted, Interrupted, RunPaused)
+
+def safe_repr(value: Any, *, max_len: int = _MAX_DETAIL_VALUE_LEN) -> str:
+    """``repr`` bounded in length and hardened against throwing ``__repr__``."""
+    try:
+        text = repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+    if len(text) > max_len:
+        text = text[: max_len - 3] + "..."
+    return text
 
 
 def event_line(index: int, event: Event) -> str:
     """Render one event as ``#3 Placed(order_id='o1')`` with truncated values."""
     parts = []
     for f in dataclasses.fields(event):  # type: ignore[arg-type]
-        value = repr(getattr(event, f.name))
-        if len(value) > _MAX_VALUE_LEN:
-            value = value[: _MAX_VALUE_LEN - 3] + "..."
+        value = safe_repr(getattr(event, f.name), max_len=_MAX_VALUE_LEN)
         parts.append(f"{f.name}={value}")
     return f"#{index} {type(event).__name__}({', '.join(parts)})"
 
@@ -82,10 +95,20 @@ def seed_indices(log: EventLog, model: NamespaceModel) -> list[int]:
 
 
 def anomaly_lines(log: EventLog) -> list[str]:
-    """Indexed lines for every anomaly event, in log order."""
-    return [
-        event_line(i, e) for i, e in enumerate(log) if isinstance(e, _ANOMALY_TYPES)
+    """Indexed lines for anomaly events in log order, capped for prompt safety.
+
+    A failure storm must not flood the "bounded" context card: after
+    ``_MAX_ANOMALY_LINES`` entries the remainder collapses to a count.
+    """
+    lines = [
+        event_line(i, e)
+        for i, e in enumerate(log)
+        if isinstance(e, _ANOMALY_EVENT_TYPES)
     ]
+    if len(lines) > _MAX_ANOMALY_LINES:
+        remainder = len(lines) - _MAX_ANOMALY_LINES
+        lines = [*lines[:_MAX_ANOMALY_LINES], f"…and {remainder} more anomalies"]
+    return lines
 
 
 def _counts(log: EventLog) -> tuple[dict[str, int], dict[str, int]]:
@@ -135,7 +158,7 @@ def render_event_detail(index: int, log: EventLog) -> str:
     event = log[index]
     lines = [f"#{index} {type(event).__name__}"]
     for f in dataclasses.fields(event):  # type: ignore[arg-type]
-        lines.append(f"  {f.name}: {getattr(event, f.name)!r}")
+        lines.append(f"  {f.name}: {safe_repr(getattr(event, f.name))}")
     lines.append(f"  kind: {kind_of(event)}")
     namespace = getattr(type(event), "__namespace__", None)
     if namespace is not None:

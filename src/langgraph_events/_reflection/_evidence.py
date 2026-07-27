@@ -18,13 +18,21 @@ if TYPE_CHECKING:
     from langgraph_events._namespace import NamespaceModel
 
 
-def find_index(log: EventLog, event: Event) -> int | None:
-    """Locate *event* in *log* — identity first, then latest equal instance."""
+def find_index(
+    log: EventLog, event: Event, *, equality_before: int | None = None
+) -> int | None:
+    """Locate *event* in *log* — identity first, then latest equal instance.
+
+    ``equality_before`` bounds the equality fallback (identity search stays
+    global): a *backward* link must never resolve to a position at or after
+    its effect, even when equal instances repeat later in the log.
+    """
     events = log.events
     for i in range(len(events) - 1, -1, -1):
         if events[i] is event:
             return i
-    for i in range(len(events) - 1, -1, -1):
+    stop = len(events) if equality_before is None else equality_before
+    for i in range(stop - 1, -1, -1):
         if type(events[i]) is type(event) and events[i] == event:
             return i
     return None
@@ -41,7 +49,7 @@ def _explicit_link_lines(index: int, event: Event, log: EventLog) -> list[str]:
         value = getattr(event, f.name)
         if not isinstance(value, Event):
             continue
-        j = find_index(log, value)
+        j = find_index(log, value, equality_before=index)
         if j is None or j == index:
             continue
         marker = "" if log[j] is value else " (equality match)"

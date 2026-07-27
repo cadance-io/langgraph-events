@@ -151,3 +151,14 @@ def describe_evidence():
             dispatched = reflection.log.latest(Fulfillment.Ship.Dispatched)
 
             assert reflection.evidence(dispatched) == reflection.evidence(1)
+
+    def when_equal_events_repeat_after_the_effect():
+        def it_resolves_backward_links_to_a_preceding_instance():
+            graph = EventGraph([Fulfillment.Ship, notify_customer])
+            raised = HandlerRaised(handler="h", source_event=Started(data="dup"))
+            log = EventLog([Started(data="dup"), raised, Started(data="dup")])
+            reflection = graph.reflect(log)
+
+            text = reflection.evidence(1)
+
+            assert "source_event: #0 Started (equality match)" in text

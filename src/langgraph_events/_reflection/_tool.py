@@ -21,7 +21,7 @@ from langgraph_events._event import (
     SystemEvent,
     _iter_nested_events,
 )
-from langgraph_events._reflection._text import event_line
+from langgraph_events._reflection._text import event_line, safe_repr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -138,7 +138,7 @@ ops:
   has(type) / count(type) — existence / count
   after(type) / before(type) — events after / before the first match
   evidence(index) — all facts on how that event came to be: explicit links,
-    owning command, static-edge candidates, downstream face
+    owning command, static-edge candidates, forward face
   state — reducer projections over the log
   schema — the static topology: what can cause what
 """
@@ -179,59 +179,89 @@ def _run_type_op(  # noqa: PLR0911 — flat op dispatch, one return per op
         segment = list(enumerate(events[anchor + 1 :], start=anchor + 1))
     else:
         segment = list(enumerate(events[:anchor]))
+    if not segment:
+        # The type DID match — say so, or the agent concludes it doesn't exist.
+        return f"no events {op} the first {event_type.__name__} (#{anchor})"
     return _listing(segment, limit)
 
 
 def _render_state(state: dict[str, Any]) -> str:
     if not state:
         return "no reducers registered"
-    return "\n".join(f"{name}: {value!r}" for name, value in state.items())
+    return "\n".join(f"{name}: {safe_repr(value)}" for name, value in state.items())
 
 
-def build_tool(reflection: Reflection) -> QueryTool:
+def _coerce_int(value: Any) -> int | None:
+    """Best-effort int coercion for model-supplied arguments ("3" → 3)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_tool(reflection: Reflection, *, model: NamespaceModel) -> QueryTool:
     """Build the query_log tool over *reflection*."""
     log = reflection.log
-    classes = _model_classes(reflection._model, log)
+    classes = _model_classes(model, log)
     vocabulary = _type_vocabulary(classes)
 
-    def run(  # noqa: PLR0911 — flat op dispatch, one return per op
+    def run(  # noqa: PLR0911, PLR0912 — flat op dispatch, one return per op
         *,
         op: str = "",
         type: str | None = None,
         index: int | None = None,
         limit: int = _DEFAULT_LIMIT,
+        **extra: Any,
     ) -> str:
+        # Model-controlled inputs: validate everything up front and answer
+        # bad input with guidance strings; only genuine bugs may propagate.
+        if extra:
+            return (
+                f"error: unknown argument(s) {', '.join(sorted(extra))} — "
+                f"valid: op, type, index, limit"
+            )
         if op not in _OPS:
             return f"error: unknown op {op!r}. valid ops: {', '.join(_OPS)}"
-        try:
-            if op in _TYPE_OPS:
-                if type is None:
-                    return f"error: op {op!r} requires the `type` argument"
-                event_type = vocabulary.get(type)
-                if event_type is None:
-                    close = difflib.get_close_matches(type, vocabulary, n=3)
-                    hint = f" — did you mean: {', '.join(close)}?" if close else ""
-                    return (
-                        f"error: unknown type {type!r}{hint} "
-                        f"valid types: {', '.join(sorted(vocabulary))}"
-                    )
-                return _run_type_op(op, log, event_type, limit)
-            if op in _INDEX_OPS:
-                if index is None:
-                    return f"error: op {op!r} requires the `index` argument"
+        if index is not None:
+            index = _coerce_int(index)
+            if index is None:
+                return "error: `index` must be an integer"
+        coerced_limit = _coerce_int(limit)
+        if coerced_limit is None or coerced_limit <= 0:
+            return "error: `limit` must be a positive integer"
+        limit = coerced_limit
+        if op in _TYPE_OPS:
+            if type is None:
+                return f"error: op {op!r} requires the `type` argument"
+            event_type = vocabulary.get(type)
+            if event_type is None:
+                shown = type[:80] + "…" if len(type) > 80 else type
+                close = difflib.get_close_matches(type[:200], vocabulary, n=3)
+                hint = f" — did you mean: {', '.join(close)}?" if close else ""
+                return (
+                    f"error: unknown type {shown!r}{hint} "
+                    f"valid types: {', '.join(sorted(vocabulary))}"
+                )
+            return _run_type_op(op, log, event_type, limit)
+        if op in _INDEX_OPS:
+            if index is None:
+                return f"error: op {op!r} requires the `index` argument"
+            try:
+                # Only the index gate may convert exceptions to guidance —
+                # anything raised by user code (reducers, repr) propagates.
                 if op == "get":
                     return reflection.event(index)
                 return reflection.evidence(index)
-            if op == "list":
-                pairs = list(enumerate(log))[index or 0 :]
-                return _listing(pairs, limit)
-            if op == "overview":
-                return reflection.overview()
-            if op == "state":
-                return _render_state(reflection.state())
-            return reflection.schema()
-        except (IndexError, ValueError, KeyError) as exc:
-            return f"error: {exc}"
+            except (IndexError, ValueError) as exc:
+                return f"error: {exc}"
+        if op == "list":
+            pairs = list(enumerate(log))[index or 0 :]
+            return _listing(pairs, limit)
+        if op == "overview":
+            return reflection.overview()
+        if op == "state":
+            return _render_state(reflection.state())
+        return reflection.schema()
 
     description = _DESCRIPTION_HEADER + _vocabulary_section(classes, vocabulary)
     parameters = {
