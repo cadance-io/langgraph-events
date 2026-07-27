@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from langgraph_events._event import Event
     from langgraph_events._event_log import EventLog
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
@@ -56,6 +57,34 @@ class Reflection:
         from langgraph_events._reflection import _text  # noqa: PLC0415
 
         return _text.render_event_detail(index, self._log)
+
+    def evidence(self, event: Event | int) -> str:
+        """Every deterministic fact bearing on how one event came to be.
+
+        A verdict-free join: explicit instance links, the owning command,
+        matching static edges with candidate instances, and the forward face.
+        No cause is chosen — correlation is the querying agent's job.
+        """
+        from langgraph_events._reflection import _evidence  # noqa: PLC0415
+
+        return _evidence.render_evidence(
+            self._resolve_index(event), self._log, self._model
+        )
+
+    def _resolve_index(self, event: Event | int) -> int:
+        from langgraph_events._reflection import _evidence  # noqa: PLC0415
+
+        if isinstance(event, int):
+            if not -len(self._log) <= event < len(self._log):
+                raise IndexError(
+                    f"index {event} out of range "
+                    f"(log has {len(self._log)} events, valid: 0..{len(self._log) - 1})"
+                )
+            return event
+        index = _evidence.find_index(self._log, event)
+        if index is None:
+            raise ValueError(f"event {type(event).__name__} not found in this log")
+        return index
 
     def schema(self) -> str:
         """The static topology — what can cause what. A fact about the code."""
