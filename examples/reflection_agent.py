@@ -49,14 +49,16 @@ class CardDeclinedError(Exception):
     """Simulated payment-processor decline."""
 
 
+def _status_of(event: Event) -> str | None:
+    if isinstance(event, Sales.Cancel.Cancelled):
+        return "cancelled"
+    if isinstance(event, Sales.Place.Placed):
+        return "placed"
+    return None
+
+
 class Sales(Namespace):
-    order_status = ScalarReducer(
-        event_type=Event,
-        fn=lambda e: {
-            "Placed": "placed",
-            "Cancelled": "cancelled",
-        }.get(type(e).__name__),
-    )
+    order_status = ScalarReducer(event_type=Event, fn=_status_of)
 
     class Place(Command):
         order_id: str = ""

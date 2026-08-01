@@ -68,35 +68,15 @@ returning `str`) maps 1:1 onto an Anthropic tool dict or LangChain's
 `StructuredTool.from_function`:
 
 ```python
-# Anthropic — a complete tool_use round-trip
+# Anthropic
 tool = run.tool()
 anthropic_tool = {
     "name": tool.name,
     "description": tool.description,
     "input_schema": tool.parameters,
 }
-
-messages = [{"role": "user", "content": "Why was the order cancelled?"}]
-while True:
-    response = client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=1024,
-        tools=[anthropic_tool],
-        messages=messages,
-    )
-    if response.stop_reason != "tool_use":
-        break
-    messages.append({"role": "assistant", "content": response.content})
-    results = [
-        {
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": tool.run(**block.input),
-        }
-        for block in response.content
-        if block.type == "tool_use"
-    ]
-    messages.append({"role": "user", "content": results})
+# then the standard tool-use loop; your half is one line per tool_use block:
+content = tool.run(**block.input)  # goes back as the tool_result content
 ```
 
 ```python

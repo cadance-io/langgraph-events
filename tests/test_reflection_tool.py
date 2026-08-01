@@ -6,7 +6,30 @@ import re
 
 from conftest import Order, Started
 
-from langgraph_events import Command, DomainEvent, EventGraph, EventLog, Namespace
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    EventGraph,
+    EventLog,
+    HandlerRaised,
+    IntegrationEvent,
+    Namespace,
+)
+
+
+class Wrapped(IntegrationEvent):
+    payload: object = None
+
+
+class _RaisingEq:
+    def __eq__(self, other: object) -> bool:
+        raise ValueError("bad eq")
+
+    def __hash__(self) -> int:
+        return 0
+
+    def __repr__(self) -> str:
+        return "<raising-eq>"
 
 
 class Warehouse(Namespace):
@@ -152,6 +175,13 @@ def describe_tool():
             assert out.startswith("error: unknown type 'Placd'")
             assert "Placed" in out
 
+        def it_truncates_the_echoed_unknown_type():
+            tool, _ = _tool_and_reflection()
+
+            out = tool.run(op="filter", type="x" * 100_000)
+
+            assert len(out) < 5_000
+
     def when_the_index_is_out_of_range():
         def it_returns_a_range_guidance_string():
             tool, _ = _tool_and_reflection()
@@ -272,6 +302,11 @@ def describe_tool():
                 op="filter", type="Place", limit=1
             )
 
+        def it_returns_guidance_for_unknown_arguments():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="overview", offset=2).startswith("error:")
+
     def when_required_arguments_are_missing():
         def it_returns_guidance_for_a_missing_type():
             tool, _ = _tool_and_reflection()
@@ -327,17 +362,23 @@ def describe_tool():
 
             assert graph.reflect(log).tool().run(op="count", type="Started") == "1"
 
-        def it_returns_guidance_for_unknown_arguments():
-            tool, _ = _tool_and_reflection()
+    def when_user_equality_raises():
+        def it_propagates_instead_of_returning_guidance():
+            import pytest
 
-            assert tool.run(op="overview", offset=2).startswith("error:")
+            graph = EventGraph([Order.Place])
+            log = EventLog(
+                [
+                    Wrapped(payload=_RaisingEq()),
+                    HandlerRaised(
+                        handler="h", source_event=Wrapped(payload=_RaisingEq())
+                    ),
+                ]
+            )
+            tool = graph.reflect(log).tool()
 
-        def it_truncates_the_echoed_unknown_type():
-            tool, _ = _tool_and_reflection()
-
-            out = tool.run(op="filter", type="x" * 100_000)
-
-            assert len(out) < 5_000
+            with pytest.raises(ValueError, match="bad eq"):
+                tool.run(op="evidence", index=1)
 
     def when_nothing_follows_the_anchor():
         def it_names_the_anchor_instead_of_claiming_no_match():

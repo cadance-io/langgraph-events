@@ -248,11 +248,13 @@ def build_tool(reflection: Reflection, *, model: NamespaceModel) -> QueryTool:
                 return f"error: op {op!r} requires the `index` argument"
             try:
                 # Only the index gate may convert exceptions to guidance —
-                # anything raised by user code (reducers, repr) propagates.
+                # anything raised by user code (reducers, repr, __eq__)
+                # propagates. IndexError only: the tool always passes an int,
+                # for which the gate's ValueError branch is unreachable.
                 if op == "get":
                     return reflection.event(index)
                 return reflection.evidence(index)
-            except (IndexError, ValueError) as exc:
+            except IndexError as exc:
                 return f"error: {exc}"
         if op == "list":
             pairs = list(enumerate(log))[index or 0 :]
