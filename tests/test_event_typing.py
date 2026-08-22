@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import assert_type
 
-from langgraph_events import IntegrationEvent
+from langgraph_events import Event, HandlerReturn, IntegrationEvent
 
 
 class Ordered(IntegrationEvent):
@@ -40,3 +40,16 @@ def constructor_rejects_a_mistyped_field() -> None:
 def events_are_frozen() -> None:
     event = Ordered(sku="abc")
     event.sku = "def"  # type: ignore[misc]
+
+
+def the_package_reexports_its_documented_public_names() -> None:
+    """``Event`` and ``HandlerReturn`` are importable by design; the docs use both.
+
+    Under ``no_implicit_reexport`` a name the package imports but never re-exports is
+    invisible to a consumer, however public its docstring claims to be.
+    """
+
+    def catch_all(event: Event) -> HandlerReturn:
+        return None
+
+    assert_type(catch_all(Ordered()), HandlerReturn)
