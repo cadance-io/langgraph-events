@@ -22,7 +22,7 @@ Use `uv run scripts/release.py {major|minor|patch|X.Y.Z}` — do not hand-edit v
 
 ## Conventions
 
-- Python 3.10+, line length 88
+- Python 3.11+, line length 88
 - Use `uv` to run all tooling (not bare `python` or `pytest`)
 - Ruff for linting and formatting (config in pyproject.toml)
 - mypy strict mode

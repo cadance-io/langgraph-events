@@ -68,7 +68,7 @@ pip install langgraph-events           # core
 pip install "langgraph-events[agui]"   # + AG-UI adapter
 ```
 
-Requires Python 3.10+.
+Requires Python 3.11+.
 
 ## Navigate
 
