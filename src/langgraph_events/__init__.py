@@ -14,7 +14,7 @@ from langgraph_events._event import (
     Cancelled,
     Command,
     DomainEvent,
-    Event,  # noqa: F401 (importable for reducer event_type=Event catch-all)
+    Event,
     Halted,
     HandlerRaised,
     IntegrationEvent,
@@ -62,7 +62,7 @@ from langgraph_events._reducer import (
 )
 from langgraph_events._reflection import QueryTool, Reflection
 from langgraph_events._types import (
-    HandlerReturn,  # noqa: F401 (importable but not promoted)
+    HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
 
 # --- Deprecated top-level aliases ----------------------------------------
@@ -103,6 +103,7 @@ __all__ = [
     "CommandPrivacyError",
     "DomainEvent",
     "DomainPatternWarning",
+    "Event",
     "EventGraph",
     "EventLog",
     "FoldReducer",

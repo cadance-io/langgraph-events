@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Event` and `HandlerReturn` are now re-exported, not merely importable.** Both were imported
+  into the package namespace under a `# noqa: F401` but never re-exported, so a consumer running
+  mypy with `no_implicit_reexport` (which `strict = true` implies) got
+  `Module "langgraph_events" does not explicitly export attribute "Event"` — despite `Event`
+  being annotated in four places across the docs and `HandlerReturn` being a documented handler
+  return type. `Event` joins `__all__`; `HandlerReturn` re-exports through an explicit
+  `as` alias, staying out of `__all__` as intended so `import *` is unchanged.
+
 ## [0.23.0] - 2026-08-22
 
 ### Added
