@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it (handler metadata is immutable after construction); repeated calls no
   longer rebuild or re-emit pattern warnings.
 
+### Fixed
+
+- **`__set_name__` rejections are asserted portably.** Python 3.12 stopped
+  wrapping exceptions raised in `__set_name__`, so the nesting-rule tests —
+  which asserted `RuntimeError` and read `__cause__` — failed on 3.12 and 3.13.
+  They now assert the exact shape each interpreter produces. The library's
+  behaviour is unchanged; only the tests were version-bound.
+
 ## [0.22.0] - 2026-06-14
 
 ### Added
