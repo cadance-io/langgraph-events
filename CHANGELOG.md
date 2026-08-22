@@ -28,12 +28,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EventLog` injection.
 - `examples/reflection_agent.py` — an offline ReAct-style diagnosis loop
   ("why was this order cancelled?") driven entirely through `query_log`.
+- **Event constructors are now visible to type checkers.**
+  `Event.__init_subclass__` applies `dataclasses.dataclass(frozen=True)`, but
+  nothing told a type checker that — and the package ships `py.typed`, so every
+  consumer had to silence `call-arg` on every event construction. `Event` now
+  carries `@dataclass_transform(frozen_default=True)`, so an event's generated
+  `__init__` is visible, its fields keep their declared types, an unknown or
+  mistyped keyword is rejected, and assignment is refused. Pinned by
+  `tests/test_event_typing.py`, which the mypy gate now checks.
+- **CI runs the test suite on every supported Python** (3.11, 3.12, 3.13), and
+  the release workflow gates on the same matrix. Both previously ran a single
+  interpreter, so version-specific breakage was invisible.
 
 ### Changed
 
 - `EventGraph.namespaces()` now builds the `NamespaceModel` once and caches
   it (handler metadata is immutable after construction); repeated calls no
   longer rebuild or re-emit pattern warnings.
+
+### Removed
+
+- **BREAKING: Python 3.10 is no longer supported.** The minimum is now 3.11.
+  Nothing supported 3.10 in practice — ruff already targeted `py311`, CI never
+  ran it, and 43 tests fail there — so the declaration was a claim nothing
+  checked. **Existing 3.10 installations keep working and nothing breaks at
+  runtime**: `requires-python` means pip and uv simply will not offer this
+  version to a 3.10 environment, so a 3.10 user stays on 0.22.0 rather than
+  receiving a broken upgrade.
+
+### Fixed
+
+- **`__set_name__` rejections are asserted portably.** Python 3.12 stopped
+  wrapping exceptions raised in `__set_name__`, so the nesting-rule tests —
+  which asserted `RuntimeError` and read `__cause__` — failed on 3.12 and 3.13.
+  They now assert the exact shape each interpreter produces. The library's
+  behaviour is unchanged; only the tests were version-bound.
 
 ## [0.22.0] - 2026-06-14
 

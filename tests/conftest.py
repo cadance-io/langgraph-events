@@ -1,5 +1,7 @@
 """Shared fixtures and event classes for the test suite."""
 
+import sys
+
 import pytest
 
 from langgraph_events import (
@@ -12,6 +14,17 @@ from langgraph_events import (
     ScalarReducer,
     on,
 )
+
+_WRAPS_SET_NAME_ERRORS = sys.version_info < (3, 12)
+"""CPython wrapped a failing ``__set_name__`` in RuntimeError until 3.12."""
+
+SET_NAME_ERRORS = RuntimeError if _WRAPS_SET_NAME_ERRORS else TypeError
+
+
+def set_name_cause(error: BaseException) -> BaseException:
+    """The error ``__set_name__`` raised, unwrapped on the Pythons that wrap it."""
+    return error.__cause__ if _WRAPS_SET_NAME_ERRORS else error
+
 
 # ---------------------------------------------------------------------------
 # Reusable event classes (used across multiple test files)

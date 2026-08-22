@@ -6,8 +6,24 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+*"
 
 jobs:
+  test:
+    name: Test
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --group dev
+      - run: uv run pytest tests/
+
   build:
     name: Build and validate
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +38,7 @@ jobs:
             exit 1
           fi
       - run: uv run ruff check src/ tests/
-      - run: uv run mypy src/
-      - run: uv run pytest tests/
+      - run: uv run mypy src/ tests/test_event_typing.py tests/test_fold_reducer_typing.py
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:

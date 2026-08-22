@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "langgraph-events"
 version = "0.22.0"
 description = "Opinionated event-driven abstraction for LangGraph. State IS events."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "MIT"
 authors = [{name = "cadance-io"}]
 readme = "README.md"
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

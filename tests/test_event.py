@@ -3,6 +3,7 @@
 import dataclasses
 
 import pytest
+from conftest import SET_NAME_ERRORS, set_name_cause
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from langgraph_events import (
@@ -322,29 +323,31 @@ def describe_Command():
     def when_nested_in_non_domain_class():
 
         def it_rejects():
-            with pytest.raises(RuntimeError) as exc_info:
+            with pytest.raises(SET_NAME_ERRORS) as exc_info:
 
                 class NotDomain:
                     class Place(Command):
                         pass
 
-            assert isinstance(exc_info.value.__cause__, TypeError)
-            assert "must be nested" in str(exc_info.value.__cause__)
-            assert "Namespace" in str(exc_info.value.__cause__)
+            cause = set_name_cause(exc_info.value)
+            assert isinstance(cause, TypeError)
+            assert "must be nested" in str(cause)
+            assert "Namespace" in str(cause)
 
     def when_nested_in_command():
 
         def it_rejects():
-            with pytest.raises(RuntimeError) as exc_info:
+            with pytest.raises(SET_NAME_ERRORS) as exc_info:
 
                 class Widget(Namespace):
                     class Place(Command):
                         class Inner(Command):
                             pass
 
-            assert isinstance(exc_info.value.__cause__, TypeError)
-            assert "must be nested" in str(exc_info.value.__cause__)
-            assert "Namespace" in str(exc_info.value.__cause__)
+            cause = set_name_cause(exc_info.value)
+            assert isinstance(cause, TypeError)
+            assert "must be nested" in str(cause)
+            assert "Namespace" in str(cause)
 
 
 def describe_DomainEvent():
@@ -390,14 +393,15 @@ def describe_DomainEvent():
     def when_nested_in_non_domain_class():
 
         def it_rejects():
-            with pytest.raises(RuntimeError) as exc_info:
+            with pytest.raises(SET_NAME_ERRORS) as exc_info:
 
                 class NotDomain:
                     class Placed(DomainEvent):
                         pass
 
-            assert isinstance(exc_info.value.__cause__, TypeError)
-            assert "must be nested" in str(exc_info.value.__cause__)
+            cause = set_name_cause(exc_info.value)
+            assert isinstance(cause, TypeError)
+            assert "must be nested" in str(cause)
 
     def when_subclass_of_validated_event():
 

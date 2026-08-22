@@ -10,7 +10,7 @@ import types
 import typing
 import weakref
 from dataclasses import fields as dc_fields
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, dataclass_transform
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,6 +26,7 @@ during ``__dict__`` walks (it shares a class object with a directly-nested
 DomainEvent for single-outcome Commands) or look it up by attribute access."""
 
 
+@dataclass_transform(frozen_default=True)
 class Event:
     """Internal base class for all events.
 
@@ -443,7 +444,7 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
         # verdict, so legitimate spellings (incl. module-level ClassVar
         # aliases under PEP 563) never trip this.
         for name in _RESERVED_MODIFIERS:
-            if any(f.name == name for f in dc_fields(cls)):  # type: ignore[arg-type]
+            if any(f.name == name for f in dc_fields(cls)):
                 raise _reserved_modifier_error(cls, name)
         if _inherits_namespace(cls):
             return
@@ -698,7 +699,7 @@ class Interrupted(SystemEvent):
             got = type(resume_value).__name__
             raise TypeError(f"resume() requires an Event instance, got {got}")
         new_events.append(resume_value)
-        new_events.append(Resumed(value=resume_value, interrupted=self))  # type: ignore[call-arg]
+        new_events.append(Resumed(value=resume_value, interrupted=self))
 
 
 class Resumed(SystemEvent):
@@ -853,7 +854,7 @@ class SystemPromptSet(IntegrationEvent, MessageEvent):
         """Create from a plain string, wrapping it in a ``SystemMessage``."""
         from langchain_core.messages import SystemMessage as SysMsg  # noqa: PLC0415
 
-        return cls(message=SysMsg(content=content))  # type: ignore[call-arg]
+        return cls(message=SysMsg(content=content))
 
 
 class Scatter:

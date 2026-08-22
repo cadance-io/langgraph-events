@@ -1291,7 +1291,7 @@ class EventGraph:
 
     @staticmethod
     def _unresumable_event(value: Event) -> Unresumable:
-        return Unresumable(resume_value=type(value).__name__)  # type: ignore[call-arg]
+        return Unresumable(resume_value=type(value).__name__)
 
     def resume(self, value: Event, **kwargs: Any) -> EventLog:
         """Resume an interrupted graph with a domain event.
