@@ -38,7 +38,7 @@ jobs:
             exit 1
           fi
       - run: uv run ruff check src/ tests/
-      - run: uv run mypy src/
+      - run: uv run mypy src/ tests/test_event_typing.py tests/test_fold_reducer_typing.py
       - run: uv build
       - uses: actions/upload-artifact@v4
         with:

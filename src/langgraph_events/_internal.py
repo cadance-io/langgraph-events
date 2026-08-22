@@ -156,7 +156,7 @@ def make_router_node(
         has_resume = any(isinstance(e, Resumed) for e in new_events)
         current_round = 1 if has_resume else state.get("_round", 0) + 1
         if current_round > max_rounds:
-            halted = MaxRoundsExceeded(rounds=max_rounds)  # type: ignore[call-arg]
+            halted = MaxRoundsExceeded(rounds=max_rounds)
             return {
                 "_cursor": len(state["events"]),
                 "_pending": [halted],
@@ -176,7 +176,7 @@ def make_router_node(
                     "_round": current_round,
                 }
             started_at = configurable[_DEADLINE_STARTED_AT_KEY]
-            paused = RunPaused(  # type: ignore[call-arg]
+            paused = RunPaused(
                 elapsed_seconds=time.monotonic() - started_at,
             )
             return {
@@ -350,7 +350,7 @@ def _make_handler_raised(
     meta: HandlerMeta, event: Event, exc: Exception
 ) -> HandlerRaised:
     """Build a ``HandlerRaised`` event for a caught declared exception."""
-    return HandlerRaised(  # type: ignore[call-arg]
+    return HandlerRaised(
         handler=meta.name,
         source_event=event,
         exception=exc,
@@ -383,7 +383,7 @@ def _check_invariants(
     inv_cls = _find_failing_invariant(meta, EventLog(state["events"]))
     if inv_cls is None:
         return None
-    return InvariantViolated(  # type: ignore[call-arg]
+    return InvariantViolated(
         invariant=inv_cls(),
         handler=meta.name,
         source_event=event,
@@ -417,7 +417,7 @@ def _check_invariants_post(
     inv_cls = _find_failing_invariant(meta, simulated)
     if inv_cls is None:
         return None
-    return InvariantViolated(  # type: ignore[call-arg]
+    return InvariantViolated(
         invariant=inv_cls(),
         handler=meta.name,
         source_event=event,

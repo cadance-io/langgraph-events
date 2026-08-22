@@ -33,7 +33,7 @@ repos:
       - id: mypy
         name: mypy
         language: system
-        entry: uv run mypy src/
+        entry: uv run mypy src/ tests/test_event_typing.py tests/test_fold_reducer_typing.py
         types: [python]
         pass_filenames: false
         require_serial: true

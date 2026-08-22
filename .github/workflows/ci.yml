@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - run: uv sync --group dev
-      - run: uv run mypy src/
+      - run: uv run mypy src/ tests/test_event_typing.py tests/test_fold_reducer_typing.py
 
   test:
     strategy:
