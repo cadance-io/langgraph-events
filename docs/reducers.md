@@ -191,3 +191,10 @@ rebuilt = replay_reducer(my_reducer, event_log)
 ```
 
 The library doesn't iterate the checkpointer for you — wire the loop in your own startup or migration script. See [Event migrations](event-migrations.md) for the reducer-state matrix.
+
+## Introspection
+
+`graph.reflect(log).state()` projects every registered reducer over a run's
+event log from scratch — the runtime answer to "what's the derived state
+now", for code and for agents (via the `state` op of the `query_log` tool).
+See [Reflection](reflection.md).

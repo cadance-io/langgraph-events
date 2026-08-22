@@ -50,6 +50,7 @@ pip install git+https://github.com/cadance-io/langgraph-events.git
 - Getting started: [`docs/getting-started.md`](docs/getting-started.md)
 - Core concepts: [`docs/concepts.md`](docs/concepts.md)
 - Patterns: [`docs/patterns.md`](docs/patterns.md)
+- Reflection (agent-queryable event log): [`docs/reflection.md`](docs/reflection.md)
 - API reference: [`docs/api.md`](docs/api.md)
 - AG-UI adapter: [`docs/agui.md`](docs/agui.md)
 - Checkpointer and graph evolution: [`docs/checkpointer-evolution.md`](docs/checkpointer-evolution.md)

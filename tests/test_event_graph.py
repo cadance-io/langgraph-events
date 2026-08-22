@@ -6,7 +6,15 @@ import typing
 import warnings
 
 import pytest
-from conftest import Completed, Ended, MessageReceived, MessageSent, Processed, Started
+from conftest import (
+    Completed,
+    Ended,
+    MessageReceived,
+    MessageSent,
+    Order,
+    Processed,
+    Started,
+)
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -5078,3 +5086,10 @@ def describe_assert_resume_recovers():
                 assert_resume_recovers(
                     before, after, seed=Started(data="x"), resume_with=_Go()
                 )
+
+
+def describe_namespaces_cache():
+    def it_reuses_a_cached_namespace_model_across_calls():
+        graph = EventGraph([Order.Place])
+
+        assert graph.namespaces() is graph.namespaces()

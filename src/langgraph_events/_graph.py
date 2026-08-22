@@ -64,6 +64,7 @@ if TYPE_CHECKING:
     from langgraph.types import StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reflection import Reflection
 
 
 class OrphanedEventWarning(UserWarning):
@@ -580,12 +581,7 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
     sig = inspect.signature(meta.fn)
     first_param = next(iter(sig.parameters), None)
     claimed: set[str | None] = {first_param, "self"}
-    if meta.log_param:
-        claimed.add(meta.log_param)
-    if meta.config_param:
-        claimed.add(meta.config_param)
-    if meta.store_param:
-        claimed.add(meta.store_param)
+    claimed.update(meta.framework_params)
     claimed.update(meta.reducer_params)
     claimed.update(meta.field_inject_params)
     claimed.update(name for name, _ in meta.service_params)
@@ -707,6 +703,9 @@ class EventGraph:
             UserMessageReceived(message=HumanMessage(content="Hi")),
         ])
     """
+
+    # Lazily built by namespaces(); class-level default keeps __init__ lean.
+    _namespaces_cache: NamespaceModel | None = None
 
     def __init__(
         self,
@@ -836,8 +835,26 @@ class EventGraph:
         Render it via :meth:`NamespaceModel.text`, :meth:`NamespaceModel.mermaid`
         (with ``view="structure"`` or ``view="choreography"``),
         :meth:`NamespaceModel.json`, or read the data attributes directly.
+
+        Built once and cached — handler metadata is immutable after
+        construction, and per-dispatch ``Reflection`` injection reads it.
         """
-        return NamespaceModel._build(self._handler_metas, self._return_info)
+        if self._namespaces_cache is None:  # class-level default; set per instance
+            self._namespaces_cache = NamespaceModel._build(
+                self._handler_metas, self._return_info
+            )
+        return self._namespaces_cache
+
+    def reflect(self, log: EventLog) -> Reflection:
+        """Return a :class:`Reflection` — deterministic query surface over *log*.
+
+        Bundles the log with this graph's namespace model and reducers so an
+        agent (or code) can query facts about a run: listings, field dumps,
+        static topology, reducer projections, and verdict-free evidence joins.
+        """
+        from langgraph_events._reflection import Reflection  # noqa: PLC0415
+
+        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
 
     @property
     def reducer_names(self) -> frozenset[str]:
@@ -908,6 +925,7 @@ class EventGraph:
                 return_contract=self._return_contracts.get(meta.name),
                 services_by_type=self._services_by_type or None,
                 services_by_name=self._services_by_name or None,
+                model_provider=self.namespaces,
             )
             graph.add_node(meta.node_name, cast("Any", handler_node))
             handler_names.append(meta.node_name)

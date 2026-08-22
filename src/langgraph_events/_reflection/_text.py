@@ -1,0 +1,187 @@
+"""Text renderers for Reflection output — compact, #index-addressed, deterministic."""
+
+from __future__ import annotations
+
+import dataclasses
+from typing import TYPE_CHECKING
+
+from langgraph_events._event import (
+    _ANOMALY_EVENT_TYPES,
+    Command,
+    DomainEvent,
+    Event,
+    Halted,
+    IntegrationEvent,
+    Interrupted,
+    Resumed,
+    RunPaused,
+    SystemEvent,
+)
+
+if TYPE_CHECKING:
+    from typing import Any
+
+    from langgraph_events._event_log import EventLog
+    from langgraph_events._namespace import NamespaceModel
+
+_MAX_VALUE_LEN = 40
+# Drill-down ops (get/state) show much more than listings, but still bound
+# each value: event fields carry untrusted runtime data, and an unbounded
+# repr is both a prompt-injection amplifier and a context flood.
+_MAX_DETAIL_VALUE_LEN = 2000
+_MAX_ANOMALY_LINES = 5
+
+
+def safe_repr(value: Any, *, max_len: int = _MAX_DETAIL_VALUE_LEN) -> str:
+    """``repr`` bounded in length and hardened against throwing ``__repr__``."""
+    try:
+        text = repr(value)
+    except Exception:
+        return f"<unrepresentable {type(value).__name__}>"
+    if len(text) > max_len:
+        text = text[: max_len - 3] + "..."
+    return text
+
+
+def event_line(index: int, event: Event) -> str:
+    """Render one event as ``#3 Placed(order_id='o1')`` with truncated values."""
+    parts = []
+    for f in dataclasses.fields(event):  # type: ignore[arg-type]
+        value = safe_repr(getattr(event, f.name), max_len=_MAX_VALUE_LEN)
+        parts.append(f"{f.name}={value}")
+    return f"#{index} {type(event).__name__}({', '.join(parts)})"
+
+
+def kind_of(event: Event) -> str:
+    """Classify an event into its taxonomy kind."""
+    if isinstance(event, Command):
+        return "command"
+    if isinstance(event, DomainEvent):
+        return "domain"
+    if isinstance(event, IntegrationEvent):
+        return "integration"
+    if isinstance(event, SystemEvent):
+        return "system"
+    return "event"
+
+
+def run_status(log: EventLog) -> str:
+    """Derive the run's terminal status from the log — a fact, not a judgment."""
+    if log.has(Halted):
+        return "halted"
+    # Scanning backward, an Interrupted seen before any Resumed is the latest
+    # interrupt with no resume — the run is still waiting on input.
+    for event in reversed(log.events):
+        if isinstance(event, Resumed):
+            break
+        if isinstance(event, Interrupted):
+            return "interrupted"
+    if log and isinstance(log[-1], RunPaused):
+        return "paused"
+    return "completed"
+
+
+def seed_indices(log: EventLog, model: NamespaceModel) -> list[int]:
+    """Indices of the leading events matching the model's seed types."""
+    if not model.seeds:
+        return []
+    seed_types = tuple(model.seeds)
+    indices = []
+    for i, event in enumerate(log):
+        if not isinstance(event, seed_types):
+            break
+        indices.append(i)
+    return indices
+
+
+def anomaly_lines(log: EventLog) -> list[str]:
+    """Indexed lines for anomaly events in log order, capped for prompt safety.
+
+    A failure storm must not flood the "bounded" context card: after
+    ``_MAX_ANOMALY_LINES`` entries the remainder collapses to a count.
+    """
+    lines = [
+        event_line(i, e)
+        for i, e in enumerate(log)
+        if isinstance(e, _ANOMALY_EVENT_TYPES)
+    ]
+    if len(lines) > _MAX_ANOMALY_LINES:
+        remainder = len(lines) - _MAX_ANOMALY_LINES
+        lines = [*lines[:_MAX_ANOMALY_LINES], f"…and {remainder} more anomalies"]
+    return lines
+
+
+def _counts(log: EventLog) -> tuple[dict[str, int], dict[str, int]]:
+    by_kind: dict[str, int] = {}
+    by_namespace: dict[str, int] = {}
+    for event in log:
+        kind = kind_of(event)
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+        namespace = getattr(type(event), "__namespace__", None)
+        if namespace is not None:
+            by_namespace[namespace] = by_namespace.get(namespace, 0) + 1
+    return by_kind, by_namespace
+
+
+def render_overview(log: EventLog, model: NamespaceModel) -> str:
+    """The overview op: totals, counts, seeds, anomalies, status."""
+    by_kind, by_namespace = _counts(log)
+    lines = [f"run overview: {len(log)} events, status: {run_status(log)}"]
+    if by_kind:
+        lines.append(
+            "kinds: " + ", ".join(f"{k}: {n}" for k, n in sorted(by_kind.items()))
+        )
+    if by_namespace:
+        lines.append(
+            "namespaces: "
+            + ", ".join(f"{ns}: {n}" for ns, n in sorted(by_namespace.items()))
+        )
+    seeds = seed_indices(log, model)
+    if seeds:
+        lines.append("seeds:")
+        lines.extend(f"  {event_line(i, log[i])}" for i in seeds)
+    anomalies = anomaly_lines(log)
+    if anomalies:
+        lines.append("anomalies:")
+        lines.extend(f"  {line}" for line in anomalies)
+    else:
+        lines.append("anomalies: none")
+    return "\n".join(lines)
+
+
+def render_event_detail(index: int, log: EventLog) -> str:
+    """The get op: one event, every field on its own line, plus taxonomy facts.
+
+    *index* must be canonical (0-based, in range) — callers go through
+    ``Reflection._resolve_index``.
+    """
+    event = log[index]
+    lines = [f"#{index} {type(event).__name__}"]
+    for f in dataclasses.fields(event):  # type: ignore[arg-type]
+        lines.append(f"  {f.name}: {safe_repr(getattr(event, f.name))}")
+    lines.append(f"  kind: {kind_of(event)}")
+    namespace = getattr(type(event), "__namespace__", None)
+    if namespace is not None:
+        lines.append(f"  namespace: {namespace}")
+    command = getattr(type(event), "__command__", None)
+    if command is not None:
+        lines.append(f"  command: {command.__name__}")
+    return "\n".join(lines)
+
+
+def render_context(log: EventLog, model: NamespaceModel, *, tail: int) -> str:
+    """The prompt context card: bounded shape of the run + tool pointer."""
+    total = len(log)
+    lines = [
+        f"[run context] {total} events, status: {run_status(log)} — "
+        "use the query_log tool to inspect the event log"
+    ]
+    anomalies = anomaly_lines(log)
+    if anomalies:
+        lines.append("anomalies:")
+        lines.extend(f"  {line}" for line in anomalies)
+    shown = min(tail, total)
+    lines.append(f"recent events (last {shown} of {total}):")
+    start = total - shown
+    lines.extend(f"  {event_line(start + i, e)}" for i, e in enumerate(log[start:]))
+    return "\n".join(lines)

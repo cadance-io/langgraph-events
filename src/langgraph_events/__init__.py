@@ -60,6 +60,7 @@ from langgraph_events._reducer import (
     ScalarReducer,
     message_reducer,
 )
+from langgraph_events._reflection import QueryTool, Reflection
 from langgraph_events._types import (
     HandlerReturn,  # noqa: F401 (importable but not promoted)
 )
@@ -121,8 +122,10 @@ __all__ = [
     "Namespace",
     "NamespaceModel",
     "OrphanedEventWarning",
+    "QueryTool",
     "Reducer",
     "ReducerNotSetError",
+    "Reflection",
     "Resumed",
     "RunPaused",
     "ScalarReducer",

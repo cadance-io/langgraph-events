@@ -798,6 +798,21 @@ class InvariantViolated(SystemEvent):
     would_emit: tuple[Event, ...] = ()
 
 
+# The framework events that signal something went wrong or interrupted the
+# run — the canonical "anomaly" set, declared next to the classes so a new
+# anomaly event is added here (and only here). Consumed by the reflection
+# surface (overview/context anomaly listings). Deliberately distinct from
+# ``_namespace/_model._FRAMEWORK_EMITTED`` (which classifies *emission*
+# sources for the static model, e.g. includes ``Resumed``).
+_ANOMALY_EVENT_TYPES: tuple[type[SystemEvent], ...] = (
+    HandlerRaised,
+    InvariantViolated,
+    Halted,
+    Interrupted,
+    RunPaused,
+)
+
+
 class SystemPromptSet(IntegrationEvent, MessageEvent):
     """Built-in event for setting the system prompt as a first-class citizen.
 
