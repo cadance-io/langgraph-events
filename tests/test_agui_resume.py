@@ -228,12 +228,78 @@ def describe_agui_messages_to_langchain():
             assert out.content == "42"
             assert out.tool_call_id == "tc1"
 
-        def it_does_not_propagate_error_field():
-            msg = AGUIToolMessage(
-                id="tm1", content="42", tool_call_id="tc1", error="boom"
-            )
+        def it_defaults_status_to_success():
+            msg = AGUIToolMessage(id="tm1", content="42", tool_call_id="tc1")
             [out] = agui_messages_to_langchain([msg])
-            assert getattr(out, "status", None) != "error"
+            assert out.status == "success"
+
+        def when_the_error_field_is_set():
+            def it_maps_the_error_field_to_an_error_status():
+                msg = AGUIToolMessage(
+                    id="tm1", content="42", tool_call_id="tc1", error="boom"
+                )
+                [out] = agui_messages_to_langchain([msg])
+                assert out.status == "error"
+
+            def when_the_content_is_empty():
+                def it_still_maps_to_an_error_status():
+                    msg = AGUIToolMessage(
+                        id="tm1", content="", tool_call_id="tc1", error="error"
+                    )
+                    [out] = agui_messages_to_langchain([msg])
+                    assert out.status == "error"
+                    assert out.content == ""
+
+        def when_the_error_field_is_an_empty_string():
+            """A client that initialises `error: ""` reports no failure.
+
+            The outbound mapper never sends an empty `error`, because a client
+            writing `if (msg.error)` would read it as a success. Truthiness is
+            therefore the one rule that governs the field, in both directions.
+            """
+
+            def it_maps_to_a_success_status():
+                msg = AGUIToolMessage(
+                    id="tm1", content="42", tool_call_id="tc1", error=""
+                )
+                [out] = agui_messages_to_langchain([msg])
+                assert out.status == "success"
+
+    def when_message_carries_extra_fields():
+        def it_collects_them_under_the_reserved_additional_kwargs_key():
+            msg = AGUISystemMessage(id="s1", content="x", failure={"retryable": True})
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {
+                "langgraph_events.agui": {"failure": {"retryable": True}}
+            }
+
+    def when_message_carries_more_extra_data_than_the_cap_allows():
+        """Inbound extras are client input that reaches the checkpoint.
+
+        Without a cap a client can grow a thread's checkpoint without bound.
+        """
+
+        def it_drops_them():
+            msg = AGUISystemMessage(id="s1", content="x", blob="a" * 9000)
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {}
+
+        def it_logs_a_warning_naming_the_message(caplog):
+            msg = AGUISystemMessage(id="s-oversized", content="x", blob="a" * 9000)
+            agui_messages_to_langchain([msg])
+            assert any("s-oversized" in r.message for r in caplog.records)
+
+    def when_an_extra_value_cannot_be_measured():
+        def it_drops_them():
+            msg = AGUISystemMessage(id="s1", content="x", blob=object())
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {}
+
+    def when_message_carries_no_extra_fields():
+        def it_leaves_additional_kwargs_empty():
+            msg = AGUISystemMessage(id="s1", content="x")
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {}
 
     def when_role_is_reasoning():
         def it_skips_silently():

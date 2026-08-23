@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AG-UI message passthrough (`AGUI_EXTRAS_KEY`)** — a mapping under the reserved
+  `additional_kwargs["langgraph_events.agui"]` key on a LangChain message becomes extra top-level
+  fields on the AG-UI message in `MessagesSnapshot`. AG-UI models set `extra="allow"`, so a client
+  can now receive structured data the protocol does not declare — a `{"failure": {"retryable":
+  true}}` hint on a failure notice, for instance. Nothing else in `additional_kwargs` crosses the
+  wire, so provider metadata and internal state stay on the backend. `agui_messages_to_langchain`
+  and `detect_new_tool_results` mirror it: the extra fields an inbound AG-UI message carries are
+  collected back under the same key.
+
+  The key is package-qualified on purpose. `additional_kwargs` is a shared namespace that
+  LangChain provider integrations also write into, and there is no opt-in and no version gate, so
+  a plain `"agui"` would have started forwarding a consumer's existing key silently. **Check
+  `additional_kwargs` for prior use before adopting this.** Read the constant, not the literal.
+
+- **`AGUI_EXTRAS_MAX_BYTES`** — a size cap on the extra fields one inbound AG-UI message may
+  carry, 8 KiB of JSON. Inbound extras are unvalidated client input: they enter
+  `additional_kwargs`, flow through `add_messages` into the checkpoint, and are served back out on
+  the next `MessagesSnapshot` — to every client on that thread, not only the one that sent it.
+  Without a cap a client could grow a thread's checkpoint without bound. Extras over the cap, or
+  extras that do not encode as JSON, are dropped with a `WARNING` naming the message; the message
+  itself still converts. The trust boundary is documented in `docs/agui.md` and on
+  `collect_inbound_extras`.
+
+### Changed
+
+- **`BaseMessage.name` now reaches the AG-UI message.** `agui_messages_to_langchain` already read
+  `name` inbound, but the outbound mapper dropped it, so a named message did not round-trip.
+  AG-UI declares `name` on `UserMessage`, `AssistantMessage` and `SystemMessage`. Its
+  `ToolMessage` declares no `name`, so tool messages are unchanged. This changes the wire payload
+  for every existing consumer, which is why it is filed here rather than under `Fixed`.
+
+### Fixed
+
+- **`ToolMessage.status` and AG-UI `ToolMessage.error` now map in both directions.** A tool result
+  the client marked as failed reached the model as a success, because every conversion path
+  dropped the field. `detect_new_tool_results` and `agui_messages_to_langchain` now set
+  `status="error"` when the AG-UI `error` is truthy, and `MessagesSnapshot` now sends `error` when
+  the LangChain status is `"error"`. The outbound `error` is always truthy: an errored tool
+  message with empty content sends the literal `"error"` instead, because an empty string is
+  falsy and a client writing `if (msg.error)` would read the failure as a success. Truthiness is
+  the one rule that governs the field in both directions, so a client that initialises
+  `error: ""` on every tool result reports no failure. Only *presence* maps: the error text does
+  not come back, because LangChain's `ToolMessage` has no field for it and `content` is where a
+  tool's failure reason belongs. This is ag-ui issue #2226, whose upstream fix covered only the
+  inbound half of `ag_ui_langgraph`.
+- **A bad extras mapping no longer poisons a thread.** `MessagesSnapshot` is rebuilt from the
+  **checkpointed** message list on every `connect()`. A collision or a non-mapping value used to
+  raise `ValueError` inside that build. The raise escaped the adapter's async generator into the
+  consumer's HTTP handler and never became a `RunError`, so one bad value broke every later
+  connect on that thread until someone edited the checkpoint. The build now degrades instead: a
+  non-mapping value is dropped whole, a non-string key or an entry naming a declared AG-UI field
+  drops that entry only, and each cause warns once per message class.
+- **A `ToolMessage` with block content no longer breaks the stream.** The `tool` branch of the
+  snapshot mapper passed list content straight to AG-UI, which declares `content: str`, so the
+  pydantic `ValidationError` surfaced as a `RunError` and killed the connect stream. It now
+  degrades to `""`, matching the `system` branch, and logs a `WARNING` naming the tool call
+  because the content is lost.
+- **`detect_new_tool_results` carries message extras.** The two inbound paths disagreed:
+  `agui_messages_to_langchain` gained both the error status and the extras, while
+  `detect_new_tool_results` gained only the status, so a consumer routing frontend tool results
+  through it lost the extra fields the client sent.
+
 ## [0.23.1] - 2026-08-22
 
 ### Fixed

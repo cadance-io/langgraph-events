@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping
+from functools import cache
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ag_ui.core import (
     BaseEvent,
@@ -16,6 +19,7 @@ from ag_ui.core import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from pydantic import BaseModel
 
 from langgraph_events._event import (
     Event,
@@ -29,6 +33,7 @@ from ._events import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
 )
+from ._extras import AGUI_EXTRAS_KEY
 from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
@@ -36,8 +41,22 @@ if TYPE_CHECKING:
 
     from ._context import MapperContext
 
+logger = logging.getLogger(__name__)
 
 _warned_classes: set[type] = set()
+_warned_extras: set[tuple[type, str]] = set()
+
+AGUIMessageT = TypeVar("AGUIMessageT", bound=BaseModel)
+
+TOOL_ERROR_STATUS = "error"
+"""The LangChain ``ToolMessage.status`` value that marks a failed tool result.
+
+The literal doubles as the fallback for AG-UI ``ToolMessage.error``. AG-UI
+declares ``error`` as a string, and an empty string is falsy, so a client
+writing ``if (msg.error)`` reads a failed tool result as a success. An errored
+tool message with empty content therefore sends this literal. The literal is
+fixed, so it carries nothing about the tool, its arguments or its result.
+"""
 
 
 class UnmappedEventError(TypeError):
@@ -77,6 +96,106 @@ def _handle_unmapped(cls: type, on_unmapped: str) -> list[BaseEvent]:
     return []
 
 
+def _warn_dropped_extras(cls: type, kind: str, detail: str) -> None:
+    """Warn once that AG-UI passthrough fields were dropped from *cls*.
+
+    *kind* is the dedupe key, not the message. It takes one of three fixed
+    values, so the dedupe set stays bounded however many bad messages arrive.
+    *detail* carries the specifics for the reader.
+    """
+    key = (cls, kind)
+    if key in _warned_extras:
+        return
+    _warned_extras.add(key)
+    warnings.warn(
+        f"Dropping AG-UI passthrough fields from a {cls.__name__}: {detail} "
+        f"The rest of the message is unchanged.",
+        stacklevel=3,
+    )
+
+
+@cache
+def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
+    """Return every name that already addresses a field on *cls*.
+
+    An AG-UI model has ``populate_by_name=True`` with a camelCase alias
+    generator, so ``tool_call_id`` and ``toolCallId`` both reach the same
+    declared field. Both spellings are reserved.
+
+    ``field.alias`` is the only alias an AG-UI model sets today. A model that
+    set ``validation_alias`` or ``serialization_alias`` instead would need
+    those read here too.
+    """
+    names: set[str] = set()
+    for name, field in cls.model_fields.items():
+        names.add(name)
+        if field.alias:
+            names.add(field.alias)
+    return frozenset(names)
+
+
+def _build_agui_message(
+    cls: type[AGUIMessageT],
+    source: Any,
+    **fields: Any,
+) -> AGUIMessageT:
+    """Build an AG-UI message, adding the passthrough fields *source* carries.
+
+    The passthrough fields come from ``source.additional_kwargs[AGUI_EXTRAS_KEY]``.
+
+    This function never raises. It runs inside :func:`build_messages_snapshot`,
+    which ``connect()`` calls on the **checkpointed** message list. A raise here
+    escapes the adapter's async generator into the consumer's HTTP handler and
+    never becomes a ``RUN_ERROR``, so one bad value in a checkpoint would break
+    every later connect on that thread until someone edited the checkpoint. A
+    value that cannot ride through is dropped, and warned about once per class
+    and cause. This matches the ``tool`` branch below, which degrades block
+    content rather than raising.
+
+    Three causes drop something:
+
+    - the reserved key holds a non-mapping — the whole value goes;
+    - an entry key is not a string — that entry goes, because ``**`` refuses it;
+    - an entry addresses a declared field — that entry goes, because it would
+      rewrite protocol data.
+    """
+    extras = getattr(source, "additional_kwargs", None) or {}
+    passthrough = extras.get(AGUI_EXTRAS_KEY)
+    if passthrough is None:
+        return cls(**fields)
+    if not isinstance(passthrough, Mapping):
+        _warn_dropped_extras(
+            cls,
+            "not-a-mapping",
+            f"additional_kwargs[{AGUI_EXTRAS_KEY!r}] must be a mapping of AG-UI "
+            f"message fields, got {type(passthrough).__name__}.",
+        )
+        return cls(**fields)
+
+    usable = {k: v for k, v in passthrough.items() if isinstance(k, str)}
+    unusable = [k for k in passthrough if not isinstance(k, str)]
+    if unusable:
+        _warn_dropped_extras(
+            cls,
+            "non-string-key",
+            f"an AG-UI message field name must be a string, and "
+            f"{', '.join(repr(k) for k in unusable)} is not.",
+        )
+
+    collisions = sorted(set(usable) & _declared_names(cls))
+    for name in collisions:
+        del usable[name]
+    if collisions:
+        _warn_dropped_extras(
+            cls,
+            "declared-field",
+            f"{cls.__name__} declares {', '.join(collisions)}, so the entry "
+            f"would rewrite protocol data. Rename the entry, or set the field "
+            f"through the LangChain message.",
+        )
+    return cls(**fields, **usable)
+
+
 def _langchain_to_agui_messages(
     messages: list[Any],
 ) -> list[Message]:
@@ -94,8 +213,18 @@ def _langchain_to_agui_messages(
     for msg in messages:
         msg_type = msg.type
         msg_id = getattr(msg, "id", None) or ""
+        msg_name = getattr(msg, "name", None)
         if msg_type == "human":
-            result.append(UserMessage(id=msg_id, role="user", content=msg.content))
+            result.append(
+                _build_agui_message(
+                    UserMessage,
+                    msg,
+                    id=msg_id,
+                    role="user",
+                    content=msg.content,
+                    name=msg_name,
+                )
+            )
         elif msg_type == "ai":
             tool_calls = None
             if hasattr(msg, "tool_calls") and msg.tool_calls:
@@ -111,28 +240,53 @@ def _langchain_to_agui_messages(
                     for tc in msg.tool_calls
                 ]
             result.append(
-                AssistantMessage(
+                _build_agui_message(
+                    AssistantMessage,
+                    msg,
                     id=msg_id,
                     role="assistant",
                     content=msg.content if isinstance(msg.content, str) else None,
+                    name=msg_name,
                     tool_calls=tool_calls,
                 )
             )
         elif msg_type == "system":
             result.append(
-                SystemMessage(
+                _build_agui_message(
+                    SystemMessage,
+                    msg,
                     id=msg_id,
                     role="system",
                     content=msg.content if isinstance(msg.content, str) else "",
+                    name=msg_name,
                 )
             )
         elif msg_type == "tool":
+            # AG-UI declares tool content as a plain string, and ToolMessage
+            # has no name field. Block content has no lossless mapping, so it
+            # degrades to "" rather than raising inside the snapshot build.
+            content = msg.content if isinstance(msg.content, str) else ""
+            if not isinstance(msg.content, str):
+                logger.warning(
+                    "Dropping block content from tool result %s — AG-UI declares "
+                    "ToolMessage.content as a string, so there is no lossless "
+                    "mapping. The client receives an empty content.",
+                    getattr(msg, "tool_call_id", "") or msg_id,
+                )
+            # An errored result must reach the client as a truthy `error`, or
+            # `if (msg.error)` reads the failure as a success. The content is
+            # the reason when there is one. Empty content — genuine, or block
+            # content degraded above — falls back to the status literal.
+            is_error = getattr(msg, "status", None) == TOOL_ERROR_STATUS
             result.append(
-                AguiToolMessage(
+                _build_agui_message(
+                    AguiToolMessage,
+                    msg,
                     id=msg_id,
                     role="tool",
-                    content=msg.content or "",
+                    content=content,
                     tool_call_id=getattr(msg, "tool_call_id", ""),
+                    error=(content or TOOL_ERROR_STATUS) if is_error else None,
                 )
             )
     return result

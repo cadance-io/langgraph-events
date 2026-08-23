@@ -33,10 +33,11 @@ from langgraph_events.agui import (
     InterruptedWithPayload,
     MapperContext,
     UnmappedEventError,
+    agui_messages_to_langchain,
     build_langchain_tools,
     detect_new_tool_results,
 )
-from langgraph_events.agui._mappers import _warned_classes
+from langgraph_events.agui._mappers import _warned_classes, _warned_extras
 
 # ---------------------------------------------------------------------------
 # Test event classes
@@ -2962,6 +2963,613 @@ def describe_system_message_conversion():
         assert sys_msgs[0].content == "You are a helpful assistant"
 
 
+def describe_agui_message_extras():
+    """The reserved `additional_kwargs` key rides through onto the AG-UI message."""
+
+    def when_the_reserved_key_carries_a_mapping():
+        async def it_forwards_each_entry_as_an_agui_message_field():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="the step failed",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"failure": {"retryable": True}}
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.model_dump()["failure"] == {"retryable": True}
+
+        async def it_forwards_on_a_tool_message():
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(
+                        ToolMessage(
+                            content="42",
+                            tool_call_id="tc-1",
+                            additional_kwargs={
+                                "langgraph_events.agui": {"latency_ms": 12}
+                            },
+                        ),
+                    )
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.model_dump()["latency_ms"] == 12
+
+        async def it_forwards_on_a_user_message():
+            @on(UserAsked)
+            def echo(event: UserAsked) -> UserSent:
+                return UserSent(
+                    message=HumanMessage(
+                        content="hello",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"source": "voice"}
+                        },
+                    )
+                )
+
+            graph = EventGraph([echo], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [user_msg] = [m for m in snap.messages if m.role == "user"]
+            assert user_msg.model_dump()["source"] == "voice"
+
+        async def it_forwards_on_an_assistant_message():
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(
+                    message=AIMessage(
+                        content="hi",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"confidence": 0.9}
+                        },
+                    )
+                )
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [ai_msg] = [m for m in snap.messages if m.role == "assistant"]
+            assert ai_msg.model_dump()["confidence"] == 0.9
+
+    def when_the_reserved_key_is_absent():
+        async def it_adds_no_fields():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={"internal_trace_id": "t-1"},
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.model_extra == {}
+
+    def when_an_entry_names_a_declared_agui_field():
+        """The declared field wins — the entry would rewrite protocol data."""
+
+        async def it_drops_the_entry_and_keeps_the_rest():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": {
+                                "content": "hijacked",
+                                "failure": "kept",
+                            }
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.content == "plain"
+            assert sys_msg.model_extra == {"failure": "kept"}
+
+        async def it_warns_naming_the_key():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"content": "hijacked"}
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_extras.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
+
+            assert [x for x in w if "declares content" in str(x.message)]
+
+        async def it_warns_once_for_the_repeated_drop():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"content": "hijacked"}
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_extras.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
+                await _collect(adapter, _make_input())
+
+            assert len([x for x in w if "declares content" in str(x.message)]) == 1
+
+        async def it_rejects_a_camel_case_alias_of_a_declared_field():
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(
+                        ToolMessage(
+                            content="42",
+                            tool_call_id="tc-1",
+                            additional_kwargs={
+                                "langgraph_events.agui": {"toolCallId": "spoofed"}
+                            },
+                        ),
+                    )
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.tool_call_id == "tc-1"
+            assert tool_msg.model_extra == {}
+
+    def when_an_entry_key_is_not_a_string():
+        async def it_drops_the_entry_and_keeps_the_rest():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": {7: "numeric", "failure": "kept"}
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.model_extra == {"failure": "kept"}
+
+    def when_the_reserved_key_is_not_a_mapping():
+        async def it_drops_the_value():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": ["not", "a", "mapping"]
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.content == "plain"
+            assert sys_msg.model_extra == {}
+
+        async def it_warns_naming_the_type_it_got():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": ["not", "a", "mapping"]
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_extras.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
+
+            assert [x for x in w if "list" in str(x.message)]
+
+    def when_a_bad_reserved_key_is_already_in_the_checkpoint():
+        """`build_messages_snapshot` runs on every `connect()`.
+
+        A raise inside it escapes the async generator into the consumer's
+        HTTP handler and never becomes a RUN_ERROR. The bad value sits in
+        the checkpoint, so the thread would raise forever.
+        """
+
+        async def it_still_serves_the_connect_snapshot():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "langgraph_events.agui": ["not", "a", "mapping"]
+                        },
+                    )
+                )
+
+            graph = EventGraph(
+                [notify],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer()],
+            )
+            await graph.ainvoke(
+                UserAsked(question="go"),
+                config={"configurable": {"thread_id": "t-poisoned"}},
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="unused"),
+            )
+
+            events = [
+                event
+                async for event in adapter.connect(_make_input(thread_id="t-poisoned"))
+            ]
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.content == "plain"
+            assert sys_msg.model_extra == {}
+
+
+def describe_agui_message_extras_round_trip():
+    """A client's extra fields come back out on the next snapshot."""
+
+    def when_an_inbound_message_carries_extra_fields():
+        async def it_returns_them_to_the_client_unchanged():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            carried: list[Any] = []
+
+            def seed(inp: RunAgentInput) -> UserAsked:
+                carried.extend(agui_messages_to_langchain(inp.messages))
+                return UserAsked(question="go")
+
+            @on(UserAsked)
+            def replay(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(messages=tuple(carried))
+
+            graph = EventGraph([replay], reducers=[message_reducer()])
+            adapter = AGUIAdapter(graph=graph, seed_factory=seed)
+            events = await _collect(
+                adapter,
+                _make_input(
+                    messages=[
+                        AguiToolMessage(
+                            id="m-1",
+                            role="tool",
+                            content="42",
+                            tool_call_id="tc-1",
+                            latency_ms=12,
+                        )
+                    ]
+                ),
+            )
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.model_dump()["latency_ms"] == 12
+
+
+def describe_message_name_forwarding():
+    """LangChain `BaseMessage.name` reaches the AG-UI message that declares it."""
+
+    def when_the_langchain_message_has_a_name():
+        async def it_forwards_the_name_on_an_assistant_message():
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="hi", name="planner"))
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [ai_msg] = [m for m in snap.messages if m.role == "assistant"]
+            assert ai_msg.name == "planner"
+
+        async def it_forwards_the_name_on_a_user_message():
+            @on(UserAsked)
+            def echo(event: UserAsked) -> UserSent:
+                return UserSent(message=HumanMessage(content="hi", name="alice"))
+
+            graph = EventGraph([echo], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [user_msg] = [m for m in snap.messages if m.role == "user"]
+            assert user_msg.name == "alice"
+
+        async def it_forwards_the_name_on_a_system_message():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(content="rules", name="policy")
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.name == "policy"
+
+    def when_the_langchain_message_has_no_name():
+        async def it_leaves_the_name_unset():
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="hi"))
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [ai_msg] = [m for m in snap.messages if m.role == "assistant"]
+            assert ai_msg.name is None
+
+
+def describe_tool_message_status_conversion():
+    """LangChain `ToolMessage.status` maps to the AG-UI `error` field."""
+
+    def when_the_status_is_error():
+        async def it_sets_the_agui_error_field():
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(
+                        ToolMessage(
+                            content="boom",
+                            tool_call_id="tc-1",
+                            status="error",
+                        ),
+                    )
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.error == "boom"
+            assert tool_msg.content == "boom"
+
+        def when_the_content_is_empty():
+            async def it_still_sets_a_truthy_error():
+                @on(UserAsked)
+                def run_tool(event: UserAsked) -> ToolsExecuted:
+                    return ToolsExecuted(
+                        messages=(
+                            ToolMessage(
+                                content="",
+                                tool_call_id="tc-1",
+                                status="error",
+                            ),
+                        )
+                    )
+
+                graph = EventGraph([run_tool], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                )
+                events = await _collect(adapter, _make_input())
+
+                snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+                [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+                assert tool_msg.error == "error"
+                assert tool_msg.content == ""
+
+        def when_the_content_is_a_block_list():
+            async def it_still_sets_a_truthy_error():
+                @on(UserAsked)
+                def run_tool(event: UserAsked) -> ToolsExecuted:
+                    return ToolsExecuted(
+                        messages=(
+                            ToolMessage(
+                                content=[{"type": "text", "text": "boom"}],
+                                tool_call_id="tc-1",
+                                status="error",
+                            ),
+                        )
+                    )
+
+                graph = EventGraph([run_tool], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                )
+                events = await _collect(adapter, _make_input())
+
+                snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+                [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+                assert tool_msg.error == "error"
+                assert tool_msg.content == ""
+
+    def when_the_status_is_success():
+        async def it_leaves_the_agui_error_field_unset():
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(ToolMessage(content="42", tool_call_id="tc-1"),)
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.error is None
+
+    def when_the_content_is_a_block_list():
+        async def it_still_builds_the_snapshot():
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(
+                        ToolMessage(
+                            content=[{"type": "text", "text": "42"}],
+                            tool_call_id="tc-1",
+                        ),
+                    )
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.content == ""
+
+        async def it_logs_a_warning_naming_the_tool_call(caplog):
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(
+                        ToolMessage(
+                            content=[{"type": "text", "text": "42"}],
+                            tool_call_id="tc-dropped",
+                        ),
+                    )
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input())
+
+            assert any("tc-dropped" in r.message for r in caplog.records)
+
+
 def describe_multiple_custom_reducers():
     """StateSnapshot tracks changes across multiple non-message reducers."""
 
@@ -3651,6 +4259,123 @@ def describe_detect_new_tool_results():
 
             with pytest.raises(ValueError, match=r"tool_call_id"):
                 detect_new_tool_results(inp, {"messages": []})
+
+    def when_the_agui_message_reports_an_error():
+        def it_marks_the_langchain_message_as_an_error():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="boom",
+                        tool_call_id="tc-1",
+                        error="boom",
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.status == "error"
+
+    def when_the_agui_message_reports_no_error():
+        def it_marks_the_langchain_message_as_a_success():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.status == "success"
+
+    def when_the_agui_error_field_is_an_empty_string():
+        """A client that initialises `error: ""` reports no failure.
+
+        The outbound mapper never sends an empty `error`, because a client
+        writing `if (msg.error)` would read it as a success. Truthiness is
+        therefore the one rule that governs the field, in both directions.
+        """
+
+        def it_marks_the_langchain_message_as_a_success():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                        error="",
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.status == "success"
+
+    def when_the_agui_message_carries_extra_fields():
+        """The same slot `agui_messages_to_langchain` fills on the other path."""
+
+        def it_collects_them_under_the_reserved_additional_kwargs_key():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                        latency_ms=12,
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.additional_kwargs == {
+                "langgraph_events.agui": {"latency_ms": 12}
+            }
+
+        def when_the_extra_fields_exceed_the_cap():
+            def it_drops_them():
+                from ag_ui.core import ToolMessage as AguiToolMessage
+
+                inp = _make_input(
+                    messages=[
+                        AguiToolMessage(
+                            id="m-1",
+                            role="tool",
+                            content="42",
+                            tool_call_id="tc-1",
+                            blob="a" * 9000,
+                        ),
+                    ],
+                )
+                [out] = detect_new_tool_results(inp, {"messages": []})
+                assert out.additional_kwargs == {}
+
+    def when_the_agui_message_carries_no_extra_fields():
+        def it_leaves_additional_kwargs_empty():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.additional_kwargs == {}
 
 
 def describe_frontend_state_mutated_event_class():

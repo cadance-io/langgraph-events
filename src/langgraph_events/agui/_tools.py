@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ._extras import collect_inbound_extras
+
 if TYPE_CHECKING:
     from ag_ui.core import RunAgentInput, Tool
     from langchain_core.messages import ToolMessage
@@ -43,6 +45,12 @@ def detect_new_tool_results(
     entry whose ``tool_call_id`` is not already present among the tool
     messages in ``checkpoint_state["messages"]``.  Handles the fresh-run
     case (``checkpoint_state is None``) by returning ``[]``.
+
+    Carries the same fields as :func:`agui_messages_to_langchain`: a truthy
+    AG-UI ``error`` becomes ``status="error"``, and the extra fields the client
+    added land under ``additional_kwargs[AGUI_EXTRAS_KEY]``. Read
+    :func:`~langgraph_events.agui._extras.collect_inbound_extras` for the trust
+    boundary that slot carries.
     """
     from langchain_core.messages import ToolMessage as LCToolMessage  # noqa: PLC0415
 
@@ -72,12 +80,20 @@ def detect_new_tool_results(
             )
         if tc_id in existing:
             continue
+        error = getattr(msg, "error", None)
         results.append(
             LCToolMessage(
                 content=getattr(msg, "content", "") or "",
                 tool_call_id=tc_id,
                 # Normalize falsy ("") id to None so LangChain generates a fresh one.
                 id=getattr(msg, "id", None) or None,
+                # AG-UI reports a client-side tool failure through `error`.
+                # Without this the model reads the failure as a success. A
+                # truthy `error` marks the failure, in both directions: the
+                # outbound mapper never sends an empty `error`, so a client
+                # that initialises `error: ""` reports no failure.
+                status="error" if error else "success",
+                additional_kwargs=collect_inbound_extras(msg),
             )
         )
     return results

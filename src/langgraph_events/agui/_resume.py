@@ -11,6 +11,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ._extras import collect_inbound_extras
+
 if TYPE_CHECKING:
     from ag_ui.core import Message
     from ag_ui.core.types import RunAgentInput
@@ -29,6 +31,13 @@ def agui_messages_to_langchain(  # noqa: PLR0912
 
     Reasoning and developer messages are skipped (logged at DEBUG); activity
     and unknown roles raise ``ValueError``.
+
+    A truthy AG-UI ``ToolMessage.error`` becomes ``ToolMessage.status="error"``.
+    Fields the client added beyond the AG-UI schema land under the reserved
+    ``additional_kwargs[AGUI_EXTRAS_KEY]`` key. Those fields are unvalidated
+    client input that reaches the checkpoint and is served back out. Read
+    :func:`~langgraph_events.agui._extras.collect_inbound_extras` before you
+    rely on them, and note the size cap in :data:`AGUI_EXTRAS_MAX_BYTES`.
 
     The default ``drop_invalid_tool_calls=False`` propagates
     ``json.JSONDecodeError`` for parity with upstream ``ag-ui-langgraph`` —
@@ -68,7 +77,14 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                 content = parts
             else:
                 content = m.content
-            out.append(HumanMessage(id=m.id, content=content, name=m.name))
+            out.append(
+                HumanMessage(
+                    id=m.id,
+                    content=content,
+                    name=m.name,
+                    additional_kwargs=collect_inbound_extras(m),
+                )
+            )
         elif isinstance(m, AssistantMessage):
             tool_calls: list[LCToolCall] = []
             for tc in m.tool_calls or []:
@@ -106,13 +122,30 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     content=m.content or "",
                     tool_calls=tool_calls,
                     name=m.name,
+                    additional_kwargs=collect_inbound_extras(m),
                 )
             )
         elif isinstance(m, AGUISystemMessage):
-            out.append(SystemMessage(id=m.id, content=m.content, name=m.name))
+            out.append(
+                SystemMessage(
+                    id=m.id,
+                    content=m.content,
+                    name=m.name,
+                    additional_kwargs=collect_inbound_extras(m),
+                )
+            )
         elif isinstance(m, AGUIToolMessage):
             out.append(
-                ToolMessage(id=m.id, content=m.content, tool_call_id=m.tool_call_id)
+                ToolMessage(
+                    id=m.id,
+                    content=m.content,
+                    tool_call_id=m.tool_call_id,
+                    # A truthy `error` marks the failure, in both directions.
+                    # The outbound mapper never sends an empty `error`, so a
+                    # client that initialises `error: ""` reports no failure.
+                    status="error" if m.error else "success",
+                    additional_kwargs=collect_inbound_extras(m),
+                )
             )
         else:
             role = getattr(m, "role", type(m).__name__)
