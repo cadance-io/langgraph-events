@@ -139,6 +139,7 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | Export | Type | Description |
 |---|---|---|
 | `AGUIAdapter` | Class | Map `EventGraph` streams to AG-UI protocol events |
+| `AGUI_EXTRAS_KEY` | Constant | Reserved `BaseMessage.additional_kwargs` key. Its mapping is forwarded as extra fields on the AG-UI message, and receives the client's extra fields on the way back |
 | `AGUIAdapter.stream()` / `.connect()` / `.reconnect()` | Method | Execute / rehydrate checkpoint / refresh |
 | `FrontendStateMutated` | Event | Adapter-emitted `IntegrationEvent` carrying `RunAgentInput.state` for client-state-mirror reducers |
 | `FrontendToolCallRequested` | Event | `Interrupted` subclass for handler-initiated frontend tool calls (CopilotKit `useFrontendTool`) |
@@ -148,7 +149,7 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `MapperContext` | Dataclass | Shared state (run ID, thread ID, message counter) per stream |
 | `create_starlette_response` / `encode_sse_stream` | Function | Framework-agnostic SSE wrapping |
 | `extract_resume_input` | Function | Pulls and JSON-decodes `RunAgentInput.forwarded_props["command"]["resume"]`. Returns `None` if absent or falsy |
-| `agui_messages_to_langchain` | Function | Converts AG-UI protocol messages to LangChain `BaseMessage` instances. Optional `drop_invalid_tool_calls=True` to skip tool calls whose JSON arguments fail to parse |
+| `agui_messages_to_langchain` | Function | Converts AG-UI protocol messages to LangChain `BaseMessage` instances. Maps `ToolMessage.error` to `status="error"` and extra fields to `additional_kwargs[AGUI_EXTRAS_KEY]`. Optional `drop_invalid_tool_calls=True` to skip tool calls whose JSON arguments fail to parse |
 | `merge_frontend_messages` | Function | `resume_factory` helper: reads messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages`, merges via `add_messages` (id-based dedup). Returns a tuple |
 | `build_langchain_tools` / `detect_new_tool_results` | Function | Convert `RunAgentInput.tools` to OpenAI-format / extract new `ToolMessage`s from a resume request |
 

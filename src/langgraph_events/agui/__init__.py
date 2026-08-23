@@ -8,6 +8,7 @@ from langgraph_events.agui._events import (
     InterruptedWithPayload,
 )
 from langgraph_events.agui._mappers import (
+    AGUI_EXTRAS_KEY,
     FallbackMapper,
     FrontendToolCallRequestedMapper,
     InterruptedMapper,
@@ -36,6 +37,7 @@ from langgraph_events.agui._transport import (
 )
 
 __all__ = [
+    "AGUI_EXTRAS_KEY",
     "AGUIAdapter",
     "AGUICustomEvent",
     "AGUISerializable",

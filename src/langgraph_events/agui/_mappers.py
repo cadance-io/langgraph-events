@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import warnings
+from collections.abc import Mapping
+from functools import cache
 from typing import TYPE_CHECKING, Any
 
 from ag_ui.core import (
@@ -33,11 +35,21 @@ from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
     from ag_ui.core import Message
+    from pydantic import BaseModel
 
     from ._context import MapperContext
 
 
 _warned_classes: set[type] = set()
+
+AGUI_EXTRAS_KEY = "agui"
+"""Reserved ``BaseMessage.additional_kwargs`` key for AG-UI passthrough fields.
+
+A consumer puts a mapping under this key on a LangChain message. Every entry
+becomes an extra field on the AG-UI message the adapter sends to the client.
+The same key receives the client's extra fields on the way back in. Nothing
+else in ``additional_kwargs`` crosses the wire.
+"""
 
 
 class UnmappedEventError(TypeError):
@@ -77,6 +89,52 @@ def _handle_unmapped(cls: type, on_unmapped: str) -> list[BaseEvent]:
     return []
 
 
+@cache
+def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
+    """Return every name that already addresses a field on *cls*.
+
+    An AG-UI model has ``populate_by_name=True`` with a camelCase alias
+    generator, so ``tool_call_id`` and ``toolCallId`` both reach the same
+    declared field. Both spellings are reserved.
+    """
+    names: set[str] = set()
+    for name, field in cls.model_fields.items():
+        names.add(name)
+        if field.alias:
+            names.add(field.alias)
+    return frozenset(names)
+
+
+def _build_agui_message(
+    cls: Any,
+    source: Any,
+    **fields: Any,
+) -> Any:
+    """Build an AG-UI message, adding the passthrough fields *source* carries.
+
+    The passthrough fields come from ``source.additional_kwargs[AGUI_EXTRAS_KEY]``.
+    An entry that addresses a declared field would silently rewrite protocol
+    data, so a collision raises ``ValueError`` naming the key.
+    """
+    extras = getattr(source, "additional_kwargs", None) or {}
+    passthrough = extras.get(AGUI_EXTRAS_KEY)
+    if passthrough is None:
+        return cls(**fields)
+    if not isinstance(passthrough, Mapping):
+        raise ValueError(
+            f"additional_kwargs[{AGUI_EXTRAS_KEY!r}] must be a mapping of "
+            f"AG-UI message fields, got {type(passthrough).__name__}."
+        )
+    collisions = sorted(set(passthrough) & _declared_names(cls))
+    if collisions:
+        raise ValueError(
+            f"additional_kwargs[{AGUI_EXTRAS_KEY!r}] must not carry "
+            f"{', '.join(collisions)} — {cls.__name__} declares that field. "
+            f"Rename the entry, or set the field through the LangChain message."
+        )
+    return cls(**fields, **passthrough)
+
+
 def _langchain_to_agui_messages(
     messages: list[Any],
 ) -> list[Message]:
@@ -94,8 +152,18 @@ def _langchain_to_agui_messages(
     for msg in messages:
         msg_type = msg.type
         msg_id = getattr(msg, "id", None) or ""
+        msg_name = getattr(msg, "name", None)
         if msg_type == "human":
-            result.append(UserMessage(id=msg_id, role="user", content=msg.content))
+            result.append(
+                _build_agui_message(
+                    UserMessage,
+                    msg,
+                    id=msg_id,
+                    role="user",
+                    content=msg.content,
+                    name=msg_name,
+                )
+            )
         elif msg_type == "ai":
             tool_calls = None
             if hasattr(msg, "tool_calls") and msg.tool_calls:
@@ -111,28 +179,43 @@ def _langchain_to_agui_messages(
                     for tc in msg.tool_calls
                 ]
             result.append(
-                AssistantMessage(
+                _build_agui_message(
+                    AssistantMessage,
+                    msg,
                     id=msg_id,
                     role="assistant",
                     content=msg.content if isinstance(msg.content, str) else None,
+                    name=msg_name,
                     tool_calls=tool_calls,
                 )
             )
         elif msg_type == "system":
             result.append(
-                SystemMessage(
+                _build_agui_message(
+                    SystemMessage,
+                    msg,
                     id=msg_id,
                     role="system",
                     content=msg.content if isinstance(msg.content, str) else "",
+                    name=msg_name,
                 )
             )
         elif msg_type == "tool":
+            # AG-UI declares tool content as a plain string, and ToolMessage
+            # has no name field. Block content has no lossless mapping, so it
+            # degrades to "" rather than raising inside the snapshot build.
+            content = msg.content if isinstance(msg.content, str) else ""
             result.append(
-                AguiToolMessage(
+                _build_agui_message(
+                    AguiToolMessage,
+                    msg,
                     id=msg_id,
                     role="tool",
-                    content=msg.content or "",
+                    content=content,
                     tool_call_id=getattr(msg, "tool_call_id", ""),
+                    error=(
+                        content if getattr(msg, "status", None) == "error" else None
+                    ),
                 )
             )
     return result

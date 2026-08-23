@@ -228,12 +228,30 @@ def describe_agui_messages_to_langchain():
             assert out.content == "42"
             assert out.tool_call_id == "tc1"
 
-        def it_does_not_propagate_error_field():
-            msg = AGUIToolMessage(
-                id="tm1", content="42", tool_call_id="tc1", error="boom"
-            )
+        def it_defaults_status_to_success():
+            msg = AGUIToolMessage(id="tm1", content="42", tool_call_id="tc1")
             [out] = agui_messages_to_langchain([msg])
-            assert getattr(out, "status", None) != "error"
+            assert out.status == "success"
+
+        def when_the_error_field_is_set():
+            def it_maps_the_error_field_to_an_error_status():
+                msg = AGUIToolMessage(
+                    id="tm1", content="42", tool_call_id="tc1", error="boom"
+                )
+                [out] = agui_messages_to_langchain([msg])
+                assert out.status == "error"
+
+    def when_message_carries_extra_fields():
+        def it_collects_them_under_the_reserved_additional_kwargs_key():
+            msg = AGUISystemMessage(id="s1", content="x", failure={"retryable": True})
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {"agui": {"failure": {"retryable": True}}}
+
+    def when_message_carries_no_extra_fields():
+        def it_leaves_additional_kwargs_empty():
+            msg = AGUISystemMessage(id="s1", content="x")
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {}
 
     def when_role_is_reasoning():
         def it_skips_silently():

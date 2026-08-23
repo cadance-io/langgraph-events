@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AG-UI message passthrough (`AGUI_EXTRAS_KEY`)** — a mapping under the reserved
+  `additional_kwargs["agui"]` key on a LangChain message becomes extra top-level fields on the
+  AG-UI message in `MessagesSnapshot`. AG-UI models set `extra="allow"`, so a client can now
+  receive structured data the protocol does not declare — a `{"failure": {"retryable": true}}`
+  hint on a failure notice, for instance. Nothing else in `additional_kwargs` crosses the wire,
+  so provider metadata and internal state stay on the backend. An entry that addresses a declared
+  AG-UI field (by name or by camelCase alias) raises `ValueError` naming the key, because it would
+  rewrite protocol data. `agui_messages_to_langchain` mirrors it: the extra fields an inbound
+  AG-UI message carries are collected back under the same key.
+
+### Fixed
+
+- **`ToolMessage.status` and AG-UI `ToolMessage.error` now map in both directions.** A tool result
+  the client marked as failed reached the model as a success, because every conversion path
+  dropped the field. `detect_new_tool_results` and `agui_messages_to_langchain` now set
+  `status="error"` when AG-UI `error` is present, and `MessagesSnapshot` now sends `error` when
+  the LangChain status is `"error"`. This is ag-ui issue #2226, whose upstream fix covered only
+  the inbound half of `ag_ui_langgraph`.
+- **`BaseMessage.name` reaches the AG-UI message.** `agui_messages_to_langchain` already read
+  `name` inbound, but the outbound mapper dropped it, so a named message did not round-trip.
+  AG-UI declares `name` on `UserMessage`, `AssistantMessage` and `SystemMessage`. Its
+  `ToolMessage` declares no `name`, so tool messages are unchanged.
+- **A `ToolMessage` with block content no longer breaks the stream.** The `tool` branch of the
+  snapshot mapper passed list content straight to AG-UI, which declares `content: str`, so the
+  pydantic `ValidationError` surfaced as a `RunError` and killed the connect stream. It now
+  degrades to `""`, matching the `system` branch.
+
 ## [0.23.1] - 2026-08-22
 
 ### Fixed

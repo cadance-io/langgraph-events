@@ -11,6 +11,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ._mappers import AGUI_EXTRAS_KEY
+
 if TYPE_CHECKING:
     from ag_ui.core import Message
     from ag_ui.core.types import RunAgentInput
@@ -18,6 +20,21 @@ if TYPE_CHECKING:
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
 
 logger = logging.getLogger(__name__)
+
+
+def _agui_extras(message: Any) -> dict[str, Any]:
+    """Return the ``additional_kwargs`` payload for an inbound AG-UI message.
+
+    AG-UI models allow extra fields. Whatever the client sent beyond the
+    declared schema is kept under the reserved ``AGUI_EXTRAS_KEY``, which is
+    the same slot :func:`~langgraph_events.agui._mappers._langchain_to_agui_messages`
+    reads on the way out. A message with no extra fields gets an empty
+    ``additional_kwargs``.
+    """
+    extra = message.model_extra
+    if not extra:
+        return {}
+    return {AGUI_EXTRAS_KEY: dict(extra)}
 
 
 def agui_messages_to_langchain(  # noqa: PLR0912
@@ -29,6 +46,10 @@ def agui_messages_to_langchain(  # noqa: PLR0912
 
     Reasoning and developer messages are skipped (logged at DEBUG); activity
     and unknown roles raise ``ValueError``.
+
+    An AG-UI ``ToolMessage.error`` becomes ``ToolMessage.status="error"``.
+    Fields the client added beyond the AG-UI schema land under the reserved
+    ``additional_kwargs[AGUI_EXTRAS_KEY]`` key. See :data:`AGUI_EXTRAS_KEY`.
 
     The default ``drop_invalid_tool_calls=False`` propagates
     ``json.JSONDecodeError`` for parity with upstream ``ag-ui-langgraph`` —
@@ -68,7 +89,14 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                 content = parts
             else:
                 content = m.content
-            out.append(HumanMessage(id=m.id, content=content, name=m.name))
+            out.append(
+                HumanMessage(
+                    id=m.id,
+                    content=content,
+                    name=m.name,
+                    additional_kwargs=_agui_extras(m),
+                )
+            )
         elif isinstance(m, AssistantMessage):
             tool_calls: list[LCToolCall] = []
             for tc in m.tool_calls or []:
@@ -106,13 +134,27 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     content=m.content or "",
                     tool_calls=tool_calls,
                     name=m.name,
+                    additional_kwargs=_agui_extras(m),
                 )
             )
         elif isinstance(m, AGUISystemMessage):
-            out.append(SystemMessage(id=m.id, content=m.content, name=m.name))
+            out.append(
+                SystemMessage(
+                    id=m.id,
+                    content=m.content,
+                    name=m.name,
+                    additional_kwargs=_agui_extras(m),
+                )
+            )
         elif isinstance(m, AGUIToolMessage):
             out.append(
-                ToolMessage(id=m.id, content=m.content, tool_call_id=m.tool_call_id)
+                ToolMessage(
+                    id=m.id,
+                    content=m.content,
+                    tool_call_id=m.tool_call_id,
+                    status="error" if m.error is not None else "success",
+                    additional_kwargs=_agui_extras(m),
+                )
             )
         else:
             role = getattr(m, "role", type(m).__name__)

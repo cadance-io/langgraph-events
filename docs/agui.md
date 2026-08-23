@@ -131,6 +131,40 @@ For redaction or value transformation, write a custom `EventMapper`.
 !!! note "Message delivery uses two channels"
     Messages reach the client via two paths simultaneously: authoritative `MessagesSnapshot` from the `message_reducer()` channel, plus real-time `TextMessageStart` / `Content` / `End` tokens. AG-UI clients reconcile them by message id.
 
+### Message field mapping
+
+`MessagesSnapshot` converts each LangChain `BaseMessage` to its AG-UI counterpart. The declared fields map like this:
+
+| LangChain | AG-UI | Direction | Notes |
+|---|---|---|---|
+| `id`, `content` | `id`, `content` | both | `AssistantMessage.content` is `None` for block content; `SystemMessage`/`ToolMessage` degrade it to `""`. |
+| `name` | `name` | both | `UserMessage`, `AssistantMessage`, `SystemMessage` only — AG-UI's `ToolMessage` declares no `name`. |
+| `AIMessage.tool_calls` | `AssistantMessage.tool_calls` | both | `args` are JSON-encoded into `function.arguments`. |
+| `ToolMessage.status` | `ToolMessage.error` | both | `status="error"` sends the content as `error`; an inbound `error` sets `status="error"`. |
+| `additional_kwargs["agui"]` | *(extra fields)* | both | Passthrough — see below. |
+
+### Passing extra data on a message
+
+AG-UI messages allow extra fields, so a client can receive structured data the protocol does not declare — a retry hint on a failure notice, for instance. Put a mapping under the reserved `additional_kwargs` key `AGUI_EXTRAS_KEY` (the literal string `"agui"`). Each entry becomes a top-level field on the AG-UI message.
+
+```python
+from langchain_core.messages import SystemMessage
+
+from langgraph_events.agui import AGUI_EXTRAS_KEY
+
+SystemMessage(
+    content="The step failed.",
+    additional_kwargs={AGUI_EXTRAS_KEY: {"failure": {"retryable": True}}},
+)
+# -> AG-UI SystemMessage(id=..., role="system", content="The step failed.",
+#                        failure={"retryable": True})
+```
+
+The mapping round-trips. `agui_messages_to_langchain` collects the extra fields an inbound AG-UI message carries back into `additional_kwargs[AGUI_EXTRAS_KEY]`.
+
+!!! warning "Only the reserved key crosses the wire"
+    Nothing else in `additional_kwargs` is forwarded. Provider metadata and internal state stay on the backend. An entry that addresses a declared AG-UI field (`content`, `toolCallId`, …) raises `ValueError` naming the key, because it would rewrite protocol data. Rename the entry, or set the field through the LangChain message.
+
 ## Connect / Reconnect
 
 `connect()` (alias `reconnect()`) emits checkpoint-backed state without running handlers — `StateSnapshot` + `MessagesSnapshot` from the checkpoint plus any pending `Interrupted` events.
@@ -336,10 +370,10 @@ Streaming-path errors propagate to the frontend as a `RUN_ERROR` event with the 
 
 ## Resume Helpers
 
-`detect_new_tool_results` covers the frontend-tool-result arm of resume. The other arm — frontend sends `Command(resume=…)` plus new chat messages — has three helpers that collapse `resume_factory` boilerplate:
+`detect_new_tool_results` covers the frontend-tool-result arm of resume. A result the client marks with `error` becomes a LangChain `ToolMessage` with `status="error"`, so the model reads the failure as a failure. The other arm — frontend sends `Command(resume=…)` plus new chat messages — has three helpers that collapse `resume_factory` boilerplate:
 
 - **`extract_resume_input(input_data)`** — pull & decode `RunAgentInput.forwarded_props["command"]["resume"]`.
-- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage`. `ReasoningMessage` / `DeveloperMessage` skipped (DEBUG); `ActivityMessage` / unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls with unparseable JSON args are dropped (WARNING).
+- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage`. `ReasoningMessage` / `DeveloperMessage` skipped (DEBUG); `ActivityMessage` / unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls with unparseable JSON args are dropped (WARNING). A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]` (see [Message field mapping](#message-field-mapping)).
 - **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — read existing messages from checkpoint, convert, merge via `add_messages` (id-based dedup; missing ids get UUIDs assigned). Returns a tuple.
 
 ```python

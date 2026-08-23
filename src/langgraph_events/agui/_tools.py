@@ -72,12 +72,16 @@ def detect_new_tool_results(
             )
         if tc_id in existing:
             continue
+        error = getattr(msg, "error", None)
         results.append(
             LCToolMessage(
                 content=getattr(msg, "content", "") or "",
                 tool_call_id=tc_id,
                 # Normalize falsy ("") id to None so LangChain generates a fresh one.
                 id=getattr(msg, "id", None) or None,
+                # AG-UI reports a client-side tool failure through `error`.
+                # Without this the model reads the failure as a success.
+                status="error" if error is not None else "success",
             )
         )
     return results
