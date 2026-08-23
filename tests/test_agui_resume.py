@@ -250,6 +250,21 @@ def describe_agui_messages_to_langchain():
                     assert out.status == "error"
                     assert out.content == ""
 
+        def when_the_error_field_is_an_empty_string():
+            """A client that initialises `error: ""` reports no failure.
+
+            The outbound mapper never sends an empty `error`, because a client
+            writing `if (msg.error)` would read it as a success. Truthiness is
+            therefore the one rule that governs the field, in both directions.
+            """
+
+            def it_maps_to_a_success_status():
+                msg = AGUIToolMessage(
+                    id="tm1", content="42", tool_call_id="tc1", error=""
+                )
+                [out] = agui_messages_to_langchain([msg])
+                assert out.status == "success"
+
     def when_message_carries_extra_fields():
         def it_collects_them_under_the_reserved_additional_kwargs_key():
             msg = AGUISystemMessage(id="s1", content="x", failure={"retryable": True})

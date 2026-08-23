@@ -80,8 +80,11 @@ def detect_new_tool_results(
                 # Normalize falsy ("") id to None so LangChain generates a fresh one.
                 id=getattr(msg, "id", None) or None,
                 # AG-UI reports a client-side tool failure through `error`.
-                # Without this the model reads the failure as a success.
-                status="error" if error is not None else "success",
+                # Without this the model reads the failure as a success. A
+                # truthy `error` marks the failure, in both directions: the
+                # outbound mapper never sends an empty `error`, so a client
+                # that initialises `error: ""` reports no failure.
+                status="error" if error else "success",
             )
         )
     return results

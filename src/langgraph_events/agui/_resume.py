@@ -47,7 +47,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     Reasoning and developer messages are skipped (logged at DEBUG); activity
     and unknown roles raise ``ValueError``.
 
-    An AG-UI ``ToolMessage.error`` becomes ``ToolMessage.status="error"``.
+    A truthy AG-UI ``ToolMessage.error`` becomes ``ToolMessage.status="error"``.
     Fields the client added beyond the AG-UI schema land under the reserved
     ``additional_kwargs[AGUI_EXTRAS_KEY]`` key. See :data:`AGUI_EXTRAS_KEY`.
 
@@ -152,7 +152,10 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     id=m.id,
                     content=m.content,
                     tool_call_id=m.tool_call_id,
-                    status="error" if m.error is not None else "success",
+                    # A truthy `error` marks the failure, in both directions.
+                    # The outbound mapper never sends an empty `error`, so a
+                    # client that initialises `error: ""` reports no failure.
+                    status="error" if m.error else "success",
                     additional_kwargs=_agui_extras(m),
                 )
             )

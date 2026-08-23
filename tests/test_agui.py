@@ -4154,6 +4154,31 @@ def describe_detect_new_tool_results():
             [out] = detect_new_tool_results(inp, {"messages": []})
             assert out.status == "success"
 
+    def when_the_agui_error_field_is_an_empty_string():
+        """A client that initialises `error: ""` reports no failure.
+
+        The outbound mapper never sends an empty `error`, because a client
+        writing `if (msg.error)` would read it as a success. Truthiness is
+        therefore the one rule that governs the field, in both directions.
+        """
+
+        def it_marks_the_langchain_message_as_a_success():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                        error="",
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.status == "success"
+
 
 def describe_frontend_state_mutated_event_class():
     """Shape checks for the new FrontendStateMutated event."""
