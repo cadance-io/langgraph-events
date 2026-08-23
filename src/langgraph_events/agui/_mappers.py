@@ -47,13 +47,18 @@ _warned_extras: set[tuple[type, str]] = set()
 
 AGUIMessageT = TypeVar("AGUIMessageT", bound=BaseModel)
 
-AGUI_EXTRAS_KEY = "agui"
+AGUI_EXTRAS_KEY = "langgraph_events.agui"
 """Reserved ``BaseMessage.additional_kwargs`` key for AG-UI passthrough fields.
 
 A consumer puts a mapping under this key on a LangChain message. Every entry
 becomes an extra field on the AG-UI message the adapter sends to the client.
 The same key receives the client's extra fields on the way back in. Nothing
 else in ``additional_kwargs`` crosses the wire.
+
+``additional_kwargs`` is a shared namespace — LangChain provider integrations
+write their own keys into it. The key is therefore package-qualified and holds
+a dot, so it is not a Python identifier and no integration can produce it as a
+keyword argument. Read the constant rather than the literal.
 """
 
 TOOL_ERROR_STATUS = "error"

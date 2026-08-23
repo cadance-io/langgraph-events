@@ -2963,7 +2963,7 @@ def describe_system_message_conversion():
 
 
 def describe_agui_message_extras():
-    """`additional_kwargs["agui"]` rides through onto the AG-UI message."""
+    """The reserved `additional_kwargs` key rides through onto the AG-UI message."""
 
     def when_the_reserved_key_carries_a_mapping():
         async def it_forwards_each_entry_as_an_agui_message_field():
@@ -2972,7 +2972,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="the step failed",
-                        additional_kwargs={"agui": {"failure": {"retryable": True}}},
+                        additional_kwargs={
+                            "langgraph_events.agui": {"failure": {"retryable": True}}
+                        },
                     )
                 )
 
@@ -2995,7 +2997,9 @@ def describe_agui_message_extras():
                         ToolMessage(
                             content="42",
                             tool_call_id="tc-1",
-                            additional_kwargs={"agui": {"latency_ms": 12}},
+                            additional_kwargs={
+                                "langgraph_events.agui": {"latency_ms": 12}
+                            },
                         ),
                     )
                 )
@@ -3043,7 +3047,10 @@ def describe_agui_message_extras():
                     message=SystemMessage(
                         content="plain",
                         additional_kwargs={
-                            "agui": {"content": "hijacked", "failure": "kept"}
+                            "langgraph_events.agui": {
+                                "content": "hijacked",
+                                "failure": "kept",
+                            }
                         },
                     )
                 )
@@ -3067,7 +3074,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="plain",
-                        additional_kwargs={"agui": {"content": "hijacked"}},
+                        additional_kwargs={
+                            "langgraph_events.agui": {"content": "hijacked"}
+                        },
                     )
                 )
 
@@ -3089,7 +3098,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="plain",
-                        additional_kwargs={"agui": {"content": "hijacked"}},
+                        additional_kwargs={
+                            "langgraph_events.agui": {"content": "hijacked"}
+                        },
                     )
                 )
 
@@ -3114,7 +3125,9 @@ def describe_agui_message_extras():
                         ToolMessage(
                             content="42",
                             tool_call_id="tc-1",
-                            additional_kwargs={"agui": {"toolCallId": "spoofed"}},
+                            additional_kwargs={
+                                "langgraph_events.agui": {"toolCallId": "spoofed"}
+                            },
                         ),
                     )
                 )
@@ -3139,7 +3152,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="plain",
-                        additional_kwargs={"agui": {7: "numeric", "failure": "kept"}},
+                        additional_kwargs={
+                            "langgraph_events.agui": {7: "numeric", "failure": "kept"}
+                        },
                     )
                 )
 
@@ -3162,7 +3177,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="plain",
-                        additional_kwargs={"agui": ["not", "a", "mapping"]},
+                        additional_kwargs={
+                            "langgraph_events.agui": ["not", "a", "mapping"]
+                        },
                     )
                 )
 
@@ -3185,7 +3202,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="plain",
-                        additional_kwargs={"agui": ["not", "a", "mapping"]},
+                        additional_kwargs={
+                            "langgraph_events.agui": ["not", "a", "mapping"]
+                        },
                     )
                 )
 
@@ -3215,7 +3234,9 @@ def describe_agui_message_extras():
                 return SystemPromptDelivered(
                     message=SystemMessage(
                         content="plain",
-                        additional_kwargs={"agui": ["not", "a", "mapping"]},
+                        additional_kwargs={
+                            "langgraph_events.agui": ["not", "a", "mapping"]
+                        },
                     )
                 )
 

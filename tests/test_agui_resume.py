@@ -269,7 +269,9 @@ def describe_agui_messages_to_langchain():
         def it_collects_them_under_the_reserved_additional_kwargs_key():
             msg = AGUISystemMessage(id="s1", content="x", failure={"retryable": True})
             [out] = agui_messages_to_langchain([msg])
-            assert out.additional_kwargs == {"agui": {"failure": {"retryable": True}}}
+            assert out.additional_kwargs == {
+                "langgraph_events.agui": {"failure": {"retryable": True}}
+            }
 
     def when_message_carries_no_extra_fields():
         def it_leaves_additional_kwargs_empty():
