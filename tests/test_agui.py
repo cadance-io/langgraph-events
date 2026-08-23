@@ -33,6 +33,7 @@ from langgraph_events.agui import (
     InterruptedWithPayload,
     MapperContext,
     UnmappedEventError,
+    agui_messages_to_langchain,
     build_langchain_tools,
     detect_new_tool_results,
 )
@@ -3015,6 +3016,52 @@ def describe_agui_message_extras():
             [tool_msg] = [m for m in snap.messages if m.role == "tool"]
             assert tool_msg.model_dump()["latency_ms"] == 12
 
+        async def it_forwards_on_a_user_message():
+            @on(UserAsked)
+            def echo(event: UserAsked) -> UserSent:
+                return UserSent(
+                    message=HumanMessage(
+                        content="hello",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"source": "voice"}
+                        },
+                    )
+                )
+
+            graph = EventGraph([echo], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [user_msg] = [m for m in snap.messages if m.role == "user"]
+            assert user_msg.model_dump()["source"] == "voice"
+
+        async def it_forwards_on_an_assistant_message():
+            @on(UserAsked)
+            def reply(event: UserAsked) -> AgentReplied:
+                return AgentReplied(
+                    message=AIMessage(
+                        content="hi",
+                        additional_kwargs={
+                            "langgraph_events.agui": {"confidence": 0.9}
+                        },
+                    )
+                )
+
+            graph = EventGraph([reply], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [ai_msg] = [m for m in snap.messages if m.role == "assistant"]
+            assert ai_msg.model_dump()["confidence"] == 0.9
+
     def when_the_reserved_key_is_absent():
         async def it_adds_no_fields():
             @on(UserAsked)
@@ -3090,7 +3137,7 @@ def describe_agui_message_extras():
                 warnings.simplefilter("always")
                 await _collect(adapter, _make_input())
 
-            assert [x for x in w if "content" in str(x.message)]
+            assert [x for x in w if "declares content" in str(x.message)]
 
         async def it_warns_once_for_the_repeated_drop():
             @on(UserAsked)
@@ -3115,7 +3162,7 @@ def describe_agui_message_extras():
                 await _collect(adapter, _make_input())
                 await _collect(adapter, _make_input())
 
-            assert len([x for x in w if "content" in str(x.message)]) == 1
+            assert len([x for x in w if "declares content" in str(x.message)]) == 1
 
         async def it_rejects_a_camel_case_alias_of_a_declared_field():
             @on(UserAsked)
@@ -3265,11 +3312,50 @@ def describe_agui_message_extras():
             assert sys_msg.model_extra == {}
 
 
+def describe_agui_message_extras_round_trip():
+    """A client's extra fields come back out on the next snapshot."""
+
+    def when_an_inbound_message_carries_extra_fields():
+        async def it_returns_them_to_the_client_unchanged():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            carried: list[Any] = []
+
+            def seed(inp: RunAgentInput) -> UserAsked:
+                carried.extend(agui_messages_to_langchain(inp.messages))
+                return UserAsked(question="go")
+
+            @on(UserAsked)
+            def replay(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(messages=tuple(carried))
+
+            graph = EventGraph([replay], reducers=[message_reducer()])
+            adapter = AGUIAdapter(graph=graph, seed_factory=seed)
+            events = await _collect(
+                adapter,
+                _make_input(
+                    messages=[
+                        AguiToolMessage(
+                            id="m-1",
+                            role="tool",
+                            content="42",
+                            tool_call_id="tc-1",
+                            latency_ms=12,
+                        )
+                    ]
+                ),
+            )
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.model_dump()["latency_ms"] == 12
+
+
 def describe_message_name_forwarding():
     """LangChain `BaseMessage.name` reaches the AG-UI message that declares it."""
 
     def when_the_langchain_message_has_a_name():
-        async def it_forwards_the_name():
+        async def it_forwards_the_name_on_an_assistant_message():
             @on(UserAsked)
             def reply(event: UserAsked) -> AgentReplied:
                 return AgentReplied(message=AIMessage(content="hi", name="planner"))
@@ -3284,6 +3370,40 @@ def describe_message_name_forwarding():
             snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
             [ai_msg] = [m for m in snap.messages if m.role == "assistant"]
             assert ai_msg.name == "planner"
+
+        async def it_forwards_the_name_on_a_user_message():
+            @on(UserAsked)
+            def echo(event: UserAsked) -> UserSent:
+                return UserSent(message=HumanMessage(content="hi", name="alice"))
+
+            graph = EventGraph([echo], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [user_msg] = [m for m in snap.messages if m.role == "user"]
+            assert user_msg.name == "alice"
+
+        async def it_forwards_the_name_on_a_system_message():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(content="rules", name="policy")
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.name == "policy"
 
     def when_the_langchain_message_has_no_name():
         async def it_leaves_the_name_unset():
