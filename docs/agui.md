@@ -140,7 +140,7 @@ For redaction or value transformation, write a custom `EventMapper`.
 | `id`, `content` | `id`, `content` | both | `AssistantMessage.content` is `None` for block content; `SystemMessage`/`ToolMessage` degrade it to `""`. |
 | `name` | `name` | both | `UserMessage`, `AssistantMessage`, `SystemMessage` only — AG-UI's `ToolMessage` declares no `name`. |
 | `AIMessage.tool_calls` | `AssistantMessage.tool_calls` | both | `args` are JSON-encoded into `function.arguments`. |
-| `ToolMessage.status` | `ToolMessage.error` | both | `status="error"` sends the content as `error`; an inbound `error` sets `status="error"`. |
+| `ToolMessage.status` | `ToolMessage.error` | both | `status="error"` sends the content as `error`, or the literal `"error"` when the content is empty, because a falsy `error` reads as a success; an inbound `error` sets `status="error"`. |
 | `additional_kwargs["agui"]` | *(extra fields)* | both | Passthrough — see below. |
 
 ### Passing extra data on a message

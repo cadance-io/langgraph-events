@@ -241,6 +241,15 @@ def describe_agui_messages_to_langchain():
                 [out] = agui_messages_to_langchain([msg])
                 assert out.status == "error"
 
+            def when_the_content_is_empty():
+                def it_still_maps_to_an_error_status():
+                    msg = AGUIToolMessage(
+                        id="tm1", content="", tool_call_id="tc1", error="error"
+                    )
+                    [out] = agui_messages_to_langchain([msg])
+                    assert out.status == "error"
+                    assert out.content == ""
+
     def when_message_carries_extra_fields():
         def it_collects_them_under_the_reserved_additional_kwargs_key():
             msg = AGUISystemMessage(id="s1", content="x", failure={"retryable": True})

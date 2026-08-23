@@ -51,6 +51,16 @@ The same key receives the client's extra fields on the way back in. Nothing
 else in ``additional_kwargs`` crosses the wire.
 """
 
+TOOL_ERROR_STATUS = "error"
+"""The LangChain ``ToolMessage.status`` value that marks a failed tool result.
+
+The literal doubles as the fallback for AG-UI ``ToolMessage.error``. AG-UI
+declares ``error`` as a string, and an empty string is falsy, so a client
+writing ``if (msg.error)`` reads a failed tool result as a success. An errored
+tool message with empty content therefore sends this literal. The literal is
+fixed, so it carries nothing about the tool, its arguments or its result.
+"""
+
 
 class UnmappedEventError(TypeError):
     """Raised by ``AGUIAdapter(on_unmapped="raise")`` for an event that reaches
@@ -205,6 +215,11 @@ def _langchain_to_agui_messages(
             # has no name field. Block content has no lossless mapping, so it
             # degrades to "" rather than raising inside the snapshot build.
             content = msg.content if isinstance(msg.content, str) else ""
+            # An errored result must reach the client as a truthy `error`, or
+            # `if (msg.error)` reads the failure as a success. The content is
+            # the reason when there is one. Empty content — genuine, or block
+            # content degraded above — falls back to the status literal.
+            is_error = getattr(msg, "status", None) == TOOL_ERROR_STATUS
             result.append(
                 _build_agui_message(
                     AguiToolMessage,
@@ -213,9 +228,7 @@ def _langchain_to_agui_messages(
                     role="tool",
                     content=content,
                     tool_call_id=getattr(msg, "tool_call_id", ""),
-                    error=(
-                        content if getattr(msg, "status", None) == "error" else None
-                    ),
+                    error=(content or TOOL_ERROR_STATUS) if is_error else None,
                 )
             )
     return result

@@ -3166,6 +3166,58 @@ def describe_tool_message_status_conversion():
             assert tool_msg.error == "boom"
             assert tool_msg.content == "boom"
 
+        def when_the_content_is_empty():
+            async def it_still_sets_a_truthy_error():
+                @on(UserAsked)
+                def run_tool(event: UserAsked) -> ToolsExecuted:
+                    return ToolsExecuted(
+                        messages=(
+                            ToolMessage(
+                                content="",
+                                tool_call_id="tc-1",
+                                status="error",
+                            ),
+                        )
+                    )
+
+                graph = EventGraph([run_tool], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                )
+                events = await _collect(adapter, _make_input())
+
+                snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+                [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+                assert tool_msg.error == "error"
+                assert tool_msg.content == ""
+
+        def when_the_content_is_a_block_list():
+            async def it_still_sets_a_truthy_error():
+                @on(UserAsked)
+                def run_tool(event: UserAsked) -> ToolsExecuted:
+                    return ToolsExecuted(
+                        messages=(
+                            ToolMessage(
+                                content=[{"type": "text", "text": "boom"}],
+                                tool_call_id="tc-1",
+                                status="error",
+                            ),
+                        )
+                    )
+
+                graph = EventGraph([run_tool], reducers=[message_reducer()])
+                adapter = AGUIAdapter(
+                    graph=graph,
+                    seed_factory=lambda inp: UserAsked(question="go"),
+                )
+                events = await _collect(adapter, _make_input())
+
+                snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+                [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+                assert tool_msg.error == "error"
+                assert tool_msg.content == ""
+
     def when_the_status_is_success():
         async def it_leaves_the_agui_error_field_unset():
             @on(UserAsked)

@@ -25,8 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the client marked as failed reached the model as a success, because every conversion path
   dropped the field. `detect_new_tool_results` and `agui_messages_to_langchain` now set
   `status="error"` when AG-UI `error` is present, and `MessagesSnapshot` now sends `error` when
-  the LangChain status is `"error"`. This is ag-ui issue #2226, whose upstream fix covered only
-  the inbound half of `ag_ui_langgraph`.
+  the LangChain status is `"error"`. The outbound `error` is always truthy: an errored tool
+  message with empty content sends the literal `"error"` instead, because an empty string is
+  falsy and a client writing `if (msg.error)` would read the failure as a success. This is
+  ag-ui issue #2226, whose upstream fix covered only the inbound half of `ag_ui_langgraph`.
 - **`BaseMessage.name` reaches the AG-UI message.** `agui_messages_to_langchain` already read
   `name` inbound, but the outbound mapper dropped it, so a named message did not round-trip.
   AG-UI declares `name` on `UserMessage`, `AssistantMessage` and `SystemMessage`. Its
