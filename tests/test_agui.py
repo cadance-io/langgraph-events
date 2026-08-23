@@ -4200,6 +4200,63 @@ def describe_detect_new_tool_results():
             [out] = detect_new_tool_results(inp, {"messages": []})
             assert out.status == "success"
 
+    def when_the_agui_message_carries_extra_fields():
+        """The same slot `agui_messages_to_langchain` fills on the other path."""
+
+        def it_collects_them_under_the_reserved_additional_kwargs_key():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                        latency_ms=12,
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.additional_kwargs == {
+                "langgraph_events.agui": {"latency_ms": 12}
+            }
+
+        def when_the_extra_fields_exceed_the_cap():
+            def it_drops_them():
+                from ag_ui.core import ToolMessage as AguiToolMessage
+
+                inp = _make_input(
+                    messages=[
+                        AguiToolMessage(
+                            id="m-1",
+                            role="tool",
+                            content="42",
+                            tool_call_id="tc-1",
+                            blob="a" * 9000,
+                        ),
+                    ],
+                )
+                [out] = detect_new_tool_results(inp, {"messages": []})
+                assert out.additional_kwargs == {}
+
+    def when_the_agui_message_carries_no_extra_fields():
+        def it_leaves_additional_kwargs_empty():
+            from ag_ui.core import ToolMessage as AguiToolMessage
+
+            inp = _make_input(
+                messages=[
+                    AguiToolMessage(
+                        id="m-1",
+                        role="tool",
+                        content="42",
+                        tool_call_id="tc-1",
+                    ),
+                ],
+            )
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.additional_kwargs == {}
+
 
 def describe_frontend_state_mutated_event_class():
     """Shape checks for the new FrontendStateMutated event."""
