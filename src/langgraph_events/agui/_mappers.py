@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from collections.abc import Mapping
 from functools import cache
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ag_ui.core import (
     BaseEvent,
@@ -18,6 +19,7 @@ from ag_ui.core import (
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
+from pydantic import BaseModel
 
 from langgraph_events._event import (
     Event,
@@ -35,12 +37,15 @@ from ._protocols import AGUICustomEvent, AGUISerializable
 
 if TYPE_CHECKING:
     from ag_ui.core import Message
-    from pydantic import BaseModel
 
     from ._context import MapperContext
 
+logger = logging.getLogger(__name__)
 
 _warned_classes: set[type] = set()
+_warned_extras: set[tuple[type, str]] = set()
+
+AGUIMessageT = TypeVar("AGUIMessageT", bound=BaseModel)
 
 AGUI_EXTRAS_KEY = "agui"
 """Reserved ``BaseMessage.additional_kwargs`` key for AG-UI passthrough fields.
@@ -99,6 +104,24 @@ def _handle_unmapped(cls: type, on_unmapped: str) -> list[BaseEvent]:
     return []
 
 
+def _warn_dropped_extras(cls: type, kind: str, detail: str) -> None:
+    """Warn once that AG-UI passthrough fields were dropped from *cls*.
+
+    *kind* is the dedupe key, not the message. It takes one of three fixed
+    values, so the dedupe set stays bounded however many bad messages arrive.
+    *detail* carries the specifics for the reader.
+    """
+    key = (cls, kind)
+    if key in _warned_extras:
+        return
+    _warned_extras.add(key)
+    warnings.warn(
+        f"Dropping AG-UI passthrough fields from a {cls.__name__}: {detail} "
+        f"The rest of the message is unchanged.",
+        stacklevel=3,
+    )
+
+
 @cache
 def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
     """Return every name that already addresses a field on *cls*.
@@ -106,6 +129,10 @@ def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
     An AG-UI model has ``populate_by_name=True`` with a camelCase alias
     generator, so ``tool_call_id`` and ``toolCallId`` both reach the same
     declared field. Both spellings are reserved.
+
+    ``field.alias`` is the only alias an AG-UI model sets today. A model that
+    set ``validation_alias`` or ``serialization_alias`` instead would need
+    those read here too.
     """
     names: set[str] = set()
     for name, field in cls.model_fields.items():
@@ -116,33 +143,65 @@ def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
 
 
 def _build_agui_message(
-    cls: Any,
+    cls: type[AGUIMessageT],
     source: Any,
     **fields: Any,
-) -> Any:
+) -> AGUIMessageT:
     """Build an AG-UI message, adding the passthrough fields *source* carries.
 
     The passthrough fields come from ``source.additional_kwargs[AGUI_EXTRAS_KEY]``.
-    An entry that addresses a declared field would silently rewrite protocol
-    data, so a collision raises ``ValueError`` naming the key.
+
+    This function never raises. It runs inside :func:`build_messages_snapshot`,
+    which ``connect()`` calls on the **checkpointed** message list. A raise here
+    escapes the adapter's async generator into the consumer's HTTP handler and
+    never becomes a ``RUN_ERROR``, so one bad value in a checkpoint would break
+    every later connect on that thread until someone edited the checkpoint. A
+    value that cannot ride through is dropped, and warned about once per class
+    and cause. This matches the ``tool`` branch below, which degrades block
+    content rather than raising.
+
+    Three causes drop something:
+
+    - the reserved key holds a non-mapping — the whole value goes;
+    - an entry key is not a string — that entry goes, because ``**`` refuses it;
+    - an entry addresses a declared field — that entry goes, because it would
+      rewrite protocol data.
     """
     extras = getattr(source, "additional_kwargs", None) or {}
     passthrough = extras.get(AGUI_EXTRAS_KEY)
     if passthrough is None:
         return cls(**fields)
     if not isinstance(passthrough, Mapping):
-        raise ValueError(
-            f"additional_kwargs[{AGUI_EXTRAS_KEY!r}] must be a mapping of "
-            f"AG-UI message fields, got {type(passthrough).__name__}."
+        _warn_dropped_extras(
+            cls,
+            "not-a-mapping",
+            f"additional_kwargs[{AGUI_EXTRAS_KEY!r}] must be a mapping of AG-UI "
+            f"message fields, got {type(passthrough).__name__}.",
         )
-    collisions = sorted(set(passthrough) & _declared_names(cls))
+        return cls(**fields)
+
+    usable = {k: v for k, v in passthrough.items() if isinstance(k, str)}
+    unusable = [k for k in passthrough if not isinstance(k, str)]
+    if unusable:
+        _warn_dropped_extras(
+            cls,
+            "non-string-key",
+            f"an AG-UI message field name must be a string, and "
+            f"{', '.join(repr(k) for k in unusable)} is not.",
+        )
+
+    collisions = sorted(set(usable) & _declared_names(cls))
+    for name in collisions:
+        del usable[name]
     if collisions:
-        raise ValueError(
-            f"additional_kwargs[{AGUI_EXTRAS_KEY!r}] must not carry "
-            f"{', '.join(collisions)} — {cls.__name__} declares that field. "
-            f"Rename the entry, or set the field through the LangChain message."
+        _warn_dropped_extras(
+            cls,
+            "declared-field",
+            f"{cls.__name__} declares {', '.join(collisions)}, so the entry "
+            f"would rewrite protocol data. Rename the entry, or set the field "
+            f"through the LangChain message.",
         )
-    return cls(**fields, **passthrough)
+    return cls(**fields, **usable)
 
 
 def _langchain_to_agui_messages(
@@ -215,6 +274,13 @@ def _langchain_to_agui_messages(
             # has no name field. Block content has no lossless mapping, so it
             # degrades to "" rather than raising inside the snapshot build.
             content = msg.content if isinstance(msg.content, str) else ""
+            if not isinstance(msg.content, str):
+                logger.warning(
+                    "Dropping block content from tool result %s — AG-UI declares "
+                    "ToolMessage.content as a string, so there is no lossless "
+                    "mapping. The client receives an empty content.",
+                    getattr(msg, "tool_call_id", "") or msg_id,
+                )
             # An errored result must reach the client as a truthy `error`, or
             # `if (msg.error)` reads the failure as a success. The content is
             # the reason when there is one. Empty content — genuine, or block

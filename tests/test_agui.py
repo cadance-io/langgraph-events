@@ -36,7 +36,7 @@ from langgraph_events.agui import (
     build_langchain_tools,
     detect_new_tool_results,
 )
-from langgraph_events.agui._mappers import _warned_classes
+from langgraph_events.agui._mappers import _warned_classes, _warned_extras
 
 # ---------------------------------------------------------------------------
 # Test event classes
@@ -3034,7 +3034,34 @@ def describe_agui_message_extras():
             assert sys_msg.model_extra == {}
 
     def when_an_entry_names_a_declared_agui_field():
-        async def it_fails_the_run_naming_the_key():
+        """The declared field wins — the entry would rewrite protocol data."""
+
+        async def it_drops_the_entry_and_keeps_the_rest():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={
+                            "agui": {"content": "hijacked", "failure": "kept"}
+                        },
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.content == "plain"
+            assert sys_msg.model_extra == {"failure": "kept"}
+
+        async def it_warns_naming_the_key():
             @on(UserAsked)
             def notify(event: UserAsked) -> SystemPromptDelivered:
                 return SystemPromptDelivered(
@@ -3049,10 +3076,35 @@ def describe_agui_message_extras():
                 graph=graph,
                 seed_factory=lambda inp: UserAsked(question="go"),
             )
-            events = await _collect(adapter, _make_input())
+            _warned_extras.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
 
-            [error] = [e for e in events if e.type == EventType.RUN_ERROR]
-            assert "content" in error.message
+            assert [x for x in w if "content" in str(x.message)]
+
+        async def it_warns_once_for_the_repeated_drop():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={"agui": {"content": "hijacked"}},
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_extras.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
+                await _collect(adapter, _make_input())
+
+            assert len([x for x in w if "content" in str(x.message)]) == 1
 
         async def it_rejects_a_camel_case_alias_of_a_declared_field():
             @on(UserAsked)
@@ -3074,11 +3126,37 @@ def describe_agui_message_extras():
             )
             events = await _collect(adapter, _make_input())
 
-            [error] = [e for e in events if e.type == EventType.RUN_ERROR]
-            assert "toolCallId" in error.message
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [tool_msg] = [m for m in snap.messages if m.role == "tool"]
+            assert tool_msg.tool_call_id == "tc-1"
+            assert tool_msg.model_extra == {}
+
+    def when_an_entry_key_is_not_a_string():
+        async def it_drops_the_entry_and_keeps_the_rest():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={"agui": {7: "numeric", "failure": "kept"}},
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            events = await _collect(adapter, _make_input())
+
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.model_extra == {"failure": "kept"}
 
     def when_the_reserved_key_is_not_a_mapping():
-        async def it_fails_the_run():
+        async def it_drops_the_value():
             @on(UserAsked)
             def notify(event: UserAsked) -> SystemPromptDelivered:
                 return SystemPromptDelivered(
@@ -3095,8 +3173,75 @@ def describe_agui_message_extras():
             )
             events = await _collect(adapter, _make_input())
 
-            [error] = [e for e in events if e.type == EventType.RUN_ERROR]
-            assert "mapping" in error.message
+            assert not [e for e in events if e.type == EventType.RUN_ERROR]
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.content == "plain"
+            assert sys_msg.model_extra == {}
+
+        async def it_warns_naming_the_type_it_got():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={"agui": ["not", "a", "mapping"]},
+                    )
+                )
+
+            graph = EventGraph([notify], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            _warned_extras.clear()
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                await _collect(adapter, _make_input())
+
+            assert [x for x in w if "list" in str(x.message)]
+
+    def when_a_bad_reserved_key_is_already_in_the_checkpoint():
+        """`build_messages_snapshot` runs on every `connect()`.
+
+        A raise inside it escapes the async generator into the consumer's
+        HTTP handler and never becomes a RUN_ERROR. The bad value sits in
+        the checkpoint, so the thread would raise forever.
+        """
+
+        async def it_still_serves_the_connect_snapshot():
+            @on(UserAsked)
+            def notify(event: UserAsked) -> SystemPromptDelivered:
+                return SystemPromptDelivered(
+                    message=SystemMessage(
+                        content="plain",
+                        additional_kwargs={"agui": ["not", "a", "mapping"]},
+                    )
+                )
+
+            graph = EventGraph(
+                [notify],
+                checkpointer=MemorySaver(),
+                reducers=[message_reducer()],
+            )
+            await graph.ainvoke(
+                UserAsked(question="go"),
+                config={"configurable": {"thread_id": "t-poisoned"}},
+            )
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="unused"),
+            )
+
+            events = [
+                event
+                async for event in adapter.connect(_make_input(thread_id="t-poisoned"))
+            ]
+
+            snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
+            [sys_msg] = [m for m in snap.messages if m.role == "system"]
+            assert sys_msg.content == "plain"
+            assert sys_msg.model_extra == {}
 
 
 def describe_message_name_forwarding():
@@ -3261,6 +3406,27 @@ def describe_tool_message_status_conversion():
             snap = [e for e in events if e.type == EventType.MESSAGES_SNAPSHOT][-1]
             [tool_msg] = [m for m in snap.messages if m.role == "tool"]
             assert tool_msg.content == ""
+
+        async def it_logs_a_warning_naming_the_tool_call(caplog):
+            @on(UserAsked)
+            def run_tool(event: UserAsked) -> ToolsExecuted:
+                return ToolsExecuted(
+                    messages=(
+                        ToolMessage(
+                            content=[{"type": "text", "text": "42"}],
+                            tool_call_id="tc-dropped",
+                        ),
+                    )
+                )
+
+            graph = EventGraph([run_tool], reducers=[message_reducer()])
+            adapter = AGUIAdapter(
+                graph=graph,
+                seed_factory=lambda inp: UserAsked(question="go"),
+            )
+            await _collect(adapter, _make_input())
+
+            assert any("tc-dropped" in r.message for r in caplog.records)
 
 
 def describe_multiple_custom_reducers():
