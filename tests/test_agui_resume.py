@@ -273,6 +273,28 @@ def describe_agui_messages_to_langchain():
                 "langgraph_events.agui": {"failure": {"retryable": True}}
             }
 
+    def when_message_carries_more_extra_data_than_the_cap_allows():
+        """Inbound extras are client input that reaches the checkpoint.
+
+        Without a cap a client can grow a thread's checkpoint without bound.
+        """
+
+        def it_drops_them():
+            msg = AGUISystemMessage(id="s1", content="x", blob="a" * 9000)
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {}
+
+        def it_logs_a_warning_naming_the_message(caplog):
+            msg = AGUISystemMessage(id="s-oversized", content="x", blob="a" * 9000)
+            agui_messages_to_langchain([msg])
+            assert any("s-oversized" in r.message for r in caplog.records)
+
+    def when_an_extra_value_cannot_be_measured():
+        def it_drops_them():
+            msg = AGUISystemMessage(id="s1", content="x", blob=object())
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {}
+
     def when_message_carries_no_extra_fields():
         def it_leaves_additional_kwargs_empty():
             msg = AGUISystemMessage(id="s1", content="x")

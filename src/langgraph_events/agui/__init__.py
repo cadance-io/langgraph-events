@@ -7,8 +7,11 @@ from langgraph_events.agui._events import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
 )
-from langgraph_events.agui._mappers import (
+from langgraph_events.agui._extras import (
     AGUI_EXTRAS_KEY,
+    AGUI_EXTRAS_MAX_BYTES,
+)
+from langgraph_events.agui._mappers import (
     FallbackMapper,
     FrontendToolCallRequestedMapper,
     InterruptedMapper,
@@ -38,6 +41,7 @@ from langgraph_events.agui._transport import (
 
 __all__ = [
     "AGUI_EXTRAS_KEY",
+    "AGUI_EXTRAS_MAX_BYTES",
     "AGUIAdapter",
     "AGUICustomEvent",
     "AGUISerializable",

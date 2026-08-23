@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ._mappers import AGUI_EXTRAS_KEY
+from ._extras import collect_inbound_extras
 
 if TYPE_CHECKING:
     from ag_ui.core import Message
@@ -20,21 +20,6 @@ if TYPE_CHECKING:
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
 
 logger = logging.getLogger(__name__)
-
-
-def _agui_extras(message: Any) -> dict[str, Any]:
-    """Return the ``additional_kwargs`` payload for an inbound AG-UI message.
-
-    AG-UI models allow extra fields. Whatever the client sent beyond the
-    declared schema is kept under the reserved ``AGUI_EXTRAS_KEY``, which is
-    the same slot :func:`~langgraph_events.agui._mappers._langchain_to_agui_messages`
-    reads on the way out. A message with no extra fields gets an empty
-    ``additional_kwargs``.
-    """
-    extra = message.model_extra
-    if not extra:
-        return {}
-    return {AGUI_EXTRAS_KEY: dict(extra)}
 
 
 def agui_messages_to_langchain(  # noqa: PLR0912
@@ -49,7 +34,10 @@ def agui_messages_to_langchain(  # noqa: PLR0912
 
     A truthy AG-UI ``ToolMessage.error`` becomes ``ToolMessage.status="error"``.
     Fields the client added beyond the AG-UI schema land under the reserved
-    ``additional_kwargs[AGUI_EXTRAS_KEY]`` key. See :data:`AGUI_EXTRAS_KEY`.
+    ``additional_kwargs[AGUI_EXTRAS_KEY]`` key. Those fields are unvalidated
+    client input that reaches the checkpoint and is served back out. Read
+    :func:`~langgraph_events.agui._extras.collect_inbound_extras` before you
+    rely on them, and note the size cap in :data:`AGUI_EXTRAS_MAX_BYTES`.
 
     The default ``drop_invalid_tool_calls=False`` propagates
     ``json.JSONDecodeError`` for parity with upstream ``ag-ui-langgraph`` —
@@ -94,7 +82,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     id=m.id,
                     content=content,
                     name=m.name,
-                    additional_kwargs=_agui_extras(m),
+                    additional_kwargs=collect_inbound_extras(m),
                 )
             )
         elif isinstance(m, AssistantMessage):
@@ -134,7 +122,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     content=m.content or "",
                     tool_calls=tool_calls,
                     name=m.name,
-                    additional_kwargs=_agui_extras(m),
+                    additional_kwargs=collect_inbound_extras(m),
                 )
             )
         elif isinstance(m, AGUISystemMessage):
@@ -143,7 +131,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     id=m.id,
                     content=m.content,
                     name=m.name,
-                    additional_kwargs=_agui_extras(m),
+                    additional_kwargs=collect_inbound_extras(m),
                 )
             )
         elif isinstance(m, AGUIToolMessage):
@@ -156,7 +144,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                     # The outbound mapper never sends an empty `error`, so a
                     # client that initialises `error: ""` reports no failure.
                     status="error" if m.error else "success",
-                    additional_kwargs=_agui_extras(m),
+                    additional_kwargs=collect_inbound_extras(m),
                 )
             )
         else:
