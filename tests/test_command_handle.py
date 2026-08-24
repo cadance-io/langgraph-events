@@ -14,8 +14,11 @@ from langgraph_events import (
     DomainEvent,
     EventGraph,
     EventLog,
+    HandlerRaised,
     IntegrationEvent,
     Interrupted,
+    Invariant,
+    InvariantViolated,
     Namespace,
     Reducer,
     Scatter,
@@ -385,8 +388,6 @@ def describe_Command_handle():
     def describe_class_level_modifiers():
         def when_invariants_set_as_class_attribute():
             def it_evaluates_the_predicate_at_dispatch():
-                from langgraph_events import Invariant, InvariantViolated
-
                 class _BlockedInv(Invariant):
                     pass
 
@@ -410,8 +411,6 @@ def describe_Command_handle():
                     # Each build must reflect the class's current declaration
                     # — a stale ``_invariants`` stamp from an earlier build
                     # must not keep evaluating a removed predicate.
-                    from langgraph_events import Invariant, InvariantViolated
-
                     class _StaleInv(Invariant):
                         pass
 
@@ -436,8 +435,6 @@ def describe_Command_handle():
 
         def when_invariants_inherited_from_a_parent_command():
             def it_evaluates_the_inherited_predicate():
-                from langgraph_events import Invariant, InvariantViolated
-
                 class _BlockedInheritedInv(Invariant):
                     pass
 
@@ -464,8 +461,6 @@ def describe_Command_handle():
 
         def when_raises_set_as_class_attribute():
             def it_routes_the_exception_to_HandlerRaised():
-                from langgraph_events import HandlerRaised
-
                 class _BoomError(Exception):
                     pass
 
@@ -492,8 +487,6 @@ def describe_Command_handle():
                     # Each build must reflect the class's current declaration
                     # — a stale ``_raises`` stamp from an earlier build must
                     # not keep catching an exception nobody declares.
-                    from langgraph_events import HandlerRaised
-
                     class _StaleBoomError(Exception):
                         pass
 
