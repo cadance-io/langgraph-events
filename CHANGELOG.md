@@ -126,6 +126,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   diagrams resolve their indices in `MermaidFlowchart.render`, which counts seeds and chained
   hops correctly by construction, and were always right.
 
+- **A field-shape mismatch on revive now names the class and the field.** `NamespaceAwareSerde`
+  revives a checkpointed event by calling the live class with the stored payload verbatim. An
+  `Event` is a frozen dataclass, so a stored key the class has since dropped, or a required field
+  the class has since gained with no `Migration.add_field`, raises `TypeError` out of `__init__`.
+  That type was missing from the ext-hook's `except` clause, so nothing reached the error channel
+  and ormsgpack's generic `ValueError: ext_hook failed` — no module, no class, no field, and a
+  `__cause__` of `None` — was all the caller saw. The clause now catches `TypeError` alongside
+  `ImportError` and `AttributeError`, and records `Cannot revive <module>.<qualname>: TypeError:
+  <message>. The class may have been renamed or removed, or its fields may have changed, since the
+  checkpoint was written.`
+
+  This is a diagnostic change only. The revive still raises, and a payload that revives today is
+  unaffected. A named added-field mismatch is fixed with `Migration.add_field`. An extra stored key
+  reaches no absorber at all, because `__init__` rejects every keyword the class does not declare.
+
 ## [0.24.0] - 2026-08-23
 
 ### Added

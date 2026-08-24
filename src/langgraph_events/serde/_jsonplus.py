@@ -206,11 +206,14 @@ def _make_ext_hook(
         )
         try:
             return _resolve_identity(module_name, qualname)(**kwargs)
-        except (ImportError, AttributeError) as exc:
+        except (ImportError, AttributeError, TypeError) as exc:
+            # ``TypeError`` is the field-shape mismatch: the identity
+            # resolves, but the stored kwargs carry a key the live class
+            # has dropped, or omit a field it has gained with no AddField.
             errors.append(
                 f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: {exc}. "
-                f"The class may have been renamed or removed since the "
-                f"checkpoint was written."
+                f"The class may have been renamed or removed, or its fields "
+                f"may have changed, since the checkpoint was written."
             )
             raise
 
