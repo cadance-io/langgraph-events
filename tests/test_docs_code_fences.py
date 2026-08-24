@@ -56,13 +56,11 @@ MIN_TOTAL_FENCES = 60
 
 def _doc_files() -> list[str]:
     """Return repo-relative paths of every published Markdown doc."""
-    out: list[str] = []
-    for path in sorted(DOCS_ROOT.rglob("*.md")):
-        parent_parts = path.relative_to(DOCS_ROOT).parts[:-1]
-        if EXCLUDED_DIRS.intersection(parent_parts):
-            continue
-        out.append(path.relative_to(REPO_ROOT).as_posix())
-    return out
+    return [
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in sorted(DOCS_ROOT.rglob("*.md"))
+        if EXCLUDED_DIRS.isdisjoint(path.relative_to(DOCS_ROOT).parts[:-1])
+    ]
 
 
 DOC_FILES = _doc_files()
