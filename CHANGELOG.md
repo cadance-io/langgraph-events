@@ -66,6 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the anomaly set the reflection surface reports. Suppress it with `RetryPolicy(observe="log")`
   for a `WARNING` instead, or `observe="silent"` for neither.
 
+  Its `exception` is the live instance — `@on(HandlerRetried, exception=SomeError)` isinstance-matches
+  it and field injection still hands it over typed — but its **traceback is detached**, along with
+  those of its `__cause__`/`__context__` chain and any `ExceptionGroup` members. A stored traceback
+  pins the failing attempt's frame and every local on it, and the `events` channel is append-only, so
+  without this a handler holding a 5 MB response body would retain `max_attempts` copies of it for the
+  rest of the run (measured: 15 MB at `max_attempts=3`, now 5 MB). The terminal `HandlerRaised` keeps
+  its traceback — that is the one you debug from — so the framework retains at most one live traceback
+  per failing invocation. Use `observe="log"` to get each attempt into your logs instead.
+
 ### Changed
 
 - **BREAKING: `retry` is now a reserved name.** Two shapes that worked before now fail:

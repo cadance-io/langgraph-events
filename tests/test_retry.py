@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
+import weakref
 from typing import ClassVar
 
 import pytest
@@ -31,6 +33,29 @@ from langgraph_events import _retry as _retry_mod
 
 class FlakyError(Exception):
     """A transient failure that a retry policy should absorb."""
+
+
+class UpstreamError(Exception):
+    """The error a handler wraps with ``raise FlakyError(...) from upstream``."""
+
+
+class Payload:
+    """A weak-referenceable handler local, sized to make retention visible."""
+
+    __slots__ = ("__weakref__", "blob")
+
+    def __init__(self) -> None:
+        self.blob = bytes(5_000_000)
+
+
+def _frame_names(exc: BaseException) -> list[str]:
+    """The function names of every frame *exc*'s traceback keeps reachable."""
+    names = []
+    tb = exc.__traceback__
+    while tb is not None:
+        names.append(tb.tb_frame.f_code.co_name)
+        tb = tb.tb_next
+    return names
 
 
 class RateLimitedError(FlakyError):
@@ -876,6 +901,151 @@ def describe_handler_retried():
 
             EventGraph([handler, watch, gave_up]).invoke(Item(n=1))
             assert noticed == [1, 2]
+
+
+def describe_traceback_retention():
+    def describe_breadcrumbs():
+        def it_detaches_the_traceback(slept):
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                raise FlakyError("transient")
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            breadcrumbs = log.filter(HandlerRetried)
+            assert [b.attempt for b in breadcrumbs] == [1, 2]
+            assert [b.exception.__traceback__ for b in breadcrumbs] == [None, None]
+            assert [str(b.exception) for b in breadcrumbs] == ["transient"] * 2
+
+        def it_frees_the_failing_handler_frame(slept):
+            # A detached traceback drops the only reference to the failed
+            # attempt's frame, so its locals become collectable. The final
+            # attempt stays pinned — that traceback lives on HandlerRaised.
+            refs: list[weakref.ref[Payload]] = []
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                payload = Payload()
+                refs.append(weakref.ref(payload))
+                raise FlakyError("transient")
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            gc.collect()
+            assert log.has(HandlerRaised)  # the run's events are still reachable
+            assert [ref() is not None for ref in refs] == [False, False, True]
+
+        def it_detaches_chained_causes(slept):
+            # ``raise X from upstream`` leaves the upstream exception's own
+            # traceback pinning the same handler frame, so clearing only the
+            # outermost __traceback__ would free nothing.
+            refs: list[weakref.ref[Payload]] = []
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                payload = Payload()
+                refs.append(weakref.ref(payload))
+                try:
+                    raise UpstreamError("upstream")
+                except UpstreamError as upstream:
+                    raise FlakyError("transient") from upstream
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            causes = [b.exception.__cause__ for b in log.filter(HandlerRetried)]
+            assert [type(c) for c in causes] == [UpstreamError, UpstreamError]
+            assert [c.__traceback__ for c in causes] == [None, None]
+            gc.collect()
+            assert [ref() is not None for ref in refs] == [False, False, True]
+
+        def it_detaches_grouped_exceptions(slept):
+            # A group's members are reachable through neither __cause__ nor
+            # __context__ — an ``asyncio.TaskGroup`` failure pins its frames
+            # through ``.exceptions`` alone.
+            refs: list[weakref.ref[Payload]] = []
+
+            @on(
+                Item,
+                raises=ExceptionGroup,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                payload = Payload()
+                refs.append(weakref.ref(payload))
+                inner = UpstreamError("upstream")
+                try:
+                    raise inner
+                except UpstreamError:
+                    pass
+                raise ExceptionGroup("group", [inner])
+
+            @on(HandlerRaised, exception=ExceptionGroup)
+            def catch_group(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            log = EventGraph([handler, catch_group]).invoke(Item(n=1))
+            members = [b.exception.exceptions[0] for b in log.filter(HandlerRetried)]
+            assert [m.__traceback__ for m in members] == [None, None]
+            gc.collect()
+            assert [ref() is not None for ref in refs] == [False, False, True]
+
+    def describe_terminal_raise():
+        def it_keeps_the_traceback(slept):
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=2, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                raise FlakyError("transient")
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            raised = log.latest(HandlerRaised)
+            assert _frame_names(raised.exception)[-1] == "handler"
+
+        def it_keeps_the_traceback_of_a_reraised_instance(slept):
+            # A handler that re-raises one cached instance hands the framework
+            # the same object for every breadcrumb and for the terminal raise.
+            # Detaching the breadcrumb must not strip the terminal traceback.
+            cached = FlakyError("cached")
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                raise cached
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            raised = log.latest(HandlerRaised)
+            assert raised.exception is cached
+            assert _frame_names(raised.exception)[-1] == "handler"
+
+    def describe_async_dispatch():
+        async def it_detaches_the_breadcrumb_traceback(slept):
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            async def handler(event: Item) -> Handled:
+                raise FlakyError("transient")
+
+            log = await EventGraph([handler, gave_up]).ainvoke(Item(n=1))
+            breadcrumbs = log.filter(HandlerRetried)
+            assert [b.exception.__traceback__ for b in breadcrumbs] == [None, None]
+            raised = log.latest(HandlerRaised)
+            assert _frame_names(raised.exception)[-1] == "handler"
 
 
 def describe_namespace_model():
