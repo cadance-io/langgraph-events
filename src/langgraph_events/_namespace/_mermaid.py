@@ -84,6 +84,10 @@ _CLASSDEF_STYLES: dict[str, str] = {
 }
 
 _LINKSTYLE_RAISES = "stroke:#6b7280,stroke-dasharray:3 3"
+# Retry is a *transient* failure absorbed in place — cyan and finely
+# dotted so it reads apart from the grey ``raises`` escalation arrow
+# that only fires once the retry budget is spent.
+_LINKSTYLE_RETRY = "stroke:#0891b2,stroke-dasharray:2 4"
 _LINKSTYLE_SCATTER = "stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3"
 _LINKSTYLE_OWNS = "stroke:#9ca3af,stroke-dasharray:3 3"
 _LINKSTYLE_INVARIANT = "stroke:#c2410c,stroke-dasharray:4 2"
@@ -180,7 +184,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     - Halted subtypes render as stadium, amber, with a dashed thick outline
     - Namespace-owned nodes sit inside a ``subgraph`` titled "<Name> namespace"
     - Solid ``-->`` arrows carry declared returns; ``raises=`` edges are
-      thin dashed grey; ``Scatter[X]`` edges are thick dashed purple
+      thin dashed grey; ``retry=`` edges are finely dotted cyan;
+      ``Scatter[X]`` edges are thick dashed purple
     - Invariants render as diamond ``:::inv`` gate nodes.  When a pinned
       reactor (``@on(InvariantViolated, invariant=Cls)``) exists, its
       output is routed *through* the Invariant diamond:
@@ -293,19 +298,25 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         # handlers and reactors keep their meaningful function names.
         inline = getattr(r, "inline", False)
 
-        # Raises edges first so a side-effect handler with only a raises
-        # declaration still contributes a real edge to the graph. All of a
-        # handler's raises edges point at the same HandlerRaised target with
-        # the same label, so dedupe per (src, tgt) — ``raises=(E1, E2)`` is
-        # one visual edge, not a stack of identical arrows.
-        seen_raises: set[tuple[str, str]] = set()
-        for e in (x for x in re_edges if x.kind == "raises"):
-            src, tgt = _record(e.source, e.target)
-            if (src, tgt) in seen_raises:
-                continue
-            seen_raises.add((src, tgt))
-            label: str | None = "(raises)" if inline else f"{name} (raises)"
-            edges.append(_FlowEdge(src, tgt, "-.->", label, "raises"))
+        # Framework-signal edges first, so a side-effect handler declaring
+        # nothing but ``raises=`` or ``retry=`` still contributes a real edge
+        # to the graph. Both draw the same way — a dashed arrow into the
+        # framework event, tagged with its kind so link_style can colour it —
+        # and both fan out per subscribed source in the model, all pointing at
+        # one target with one label. So dedupe per (src, tgt) within a kind:
+        # ``raises=(E1, E2)`` is one visual edge, not a stack of identical
+        # arrows, and a retry policy with ``observe="emit"`` gives
+        # ``HandlerRetried`` exactly one visible producer (#132).
+        for kind in ("raises", "retry"):
+            seen: set[tuple[str, str]] = set()
+            tag = f"({kind})"
+            for e in (x for x in re_edges if x.kind == kind):
+                src, tgt = _record(e.source, e.target)
+                if (src, tgt) in seen:
+                    continue
+                seen.add((src, tgt))
+                label: str | None = tag if inline else f"{name} {tag}"
+                edges.append(_FlowEdge(src, tgt, "-.->", label, kind))
 
         solid_edges = [e for e in re_edges if e.kind == "solid"]
         scatter_edges = [e for e in re_edges if e.kind == "scatter"]
@@ -472,11 +483,13 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
     if namespace_order == "affinity":
         # Affinity counts: solid + scatter reaction edges plus invariant
-        # chain edges (Command → Invariant). Ownership-fill ``-.- `` arrows
-        # and ``raises`` edges are rendering scaffolding rather than real
-        # flow, so they don't contribute. The framework ``Interrupted →
-        # Resumed`` edge carries ``__namespace__ = None`` on both endpoints
-        # and is filtered by the cross-namespace guard below.
+        # chain edges (Command → Invariant), and nothing else. Ownership-fill
+        # ``-.- `` arrows and framework-signal (``raises`` / ``retry``) edges
+        # are rendering scaffolding rather than real flow, so they don't
+        # contribute — an allowlist keeps a future ``kind`` out by default.
+        # The framework ``Interrupted → Resumed`` edge carries
+        # ``__namespace__ = None`` on both endpoints and is filtered by the
+        # cross-namespace guard below.
         affinity: dict[frozenset[str], int] = defaultdict(int)
 
         def _bump(a: type, b: type) -> None:
@@ -487,7 +500,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             affinity[frozenset([ns_a, ns_b])] += 1
 
         for e in d.edges:
-            if e.kind == "raises":
+            if e.kind not in ("solid", "scatter"):
                 continue
             _bump(e.source, e.target)
         for inv in d.invariants:
@@ -521,6 +534,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
 
     flow.link_style("scatter", _LINKSTYLE_SCATTER)
     flow.link_style("raises", _LINKSTYLE_RAISES)
+    flow.link_style("retry", _LINKSTYLE_RETRY)
     flow.link_style("ownership", _LINKSTYLE_OWNS)
     flow.link_style("invariant", _LINKSTYLE_INVARIANT)
     flow.link_style("orchestrate", _LINKSTYLE_ORCHESTRATE)

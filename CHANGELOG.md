@@ -42,8 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `deadline=`, which is only checked between dispatch rounds.
 
   `graph.namespaces()` surfaces the policy: a `retry` field on `NamespaceModel.CommandHandler` and
-  `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. Pure
-  additions, so `SCHEMA_VERSION` is unchanged.
+  `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. A policy
+  that actually emits (`observe="emit"`, the default) also contributes a first-class
+  `NamespaceModel.Edge` of `kind="retry"` from the handler's subscribed events to `HandlerRetried`,
+  so `HandlerRetried` has a visible producer in every renderer — mermaid draws it as a finely
+  dotted cyan arrow, distinct from the grey dashed `raises` escalation. `observe="log"`/`"silent"`
+  never write the event to the log and so get no edge: the diagram tracks what the log will
+  contain, not what was merely declared. Pure additions, so `SCHEMA_VERSION` is unchanged — no
+  existing field is removed, renamed, or given a new meaning, and consumers that switch on
+  `Edge.kind` should already treat an unrecognised kind as opaque.
 
   Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
 
