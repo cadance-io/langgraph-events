@@ -17,6 +17,7 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerRaised,
+    HandlerRetried,
     IntegrationEvent,
     Interrupted,
     Invariant,
@@ -61,6 +62,7 @@ from langgraph_events._reducer import (
     message_reducer,
 )
 from langgraph_events._reflection import QueryTool, Reflection
+from langgraph_events._retry import RetryPolicy
 from langgraph_events._types import (
     HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
@@ -111,6 +113,7 @@ __all__ = [
     "GraphState",
     "Halted",
     "HandlerRaised",
+    "HandlerRetried",
     "IntegrationEvent",
     "Interrupted",
     "Invariant",
@@ -128,6 +131,7 @@ __all__ = [
     "ReducerNotSetError",
     "Reflection",
     "Resumed",
+    "RetryPolicy",
     "RunPaused",
     "ScalarReducer",
     "Scatter",

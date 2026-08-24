@@ -663,6 +663,9 @@ def _expand_command_handlers(
                 )
             cmd_raises = getattr(h, "raises", ())
             cmd_invariants = getattr(h, "invariants", None)
+            # MRO lookup, like raises/invariants: a retry policy is
+            # inheritable *behavior*, unlike ``previously`` below.
+            cmd_retry = getattr(h, "retry", None)
             # Own-class read on purpose: ``previously`` is a historic *node
             # identity* claim, not inheritable behavior like raises/invariants
             # — a subclass must not capture its parent's checkpoints (nor trip
@@ -676,6 +679,7 @@ def _expand_command_handlers(
                 raises=cmd_raises,
                 invariants=cmd_invariants,
                 previously=cmd_previously,
+                retry=cmd_retry,
             )(fn)
             fn._inline_command = h
             expanded.append(fn)
@@ -824,8 +828,7 @@ class EventGraph:
             )
 
         enforce_command_privacy(self._handler_metas, self._return_info)
-        self._verify_raises_coverage()
-        self._verify_invariants_coverage()
+        self._verify_error_handling()
 
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.
@@ -976,6 +979,18 @@ class EventGraph:
 
         return self._compiled_graph
 
+    def _verify_error_handling(self) -> None:
+        """Run the construction-time error-handling gates.
+
+        Grouped to keep ``__init__`` readable. The three checks read disjoint
+        state, so the order does not change whether a graph is accepted — it
+        only decides which error surfaces first when a handler trips more
+        than one gate.
+        """
+        self._verify_raises_coverage()
+        self._verify_retry_policies()
+        self._verify_invariants_coverage()
+
     def _verify_raises_coverage(self) -> None:
         """Ensure every declared ``raises=`` entry has a matching catcher.
 
@@ -1015,13 +1030,8 @@ class EventGraph:
             for exc_type in meta.raises:
                 if not _any_catcher_covers(catchers, exc_type):
                     declared = ", ".join(t.__name__ for t in meta.raises)
-                    # Name an inline handler by its command identity (node
-                    # name = command qualname); the method name (`handle`,
-                    # positional `handle_2`) doesn't help the user find it.
-                    is_inline = getattr(meta.fn, "_inline_command", None) is not None
-                    claimant = meta.node_name if is_inline else meta.name
                     raise TypeError(
-                        f"Handler {claimant!r} declares raises=({declared}), "
+                        f"Handler {meta.claimant!r} declares raises=({declared}), "
                         f"but no handler subscribes to catch {exc_type.__name__}. "
                         f"Add a handler decorated with "
                         f"@on(HandlerRaised, exception={exc_type.__name__}) "
@@ -1029,6 +1039,50 @@ class EventGraph:
                         f"type from raises=. Note: catchers with non-exception "
                         f"field matchers (e.g. source_event=SomeType) do not "
                         f"count toward coverage."
+                    )
+
+    def _verify_retry_policies(self) -> None:
+        """Ensure every declared ``retry=`` policy can actually fire.
+
+        A ``RetryPolicy`` only ever sees exceptions the framework catches, and
+        the framework only catches what ``raises=`` declares. So two shapes are
+        dead on arrival and are rejected at construction rather than silently
+        doing nothing at runtime:
+
+        - ``retry=`` with an empty ``raises=`` — nothing is ever caught.
+        - an ``on=`` entry *disjoint from* ``raises=`` — that exception is
+          never caught, so the policy is never consulted for it. Overlap in
+          either direction is live; see the comment on the check itself.
+
+        Raises ``TypeError``.
+        """
+        for meta in self._handler_metas:
+            policy = meta.retry
+            if policy is None:
+                continue
+            if not meta.raises:
+                raise TypeError(
+                    f"Handler {meta.claimant!r} declares retry= but no raises=. A "
+                    f"retry policy only sees exceptions the framework catches; "
+                    f"add raises=(YourError,) or drop the policy."
+                )
+            for exc_type in policy.on:
+                # Scope is decided at runtime by ``isinstance(exc, policy.on)``,
+                # so an ``on=`` entry overlapping ``raises=`` in *either*
+                # direction is live: on=(OSError,) genuinely retries a declared
+                # ConnectionResetError. Only a disjoint entry is dead.
+                overlaps = issubclass(exc_type, meta.raises) or any(
+                    issubclass(declared, exc_type) for declared in meta.raises
+                )
+                if not overlaps:
+                    declared = ", ".join(t.__name__ for t in meta.raises)
+                    raise TypeError(
+                        f"Handler {meta.claimant!r} declares "
+                        f"retry=RetryPolicy(on={exc_type.__name__}), but "
+                        f"{exc_type.__name__} is not covered by "
+                        f"raises=({declared}). An exception unrelated to "
+                        f"raises= is never caught, so the policy can never "
+                        f"retry it — add it to raises= or remove it from on=."
                     )
 
     def _verify_invariants_coverage(self) -> None:

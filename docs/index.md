@@ -73,7 +73,7 @@ Requires Python 3.11+.
 ## Navigate
 
 - **Start:** [Getting Started](getting-started.md) → [Core Concepts](concepts.md)
-- **Dispatch patterns:** [Control Flow](control-flow.md) — fan-out, HITL, exceptions, invariants
+- **Dispatch patterns:** [Control Flow](control-flow.md) — fan-out, HITL, exceptions, retries, invariants
 - **State:** [Reducers](reducers.md) — domain-scoped or graph-wide
 - **Agents over the log:** [Reflection](reflection.md) — `graph.reflect(log)` + the `query_log` tool: an LLM queries the run's facts lazily instead of holding the log in context
 - **Streams:** [Streaming](streaming.md), [AG-UI Adapter](agui.md)

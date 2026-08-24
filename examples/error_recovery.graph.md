@@ -61,13 +61,11 @@ graph LR
         GaveUp([GaveUp]):::halt
     end
     HandlerRaised([HandlerRaised]):::syst
+    _e0_[ ]:::entry ==> Ask
     Ask -.->|"(raises)"| HandlerRaised
     Ask --> Answered
-    HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-    HandlerRaised -->|"backoff_and_retry [orchestrate]"| Ask
     HandlerRaised -->|give_up| GaveUp
-    linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
-    linkStyle 3 stroke:#0369a1,stroke-width:3px
+    linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
 ```
 
 ## Choreography (text)
@@ -75,14 +73,13 @@ graph LR
 ```text
 Namespaces:
   Question
-    Command: Ask  (raises RateLimitError)
+    Command: Ask  (raises RateLimitError; retry x3)
       → Answered
     Event: GaveUp  [Halted]
 System events:
   HandlerRaised
 Policies:
-  backoff_and_retry  (HandlerRaised → Ask)  [raises QuotaExhaustedError]
   give_up  (HandlerRaised → GaveUp)
-Causal notes:
-  HandlerRaised → Ask  via backoff_and_retry  [orchestrate]
+Seed events:
+  Ask
 ```

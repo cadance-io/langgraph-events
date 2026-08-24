@@ -84,6 +84,7 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
 | Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#system-events) |
 | Catch handler exceptions | `raises` on the `Command` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |
+| Retry a transient failure | `retry = RetryPolicy(...)` alongside `raises=` | [Control Flow](control-flow.md#retries) |
 | Stream LLM tokens | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
 | Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI](agui.md) |
 | Keep old checkpoints working after a rename | `@migrate_from` / `@on(previously=)` + coverage gates | [Event Migrations](event-migrations.md) |

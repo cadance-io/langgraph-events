@@ -16,6 +16,8 @@ from langgraph_events._event_log import (
     EventLog,
 )
 from langgraph_events._identity import command_identity
+from langgraph_events._retry import RetryPolicy
+from langgraph_events._validate import normalize_exception_tuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -190,13 +192,22 @@ def normalize_previous_names(previously: Any, *, owner: str) -> tuple[str, ...]:
 
 def _build_on_decorator(
     event_types: tuple[type[Event], ...],
-    raises: type[Exception] | tuple[type[Exception], ...],
-    invariants: dict[type[Invariant], Callable[..., bool]] | None,
-    field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str],
+    *,
+    raises: type[Exception] | tuple[type[Exception], ...] = (),
+    invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
+    field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str]
+    | None = None,
     node_name: str | None = None,
     previous_names: tuple[str, ...] = (),
+    retry: RetryPolicy | None = None,
 ) -> Callable[[F], F]:
-    """Validate arguments and return the decorator that stamps attributes."""
+    """Validate arguments and return the decorator that stamps attributes.
+
+    Modifiers are keyword-only: they are forwarded from three call sites in
+    ``on()``, and every new modifier would otherwise have to be threaded
+    positionally through all of them in lockstep.
+    """
+    field_matchers = field_matchers or {}
     for et in event_types:
         if not (
             isinstance(et, type)
@@ -204,18 +215,14 @@ def _build_on_decorator(
         ):
             raise TypeError(f"@on() requires Event subclasses or mixins, got {et!r}")
 
-    # Normalise and validate raises
-    raises_tuple: tuple[type[Exception], ...] = (
-        raises if isinstance(raises, tuple) else (raises,)
-    )
-    for rt in raises_tuple:
-        if not (isinstance(rt, type) and issubclass(rt, Exception)):
-            raise TypeError(
-                f"@on() raises= entries must be Exception subclasses, got {rt!r}. "
-                f"Non-Exception BaseException subclasses (KeyboardInterrupt, "
-                f"SystemExit, GeneratorExit, asyncio.CancelledError) are not "
-                f"allowed — they are runtime/exit signals, not domain errors."
-            )
+    raises_tuple = normalize_exception_tuple(raises, owner="@on() raises=")
+
+    if retry is not None and not isinstance(retry, RetryPolicy):
+        raise TypeError(
+            f"@on() retry= must be a RetryPolicy instance, got {retry!r}. "
+            f"Import it as 'from langgraph_events import RetryPolicy' — note "
+            f"this is not langgraph.types.RetryPolicy, which is node-level."
+        )
 
     invariants_tuple = _validate_invariants(invariants)
 
@@ -274,6 +281,10 @@ def _build_on_decorator(
         # ``previously`` declaration — a conditional stamp would let a stale
         # value from an earlier build keep a removed alias alive.
         fn._previous_names = previous_names  # type: ignore[attr-defined]
+        # Unconditional for the same reason as ``_previous_names`` above: a
+        # conditional stamp would keep a policy alive after it was removed
+        # from the Command between two EventGraph builds.
+        fn._retry = retry  # type: ignore[attr-defined]
         return fn
 
     return decorator
@@ -285,6 +296,7 @@ def on(
     invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
     node_name: str | None = None,
     previously: str | tuple[str, ...] = (),
+    retry: RetryPolicy | None = None,
     **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
 ) -> Any:
     """Subscribe a handler to one or more event types.
@@ -298,7 +310,7 @@ def on(
            def place(event: Order.Place) -> Order.Place.Placed:
                return Order.Place.Placed(order_id="o1")
 
-    2. **Modifiers only** — ``@on(raises=..., invariants=..., field=...)``.
+    2. **Modifiers only** — ``@on(raises=..., retry=..., invariants=..., field=...)``.
        Infers the event type from the annotation and applies modifiers::
 
            @on(invariants={CustomerNotBanned: lambda log: ...})
@@ -315,6 +327,11 @@ def on(
     this handler; a matching ``@on(HandlerRaised, exception=...)`` catcher
     must exist at compile time.
 
+    ``retry=RetryPolicy(...)`` wraps the handler call in declarative backoff:
+    the framework re-invokes it in place on a declared raise, and
+    ``HandlerRaised`` fires only once the budget is spent. Requires a
+    non-empty ``raises=``; the policy's ``on=`` must overlap it.
+
     Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
     for ``isinstance`` match (works for Event, Exception, or Invariant
     subclasses); string values do equality match (e.g. a string event field).
@@ -322,10 +339,11 @@ def on(
     ``node_name=`` pins the handler's graph-node identity (default: the
     function name) so renaming the function never breaks an interrupted
     checkpoint; ``previously=`` (str or tuple) declares historic node names to
-    keep resumable after a rename. Both are reserved keywords — a field named
-    ``node_name`` or ``previously`` cannot be matched positionally via
-    ``**field_matchers``. Inline ``Command`` handlers declare historic node
-    names as a class attribute instead: ``previously: ClassVar = (...)``.
+    keep resumable after a rename. These and ``retry=`` are reserved keywords —
+    a field named ``node_name``, ``previously``, or ``retry`` cannot be matched
+    positionally via ``**field_matchers``. Inline ``Command`` handlers declare
+    historic node names as a class attribute instead:
+    ``previously: ClassVar = (...)``.
     """
     if node_name is not None and not isinstance(node_name, str):
         raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")
@@ -337,6 +355,7 @@ def on(
         and not field_matchers
         and node_name is None
         and not previous_names
+        and retry is None
     )
     sole_arg_is_function = len(event_types) == 1 and (
         inspect.isfunction(event_types[0]) or inspect.ismethod(event_types[0])
@@ -344,24 +363,31 @@ def on(
 
     if sole_arg_is_function and no_modifiers:
         fn = event_types[0]
-        return _build_on_decorator((_infer_event_type(fn),), (), None, {}, None, ())(fn)
+        return _build_on_decorator((_infer_event_type(fn),))(fn)
 
     if not event_types:
 
         def inferring(fn: F) -> F:
             return _build_on_decorator(
                 (_infer_event_type(fn),),
-                raises,
-                invariants,
-                dict(field_matchers),
-                node_name,
-                previous_names,
+                raises=raises,
+                invariants=invariants,
+                field_matchers=dict(field_matchers),
+                node_name=node_name,
+                previous_names=previous_names,
+                retry=retry,
             )(fn)
 
         return inferring
 
     return _build_on_decorator(
-        event_types, raises, invariants, dict(field_matchers), node_name, previous_names
+        event_types,
+        raises=raises,
+        invariants=invariants,
+        field_matchers=dict(field_matchers),
+        node_name=node_name,
+        previous_names=previous_names,
+        retry=retry,
     )
 
 
@@ -404,6 +430,9 @@ class HandlerMeta:
     ] = ()
     field_inject_params: frozenset[str] = frozenset()
     raises: tuple[type[Exception], ...] = ()
+    # Declared via ``@on(retry=...)`` or a ``retry`` class attribute on a
+    # Command. ``None`` means one attempt, the pre-retry behaviour.
+    retry: RetryPolicy | None = None
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
     # (param_name, registered_service_type) for params whose annotation is a
     # base class of (or identical to) a service type registered on
@@ -414,6 +443,18 @@ class HandlerMeta:
     # key in EventGraph(services={...}). Used as the lookup key in the
     # name-keyed services map at dispatch time.
     service_name_params: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def claimant(self) -> str:
+        """The name to blame in a construction-time error message.
+
+        An inline ``Command`` handler is named by its command identity
+        (``Order.Place``), not by the method name — ``handle``, or the
+        positional dedup suffix ``handle_2``, does not help the user find it.
+        """
+        if getattr(self.fn, "_inline_command", None) is not None:
+            return self.node_name
+        return self.name
 
     def matches(self, event: Event) -> bool:
         """Check whether *event* satisfies this handler's type + field matchers.
@@ -635,6 +676,9 @@ def extract_handler_meta(
     # Extract declared raises
     raises: tuple[type[Exception], ...] = getattr(fn, "_raises", ())
 
+    # Extract the declared retry policy
+    retry: RetryPolicy | None = getattr(fn, "_retry", None)
+
     # Extract declared invariants
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = getattr(
         fn, "_invariants", ()
@@ -693,6 +737,7 @@ def extract_handler_meta(
         field_matchers=field_matchers,
         field_inject_params=field_inject_params,
         raises=raises,
+        retry=retry,
         invariants=invariants,
         service_params=service_params,
         service_name_params=service_name_params,

@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from langgraph_events._namespace._model import NamespaceModel, _event_label, _node_class
+
+if TYPE_CHECKING:
+    from langgraph_events._retry import RetryPolicy
 
 
 def _command_annotations(
     d: NamespaceModel, cmd_cls: type
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Collect dedup'd raises + invariant names + scatter targets from every
-    command handler subscribed to *cmd_cls*."""
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Collect dedup'd raises + invariant names + scatter targets + retry
+    labels from every command handler subscribed to *cmd_cls*."""
     raises: list[str] = []
     invariants: list[str] = []
     scatters: list[str] = []
+    retries: list[str] = []
     for ch in d.command_handlers:
         if cmd_cls not in ch.commands:
             continue
@@ -27,7 +33,17 @@ def _command_annotations(
             label = f"Scatter[{_event_label(tgt)}]"
             if label not in scatters:
                 scatters.append(label)
-    return tuple(raises), tuple(invariants), tuple(scatters)
+        retry_label = _retry_label(ch.retry)
+        if retry_label is not None and retry_label not in retries:
+            retries.append(retry_label)
+    return tuple(raises), tuple(invariants), tuple(scatters), tuple(retries)
+
+
+def _retry_label(policy: RetryPolicy | None) -> str | None:
+    """``retry x3`` for a declared policy, else ``None``."""
+    if policy is None:
+        return None
+    return f"retry x{policy.max_attempts}"
 
 
 def _policy_targets(p: NamespaceModel.Policy) -> str:
@@ -58,13 +74,17 @@ def _render_taxonomy_lines(  # noqa: PLR0912
                 if include_handlers:
                     if cmd.handlers:
                         suffix_parts.append(f"handlers: {', '.join(cmd.handlers)}")
-                    raises, invariants, scatters = _command_annotations(d, cmd.cls)
+                    raises, invariants, scatters, retries = _command_annotations(
+                        d, cmd.cls
+                    )
                     if scatters:
                         suffix_parts.append(f"scatters {', '.join(scatters)}")
                     if raises:
                         suffix_parts.append(f"raises {', '.join(raises)}")
                     if invariants:
                         suffix_parts.append(f"invariant: {', '.join(invariants)}")
+                    if retries:
+                        suffix_parts.append(", ".join(retries))
                 suffix = f"  ({'; '.join(suffix_parts)})" if suffix_parts else ""
                 lines.append(f"    Command: {cmd_name}{suffix}")
                 for outcome in cmd.outcomes:
@@ -111,6 +131,9 @@ def render_text_choreography(d: NamespaceModel) -> str:
                 annotations.append(
                     f"invariant: {', '.join(i.__name__ for i in p.invariants)}"
                 )
+            retry_label = _retry_label(p.retry)
+            if retry_label is not None:
+                annotations.append(retry_label)
             if p.side_effect:
                 annotations.append("side-effect")
             tail = f"  [{'; '.join(annotations)}]" if annotations else ""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any
 
 from langgraph_events._namespace._model import NamespaceModel
@@ -22,6 +23,21 @@ def _qn(cls: type) -> str:
     return cls.__qualname__
 
 
+def _encode_retry(policy: Any) -> dict[str, Any] | None:
+    """Encode a ``RetryPolicy``, or ``None`` when the handler declares none.
+
+    Walks the dataclass fields so a new policy field cannot silently go
+    missing from ``to_dict()``; only ``on`` needs non-trivial encoding.
+    """
+    if policy is None:
+        return None
+    encoded: dict[str, Any] = {
+        f.name: getattr(policy, f.name) for f in dataclasses.fields(policy)
+    }
+    encoded["on"] = [_qn(t) for t in policy.on]
+    return encoded
+
+
 def _encode_reaction(r: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "name": r.name,
@@ -30,6 +46,7 @@ def _encode_reaction(r: Any) -> dict[str, Any]:
         "raises": [_qn(t) for t in r.raises],
         "invariants": [_qn(t) for t in r.invariants],
         "field_matchers": [list(fm) for fm in r.field_matchers],
+        "retry": _encode_retry(r.retry),
         "side_effect": r.side_effect,
         "has_annotation": r.has_annotation,
     }

@@ -10,7 +10,7 @@ Runnable examples in `examples/`. Diagrams auto-generated from each example's `g
 | Supervisor loop / fan-in              | [Task](#supervisor)                       | [reducers](reducers.md#reducer)                                       |
 | Scatter fan-out / map-reduce          | [Batch](#scatter-fan-out)                 | [control-flow](control-flow.md#scatter)                               |
 | Safety gates + live streaming         | [Content](#content-pipeline)              | [streaming](streaming.md), [concepts](concepts.md#system-events)      |
-| Retries + escalation via `raises=`    | [Question](#error-recovery)               | [control-flow](control-flow.md#handler-exceptions)                    |
+| Retries + escalation via `retry=`     | [Question](#error-recovery)               | [control-flow](control-flow.md#retries)                               |
 
 <!-- autogen:start:legend -->
 <details markdown="1">
@@ -429,8 +429,8 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
 ## Retries & escalation (Question namespace) { #error-recovery }
 
 - `Question.Ask` declares `raises=(RateLimitError,)`; its inline `handle()` may raise.
-- A rate-limit catcher re-issues `Question.Ask` with `attempt+1`, looping through `Ask.handle()`.
-- `Ask.Answered` stays Command-private (produced only by `Ask.handle()`); chained catchers escalate to `Question.GaveUp` ([`Halted`](concepts.md#system-events) subtype) after `MAX_ATTEMPTS`.
+- `Ask` also declares `retry=RetryPolicy(...)`, so the framework re-invokes `handle()` in place with full-jitter exponential backoff — each wait is announced as a [`HandlerRetried`](control-flow.md#retries).
+- Only once the budget is spent does `HandlerRaised` reach `give_up`, which escalates to `Question.GaveUp` ([`Halted`](concepts.md#system-events) subtype). The catcher counts nothing and schedules nothing.
 
 <!-- autogen:start:error_recovery -->
 === "Diagram"
@@ -451,13 +451,11 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
             GaveUp([GaveUp]):::halt
         end
         HandlerRaised([HandlerRaised]):::syst
+        _e0_[ ]:::entry ==> Ask
         Ask -.->|"(raises)"| HandlerRaised
         Ask --> Answered
-        HandlerRaised -.->|"backoff_and_retry (raises)"| HandlerRaised
-        HandlerRaised -->|"backoff_and_retry [orchestrate]"| Ask
         HandlerRaised -->|give_up| GaveUp
-        linkStyle 0,2 stroke:#6b7280,stroke-dasharray:3 3
-        linkStyle 3 stroke:#0369a1,stroke-width:3px
+        linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     ```
 
 === "Flow (text)"
@@ -465,16 +463,15 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     ```text
     Namespaces:
       Question
-        Command: Ask  (raises RateLimitError)
+        Command: Ask  (raises RateLimitError; retry x3)
           → Answered
         Event: GaveUp  [Halted]
     System events:
       HandlerRaised
     Policies:
-      backoff_and_retry  (HandlerRaised → Ask)  [raises QuotaExhaustedError]
       give_up  (HandlerRaised → GaveUp)
-    Causal notes:
-      HandlerRaised → Ask  via backoff_and_retry  [orchestrate]
+    Seed events:
+      Ask
     ```
 
 [Full code](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.py) · [Raw diagrams on GitHub](https://github.com/cadance-io/langgraph-events/blob/main/examples/error_recovery.graph.md)

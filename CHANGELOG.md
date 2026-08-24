@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Declarative retry with exponential backoff (`RetryPolicy`)** — declare `retry=RetryPolicy(...)`
+  next to `raises=`, either as a class attribute on a `Command` or via `retry=` on `@on(...)`, and
+  the framework re-invokes the handler in place with full-jitter exponential backoff. With a policy
+  declared, `HandlerRaised` fires only once the retry budget is spent, so catchers stop counting
+  attempts and re-emitting commands and become pure escalation handlers. A handler with no `retry=`
+  is unaffected — `HandlerRaised` still fires on its first raise.
+
+  ```python
+  class Ask(Command):
+      raises = (RateLimitError,)
+      retry = RetryPolicy(max_attempts=3, base_delay=0.1, max_delay=10.0)
+  ```
+
+  `max_attempts` counts the initial call. Delay before retry *n* is `base_delay * 2 ** (n - 1)`
+  capped at `max_delay`; `strategy="constant"` uses `base_delay` as that ceiling every time instead
+  of doubling it. `jitter` is orthogonal to `strategy` and applies to whichever ceiling the strategy
+  computes — with `jitter=True` (the default) the wait is sampled uniformly from `[0, ceiling]`, so
+  `strategy="constant"` still varies per retry unless you also pass `jitter=False`. `on=` narrows
+  which exceptions retry and must overlap `raises=`; `respect_retry_after=True` prefers a
+  server-supplied `exception.retry_after` (clamped to `[0, max_delay]`, so a skewed clock cannot
+  produce a negative wait).
+
+  Declaring `retry=` without `raises=`, or an `on=` entry disjoint from `raises=`, is a `TypeError`
+  at graph construction — such a policy could never fire. Overlap in either direction is live:
+  `on=(OSError,)` against `raises=(ConnectionResetError,)` retries, because scope is decided at
+  runtime by `isinstance(exc, on)`.
+
+  Retries run inside the handler node: they consume no `max_rounds` budget and write no checkpoint
+  between attempts. **Retried handlers must be idempotent** — the handler re-runs from the top,
+  including any `emit_custom` it fired before raising. The backoff is not interruptible by
+  `deadline=`, which is only checked between dispatch rounds.
+
+  `graph.namespaces()` surfaces the policy: a `retry` field on `NamespaceModel.CommandHandler` and
+  `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. Pure
+  additions, so `SCHEMA_VERSION` is unchanged.
+
+  Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
+
+- **`HandlerRetried`** — a `SystemEvent` emitted before each backoff wait, carrying `handler`,
+  `source_event`, `exception`, `attempt` (1-based, the call that failed) and `delay_seconds`. Part
+  of the anomaly set the reflection surface reports. Suppress it with `RetryPolicy(observe="log")`
+  for a `WARNING` instead, or `observe="silent"` for neither.
+
+### Changed
+
+- **BREAKING: `retry` is now a reserved name.** Two shapes that worked before now fail:
+
+  - `@on(SomeEvent, retry=...)` no longer registers a **field matcher** — `retry=` is a named
+    keyword on `@on()`, so a non-`RetryPolicy` value raises `TypeError`. A handler matching on an
+    event field literally named `retry` must be rewritten; there is no positional escape hatch,
+    the same way `node_name`/`previously` are reserved.
+  - A `Command` declaring an annotated `retry` **field** (e.g. `retry: int = 0`) raises `TypeError`
+    at class creation. `retry` joins `_RESERVED_MODIFIERS` alongside `raises`/`invariants`/
+    `previously`, so a policy can never become a dataclass field serialized into every checkpoint
+    — but the guard cannot tell a policy from a payload field of the same name. Rename the field.
+
 ## [0.24.0] - 2026-08-23
 
 ### Added
