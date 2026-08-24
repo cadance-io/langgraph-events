@@ -84,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `retry`. `node_name` stays conditional on purpose — it has no class-level declaration surface,
   so an unconditional stamp would erase an explicit `@on(node_name=...)` pin rather than refresh it.
 
+- **Legend diagram coloured three arrow kinds wrong.** The hand-written "Diagram vocabulary"
+  legend — rendered into `docs/patterns.md` and the top of every `examples/*.graph.md`, and the
+  key readers use to decode all the other diagrams — assigned its `linkStyle` directives to
+  edge indices one short of the edges they described. The plain `-->` return arrow was drawn in
+  `raises` grey, the `(raises)` arrow in `scatter` purple, the `scatter` arrow in ownership grey,
+  and the ownership `-.-` arrow was left unstyled, so the legend silently taught the wrong colour
+  vocabulary. Indices are now correct and pinned by a test that checks every legend edge against
+  the renderer's own palette. Only the legend was affected — the per-example diagrams compute
+  their indices programmatically and were always right.
+
 ## [0.24.0] - 2026-08-23
 
 ### Added
