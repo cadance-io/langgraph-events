@@ -260,7 +260,7 @@ class NamespaceModel:
         source: type[Event]
         via: str
         target: type[Event]
-        kind: Literal["solid", "scatter", "raises", "framework"]
+        kind: Literal["solid", "scatter", "raises", "retry", "framework"]
         causation: Literal["intent", "react", "orchestrate", "chain"] | None = None
 
     @dataclass(frozen=True)
@@ -590,42 +590,7 @@ def _build_domain_model(  # noqa: PLR0912
             )
             policies.append(policy)
 
-        # Emit edges — solid for declared returns, scatter for Scatter[X],
-        # raises edges to HandlerRaised, mirroring the current mermaid() logic.
-        # `meta` is this edge's producing handler, so `meta.fn` is the right
-        # source for the inline/reactor split (no name-map needed — we're
-        # inside the meta loop and edge.via is meta.name).
-        is_inline = getattr(meta.fn, "_inline_command", None) is not None
-        for src_type in meta.event_types:
-            for tgt in info.event_types:
-                edges.append(
-                    NamespaceModel.Edge(
-                        source=src_type,
-                        via=meta.name,
-                        target=tgt,
-                        kind="solid",
-                        causation=_edge_causation(is_inline, tgt),
-                    )
-                )
-            for tgt in info.scatter_types:
-                edges.append(
-                    NamespaceModel.Edge(
-                        source=src_type,
-                        via=meta.name,
-                        target=tgt,
-                        kind="scatter",
-                        causation=_edge_causation(is_inline, tgt),
-                    )
-                )
-            for _exc in meta.raises:
-                edges.append(
-                    NamespaceModel.Edge(
-                        source=src_type,
-                        via=meta.name,
-                        target=HandlerRaised,
-                        kind="raises",
-                    )
-                )
+        edges.extend(_reaction_edges(meta, info))
 
     # Framework Interrupted → Resumed edge (exists iff both halves appear).
     if any_produces_interrupted and any_subscribes_resumed:
@@ -680,6 +645,62 @@ def _build_domain_model(  # noqa: PLR0912
     emit_command_chain_warnings(model)
 
     return model
+
+
+def _reaction_edges(meta: HandlerMeta, info: ReturnInfo) -> list[NamespaceModel.Edge]:
+    """Every edge one reaction contributes, from each event it subscribes to.
+
+    Solid for declared returns, scatter for ``Scatter[X]``, a ``raises`` edge
+    to ``HandlerRaised``, and — when the handler declares a retry policy that
+    emits — a ``retry`` edge to ``HandlerRetried``. Owning all four here is
+    what lets text, json, and mermaid render them without any per-renderer
+    special-casing.
+
+    ``meta.fn`` is the producing handler, so the inline/reactor split for
+    causation needs no name map.
+    """
+    is_inline = getattr(meta.fn, "_inline_command", None) is not None
+
+    # Two families, differing only in whether the edge carries a causal role.
+    # What the handler *returns* does; the framework signals it can *trigger*
+    # do not — nobody chose to produce a HandlerRaised. One raises edge per
+    # declared exception (renderers dedupe); at most one retry edge.
+    produced: list[tuple[type[Event], Literal["solid", "scatter"]]] = [
+        *((tgt, "solid") for tgt in info.event_types),
+        *((tgt, "scatter") for tgt in info.scatter_types),
+    ]
+    signals: list[tuple[type[Event], Literal["raises", "retry"]]] = [
+        (HandlerRaised, "raises") for _exc in meta.raises
+    ]
+    # A retry policy that emits puts ``HandlerRetried`` in the log, so the
+    # model owes it a producer — otherwise a reactor on ``HandlerRetried``
+    # renders as a source with no inbound edge (#132). ``observe="log"`` /
+    # ``"silent"`` never reach the log, so they get no edge: the diagram
+    # tracks what the log will actually contain, not what was merely
+    # declared. The cost of that choice is a diagram that shifts with an
+    # observability setting.
+    if meta.retry is not None and meta.retry.observe == "emit":
+        signals.append((HandlerRetried, "retry"))
+
+    out: list[NamespaceModel.Edge] = []
+    for src_type in meta.event_types:
+        for tgt, produced_kind in produced:
+            out.append(
+                NamespaceModel.Edge(
+                    source=src_type,
+                    via=meta.name,
+                    target=tgt,
+                    kind=produced_kind,
+                    causation=_edge_causation(is_inline, tgt),
+                )
+            )
+        for tgt, signal_kind in signals:
+            out.append(
+                NamespaceModel.Edge(
+                    source=src_type, via=meta.name, target=tgt, kind=signal_kind
+                )
+            )
+    return out
 
 
 def _rollup_invariants(

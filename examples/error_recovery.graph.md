@@ -31,12 +31,14 @@ graph LR
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
     Command -->|"[chain]"| Command
-    linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
-    linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
-    linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
+    Command -.->|"(retry)"| SystemEvent
+    linkStyle 2 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 3 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
+    linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
+    linkStyle 9 stroke:#0891b2,stroke-dasharray:2 4
 ```
 
 </details>
@@ -61,11 +63,14 @@ graph LR
         GaveUp([GaveUp]):::halt
     end
     HandlerRaised([HandlerRaised]):::syst
+    HandlerRetried([HandlerRetried]):::syst
     _e0_[ ]:::entry ==> Ask
     Ask -.->|"(raises)"| HandlerRaised
+    Ask -.->|"(retry)"| HandlerRetried
     Ask --> Answered
     HandlerRaised -->|give_up| GaveUp
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 2 stroke:#0891b2,stroke-dasharray:2 4
 ```
 
 ## Choreography (text)

@@ -46,6 +46,12 @@ HERO_EXAMPLE = "order"
 # GitHub (renders markdown + mermaid inside <details> natively) and on
 # MkDocs + md_in_html (the `markdown="1"` attribute opts the block into
 # markdown parsing inside Python-Markdown).
+# Hand-numbered ``linkStyle`` indices: mermaid counts every edge in
+# declaration order from 0, including the invisible ``_seed_ ==>`` entry
+# arrow and *each hop* of a chained ``A -.-> B -.-> C`` line. This is the
+# only diagram in the repo where those indices aren't computed — see #133
+# — so ``tests/test_mermaid_sync.py`` pins them against the renderer's
+# own palette.
 # Long-line-avoidance: compose the halt classdef via implicit string
 # concatenation so every physical source line stays inside the 88-column
 # budget while the runtime string keeps the single-line mermaid syntax.
@@ -85,12 +91,14 @@ graph LR
     Command -.->|invariant| Invariant -.->|reactor| Rejected
     DomainEvent -->|"reactor [orchestrate]"| Command
     Command -->|"[chain]"| Command
-    linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
-    linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
-    linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
+    Command -.->|"(retry)"| SystemEvent
+    linkStyle 2 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 3 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
+    linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
+    linkStyle 9 stroke:#0891b2,stroke-dasharray:2 4
 ```
 
 </details>"""
