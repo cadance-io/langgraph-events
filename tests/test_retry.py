@@ -200,6 +200,22 @@ class DeclaredRetry(Namespace):
             return DeclaredRetry.Cmd.Done()
 
 
+class QuietRetry(Namespace):
+    """A Command whose retry policy keeps ``HandlerRetried`` out of the log."""
+
+    class Cmd(Command):
+        raises: ClassVar = (FlakyError,)
+        retry: ClassVar = RetryPolicy(
+            max_attempts=3, base_delay=0.1, jitter=False, observe="log"
+        )
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> QuietRetry.Cmd.Done:
+            return QuietRetry.Cmd.Done()
+
+
 class InheritedRetry(Namespace):
     """A child Command inheriting ``raises``/``retry`` through the MRO."""
 
@@ -828,6 +844,45 @@ def describe_namespace_model():
 
             model = EventGraph([DeclaredRetry.Cmd, note, gave_up]).namespaces()
             assert HandlerRetried not in model.seeds
+
+    def describe_edges():
+        def when_the_policy_emits():
+            # The model owns the edge so text/json/mermaid all see it —
+            # without it, a reactor on HandlerRetried renders as a source
+            # node with no producer (#132).
+            def it_emits_a_retry_edge_to_handler_retried():
+
+                model = EventGraph([DeclaredRetry.Cmd, gave_up]).namespaces()
+                retry_edges = [e for e in model.edges if e.kind == "retry"]
+                assert [(e.source, e.target, e.via) for e in retry_edges] == [
+                    (DeclaredRetry.Cmd, HandlerRetried, "handle")
+                ]
+
+        def when_the_policy_does_not_emit():
+            # observe="log"/"silent" never writes HandlerRetried to the log,
+            # so an edge into it would be a lie.
+            def it_emits_no_retry_edge():
+
+                model = EventGraph([QuietRetry.Cmd, gave_up]).namespaces()
+                assert [e for e in model.edges if e.kind == "retry"] == []
+
+    def describe_mermaid_render():
+        def when_the_policy_emits():
+            def it_draws_the_retry_edge_into_handler_retried():
+
+                out = EventGraph([DeclaredRetry.Cmd, gave_up]).namespaces().mermaid()
+                assert 'Cmd -.->|"(retry)"| HandlerRetried' in out
+
+            def it_styles_the_retry_edge_apart_from_raises():
+
+                out = EventGraph([DeclaredRetry.Cmd, gave_up]).namespaces().mermaid()
+                assert "stroke:#0891b2" in out
+
+        def when_the_policy_does_not_emit():
+            def it_draws_no_handler_retried_node():
+
+                out = EventGraph([QuietRetry.Cmd, gave_up]).namespaces().mermaid()
+                assert "HandlerRetried" not in out
 
     def describe_text_render():
         def it_annotates_the_command():

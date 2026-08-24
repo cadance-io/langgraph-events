@@ -170,7 +170,7 @@ Topology derived from handler subscriptions — no manual node/edge wiring. `max
 - **Inspect** (all frozen dataclass tuples/dicts):
     - `.namespaces` — `dict[str, NamespaceModel.Namespace]`
     - `.command_handlers`, `.policies`, `.edges`, `.seeds`, `.integration_events`, `.system_events`
-- `Edge` carries `kind` (how — `solid`/`scatter`/`raises`/`framework`) and `causation` (causal role — `intent`/`react`/`orchestrate`/`chain`). Surfaces in `text()`, `json()`, and mermaid styling.
+- `Edge` carries `kind` (how — `solid`/`scatter`/`raises`/`retry`/`framework`) and `causation` (causal role — `intent`/`react`/`orchestrate`/`chain`). Surfaces in `text()`, `json()`, and mermaid styling.
 
 Rendered diagrams live on the [Patterns](patterns.md) page — the collapsible legend shows the shape/edge vocabulary.
 
