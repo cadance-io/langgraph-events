@@ -108,9 +108,7 @@ class Story(Namespace):
 
 
 # Fixture for the field-shape diagnostics. ``reason`` is required and is the
-# only field, so one class covers both mismatch directions: a payload written
-# before the field existed omits it, and a payload written while a since-
-# dropped field existed carries a key the live ``__init__`` rejects.
+# only field, so one class covers both mismatch directions below.
 class FieldShape(Namespace):
     class Persisted(DomainEvent):
         reason: str
@@ -641,9 +639,9 @@ def describe_NamespaceAwareSerde():
                 def it_names_the_identity_and_the_missing_field():
                     serde = NamespaceAwareSerde()
 
-                    # The reverse direction: a missing key CAN reach an
-                    # absorber, but only a class default or an ``AddField``
-                    # supplies one. A required field has neither.
+                    # A missing key CAN reach an absorber, but only a class
+                    # default or an ``AddField`` supplies one. A required
+                    # field has neither.
                     payload = synthesize_legacy_payload(
                         FieldShape.__module__, "FieldShape.Persisted", {}
                     )
@@ -661,13 +659,13 @@ def describe_NamespaceAwareSerde():
             def it_revives_the_event():
                 serde = NamespaceAwareSerde()
 
-                revived = serde.loads_typed(
-                    synthesize_legacy_payload(
-                        FieldShape.__module__,
-                        "FieldShape.Persisted",
-                        {"reason": "kept"},
-                    )
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept"},
                 )
+
+                revived = serde.loads_typed(payload)
 
                 assert isinstance(revived, FieldShape.Persisted)
                 assert revived.reason == "kept"
