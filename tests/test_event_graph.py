@@ -17,6 +17,7 @@ from conftest import (
 )
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
@@ -32,6 +33,7 @@ from langgraph_events import (
     EventGraph,
     EventLog,
     Halted,
+    HandlerRaised,
     IntegrationEvent,
     Interrupted,
     MaxRoundsExceeded,
@@ -57,6 +59,7 @@ from langgraph_events.stream import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,
+    LLMToolCallChunk,
     StateSnapshotFrame,
     StreamFrame,
 )
@@ -86,6 +89,117 @@ class _OrphanSuite(Namespace):
         label: str = ""
 
 
+class _ApprovalRequested(Interrupted):
+    """Interrupt narrowed on by the field-matcher suites."""
+
+    draft: str = ""
+
+
+class _OtherInterrupted(Interrupted):
+    """Interrupt that must *not* satisfy an ``_ApprovalRequested`` matcher."""
+
+    reason: str = ""
+
+
+class _ReviewApproved(IntegrationEvent):
+    """Resume value for the field-matcher suites."""
+
+
+class _Acknowledge(IntegrationEvent):
+    """Alternative resume value for the field-matcher suites."""
+
+
+class _OtherEvent(IntegrationEvent):
+    """Resume value that must *not* satisfy a ``_ReviewApproved`` matcher."""
+
+
+class _UserMsgReceived(IntegrationEvent):
+    """User turn in the shared ReAct-loop scenario."""
+
+    content: str = ""
+
+
+class _AssistantMsgSent(IntegrationEvent):
+    """Assistant turn in the shared ReAct-loop scenario."""
+
+    content: str = ""
+    needs_tool: bool = False
+
+
+class _ToolResultReturned(IntegrationEvent):
+    """Tool result in the shared ReAct-loop scenario."""
+
+    result: str = ""
+
+
+class _FinalAnswerProduced(IntegrationEvent):
+    """Terminal answer in the shared ReAct-loop scenario."""
+
+    answer: str = ""
+
+
+@on(_AssistantMsgSent)
+def _handle_response(
+    event: _AssistantMsgSent,
+) -> _ToolResultReturned | _FinalAnswerProduced:
+    """ReAct branch: run the tool when asked, otherwise finalize."""
+    if event.needs_tool:
+        return _ToolResultReturned(result="42")
+    return _FinalAnswerProduced(answer=event.content)
+
+
+@on(Started)
+def _to_processed(event: Started) -> Processed:
+    """``Started`` leg of the deadline / RunPaused scenarios."""
+    return Processed(data=event.data)
+
+
+@on(MessageReceived)
+def _to_ended(event: MessageReceived) -> Ended:
+    """``MessageReceived`` leg of the deadline / RunPaused scenarios."""
+    return Ended(result=event.text)
+
+
+def _deadline_graph(thread_id: str) -> tuple[EventGraph, dict[str, typing.Any]]:
+    """Checkpointed two-handler graph for the deadline suites, plus its config."""
+    graph = EventGraph([_to_processed, _to_ended], checkpointer=MemorySaver())
+    return graph, {"configurable": {"thread_id": thread_id}}
+
+
+class _DedupError(Exception):
+    """Declared raise used by the handler-dedup suites."""
+
+
+@on(Started, raises=_DedupError)
+def _raiser(event: Started) -> Ended:
+    """Handler passed twice so name dedup has to copy its ``raises=``."""
+    raise _DedupError("boom")
+
+
+@on(HandlerRaised, exception=_DedupError)
+def _catcher(event: HandlerRaised) -> Ended:
+    """Catcher passed twice so name dedup has to copy its field matchers."""
+    return Ended(result="caught")
+
+
+class _Triggered(IntegrationEvent):
+    """Seed for the scalar-reducer suites."""
+
+    value: str = ""
+    tag: str = ""
+
+
+class _Unmatched(IntegrationEvent):
+    """Event type the scalar-reducer suites reduce over but never emit."""
+
+
+class _ResultProduced(IntegrationEvent):
+    """Terminal event carrying an injected reducer value as text."""
+
+    got: str = ""
+    summary: str = ""
+
+
 class _WidgetSuite(Namespace):
     """Command with a nested DomainEvent outcome — no subscriber."""
 
@@ -102,6 +216,136 @@ class _WidgetSuite(Namespace):
 def _data_reducer() -> Reducer:
     """Simple reducer that accumulates Started.data values."""
     return Reducer(name="data_items", event_type=Started, fn=lambda e: [e.data])
+
+
+class _UserSent(IntegrationEvent, MessageEvent):
+    """Inbound chat turn for the LLM-streaming suites."""
+
+    message: HumanMessage = None  # type: ignore[assignment]
+
+
+class _AgentReplied(IntegrationEvent, MessageEvent):
+    """Outbound chat turn for the LLM-streaming suites."""
+
+    message: AIMessage = None  # type: ignore[assignment]
+
+
+@on(Started)
+def _echo(event: Started) -> Ended:
+    """Trivial ``Started -> Ended`` step for suites that just need a graph."""
+    return Ended(result=event.data)
+
+
+@on(Started)
+def _relay(event: Started) -> Processed:
+    """First leg of the shared ``Started -> Processed -> Ended`` chain."""
+    return Processed(data=event.data)
+
+
+@on(Processed)
+def _finish(event: Processed) -> Ended:
+    """Second leg of the shared ``Started -> Processed -> Ended`` chain."""
+    return Ended(result=event.data)
+
+
+@on(Started)
+def _pause_at_step_one(event: Started) -> _StepInterrupted:
+    """Interrupts the run so resume-oriented suites have a paused thread."""
+    return _StepInterrupted(step=1)
+
+
+@on(Completed)
+def _finish_completed(event: Completed) -> Ended:
+    """Resume-side step that turns a ``Completed`` resume value into ``Ended``."""
+    return Ended(result=event.result)
+
+
+def _echo_graph(**kwargs: typing.Any) -> EventGraph:
+    """An ``EventGraph`` whose sole handler echoes ``Started`` into ``Ended``."""
+    return EventGraph([_echo], **kwargs)
+
+
+def _chain_graph(**kwargs: typing.Any) -> EventGraph:
+    """An ``EventGraph`` running ``Started -> Processed -> Ended``."""
+    return EventGraph([_relay, _finish], **kwargs)
+
+
+def _interruptible_graph(
+    thread_id: str, **kwargs: typing.Any
+) -> tuple[EventGraph, dict[str, typing.Any]]:
+    """A checkpointed graph that pauses on ``Started``, plus its thread config."""
+    graph = EventGraph(
+        [_pause_at_step_one, _finish_completed],
+        checkpointer=MemorySaver(),
+        **kwargs,
+    )
+    return graph, {"configurable": {"thread_id": thread_id}}
+
+
+def _llm_graph(response: str, prompt: str = "hi") -> EventGraph:
+    """A message-reducing graph whose handler replies from a canned LLM."""
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+
+    llm = FakeListChatModel(responses=[response], sleep=0)
+
+    @on(_UserSent)
+    async def reply(event: _UserSent, messages: list[typing.Any]) -> _AgentReplied:
+        reply_message = await llm.ainvoke([*messages, HumanMessage(content=prompt)])
+        return _AgentReplied(message=reply_message)
+
+    return EventGraph([reply], reducers=[message_reducer()])
+
+
+async def _adrain(stream: typing.AsyncIterator[typing.Any]) -> list[typing.Any]:
+    """Collect an async stream into a list."""
+    return [item async for item in stream]
+
+
+def _fake_astream_events(
+    *payloads: dict[str, typing.Any],
+) -> typing.Callable[..., typing.AsyncIterator[dict[str, typing.Any]]]:
+    """Stand-in for ``compiled.astream_events`` yielding fixed v2 payloads."""
+
+    async def fake(
+        *args: typing.Any, **kwargs: typing.Any
+    ) -> typing.AsyncIterator[dict[str, typing.Any]]:
+        del args, kwargs
+        for payload in payloads:
+            yield payload
+
+    return fake
+
+
+def _custom_payload(name: str, data: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """A raw ``on_custom_event`` v2 payload."""
+    return {"event": "on_custom_event", "name": name, "data": data}
+
+
+def _chat_payload(
+    chunk: AIMessageChunk, run_id: str = "run-x"
+) -> dict[str, typing.Any]:
+    """A raw ``on_chat_model_stream`` v2 payload."""
+    return {"event": "on_chat_model_stream", "run_id": run_id, "data": {"chunk": chunk}}
+
+
+def _tool_call_chunk_message(
+    content: str = "",
+    *,
+    name: str = "search",
+    args: str = "",
+    tool_call_id: str = "tc-1",
+    index: int | None = 0,
+) -> AIMessageChunk:
+    """An ``AIMessageChunk`` with one tool-call chunk; ``index=None`` omits the key."""
+    chunk: dict[str, typing.Any] = {
+        "name": name,
+        "args": args,
+        "id": tool_call_id,
+        "type": "tool_call_chunk",
+    }
+    if index is not None:
+        chunk["index"] = index
+    return AIMessageChunk(content=content, tool_call_chunks=[chunk])
 
 
 # ---------------------------------------------------------------------------
@@ -424,50 +668,29 @@ def describe_EventGraph():
                     assert log.latest(Summarized) == Summarized(count=1)
 
                 def it_supports_react_loop_pattern():
-                    class UserMsgReceived(IntegrationEvent):
-                        content: str = ""
-
-                    class AssistantMsgSent(IntegrationEvent):
-                        content: str = ""
-                        needs_tool: bool = False
-
-                    class ToolResultReturned(IntegrationEvent):
-                        result: str = ""
-
-                    class FinalAnswerProduced(IntegrationEvent):
-                        answer: str = ""
-
                     call_count = 0
 
-                    @on(UserMsgReceived, ToolResultReturned)
-                    def call_llm(event: Event, log: EventLog) -> AssistantMsgSent:
+                    @on(_UserMsgReceived, _ToolResultReturned)
+                    def call_llm(event: Event, log: EventLog) -> _AssistantMsgSent:
                         nonlocal call_count
                         call_count += 1
-                        if isinstance(event, UserMsgReceived):
-                            return AssistantMsgSent(
+                        if isinstance(event, _UserMsgReceived):
+                            return _AssistantMsgSent(
                                 content="need tool", needs_tool=True
                             )
-                        return AssistantMsgSent(
+                        return _AssistantMsgSent(
                             content=f"got:{event.result}",
                             needs_tool=False,
                         )
 
-                    @on(AssistantMsgSent)
-                    def handle_response(
-                        event: AssistantMsgSent,
-                    ) -> ToolResultReturned | FinalAnswerProduced:
-                        if event.needs_tool:
-                            return ToolResultReturned(result="42")
-                        return FinalAnswerProduced(answer=event.content)
-
-                    graph = EventGraph([call_llm, handle_response])
-                    log = graph.invoke(UserMsgReceived(content="what is 6*7?"))
+                    graph = EventGraph([call_llm, _handle_response])
+                    log = graph.invoke(_UserMsgReceived(content="what is 6*7?"))
                     assert call_count == 2
-                    assert log.latest(FinalAnswerProduced) == (
-                        FinalAnswerProduced(answer="got:42")
+                    assert log.latest(_FinalAnswerProduced) == (
+                        _FinalAnswerProduced(answer="got:42")
                     )
-                    assert log.has(ToolResultReturned)
-                    assert log.has(AssistantMsgSent)
+                    assert log.has(_ToolResultReturned)
+                    assert log.has(_AssistantMsgSent)
 
             def when_both_types_pending():
 
@@ -563,38 +786,6 @@ def describe_EventGraph():
                     )
                     assert log.has(SystemPromptSet)
                     assert log.latest(Ended) == Ended(result="has_prompt=True")
-
-                def it_contributes_to_message_reducer():
-                    class UserMsgReceived(IntegrationEvent, MessageEvent):
-                        message: HumanMessage = None  # type: ignore[assignment]
-
-                    class Finished(IntegrationEvent):
-                        answer: str = ""
-
-                    r = message_reducer()
-
-                    received_messages: list[list[BaseMessage]] = []
-
-                    @on(UserMsgReceived)
-                    def respond(
-                        event: UserMsgReceived, messages: list[BaseMessage]
-                    ) -> Finished:
-                        received_messages.append(list(messages))
-                        return Finished(answer="ok")
-
-                    graph = EventGraph([respond], reducers=[r])
-                    log = graph.invoke(
-                        [
-                            SystemPromptSet.from_str("You are a test bot"),
-                            UserMsgReceived(message=HumanMessage(content="hello")),
-                        ]
-                    )
-                    assert log.latest(Finished) is not None
-                    msgs = received_messages[0]
-                    assert len(msgs) == 2
-                    assert isinstance(msgs[0], SystemMessage)
-                    assert msgs[0].content == "You are a test bot"
-                    assert msgs[1].content == "hello"
 
         def describe_ainvoke():
 
@@ -929,76 +1120,60 @@ def describe_EventGraph():
 
     def describe_field_matchers():
 
+        def _resume_after_interrupt(handlers, resume_with, thread_id: str) -> EventLog:
+            """Interrupt a checkpointed graph, then resume it with ``resume_with``."""
+            graph = EventGraph(handlers, checkpointer=MemorySaver())
+            config = {"configurable": {"thread_id": thread_id}}
+            graph.invoke(Started(data="test"), config=config)
+            return graph.resume(resume_with, config=config)
+
         def when_field_matches():
 
             def it_dispatches_the_handler():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                class ApprovalRequested(Interrupted):
-                    draft: str = ""
-
-                class ReviewApproved(IntegrationEvent):
-                    pass
-
                 captured = []
 
                 @on(Started)
-                def need_input(event: Started) -> ApprovalRequested:
-                    return ApprovalRequested(draft="hello")
+                def need_input(event: Started) -> _ApprovalRequested:
+                    return _ApprovalRequested(draft="hello")
 
-                @on(Resumed, interrupted=ApprovalRequested)
+                @on(Resumed, interrupted=_ApprovalRequested)
                 def handle_approval(event: Resumed) -> Ended:
                     captured.append(event.interrupted)
                     return Ended(result="approved")
 
-                graph = EventGraph(
+                log = _resume_after_interrupt(
                     [need_input, handle_approval],
-                    checkpointer=MemorySaver(),
+                    _ReviewApproved(),
+                    "field-match-test",
                 )
-                config = {"configurable": {"thread_id": "field-match-test"}}
-                graph.invoke(Started(data="test"), config=config)
-                log = graph.resume(ReviewApproved(), config=config)
 
                 assert log.latest(Ended) == Ended(result="approved")
                 assert len(captured) == 1
-                assert isinstance(captured[0], ApprovalRequested)
+                assert isinstance(captured[0], _ApprovalRequested)
 
         def when_field_does_not_match():
 
             def it_skips_the_handler():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                class ApprovalRequested(Interrupted):
-                    draft: str = ""
-
-                class OtherInterrupted(Interrupted):
-                    reason: str = ""
-
-                class ReviewApproved(IntegrationEvent):
-                    pass
-
                 captured = []
 
                 @on(Started)
-                def need_input(event: Started) -> OtherInterrupted:
-                    return OtherInterrupted(reason="different")
+                def need_input(event: Started) -> _OtherInterrupted:
+                    return _OtherInterrupted(reason="different")
 
-                @on(Resumed, interrupted=ApprovalRequested)
+                @on(Resumed, interrupted=_ApprovalRequested)
                 def handle_approval(event: Resumed) -> Ended:
                     captured.append("should not fire")
                     return Ended(result="approved")
 
-                @on(ReviewApproved)
-                def fallback(event: ReviewApproved) -> Ended:
+                @on(_ReviewApproved)
+                def fallback(event: _ReviewApproved) -> Ended:
                     return Ended(result="fallback")
 
-                graph = EventGraph(
+                log = _resume_after_interrupt(
                     [need_input, handle_approval, fallback],
-                    checkpointer=MemorySaver(),
+                    _ReviewApproved(),
+                    "field-no-match-test",
                 )
-                config = {"configurable": {"thread_id": "field-no-match-test"}}
-                graph.invoke(Started(data="test"), config=config)
-                log = graph.resume(ReviewApproved(), config=config)
 
                 assert len(captured) == 0
                 assert log.latest(Ended) == Ended(result="fallback")
@@ -1007,39 +1182,26 @@ def describe_EventGraph():
 
             def it_skips_the_handler():
                 """A None field value does not match a field matcher."""
-                from langgraph.checkpoint.memory import MemorySaver
-
-                class ApprovalRequested(Interrupted):
-                    draft: str = ""
-
-                class OtherInterrupted(Interrupted):
-                    reason: str = ""
-
-                class Acknowledge(IntegrationEvent):
-                    pass
-
                 captured = []
 
                 @on(Started)
-                def need_input(event: Started) -> OtherInterrupted:
-                    return OtherInterrupted(reason="test")
+                def need_input(event: Started) -> _OtherInterrupted:
+                    return _OtherInterrupted(reason="test")
 
-                @on(Resumed, interrupted=ApprovalRequested)
+                @on(Resumed, interrupted=_ApprovalRequested)
                 def approval_handler(event: Resumed) -> Ended:
                     captured.append("should not fire")
                     return Ended(result="approval")
 
-                @on(Acknowledge)
-                def fallback(event: Acknowledge) -> Ended:
+                @on(_Acknowledge)
+                def fallback(event: _Acknowledge) -> Ended:
                     return Ended(result="fallback")
 
-                graph = EventGraph(
+                log = _resume_after_interrupt(
                     [need_input, approval_handler, fallback],
-                    checkpointer=MemorySaver(),
+                    _Acknowledge(),
+                    "field-none-test",
                 )
-                config = {"configurable": {"thread_id": "field-none-test"}}
-                graph.invoke(Started(data="test"), config=config)
-                log = graph.resume(Acknowledge(), config=config)
 
                 assert len(captured) == 0
                 assert log.latest(Ended) == Ended(result="fallback")
@@ -1047,116 +1209,83 @@ def describe_EventGraph():
         def when_handler_requests_field_injection():
 
             def it_injects_the_narrowed_field():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                class ApprovalRequested(Interrupted):
-                    draft: str = ""
-
-                class ReviewApproved(IntegrationEvent):
-                    pass
-
                 injected_values = []
 
                 @on(Started)
-                def need_input(event: Started) -> ApprovalRequested:
-                    return ApprovalRequested(draft="my draft")
+                def need_input(event: Started) -> _ApprovalRequested:
+                    return _ApprovalRequested(draft="my draft")
 
-                @on(Resumed, interrupted=ApprovalRequested)
+                @on(Resumed, interrupted=_ApprovalRequested)
                 def handle_approval(
-                    event: Resumed, interrupted: ApprovalRequested
+                    event: Resumed, interrupted: _ApprovalRequested
                 ) -> Ended:
                     injected_values.append(interrupted)
                     return Ended(result=interrupted.draft)
 
-                graph = EventGraph(
+                log = _resume_after_interrupt(
                     [need_input, handle_approval],
-                    checkpointer=MemorySaver(),
+                    _ReviewApproved(),
+                    "field-inject-test",
                 )
-                config = {"configurable": {"thread_id": "field-inject-test"}}
-                graph.invoke(Started(data="test"), config=config)
-                log = graph.resume(ReviewApproved(), config=config)
 
                 assert log.latest(Ended) == Ended(result="my draft")
                 assert len(injected_values) == 1
-                assert isinstance(injected_values[0], ApprovalRequested)
+                assert isinstance(injected_values[0], _ApprovalRequested)
                 assert injected_values[0].draft == "my draft"
 
         def when_multiple_field_matchers():
 
             def it_requires_all_fields_to_match():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                class ApprovalRequested(Interrupted):
-                    draft: str = ""
-
-                class ReviewApproved(IntegrationEvent):
-                    pass
-
                 captured = []
 
                 @on(Started)
-                def need_input(event: Started) -> ApprovalRequested:
-                    return ApprovalRequested(draft="hello")
+                def need_input(event: Started) -> _ApprovalRequested:
+                    return _ApprovalRequested(draft="hello")
 
-                @on(Resumed, interrupted=ApprovalRequested, value=ReviewApproved)
+                @on(Resumed, interrupted=_ApprovalRequested, value=_ReviewApproved)
                 def strict_handler(
                     event: Resumed,
-                    interrupted: ApprovalRequested,
-                    value: ReviewApproved,
+                    interrupted: _ApprovalRequested,
+                    value: _ReviewApproved,
                 ) -> Ended:
                     captured.append((interrupted, value))
                     return Ended(result="strict")
 
-                graph = EventGraph(
+                log = _resume_after_interrupt(
                     [need_input, strict_handler],
-                    checkpointer=MemorySaver(),
+                    _ReviewApproved(),
+                    "multi-field-test",
                 )
-                config = {"configurable": {"thread_id": "multi-field-test"}}
-                graph.invoke(Started(data="test"), config=config)
-                log = graph.resume(ReviewApproved(), config=config)
 
                 assert log.latest(Ended) == Ended(result="strict")
                 assert len(captured) == 1
-                assert isinstance(captured[0][0], ApprovalRequested)
-                assert isinstance(captured[0][1], ReviewApproved)
+                assert isinstance(captured[0][0], _ApprovalRequested)
+                assert isinstance(captured[0][1], _ReviewApproved)
 
             def when_one_field_does_not_match():
 
                 def it_skips_the_handler():
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    class ApprovalRequested(Interrupted):
-                        draft: str = ""
-
-                    class ReviewApproved(IntegrationEvent):
-                        pass
-
-                    class OtherEvent(IntegrationEvent):
-                        pass
-
                     captured = []
 
                     @on(Started)
-                    def need_input(event: Started) -> ApprovalRequested:
-                        return ApprovalRequested(draft="hello")
+                    def need_input(event: Started) -> _ApprovalRequested:
+                        return _ApprovalRequested(draft="hello")
 
-                    # value=OtherEvent won't match ReviewApproved
-                    @on(Resumed, interrupted=ApprovalRequested, value=OtherEvent)
+                    # value=_OtherEvent won't match _ReviewApproved
+                    @on(Resumed, interrupted=_ApprovalRequested, value=_OtherEvent)
                     def strict_handler(event: Resumed) -> Ended:
                         captured.append("should not fire")
                         return Ended(result="strict")
 
-                    @on(ReviewApproved)
-                    def fallback(event: ReviewApproved) -> Ended:
+                    @on(_ReviewApproved)
+                    def fallback(event: _ReviewApproved) -> Ended:
                         return Ended(result="fallback")
 
-                    graph = EventGraph(
+                    log = _resume_after_interrupt(
                         [need_input, strict_handler, fallback],
-                        checkpointer=MemorySaver(),
+                        _ReviewApproved(),
+                        "multi-field-skip",
                     )
-                    config = {"configurable": {"thread_id": "multi-field-skip"}}
-                    graph.invoke(Started(data="test"), config=config)
-                    log = graph.resume(ReviewApproved(), config=config)
 
                     assert len(captured) == 0
                     assert log.latest(Ended) == Ended(result="fallback")
@@ -1495,25 +1624,12 @@ def describe_EventGraph():
         def describe_react_loop():
 
             def it_accumulates_system_user_assistant_tool_messages():
-                class UserMsgReceived(IntegrationEvent):
-                    content: str = ""
-
-                class AssistantMsgSent(IntegrationEvent):
-                    content: str = ""
-                    needs_tool: bool = False
-
-                class ToolResultReturned(IntegrationEvent):
-                    result: str = ""
-
-                class FinalAnswerProduced(IntegrationEvent):
-                    answer: str = ""
-
                 def to_messages(event: Event) -> list:
-                    if isinstance(event, UserMsgReceived):
+                    if isinstance(event, _UserMsgReceived):
                         return [("user", event.content)]
-                    if isinstance(event, AssistantMsgSent):
+                    if isinstance(event, _AssistantMsgSent):
                         return [("assistant", event.content)]
-                    if isinstance(event, ToolResultReturned):
+                    if isinstance(event, _ToolResultReturned):
                         return [("tool", event.result)]
                     return []
 
@@ -1525,28 +1641,20 @@ def describe_EventGraph():
                 )
                 message_snapshots: list[list] = []
 
-                @on(UserMsgReceived, ToolResultReturned)
-                def call_llm(event: Event, messages: list) -> AssistantMsgSent:
+                @on(_UserMsgReceived, _ToolResultReturned)
+                def call_llm(event: Event, messages: list) -> _AssistantMsgSent:
                     message_snapshots.append(list(messages))
-                    if isinstance(event, UserMsgReceived):
-                        return AssistantMsgSent(content="need tool", needs_tool=True)
-                    return AssistantMsgSent(
+                    if isinstance(event, _UserMsgReceived):
+                        return _AssistantMsgSent(content="need tool", needs_tool=True)
+                    return _AssistantMsgSent(
                         content=f"got:{event.result}",
                         needs_tool=False,
                     )
 
-                @on(AssistantMsgSent)
-                def handle_response(
-                    event: AssistantMsgSent,
-                ) -> ToolResultReturned | FinalAnswerProduced:
-                    if event.needs_tool:
-                        return ToolResultReturned(result="42")
-                    return FinalAnswerProduced(answer=event.content)
-
-                graph = EventGraph([call_llm, handle_response], reducers=[r])
-                log = graph.invoke(UserMsgReceived(content="what is 6*7?"))
-                assert log.latest(FinalAnswerProduced) == (
-                    FinalAnswerProduced(answer="got:42")
+                graph = EventGraph([call_llm, _handle_response], reducers=[r])
+                log = graph.invoke(_UserMsgReceived(content="what is 6*7?"))
+                assert log.latest(_FinalAnswerProduced) == (
+                    _FinalAnswerProduced(answer="got:42")
                 )
                 assert message_snapshots[0] == [
                     ("system", "You are helpful"),
@@ -1923,28 +2031,19 @@ def describe_EventGraph():
         def when_no_matching_events():
 
             def it_defaults_to_none():
-                class Triggered(IntegrationEvent):
-                    pass
-
-                class Unmatched(IntegrationEvent):
-                    pass
-
-                class ResultProduced(IntegrationEvent):
-                    got: str = ""
-
                 sr = ScalarReducer(
                     name="mode",
-                    event_type=Unmatched,
+                    event_type=_Unmatched,
                     fn=lambda e: "irrelevant",
                 )
 
-                @on(Triggered)
-                def handle(event: Triggered, mode: object) -> ResultProduced:
-                    return ResultProduced(got=str(mode))
+                @on(_Triggered)
+                def handle(event: _Triggered, mode: object) -> _ResultProduced:
+                    return _ResultProduced(got=str(mode))
 
                 graph = EventGraph([handle], reducers=[sr])
-                log = graph.invoke(Triggered())
-                assert log.latest(ResultProduced) == ResultProduced(got="None")
+                log = graph.invoke(_Triggered())
+                assert log.latest(_ResultProduced) == _ResultProduced(got="None")
 
             def it_returns_skip():
                 class StepCompleted(IntegrationEvent):
@@ -1964,88 +2063,67 @@ def describe_EventGraph():
                 )
 
             def it_treats_skip_from_fn_as_no_contribution():
-                class Triggered(IntegrationEvent):
-                    pass
-
                 from langgraph_events import SKIP
 
                 sr = ScalarReducer(
                     name="mode",
-                    event_type=Triggered,
+                    event_type=_Triggered,
                     fn=lambda e: SKIP,
                     default="fallback",
                 )
 
-                result = sr.collect([Triggered()])
+                result = sr.collect([_Triggered()])
                 assert result is SKIP
                 assert sr.has_contributions(result) is False
-                assert sr.seed([Triggered()]) == "fallback"
+                assert sr.seed([_Triggered()]) == "fallback"
 
             def it_uses_custom_default():
-                class Triggered(IntegrationEvent):
-                    pass
-
-                class Unmatched(IntegrationEvent):
-                    pass
-
-                class ResultProduced(IntegrationEvent):
-                    got: str = ""
-
                 sr = ScalarReducer(
                     name="mode",
-                    event_type=Unmatched,
+                    event_type=_Unmatched,
                     fn=lambda e: "irrelevant",
                     default="fallback",
                 )
 
-                @on(Triggered)
-                def handle(event: Triggered, mode: str) -> ResultProduced:
-                    return ResultProduced(got=mode)
+                @on(_Triggered)
+                def handle(event: _Triggered, mode: str) -> _ResultProduced:
+                    return _ResultProduced(got=mode)
 
                 graph = EventGraph([handle], reducers=[sr])
-                log = graph.invoke(Triggered())
-                assert log.latest(ResultProduced) == ResultProduced(got="fallback")
+                log = graph.invoke(_Triggered())
+                assert log.latest(_ResultProduced) == _ResultProduced(got="fallback")
 
         def when_mixed_list_reducers():
 
             def it_works_alongside_list_reducers():
-                class Triggered(IntegrationEvent):
-                    tag: str = ""
-
-                class ResultProduced(IntegrationEvent):
-                    summary: str = ""
-
                 list_r = Reducer(
                     name="tags",
-                    event_type=Triggered,
+                    event_type=_Triggered,
                     fn=lambda e: [e.tag] if e.tag else [],
                 )
                 scalar_r = ScalarReducer(
                     name="last_tag",
-                    event_type=Triggered,
+                    event_type=_Triggered,
                     fn=lambda e: e.tag,
                 )
 
-                @on(Triggered)
+                @on(_Triggered)
                 def handle(
-                    event: Triggered,
+                    event: _Triggered,
                     tags: list,
                     last_tag: object,
-                ) -> ResultProduced:
-                    return ResultProduced(summary=f"tags={tags},last={last_tag}")
+                ) -> _ResultProduced:
+                    return _ResultProduced(summary=f"tags={tags},last={last_tag}")
 
                 graph = EventGraph([handle], reducers=[list_r, scalar_r])
-                log = graph.invoke(Triggered(tag="x"))
-                assert log.latest(ResultProduced) == (
-                    ResultProduced(summary="tags=['x'],last=x")
+                log = graph.invoke(_Triggered(tag="x"))
+                assert log.latest(_ResultProduced) == (
+                    _ResultProduced(summary="tags=['x'],last=x")
                 )
 
         def when_parallel_handlers():
 
             def it_handles_parallel_handler_contributions():
-                class Triggered(IntegrationEvent):
-                    value: str = ""
-
                 class ResultAProduced(IntegrationEvent):
                     data: str = ""
 
@@ -2057,7 +2135,7 @@ def describe_EventGraph():
                     event_type=Event,
                     fn=lambda e: (
                         e.value
-                        if isinstance(e, Triggered)
+                        if isinstance(e, _Triggered)
                         else (
                             e.data
                             if isinstance(e, (ResultAProduced, ResultBProduced))
@@ -2066,16 +2144,16 @@ def describe_EventGraph():
                     ),
                 )
 
-                @on(Triggered)
-                def handler_a(event: Triggered, latest: object) -> ResultAProduced:
+                @on(_Triggered)
+                def handler_a(event: _Triggered, latest: object) -> ResultAProduced:
                     return ResultAProduced(data=f"a:{event.value}")
 
-                @on(Triggered)
-                def handler_b(event: Triggered, latest: object) -> ResultBProduced:
+                @on(_Triggered)
+                def handler_b(event: _Triggered, latest: object) -> ResultBProduced:
                     return ResultBProduced(data=f"b:{event.value}")
 
                 graph = EventGraph([handler_a, handler_b], reducers=[sr])
-                log = graph.invoke(Triggered(value="x"))
+                log = graph.invoke(_Triggered(value="x"))
                 # Both handlers run in parallel — should not crash
                 assert log.has(ResultAProduced)
                 assert log.has(ResultBProduced)
@@ -2089,9 +2167,6 @@ def describe_EventGraph():
                 class UnrelatedReceived(IntegrationEvent):
                     pass
 
-                class ResultProduced(IntegrationEvent):
-                    got: str = ""
-
                 sr = ScalarReducer(
                     name="kept",
                     event_type=ValueSet,
@@ -2103,23 +2178,20 @@ def describe_EventGraph():
                     return UnrelatedReceived()
 
                 @on(UnrelatedReceived)
-                def step2(event: UnrelatedReceived, kept: object) -> ResultProduced:
-                    return ResultProduced(got=str(kept))
+                def step2(event: UnrelatedReceived, kept: object) -> _ResultProduced:
+                    return _ResultProduced(got=str(kept))
 
                 graph = EventGraph([step1, step2], reducers=[sr])
                 log = graph.invoke(ValueSet(value="hello"))
                 # Round 2 produces UnrelatedReceived (doesn't match event_type) —
                 # scalar must still be "hello", not reverted.
-                assert log.latest(ResultProduced) == ResultProduced(got="hello")
+                assert log.latest(_ResultProduced) == _ResultProduced(got="hello")
 
         def when_fn_returns_none():
 
             def it_stores_none_as_valid_contribution():
                 class ClearSignaled(IntegrationEvent):
                     pass
-
-                class ResultProduced(IntegrationEvent):
-                    got: str = ""
 
                 sr = ScalarReducer(
                     name="value",
@@ -2129,13 +2201,13 @@ def describe_EventGraph():
                 )
 
                 @on(ClearSignaled)
-                def handle(event: ClearSignaled, value: object) -> ResultProduced:
-                    return ResultProduced(got=repr(value))
+                def handle(event: ClearSignaled, value: object) -> _ResultProduced:
+                    return _ResultProduced(got=repr(value))
 
                 graph = EventGraph([handle], reducers=[sr])
                 log = graph.invoke(ClearSignaled())
                 # fn returns None — this is a real contribution, not "no contribution"
-                assert log.latest(ResultProduced) == ResultProduced(got="None")
+                assert log.latest(_ResultProduced) == _ResultProduced(got="None")
 
         def when_protocol_event_type():
 
@@ -2152,9 +2224,6 @@ def describe_EventGraph():
                 class ScoreBRecorded(IntegrationEvent):
                     score: int = 0
 
-                class ResultProduced(IntegrationEvent):
-                    got: str = ""
-
                 sr = ScalarReducer(
                     name="last_score",
                     event_type=HasScore,
@@ -2166,45 +2235,41 @@ def describe_EventGraph():
                     return ScoreBRecorded(score=event.score + 10)
 
                 @on(ScoreBRecorded)
-                def step_b(event: ScoreBRecorded, last_score: object) -> ResultProduced:
-                    return ResultProduced(got=str(last_score))
+                def step_b(
+                    event: ScoreBRecorded, last_score: object
+                ) -> _ResultProduced:
+                    return _ResultProduced(got=str(last_score))
 
                 graph = EventGraph([step_a, step_b], reducers=[sr])
                 log = graph.invoke(ScoreARecorded(score=5))
                 # ScoreA(5) → 5, then ScoreB(15) → 15
-                assert log.latest(ResultProduced) == ResultProduced(got="15")
+                assert log.latest(_ResultProduced) == _ResultProduced(got="15")
 
         def when_checkpointer():
 
             def it_does_not_lose_scalar_on_re_invoke():
                 from langgraph.checkpoint.memory import MemorySaver
 
-                class Triggered(IntegrationEvent):
-                    value: str = ""
-
-                class ResultProduced(IntegrationEvent):
-                    got: str = ""
-
                 sr = ScalarReducer(
                     name="latest",
-                    event_type=Triggered,
+                    event_type=_Triggered,
                     fn=lambda e: e.value,
                 )
 
-                @on(Triggered)
-                def handle(event: Triggered, latest: object) -> ResultProduced:
-                    return ResultProduced(got=str(latest))
+                @on(_Triggered)
+                def handle(event: _Triggered, latest: object) -> _ResultProduced:
+                    return _ResultProduced(got=str(latest))
 
                 graph = EventGraph([handle], reducers=[sr], checkpointer=MemorySaver())
                 config = {"configurable": {"thread_id": "scalar-re-invoke"}}
 
                 # Run 1
-                log1 = graph.invoke(Triggered(value="first"), config=config)
-                assert log1.latest(ResultProduced) == ResultProduced(got="first")
+                log1 = graph.invoke(_Triggered(value="first"), config=config)
+                assert log1.latest(_ResultProduced) == _ResultProduced(got="first")
 
                 # Run 2 — re-invoke on same thread
-                log2 = graph.invoke(Triggered(value="second"), config=config)
-                assert log2.latest(ResultProduced) == ResultProduced(got="second")
+                log2 = graph.invoke(_Triggered(value="second"), config=config)
+                assert log2.latest(_ResultProduced) == _ResultProduced(got="second")
 
     def describe_message_reducer():
 
@@ -2356,21 +2421,7 @@ def describe_EventGraph():
         def when_no_checkpointer():
 
             def it_returns_same_instance():
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
-                first = graph.compiled
-                second = graph.compiled
-                assert first is second
-
-            def it_returns_cached_instance_on_second_call():
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
+                graph = _echo_graph()
                 first = graph.compiled
                 second = graph.compiled
                 assert first is second
@@ -2378,13 +2429,7 @@ def describe_EventGraph():
         def when_checkpointer():
 
             def it_persists_state():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step], checkpointer=MemorySaver())
+                graph = _echo_graph(checkpointer=MemorySaver())
 
                 config = {"configurable": {"thread_id": "test-1"}}
                 log = graph.invoke(Started(data="hello"), config=config)
@@ -2394,8 +2439,6 @@ def describe_EventGraph():
                 assert len(state.events) == 2
 
             def it_only_processes_new_events_on_re_invoke():
-                from langgraph.checkpoint.memory import MemorySaver
-
                 seen: list[list[str]] = []
 
                 @on(Started)
@@ -2417,13 +2460,7 @@ def describe_EventGraph():
                 assert seen[-1] == ["b"]
 
             def it_handles_three_sequential_re_invokes():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step], checkpointer=MemorySaver())
+                graph = _echo_graph(checkpointer=MemorySaver())
                 config = {"configurable": {"thread_id": "re-invoke-3"}}
 
                 graph.invoke(Started(data="first"), config=config)
@@ -2442,15 +2479,7 @@ def describe_EventGraph():
         def when_default():
 
             def it_yields_event_objects():
-                @on(Started)
-                def step1(event: Started) -> Processed:
-                    return Processed(data=event.data)
-
-                @on(Processed)
-                def step2(event: Processed) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step1, step2])
+                graph = _chain_graph()
                 events = list(graph.stream_events(Started(data="hi")))
                 assert all(isinstance(e, Event) for e in events)
                 types = [type(e).__name__ for e in events]
@@ -2459,15 +2488,7 @@ def describe_EventGraph():
                 assert "Ended" in types
 
             def it_yields_events_in_order():
-                @on(Started)
-                def step1(event: Started) -> Processed:
-                    return Processed(data="mid")
-
-                @on(Processed)
-                def step2(event: Processed) -> Ended:
-                    return Ended(result="done")
-
-                graph = EventGraph([step1, step2])
+                graph = _chain_graph()
                 events = list(graph.stream_events(Started(data="go")))
                 assert isinstance(events[0], Started)
                 assert isinstance(events[-1], Ended)
@@ -2475,11 +2496,7 @@ def describe_EventGraph():
         def when_multi_seed():
 
             def it_includes_all_seed_types():
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
+                graph = _echo_graph()
                 events = list(graph.stream_events([Started(data="a")]))
                 types = [type(e).__name__ for e in events]
                 assert "Started" in types
@@ -2488,17 +2505,7 @@ def describe_EventGraph():
         def when_include_reducers_true():
 
             def it_yields_stream_frames():
-                reducer = _data_reducer()
-
-                @on(Started)
-                def step1(event: Started) -> Processed:
-                    return Processed(data=event.data)
-
-                @on(Processed)
-                def step2(event: Processed) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step1, step2], reducers=[reducer])
+                graph = _chain_graph(reducers=[_data_reducer()])
                 frames = list(
                     graph.stream_events(
                         Started(data="hello"),
@@ -2519,13 +2526,7 @@ def describe_EventGraph():
         def when_include_reducers_selective():
 
             def it_only_includes_named_reducers():
-                reducer = _data_reducer()
-
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step], reducers=[reducer])
+                graph = _echo_graph(reducers=[_data_reducer()])
                 frames = list(
                     graph.stream_events(
                         Started(data="x"),
@@ -2538,13 +2539,7 @@ def describe_EventGraph():
         def when_include_reducers_partial_overlap():
 
             def it_includes_only_valid_reducer_names():
-                reducer = _data_reducer()
-
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step], reducers=[reducer])
+                graph = _echo_graph(reducers=[_data_reducer()])
                 frames = list(
                     graph.stream_events(
                         Started(data="x"),
@@ -2559,13 +2554,7 @@ def describe_EventGraph():
         def when_include_reducers_unknown_name():
 
             def it_warns_about_unknown_reducer_names():
-                reducer = _data_reducer()
-
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step], reducers=[reducer])
+                graph = _echo_graph(reducers=[_data_reducer()])
                 with pytest.warns(
                     UserWarning,
                     match="Unknown reducer name.*nonexistent",
@@ -2578,13 +2567,7 @@ def describe_EventGraph():
                     )
 
             def it_falls_back_to_bare_events():
-                reducer = _data_reducer()
-
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step], reducers=[reducer])
+                graph = _echo_graph(reducers=[_data_reducer()])
                 frames = list(
                     graph.stream_events(
                         Started(data="x"),
@@ -2596,11 +2579,7 @@ def describe_EventGraph():
         def when_include_reducers_false():
 
             def it_yields_bare_event_objects():
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
+                graph = _echo_graph()
                 events = list(graph.stream_events(Started(data="hi")))
                 assert all(isinstance(e, Event) for e in events)
                 assert not any(isinstance(e, StreamFrame) for e in events)
@@ -2609,24 +2588,13 @@ def describe_EventGraph():
 
             @pytest.mark.asyncio
             async def it_yields_stream_frames():
-                reducer = _data_reducer()
-
-                @on(Started)
-                def step1(event: Started) -> Processed:
-                    return Processed(data=event.data)
-
-                @on(Processed)
-                def step2(event: Processed) -> Ended:
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step1, step2], reducers=[reducer])
-                frames = [
-                    f
-                    async for f in graph.astream_events(
+                graph = _chain_graph(reducers=[_data_reducer()])
+                frames = await _adrain(
+                    graph.astream_events(
                         Started(data="async"),
                         include_reducers=True,
                     )
-                ]
+                )
                 assert all(isinstance(f, StreamFrame) for f in frames)
                 types = [type(f.event).__name__ for f in frames]
                 assert "Started" in types
@@ -2664,22 +2632,20 @@ def describe_EventGraph():
 
     def describe_stream_resume():
 
-        def it_yields_resume_handler_events():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            @on(Started)
-            def need_input(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
-            @on(Completed)
-            def finish(event: Completed) -> Ended:
-                return Ended(result=event.result)
-
-            graph = EventGraph(
-                [need_input, finish],
-                checkpointer=MemorySaver(),
+        async def _v2_resume_frames(graph, config):
+            """Resume through the v2 path; return the ``StreamFrame``s yielded."""
+            frames = await _adrain(
+                graph.astream_resume(
+                    Completed(result="done"),
+                    include_reducers=True,
+                    include_custom_events=True,
+                    config=config,
+                )
             )
-            config = {"configurable": {"thread_id": "sr-handler"}}
+            return [f for f in frames if isinstance(f, StreamFrame)]
+
+        def it_yields_resume_handler_events():
+            graph, config = _interruptible_graph("sr-handler")
             graph.invoke(Started(data="go"), config=config)
 
             events = list(graph.stream_resume(Completed(result="done"), config=config))
@@ -2687,21 +2653,7 @@ def describe_EventGraph():
             assert "Ended" in types
 
         def it_includes_stale_interrupted_in_raw_stream():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            @on(Started)
-            def need_input(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
-            @on(Completed)
-            def finish(event: Completed) -> Ended:
-                return Ended(result=event.result)
-
-            graph = EventGraph(
-                [need_input, finish],
-                checkpointer=MemorySaver(),
-            )
-            config = {"configurable": {"thread_id": "sr-no-stale"}}
+            graph, config = _interruptible_graph("sr-no-stale")
             graph.invoke(Started(data="go"), config=config)
 
             events = list(graph.stream_resume(Completed(result="done"), config=config))
@@ -2709,23 +2661,9 @@ def describe_EventGraph():
             assert any(isinstance(e, Interrupted) for e in events)
 
         def it_yields_reducer_stream_frames():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            @on(Started)
-            def need_input(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
-            @on(Completed)
-            def finish(event: Completed) -> Ended:
-                return Ended(result=event.result)
-
-            reducer = _data_reducer()
-            graph = EventGraph(
-                [need_input, finish],
-                checkpointer=MemorySaver(),
-                reducers=[reducer],
+            graph, config = _interruptible_graph(
+                "sr-reducers", reducers=[_data_reducer()]
             )
-            config = {"configurable": {"thread_id": "sr-reducers"}}
             graph.invoke(Started(data="go"), config=config)
 
             frames = list(
@@ -2740,45 +2678,22 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_yields_resume_events_async():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            @on(Started)
-            def need_input(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
-            @on(Completed)
-            def finish(event: Completed) -> Ended:
-                return Ended(result=event.result)
-
-            graph = EventGraph(
-                [need_input, finish],
-                checkpointer=MemorySaver(),
-            )
-            config = {"configurable": {"thread_id": "sr-async"}}
+            graph, config = _interruptible_graph("sr-async")
             await graph.ainvoke(Started(data="go"), config=config)
 
-            events = [
-                e
-                async for e in graph.astream_resume(
-                    Completed(result="async-done"), config=config
-                )
-            ]
+            events = await _adrain(
+                graph.astream_resume(Completed(result="async-done"), config=config)
+            )
             types = [type(e).__name__ for e in events]
             assert "Ended" in types
 
         def it_yields_new_interrupted_during_resume():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            @on(Started)
-            def step_one(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
             @on(Completed)
             def step_two(event: Completed) -> _StepInterrupted:
                 return _StepInterrupted(step=2)
 
             graph = EventGraph(
-                [step_one, step_two],
+                [_pause_at_step_one, step_two],
                 checkpointer=MemorySaver(),
             )
             config = {"configurable": {"thread_id": "sr-new-interrupt"}}
@@ -2802,24 +2717,8 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_preserves_reducer_state_from_checkpoint_in_v2():
-            from langgraph.checkpoint.memory import MemorySaver
-
             r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
-
-            @on(Started)
-            def need_input(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
-            @on(Completed)
-            def finish(event: Completed) -> Ended:
-                return Ended(result=event.result)
-
-            graph = EventGraph(
-                [need_input, finish],
-                checkpointer=MemorySaver(),
-                reducers=[r],
-            )
-            config = {"configurable": {"thread_id": "v2-resume-reducer"}}
+            graph, config = _interruptible_graph("v2-resume-reducer", reducers=[r])
 
             # First run — seed with MessageReceived to populate reducer, then
             # interrupt via Started → _StepInterrupted.
@@ -2828,25 +2727,13 @@ def describe_EventGraph():
             )
 
             # Resume via _astream_v2 path (include_custom_events forces v2)
-            frames = [
-                item
-                async for item in graph.astream_resume(
-                    Completed(result="done"),
-                    include_reducers=True,
-                    include_custom_events=True,
-                    config=config,
-                )
-            ]
-
-            stream_frames = [f for f in frames if isinstance(f, StreamFrame)]
+            stream_frames = await _v2_resume_frames(graph, config)
             assert len(stream_frames) > 0
             # Reducer must reflect checkpoint state ("hello" from first run)
             assert "hello" in stream_frames[0].reducers["texts"]
 
         @pytest.mark.asyncio
         async def it_accumulates_reducer_across_v2_astream_events_runs():
-            from langgraph.checkpoint.memory import MemorySaver
-
             r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
 
             @on(MessageReceived)
@@ -2860,27 +2747,19 @@ def describe_EventGraph():
             )
             config = {"configurable": {"thread_id": "v2-second-run"}}
 
-            # First run via astream_events (v2 path)
-            _ = [
-                item
-                async for item in graph.astream_events(
-                    MessageReceived(text="first"),
+            def _v2_run(text: str):
+                return graph.astream_events(
+                    MessageReceived(text=text),
                     include_reducers=True,
                     include_custom_events=True,
                     config=config,
                 )
-            ]
+
+            # First run via astream_events (v2 path)
+            _ = await _adrain(_v2_run("first"))
 
             # Second run on same thread — seed contributes on top of checkpoint
-            frames = [
-                item
-                async for item in graph.astream_events(
-                    MessageReceived(text="second"),
-                    include_reducers=True,
-                    include_custom_events=True,
-                    config=config,
-                )
-            ]
+            frames = await _adrain(_v2_run("second"))
 
             stream_frames = [f for f in frames if isinstance(f, StreamFrame)]
             assert len(stream_frames) > 0
@@ -2890,28 +2769,12 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_preserves_scalar_reducer_from_checkpoint_in_v2():
-            from langgraph.checkpoint.memory import MemorySaver
-
             sr = ScalarReducer(
                 name="proposal",
                 event_type=MessageReceived,
                 fn=lambda e: e.text,
             )
-
-            @on(Started)
-            def need_input(event: Started) -> _StepInterrupted:
-                return _StepInterrupted(step=1)
-
-            @on(Completed)
-            def finish(event: Completed) -> Ended:
-                return Ended(result=event.result)
-
-            graph = EventGraph(
-                [need_input, finish],
-                checkpointer=MemorySaver(),
-                reducers=[sr],
-            )
-            config = {"configurable": {"thread_id": "v2-scalar-resume"}}
+            graph, config = _interruptible_graph("v2-scalar-resume", reducers=[sr])
 
             # First run — MessageReceived populates scalar, Started interrupts
             graph.invoke(
@@ -2919,17 +2782,7 @@ def describe_EventGraph():
             )
 
             # Resume via v2 path
-            frames = [
-                item
-                async for item in graph.astream_resume(
-                    Completed(result="done"),
-                    include_reducers=True,
-                    include_custom_events=True,
-                    config=config,
-                )
-            ]
-
-            stream_frames = [f for f in frames if isinstance(f, StreamFrame)]
+            stream_frames = await _v2_resume_frames(graph, config)
             assert len(stream_frames) > 0
             assert stream_frames[0].reducers["proposal"] == "chosen"
 
@@ -3224,21 +3077,7 @@ def describe_EventGraph():
                     RunPaused being a SystemEvent rather than a Halted
                     subclass — MaxRoundsExceeded would re-terminate here.
                     """
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    @on(Started)
-                    def to_processed(event: Started) -> Processed:
-                        return Processed(data=event.data)
-
-                    @on(MessageReceived)
-                    def to_ended(event: MessageReceived) -> Ended:
-                        return Ended(result=event.text)
-
-                    graph = EventGraph(
-                        [to_processed, to_ended],
-                        checkpointer=MemorySaver(),
-                    )
-                    config = {"configurable": {"thread_id": "deadline-resume"}}
+                    graph, config = _deadline_graph("deadline-resume")
 
                     # Run 1: deadline already expired → RunPaused emitted.
                     log1 = graph.invoke(
@@ -3377,21 +3216,7 @@ def describe_EventGraph():
                     the second run would inherit a stuck flag and
                     drain silently with no ``RunPaused`` event.
                     """
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    @on(Started)
-                    def to_processed(event: Started) -> Processed:
-                        return Processed(data=event.data)
-
-                    @on(MessageReceived)
-                    def to_ended(event: MessageReceived) -> Ended:
-                        return Ended(result=event.text)
-
-                    graph = EventGraph(
-                        [to_processed, to_ended],
-                        checkpointer=MemorySaver(),
-                    )
-                    config = {"configurable": {"thread_id": "double-pause"}}
+                    graph, config = _deadline_graph("double-pause")
 
                     log1 = graph.invoke(
                         Started(data="first"), deadline=0.0, config=config
@@ -3643,47 +3468,20 @@ def describe_EventGraph():
                 assert "-->|handler|" in output
                 assert "-->|handler_2|" in output
 
+            def _deduped_metas(handlers, prefix: str):
+                """Handler metas whose name starts with ``prefix`` after dedup."""
+                graph = EventGraph(handlers)
+                return [m for m in graph._handler_metas if m.name.startswith(prefix)]
+
             def it_preserves_raises_on_deduped_copies():
-                from langgraph_events import HandlerRaised
-
-                class _DedupError(Exception):
-                    pass
-
-                @on(Started, raises=_DedupError)
-                def raiser(event: Started) -> Ended:
-                    raise _DedupError("boom")
-
-                @on(HandlerRaised, exception=_DedupError)
-                def catcher(event: HandlerRaised) -> Ended:
-                    return Ended(result="caught")
-
-                graph = EventGraph([raiser, raiser, catcher])
-                raisers = [
-                    m for m in graph._handler_metas if m.name.startswith("raiser")
-                ]
+                raisers = _deduped_metas([_raiser, _raiser, _catcher], "_raiser")
                 assert len(raisers) == 2
                 # Without the fix, the second copy's raises= is silently dropped
                 for m in raisers:
                     assert m.raises == (_DedupError,)
 
             def it_preserves_field_matchers_on_deduped_copies():
-                from langgraph_events import HandlerRaised
-
-                class _DedupError(Exception):
-                    pass
-
-                @on(Started, raises=_DedupError)
-                def raiser(event: Started) -> Ended:
-                    raise _DedupError("boom")
-
-                @on(HandlerRaised, exception=_DedupError)
-                def catcher(event: HandlerRaised) -> Ended:
-                    return Ended(result="caught")
-
-                graph = EventGraph([raiser, catcher, catcher])
-                catchers = [
-                    m for m in graph._handler_metas if m.name.startswith("catcher")
-                ]
+                catchers = _deduped_metas([_raiser, _catcher, _catcher], "_catcher")
                 assert len(catchers) == 2
                 # Without the fix, the second copy becomes a universal catcher
                 for m in catchers:
@@ -3723,137 +3521,96 @@ def describe_EventGraph():
 
         def describe_custom_event_helpers():
 
-            @pytest.mark.asyncio
-            async def it_emits_custom_frames_from_sync_handler():
+            @on(Started)
+            def _emit_custom_sync(event: Started) -> Ended:
+                emit_custom("tool.progress", {"pct": 25})
+                return Ended(result=event.data)
 
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    emit_custom("tool.progress", {"pct": 25})
-                    return Ended(result=event.data)
+            @on(Started)
+            async def _emit_custom_async(event: Started) -> Ended:
+                await aemit_custom("tool.progress", {"pct": 80})
+                return Ended(result=event.data)
 
-                graph = EventGraph([step])
-                items = [
-                    item
-                    async for item in graph.astream_events(
+            @on(Started)
+            def _emit_snapshot_sync(event: Started) -> Ended:
+                emit_state_snapshot({"step": "draft"})
+                return Ended(result=event.data)
+
+            @on(Started)
+            async def _emit_snapshot_async(event: Started) -> Ended:
+                await aemit_state_snapshot({"step": "review"})
+                return Ended(result=event.data)
+
+            async def _frames_from(step):
+                """Stream a one-handler graph with custom events switched on."""
+                return await _adrain(
+                    EventGraph([step]).astream_events(
                         Started(data="hello"),
                         include_custom_events=True,
                     )
-                ]
+                )
+
+            @pytest.mark.asyncio
+            @pytest.mark.parametrize(
+                "step, pct",
+                [(_emit_custom_sync, 25), (_emit_custom_async, 80)],
+                ids=["sync_handler", "async_handler"],
+            )
+            async def it_emits_custom_frames(step, pct):
+                items = await _frames_from(step)
 
                 custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
                 assert len(custom_frames) == 1
                 assert custom_frames[0].name == "tool.progress"
-                assert custom_frames[0].data == {"pct": 25}
+                assert custom_frames[0].data == {"pct": pct}
 
             @pytest.mark.asyncio
-            async def it_emits_custom_frames_from_async_handler():
-
-                @on(Started)
-                async def step(event: Started) -> Ended:
-                    await aemit_custom("tool.progress", {"pct": 80})
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
-                items = [
-                    item
-                    async for item in graph.astream_events(
-                        Started(data="hello"),
-                        include_custom_events=True,
-                    )
-                ]
-
-                custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
-                assert len(custom_frames) == 1
-                assert custom_frames[0].name == "tool.progress"
-                assert custom_frames[0].data == {"pct": 80}
-
-            @pytest.mark.asyncio
-            async def it_emits_state_snapshot_frames_from_sync_handler():
-                @on(Started)
-                def step(event: Started) -> Ended:
-                    emit_state_snapshot({"step": "draft"})
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
-                items = [
-                    item
-                    async for item in graph.astream_events(
-                        Started(data="hello"),
-                        include_custom_events=True,
-                    )
-                ]
+            @pytest.mark.parametrize(
+                "step, stage",
+                [(_emit_snapshot_sync, "draft"), (_emit_snapshot_async, "review")],
+                ids=["sync_handler", "async_handler"],
+            )
+            async def it_emits_state_snapshot_frames(step, stage):
+                items = await _frames_from(step)
 
                 snapshots = [i for i in items if isinstance(i, StateSnapshotFrame)]
                 assert len(snapshots) == 1
-                assert snapshots[0].data == {"step": "draft"}
+                assert snapshots[0].data == {"step": stage}
+
+            @pytest.mark.parametrize(
+                "emit",
+                [
+                    lambda: emit_custom("tool.progress", {"pct": 1}),
+                    lambda: emit_state_snapshot({"step": "x"}),
+                ],
+                ids=["emit_custom", "emit_state_snapshot"],
+            )
+            def it_raises_for_a_sync_emit_outside_a_handler(emit):
+                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
+                    emit()
 
             @pytest.mark.asyncio
-            async def it_emits_state_snapshot_frames_from_async_handler():
-                @on(Started)
-                async def step(event: Started) -> Ended:
-                    await aemit_state_snapshot({"step": "review"})
-                    return Ended(result=event.data)
-
-                graph = EventGraph([step])
-                items = [
-                    item
-                    async for item in graph.astream_events(
-                        Started(data="hello"),
-                        include_custom_events=True,
-                    )
-                ]
-
-                snapshots = [i for i in items if isinstance(i, StateSnapshotFrame)]
-                assert len(snapshots) == 1
-                assert snapshots[0].data == {"step": "review"}
-
-            def it_raises_for_emit_custom_outside_handler():
+            @pytest.mark.parametrize(
+                "aemit",
+                [
+                    lambda: aemit_custom("tool.progress", {"pct": 1}),
+                    lambda: aemit_state_snapshot({"step": "x"}),
+                ],
+                ids=["aemit_custom", "aemit_state_snapshot"],
+            )
+            async def it_raises_for_an_async_emit_outside_a_handler(aemit):
                 with pytest.raises(RuntimeError, match="while an EventGraph handler"):
-                    emit_custom("tool.progress", {"pct": 1})
-
-            def it_raises_for_emit_state_snapshot_outside_handler():
-                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
-                    emit_state_snapshot({"step": "x"})
-
-            @pytest.mark.asyncio
-            async def it_raises_for_aemit_custom_outside_handler():
-                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
-                    await aemit_custom("tool.progress", {"pct": 1})
-
-            @pytest.mark.asyncio
-            async def it_raises_for_aemit_state_snapshot_outside_handler():
-                with pytest.raises(RuntimeError, match="while an EventGraph handler"):
-                    await aemit_state_snapshot({"step": "x"})
+                    await aemit()
 
         @pytest.mark.asyncio
         async def it_yields_llm_token_and_stream_end_frames():
-            from typing import Any
-
-            from langchain_core.language_models.fake_chat_models import (
-                FakeListChatModel,
-            )
-
-            llm = FakeListChatModel(responses=["hello world"], sleep=0)
-
-            class UserSent(IntegrationEvent, MessageEvent):
-                message: HumanMessage = None  # type: ignore[assignment]
-
-            class AgentReplied(IntegrationEvent, MessageEvent):
-                message: AIMessage = None  # type: ignore[assignment]
-
-            @on(UserSent)
-            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
-                response = await llm.ainvoke([*messages, HumanMessage(content="hi")])
-                return AgentReplied(message=response)
-
-            graph = EventGraph([reply], reducers=[message_reducer()])
-            items = [
-                item
-                async for item in graph.astream_events(
-                    UserSent(message=HumanMessage(content="hi")),
+            graph = _llm_graph("hello world")
+            items = await _adrain(
+                graph.astream_events(
+                    _UserSent(message=HumanMessage(content="hi")),
                     include_llm_tokens=True,
                 )
-            ]
+            )
 
             tokens = [i for i in items if isinstance(i, LLMToken)]
             ends = [i for i in items if isinstance(i, LLMStreamEnd)]
@@ -3868,33 +3625,13 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_yields_domain_events_alongside_llm_tokens():
-            from typing import Any
-
-            from langchain_core.language_models.fake_chat_models import (
-                FakeListChatModel,
-            )
-
-            llm = FakeListChatModel(responses=["reply"], sleep=0)
-
-            class UserSent(IntegrationEvent, MessageEvent):
-                message: HumanMessage = None  # type: ignore[assignment]
-
-            class AgentReplied(IntegrationEvent, MessageEvent):
-                message: AIMessage = None  # type: ignore[assignment]
-
-            @on(UserSent)
-            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
-                response = await llm.ainvoke([*messages, HumanMessage(content="hi")])
-                return AgentReplied(message=response)
-
-            graph = EventGraph([reply], reducers=[message_reducer()])
-            items = [
-                item
-                async for item in graph.astream_events(
-                    UserSent(message=HumanMessage(content="hi")),
+            graph = _llm_graph("reply")
+            items = await _adrain(
+                graph.astream_events(
+                    _UserSent(message=HumanMessage(content="hi")),
                     include_llm_tokens=True,
                 )
-            ]
+            )
 
             domain_events = [i for i in items if isinstance(i, Event)]
             tokens = [i for i in items if isinstance(i, LLMToken)]
@@ -3903,34 +3640,14 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_yields_reducer_frames_and_tokens():
-            from typing import Any
-
-            from langchain_core.language_models.fake_chat_models import (
-                FakeListChatModel,
-            )
-
-            llm = FakeListChatModel(responses=["hi back"], sleep=0)
-
-            class UserSent(IntegrationEvent, MessageEvent):
-                message: HumanMessage = None  # type: ignore[assignment]
-
-            class AgentReplied(IntegrationEvent, MessageEvent):
-                message: AIMessage = None  # type: ignore[assignment]
-
-            @on(UserSent)
-            async def reply(event: UserSent, messages: list[Any]) -> AgentReplied:
-                response = await llm.ainvoke([*messages, HumanMessage(content="go")])
-                return AgentReplied(message=response)
-
-            graph = EventGraph([reply], reducers=[message_reducer()])
-            items = [
-                item
-                async for item in graph.astream_events(
-                    UserSent(message=HumanMessage(content="go")),
+            graph = _llm_graph("hi back", prompt="go")
+            items = await _adrain(
+                graph.astream_events(
+                    _UserSent(message=HumanMessage(content="go")),
                     include_reducers=True,
                     include_llm_tokens=True,
                 )
-            ]
+            )
 
             frames = [i for i in items if isinstance(i, StreamFrame)]
             tokens = [i for i in items if isinstance(i, LLMToken)]
@@ -3945,25 +3662,14 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_reports_empty_changed_reducers_for_non_matching_events():
-            reducer = _data_reducer()
-
-            @on(Started)
-            def step1(event: Started) -> Processed:
-                return Processed(data=f"mid:{event.data}")
-
-            @on(Processed)
-            def step2(event: Processed) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step1, step2], reducers=[reducer])
-            items = [
-                item
-                async for item in graph.astream_events(
+            graph = _chain_graph(reducers=[_data_reducer()])
+            items = await _adrain(
+                graph.astream_events(
                     Started(data="x"),
                     include_reducers=True,
                     include_llm_tokens=True,
                 )
-            ]
+            )
 
             frames = [i for i in items if isinstance(i, StreamFrame)]
             assert len(frames) >= 3
@@ -3974,48 +3680,30 @@ def describe_EventGraph():
         @pytest.mark.asyncio
         async def it_omits_tokens_by_default():
             """Without include_llm_tokens, no LLMToken/LLMStreamEnd are yielded."""
-
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step])
-            items = [item async for item in graph.astream_events(Started(data="hi"))]
+            graph = _echo_graph()
+            items = await _adrain(graph.astream_events(Started(data="hi")))
             assert all(isinstance(i, Event) for i in items)
             assert not any(isinstance(i, (LLMToken, LLMStreamEnd)) for i in items)
 
         @pytest.mark.asyncio
         async def it_yields_custom_event_frames_from_v2_custom_events(monkeypatch):
+            graph = _echo_graph()
+            monkeypatch.setattr(
+                graph.compiled,
+                "astream_events",
+                _fake_astream_events(
+                    _custom_payload("progress", {"pct": 50}),
+                    _custom_payload(STATE_SNAPSHOT_EVENT_NAME, {"step": "draft"}),
+                ),
+            )
 
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step])
-
-            async def fake_astream_events(*args, **kwargs):
-                del args, kwargs
-                yield {
-                    "event": "on_custom_event",
-                    "name": "progress",
-                    "data": {"pct": 50},
-                }
-                yield {
-                    "event": "on_custom_event",
-                    "name": STATE_SNAPSHOT_EVENT_NAME,
-                    "data": {"step": "draft"},
-                }
-
-            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
-
-            items = [
-                item
-                async for item in graph.astream_events(
+            items = await _adrain(
+                graph.astream_events(
                     Started(data="hi"),
                     include_llm_tokens=True,
                     include_custom_events=True,
                 )
-            ]
+            )
 
             custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
             assert len(custom_frames) == 1
@@ -4028,28 +3716,20 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_does_not_yield_custom_event_frames_by_default(monkeypatch):
-
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step])
+            graph = _echo_graph()
 
             called = False
+            fake = _fake_astream_events(_custom_payload("progress", {"pct": 50}))
 
-            async def fake_astream_events(*args, **kwargs):
+            async def tracking_fake(*args, **kwargs):
                 nonlocal called
                 called = True
-                del args, kwargs
-                yield {
-                    "event": "on_custom_event",
-                    "name": "progress",
-                    "data": {"pct": 50},
-                }
+                async for payload in fake(*args, **kwargs):
+                    yield payload
 
-            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+            monkeypatch.setattr(graph.compiled, "astream_events", tracking_fake)
 
-            items = [item async for item in graph.astream_events(Started(data="hi"))]
+            items = await _adrain(graph.astream_events(Started(data="hi")))
             assert not any(isinstance(i, CustomEventFrame) for i in items)
             # Default flags route to _astream_core, not v2 — confirm the fake
             # was not called so the test's intent is clear.
@@ -4057,94 +3737,56 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_filters_custom_events_in_v2_path(monkeypatch):
-
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step])
-
-            async def fake_astream_events(*args, **kwargs):
-                del args, kwargs
-                yield {
-                    "event": "on_custom_event",
-                    "name": "progress",
-                    "data": {"pct": 50},
-                }
-
-            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
+            graph = _echo_graph()
+            monkeypatch.setattr(
+                graph.compiled,
+                "astream_events",
+                _fake_astream_events(_custom_payload("progress", {"pct": 50})),
+            )
 
             # include_llm_tokens routes to _astream_v2 but custom events off
-            items = [
-                item
-                async for item in graph.astream_events(
+            items = await _adrain(
+                graph.astream_events(
                     Started(data="hi"),
                     include_llm_tokens=True,
                     include_custom_events=False,
                 )
-            ]
+            )
             assert not any(isinstance(i, CustomEventFrame) for i in items)
 
         @pytest.mark.asyncio
-        async def it_yields_custom_event_frames_on_opt_in(
-            monkeypatch,
-        ):
+        async def it_yields_custom_event_frames_on_opt_in(monkeypatch):
+            graph = _echo_graph()
+            monkeypatch.setattr(
+                graph.compiled,
+                "astream_events",
+                _fake_astream_events(_custom_payload("progress", {"pct": 50})),
+            )
 
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step])
-
-            async def fake_astream_events(*args, **kwargs):
-                del args, kwargs
-                yield {
-                    "event": "on_custom_event",
-                    "name": "progress",
-                    "data": {"pct": 50},
-                }
-
-            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
-
-            items = [
-                item
-                async for item in graph.astream_events(
+            items = await _adrain(
+                graph.astream_events(
                     Started(data="hi"),
                     include_custom_events=True,
                 )
-            ]
+            )
             custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
             assert len(custom_frames) == 1
 
         @pytest.mark.asyncio
-        async def it_yields_custom_event_frames_in_astream_resume(
-            monkeypatch,
-        ):
-            from langgraph.checkpoint.memory import MemorySaver
+        async def it_yields_custom_event_frames_in_astream_resume(monkeypatch):
+            graph = _echo_graph(checkpointer=MemorySaver())
+            monkeypatch.setattr(
+                graph.compiled,
+                "astream_events",
+                _fake_astream_events(_custom_payload("resume.progress", {"pct": 90})),
+            )
 
-            @on(Started)
-            def step(event: Started) -> Ended:
-                return Ended(result=event.data)
-
-            graph = EventGraph([step], checkpointer=MemorySaver())
-
-            async def fake_astream_events(*args, **kwargs):
-                del args, kwargs
-                yield {
-                    "event": "on_custom_event",
-                    "name": "resume.progress",
-                    "data": {"pct": 90},
-                }
-
-            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream_events)
-
-            items = [
-                item
-                async for item in graph.astream_resume(
+            items = await _adrain(
+                graph.astream_resume(
                     Started(data="resume"),
                     include_custom_events=True,
                 )
-            ]
+            )
 
             custom_frames = [i for i in items if isinstance(i, CustomEventFrame)]
             assert len(custom_frames) == 1
@@ -4156,66 +3798,26 @@ def describe_EventGraph():
 
                 @pytest.mark.asyncio
                 async def it_yields_frames_per_tool_call_chunk(monkeypatch):
-                    from langchain_core.messages import AIMessageChunk
-
-                    from langgraph_events._graph import LLMToolCallChunk
-
-                    @on(Started)
-                    def step(event: Started) -> Ended:
-                        return Ended(result=event.data)
-
-                    graph = EventGraph([step])
-
-                    async def fake_astream_events(*args, **kwargs):
-                        del args, kwargs
-                        yield {
-                            "event": "on_chat_model_stream",
-                            "run_id": "run-x",
-                            "data": {
-                                "chunk": AIMessageChunk(
-                                    content="",
-                                    tool_call_chunks=[
-                                        {
-                                            "name": "search",
-                                            "args": "",
-                                            "id": "tc-1",
-                                            "index": 0,
-                                            "type": "tool_call_chunk",
-                                        },
-                                    ],
-                                ),
-                            },
-                        }
-                        yield {
-                            "event": "on_chat_model_stream",
-                            "run_id": "run-x",
-                            "data": {
-                                "chunk": AIMessageChunk(
-                                    content="",
-                                    tool_call_chunks=[
-                                        {
-                                            "name": "",
-                                            "args": '{"q":"hi"}',
-                                            "id": "",
-                                            "index": 0,
-                                            "type": "tool_call_chunk",
-                                        },
-                                    ],
-                                ),
-                            },
-                        }
-
+                    graph = _echo_graph()
                     monkeypatch.setattr(
-                        graph.compiled, "astream_events", fake_astream_events
+                        graph.compiled,
+                        "astream_events",
+                        _fake_astream_events(
+                            _chat_payload(_tool_call_chunk_message()),
+                            _chat_payload(
+                                _tool_call_chunk_message(
+                                    name="", args='{"q":"hi"}', tool_call_id=""
+                                )
+                            ),
+                        ),
                     )
 
-                    items = [
-                        item
-                        async for item in graph.astream_events(
+                    items = await _adrain(
+                        graph.astream_events(
                             Started(data="hi"),
                             include_llm_tokens=True,
                         )
-                    ]
+                    )
 
                     chunks = [i for i in items if isinstance(i, LLMToolCallChunk)]
                     assert len(chunks) == 2
@@ -4228,48 +3830,21 @@ def describe_EventGraph():
 
                 @pytest.mark.asyncio
                 async def it_yields_both_text_and_tool_call_from_one_chunk(monkeypatch):
-                    from langchain_core.messages import AIMessageChunk
-
-                    from langgraph_events._graph import LLMToken, LLMToolCallChunk
-
-                    @on(Started)
-                    def step(event: Started) -> Ended:
-                        return Ended(result=event.data)
-
-                    graph = EventGraph([step])
-
-                    async def fake_astream_events(*args, **kwargs):
-                        del args, kwargs
-                        yield {
-                            "event": "on_chat_model_stream",
-                            "run_id": "run-x",
-                            "data": {
-                                "chunk": AIMessageChunk(
-                                    content="thinking…",
-                                    tool_call_chunks=[
-                                        {
-                                            "name": "search",
-                                            "args": "",
-                                            "id": "tc-1",
-                                            "index": 0,
-                                            "type": "tool_call_chunk",
-                                        },
-                                    ],
-                                ),
-                            },
-                        }
-
+                    graph = _echo_graph()
                     monkeypatch.setattr(
-                        graph.compiled, "astream_events", fake_astream_events
+                        graph.compiled,
+                        "astream_events",
+                        _fake_astream_events(
+                            _chat_payload(_tool_call_chunk_message("thinking…"))
+                        ),
                     )
 
-                    items = [
-                        item
-                        async for item in graph.astream_events(
+                    items = await _adrain(
+                        graph.astream_events(
                             Started(data="hi"),
                             include_llm_tokens=True,
                         )
-                    ]
+                    )
 
                     tokens = [i for i in items if isinstance(i, LLMToken)]
                     chunks = [i for i in items if isinstance(i, LLMToolCallChunk)]
@@ -4282,84 +3857,32 @@ def describe_EventGraph():
 
                 @pytest.mark.asyncio
                 async def it_suppresses_chunks(monkeypatch):
-                    from langchain_core.messages import AIMessageChunk
-
-                    from langgraph_events._graph import LLMToolCallChunk
-
-                    @on(Started)
-                    def step(event: Started) -> Ended:
-                        return Ended(result=event.data)
-
-                    graph = EventGraph([step])
-
-                    async def fake_astream_events(*args, **kwargs):
-                        del args, kwargs
-                        yield {
-                            "event": "on_chat_model_stream",
-                            "run_id": "run-x",
-                            "data": {
-                                "chunk": AIMessageChunk(
-                                    content="",
-                                    tool_call_chunks=[
-                                        {
-                                            "name": "search",
-                                            "args": "",
-                                            "id": "tc-1",
-                                            "index": 0,
-                                            "type": "tool_call_chunk",
-                                        },
-                                    ],
-                                ),
-                            },
-                        }
-
+                    graph = _echo_graph()
                     monkeypatch.setattr(
-                        graph.compiled, "astream_events", fake_astream_events
+                        graph.compiled,
+                        "astream_events",
+                        _fake_astream_events(_chat_payload(_tool_call_chunk_message())),
                     )
 
-                    items = [
-                        item
-                        async for item in graph.astream_events(
+                    items = await _adrain(
+                        graph.astream_events(
                             Started(data="hi"),
                             include_custom_events=True,
                         )
-                    ]
+                    )
                     assert not any(isinstance(i, LLMToolCallChunk) for i in items)
 
             def when_chunk_missing_index():
 
                 @pytest.mark.asyncio
                 async def it_raises(monkeypatch):
-                    from langchain_core.messages import AIMessageChunk
-
-                    @on(Started)
-                    def step(event: Started) -> Ended:
-                        return Ended(result=event.data)
-
-                    graph = EventGraph([step])
-
-                    async def fake_astream_events(*args, **kwargs):
-                        del args, kwargs
-                        yield {
-                            "event": "on_chat_model_stream",
-                            "run_id": "run-x",
-                            "data": {
-                                "chunk": AIMessageChunk(
-                                    content="",
-                                    tool_call_chunks=[
-                                        {
-                                            "name": "search",
-                                            "args": "",
-                                            "id": "tc-1",
-                                            "type": "tool_call_chunk",
-                                        },
-                                    ],
-                                ),
-                            },
-                        }
-
+                    graph = _echo_graph()
                     monkeypatch.setattr(
-                        graph.compiled, "astream_events", fake_astream_events
+                        graph.compiled,
+                        "astream_events",
+                        _fake_astream_events(
+                            _chat_payload(_tool_call_chunk_message(index=None))
+                        ),
                     )
 
                     with pytest.raises(ValueError, match=r"missing 'index'"):
@@ -4659,62 +4182,50 @@ class _Go(IntegrationEvent):
     pass
 
 
+@on(Started)
+def _waiter(event: Started) -> _Pause:
+    """Pauses the run so resume-policy suites have an interrupted thread."""
+    return _Pause()
+
+
+@on(_Go)
+def _go_noop(event: _Go) -> None:
+    """Resume-side handler that produces nothing."""
+    return None
+
+
+@on(_Go)
+def _go_ends(event: _Go) -> Ended:
+    """Resume-side handler that completes the run."""
+    return Ended(result="went")
+
+
+def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
+    """A graph whose paused handler was removed, plus the paused thread config."""
+    cfg = {"configurable": {"thread_id": tid}}
+    EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+        Started(data="x"), config=cfg
+    )
+    return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
+
+
 def describe_on_unresumable():
     # resume() on a thread that is not awaiting input (paused handler removed,
     # already-finished, or double-resume) is governed by
     # EventGraph(on_unresumable=...). Default `raise` turns the old silent
     # no-op into a clear error; `warn`/`halt` opt into non-fatal handling.
 
-    def _paused_thread(saver, tid):
-        from langgraph.checkpoint.memory import MemorySaver  # noqa: F401
-
-        @on(Started)
-        def waiter(event: Started) -> _Pause:
-            return _Pause()
-
-        @on(_Go)
-        def go(event: _Go) -> None:
-            return None
-
-        cfg = {"configurable": {"thread_id": tid}}
-        EventGraph([waiter, go], checkpointer=saver).invoke(
-            Started(data="x"), config=cfg
-        )
-        return cfg
-
     def when_the_paused_handler_was_removed():
         def with_default_policy():
             def it_raises_unresumable_error():
-                from langgraph.checkpoint.memory import MemorySaver
-
-                from langgraph_events import UnresumableError
-
-                saver = MemorySaver()
-                cfg = _paused_thread(saver, "unres-raise")
-
-                @on(_Go)
-                def go(event: _Go) -> None:
-                    return None
-
-                v2 = EventGraph([go], checkpointer=saver)  # waiter removed
+                v2, cfg = _resumable_pair(MemorySaver(), "unres-raise")
                 with pytest.raises(UnresumableError):
                     v2.resume(_Go(), config=cfg)
 
     def when_the_thread_is_genuinely_interrupted():
         def it_resumes_normally():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            @on(Started)
-            def waiter(event: Started) -> _Pause:
-                return _Pause()
-
-            @on(_Go)
-            def go(event: _Go) -> Ended:
-                return Ended(result="went")
-
-            saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "unres-live"}}
-            graph = EventGraph([waiter, go], checkpointer=saver)
+            graph = EventGraph([_waiter, _go_ends], checkpointer=MemorySaver())
             graph.invoke(Started(data="x"), config=cfg)
             assert graph.get_state(cfg).is_interrupted
 
@@ -4723,27 +4234,14 @@ def describe_on_unresumable():
 
     def when_the_policy_value_is_invalid():
         def it_raises_at_construction():
-            @on(Started)
-            def h(event: Started) -> None:
-                return None
-
             with pytest.raises(ValueError, match="on_unresumable"):
-                EventGraph([h], on_unresumable="nope")  # type: ignore[arg-type]
+                EventGraph([_echo], on_unresumable="nope")  # type: ignore[arg-type]
 
     def when_warn_policy():
         def it_warns_and_leaves_the_log_unchanged():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events import Halted
-
-            saver = MemorySaver()
-            cfg = _paused_thread(saver, "unres-warn")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver, on_unresumable="warn")
+            v2, cfg = _resumable_pair(
+                MemorySaver(), "unres-warn", on_unresumable="warn"
+            )
             with pytest.warns(UserWarning, match="not awaiting input"):
                 log = v2.resume(_Go(), config=cfg)
 
@@ -4751,78 +4249,41 @@ def describe_on_unresumable():
 
     def when_halt_policy():
         def it_finalizes_the_thread_terminally():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events import Halted, Unresumable
-
-            saver = MemorySaver()
-            cfg = _paused_thread(saver, "unres-halt")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver, on_unresumable="halt")
+            v2, cfg = _resumable_pair(
+                MemorySaver(), "unres-halt", on_unresumable="halt"
+            )
             log = v2.resume(_Go(), config=cfg)
 
             assert isinstance(log.latest(Unresumable), Unresumable)
             assert isinstance(log.latest(Unresumable), Halted)
             assert not v2.get_state(cfg).is_interrupted
 
-    def when_resumed_via_aresume():
-        def it_honors_the_policy():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events import UnresumableError
-
-            saver = MemorySaver()
-            cfg = _paused_thread(saver, "unres-aresume")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver)
+    def when_resumed_via_another_entrypoint():
+        # Every resume entrypoint consults the same on_unresumable policy.
+        @pytest.mark.parametrize(
+            "tid, drive",
+            [
+                (
+                    "unres-aresume",
+                    lambda graph, cfg: asyncio.run(graph.aresume(_Go(), config=cfg)),
+                ),
+                (
+                    "unres-stream",
+                    lambda graph, cfg: list(graph.stream_resume(_Go(), config=cfg)),
+                ),
+                (
+                    "unres-astream",
+                    lambda graph, cfg: asyncio.run(
+                        _adrain(graph.astream_resume(_Go(), config=cfg))
+                    ),
+                ),
+            ],
+            ids=["aresume", "stream_resume", "astream_resume"],
+        )
+        def it_honors_the_policy(tid, drive):
+            v2, cfg = _resumable_pair(MemorySaver(), tid)
             with pytest.raises(UnresumableError):
-                asyncio.run(v2.aresume(_Go(), config=cfg))
-
-    def when_resumed_via_stream_resume():
-        def it_honors_the_policy():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events import UnresumableError
-
-            saver = MemorySaver()
-            cfg = _paused_thread(saver, "unres-stream")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver)
-            with pytest.raises(UnresumableError):
-                list(v2.stream_resume(_Go(), config=cfg))
-
-    def when_resumed_via_astream_resume():
-        def it_honors_the_policy():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events import UnresumableError
-
-            saver = MemorySaver()
-            cfg = _paused_thread(saver, "unres-astream")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver)
-
-            async def drain():
-                return [x async for x in v2.astream_resume(_Go(), config=cfg)]
-
-            with pytest.raises(UnresumableError):
-                asyncio.run(drain())
+                drive(v2, cfg)
 
 
 class _AsyncOnlySaver(MemorySaver):
@@ -4867,39 +4328,27 @@ def describe_async_only_checkpointer():
     # on_unresumable policy reads previously went through sync get_state, which
     # such a checkpointer rejects from the running event loop.
 
-    async def _apaused(saver, tid):
-        """Pause a thread inside ``waiter`` via ainvoke; return its config."""
-
-        @on(Started)
-        def waiter(event: Started) -> _Pause:
-            return _Pause()
-
-        @on(_Go)
-        def go(event: _Go) -> None:
-            return None
-
+    async def _apaused_pair(tid: str, **kwargs: typing.Any):
+        """Pause a thread via ainvoke, then rebuild it without ``_waiter``."""
+        saver = _AsyncOnlySaver()
         cfg = {"configurable": {"thread_id": tid}}
-        await EventGraph([waiter, go], checkpointer=saver).ainvoke(
+        await EventGraph([_waiter, _go_noop], checkpointer=saver).ainvoke(
             Started(data="x"), config=cfg
         )
-        return cfg
+        return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
 
     def when_the_thread_is_genuinely_pending():
         def without_sync_checkpointer_access():
+
+            async def _paused_graph(tid: str):
+                cfg = {"configurable": {"thread_id": tid}}
+                graph = EventGraph([_waiter, _go_ends], checkpointer=_AsyncOnlySaver())
+                await graph.ainvoke(Started(data="x"), config=cfg)
+                return graph, cfg
+
             @pytest.mark.asyncio
             async def it_aresumes():
-                @on(Started)
-                def waiter(event: Started) -> _Pause:
-                    return _Pause()
-
-                @on(_Go)
-                def go(event: _Go) -> Ended:
-                    return Ended(result="went")
-
-                saver = _AsyncOnlySaver()
-                cfg = {"configurable": {"thread_id": "async-only-aresume"}}
-                graph = EventGraph([waiter, go], checkpointer=saver)
-                await graph.ainvoke(Started(data="x"), config=cfg)
+                graph, cfg = await _paused_graph("async-only-aresume")
 
                 log = await graph.aresume(_Go(), config=cfg)
                 assert log.latest(Resumed) is not None
@@ -4907,46 +4356,21 @@ def describe_async_only_checkpointer():
 
             @pytest.mark.asyncio
             async def it_astream_resumes():
-                @on(Started)
-                def waiter(event: Started) -> _Pause:
-                    return _Pause()
+                graph, cfg = await _paused_graph("async-only-astream")
 
-                @on(_Go)
-                def go(event: _Go) -> Ended:
-                    return Ended(result="went")
-
-                saver = _AsyncOnlySaver()
-                cfg = {"configurable": {"thread_id": "async-only-astream"}}
-                graph = EventGraph([waiter, go], checkpointer=saver)
-                await graph.ainvoke(Started(data="x"), config=cfg)
-
-                events = [e async for e in graph.astream_resume(_Go(), config=cfg)]
+                events = await _adrain(graph.astream_resume(_Go(), config=cfg))
                 assert any(isinstance(e, Ended) for e in events)
 
     def when_the_thread_is_not_pending():
         @pytest.mark.asyncio
         async def it_aresume_raises_under_default_policy():
-            saver = _AsyncOnlySaver()
-            cfg = await _apaused(saver, "async-only-raise")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver)  # waiter removed
+            v2, cfg = await _apaused_pair("async-only-raise")
             with pytest.raises(UnresumableError):
                 await v2.aresume(_Go(), config=cfg)
 
         @pytest.mark.asyncio
         async def it_aresume_warns_and_leaves_the_log_unchanged():
-            saver = _AsyncOnlySaver()
-            cfg = await _apaused(saver, "async-only-warn")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver, on_unresumable="warn")
+            v2, cfg = await _apaused_pair("async-only-warn", on_unresumable="warn")
             with pytest.warns(UserWarning, match="not awaiting input"):
                 log = await v2.aresume(_Go(), config=cfg)
 
@@ -4954,29 +4378,17 @@ def describe_async_only_checkpointer():
 
         @pytest.mark.asyncio
         async def it_aresume_halt_finalizes_the_thread_terminally():
-            saver = _AsyncOnlySaver()
-            cfg = await _apaused(saver, "async-only-halt")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver, on_unresumable="halt")
+            v2, cfg = await _apaused_pair("async-only-halt", on_unresumable="halt")
             log = await v2.aresume(_Go(), config=cfg)
 
             assert log.latest(Unresumable) is not None
 
         @pytest.mark.asyncio
         async def it_astream_resume_halt_yields_the_terminal_event():
-            saver = _AsyncOnlySaver()
-            cfg = await _apaused(saver, "async-only-astream-halt")
-
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            v2 = EventGraph([go], checkpointer=saver, on_unresumable="halt")
-            events = [e async for e in v2.astream_resume(_Go(), config=cfg)]
+            v2, cfg = await _apaused_pair(
+                "async-only-astream-halt", on_unresumable="halt"
+            )
+            events = await _adrain(v2.astream_resume(_Go(), config=cfg))
 
             assert any(isinstance(e, Unresumable) for e in events)
 
@@ -4986,106 +4398,72 @@ def describe_assert_resume_recovers():
     # proof for an @on(previously=) rename into one assertion — the handler
     # analog of assert_all_baselined_revive.
 
+    def _recovers(before: EventGraph, after: EventGraph):
+        from langgraph_events.serde import assert_resume_recovers
+
+        return assert_resume_recovers(
+            before, after, seed=Started(data="x"), resume_with=_Go()
+        )
+
     def when_a_renamed_handler_declares_previously():
         def it_returns_the_post_resume_log():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events.serde import assert_resume_recovers
-
             saver = MemorySaver()
 
             @on(Started)
             def await_input(event: Started) -> _Pause:
                 return _Pause()
 
-            @on(_Go)
-            def go(event: _Go) -> Ended:
-                return Ended(result="went")
-
-            before = EventGraph([await_input, go], checkpointer=saver)
+            before = EventGraph([await_input, _go_ends], checkpointer=saver)
 
             @on(Started, previously="await_input")
             def gather(event: Started) -> _Pause:
                 return _Pause()
 
-            after = EventGraph([gather, go], checkpointer=saver)
+            after = EventGraph([gather, _go_ends], checkpointer=saver)
 
-            log = assert_resume_recovers(
-                before, after, seed=Started(data="x"), resume_with=_Go()
-            )
+            log = _recovers(before, after)
             assert log.latest(Ended) == Ended(result="went")
 
     def when_the_rename_is_undeclared():
         def it_propagates_unresumable_error():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events import UnresumableError
-            from langgraph_events.serde import assert_resume_recovers
-
             saver = MemorySaver()
 
             @on(Started)
             def await_input(event: Started) -> _Pause:
                 return _Pause()
 
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            before = EventGraph([await_input, go], checkpointer=saver)
+            before = EventGraph([await_input, _go_noop], checkpointer=saver)
 
             @on(Started)  # renamed, NO previously=
             def gather(event: Started) -> _Pause:
                 return _Pause()
 
-            after = EventGraph([gather, go], checkpointer=saver)
+            after = EventGraph([gather, _go_noop], checkpointer=saver)
 
             with pytest.raises(UnresumableError):
-                assert_resume_recovers(
-                    before, after, seed=Started(data="x"), resume_with=_Go()
-                )
+                _recovers(before, after)
 
     def when_the_seed_does_not_interrupt():
         def it_raises_a_precondition_error():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events.serde import assert_resume_recovers
-
             saver = MemorySaver()
 
             @on(Started)
             def noop(event: Started) -> None:
                 return None
 
-            @on(_Go)
-            def go(event: _Go) -> None:
-                return None
-
-            before = EventGraph([noop, go], checkpointer=saver)
-            after = EventGraph([noop, go], checkpointer=saver)
+            before = EventGraph([noop, _go_noop], checkpointer=saver)
+            after = EventGraph([noop, _go_noop], checkpointer=saver)
 
             with pytest.raises(AssertionError, match="did not pause"):
-                assert_resume_recovers(
-                    before, after, seed=Started(data="x"), resume_with=_Go()
-                )
+                _recovers(before, after)
 
     def when_the_graphs_do_not_share_a_checkpointer():
         def it_raises_value_error():
-            from langgraph.checkpoint.memory import MemorySaver
-
-            from langgraph_events.serde import assert_resume_recovers
-
-            @on(Started)
-            def await_input(event: Started) -> _Pause:
-                return _Pause()
-
-            before = EventGraph([await_input], checkpointer=MemorySaver())
-            after = EventGraph([await_input], checkpointer=MemorySaver())
+            before = EventGraph([_waiter], checkpointer=MemorySaver())
+            after = EventGraph([_waiter], checkpointer=MemorySaver())
 
             with pytest.raises(ValueError, match="checkpointer"):
-                assert_resume_recovers(
-                    before, after, seed=Started(data="x"), resume_with=_Go()
-                )
+                _recovers(before, after)
 
 
 def describe_namespaces_cache():

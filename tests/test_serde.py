@@ -451,6 +451,75 @@ class ReviewApproved(IntegrationEvent):
 # ``EXT_CONSTRUCTOR_KW_ARGS`` revival path that #68 broke. Module-level so
 # the qualname registered at encode time resolves on the import-and-getattr
 # walk performed by upstream's ext-hook.
+def _rename_migration(
+    name: str,
+    *,
+    old_module: str,
+    old_qualname: str,
+    new_module: str,
+    new_qualname: str,
+) -> Any:
+    """A single-operation ``Migration`` that renames one event identity."""
+    from langgraph_events.serde.migrations import Migration, RenameEvent
+
+    return Migration(
+        name=name,
+        operations=(
+            RenameEvent(
+                old_module=old_module,
+                old_qualname=old_qualname,
+                new_module=new_module,
+                new_qualname=new_qualname,
+            ),
+        ),
+    )
+
+
+def _persona_rename(name: str, **overrides: Any) -> Any:
+    """The recurring ``legacy.persona:Legacy.Approved`` -> ``Persona.Approve.Approved``
+    rename; ``overrides`` swap individual endpoints."""
+    endpoints: dict[str, Any] = {
+        "old_module": "legacy.persona",
+        "old_qualname": "Legacy.Approved",
+        "new_module": Persona.__module__,
+        "new_qualname": "Persona.Approve.Approved",
+    }
+    endpoints.update(overrides)
+    return _rename_migration(name, **endpoints)
+
+
+def _add_field_migration(
+    name: str, *, module: str, qualname: str, field: str, **default: Any
+) -> Any:
+    """A single-operation ``Migration`` that injects one missing field."""
+    from langgraph_events.serde.migrations import AddField, Migration
+
+    return Migration(
+        name=name,
+        operations=(
+            AddField(module=module, qualname=qualname, field=field, **default),
+        ),
+    )
+
+
+def _persisted_field_migration(name: str, field: str, **default: Any) -> Any:
+    """``_add_field_migration`` keyed on ``NestedPersist.Persist.Persisted``."""
+    return _add_field_migration(
+        name,
+        module=NestedPersist.__module__,
+        qualname="NestedPersist.Persist.Persisted",
+        field=field,
+        **default,
+    )
+
+
+def _persisted_payload(**kwargs: Any) -> Any:
+    """A legacy wire payload for ``NestedPersist.Persist.Persisted``."""
+    return synthesize_legacy_payload(
+        NestedPersist.__module__, "NestedPersist.Persist.Persisted", kwargs
+    )
+
+
 @dataclasses.dataclass
 class PlainPayload:
     name: str
@@ -813,33 +882,15 @@ def describe_NamespaceAwareSerde():
                 # under different qualnames. Once renamed, a checkpoint that
                 # captured pre-rename state holds a HETEROGENEOUS list of
                 # legacy payloads. Each branch must migrate independently.
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 migrations = [
-                    Migration(
-                        name="rename-persona-approved",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.Approved",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
-                    ),
-                    Migration(
-                        name="rename-story-approved",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.story",
-                                old_qualname="Legacy.StoryApproved",
-                                new_module=Story.__module__,
-                                new_qualname="Story.Approve.Approved",
-                            ),
-                        ),
+                    _persona_rename("rename-persona-approved"),
+                    _rename_migration(
+                        "rename-story-approved",
+                        old_module="legacy.story",
+                        old_qualname="Legacy.StoryApproved",
+                        new_module=Story.__module__,
+                        new_qualname="Story.Approve.Approved",
                     ),
                 ]
                 serde = NamespaceAwareSerde(migrations=migrations)
@@ -882,23 +933,9 @@ def describe_NamespaceAwareSerde():
                 # branch already recurses with the same hook, so a renamed
                 # event one layer down should rewrite through the same
                 # rename table with zero extra code.
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 migrations = [
-                    Migration(
-                        name="rename-legacy-persona",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.Approved",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
-                    ),
+                    _persona_rename("rename-legacy-persona"),
                 ]
                 serde = NamespaceAwareSerde(migrations=migrations)
                 payload = _legacy_interrupted_payload(
@@ -1054,33 +1091,21 @@ def describe_NamespaceAwareSerde():
                 # release N renamed Legacy.A → Legacy.B; release N+1 renamed
                 # Legacy.B → Persona.Approve.Approved. Payloads from BOTH
                 # historic identities should land on the current class.
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 migrations = [
-                    Migration(
-                        name="release-N",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.A",
-                                new_module="legacy.persona",
-                                new_qualname="Legacy.B",
-                            ),
-                        ),
+                    _rename_migration(
+                        "release-N",
+                        old_module="legacy.persona",
+                        old_qualname="Legacy.A",
+                        new_module="legacy.persona",
+                        new_qualname="Legacy.B",
                     ),
-                    Migration(
-                        name="release-N+1",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.B",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
+                    _rename_migration(
+                        "release-N+1",
+                        old_module="legacy.persona",
+                        old_qualname="Legacy.B",
+                        new_module=Persona.__module__,
+                        new_qualname="Persona.Approve.Approved",
                     ),
                 ]
 
@@ -1107,32 +1132,15 @@ def describe_NamespaceAwareSerde():
                 def it_injects_the_default_value():
                     # Without AddField the dataclass constructor raises
                     # TypeError because ``command_id`` is required.
-                    from langgraph_events.serde.migrations import (
-                        AddField,
-                        Migration,
+                    serde = NamespaceAwareSerde(
+                        migrations=[
+                            _persisted_field_migration(
+                                "add-command-id", "command_id", default="legacy"
+                            )
+                        ]
                     )
 
-                    migrations = [
-                        Migration(
-                            name="add-command-id",
-                            operations=(
-                                AddField(
-                                    module=NestedPersist.__module__,
-                                    qualname="NestedPersist.Persist.Persisted",
-                                    field="command_id",
-                                    default="legacy",
-                                ),
-                            ),
-                        ),
-                    ]
-                    serde = NamespaceAwareSerde(migrations=migrations)
-                    payload = synthesize_legacy_payload(
-                        NestedPersist.__module__,
-                        "NestedPersist.Persist.Persisted",
-                        {"note": "old"},
-                    )
-
-                    revived = serde.loads_typed(payload)
+                    revived = serde.loads_typed(_persisted_payload(note="old"))
 
                     assert isinstance(revived, NestedPersist.Persist.Persisted)
                     assert revived.command_id == "legacy"
@@ -1143,41 +1151,24 @@ def describe_NamespaceAwareSerde():
                     # Two distinct payloads must NOT share the same list
                     # object — that would be a classic mutable-default bug
                     # made worse by living one layer down inside the serde.
-                    from langgraph_events.serde.migrations import (
-                        AddField,
-                        Migration,
-                    )
-
-                    migrations = [
-                        Migration(
-                            name="add-tags",
-                            operations=(
-                                AddField(
-                                    module=NestedPersist.__module__,
-                                    qualname="NestedPersist.Persist.Persisted",
-                                    field="tags",
-                                    default_factory=list,
-                                ),
-                            ),
-                        ),
-                    ]
+                    #
                     # Override the default tuple field with a list-typed one
                     # by going through kwargs directly — we want to observe
                     # whether revival hands back the SAME list instance.
-                    serde = NamespaceAwareSerde(migrations=migrations)
-                    raw1 = synthesize_legacy_payload(
-                        NestedPersist.__module__,
-                        "NestedPersist.Persist.Persisted",
-                        {"command_id": "c1", "note": "a"},
-                    )
-                    raw2 = synthesize_legacy_payload(
-                        NestedPersist.__module__,
-                        "NestedPersist.Persist.Persisted",
-                        {"command_id": "c2", "note": "b"},
+                    serde = NamespaceAwareSerde(
+                        migrations=[
+                            _persisted_field_migration(
+                                "add-tags", "tags", default_factory=list
+                            )
+                        ]
                     )
 
-                    r1 = serde.loads_typed(raw1)
-                    r2 = serde.loads_typed(raw2)
+                    r1 = serde.loads_typed(
+                        _persisted_payload(command_id="c1", note="a")
+                    )
+                    r2 = serde.loads_typed(
+                        _persisted_payload(command_id="c2", note="b")
+                    )
 
                     # Frozen dataclass coerces our list into the declared
                     # ``tuple[str, ...]`` only when we pass a tuple — we
@@ -1190,32 +1181,17 @@ def describe_NamespaceAwareSerde():
                     # If a payload predates the AddField migration but
                     # happens to carry the field (e.g. a backfill ran),
                     # setdefault must not overwrite the existing value.
-                    from langgraph_events.serde.migrations import (
-                        AddField,
-                        Migration,
+                    serde = NamespaceAwareSerde(
+                        migrations=[
+                            _persisted_field_migration(
+                                "add-command-id", "command_id", default="legacy"
+                            )
+                        ]
                     )
 
-                    migrations = [
-                        Migration(
-                            name="add-command-id",
-                            operations=(
-                                AddField(
-                                    module=NestedPersist.__module__,
-                                    qualname="NestedPersist.Persist.Persisted",
-                                    field="command_id",
-                                    default="legacy",
-                                ),
-                            ),
-                        ),
-                    ]
-                    serde = NamespaceAwareSerde(migrations=migrations)
-                    payload = synthesize_legacy_payload(
-                        NestedPersist.__module__,
-                        "NestedPersist.Persist.Persisted",
-                        {"command_id": "from-old", "note": "n"},
+                    revived = serde.loads_typed(
+                        _persisted_payload(command_id="from-old", note="n")
                     )
-
-                    revived = serde.loads_typed(payload)
 
                     assert revived.command_id == "from-old"
 
@@ -1224,10 +1200,6 @@ def describe_NamespaceAwareSerde():
                 # Simulate a checkpoint produced by an older build where the
                 # event class lived at "legacy.module:Legacy.Approved", later
                 # renamed to the live `Persona.Approve.Approved`.
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 payload = synthesize_legacy_payload(
                     module="legacy.persona",
@@ -1235,17 +1207,7 @@ def describe_NamespaceAwareSerde():
                     kwargs={"note": "hi"},
                 )
                 migrations = [
-                    Migration(
-                        name="rename-legacy-persona-approved",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.Approved",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
-                    ),
+                    _persona_rename("rename-legacy-persona-approved"),
                 ]
 
                 serde = NamespaceAwareSerde(migrations=migrations)
@@ -1645,33 +1607,15 @@ def describe_NamespaceAwareSerde():
 
         def when_duplicate_old_source():
             def it_raises_naming_the_ambiguous_source():
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 migrations = [
-                    Migration(
-                        name="rename-to-persona",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.Approved",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
-                    ),
-                    Migration(
-                        name="rename-to-story",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.Approved",
-                                new_module=Story.__module__,
-                                new_qualname="Story.Approve.Approved",
-                            ),
-                        ),
+                    _persona_rename("rename-to-persona"),
+                    _rename_migration(
+                        "rename-to-story",
+                        old_module="legacy.persona",
+                        old_qualname="Legacy.Approved",
+                        new_module=Story.__module__,
+                        new_qualname="Story.Approve.Approved",
                     ),
                 ]
 
@@ -1686,25 +1630,17 @@ def describe_NamespaceAwareSerde():
 
         def when_old_qualname_still_resolves():
             def it_raises_to_prevent_shadowing_the_live_class():
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 # `Persona.Approve.Approved` IS live — declaring a migration
                 # whose old name points at it would silently rewrite live
                 # payloads on read.
                 migrations = [
-                    Migration(
-                        name="shadows-live",
-                        operations=(
-                            RenameEvent(
-                                old_module=Persona.__module__,
-                                old_qualname="Persona.Approve.Approved",
-                                new_module=Story.__module__,
-                                new_qualname="Story.Approve.Approved",
-                            ),
-                        ),
+                    _rename_migration(
+                        "shadows-live",
+                        old_module=Persona.__module__,
+                        old_qualname="Persona.Approve.Approved",
+                        new_module=Story.__module__,
+                        new_qualname="Story.Approve.Approved",
                     ),
                 ]
 
@@ -1781,33 +1717,21 @@ def describe_NamespaceAwareSerde():
 
         def when_cycle_exists_in_chain():
             def it_raises_naming_the_cycle_start():
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 migrations = [
-                    Migration(
-                        name="forward",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.a",
-                                old_qualname="A",
-                                new_module="legacy.b",
-                                new_qualname="B",
-                            ),
-                        ),
+                    _rename_migration(
+                        "forward",
+                        old_module="legacy.a",
+                        old_qualname="A",
+                        new_module="legacy.b",
+                        new_qualname="B",
                     ),
-                    Migration(
-                        name="reverse",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.b",
-                                old_qualname="B",
-                                new_module="legacy.a",
-                                new_qualname="A",
-                            ),
-                        ),
+                    _rename_migration(
+                        "reverse",
+                        old_module="legacy.b",
+                        old_qualname="B",
+                        new_module="legacy.a",
+                        new_qualname="A",
                     ),
                 ]
 
@@ -1821,22 +1745,14 @@ def describe_NamespaceAwareSerde():
                 # which is technically true but misleads — the actual
                 # cause is that the user wrote a rename whose target
                 # equals its source (often a typo or stale paste).
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
-                )
 
                 migrations = [
-                    Migration(
-                        name="self",
-                        operations=(
-                            RenameEvent(
-                                old_module=Persona.__module__,
-                                old_qualname="Persona.Approve.Approved",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
+                    _rename_migration(
+                        "self",
+                        old_module=Persona.__module__,
+                        old_qualname="Persona.Approve.Approved",
+                        new_module=Persona.__module__,
+                        new_qualname="Persona.Approve.Approved",
                     ),
                 ]
 
@@ -1912,25 +1828,11 @@ def describe_NamespaceAwareSerde():
         # not "live or migrated?").
 
         def it_returns_every_revivable_identity():
-            from langgraph_events.serde.migrations import (
-                Migration,
-                RenameEvent,
-            )
 
             serde = NamespaceAwareSerde(
                 namespaces=[DecoReorg],
                 migrations=[
-                    Migration(
-                        name="legacy-rename",
-                        operations=(
-                            RenameEvent(
-                                old_module="legacy.persona",
-                                old_qualname="Legacy.Approved",
-                                new_module=Persona.__module__,
-                                new_qualname="Persona.Approve.Approved",
-                            ),
-                        ),
-                    ),
+                    _persona_rename("legacy-rename"),
                 ],
             )
 
@@ -2033,24 +1935,12 @@ def describe_NamespaceAwareSerde():
         def when_baseline_identity_has_a_hand_authored_migration():
             def it_passes_silently(tmp_path: Any):
                 from langgraph_events.serde.migrations import (
-                    Migration,
-                    RenameEvent,
                     assert_all_baselined_cover,
                 )
 
                 serde = NamespaceAwareSerde(
                     migrations=[
-                        Migration(
-                            name="legacy-rename",
-                            operations=(
-                                RenameEvent(
-                                    old_module="legacy.persona",
-                                    old_qualname="Legacy.Approved",
-                                    new_module=Persona.__module__,
-                                    new_qualname="Persona.Approve.Approved",
-                                ),
-                            ),
-                        ),
+                        _persona_rename("legacy-rename"),
                     ],
                 )
                 baseline = _baseline_file(
@@ -2588,10 +2478,12 @@ def describe_origin_scoped_backfill():
                     note: str = ""
 
     def when_a_raw_AddField_targets_a_historic_identity():
-        def it_applies_before_the_rename():
+
+        def _new_era_serde() -> NamespaceAwareSerde:
+            """Serde whose only fill is keyed on the historic ``ChainScoped.New``."""
             from langgraph_events.serde.migrations import Migration
 
-            serde = NamespaceAwareSerde(
+            return NamespaceAwareSerde(
                 namespaces=[ChainScoped],
                 migrations=[
                     Migration.add_field(
@@ -2604,7 +2496,8 @@ def describe_origin_scoped_backfill():
                 ],
             )
 
-            revived = serde.loads_typed(
+        def it_applies_before_the_rename():
+            revived = _new_era_serde().loads_typed(
                 synthesize_legacy_payload(ChainScoped.__module__, "ChainScoped.New", {})
             )
 
@@ -2615,22 +2508,7 @@ def describe_origin_scoped_backfill():
             # Exact-origin contract: on the chain Old → New → current, a
             # fill keyed on New must not apply to payloads written under
             # Old. "Every era" is class-global @backfill's job.
-            from langgraph_events.serde.migrations import Migration
-
-            serde = NamespaceAwareSerde(
-                namespaces=[ChainScoped],
-                migrations=[
-                    Migration.add_field(
-                        name="new-era-fill",
-                        module=ChainScoped.__module__,
-                        qualname="ChainScoped.New",
-                        field="source",
-                        default="new-era",
-                    )
-                ],
-            )
-
-            revived = serde.loads_typed(
+            revived = _new_era_serde().loads_typed(
                 synthesize_legacy_payload(ChainScoped.__module__, "ChainScoped.Old", {})
             )
 
@@ -2847,69 +2725,65 @@ def describe_assert_all_baselined_handlers_cover():
     # the previous release wrote must still be live or covered by an
     # @on(previously=...) alias, else an interrupted checkpoint paused at the
     # old node would silently drop on resume.
+    # Aliased under ``_`` so pytest-describe does not collect the imported
+    # callables as tests of this block.
+    from langgraph_events.serde.migrations import (
+        assert_all_baselined_handlers_cover as _assert_handlers_cover,
+    )
+    from langgraph_events.serde.migrations.detect import (
+        CoverageError,
+        HandlerCoverageError,
+    )
+    from langgraph_events.serde.migrations.detect import (
+        write_baseline as _write_baseline,
+    )
+
+    def _baseline_for(graph: EventGraph, tmp_path: Any) -> Any:
+        """Write ``graph``'s handler baseline under *tmp_path* and return it."""
+        baseline = tmp_path / "b.json"
+        _write_baseline(graph, baseline)
+        return baseline
 
     def when_every_baselined_handler_is_live():
         def it_passes_silently(tmp_path: Any):
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_handlers_cover,
-            )
-            from langgraph_events.serde.migrations.detect import write_baseline
-
             @on(Started)
             def place(event: Started) -> None:
                 return None
 
             graph = EventGraph([place])
-            baseline = tmp_path / "b.json"
-            write_baseline(graph, baseline)
+            baseline = _baseline_for(graph, tmp_path)
 
-            assert_all_baselined_handlers_cover(graph, baseline)
+            _assert_handlers_cover(graph, baseline)
 
     def when_a_handler_is_renamed():
         def with_previously_declared():
             def it_passes(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_handlers_cover,
-                )
-                from langgraph_events.serde.migrations.detect import write_baseline
-
                 @on(Started)
                 def place(event: Started) -> None:
                     return None
 
-                baseline = tmp_path / "b.json"
-                write_baseline(EventGraph([place]), baseline)
+                baseline = _baseline_for(EventGraph([place]), tmp_path)
 
                 @on(Started, previously="place")
                 def submit(event: Started) -> None:
                     return None
 
-                assert_all_baselined_handlers_cover(EventGraph([submit]), baseline)
+                _assert_handlers_cover(EventGraph([submit]), baseline)
 
         def without_previously_declared():
             def it_raises_naming_the_lost_handler(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_handlers_cover,
-                )
-                from langgraph_events.serde.migrations.detect import (
-                    CoverageError,
-                    HandlerCoverageError,
-                    write_baseline,
-                )
-
                 @on(Started)
                 def place(event: Started) -> None:
                     return None
 
-                baseline = tmp_path / "b.json"
-                write_baseline(EventGraph([place]), baseline)
+                baseline = _baseline_for(EventGraph([place]), tmp_path)
 
                 @on(Started)
                 def submit(event: Started) -> None:
                     return None
 
                 with pytest.raises(HandlerCoverageError, match="place") as excinfo:
-                    assert_all_baselined_handlers_cover(EventGraph([submit]), baseline)
+                    _assert_handlers_cover(EventGraph([submit]), baseline)
                 # sibling of MigrationCoverageError under the shared base
                 assert isinstance(excinfo.value, CoverageError)
                 assert excinfo.value.uncovered == ("place",)
@@ -2919,11 +2793,6 @@ def describe_assert_all_baselined_handlers_cover():
         # HandlerMeta.previous_names the gate unions into its reachable set.
         def with_previously_declared():
             def it_passes(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_handlers_cover,
-                )
-                from langgraph_events.serde.migrations.detect import write_baseline
-
                 class _Replat(Namespace):
                     class Persist(Command):
                         previously: ClassVar = ("persist",)
@@ -2935,23 +2804,12 @@ def describe_assert_all_baselined_handlers_cover():
                 def persist_reactor(event: Started) -> None:
                     return None
 
-                baseline = tmp_path / "b.json"
-                write_baseline(EventGraph([persist_reactor]), baseline)
+                baseline = _baseline_for(EventGraph([persist_reactor]), tmp_path)
 
-                assert_all_baselined_handlers_cover(
-                    EventGraph([_Replat.Persist]), baseline
-                )
+                _assert_handlers_cover(EventGraph([_Replat.Persist]), baseline)
 
         def without_previously_declared():
             def it_raises_naming_the_lost_handler(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_handlers_cover,
-                )
-                from langgraph_events.serde.migrations.detect import (
-                    HandlerCoverageError,
-                    write_baseline,
-                )
-
                 class _Replat2(Namespace):
                     class Persist(Command):
                         def handle(self) -> None:
@@ -2961,13 +2819,10 @@ def describe_assert_all_baselined_handlers_cover():
                 def persist_reactor(event: Started) -> None:
                     return None
 
-                baseline = tmp_path / "b.json"
-                write_baseline(EventGraph([persist_reactor]), baseline)
+                baseline = _baseline_for(EventGraph([persist_reactor]), tmp_path)
 
                 with pytest.raises(HandlerCoverageError, match="persist"):
-                    assert_all_baselined_handlers_cover(
-                        EventGraph([_Replat2.Persist]), baseline
-                    )
+                    _assert_handlers_cover(EventGraph([_Replat2.Persist]), baseline)
 
     def when_baseline_recorded_old_positional_inline_command_names():
         # Pre-#97 baselines recorded inline command handlers by their
@@ -2977,14 +2832,6 @@ def describe_assert_all_baselined_handlers_cover():
 
         def it_raises_until_the_baseline_is_regenerated(tmp_path: Any):
             import json
-
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_handlers_cover,
-            )
-            from langgraph_events.serde.migrations.detect import (
-                HandlerCoverageError,
-                write_baseline,
-            )
 
             graph = EventGraph([Persona.Approve, Story.Approve])
             baseline = tmp_path / "b.json"
@@ -2999,20 +2846,16 @@ def describe_assert_all_baselined_handlers_cover():
             )
 
             with pytest.raises(HandlerCoverageError) as excinfo:
-                assert_all_baselined_handlers_cover(graph, baseline)
+                _assert_handlers_cover(graph, baseline)
             assert excinfo.value.uncovered == ("handle", "handle_2")
 
             # The documented one-time migration: regenerate the baseline.
-            write_baseline(graph, baseline)
-            assert_all_baselined_handlers_cover(graph, baseline)
+            _write_baseline(graph, baseline)
+            _assert_handlers_cover(graph, baseline)
 
     def when_baseline_predates_handler_tracking():
         def it_loads_a_v1_baseline_and_passes(tmp_path: Any):
             import json
-
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_handlers_cover,
-            )
 
             @on(Started)
             def place(event: Started) -> None:
@@ -3021,4 +2864,4 @@ def describe_assert_all_baselined_handlers_cover():
             baseline = tmp_path / "v1.json"
             baseline.write_text(json.dumps({"version": 1, "events": []}))
 
-            assert_all_baselined_handlers_cover(EventGraph([place]), baseline)
+            _assert_handlers_cover(EventGraph([place]), baseline)

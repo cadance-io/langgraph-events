@@ -41,7 +41,15 @@ repos:
       - id: jscpd
         name: jscpd
         language: system
-        entry: npx jscpd src/ tests/ --min-tokens 30 --min-lines 2 --threshold 5
+        # Version pinned and --max-size explicit on purpose. jscpd defaulted
+        # --max-size to 100kb for years, which silently skipped test_agui.py,
+        # test_event_graph.py and test_serde.py -- the three files that carried
+        # ~89% of the duplication -- so this gate reported ~4% while the real
+        # figure was 11.6%. A bare `npx jscpd` also re-resolves to whatever
+        # version is newest, so the gate could change behaviour with no commit.
+        # Skipped files are not reported, so the failure mode is silent: keep
+        # --max-size comfortably above the largest file under src/ and tests/.
+        entry: npx jscpd@5.0.16 src/ tests/ --min-tokens 30 --min-lines 2 --threshold 5 --max-size 5mb
         types: [python]
         pass_filenames: false
         require_serial: true
