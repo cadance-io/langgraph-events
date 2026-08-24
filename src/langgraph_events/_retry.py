@@ -118,7 +118,13 @@ class RetryPolicy:
         if self.respect_retry_after:
             hint = getattr(exc, "retry_after", None)
             if isinstance(hint, (int, float)) and not isinstance(hint, bool):
-                return min(float(hint), self.max_delay)
+                # Clamped low as well as high: a skewed clock or a past
+                # Retry-After date yields a negative delta, and ``time.sleep``
+                # rejects that with a ValueError raised outside the
+                # ``except meta.raises`` boundary — aborting the run instead
+                # of surfacing as HandlerRaised. ``asyncio.sleep`` returns
+                # immediately, so without this the two paths disagree.
+                return max(0.0, min(float(hint), self.max_delay))
         raw = (
             self.base_delay * 2 ** (attempt - 1)
             if self.strategy == "exponential"

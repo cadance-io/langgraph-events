@@ -1072,15 +1072,22 @@ class EventGraph:
                     f"add raises=(YourError,) or drop the policy."
                 )
             for exc_type in policy.on:
-                if not issubclass(exc_type, meta.raises):
+                # Scope is decided at runtime by ``isinstance(exc, policy.on)``,
+                # so an ``on=`` entry overlapping ``raises=`` in *either*
+                # direction is live: on=(OSError,) genuinely retries a declared
+                # ConnectionResetError. Only a disjoint entry is dead.
+                overlaps = issubclass(exc_type, meta.raises) or any(
+                    issubclass(declared, exc_type) for declared in meta.raises
+                )
+                if not overlaps:
                     declared = ", ".join(t.__name__ for t in meta.raises)
                     raise TypeError(
                         f"Handler {claimant!r} declares "
                         f"retry=RetryPolicy(on={exc_type.__name__}), but "
                         f"{exc_type.__name__} is not covered by "
-                        f"raises=({declared}). An exception outside raises= is "
-                        f"never caught, so the policy can never retry it — add "
-                        f"it to raises= or remove it from on=."
+                        f"raises=({declared}). An exception unrelated to "
+                        f"raises= is never caught, so the policy can never "
+                        f"retry it — add it to raises= or remove it from on=."
                     )
 
     def _verify_invariants_coverage(self) -> None:

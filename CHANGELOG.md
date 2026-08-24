@@ -22,9 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
   `max_attempts` counts the initial call. Delay before retry *n* is `base_delay * 2 ** (n - 1)`
-  capped at `max_delay`, sampled uniformly from `[0, ceiling]` when `jitter=True` (the default);
-  `strategy="constant"` waits flat. `on=` narrows which exceptions retry and must be a subset of
-  `raises=`; `respect_retry_after=True` prefers a server-supplied `exception.retry_after`.
+  capped at `max_delay`; `strategy="constant"` uses `base_delay` as that ceiling every time instead
+  of doubling it. `jitter` is orthogonal to `strategy` and applies to whichever ceiling the strategy
+  computes — with `jitter=True` (the default) the wait is sampled uniformly from `[0, ceiling]`, so
+  `strategy="constant"` still varies per retry unless you also pass `jitter=False`. `on=` narrows
+  which exceptions retry and must overlap `raises=`; `respect_retry_after=True` prefers a
+  server-supplied `exception.retry_after` (clamped to `[0, max_delay]`, so a skewed clock cannot
+  produce a negative wait).
   Declaring `retry=` without `raises=`, or an `on=` entry outside `raises=`, is a `TypeError` at
   graph construction — such a policy could never fire.
 
@@ -40,10 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the anomaly set the reflection surface reports. Suppress it with `RetryPolicy(observe="log")`
   for a `WARNING` instead, or `observe="silent"` for neither.
 
-- **`retry` is a reserved class-level modifier on `Command`** — annotating it (rather than using
-  `ClassVar` or a bare assignment) raises `TypeError` at class creation, same guard as
-  `raises`/`invariants`/`previously`, so a policy can never become a dataclass field serialized
-  into every checkpoint.
+### Changed
+
+- **BREAKING: `retry` is now a reserved name.** Two shapes that worked before now fail:
+
+  - `@on(SomeEvent, retry=...)` no longer registers a **field matcher** — `retry=` is a named
+    keyword on `@on()`, so a non-`RetryPolicy` value raises `TypeError`. A handler matching on an
+    event field literally named `retry` must be rewritten; there is no positional escape hatch,
+    the same way `node_name`/`previously` are reserved.
+  - A `Command` declaring an annotated `retry` **field** (e.g. `retry: int = 0`) raises `TypeError`
+    at class creation. `retry` joins `_RESERVED_MODIFIERS` alongside `raises`/`invariants`/
+    `previously`, so a policy can never become a dataclass field serialized into every checkpoint
+    — but the guard cannot tell a policy from a payload field of the same name. Rename the field.
 
 ## [0.24.0] - 2026-08-23
 

@@ -13,6 +13,7 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerRaised,
+    HandlerRetried,
     IntegrationEvent,
     Interrupted,
     InvariantViolated,
@@ -48,6 +49,7 @@ _FRAMEWORK_EMITTED: tuple[type[Event], ...] = (
     Interrupted,
     Resumed,
     HandlerRaised,
+    HandlerRetried,
     InvariantViolated,
 )
 

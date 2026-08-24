@@ -86,6 +86,16 @@ def describe_retry_policy():
                 )
                 assert policy.delay_for(1, RateLimitedError(retry_after=90.0)) == 2.0
 
+            def it_clamps_a_negative_hint_to_zero():
+                # A skewed clock or a past Retry-After date can produce a
+                # negative delta. time.sleep() rejects it with a ValueError
+                # raised outside the ``except meta.raises`` boundary, which
+                # would abort the whole run instead of surfacing as
+                # HandlerRaised; asyncio.sleep() silently returns. Clamp so
+                # both dispatch paths agree.
+                policy = RetryPolicy(respect_retry_after=True)
+                assert policy.delay_for(1, RateLimitedError(retry_after=-5.0)) == 0.0
+
             def it_falls_back_to_the_computed_curve():
                 policy = RetryPolicy(
                     base_delay=0.1, jitter=False, respect_retry_after=True
@@ -256,6 +266,25 @@ def describe_retry():
 
                 with pytest.raises(TypeError, match=r"ValueError.*raises="):
                     EventGraph([handler, catcher])
+
+        def when_on_is_a_superclass_of_a_declared_raise():
+            def it_accepts():
+                # Runtime scope is isinstance(exc, policy.on), so on=(OSError,)
+                # genuinely retries a declared ConnectionResetError. The gate
+                # must not reject a config that works.
+                @on(
+                    Started,
+                    raises=ConnectionResetError,
+                    retry=RetryPolicy(on=(OSError,)),
+                )
+                def handler(event: Started) -> Ended:
+                    raise ConnectionResetError("boom")
+
+                @on(HandlerRaised)
+                def catcher(event: HandlerRaised) -> Recovered:
+                    return Recovered(reason="caught")
+
+                EventGraph([handler, catcher])  # must not raise
 
         def when_retry_is_not_a_policy():
             def it_rejects():
@@ -545,6 +574,23 @@ def describe_namespace_model():
             model = EventGraph([handler, catcher]).namespaces()
             (policy,) = [p for p in model.policies if p.name == "handler"]
             assert policy.retry == RetryPolicy(max_attempts=2)
+
+    def describe_seeds():
+        def it_does_not_classify_handler_retried_as_a_seed():
+            # HandlerRetried is framework-written, like HandlerRaised. Left
+            # out of _FRAMEWORK_EMITTED it is misread as a run seed: the
+            # structure diagram draws an entry arrow into it and the
+            # reflection surface treats leading occurrences as seeds.
+            @on(HandlerRetried)
+            def note(event: HandlerRetried) -> Recovered:
+                return Recovered(reason="retried")
+
+            @on(HandlerRaised, exception=FlakyError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            model = EventGraph([DeclaredRetry.Cmd, note, catcher]).namespaces()
+            assert HandlerRetried not in model.seeds
 
     def describe_text_render():
         def it_annotates_the_command():

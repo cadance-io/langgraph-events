@@ -324,7 +324,8 @@ def give_up(event: HandlerRaised) -> Question.GaveUp:
 ```
 
 - `max_attempts` counts the **initial call**: `3` means one call plus two retries.
-- Delay before retry *n* is `base_delay * 2 ** (n - 1)`, capped at `max_delay`. With `jitter=True` (the default) the wait is sampled uniformly from `[0, that ceiling]` — full jitter, against thundering herds. `strategy="constant"` waits `base_delay` flat.
+- Delay before retry *n* is `base_delay * 2 ** (n - 1)`, capped at `max_delay`. `strategy="constant"` uses `base_delay` as that ceiling on every retry instead of doubling it.
+- `jitter` is orthogonal to `strategy` and applies to whichever ceiling the strategy computes. With `jitter=True` (the default) the wait is sampled uniformly from `[0, ceiling]` — full jitter, against thundering herds. Note this means `strategy="constant", jitter=True` still varies per retry, averaging `base_delay / 2`; pass `jitter=False` for a genuinely flat wait.
 - `on=(...)` narrows which exceptions retry; it must be a subset of `raises=`. Anything declared in `raises=` but excluded from `on=` surfaces on its first raise — that is how a non-transient error stays non-transient.
 - `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve (still capped by `max_delay`, never jittered).
 - Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). Use `observe="log"` for a `WARNING` instead, or `observe="silent"` for neither.
