@@ -209,7 +209,7 @@ Position `deadline` strictly tighter than whichever hard cancellation the caller
 
 `RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
 
-The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. The one exception is [`RetryPolicy`](#retries) backoff, which reads the same deadline before each wait: a retry whose sleep would cross the boundary is abandoned rather than started, surfacing as `HandlerRaised(abandoned_for_deadline=True)`. Sizing `max_delay * (max_attempts - 1)` under your deadline budget is therefore no longer required to avoid an overshoot — though a single long-running handler call still is, since only the waits between attempts are bounded, not the attempts themselves.
+The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. The one exception is [`RetryPolicy`](#retries) backoff, which reads the same deadline before every wait: a sleep that would land on or past the boundary is abandoned rather than started, and the give-up surfaces as `HandlerRaised(abandoned_for_deadline=True)`. So you do not have to size the worst-case total backoff, `max_delay * (max_attempts - 1)`, under your deadline budget — the waits between attempts are bounded for you. The attempts themselves are not: a single long-running handler call can still run past the boundary, and the pause lands at the first round boundary after it returns.
 
 ### Surfacing the pause inline
 
@@ -300,7 +300,7 @@ def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.Ask:
 
 ## Retries
 
-Declare `retry=RetryPolicy(...)` alongside `raises=` — on a `Command` as a class attribute, or via `retry=` on `@on(...)`. The framework re-invokes the handler in place with exponential backoff; `HandlerRaised` fires only once the budget is spent, so catchers become pure escalation handlers.
+Declare `retry=RetryPolicy(...)` alongside `raises=` — on a `Command` as a class attribute, or via `retry=` on `@on(...)`. The framework re-invokes the handler in place with exponential backoff; `HandlerRaised` fires only once the budget is spent — or once the run's `deadline=` cuts the backoff short — so catchers become pure escalation handlers.
 
 ```python
 from langgraph_events import RetryPolicy
@@ -328,7 +328,7 @@ class Question(Namespace):
 
 @on(HandlerRaised, exception=RateLimitError)
 def give_up(event: HandlerRaised) -> Question.GaveUp:
-    return Question.GaveUp(reason=str(event.exception))  # budget spent
+    return Question.GaveUp(reason=str(event.exception))  # budget spent, or out of time
 ```
 
 - `max_attempts` counts the **initial call**: `3` means one call plus two retries.
@@ -338,11 +338,15 @@ def give_up(event: HandlerRaised) -> Question.GaveUp:
 - `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve, clamped to `[0, max_delay]` and never jittered — so a skewed clock or an already-past `Retry-After` retries immediately rather than crashing the run. A non-numeric or `bool` hint is ignored and the computed curve is used.
 - Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). Use `observe="log"` for a `WARNING` instead, or `observe="silent"` for neither.
 - Declaring `retry=` without `raises=`, or an `on=` entry **disjoint from** every type in `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
-- **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
-- **`HandlerRetried` carries the exception without its traceback.** The instance is live — `@on(HandlerRetried, exception=RateLimitError)` isinstance-matches it, field injection hands it over typed, `str(...)` and `.args` read normally — but `__traceback__` is detached, along with those of its `__cause__`/`__context__` chain and any `ExceptionGroup` members. Both notes are consequences of the same design: the framework holds onto your failure. A traceback pins the failing attempt's frame and every local on it, and the `events` channel is append-only, so a breadcrumb that kept one would retain a copy of whatever the handler was working on — the LLM response, the fetched payload, the dataframe — for the rest of the run, once per attempt. The terminal `HandlerRaised` keeps its traceback, so the framework retains at most one live traceback per failing invocation and that is the one you debug from. If you need a *per-attempt* stack, capture it inside the handler while the frames are still live — `observe="log"` records each attempt as a `WARNING` but logs the exception's type and message, not its frames.
 - Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts.
-- The backoff is **deadline-aware**. A sleep is never *started* if it would land on or past the run's `deadline=` — the policy gives up there and then, even with attempts left, emitting `HandlerRaised(abandoned_for_deadline=True)` so the run reaches the router and pauses cleanly. Nothing is clamped: burning the rest of the budget on an attempt that probably cannot finish either only delays the pause. An in-flight sleep is still not interruptible, so a single backoff can only overshoot by the scheduling slop of the check, not by `max_delay`.
-- Catchers can tell the two exits apart: `abandoned_for_deadline` is `True` only for the deadline give-up, and `False` for an exhausted attempt budget, an out-of-`on=` exception, or a handler with no policy at all. The abandoned attempt emits no `HandlerRetried` — no wait happened.
+- The backoff is **deadline-aware**. A sleep is never *started* if it would land on or past the run's `deadline=` — the policy gives up there and then, even with attempts left, so the run returns to the router instead of sleeping through the soft boundary. Nothing is clamped: burning the rest of the budget on an attempt that probably cannot finish either only delays the pause.
+- That give-up is the only raise tagged `abandoned_for_deadline=True`. The field is `False` for an exhausted attempt budget, an out-of-`on=` exception, and a handler with no policy at all, so a catcher can tell "ran out of time" from "ran out of tries". The abandoned attempt emits no `HandlerRetried` — no wait happened.
+- **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
+- **`HandlerRetried` carries the exception without its traceback.** The instance is live — matchers and field injection work on it — but `__traceback__` is detached. The terminal `HandlerRaised` keeps its own.
 - Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node. Import this one from `langgraph_events`.
+
+Idempotence and the detached traceback are two consequences of the same design: the framework holds onto your failure. A retried call re-runs from the top, so any side effect it performed before raising happens again. And because the `events` channel is append-only, whatever a stored event still references lives for the rest of the run — a traceback pins the failing attempt's frame and every local on it, so a breadcrumb that kept one would hold a copy of what the handler was working on (the LLM response, the fetched payload, the dataframe) once per attempt. So the breadcrumb keeps the exception and drops the frames: `HandlerRetried.exception` is the live instance — `@on(HandlerRetried, exception=RateLimitError)` isinstance-matches it, field injection hands it over typed, `str(...)` and `.args` read normally — with `__traceback__` cleared, along with those of its `__cause__`/`__context__` chain and any `ExceptionGroup` members. Only the terminal `HandlerRaised` keeps a traceback, so the framework retains at most one live traceback per failing invocation, and that is the one you debug from.
+
+If you need a *per-attempt* stack, capture it inside the handler while the frames are still live. `observe="log"` records each attempt as a `WARNING`, but logs the exception's type and message, not its frames.
 
 See the [Error Recovery pattern](patterns.md#error-recovery).

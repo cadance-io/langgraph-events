@@ -12,9 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Declarative retry with exponential backoff (`RetryPolicy`)** — declare `retry=RetryPolicy(...)`
   next to `raises=`, either as a class attribute on a `Command` or via `retry=` on `@on(...)`, and
   the framework re-invokes the handler in place with full-jitter exponential backoff. With a policy
-  declared, `HandlerRaised` fires only once the retry budget is spent, so catchers stop counting
-  attempts and re-emitting commands and become pure escalation handlers. A handler with no `retry=`
-  is unaffected — `HandlerRaised` still fires on its first raise.
+  declared, `HandlerRaised` fires only once the retry budget is spent — or once the run's
+  `deadline=` cuts the backoff short (below) — so catchers stop counting attempts and re-emitting
+  commands and become pure escalation handlers. A handler with no `retry=` is unaffected —
+  `HandlerRaised` still fires on its first raise.
 
   ```python
   class Ask(Command):
@@ -38,7 +39,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Retries run inside the handler node: they consume no `max_rounds` budget and write no checkpoint
   between attempts. **Retried handlers must be idempotent** — the handler re-runs from the top,
-  including any `emit_custom` it fired before raising. The backoff is deadline-aware — see below.
+  including any `emit_custom` it fired before raising.
+
+  The backoff is **deadline-aware**: the policy reads the run's `deadline=` before every wait and
+  refuses to start a backoff that would land on or past it, giving up even with attempts left.
+  Nothing is clamped — spending what is left of the budget on an attempt that probably cannot
+  finish either only delays the pause — so instead of sleeping through the soft boundary and into
+  the caller's hard cancellation, the run returns to the router, which emits `RunPaused` at the
+  first round boundary past the deadline. A run with no `deadline=` is unaffected, and the deadline
+  is read once per handler node, not per event.
 
   `graph.namespaces()` surfaces the policy: a `retry` field on `NamespaceModel.CommandHandler` and
   `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. Pure
@@ -46,34 +55,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
 
-- **Deadline-aware retry backoff** — a `RetryPolicy` now reads the run's `deadline=` before every
-  wait and refuses to start a backoff that would land on or past it. It gives up instead, even with
-  attempts left, so the run reaches the router and pauses with `RunPaused` rather than sleeping
-  through the soft boundary and into the caller's hard cancellation. Nothing is clamped: spending
-  what remains of the budget on an attempt that probably cannot finish either only delays the
-  pause. A run with no `deadline=` is unaffected, and the deadline is read once per handler node,
-  not per event.
-
-  The abandoned attempt emits no `HandlerRetried` (no wait happened) and the terminal
-  `HandlerRaised` carries a new **`abandoned_for_deadline: bool`** field — `True` only for this
-  give-up, `False` for an exhausted attempt budget, an out-of-`on=` exception, or a handler with no
-  policy. Operators (and catchers) can therefore tell "ran out of time" from "ran out of tries"
-  without inferring it from timestamps. The field defaults to `False`, so existing catchers and
-  serialized logs are unaffected.
+- **`HandlerRaised.abandoned_for_deadline`** — a new `bool` field on the existing event, `True`
+  only when a `RetryPolicy` still had attempts left but the next backoff would have landed on or
+  past the run's `deadline=`. It is `False` for an exhausted attempt budget, an out-of-`on=`
+  exception, and a handler with no policy, so operators (and catchers) can tell "ran out of time"
+  from "ran out of tries" without inferring it from timestamps. Defaults to `False`, so existing
+  catchers and serialized logs are unaffected.
 
 - **`HandlerRetried`** — a `SystemEvent` emitted before each backoff wait, carrying `handler`,
   `source_event`, `exception`, `attempt` (1-based, the call that failed) and `delay_seconds`. Part
-  of the anomaly set the reflection surface reports. Suppress it with `RetryPolicy(observe="log")`
-  for a `WARNING` instead, or `observe="silent"` for neither.
+  of the anomaly set the reflection surface reports. A deadline give-up emits none — no wait
+  happened. Suppress it with `RetryPolicy(observe="log")` for a `WARNING` carrying the exception's
+  type and message (not its frames) instead, or `observe="silent"` for neither.
 
-  Its `exception` is the live instance — `@on(HandlerRetried, exception=SomeError)` isinstance-matches
-  it and field injection still hands it over typed — but its **traceback is detached**, along with
-  those of its `__cause__`/`__context__` chain and any `ExceptionGroup` members. A stored traceback
-  pins the failing attempt's frame and every local on it, and the `events` channel is append-only, so
-  without this a handler holding a 5 MB response body would retain `max_attempts` copies of it for the
-  rest of the run (measured: 15 MB at `max_attempts=3`, now 5 MB). The terminal `HandlerRaised` keeps
-  its traceback — that is the one you debug from — so the framework retains at most one live traceback
-  per failing invocation. Use `observe="log"` to get each attempt into your logs instead.
+  Its `exception` is the live instance — `@on(HandlerRetried, exception=SomeError)`
+  isinstance-matches it and field injection still hands it over typed — but its **traceback is
+  detached**, along with those of its `__cause__`/`__context__` chain and any `ExceptionGroup`
+  members. A traceback pins the failing attempt's frame and every local on it, and the `events`
+  channel is append-only, so a breadcrumb that kept one would hold whatever the handler was working
+  on for the rest of the run, once per attempt: with a 5 MB response body in scope and
+  `max_attempts=3` that is 15 MB stranded rather than 5 MB. Only the terminal `HandlerRaised` keeps
+  its traceback — that is the one you debug from — so the framework retains at most one live
+  traceback per failing invocation.
 
 ### Changed
 
