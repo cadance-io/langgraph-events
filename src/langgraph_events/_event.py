@@ -728,6 +728,12 @@ class HandlerRaised(SystemEvent):
     - ``handler``: name of the handler that raised.
     - ``source_event``: the event the raising handler was processing.
     - ``exception``: the caught exception instance.
+    - ``abandoned_for_deadline``: ``True`` when a ``RetryPolicy`` still had
+      attempts left but the next backoff would have crossed the run's
+      ``deadline=``, so the retry loop gave up early. ``False`` for every
+      other raise — no policy, out-of-scope exception, or a genuinely
+      exhausted attempt budget. Lets an operator tell "ran out of time"
+      from "ran out of tries".
 
     ``source_event`` is named as such (rather than ``event``) to keep the
     handler's own ``event`` parameter free when this field is used as a
@@ -738,6 +744,7 @@ class HandlerRaised(SystemEvent):
     handler: str = ""
     source_event: Event | None = None
     exception: Exception | None = None
+    abandoned_for_deadline: bool = False
 
 
 class HandlerRetried(SystemEvent):

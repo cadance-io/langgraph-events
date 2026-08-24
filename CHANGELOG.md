@@ -38,14 +38,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Retries run inside the handler node: they consume no `max_rounds` budget and write no checkpoint
   between attempts. **Retried handlers must be idempotent** — the handler re-runs from the top,
-  including any `emit_custom` it fired before raising. The backoff is not interruptible by
-  `deadline=`, which is only checked between dispatch rounds.
+  including any `emit_custom` it fired before raising. The backoff is deadline-aware — see below.
 
   `graph.namespaces()` surfaces the policy: a `retry` field on `NamespaceModel.CommandHandler` and
   `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. Pure
   additions, so `SCHEMA_VERSION` is unchanged.
 
   Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
+
+- **Deadline-aware retry backoff** — a `RetryPolicy` now reads the run's `deadline=` before every
+  wait and refuses to start a backoff that would land on or past it. It gives up instead, even with
+  attempts left, so the run reaches the router and pauses with `RunPaused` rather than sleeping
+  through the soft boundary and into the caller's hard cancellation. Nothing is clamped: spending
+  what remains of the budget on an attempt that probably cannot finish either only delays the
+  pause. A run with no `deadline=` is unaffected, and the deadline is read once per handler node,
+  not per event.
+
+  The abandoned attempt emits no `HandlerRetried` (no wait happened) and the terminal
+  `HandlerRaised` carries a new **`abandoned_for_deadline: bool`** field — `True` only for this
+  give-up, `False` for an exhausted attempt budget, an out-of-`on=` exception, or a handler with no
+  policy. Operators (and catchers) can therefore tell "ran out of time" from "ran out of tries"
+  without inferring it from timestamps. The field defaults to `False`, so existing catchers and
+  serialized logs are unaffected.
 
 - **`HandlerRetried`** — a `SystemEvent` emitted before each backoff wait, carrying `handler`,
   `source_event`, `exception`, `attempt` (1-based, the call that failed) and `delay_seconds`. Part

@@ -209,7 +209,7 @@ Position `deadline` strictly tighter than whichever hard cancellation the caller
 
 `RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
 
-The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. That includes [`RetryPolicy`](#retries) backoff: size `max_delay * (max_attempts - 1)` — the worst-case total backoff — well under your deadline budget, or a run can overshoot the soft boundary and trip the hard cancellation instead.
+The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. The one exception is [`RetryPolicy`](#retries) backoff, which reads the same deadline before each wait: a retry whose sleep would cross the boundary is abandoned rather than started, surfacing as `HandlerRaised(abandoned_for_deadline=True)`. Sizing `max_delay * (max_attempts - 1)` under your deadline budget is therefore no longer required to avoid an overshoot — though a single long-running handler call still is, since only the waits between attempts are bounded, not the attempts themselves.
 
 ### Surfacing the pause inline
 
@@ -339,7 +339,9 @@ def give_up(event: HandlerRaised) -> Question.GaveUp:
 - Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). Use `observe="log"` for a `WARNING` instead, or `observe="silent"` for neither.
 - Declaring `retry=` without `raises=`, or an `on=` entry **disjoint from** every type in `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
 - **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
-- Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts. The backoff is *not* interruptible by `deadline=`, which is only checked between rounds. Keep the worst-case total backoff, `max_delay * (max_attempts - 1)`, well under your deadline budget.
+- Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts.
+- The backoff is **deadline-aware**. A sleep is never *started* if it would land on or past the run's `deadline=` — the policy gives up there and then, even with attempts left, emitting `HandlerRaised(abandoned_for_deadline=True)` so the run reaches the router and pauses cleanly. Nothing is clamped: burning the rest of the budget on an attempt that probably cannot finish either only delays the pause. An in-flight sleep is still not interruptible, so a single backoff can only overshoot by the scheduling slop of the check, not by `max_delay`.
+- Catchers can tell the two exits apart: `abandoned_for_deadline` is `True` only for the deadline give-up, and `False` for an exhausted attempt budget, an out-of-`on=` exception, or a handler with no policy at all. The abandoned attempt emits no `HandlerRetried` — no wait happened.
 - Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node. Import this one from `langgraph_events`.
 
 See the [Error Recovery pattern](patterns.md#error-recovery).

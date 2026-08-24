@@ -292,6 +292,35 @@ def catch_any(event: HandlerRaised) -> Recovered:
     return Recovered(reason=str(event.exception))
 
 
+def _budget(seconds: float = 30.0) -> float:
+    """A deadline *seconds* from now, on the clock the router reads."""
+    return time.monotonic() + seconds
+
+
+@pytest.fixture
+def overshooting():
+    """A handler whose 60s backoff cannot fit inside a 30s deadline budget.
+
+    Returns ``(graph, attempts)``. The policy still has four retries left
+    after the first failure, so any give-up observed here is the deadline's
+    doing and not an exhausted budget.
+    """
+    attempts = _Attempts(succeed_on=99)
+
+    @on(
+        Item,
+        raises=FlakyError,
+        retry=RetryPolicy(
+            max_attempts=5, base_delay=60.0, max_delay=60.0, jitter=False
+        ),
+    )
+    def overshoot(event: Item) -> Handled:
+        attempts.tick()
+        raise FlakyError("always")
+
+    return EventGraph([overshoot, gave_up]), attempts
+
+
 @pytest.fixture
 def slept(monkeypatch):
     """Record requested backoff delays instead of waiting for them."""
@@ -665,6 +694,63 @@ def describe_retry_scope():
             assert attempts.calls == 6
             assert log.latest(Handled) == Handled(n=99)
             assert not log.has(MaxRoundsExceeded)
+
+    def describe_deadline():
+        def when_the_next_backoff_would_cross_it():
+            def it_gives_up_before_sleeping(slept, overshooting):
+                # A 60s backoff entered with 30s of budget left would
+                # overshoot the soft boundary, so the policy stops here
+                # rather than starting a sleep the router cannot preempt.
+                graph, attempts = overshooting
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                assert log.count(HandlerRaised) == 1
+
+            def it_marks_the_raise_abandoned_for_deadline(slept, overshooting):
+                graph, _ = overshooting
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert log.latest(HandlerRaised).abandoned_for_deadline is True
+
+            async def it_gives_up_before_awaiting_a_sleep(slept, overshooting):
+                # ``ainvoke`` routes through ``_process_events_async``, whose
+                # backoff is a separate ``await`` — pin the same give-up there.
+                graph, attempts = overshooting
+                log = await graph.ainvoke(Item(n=1), deadline=_budget())
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                assert log.latest(HandlerRaised).abandoned_for_deadline is True
+
+        def when_the_next_backoff_fits_inside_it():
+            def it_retries_the_whole_budget(slept):
+                attempts = _Attempts(succeed_on=99)
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    raise FlakyError("always")
+
+                graph = EventGraph([handler, gave_up])
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert attempts.calls == 3
+                assert slept == [0.1, 0.2]
+                assert log.latest(HandlerRaised).abandoned_for_deadline is False
+
+        def when_no_deadline_is_set():
+            def it_leaves_the_raise_unmarked(slept, overshooting):
+                # Same policy, no ``deadline=``: the 60s backoff is slept and
+                # the budget runs out the ordinary way.
+                graph, attempts = overshooting
+                log = graph.invoke(Item(n=1))
+                assert attempts.calls == 5
+                assert slept == [60.0] * 4
+                assert log.latest(HandlerRaised).abandoned_for_deadline is False
 
     def describe_invariants():
         def it_evaluates_the_predicate_once_per_dispatch(slept):

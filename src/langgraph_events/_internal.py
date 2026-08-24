@@ -352,39 +352,65 @@ def _inject_fields(
 
 
 def _make_handler_raised(
-    meta: HandlerMeta, event: Event, exc: Exception
+    meta: HandlerMeta,
+    event: Event,
+    exc: Exception,
+    *,
+    abandoned_for_deadline: bool = False,
 ) -> HandlerRaised:
     """Build a ``HandlerRaised`` event for a caught declared exception."""
     return HandlerRaised(
         handler=meta.name,
         source_event=event,
         exception=exc,
+        abandoned_for_deadline=abandoned_for_deadline,
     )
 
 
-def _next_delay(
+def _next_delay_or_give_up(
     meta: HandlerMeta,
     event: Event,
     exc: Exception,
     attempt: int,
     new_events: list[Event],
+    deadline: float | None,
 ) -> float | None:
     """Seconds to wait before re-invoking *meta*, or ``None`` to give up.
 
-    ``None`` means the caller must emit ``HandlerRaised`` — no policy, the
-    budget is spent, or this exception is out of the policy's ``on=`` scope.
-    Otherwise the attempt is recorded per ``policy.observe`` (append a
-    ``HandlerRetried``, log a warning, or stay quiet) and the delay returned.
+    ``None`` means the retry loop is over and the terminal ``HandlerRaised``
+    has already been appended to *new_events* — no policy, the budget is
+    spent, this exception is out of the policy's ``on=`` scope, or the next
+    backoff would cross *deadline*.  Otherwise the attempt is recorded per
+    ``policy.observe`` (append a ``HandlerRetried``, log a warning, or stay
+    quiet) and the delay returned.
+
+    *deadline* is the run's soft-timeout instant on ``time.monotonic()``'s
+    clock, or ``None`` when the caller passed no ``deadline=``.  A sleep that
+    would land on or past it is refused outright rather than clamped: the
+    router only checks the deadline *between* rounds, so an in-flight backoff
+    cannot be preempted, and burning what is left of the budget on an attempt
+    that almost certainly cannot finish either just delays the pause.  Giving
+    up here lets the run reach the router and emit ``RunPaused`` promptly.
+    The raise is tagged ``abandoned_for_deadline=True`` so it stays
+    distinguishable from an exhausted attempt budget.
 
     Shared by both dispatch paths; only the sleep call itself differs between
     them.
     """
     policy = meta.retry
-    if policy is None or attempt >= policy.max_attempts:
-        return None
-    if not policy.retries(exc, meta.raises):
+    if (
+        policy is None
+        or attempt >= policy.max_attempts
+        or not policy.retries(exc, meta.raises)
+    ):
+        new_events.append(_make_handler_raised(meta, event, exc))
         return None
     delay = policy.delay_for(attempt, exc)
+    if deadline is not None and time.monotonic() + delay >= deadline:
+        new_events.append(
+            _make_handler_raised(meta, event, exc, abandoned_for_deadline=True)
+        )
+        return None
     if policy.observe == "emit":
         new_events.append(
             HandlerRetried(
@@ -533,6 +559,7 @@ def _process_events_sync(
     new_events: list[Event],
     lg_interrupt: Any,
     return_contract: Any = None,
+    deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the sync dispatch path."""
     for event in matching:
@@ -546,9 +573,10 @@ def _process_events_sync(
             try:
                 result = _invoke_sync_path(meta, event, call_inject)
             except meta.raises as exc:
-                delay = _next_delay(meta, event, exc, attempt, new_events)
+                delay = _next_delay_or_give_up(
+                    meta, event, exc, attempt, new_events, deadline
+                )
                 if delay is None:
-                    new_events.append(_make_handler_raised(meta, event, exc))
                     break
                 _retry._sleep(delay)
                 attempt += 1
@@ -567,6 +595,7 @@ async def _process_events_async(
     new_events: list[Event],
     lg_interrupt: Any,
     return_contract: Any = None,
+    deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the async dispatch path."""
     for event in matching:
@@ -580,9 +609,10 @@ async def _process_events_async(
             try:
                 result = await _invoke_async_path(meta, event, call_inject)
             except meta.raises as exc:
-                delay = _next_delay(meta, event, exc, attempt, new_events)
+                delay = _next_delay_or_give_up(
+                    meta, event, exc, attempt, new_events, deadline
+                )
                 if delay is None:
-                    new_events.append(_make_handler_raised(meta, event, exc))
                     break
                 await _retry._asleep(delay)
                 attempt += 1
@@ -626,7 +656,7 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[Event], dict[str, Any]]:
+    ) -> tuple[list[Event], dict[str, Any], float | None]:
         matching = [e for e in state["_pending"] if meta.matches(e)]
         inject = _build_inject(
             meta,
@@ -637,7 +667,10 @@ def make_handler_node(
             svcs_by_name,
             model_provider=model_provider,
         )
-        return matching, inject
+        # Read once per node call, not per event: the retry loop only needs
+        # it on the failure path, and the no-deadline case stays a ``None``.
+        deadline = (config or {}).get("configurable", {}).get(_DEADLINE_KEY)
+        return matching, inject, deadline
 
     def _finalize(new_events: list[Event]) -> StateDict:
         output: StateDict = {"events": new_events}
@@ -649,7 +682,7 @@ def make_handler_node(
         # Precondition check — outside the raises= catch boundary so a user
         # with raises=RuntimeError can't swallow this framework diagnostic.
         _check_sync_invocation_of_async(meta)
-        matching, inject = _prepare(state, config)
+        matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
         tokens = _set_custom_emitters(
             sync_emitter=lambda name, data: dispatch_custom_event(
@@ -672,13 +705,14 @@ def make_handler_node(
                 new_events,
                 lg_interrupt,
                 return_contract,
+                deadline,
             )
         finally:
             _reset_custom_emitters(tokens)
         return _finalize(new_events)
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
-        matching, inject = _prepare(state, config)
+        matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
         tokens = _set_custom_emitters(
             sync_emitter=lambda name, data: dispatch_custom_event(
@@ -701,6 +735,7 @@ def make_handler_node(
                 new_events,
                 lg_interrupt,
                 return_contract,
+                deadline,
             )
         except asyncio.CancelledError:
             return _finalize([Cancelled()])

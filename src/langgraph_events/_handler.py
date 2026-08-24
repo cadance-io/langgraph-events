@@ -329,8 +329,10 @@ def on(
 
     ``retry=RetryPolicy(...)`` wraps the handler call in declarative backoff:
     the framework re-invokes it in place on a declared raise, and
-    ``HandlerRaised`` fires only once the budget is spent. Requires a
-    non-empty ``raises=``; the policy's ``on=`` must overlap it.
+    ``HandlerRaised`` fires only once the budget is spent — or, earlier, once
+    the next backoff would cross the run's ``deadline=``, in which case it
+    carries ``abandoned_for_deadline=True``. Requires a non-empty ``raises=``;
+    the policy's ``on=`` must overlap it.
 
     Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
     for ``isinstance`` match (works for Event, Exception, or Invariant
