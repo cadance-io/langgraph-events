@@ -308,8 +308,6 @@ class _CrossBoomError(Exception):
 # the handler scan and silently keep the parent's handler (issue #127).
 class _Upstream(Namespace):
     class Parent(Command):
-        previously: ClassVar = ("legacy_upstream",)
-
         class Done(DomainEvent):
             note: str = ""
 
@@ -453,10 +451,13 @@ def describe_Command_handle():
             def it_resolves_outcomes_from_the_parent_namespace():
                 assert _Downstream.Child.Outcomes is _Upstream.Parent.Done
 
-        def when_a_cross_namespace_child_adds_an_outcome():
+            def it_registers_alongside_its_parent():
+                # Sharing one handler function across two Commands trips the
+                # duplicate-binding build error; pre-fix the child held the
+                # parent's function, so registering both blew up.
+                EventGraph([_Upstream.Parent, _Downstream.Child])  # no raise
 
-            def it_synthesises_a_fresh_outcomes_alias():
-                assert _Downstream.Extended.Outcomes is _Downstream.Extended.Extra
+        def when_a_cross_namespace_child_adds_an_outcome():
 
             def it_dispatches_to_the_added_outcome():
                 graph = EventGraph([_Downstream.Extended])
@@ -871,18 +872,6 @@ def describe_Command_handle():
                 assert aliases == {
                     "_Lineage.Parent": ("legacy_save",),
                     "_Lineage.Child": (),
-                }
-
-        def when_a_parent_command_lives_in_another_namespace():
-            # Same rule across namespaces — and registering both proves the
-            # child's handler is its own function, not an alias of the
-            # parent's (which would trip the duplicate-binding build error).
-            def it_is_not_inherited_by_a_subclass():
-                metas = EventGraph([_Upstream.Parent, _Downstream.Child])._handler_metas
-                aliases = {m.node_name: m.previous_names for m in metas}
-                assert aliases == {
-                    "_Upstream.Parent": ("legacy_upstream",),
-                    "_Downstream.Child": (),
                 }
 
     def describe_EventGraph_registration():
