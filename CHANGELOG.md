@@ -89,6 +89,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: a concrete `Command` may not be subclassed.** `class Ask(Command)` is unchanged —
+  that is how a Command is declared. `class Child(Ask)`, where `Ask` is a declared Command, now
+  raises `TypeError` at class creation, naming both classes. One Command is one intent, with its
+  own handler, outcomes and node identity; a subclass is a second intent wearing the first one's.
+  Share what two commands have in common through a helper function or a shared policy object
+  (`retry: ClassVar = SHARED_POLICY`), and declare the second command independently.
+
+  `raises`, `invariants`, `retry` and `previously` are still read off the command class — but never
+  from a parent, so the documented asymmetry between them is gone: `previously` was read from the
+  class's own `__dict__` precisely because the other three were MRO-inherited, and with no parent
+  to inherit from all four read the same way. The `Command.handle()` privacy rule loses its
+  parent-Command case for the same reason: an outcome is private to exactly the one Command it is
+  nested under.
+
+  Untouched: `Namespace` subclassing (child domains still inherit parent reducers via the MRO),
+  `DomainEvent` subclassing another `DomainEvent` (refining an event keeps its namespace and
+  `__command__`), and `Interrupted` / `IntegrationEvent` / `Halted` subclassing. One narrow shape
+  changes with it: a module-level `class Hybrid(Command, SomeStampedDomainEvent)` used to be
+  admitted by the same scaffolding — it now gets the ordinary "must be nested inside a Namespace"
+  rejection.
+
 - **BREAKING: `retry` is now a reserved name.** Two shapes that worked before now fail:
 
   - `@on(SomeEvent, retry=...)` no longer registers a **field matcher** — `retry=` is a named

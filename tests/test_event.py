@@ -311,6 +311,22 @@ def describe_Command():
                 class Place(Command):
                     pass
 
+        def when_it_mixes_in_an_already_stamped_event():
+            # A base carrying a ``__namespace__`` does not excuse a Command
+            # from the nesting rule — the stamp says where *that* event
+            # lives, not where this command does.
+            def it_rejects():
+                class Widget0(Namespace):
+                    class Place(Command):
+                        class Placed(DomainEvent):
+                            pass
+
+                msg = r"Command.*must be nested.*Namespace"
+                with pytest.raises(TypeError, match=msg):
+
+                    class Hybrid(Command, Widget0.Place.Placed):
+                        pass
+
     def when_nested_in_domain():
 
         def it_accepts_and_stamps_domain():
@@ -348,6 +364,75 @@ def describe_Command():
             assert isinstance(cause, TypeError)
             assert "must be nested" in str(cause)
             assert "Namespace" in str(cause)
+
+    def when_subclassing_a_concrete_command():
+        # ``class Ask(Command)`` is how a Command is declared; ``class
+        # Child(Ask)`` is a second intent wearing the first one's identity.
+
+        def it_rejects():
+            class Widget(Namespace):
+                class Place(Command):
+                    class Placed(DomainEvent):
+                        pass
+
+                    def handle(self) -> None:
+                        return None
+
+            with pytest.raises(TypeError, match=r"may not be subclassed"):
+
+                class Rush(Widget.Place):
+                    pass
+
+        def it_names_both_classes_and_says_what_to_do_instead():
+            class Widget2(Namespace):
+                class Place(Command):
+                    def handle(self) -> None:
+                        return None
+
+            with pytest.raises(TypeError) as exc_info:
+
+                class Rush(Widget2.Place):
+                    pass
+
+            msg = str(exc_info.value)
+            assert "Rush" in msg and "Widget2.Place" in msg
+            assert "helper" in msg and "Namespace" in msg
+
+        def when_the_parent_declares_no_handler():
+            # The rule is structural — it does not depend on the parent
+            # carrying a handler, so a handler-less intermediate base is
+            # rejected just the same.
+            def it_rejects():
+                class Widget3(Namespace):
+                    class Base(Command):
+                        pass
+
+                with pytest.raises(TypeError, match=r"may not be subclassed"):
+
+                    class Derived(Widget3.Base):
+                        pass
+
+        def when_the_subclass_is_declared_inside_the_same_namespace():
+            def it_rejects():
+                with pytest.raises(TypeError, match=r"may not be subclassed"):
+
+                    class Widget4(Namespace):
+                        class Place(Command):
+                            def handle(self) -> None:
+                                return None
+
+                        class Rush(Place):
+                            pass
+
+        def when_the_command_composes_a_mixin():
+            # Mixins are not Commands — composing one stays legal.
+            def it_accepts():
+                class Widget5(Namespace):
+                    class Place(Command, Auditable):
+                        def handle(self) -> None:
+                            return None
+
+                assert Widget5.Place.__namespace__ == "Widget5"
 
 
 def describe_DomainEvent():

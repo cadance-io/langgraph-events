@@ -282,22 +282,17 @@ class Vault2(Namespace):
             return _VaultPause()
 
 
-# Parent/Child pair: ``previously`` is a historic node-identity claim and must
-# NOT be inherited (contrast with ``invariants``/``raises``, which are
-# behavioral contracts and do inherit).
+# A renamed Command claiming its historic node name. Module level so the
+# inline handler's forward-referenced return annotation resolves.
 class _Lineage(Namespace):
-    class Parent(Command):
+    class Renamed(Command):
         previously: ClassVar = ("legacy_save",)
 
         class Done(DomainEvent):
             pass
 
-        def handle(self) -> _Lineage.Parent.Done:
-            return _Lineage.Parent.Done()
-
-    class Child(Parent):
-        def handle(self) -> _Lineage.Parent.Done:
-            return _Lineage.Parent.Done()
+        def handle(self) -> _Lineage.Renamed.Done:
+            return _Lineage.Renamed.Done()
 
 
 def describe_Command_handle():
@@ -433,8 +428,11 @@ def describe_Command_handle():
                     assert not log.has(InvariantViolated)
                     assert log.has(_StaleInvariants.Cmd.Done)
 
-        def when_invariants_inherited_from_a_parent_command():
-            def it_evaluates_the_inherited_predicate():
+        def when_a_second_command_would_inherit_the_declaration():
+            # Subclassing the declaring Command was the only way to share a
+            # predicate set; a concrete Command may not be subclassed, so
+            # the second command declares (or calls) its own.
+            def it_rejects_the_subclass_at_class_creation():
                 class _BlockedInheritedInv(Invariant):
                     pass
 
@@ -450,14 +448,10 @@ def describe_Command_handle():
                         def handle(self) -> _InlineInherit.Parent.Done:
                             return _InlineInherit.Parent.Done()
 
-                    class Child(Parent):
-                        def handle(self) -> _InlineInherit.Parent.Done:
-                            return _InlineInherit.Parent.Done()
+                with pytest.raises(TypeError, match=r"may not be subclassed"):
 
-                graph = EventGraph([_InlineInherit.Child])
-                log = graph.invoke(_InlineInherit.Child())
-                assert log.has(InvariantViolated)
-                assert not log.has(_InlineInherit.Parent.Done)
+                    class Child(_InlineInherit.Parent):
+                        pass
 
         def when_raises_set_as_class_attribute():
             def it_routes_the_exception_to_HandlerRaised():
@@ -807,18 +801,21 @@ def describe_Command_handle():
                             def handle(self) -> None:
                                 return None
 
-        def when_a_parent_command_declares_previously():
-            # A historic node name belongs to exactly one class. Were the
-            # attribute read through the MRO, Child would claim Parent's
-            # checkpoints — and registering both would trip the
-            # duplicate-alias build error for code the user never wrote.
-            def it_is_not_inherited_by_a_subclass():
-                metas = EventGraph([_Lineage.Parent, _Lineage.Child])._handler_metas
+        def when_declared_on_a_module_level_command():
+            def it_registers_the_alias_against_that_command():
+                metas = EventGraph([_Lineage.Renamed])._handler_metas
                 aliases = {m.node_name: m.previous_names for m in metas}
-                assert aliases == {
-                    "_Lineage.Parent": ("legacy_save",),
-                    "_Lineage.Child": (),
-                }
+                assert aliases == {"_Lineage.Renamed": ("legacy_save",)}
+
+        def when_a_second_command_would_inherit_it():
+            # A historic node name identifies exactly one class, and the
+            # only shape that could have shared one — subclassing the
+            # command — is rejected outright.
+            def it_rejects_the_subclass_at_class_creation():
+                with pytest.raises(TypeError, match=r"may not be subclassed"):
+
+                    class Heir(_Lineage.Renamed):
+                        pass
 
     def describe_EventGraph_registration():
 

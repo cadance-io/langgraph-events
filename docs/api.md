@@ -5,7 +5,7 @@
 | Export | Type | Description |
 |---|---|---|
 | `Namespace` | Base class | Namespace for nested commands and outcomes; exposes `__namespace_name__`, `__reducers__` |
-| `Command` | Base class | Imperative intent; must be nested inside a `Namespace`. Auto-exposes `.Outcomes` — union of nested `DomainEvent`s. A `handle` method on the class registers as the command's inline handler when passed to `EventGraph` |
+| `Command` | Base class | Imperative intent; must be nested inside a `Namespace`, and may not itself be subclassed once declared (`class Rush(Order.Place)` is a `TypeError`). Auto-exposes `.Outcomes` — union of nested `DomainEvent`s. A `handle` method on the class registers as the command's inline handler when passed to `EventGraph` |
 | `DomainEvent` | Base class | Fact inside the domain; must be nested inside a `Namespace` or `Command` |
 | `IntegrationEvent` | Base class | Cross-boundary fact; top-level |
 | `SystemEvent` | Base class | Framework-emitted fact; top-level |
@@ -32,9 +32,9 @@ Modifiers:
 
 - `*field_matchers` — [field dispatch](control-flow.md#field-matchers); `type` values do `isinstance`, `str` values do equality.
 - `raises=` — [declared exceptions](control-flow.md#handler-exceptions).
-- `retry=RetryPolicy(...)` — [declarative backoff](control-flow.md#retries) around the handler call. Spelled as a `retry` class attribute on a `Command`, MRO-inherited like `raises`/`invariants`.
+- `retry=RetryPolicy(...)` — [declarative backoff](control-flow.md#retries) around the handler call. Spelled as a `retry` class attribute on a `Command`, alongside `raises`/`invariants`.
 - `invariants={InvariantClass: predicate}` — [preconditions](control-flow.md#invariants).
-- `node_name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. These, and `retry=`, are reserved (a field named `node_name`/`previously`/`retry` can't be matched via `**field_matchers`; a `Command` declaring an annotated `retry` field also fails at class creation — use `retry: ClassVar = ...` for the policy, or rename the field). Inline `Command.handle()` handlers default their node identity to the **command's `__qualname__`** (e.g. `Order.Place`), not the method name, so it is stable regardless of `handlers=[...]` order; a renamed command declares its historic node names as a class attribute, `previously: ClassVar = (...)` — mirroring `raises`/`invariants` in spelling, but unlike them deliberately **not** MRO-inherited (a historic node name identifies exactly one class). See [Handler renames](event-migrations.md#handler-renames).
+- `node_name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. These, and `retry=`, are reserved (a field named `node_name`/`previously`/`retry` can't be matched via `**field_matchers`; a `Command` declaring an annotated `retry` field also fails at class creation — use `retry: ClassVar = ...` for the policy, or rename the field). Inline `Command.handle()` handlers default their node identity to the **command's `__qualname__`** (e.g. `Order.Place`), not the method name, so it is stable regardless of `handlers=[...]` order; a renamed command declares its historic node names as a class attribute, `previously: ClassVar = (...)`, mirroring `raises`/`invariants` in spelling. All four are read off the command class that declares them — a concrete `Command` may not be subclassed, so a historic node name still identifies exactly one class. See [Handler renames](event-migrations.md#handler-renames).
 
 Returns enforced against the declared annotation, or the subscribed `Command.Outcomes` when unannotated.
 

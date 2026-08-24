@@ -115,37 +115,15 @@ class _PrivPause(Namespace):
             return Interrupted(reason="waiting")
 
 
-class _PrivInherit(Namespace):
-    """Child Command inherits its parent's private outcome (legal)."""
+class _PrivOwner(Namespace):
+    """Command emitting its own private outcome (legal)."""
 
-    class Parent(Command):
+    class Save(Command):
         class Done(DomainEvent):
             pass
 
-        def handle(self) -> _PrivInherit.Parent.Done:
-            return _PrivInherit.Parent.Done()
-
-    class Child(Parent):
-        def handle(self) -> _PrivInherit.Parent.Done:
-            return _PrivInherit.Parent.Done()
-
-
-class _PrivInheritAdd(Namespace):
-    """Child Command adds its own private outcome alongside the parent's."""
-
-    class Parent(Command):
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> _PrivInheritAdd.Parent.Done:
-            return _PrivInheritAdd.Parent.Done()
-
-    class Child(Parent):
-        class Other(DomainEvent):
-            pass
-
-        def handle(self) -> _PrivInheritAdd.Child.Other:
-            return _PrivInheritAdd.Child.Other()
+        def handle(self) -> _PrivOwner.Save.Done:
+            return _PrivOwner.Save.Done()
 
 
 class _PrivLeaky(Namespace):
@@ -210,16 +188,19 @@ def describe_command_privacy():
             def it_builds_the_graph():
                 EventGraph([_PrivPause.Wait])  # no raise
 
-        def when_child_command_handle_returns_a_private_event_of_its_parent():
+        def when_handle_returns_its_own_nested_outcome():
             def it_builds_the_graph():
-                EventGraph([_PrivInherit.Child])  # no raise
+                EventGraph([_PrivOwner.Save])  # no raise
 
-        def when_child_command_adds_a_new_outcome():
-            def it_admits_the_new_outcome():
-                EventGraph([_PrivInheritAdd.Child])  # no raise
+        def when_a_second_command_would_inherit_the_private_outcome():
+            # There is no "parent Command" case for the privacy rule to
+            # admit: a concrete Command may not be subclassed, so an outcome
+            # is private to exactly the one Command it is nested under.
+            def it_rejects_the_subclass_at_class_creation():
+                with pytest.raises(TypeError, match=r"may not be subclassed"):
 
-            def it_synthesises_a_fresh_outcomes_alias():
-                assert _PrivInheritAdd.Child.Outcomes is _PrivInheritAdd.Child.Other
+                    class Heir(_PrivOwner.Save):
+                        pass
 
     def describe_reactor():
         def when_reactor_returns_a_command_private_event():

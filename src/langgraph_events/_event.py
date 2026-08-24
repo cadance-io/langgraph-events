@@ -338,7 +338,13 @@ class _NestedEventMeta(type):
 
 def _inherits_namespace(cls: type) -> bool:
     """True if any base of *cls* (other than itself) already has a stamped
-    ``__namespace__`` — meaning it inherits from an already-validated event."""
+    ``__namespace__`` — meaning it inherits from an already-validated event.
+
+    Only ``DomainEvent`` uses this: refining an existing event (``class
+    FastPlaced(Order.Place.Placed)``) keeps the base's namespace and command,
+    so the nesting rule has nothing left to check. ``Command`` has no such
+    case — a concrete Command may not be subclassed at all.
+    """
     return any(
         getattr(base, "__namespace__", None) is not None for base in cls.__mro__[1:]
     )
@@ -381,11 +387,38 @@ def _reserved_modifier_error(cls: type, name: str) -> TypeError:
     )
 
 
+def _reject_command_subclassing(cls: type) -> None:
+    """Reject *cls* if any of its bases is an already-declared ``Command``.
+
+    ``class Ask(Command)`` declares a Command; ``class Child(Ask)`` would be
+    a second intent wearing the first one's identity — one handler, one node
+    name, one set of outcomes, two classes. Bases suffice: a base that is not
+    a ``Command`` subclass cannot have one deeper in its own MRO.
+    """
+    for base in cls.__bases__:
+        if base is Command or not issubclass(base, Command):
+            continue
+        raise TypeError(
+            f"Command {cls.__qualname__!r} subclasses Command "
+            f"{base.__qualname__!r}. A concrete Command may not be "
+            f"subclassed — one Command is one intent, with its own handler, "
+            f"outcomes and node identity. Declare {cls.__name__!r} as its "
+            f"own Command nested in a Namespace, and share whatever the two "
+            f"have in common through a helper function (or a private method "
+            f"on each)."
+        )
+
+
 class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     """Imperative intent. Must be nested inside a ``Namespace`` subclass.
 
     Use imperative naming (``Place``, ``Ship``, ``Cancel``).  Outcomes of
     a command are typically nested ``DomainEvent`` subclasses.
+
+    Subclassing ``Command`` declares a command; subclassing a *declared*
+    command raises ``TypeError`` — one Command is one intent, with its own
+    handler, outcomes and node identity. Share behaviour between two
+    commands with a helper function, not a base class.
 
     Example::
 
@@ -404,6 +437,9 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     __command_handler__: ClassVar[Any] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Checked first: the shape is wrong regardless of what the body
+        # declares.
+        _reject_command_subclassing(cls)
         own_annotations = cls.__dict__.get("__annotations__", {})
         # Real (non-string) annotations can be judged directly and rejected
         # before any dataclass processing. PEP 563 string annotations are
@@ -446,8 +482,6 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
         for name in _RESERVED_MODIFIERS:
             if any(f.name == name for f in dc_fields(cls)):
                 raise _reserved_modifier_error(cls, name)
-        if _inherits_namespace(cls):
-            return
         if not _is_nested_in_class(cls):
             raise TypeError(
                 f"Command {cls.__name__!r} must be nested inside a Namespace "
