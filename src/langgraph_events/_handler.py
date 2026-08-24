@@ -270,21 +270,24 @@ def _build_on_decorator(
         fn._event_types = event_types  # type: ignore[attr-defined]
         if field_matchers:
             fn._field_matchers = dict(field_matchers)  # type: ignore[attr-defined]
-        if raises_tuple:
-            fn._raises = raises_tuple  # type: ignore[attr-defined]
-        if invariants_tuple:
-            fn._invariants = invariants_tuple  # type: ignore[attr-defined]
+        # Unconditional, all four: every EventGraph build re-stamps inline
+        # command handlers from the class's *current* ``raises`` /
+        # ``invariants`` / ``previously`` / ``retry``, so a conditional stamp
+        # would let an earlier build's value keep a since-removed contract,
+        # alias, or policy alive. Their falsy values match the defaults
+        # ``extract_handler_meta`` reads them with, so an empty stamp is
+        # indistinguishable from no stamp for every consumer.
+        fn._raises = raises_tuple  # type: ignore[attr-defined]
+        fn._invariants = invariants_tuple  # type: ignore[attr-defined]
+        fn._previous_names = previous_names  # type: ignore[attr-defined]
+        fn._retry = retry  # type: ignore[attr-defined]
+        # ``node_name`` has no class-level declaration to re-stamp from (see
+        # ``extract_handler_meta``), so there is no stale value to correct and
+        # an unconditional stamp would only erase an explicit
+        # ``@on(node_name=...)`` pin — the identity that keeps interrupted
+        # checkpoints resumable across a rename.
         if node_name is not None:
             fn._node_name = node_name  # type: ignore[attr-defined]
-        # Unconditional: inline command handlers are re-stamped on every
-        # EventGraph build, and each build must reflect the class's *current*
-        # ``previously`` declaration — a conditional stamp would let a stale
-        # value from an earlier build keep a removed alias alive.
-        fn._previous_names = previous_names  # type: ignore[attr-defined]
-        # Unconditional for the same reason as ``_previous_names`` above: a
-        # conditional stamp would keep a policy alive after it was removed
-        # from the Command between two EventGraph builds.
-        fn._retry = retry  # type: ignore[attr-defined]
         return fn
 
     return decorator
