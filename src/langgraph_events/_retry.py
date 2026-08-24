@@ -18,10 +18,9 @@ import asyncio
 import random
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
-_STRATEGIES = ("exponential", "constant")
-_OBSERVE_MODES = ("emit", "log", "silent")
+from langgraph_events._validate import normalize_exception_tuple
 
 Strategy = Literal["exponential", "constant"]
 Observe = Literal["emit", "log", "silent"]
@@ -83,27 +82,19 @@ class RetryPolicy:
                 f"RetryPolicy max_delay ({self.max_delay!r}) must be >= "
                 f"base_delay ({self.base_delay!r})."
             )
-        if self.strategy not in _STRATEGIES:
+        if self.strategy not in get_args(Strategy):
             raise ValueError(
-                f"RetryPolicy strategy must be one of {_STRATEGIES}, "
+                f"RetryPolicy strategy must be one of {get_args(Strategy)}, "
                 f"got {self.strategy!r}."
             )
-        if self.observe not in _OBSERVE_MODES:
+        if self.observe not in get_args(Observe):
             raise ValueError(
-                f"RetryPolicy observe must be one of {_OBSERVE_MODES}, "
+                f"RetryPolicy observe must be one of {get_args(Observe)}, "
                 f"got {self.observe!r}."
             )
-        normalized = self.on if isinstance(self.on, tuple) else (self.on,)
-        for entry in normalized:
-            if not (isinstance(entry, type) and issubclass(entry, Exception)):
-                raise TypeError(
-                    f"RetryPolicy on= entries must be Exception subclasses, got "
-                    f"{entry!r}. Non-Exception BaseException subclasses "
-                    f"(KeyboardInterrupt, SystemExit, GeneratorExit, "
-                    f"asyncio.CancelledError) are not allowed — they are "
-                    f"runtime/exit signals, not domain errors."
-                )
-        object.__setattr__(self, "on", normalized)
+        object.__setattr__(
+            self, "on", normalize_exception_tuple(self.on, owner="RetryPolicy on=")
+        )
 
     def delay_for(self, attempt: int, exc: Exception | None = None) -> float:
         """Seconds to wait before the attempt after *attempt*.

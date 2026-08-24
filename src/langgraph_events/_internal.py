@@ -7,7 +7,6 @@ that implement the hub-and-spoke reactive loop on top of LangGraph's StateGraph.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import operator
 import time
@@ -42,7 +41,7 @@ from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
 
-_logger = logging.getLogger("langgraph_events")
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Internal state — users never see this
@@ -542,7 +541,8 @@ def _process_events_sync(
             new_events.append(violation)
             continue
         call_inject = _inject_fields(meta, event, inject)
-        for attempt in itertools.count(1):
+        attempt = 1
+        while True:
             try:
                 result = _invoke_sync_path(meta, event, call_inject)
             except meta.raises as exc:
@@ -551,6 +551,7 @@ def _process_events_sync(
                     new_events.append(_make_handler_raised(meta, event, exc))
                     break
                 _retry._sleep(delay)
+                attempt += 1
                 continue
             _collect_and_check(
                 result, new_events, lg_interrupt, meta, state, event, return_contract
@@ -574,7 +575,8 @@ async def _process_events_async(
             new_events.append(violation)
             continue
         call_inject = _inject_fields(meta, event, inject)
-        for attempt in itertools.count(1):
+        attempt = 1
+        while True:
             try:
                 result = await _invoke_async_path(meta, event, call_inject)
             except meta.raises as exc:
@@ -583,6 +585,7 @@ async def _process_events_async(
                     new_events.append(_make_handler_raised(meta, event, exc))
                     break
                 await _retry._asleep(delay)
+                attempt += 1
                 continue
             _collect_and_check(
                 result, new_events, lg_interrupt, meta, state, event, return_contract

@@ -12,12 +12,13 @@ if TYPE_CHECKING:
 
 def _command_annotations(
     d: NamespaceModel, cmd_cls: type
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    """Collect dedup'd raises + invariant names + scatter targets from every
-    command handler subscribed to *cmd_cls*."""
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    """Collect dedup'd raises + invariant names + scatter targets + retry
+    labels from every command handler subscribed to *cmd_cls*."""
     raises: list[str] = []
     invariants: list[str] = []
     scatters: list[str] = []
+    retries: list[str] = []
     for ch in d.command_handlers:
         if cmd_cls not in ch.commands:
             continue
@@ -32,7 +33,10 @@ def _command_annotations(
             label = f"Scatter[{_event_label(tgt)}]"
             if label not in scatters:
                 scatters.append(label)
-    return tuple(raises), tuple(invariants), tuple(scatters)
+        retry_label = _retry_label(ch.retry)
+        if retry_label is not None and retry_label not in retries:
+            retries.append(retry_label)
+    return tuple(raises), tuple(invariants), tuple(scatters), tuple(retries)
 
 
 def _retry_label(policy: RetryPolicy | None) -> str | None:
@@ -40,18 +44,6 @@ def _retry_label(policy: RetryPolicy | None) -> str | None:
     if policy is None:
         return None
     return f"retry x{policy.max_attempts}"
-
-
-def _command_retries(d: NamespaceModel, cmd_cls: type) -> tuple[str, ...]:
-    """Dedup'd retry labels from every command handler subscribed to *cmd_cls*."""
-    labels: list[str] = []
-    for ch in d.command_handlers:
-        if cmd_cls not in ch.commands:
-            continue
-        label = _retry_label(ch.retry)
-        if label is not None and label not in labels:
-            labels.append(label)
-    return tuple(labels)
 
 
 def _policy_targets(p: NamespaceModel.Policy) -> str:
@@ -82,8 +74,9 @@ def _render_taxonomy_lines(  # noqa: PLR0912
                 if include_handlers:
                     if cmd.handlers:
                         suffix_parts.append(f"handlers: {', '.join(cmd.handlers)}")
-                    raises, invariants, scatters = _command_annotations(d, cmd.cls)
-                    retries = _command_retries(d, cmd.cls)
+                    raises, invariants, scatters, retries = _command_annotations(
+                        d, cmd.cls
+                    )
                     if scatters:
                         suffix_parts.append(f"scatters {', '.join(scatters)}")
                     if raises:

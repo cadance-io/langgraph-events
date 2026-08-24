@@ -232,14 +232,15 @@ class InheritedRetry(Namespace):
 
 @pytest.fixture
 def inline_attempts():
-    """Reset the module-level counter the inline-command scenarios share."""
+    """Reset the counter the module-level inline-command scenarios share.
 
-    def configure(succeed_on: int) -> _Attempts:
-        _INLINE.succeed_on = succeed_on
-        _INLINE.calls = 0
-        return _INLINE
-
-    return configure
+    Inline ``Command`` handlers must be declared at module level for their
+    forward-referenced return annotations to resolve, so they cannot close
+    over a per-test counter — they share ``_INLINE``, which this resets.
+    """
+    _INLINE.succeed_on = 1
+    _INLINE.calls = 0
+    return _INLINE
 
 
 class Item(IntegrationEvent):
@@ -266,6 +267,29 @@ class NeedsInput(Interrupted):
     """Human-in-the-loop pause returned by a retryable handler."""
 
     question: str = ""
+
+
+@on(HandlerRaised, exception=FlakyError)
+def gave_up(event: HandlerRaised) -> Recovered:
+    """Escalation catcher — satisfies raises= coverage.
+
+    Most retry tests need a catcher only so the graph builds; they assert on
+    the retry behaviour, not on the escalation. Use :func:`echo_failure` when
+    the exception message itself is under test.
+    """
+    return Recovered(reason="gave up")
+
+
+@on(HandlerRaised, exception=FlakyError)
+def echo_failure(event: HandlerRaised) -> Recovered:
+    """Escalation catcher that surfaces the exception that exhausted the budget."""
+    return Recovered(reason=str(event.exception))
+
+
+@on(HandlerRaised)
+def catch_any(event: HandlerRaised) -> Recovered:
+    """Universal catcher — for graphs declaring more than one raise."""
+    return Recovered(reason=str(event.exception))
 
 
 @pytest.fixture
@@ -303,11 +327,11 @@ def describe_retry():
                     raise FlakyError("boom")
 
                 @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
+                def local_catcher(event: HandlerRaised) -> Recovered:
                     return Recovered(reason="caught")
 
                 with pytest.raises(TypeError, match=r"ValueError.*raises="):
-                    EventGraph([handler, catcher])
+                    EventGraph([handler, local_catcher])
 
         def when_on_is_a_superclass_of_a_declared_raise():
             def it_accepts():
@@ -323,10 +347,10 @@ def describe_retry():
                     raise ConnectionResetError("boom")
 
                 @on(HandlerRaised)
-                def catcher(event: HandlerRaised) -> Recovered:
+                def local_catcher(event: HandlerRaised) -> Recovered:
                     return Recovered(reason="caught")
 
-                EventGraph([handler, catcher])  # must not raise
+                EventGraph([handler, local_catcher])  # must not raise
 
         def when_an_inline_command_declares_it():
             def it_names_the_command_not_the_method():
@@ -365,11 +389,7 @@ def describe_retry():
                     raise FlakyError("transient")
                 return Ended(result="recovered")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            log = EventGraph([handler, catcher]).invoke(Started(data="go"))
+            log = EventGraph([handler, gave_up]).invoke(Started(data="go"))
             assert log.latest(Ended) == Ended(result="recovered")
             assert log.latest(HandlerRaised) is None
             assert attempts.calls == 3
@@ -387,11 +407,7 @@ def describe_retry():
                     raise FlakyError("transient")
                 return Ended(result="recovered")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            EventGraph([handler, catcher]).invoke(Started(data="go"))
+            EventGraph([handler, gave_up]).invoke(Started(data="go"))
             assert slept == [0.1, 0.2]
 
         def it_emits_handler_raised_after_exhaustion(slept):
@@ -406,11 +422,7 @@ def describe_retry():
                 attempts.tick()
                 raise FlakyError("always")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason=str(event.exception))
-
-            log = EventGraph([handler, catcher]).invoke(Started(data="go"))
+            log = EventGraph([handler, echo_failure]).invoke(Started(data="go"))
             assert attempts.calls == 2
             assert log.count(HandlerRaised) == 1
             assert log.latest(Recovered) == Recovered(reason="always")
@@ -428,11 +440,7 @@ def describe_retry():
                     raise FlakyError("transient")
                 return Ended(result="recovered")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            log = EventGraph([handler, catcher]).invoke(Started(data="go"))
+            log = EventGraph([handler, gave_up]).invoke(Started(data="go"))
             retried = log.filter(HandlerRetried)
             assert [(e.attempt, e.delay_seconds) for e in retried] == [
                 (1, 0.1),
@@ -443,6 +451,25 @@ def describe_retry():
             assert retried[0].source_event == Started(data="go")
 
     def describe_runtime_async():
+        async def it_emits_handler_raised_and_breadcrumbs(slept):
+            attempts = _Attempts(succeed_on=99)
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.25, jitter=False),
+            )
+            async def handler(event: Item) -> Handled:
+                attempts.tick()
+                raise FlakyError("always")
+
+            log = await EventGraph([handler, echo_failure]).ainvoke(Item(n=1))
+            assert attempts.calls == 3
+            assert slept == [0.25, 0.5]
+            assert [e.attempt for e in log.filter(HandlerRetried)] == [1, 2]
+            assert log.count(HandlerRaised) == 1
+            assert log.latest(Recovered) == Recovered(reason="always")
+
         async def it_retries_until_the_handler_succeeds(slept):
             attempts = _Attempts(succeed_on=2)
 
@@ -456,85 +483,32 @@ def describe_retry():
                     raise FlakyError("transient")
                 return Ended(result="async recovered")
 
-            @on(HandlerRaised, exception=FlakyError)
-            async def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            log = await EventGraph([handler, catcher]).ainvoke(Started(data="go"))
+            log = await EventGraph([handler, gave_up]).ainvoke(Started(data="go"))
             assert log.latest(Ended) == Ended(result="async recovered")
             assert slept == [0.5]
 
-    def describe_runtime_async_exhaustion():
-        async def it_emits_handler_raised_and_breadcrumbs(slept):
-            attempts = _Attempts(succeed_on=99)
+    def describe_observe():
+        @pytest.mark.parametrize(
+            ("mode", "expect_log"), [("log", True), ("silent", False)]
+        )
+        def it_suppresses_the_event(slept, caplog, mode, expect_log):
+            attempts = _Attempts(succeed_on=2)
 
             @on(
-                Item,
+                Started,
                 raises=FlakyError,
-                retry=RetryPolicy(max_attempts=3, base_delay=0.25, jitter=False),
+                retry=RetryPolicy(max_attempts=2, jitter=False, observe=mode),
             )
-            async def handler(event: Item) -> Handled:
-                attempts.tick()
-                raise FlakyError("always")
+            def handler(event: Started) -> Ended:
+                if not attempts.tick():
+                    raise FlakyError("transient")
+                return Ended(result="recovered")
 
-            @on(HandlerRaised, exception=FlakyError)
-            async def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason=str(event.exception))
-
-            log = await EventGraph([handler, catcher]).ainvoke(Item(n=1))
-            assert attempts.calls == 3
-            assert slept == [0.25, 0.5]
-            assert [e.attempt for e in log.filter(HandlerRetried)] == [1, 2]
-            assert log.count(HandlerRaised) == 1
-            assert log.latest(Recovered) == Recovered(reason="always")
-
-    def describe_observe():
-        def when_log():
-            def it_does_not_emit_handler_retried(slept, caplog):
-                attempts = _Attempts(succeed_on=2)
-
-                @on(
-                    Started,
-                    raises=FlakyError,
-                    retry=RetryPolicy(max_attempts=2, jitter=False, observe="log"),
-                )
-                def handler(event: Started) -> Ended:
-                    if not attempts.tick():
-                        raise FlakyError("transient")
-                    return Ended(result="recovered")
-
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                with caplog.at_level(logging.WARNING, logger="langgraph_events"):
-                    log = EventGraph([handler, catcher]).invoke(Started(data="go"))
-                assert not log.has(HandlerRetried)
-                assert "attempt 1" in caplog.text
-
-        def when_silent():
-            def it_records_nothing(slept, caplog):
-                attempts = _Attempts(succeed_on=2)
-
-                @on(
-                    Started,
-                    raises=FlakyError,
-                    retry=RetryPolicy(max_attempts=2, jitter=False, observe="silent"),
-                )
-                def handler(event: Started) -> Ended:
-                    if not attempts.tick():
-                        raise FlakyError("transient")
-                    return Ended(result="recovered")
-
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                with caplog.at_level(logging.WARNING, logger="langgraph_events"):
-                    log = EventGraph([handler, catcher]).invoke(Started(data="go"))
-                assert not log.has(HandlerRetried)
-                assert caplog.text == ""
-                assert slept == [0.1]
+            with caplog.at_level(logging.WARNING, logger="langgraph_events"):
+                log = EventGraph([handler, gave_up]).invoke(Started(data="go"))
+            assert not log.has(HandlerRetried)
+            assert slept == [0.1]
+            assert ("attempt 1" in caplog.text) is expect_log
 
     def describe_non_retryable():
         def when_the_exception_is_outside_on():
@@ -550,11 +524,7 @@ def describe_retry():
                     attempts.tick()
                     raise ValueError("permanent")
 
-                @on(HandlerRaised)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason=str(event.exception))
-
-                log = EventGraph([handler, catcher]).invoke(Started(data="go"))
+                log = EventGraph([handler, catch_any]).invoke(Started(data="go"))
                 assert attempts.calls == 1
                 assert slept == []
                 assert log.latest(Recovered) == Recovered(reason="permanent")
@@ -571,10 +541,12 @@ def describe_retry():
                         raise FlakyError("boom")
 
                     @on(HandlerRaised, exception=FlakyError)
-                    def catcher(event: HandlerRaised) -> Recovered:
+                    def local_catcher(event: HandlerRaised) -> Recovered:
                         return Recovered(reason="caught")
 
-                    log = EventGraph([handler, catcher]).invoke(Started(data="go"))
+                    log = EventGraph([handler, local_catcher]).invoke(
+                        Started(data="go")
+                    )
                     assert attempts.calls == 1
                     assert slept == []
                     assert log.has(HandlerRaised)
@@ -582,13 +554,10 @@ def describe_retry():
     def describe_class_attribute():
         def when_declared_on_a_command():
             def it_applies_the_policy(slept, inline_attempts):
-                attempts = inline_attempts(succeed_on=3)
+                inline_attempts.succeed_on = 3
+                attempts = inline_attempts
 
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                log = EventGraph([DeclaredRetry.Cmd, catcher]).invoke(
+                log = EventGraph([DeclaredRetry.Cmd, gave_up]).invoke(
                     DeclaredRetry.Cmd()
                 )
                 assert log.has(DeclaredRetry.Cmd.Done)
@@ -597,13 +566,9 @@ def describe_retry():
 
         def when_inherited_from_a_parent_command():
             def it_applies_the_inherited_policy(slept, inline_attempts):
-                inline_attempts(succeed_on=2)
+                inline_attempts.succeed_on = 2
 
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                log = EventGraph([InheritedRetry.Child, catcher]).invoke(
+                log = EventGraph([InheritedRetry.Child, gave_up]).invoke(
                     InheritedRetry.Child()
                 )
                 assert log.has(InheritedRetry.Parent.Done)
@@ -611,13 +576,9 @@ def describe_retry():
 
         def when_a_child_overrides_the_inherited_policy():
             def it_uses_the_child_policy(slept, inline_attempts):
-                inline_attempts(succeed_on=2)
+                inline_attempts.succeed_on = 2
 
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                log = EventGraph([InheritedRetry.Overriding, catcher]).invoke(
+                log = EventGraph([InheritedRetry.Overriding, gave_up]).invoke(
                     InheritedRetry.Overriding()
                 )
                 assert log.has(InheritedRetry.Parent.Done)
@@ -663,11 +624,7 @@ def describe_retry_scope():
                         raise FlakyError(f"transient {event.n}")
                     return Handled(n=event.n)
 
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                log = EventGraph([split, work, catcher]).invoke(FanOut())
+                log = EventGraph([split, work, gave_up]).invoke(FanOut())
                 assert sorted(e.n for e in log.filter(Handled)) == [0, 1, 2]
                 assert not log.has(HandlerRaised)
                 assert len(slept) == 3
@@ -681,11 +638,7 @@ def describe_retry_scope():
                     attempts.tick()
                     raise FlakyError("always")
 
-                @on(HandlerRaised, exception=FlakyError)
-                def catcher(event: HandlerRaised) -> Recovered:
-                    return Recovered(reason="gave up")
-
-                log = EventGraph([handler, catcher]).invoke(Item(n=1))
+                log = EventGraph([handler, gave_up]).invoke(Item(n=1))
                 assert attempts.calls == 1
                 assert slept == []
                 assert not log.has(HandlerRetried)
@@ -707,11 +660,7 @@ def describe_retry_scope():
                     raise FlakyError("transient")
                 return Handled(n=99)
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            graph = EventGraph([handler, catcher], max_rounds=2)
+            graph = EventGraph([handler, gave_up], max_rounds=2)
             log = graph.invoke(Item(n=1))
             assert attempts.calls == 6
             assert log.latest(Handled) == Handled(n=99)
@@ -735,15 +684,11 @@ def describe_retry_scope():
                     raise FlakyError("transient")
                 return Handled(n=1)
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
             @on(InvariantViolated)
             def violated(event: InvariantViolated) -> None:
                 return None
 
-            log = EventGraph([handler, catcher, violated]).invoke(Item(n=1))
+            log = EventGraph([handler, gave_up, violated]).invoke(Item(n=1))
             assert attempts.calls == 3
             assert len(evaluations) == 2
             assert log.latest(Handled) == Handled(n=1)
@@ -765,15 +710,11 @@ def describe_retry_scope():
                 attempts.tick()
                 return NeedsInput(question="ok?")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
             @on(Resumed, interrupted=NeedsInput)
             def after(event: Resumed) -> None:
                 return None
 
-            graph = EventGraph([pauser, catcher, after], checkpointer=MemorySaver())
+            graph = EventGraph([pauser, gave_up, after], checkpointer=MemorySaver())
             config = {"configurable": {"thread_id": "retry-interrupt"}}
             graph.invoke(Item(n=1), config=config)
             assert graph.get_state(config).is_interrupted
@@ -796,11 +737,7 @@ def describe_retry_scope():
                     raise FlakyError("transient")
                 return Handled(n=5)
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            log = EventGraph([handler, catcher]).invoke(Item(n=1))
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
             assert attempts.calls == 3
             assert log.latest(Handled) == Handled(n=5)
             assert slept == [0.2, 0.4]
@@ -822,10 +759,10 @@ def describe_retry_scope():
                 return Handled(n=1)
 
             @on(HandlerRaised, exception=RateLimitedError)
-            def catcher(event: HandlerRaised) -> Recovered:
+            def local_catcher(event: HandlerRaised) -> Recovered:
                 return Recovered(reason="gave up")
 
-            log = EventGraph([handler, catcher]).invoke(Item(n=1))
+            log = EventGraph([handler, local_catcher]).invoke(Item(n=1))
             assert slept == [1.5]
             assert log.latest(HandlerRetried).delay_seconds == 1.5
 
@@ -851,22 +788,15 @@ def describe_handler_retried():
                 noticed.append(event.attempt)
                 return Recovered(reason=str(exception))
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            EventGraph([handler, watch, catcher]).invoke(Item(n=1))
+            EventGraph([handler, watch, gave_up]).invoke(Item(n=1))
             assert noticed == [1, 2]
 
 
 def describe_namespace_model():
     def describe_command_handler():
         def it_carries_the_declared_policy():
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
 
-            model = EventGraph([DeclaredRetry.Cmd, catcher]).namespaces()
+            model = EventGraph([DeclaredRetry.Cmd, gave_up]).namespaces()
             (handler,) = [
                 ch for ch in model.command_handlers if DeclaredRetry.Cmd in ch.commands
             ]
@@ -882,11 +812,7 @@ def describe_namespace_model():
             def handler(event: Started) -> Ended:
                 raise FlakyError("boom")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            model = EventGraph([handler, catcher]).namespaces()
+            model = EventGraph([handler, gave_up]).namespaces()
             (policy,) = [p for p in model.policies if p.name == "handler"]
             assert policy.retry == RetryPolicy(max_attempts=2)
 
@@ -900,29 +826,19 @@ def describe_namespace_model():
             def note(event: HandlerRetried) -> Recovered:
                 return Recovered(reason="retried")
 
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
-
-            model = EventGraph([DeclaredRetry.Cmd, note, catcher]).namespaces()
+            model = EventGraph([DeclaredRetry.Cmd, note, gave_up]).namespaces()
             assert HandlerRetried not in model.seeds
 
     def describe_text_render():
         def it_annotates_the_command():
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
 
-            text = EventGraph([DeclaredRetry.Cmd, catcher]).namespaces().text()
+            text = EventGraph([DeclaredRetry.Cmd, gave_up]).namespaces().text()
             assert "retry x3" in text
 
     def describe_json_render():
         def it_encodes_the_policy():
-            @on(HandlerRaised, exception=FlakyError)
-            def catcher(event: HandlerRaised) -> Recovered:
-                return Recovered(reason="gave up")
 
-            payload = EventGraph([DeclaredRetry.Cmd, catcher]).namespaces().to_dict()
+            payload = EventGraph([DeclaredRetry.Cmd, gave_up]).namespaces().to_dict()
             (encoded,) = [
                 r
                 for r in payload["command_handlers"]

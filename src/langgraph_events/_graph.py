@@ -980,11 +980,10 @@ class EventGraph:
         return self._compiled_graph
 
     def _verify_error_handling(self) -> None:
-        """Run the construction-time error-handling gates, in dependency order.
+        """Run the construction-time error-handling gates.
 
-        ``retry=`` is validated against ``raises=``, so coverage is checked
-        first and the whole group is kept together here rather than inline in
-        ``__init__``.
+        Grouped to keep ``__init__`` readable; the three checks are independent
+        and the order between them is not significant.
         """
         self._verify_raises_coverage()
         self._verify_retry_policies()
@@ -1029,13 +1028,8 @@ class EventGraph:
             for exc_type in meta.raises:
                 if not _any_catcher_covers(catchers, exc_type):
                     declared = ", ".join(t.__name__ for t in meta.raises)
-                    # Name an inline handler by its command identity (node
-                    # name = command qualname); the method name (`handle`,
-                    # positional `handle_2`) doesn't help the user find it.
-                    is_inline = getattr(meta.fn, "_inline_command", None) is not None
-                    claimant = meta.node_name if is_inline else meta.name
                     raise TypeError(
-                        f"Handler {claimant!r} declares raises=({declared}), "
+                        f"Handler {meta.claimant!r} declares raises=({declared}), "
                         f"but no handler subscribes to catch {exc_type.__name__}. "
                         f"Add a handler decorated with "
                         f"@on(HandlerRaised, exception={exc_type.__name__}) "
@@ -1063,11 +1057,9 @@ class EventGraph:
             policy = meta.retry
             if policy is None:
                 continue
-            is_inline = getattr(meta.fn, "_inline_command", None) is not None
-            claimant = meta.node_name if is_inline else meta.name
             if not meta.raises:
                 raise TypeError(
-                    f"Handler {claimant!r} declares retry= but no raises=. A "
+                    f"Handler {meta.claimant!r} declares retry= but no raises=. A "
                     f"retry policy only sees exceptions the framework catches; "
                     f"add raises=(YourError,) or drop the policy."
                 )
@@ -1082,7 +1074,7 @@ class EventGraph:
                 if not overlaps:
                     declared = ", ".join(t.__name__ for t in meta.raises)
                     raise TypeError(
-                        f"Handler {claimant!r} declares "
+                        f"Handler {meta.claimant!r} declares "
                         f"retry=RetryPolicy(on={exc_type.__name__}), but "
                         f"{exc_type.__name__} is not covered by "
                         f"raises=({declared}). An exception unrelated to "

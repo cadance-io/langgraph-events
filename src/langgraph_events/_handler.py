@@ -17,6 +17,7 @@ from langgraph_events._event_log import (
 )
 from langgraph_events._identity import command_identity
 from langgraph_events._retry import RetryPolicy
+from langgraph_events._validate import normalize_exception_tuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -191,14 +192,22 @@ def normalize_previous_names(previously: Any, *, owner: str) -> tuple[str, ...]:
 
 def _build_on_decorator(
     event_types: tuple[type[Event], ...],
-    raises: type[Exception] | tuple[type[Exception], ...],
-    invariants: dict[type[Invariant], Callable[..., bool]] | None,
-    field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str],
+    *,
+    raises: type[Exception] | tuple[type[Exception], ...] = (),
+    invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
+    field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str]
+    | None = None,
     node_name: str | None = None,
     previous_names: tuple[str, ...] = (),
     retry: RetryPolicy | None = None,
 ) -> Callable[[F], F]:
-    """Validate arguments and return the decorator that stamps attributes."""
+    """Validate arguments and return the decorator that stamps attributes.
+
+    Modifiers are keyword-only: they are forwarded from three call sites in
+    ``on()``, and every new modifier would otherwise have to be threaded
+    positionally through all of them in lockstep.
+    """
+    field_matchers = field_matchers or {}
     for et in event_types:
         if not (
             isinstance(et, type)
@@ -206,18 +215,7 @@ def _build_on_decorator(
         ):
             raise TypeError(f"@on() requires Event subclasses or mixins, got {et!r}")
 
-    # Normalise and validate raises
-    raises_tuple: tuple[type[Exception], ...] = (
-        raises if isinstance(raises, tuple) else (raises,)
-    )
-    for rt in raises_tuple:
-        if not (isinstance(rt, type) and issubclass(rt, Exception)):
-            raise TypeError(
-                f"@on() raises= entries must be Exception subclasses, got {rt!r}. "
-                f"Non-Exception BaseException subclasses (KeyboardInterrupt, "
-                f"SystemExit, GeneratorExit, asyncio.CancelledError) are not "
-                f"allowed — they are runtime/exit signals, not domain errors."
-            )
+    raises_tuple = normalize_exception_tuple(raises, owner="@on() raises=")
 
     if retry is not None and not isinstance(retry, RetryPolicy):
         raise TypeError(
@@ -359,33 +357,31 @@ def on(
 
     if sole_arg_is_function and no_modifiers:
         fn = event_types[0]
-        return _build_on_decorator(
-            (_infer_event_type(fn),), (), None, {}, None, (), None
-        )(fn)
+        return _build_on_decorator((_infer_event_type(fn),))(fn)
 
     if not event_types:
 
         def inferring(fn: F) -> F:
             return _build_on_decorator(
                 (_infer_event_type(fn),),
-                raises,
-                invariants,
-                dict(field_matchers),
-                node_name,
-                previous_names,
-                retry,
+                raises=raises,
+                invariants=invariants,
+                field_matchers=dict(field_matchers),
+                node_name=node_name,
+                previous_names=previous_names,
+                retry=retry,
             )(fn)
 
         return inferring
 
     return _build_on_decorator(
         event_types,
-        raises,
-        invariants,
-        dict(field_matchers),
-        node_name,
-        previous_names,
-        retry,
+        raises=raises,
+        invariants=invariants,
+        field_matchers=dict(field_matchers),
+        node_name=node_name,
+        previous_names=previous_names,
+        retry=retry,
     )
 
 
@@ -441,6 +437,18 @@ class HandlerMeta:
     # key in EventGraph(services={...}). Used as the lookup key in the
     # name-keyed services map at dispatch time.
     service_name_params: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def claimant(self) -> str:
+        """The name to blame in a construction-time error message.
+
+        An inline ``Command`` handler is named by its command identity
+        (``Order.Place``), not by the method name — ``handle``, or the
+        positional dedup suffix ``handle_2``, does not help the user find it.
+        """
+        if getattr(self.fn, "_inline_command", None) is not None:
+            return self.node_name
+        return self.name
 
     def matches(self, event: Event) -> bool:
         """Check whether *event* satisfies this handler's type + field matchers.
