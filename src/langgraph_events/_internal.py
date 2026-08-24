@@ -365,13 +365,53 @@ def _make_handler_raised(
     *,
     abandoned_for_deadline: bool = False,
 ) -> HandlerRaised:
-    """Build a ``HandlerRaised`` event for a caught declared exception."""
+    """Build a ``HandlerRaised`` event for a caught declared exception.
+
+    The traceback is kept: this is the terminal failure, the one people debug
+    from.  Its retry breadcrumbs drop theirs — see :func:`_detach_traceback`.
+    """
     return HandlerRaised(
         handler=meta.name,
         source_event=event,
         exception=exc,
         abandoned_for_deadline=abandoned_for_deadline,
     )
+
+
+def _detach_traceback(exc: BaseException) -> None:
+    """Drop, in place, every frame *exc* keeps reachable.
+
+    A stored exception's ``__traceback__`` pins the failing handler's frame —
+    and every local on it — plus the dispatch frames above it, for as long as
+    the event holding it lives.  Since the ``events`` channel is append-only,
+    that is the whole run.
+
+    The instance itself must survive: ``@on(HandlerRetried, exception=X)``
+    isinstance-matches it and field injection hands it to the handler typed.
+    So the frames go and the exception stays.
+
+    The chain is walked because ``raise Wrapped(...) from upstream`` (and the
+    implicit ``__context__`` an ``except`` block sets) leaves the *inner*
+    exception's traceback pinning the very same handler frame — clearing only
+    the outermost one would free nothing.  Group members are walked for the
+    same reason, and are reachable through neither link: an
+    ``asyncio.TaskGroup`` failure pins its frames through ``.exceptions``.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.__traceback__ = None
+        pending.extend(
+            linked
+            for linked in (current.__cause__, current.__context__)
+            if linked is not None
+        )
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
 
 
 def _next_delay_or_give_up(
@@ -419,6 +459,12 @@ def _next_delay_or_give_up(
         )
         return None
     if policy.observe == "emit":
+        # Why the breadcrumb must not carry the attempt's frames is in
+        # _detach_traceback. Mutating the caller's exception is safe *here*
+        # because the next attempt re-raises into a fresh traceback, so the
+        # terminal HandlerRaised still gets one even when a handler re-raises
+        # a single cached instance.
+        _detach_traceback(exc)
         new_events.append(
             HandlerRetried(
                 handler=meta.name,
