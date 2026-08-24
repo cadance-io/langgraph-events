@@ -65,6 +65,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `previously`, so a policy can never become a dataclass field serialized into every checkpoint
     — but the guard cannot tell a policy from a payload field of the same name. Rename the field.
 
+### Fixed
+
+- **A `Command` subclassing a `Command` in another namespace now binds its own handler.** The
+  child's `handle()` was silently ignored and the parent's ran instead — the graph built,
+  dispatched, and produced the parent's outcome with no warning. `Command.__init_subclass__`
+  returned early for any subclass whose parent already carried a stamped `__namespace__`, skipping
+  the public-method scan that sets `__command_handler__` along with the nesting validation the
+  early return was meant to waive. Whether the parent was stamped yet was pure class-creation
+  ordering: `__set_name__` stamps `__namespace__` only once the enclosing `Namespace` body
+  finishes, so a child in the *same* namespace bound its handler correctly while a child in a
+  different one did not. The two concerns are now separated — an inheriting subclass still skips
+  the nesting check (its parent carries the namespace), but the handler scan always runs. Commands
+  inheriting across namespaces are consequently subject to the same single-public-method rule as
+  any other command, and a child with no public method of its own still inherits its parent's
+  handler. `raises`/`invariants`/`retry` keep inheriting through the MRO; `previously` stays
+  un-inherited; command privacy still admits a child emitting its parent's private outcomes.
+
 ## [0.24.0] - 2026-08-23
 
 ### Added

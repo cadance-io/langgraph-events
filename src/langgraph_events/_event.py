@@ -446,9 +446,14 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
         for name in _RESERVED_MODIFIERS:
             if any(f.name == name for f in dc_fields(cls)):
                 raise _reserved_modifier_error(cls, name)
-        if _inherits_namespace(cls):
-            return
-        if not _is_nested_in_class(cls):
+        # Inheriting an already-validated Command waives the *nesting* check
+        # (the parent carries the namespace) — but not the handler scan below.
+        # Skipping both used to mean a child declared in a different namespace
+        # than its parent silently kept the parent's handler, while a child in
+        # the same namespace bound its own; the difference was pure class-
+        # creation ordering (``__set_name__`` stamps ``__namespace__`` only
+        # once the enclosing Namespace body finishes), not a decision. See #127.
+        if not _inherits_namespace(cls) and not _is_nested_in_class(cls):
             raise TypeError(
                 f"Command {cls.__name__!r} must be nested inside a Namespace "
                 f"subclass, e.g. "

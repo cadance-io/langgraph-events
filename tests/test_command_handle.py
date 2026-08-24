@@ -297,6 +297,58 @@ class _Lineage(Namespace):
             return _Lineage.Parent.Done()
 
 
+class _CrossBoomError(Exception):
+    pass
+
+
+# Cross-namespace inheritance. ``_Lineage`` above inherits within one
+# namespace, where the parent's ``__namespace__`` is not stamped yet while the
+# shared class body runs. Here the parent namespace is fully built first, so
+# the child subclasses an already-stamped Command — the path that used to skip
+# the handler scan and silently keep the parent's handler (issue #127).
+class _Upstream(Namespace):
+    class Parent(Command):
+        previously: ClassVar = ("legacy_upstream",)
+
+        class Done(DomainEvent):
+            note: str = ""
+
+        def handle(self) -> _Upstream.Parent.Done:
+            return _Upstream.Parent.Done(note="parent")
+
+
+class _Downstream(Namespace):
+    class Child(_Upstream.Parent):
+        def handle(self) -> _Upstream.Parent.Done:
+            return _Upstream.Parent.Done(note="child")
+
+    class Extended(_Upstream.Parent):
+        class Extra(DomainEvent):
+            pass
+
+        def handle(self) -> _Downstream.Extended.Extra:
+            return _Downstream.Extended.Extra()
+
+
+# ``raises`` is a behavioral contract read through the MRO; the child below
+# inherits it across the namespace boundary and raises from its own handler.
+class _UpstreamRaises(Namespace):
+    class Parent(Command):
+        raises: ClassVar = (_CrossBoomError,)
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _UpstreamRaises.Parent.Done:
+            return _UpstreamRaises.Parent.Done()
+
+
+class _DownstreamRaises(Namespace):
+    class Child(_UpstreamRaises.Parent):
+        def handle(self) -> _UpstreamRaises.Parent.Done:
+            raise _CrossBoomError("nope")
+
+
 def describe_Command_handle():
 
     def describe_class_creation():
@@ -382,6 +434,47 @@ def describe_Command_handle():
                 log = graph.invoke(_Helped.Cmd())
                 assert log.latest(_Helped.Cmd.Done).note == "ok"
 
+        def when_command_subclasses_a_command_in_another_namespace():
+            # The parent is already stamped with its own ``__namespace__`` by
+            # the time the child's class body runs; the child must still bind
+            # its own handler rather than silently keeping the parent's.
+
+            def it_stamps_the_childs_own_handler():
+                assert (
+                    _Downstream.Child.__command_handler__
+                    is _Downstream.Child.__dict__["handle"]
+                )
+
+            def it_dispatches_the_childs_handler():
+                graph = EventGraph([_Downstream.Child])
+                log = graph.invoke(_Downstream.Child())
+                assert log.latest(_Upstream.Parent.Done).note == "child"
+
+            def it_resolves_outcomes_from_the_parent_namespace():
+                assert _Downstream.Child.Outcomes is _Upstream.Parent.Done
+
+        def when_a_cross_namespace_child_adds_an_outcome():
+
+            def it_synthesises_a_fresh_outcomes_alias():
+                assert _Downstream.Extended.Outcomes is _Downstream.Extended.Extra
+
+            def it_dispatches_to_the_added_outcome():
+                graph = EventGraph([_Downstream.Extended])
+                log = graph.invoke(_Downstream.Extended())
+                assert log.has(_Downstream.Extended.Extra)
+
+        def when_a_subclass_is_not_nested_in_a_namespace():
+            # Inheriting a Command that already carries a namespace keeps the
+            # nesting requirement waived — only the handler scan is restored.
+
+            def it_skips_the_nesting_check():
+                class _Detached(_Upstream.Parent):
+                    pass
+
+                assert (
+                    _Detached.__command_handler__ is _Upstream.Parent.__dict__["handle"]
+                )
+
     def describe_class_level_modifiers():
         def when_invariants_set_as_class_attribute():
             def it_evaluates_the_predicate_at_dispatch():
@@ -457,6 +550,19 @@ def describe_Command_handle():
                 graph = EventGraph([_InlineRaises.Cmd, catch])
                 log = graph.invoke(_InlineRaises.Cmd())
                 assert log.has(HandlerRaised)
+
+        def when_raises_inherited_from_a_parent_in_another_namespace():
+            def it_routes_the_exception_to_HandlerRaised():
+                from langgraph_events import HandlerRaised
+
+                @on(HandlerRaised, exception=_CrossBoomError)
+                def catch_cross(event: HandlerRaised) -> None:
+                    return None
+
+                graph = EventGraph([_DownstreamRaises.Child, catch_cross])
+                log = graph.invoke(_DownstreamRaises.Child())
+                assert log.has(HandlerRaised)
+                assert not log.has(_UpstreamRaises.Parent.Done)
 
         def when_raises_is_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():
@@ -765,6 +871,18 @@ def describe_Command_handle():
                 assert aliases == {
                     "_Lineage.Parent": ("legacy_save",),
                     "_Lineage.Child": (),
+                }
+
+        def when_a_parent_command_lives_in_another_namespace():
+            # Same rule across namespaces — and registering both proves the
+            # child's handler is its own function, not an alias of the
+            # parent's (which would trip the duplicate-binding build error).
+            def it_is_not_inherited_by_a_subclass():
+                metas = EventGraph([_Upstream.Parent, _Downstream.Child])._handler_metas
+                aliases = {m.node_name: m.previous_names for m in metas}
+                assert aliases == {
+                    "_Upstream.Parent": ("legacy_upstream",),
+                    "_Downstream.Child": (),
                 }
 
     def describe_EventGraph_registration():
