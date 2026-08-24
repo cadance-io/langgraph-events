@@ -982,8 +982,10 @@ class EventGraph:
     def _verify_error_handling(self) -> None:
         """Run the construction-time error-handling gates.
 
-        Grouped to keep ``__init__`` readable; the three checks are independent
-        and the order between them is not significant.
+        Grouped to keep ``__init__`` readable. The three checks read disjoint
+        state, so the order does not change whether a graph is accepted — it
+        only decides which error surfaces first when a handler trips more
+        than one gate.
         """
         self._verify_raises_coverage()
         self._verify_retry_policies()
@@ -1048,8 +1050,9 @@ class EventGraph:
         doing nothing at runtime:
 
         - ``retry=`` with an empty ``raises=`` — nothing is ever caught.
-        - an ``on=`` entry absent from ``raises=`` — that exception propagates
-          out of the handler and crashes the run before the policy is consulted.
+        - an ``on=`` entry *disjoint from* ``raises=`` — that exception is
+          never caught, so the policy is never consulted for it. Overlap in
+          either direction is live; see the comment on the check itself.
 
         Raises ``TypeError``.
         """

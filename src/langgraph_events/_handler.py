@@ -310,7 +310,7 @@ def on(
            def place(event: Order.Place) -> Order.Place.Placed:
                return Order.Place.Placed(order_id="o1")
 
-    2. **Modifiers only** — ``@on(raises=..., invariants=..., field=...)``.
+    2. **Modifiers only** — ``@on(raises=..., retry=..., invariants=..., field=...)``.
        Infers the event type from the annotation and applies modifiers::
 
            @on(invariants={CustomerNotBanned: lambda log: ...})
@@ -327,6 +327,11 @@ def on(
     this handler; a matching ``@on(HandlerRaised, exception=...)`` catcher
     must exist at compile time.
 
+    ``retry=RetryPolicy(...)`` wraps the handler call in declarative backoff:
+    the framework re-invokes it in place on a declared raise, and
+    ``HandlerRaised`` fires only once the budget is spent. Requires a
+    non-empty ``raises=``; the policy's ``on=`` must overlap it.
+
     Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
     for ``isinstance`` match (works for Event, Exception, or Invariant
     subclasses); string values do equality match (e.g. a string event field).
@@ -334,10 +339,11 @@ def on(
     ``node_name=`` pins the handler's graph-node identity (default: the
     function name) so renaming the function never breaks an interrupted
     checkpoint; ``previously=`` (str or tuple) declares historic node names to
-    keep resumable after a rename. Both are reserved keywords — a field named
-    ``node_name`` or ``previously`` cannot be matched positionally via
-    ``**field_matchers``. Inline ``Command`` handlers declare historic node
-    names as a class attribute instead: ``previously: ClassVar = (...)``.
+    keep resumable after a rename. These and ``retry=`` are reserved keywords —
+    a field named ``node_name``, ``previously``, or ``retry`` cannot be matched
+    positionally via ``**field_matchers``. Inline ``Command`` handlers declare
+    historic node names as a class attribute instead:
+    ``previously: ClassVar = (...)``.
     """
     if node_name is not None and not isinstance(node_name, str):
         raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")

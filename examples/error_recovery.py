@@ -11,12 +11,15 @@ instead of surfacing the failure immediately. Only when the retry budget is
 spent does the exception surface as ``HandlerRaised``, so the catcher is a pure
 *escalation* handler: it never has to count attempts or schedule a retry.
 
-Covers APIs not shown in other examples:
-  - ``raises = (...,)`` as a class-level attribute on a ``Command``
+Covers:
   - ``retry = RetryPolicy(...)`` — declarative backoff, framework-enforced
+    (not shown in any other example)
   - ``HandlerRetried`` — built-in event emitted before each backoff wait
+    (not shown in any other example)
+  - ``raises = (...,)`` as a class-level attribute on a ``Command``
   - ``HandlerRaised`` — built-in event wrapping a caught exception
-  - Field injection of the exception (``exception: RateLimitError``)
+  - ``@on(HandlerRaised, exception=...)`` as a field matcher narrowing a
+    catcher to one exception type
 
 Usage:
     python examples/error_recovery.py
@@ -84,9 +87,10 @@ class Question(Namespace):
         question: str = ""
 
         raises = (RateLimitError,)
-        # Full jitter: each wait is uniform in [0, base * 2**n], capped at
-        # max_delay. Set ``respect_retry_after=True`` to prefer a server-
-        # supplied ``exception.retry_after`` over the computed curve.
+        # Full jitter: the wait before retry n is uniform in
+        # [0, min(base_delay * 2**(n-1), max_delay)] — the cap applies to the
+        # ceiling, before sampling. Set ``respect_retry_after=True`` to prefer
+        # a server-supplied ``exception.retry_after`` over the computed curve.
         retry = RetryPolicy(max_attempts=MAX_ATTEMPTS, base_delay=0.05, max_delay=1.0)
 
         class Answered(DomainEvent, Auditable):

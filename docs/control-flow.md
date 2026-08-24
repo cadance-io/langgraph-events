@@ -209,7 +209,7 @@ Position `deadline` strictly tighter than whichever hard cancellation the caller
 
 `RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
 
-The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. That includes [`RetryPolicy`](#retries) backoff: size `max_delay * max_attempts` well under your deadline budget, or a run can overshoot the soft boundary and trip the hard cancellation instead.
+The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. That includes [`RetryPolicy`](#retries) backoff: size `max_delay * (max_attempts - 1)` — the worst-case total backoff — well under your deadline budget, or a run can overshoot the soft boundary and trip the hard cancellation instead.
 
 ### Surfacing the pause inline
 
@@ -280,8 +280,12 @@ class Question(Namespace):
 
         def handle(self) -> Question.Ask.Answered:
             if upstream_rate_limited():
+                # Honored only under respect_retry_after=True; decorative here.
                 raise RateLimitError(retry_after=0.2)
             return Question.Ask.Answered(answer=...)
+
+    class GaveUp(Halted):
+        reason: str = ""
 
 
 @on(HandlerRaised, exception=RateLimitError)
@@ -314,8 +318,12 @@ class Question(Namespace):
 
         def handle(self) -> Question.Ask.Answered:
             if upstream_rate_limited():
+                # Honored only under respect_retry_after=True; decorative here.
                 raise RateLimitError(retry_after=0.2)
             return Question.Ask.Answered(answer=...)
+
+    class GaveUp(Halted):
+        reason: str = ""
 
 
 @on(HandlerRaised, exception=RateLimitError)
@@ -326,12 +334,12 @@ def give_up(event: HandlerRaised) -> Question.GaveUp:
 - `max_attempts` counts the **initial call**: `3` means one call plus two retries.
 - Delay before retry *n* is `base_delay * 2 ** (n - 1)`, capped at `max_delay`. `strategy="constant"` uses `base_delay` as that ceiling on every retry instead of doubling it.
 - `jitter` is orthogonal to `strategy` and applies to whichever ceiling the strategy computes. With `jitter=True` (the default) the wait is sampled uniformly from `[0, ceiling]` — full jitter, against thundering herds. Note this means `strategy="constant", jitter=True` still varies per retry, averaging `base_delay / 2`; pass `jitter=False` for a genuinely flat wait.
-- `on=(...)` narrows which exceptions retry; it must be a subset of `raises=`. Anything declared in `raises=` but excluded from `on=` surfaces on its first raise — that is how a non-transient error stays non-transient.
-- `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve (still capped by `max_delay`, never jittered).
+- `on=(...)` narrows which exceptions retry; each entry must **overlap** `raises=` — either a subclass of a declared raise (`raises=(OSError,)`, `on=(ConnectionResetError,)`) or a superclass of one (`raises=(ConnectionResetError,)`, `on=(OSError,)`). Scope is decided at runtime by `isinstance(exc, on)`, and only what `raises=` already catches ever reaches the policy. Anything declared in `raises=` but outside `on=` surfaces on its first raise — that is how a non-transient error stays non-transient.
+- `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve, clamped to `[0, max_delay]` and never jittered — so a skewed clock or an already-past `Retry-After` retries immediately rather than crashing the run. A non-numeric or `bool` hint is ignored and the computed curve is used.
 - Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). Use `observe="log"` for a `WARNING` instead, or `observe="silent"` for neither.
-- Declaring `retry=` without `raises=`, or an `on=` entry outside `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
+- Declaring `retry=` without `raises=`, or an `on=` entry **disjoint from** every type in `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
 - **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
-- Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts. The backoff is *not* interruptible by `deadline=`, which is only checked between rounds — keep `max_delay * max_attempts` well under your deadline budget.
+- Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts. The backoff is *not* interruptible by `deadline=`, which is only checked between rounds. Keep the worst-case total backoff, `max_delay * (max_attempts - 1)`, well under your deadline budget.
 - Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node. Import this one from `langgraph_events`.
 
 See the [Error Recovery pattern](patterns.md#error-recovery).

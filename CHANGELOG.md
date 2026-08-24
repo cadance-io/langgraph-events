@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Declarative retry with exponential backoff (`RetryPolicy`)** — declare `retry=RetryPolicy(...)`
   next to `raises=`, either as a class attribute on a `Command` or via `retry=` on `@on(...)`, and
-  the framework re-invokes the handler in place with full-jitter exponential backoff. `HandlerRaised`
-  now fires only once the retry budget is spent, so catchers stop counting attempts and re-emitting
-  commands and become pure escalation handlers.
+  the framework re-invokes the handler in place with full-jitter exponential backoff. With a policy
+  declared, `HandlerRaised` fires only once the retry budget is spent, so catchers stop counting
+  attempts and re-emitting commands and become pure escalation handlers. A handler with no `retry=`
+  is unaffected — `HandlerRaised` still fires on its first raise.
 
   ```python
   class Ask(Command):
@@ -29,13 +30,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which exceptions retry and must overlap `raises=`; `respect_retry_after=True` prefers a
   server-supplied `exception.retry_after` (clamped to `[0, max_delay]`, so a skewed clock cannot
   produce a negative wait).
-  Declaring `retry=` without `raises=`, or an `on=` entry outside `raises=`, is a `TypeError` at
-  graph construction — such a policy could never fire.
+
+  Declaring `retry=` without `raises=`, or an `on=` entry disjoint from `raises=`, is a `TypeError`
+  at graph construction — such a policy could never fire. Overlap in either direction is live:
+  `on=(OSError,)` against `raises=(ConnectionResetError,)` retries, because scope is decided at
+  runtime by `isinstance(exc, on)`.
 
   Retries run inside the handler node: they consume no `max_rounds` budget and write no checkpoint
   between attempts. **Retried handlers must be idempotent** — the handler re-runs from the top,
   including any `emit_custom` it fired before raising. The backoff is not interruptible by
   `deadline=`, which is only checked between dispatch rounds.
+
+  `graph.namespaces()` surfaces the policy: a `retry` field on `NamespaceModel.CommandHandler` and
+  `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. Pure
+  additions, so `SCHEMA_VERSION` is unchanged.
 
   Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
 

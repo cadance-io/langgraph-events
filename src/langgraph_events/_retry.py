@@ -4,7 +4,7 @@
 :class:`~langgraph_events._event.Command` (``retry = RetryPolicy(...)``) or via
 ``@on(..., retry=RetryPolicy(...))``.  The framework then re-invokes the handler
 in place when it raises one of its declared ``raises=`` exceptions, waiting
-``delay_for(attempt)`` seconds between tries.  Only the *final* failure surfaces
+``delay_for(attempt, exc)`` seconds between tries.  Only the *final* failure surfaces
 as ``HandlerRaised``, so catchers become pure escalation handlers.
 
 Not to be confused with ``langgraph.types.RetryPolicy``, which is a *node*-level
@@ -48,11 +48,14 @@ class RetryPolicy:
     ``max_attempts`` is the *total* number of calls, not the number of extra
     ones: ``max_attempts=3`` means one initial call plus two retries.
 
-    ``on`` narrows which exceptions retry.  It must be a subset of the
-    handler's ``raises=``; the empty default means "every declared raise".
-    An exception that is declared in ``raises=`` but excluded from ``on``
-    surfaces as ``HandlerRaised`` on its first raise — that is how a
-    non-transient error stays non-transient.
+    ``on`` narrows which exceptions retry.  It must *overlap* the handler's
+    ``raises=`` — in either direction, since scope is decided at runtime by
+    ``isinstance(exc, on)``: ``on=(OSError,)`` against
+    ``raises=(ConnectionResetError,)`` is live.  Only a disjoint entry is
+    rejected.  The empty default means "every declared raise".  An exception
+    that is declared in ``raises=`` but excluded from ``on`` surfaces as
+    ``HandlerRaised`` on its first raise — that is how a non-transient error
+    stays non-transient.
 
     Retried handlers are re-run from the top, so **they must be idempotent**:
     any side effect performed before the raise happens again on every attempt.
@@ -103,8 +106,12 @@ class RetryPolicy:
         first backoff is ``delay_for(1)``.
 
         With ``respect_retry_after`` a server-supplied ``exc.retry_after`` wins
-        over the computed curve and is used verbatim (capped by ``max_delay``,
-        never jittered) — the upstream told us exactly how long to wait.
+        over the computed curve — the upstream told us exactly how long to
+        wait — clamped to ``[0, max_delay]`` and never jittered.  The low
+        clamp keeps a skewed clock or a past ``Retry-After`` date from handing
+        ``time.sleep`` a negative value.  A ``bool`` hint is rejected (it is an
+        ``int`` subclass, and ``retry_after=True`` is never a real delay) and
+        falls through to the computed curve.
         """
         if self.respect_retry_after:
             hint = getattr(exc, "retry_after", None)
