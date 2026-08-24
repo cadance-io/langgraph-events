@@ -14,6 +14,8 @@ from collections.abc import Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 if TYPE_CHECKING:
+    from contextvars import Token
+
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
     from langgraph_events._namespace import NamespaceModel
@@ -23,7 +25,12 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events import _retry
-from langgraph_events._custom_event import _reset_custom_emitters, _set_custom_emitters
+from langgraph_events._custom_event import (
+    _AsyncEmitter,
+    _reset_custom_emitters,
+    _set_custom_emitters,
+    _SyncEmitter,
+)
 from langgraph_events._event import (
     Cancelled,
     Event,
@@ -672,6 +679,27 @@ def make_handler_node(
         deadline = (config or {}).get("configurable", {}).get(_DEADLINE_KEY)
         return matching, inject, deadline
 
+    def _bind_custom_emitters(
+        config: RunnableConfig,
+    ) -> tuple[Token[_SyncEmitter | None], Token[_AsyncEmitter | None]]:
+        """Bind this node call's custom-event emitters to *config*.
+
+        Both dispatch paths bind the same pair; the sync and async node bodies
+        diverge only at the ``_process_events_*`` call, not here.
+        """
+        return _set_custom_emitters(
+            sync_emitter=lambda name, data: dispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+            async_emitter=lambda name, data: adispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+        )
+
     def _finalize(new_events: list[Event]) -> StateDict:
         output: StateDict = {"events": new_events}
         if reds:
@@ -684,18 +712,7 @@ def make_handler_node(
         _check_sync_invocation_of_async(meta)
         matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
-        tokens = _set_custom_emitters(
-            sync_emitter=lambda name, data: dispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-            async_emitter=lambda name, data: adispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-        )
+        tokens = _bind_custom_emitters(config)
         try:
             _process_events_sync(
                 meta,
@@ -714,18 +731,7 @@ def make_handler_node(
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
         matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
-        tokens = _set_custom_emitters(
-            sync_emitter=lambda name, data: dispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-            async_emitter=lambda name, data: adispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-        )
+        tokens = _bind_custom_emitters(config)
         try:
             await _process_events_async(
                 meta,
