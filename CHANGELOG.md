@@ -65,6 +65,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `previously`, so a policy can never become a dataclass field serialized into every checkpoint
     — but the guard cannot tell a policy from a payload field of the same name. Rename the field.
 
+### Fixed
+
+- **Removing a `Command`'s `raises` or `invariants` no longer leaves the old contract enforced.**
+  `@on()` stamped `_raises` and `_invariants` onto the handler function only when the value was
+  non-empty. Because `EventGraph(...)` re-stamps every inline `Command` handler from its class
+  attributes on each build, deleting a declaration between two builds in the same process left the
+  earlier stamp in place: the second graph kept turning the removed exception into `HandlerRaised`
+  instead of letting it propagate, kept evaluating the removed invariant, and kept demanding a
+  catcher for a type nobody declares. Both are now stamped unconditionally, matching `previously`
+  and `retry`. `node_name` stays conditional on purpose — it has no class-level declaration surface,
+  so an unconditional stamp would erase an explicit `@on(node_name=...)` pin rather than refresh it.
+
 ## [0.24.0] - 2026-08-23
 
 ### Added

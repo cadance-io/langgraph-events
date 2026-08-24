@@ -405,6 +405,35 @@ def describe_Command_handle():
                 assert log.has(InvariantViolated)
                 assert not log.has(_InlineInv.Cmd.Done)
 
+            def when_the_declaration_is_removed_between_builds():
+                def it_stops_evaluating_the_predicate():
+                    # Each build must reflect the class's current declaration
+                    # — a stale ``_invariants`` stamp from an earlier build
+                    # must not keep evaluating a removed predicate.
+                    from langgraph_events import Invariant, InvariantViolated
+
+                    class _StaleInv(Invariant):
+                        pass
+
+                    class _StaleInvariants(Namespace):
+                        class Cmd(Command):
+                            invariants: ClassVar = {_StaleInv: lambda log: False}
+
+                            class Done(DomainEvent):
+                                pass
+
+                            def handle(self) -> _StaleInvariants.Cmd.Done:
+                                return _StaleInvariants.Cmd.Done()
+
+                    first = EventGraph([_StaleInvariants.Cmd])
+                    assert first.invoke(_StaleInvariants.Cmd()).has(InvariantViolated)
+                    del _StaleInvariants.Cmd.invariants
+                    log = EventGraph([_StaleInvariants.Cmd]).invoke(
+                        _StaleInvariants.Cmd()
+                    )
+                    assert not log.has(InvariantViolated)
+                    assert log.has(_StaleInvariants.Cmd.Done)
+
         def when_invariants_inherited_from_a_parent_command():
             def it_evaluates_the_inherited_predicate():
                 from langgraph_events import Invariant, InvariantViolated
@@ -457,6 +486,37 @@ def describe_Command_handle():
                 graph = EventGraph([_InlineRaises.Cmd, catch])
                 log = graph.invoke(_InlineRaises.Cmd())
                 assert log.has(HandlerRaised)
+
+            def when_the_declaration_is_removed_between_builds():
+                def it_stops_routing_the_exception_to_HandlerRaised():
+                    # Each build must reflect the class's current declaration
+                    # — a stale ``_raises`` stamp from an earlier build must
+                    # not keep catching an exception nobody declares.
+                    from langgraph_events import HandlerRaised
+
+                    class _StaleBoomError(Exception):
+                        pass
+
+                    class _StaleRaises(Namespace):
+                        class Cmd(Command):
+                            raises: ClassVar = (_StaleBoomError,)
+
+                            class Done(DomainEvent):
+                                pass
+
+                            def handle(self) -> _StaleRaises.Cmd.Done:
+                                raise _StaleBoomError("nope")
+
+                    @on(HandlerRaised, exception=_StaleBoomError)
+                    def catch(event: HandlerRaised) -> None:
+                        return None
+
+                    first = EventGraph([_StaleRaises.Cmd, catch])
+                    assert first.invoke(_StaleRaises.Cmd()).has(HandlerRaised)
+                    del _StaleRaises.Cmd.raises
+                    second = EventGraph([_StaleRaises.Cmd, catch])
+                    with pytest.raises(_StaleBoomError, match="nope"):
+                        second.invoke(_StaleRaises.Cmd())
 
         def when_raises_is_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():
