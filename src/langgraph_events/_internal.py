@@ -14,6 +14,8 @@ from collections.abc import Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 if TYPE_CHECKING:
+    from contextvars import Token
+
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
     from langgraph_events._namespace import NamespaceModel
@@ -23,7 +25,12 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events import _retry
-from langgraph_events._custom_event import _reset_custom_emitters, _set_custom_emitters
+from langgraph_events._custom_event import (
+    _AsyncEmitter,
+    _reset_custom_emitters,
+    _set_custom_emitters,
+    _SyncEmitter,
+)
 from langgraph_events._event import (
     Cancelled,
     Event,
@@ -352,40 +359,112 @@ def _inject_fields(
 
 
 def _make_handler_raised(
-    meta: HandlerMeta, event: Event, exc: Exception
+    meta: HandlerMeta,
+    event: Event,
+    exc: Exception,
+    *,
+    abandoned_for_deadline: bool = False,
 ) -> HandlerRaised:
-    """Build a ``HandlerRaised`` event for a caught declared exception."""
+    """Build a ``HandlerRaised`` event for a caught declared exception.
+
+    The traceback is kept: this is the terminal failure, the one people debug
+    from.  Its retry breadcrumbs drop theirs — see :func:`_detach_traceback`.
+    """
     return HandlerRaised(
         handler=meta.name,
         source_event=event,
         exception=exc,
+        abandoned_for_deadline=abandoned_for_deadline,
     )
 
 
-def _next_delay(
+def _detach_traceback(exc: BaseException) -> None:
+    """Drop, in place, every frame *exc* keeps reachable.
+
+    A stored exception's ``__traceback__`` pins the failing handler's frame —
+    and every local on it — plus the dispatch frames above it, for as long as
+    the event holding it lives.  Since the ``events`` channel is append-only,
+    that is the whole run.
+
+    The instance itself must survive: ``@on(HandlerRetried, exception=X)``
+    isinstance-matches it and field injection hands it to the handler typed.
+    So the frames go and the exception stays.
+
+    The chain is walked because ``raise Wrapped(...) from upstream`` (and the
+    implicit ``__context__`` an ``except`` block sets) leaves the *inner*
+    exception's traceback pinning the very same handler frame — clearing only
+    the outermost one would free nothing.  Group members are walked for the
+    same reason, and are reachable through neither link: an
+    ``asyncio.TaskGroup`` failure pins its frames through ``.exceptions``.
+    """
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        current.__traceback__ = None
+        pending.extend(
+            linked
+            for linked in (current.__cause__, current.__context__)
+            if linked is not None
+        )
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+
+
+def _next_delay_or_give_up(
     meta: HandlerMeta,
     event: Event,
     exc: Exception,
     attempt: int,
     new_events: list[Event],
+    deadline: float | None,
 ) -> float | None:
     """Seconds to wait before re-invoking *meta*, or ``None`` to give up.
 
-    ``None`` means the caller must emit ``HandlerRaised`` — no policy, the
-    budget is spent, or this exception is out of the policy's ``on=`` scope.
-    Otherwise the attempt is recorded per ``policy.observe`` (append a
-    ``HandlerRetried``, log a warning, or stay quiet) and the delay returned.
+    ``None`` means the retry loop is over and the terminal ``HandlerRaised``
+    has already been appended to *new_events* — no policy, the budget is
+    spent, this exception is out of the policy's ``on=`` scope, or the next
+    backoff would cross *deadline*.  Otherwise the attempt is recorded per
+    ``policy.observe`` (append a ``HandlerRetried``, log a warning, or stay
+    quiet) and the delay returned.
+
+    *deadline* is the run's soft-timeout instant on ``time.monotonic()``'s
+    clock, or ``None`` when the caller passed no ``deadline=``.  A sleep that
+    would land on or past it is refused outright rather than clamped: the
+    router only checks the deadline *between* rounds, so an in-flight backoff
+    cannot be preempted, and burning what is left of the budget on an attempt
+    that almost certainly cannot finish either just delays the pause.  Giving
+    up here lets the run reach the router and emit ``RunPaused`` promptly.
+    The raise is tagged ``abandoned_for_deadline=True`` so it stays
+    distinguishable from an exhausted attempt budget.
 
     Shared by both dispatch paths; only the sleep call itself differs between
     them.
     """
     policy = meta.retry
-    if policy is None or attempt >= policy.max_attempts:
-        return None
-    if not policy.retries(exc, meta.raises):
+    if (
+        policy is None
+        or attempt >= policy.max_attempts
+        or not policy.retries(exc, meta.raises)
+    ):
+        new_events.append(_make_handler_raised(meta, event, exc))
         return None
     delay = policy.delay_for(attempt, exc)
+    if deadline is not None and time.monotonic() + delay >= deadline:
+        new_events.append(
+            _make_handler_raised(meta, event, exc, abandoned_for_deadline=True)
+        )
+        return None
     if policy.observe == "emit":
+        # Why the breadcrumb must not carry the attempt's frames is in
+        # _detach_traceback. Mutating the caller's exception is safe *here*
+        # because the next attempt re-raises into a fresh traceback, so the
+        # terminal HandlerRaised still gets one even when a handler re-raises
+        # a single cached instance.
+        _detach_traceback(exc)
         new_events.append(
             HandlerRetried(
                 handler=meta.name,
@@ -533,6 +612,7 @@ def _process_events_sync(
     new_events: list[Event],
     lg_interrupt: Any,
     return_contract: Any = None,
+    deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the sync dispatch path."""
     for event in matching:
@@ -546,9 +626,10 @@ def _process_events_sync(
             try:
                 result = _invoke_sync_path(meta, event, call_inject)
             except meta.raises as exc:
-                delay = _next_delay(meta, event, exc, attempt, new_events)
+                delay = _next_delay_or_give_up(
+                    meta, event, exc, attempt, new_events, deadline
+                )
                 if delay is None:
-                    new_events.append(_make_handler_raised(meta, event, exc))
                     break
                 _retry._sleep(delay)
                 attempt += 1
@@ -567,6 +648,7 @@ async def _process_events_async(
     new_events: list[Event],
     lg_interrupt: Any,
     return_contract: Any = None,
+    deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the async dispatch path."""
     for event in matching:
@@ -580,9 +662,10 @@ async def _process_events_async(
             try:
                 result = await _invoke_async_path(meta, event, call_inject)
             except meta.raises as exc:
-                delay = _next_delay(meta, event, exc, attempt, new_events)
+                delay = _next_delay_or_give_up(
+                    meta, event, exc, attempt, new_events, deadline
+                )
                 if delay is None:
-                    new_events.append(_make_handler_raised(meta, event, exc))
                     break
                 await _retry._asleep(delay)
                 attempt += 1
@@ -626,7 +709,7 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[Event], dict[str, Any]]:
+    ) -> tuple[list[Event], dict[str, Any], float | None]:
         matching = [e for e in state["_pending"] if meta.matches(e)]
         inject = _build_inject(
             meta,
@@ -637,7 +720,31 @@ def make_handler_node(
             svcs_by_name,
             model_provider=model_provider,
         )
-        return matching, inject
+        # Read once per node call, not per event: the retry loop only needs
+        # it on the failure path, and the no-deadline case stays a ``None``.
+        deadline = (config or {}).get("configurable", {}).get(_DEADLINE_KEY)
+        return matching, inject, deadline
+
+    def _bind_custom_emitters(
+        config: RunnableConfig,
+    ) -> tuple[Token[_SyncEmitter | None], Token[_AsyncEmitter | None]]:
+        """Bind this node call's custom-event emitters to *config*.
+
+        Both dispatch paths bind the same pair; the sync and async node bodies
+        diverge only at the ``_process_events_*`` call, not here.
+        """
+        return _set_custom_emitters(
+            sync_emitter=lambda name, data: dispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+            async_emitter=lambda name, data: adispatch_custom_event(
+                name,
+                data,
+                config=config,
+            ),
+        )
 
     def _finalize(new_events: list[Event]) -> StateDict:
         output: StateDict = {"events": new_events}
@@ -649,20 +756,9 @@ def make_handler_node(
         # Precondition check — outside the raises= catch boundary so a user
         # with raises=RuntimeError can't swallow this framework diagnostic.
         _check_sync_invocation_of_async(meta)
-        matching, inject = _prepare(state, config)
+        matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
-        tokens = _set_custom_emitters(
-            sync_emitter=lambda name, data: dispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-            async_emitter=lambda name, data: adispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-        )
+        tokens = _bind_custom_emitters(config)
         try:
             _process_events_sync(
                 meta,
@@ -672,26 +768,16 @@ def make_handler_node(
                 new_events,
                 lg_interrupt,
                 return_contract,
+                deadline,
             )
         finally:
             _reset_custom_emitters(tokens)
         return _finalize(new_events)
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
-        matching, inject = _prepare(state, config)
+        matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
-        tokens = _set_custom_emitters(
-            sync_emitter=lambda name, data: dispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-            async_emitter=lambda name, data: adispatch_custom_event(
-                name,
-                data,
-                config=config,
-            ),
-        )
+        tokens = _bind_custom_emitters(config)
         try:
             await _process_events_async(
                 meta,
@@ -701,6 +787,7 @@ def make_handler_node(
                 new_events,
                 lg_interrupt,
                 return_contract,
+                deadline,
             )
         except asyncio.CancelledError:
             return _finalize([Cancelled()])

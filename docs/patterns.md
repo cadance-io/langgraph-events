@@ -432,7 +432,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
 
 - `Question.Ask` declares `raises=(RateLimitError,)`; its inline `handle()` may raise.
 - `Ask` also declares `retry=RetryPolicy(...)`, so the framework re-invokes `handle()` in place with full-jitter exponential backoff — each wait is announced as a [`HandlerRetried`](control-flow.md#retries), the finely dotted cyan `(retry)` arrow below. That is why `Ask` carries two framework-signal arrows in the diagram: `(retry)` for every absorbed failure, `(raises)` for the one that escalates. `observe="log"`/`"silent"` would suppress the event and its arrow alike.
-- Only once the budget is spent does `HandlerRaised` reach `give_up`, which escalates to `Question.GaveUp` ([`Halted`](concepts.md#system-events) subtype). The catcher counts nothing and schedules nothing.
+- Only once the budget is spent — or the run's `deadline=` [cuts the backoff short](control-flow.md#retries) — does `HandlerRaised` reach `give_up`, which escalates to `Question.GaveUp` ([`Halted`](concepts.md#system-events) subtype). The catcher counts nothing and schedules nothing.
 
 <!-- autogen:start:error_recovery -->
 === "Diagram"

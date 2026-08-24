@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
+import traceback
+import weakref
 from typing import ClassVar
 
 import pytest
@@ -31,6 +34,24 @@ from langgraph_events import _retry as _retry_mod
 
 class FlakyError(Exception):
     """A transient failure that a retry policy should absorb."""
+
+
+class UpstreamError(Exception):
+    """The error a handler wraps with ``raise FlakyError(...) from upstream``."""
+
+
+class Payload:
+    """A weak-referenceable handler local, sized to make retention visible."""
+
+    __slots__ = ("__weakref__", "blob")
+
+    def __init__(self) -> None:
+        self.blob = bytes(5_000_000)
+
+
+def _frame_names(exc: BaseException) -> list[str]:
+    """The function names of every frame *exc*'s traceback keeps reachable."""
+    return [frame.name for frame in traceback.extract_tb(exc.__traceback__)]
 
 
 class RateLimitedError(FlakyError):
@@ -306,6 +327,35 @@ def echo_failure(event: HandlerRaised) -> Recovered:
 def catch_any(event: HandlerRaised) -> Recovered:
     """Universal catcher — for graphs declaring more than one raise."""
     return Recovered(reason=str(event.exception))
+
+
+def _budget() -> float:
+    """A deadline 30s from now, on the clock the router reads."""
+    return time.monotonic() + 30.0
+
+
+@pytest.fixture
+def overshooting():
+    """A handler whose 60s backoff cannot fit inside a 30s deadline budget.
+
+    Returns ``(graph, attempts)``. The policy still has four retries left
+    after the first failure, so any give-up observed here is the deadline's
+    doing and not an exhausted budget.
+    """
+    attempts = _Attempts(succeed_on=99)
+
+    @on(
+        Item,
+        raises=FlakyError,
+        retry=RetryPolicy(
+            max_attempts=5, base_delay=60.0, max_delay=60.0, jitter=False
+        ),
+    )
+    def overshoot(event: Item) -> Handled:
+        attempts.tick()
+        raise FlakyError("always")
+
+    return EventGraph([overshoot, gave_up]), attempts
 
 
 @pytest.fixture
@@ -682,6 +732,63 @@ def describe_retry_scope():
             assert log.latest(Handled) == Handled(n=99)
             assert not log.has(MaxRoundsExceeded)
 
+    def describe_deadline():
+        def when_the_next_backoff_would_cross_it():
+            def it_gives_up_before_sleeping(slept, overshooting):
+                # A 60s backoff entered with 30s of budget left would
+                # overshoot the soft boundary, so the policy stops here
+                # rather than starting a sleep the router cannot preempt.
+                graph, attempts = overshooting
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                assert log.count(HandlerRaised) == 1
+
+            def it_marks_the_raise_abandoned_for_deadline(slept, overshooting):
+                graph, _ = overshooting
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert log.latest(HandlerRaised).abandoned_for_deadline is True
+
+            async def it_gives_up_before_awaiting_a_sleep(slept, overshooting):
+                # ``ainvoke`` routes through ``_process_events_async``, whose
+                # backoff is a separate ``await`` — pin the same give-up there.
+                graph, attempts = overshooting
+                log = await graph.ainvoke(Item(n=1), deadline=_budget())
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                assert log.latest(HandlerRaised).abandoned_for_deadline is True
+
+        def when_the_next_backoff_fits_inside_it():
+            def it_retries_the_whole_budget(slept):
+                attempts = _Attempts(succeed_on=99)
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    raise FlakyError("always")
+
+                graph = EventGraph([handler, gave_up])
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert attempts.calls == 3
+                assert slept == [0.1, 0.2]
+                assert log.latest(HandlerRaised).abandoned_for_deadline is False
+
+        def when_no_deadline_is_set():
+            def it_leaves_the_raise_unmarked(slept, overshooting):
+                # Same policy, no ``deadline=``: the 60s backoff is slept and
+                # the budget runs out the ordinary way.
+                graph, attempts = overshooting
+                log = graph.invoke(Item(n=1))
+                assert attempts.calls == 5
+                assert slept == [60.0] * 4
+                assert log.latest(HandlerRaised).abandoned_for_deadline is False
+
     def describe_invariants():
         def it_evaluates_the_predicate_once_per_dispatch(slept):
             # ``_check_invariants`` sits outside the attempt loop: the pre and
@@ -806,6 +913,151 @@ def describe_handler_retried():
 
             EventGraph([handler, watch, gave_up]).invoke(Item(n=1))
             assert noticed == [1, 2]
+
+
+def describe_traceback_retention():
+    def describe_breadcrumbs():
+        def it_detaches_the_traceback(slept):
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                raise FlakyError("transient")
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            breadcrumbs = log.filter(HandlerRetried)
+            assert [b.attempt for b in breadcrumbs] == [1, 2]
+            assert [b.exception.__traceback__ for b in breadcrumbs] == [None, None]
+            assert [str(b.exception) for b in breadcrumbs] == ["transient"] * 2
+
+        def it_frees_the_failing_handler_frame(slept):
+            # A detached traceback drops the only reference to the failed
+            # attempt's frame, so its locals become collectable. The final
+            # attempt stays pinned — that traceback lives on HandlerRaised.
+            refs: list[weakref.ref[Payload]] = []
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                payload = Payload()
+                refs.append(weakref.ref(payload))
+                raise FlakyError("transient")
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            gc.collect()
+            assert log.has(HandlerRaised)  # the run's events are still reachable
+            assert [ref() is not None for ref in refs] == [False, False, True]
+
+        def it_detaches_chained_causes(slept):
+            # ``raise X from upstream`` leaves the upstream exception's own
+            # traceback pinning the same handler frame, so clearing only the
+            # outermost __traceback__ would free nothing.
+            refs: list[weakref.ref[Payload]] = []
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                payload = Payload()
+                refs.append(weakref.ref(payload))
+                try:
+                    raise UpstreamError("upstream")
+                except UpstreamError as upstream:
+                    raise FlakyError("transient") from upstream
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            causes = [b.exception.__cause__ for b in log.filter(HandlerRetried)]
+            assert [type(c) for c in causes] == [UpstreamError, UpstreamError]
+            assert [c.__traceback__ for c in causes] == [None, None]
+            gc.collect()
+            assert [ref() is not None for ref in refs] == [False, False, True]
+
+        def it_detaches_grouped_exceptions(slept):
+            # A group's members are reachable through neither __cause__ nor
+            # __context__ — an ``asyncio.TaskGroup`` failure pins its frames
+            # through ``.exceptions`` alone.
+            refs: list[weakref.ref[Payload]] = []
+
+            @on(
+                Item,
+                raises=ExceptionGroup,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                payload = Payload()
+                refs.append(weakref.ref(payload))
+                inner = UpstreamError("upstream")
+                try:
+                    raise inner
+                except UpstreamError:
+                    pass
+                raise ExceptionGroup("group", [inner])
+
+            @on(HandlerRaised, exception=ExceptionGroup)
+            def catch_group(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            log = EventGraph([handler, catch_group]).invoke(Item(n=1))
+            members = [b.exception.exceptions[0] for b in log.filter(HandlerRetried)]
+            assert [m.__traceback__ for m in members] == [None, None]
+            gc.collect()
+            assert [ref() is not None for ref in refs] == [False, False, True]
+
+    def describe_terminal_raise():
+        def it_keeps_the_traceback(slept):
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=2, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                raise FlakyError("transient")
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            raised = log.latest(HandlerRaised)
+            assert _frame_names(raised.exception)[-1] == "handler"
+
+        def it_keeps_the_traceback_of_a_reraised_instance(slept):
+            # A handler that re-raises one cached instance hands the framework
+            # the same object for every breadcrumb and for the terminal raise.
+            # Detaching the breadcrumb must not strip the terminal traceback.
+            cached = FlakyError("cached")
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                raise cached
+
+            log = EventGraph([handler, gave_up]).invoke(Item(n=1))
+            raised = log.latest(HandlerRaised)
+            assert raised.exception is cached
+            assert _frame_names(raised.exception)[-1] == "handler"
+
+    def describe_async_dispatch():
+        async def it_detaches_the_breadcrumb_traceback(slept):
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            async def handler(event: Item) -> Handled:
+                raise FlakyError("transient")
+
+            log = await EventGraph([handler, gave_up]).ainvoke(Item(n=1))
+            breadcrumbs = log.filter(HandlerRetried)
+            assert [b.exception.__traceback__ for b in breadcrumbs] == [None, None]
+            raised = log.latest(HandlerRaised)
+            assert _frame_names(raised.exception)[-1] == "handler"
 
 
 def describe_namespace_model():
