@@ -107,6 +107,15 @@ class Story(Namespace):
             return Story.Approve.Approved(note=self.note)
 
 
+# Fixture for the field-shape diagnostics. ``reason`` is required and is the
+# only field, so one class covers both mismatch directions: a payload written
+# before the field existed omits it, and a payload written while a since-
+# dropped field existed carries a key the live ``__init__`` rejects.
+class FieldShape(Namespace):
+    class Persisted(DomainEvent):
+        reason: str
+
+
 # Fixtures for the decorator-driven migration tests. Module-level so their
 # qualnames resolve through ``importlib.import_module`` + dotted ``getattr``
 # at serde-construction validation time. Function-local classes acquire
@@ -600,6 +609,68 @@ def describe_NamespaceAwareSerde():
 
                 with pytest.raises(ValueError, match=r"GhostClass|Persona\.Approve"):
                     serde.loads_typed((kind, tampered))
+
+    def describe_revival_of_a_changed_class():
+        # Sibling of the missing-class case above. The identity still
+        # resolves, but the stored kwargs no longer match the live
+        # ``__init__``, so the frozen dataclass raises ``TypeError``.
+
+        def when_a_field_was_removed_from_the_class():
+            def it_names_the_identity_and_the_rejected_field():
+                serde = NamespaceAwareSerde()
+
+                # An extra stored key reaches no absorber — ``__init__``
+                # rejects every keyword the class does not declare.
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept", "note": "dropped"},
+                )
+
+                with pytest.raises(ValueError) as excinfo:
+                    serde.loads_typed(payload)
+
+                message = str(excinfo.value)
+                assert "FieldShape.Persisted" in message
+                assert "TypeError" in message
+                assert "note" in message
+                assert "fields may have changed" in message
+
+        def when_a_required_field_was_added_to_the_class():
+            def without_a_migration():
+                def it_names_the_identity_and_the_missing_field():
+                    serde = NamespaceAwareSerde()
+
+                    # The reverse direction: a missing key CAN reach an
+                    # absorber, but only a class default or an ``AddField``
+                    # supplies one. A required field has neither.
+                    payload = synthesize_legacy_payload(
+                        FieldShape.__module__, "FieldShape.Persisted", {}
+                    )
+
+                    with pytest.raises(ValueError) as excinfo:
+                        serde.loads_typed(payload)
+
+                    message = str(excinfo.value)
+                    assert "FieldShape.Persisted" in message
+                    assert "TypeError" in message
+                    assert "reason" in message
+                    assert "fields may have changed" in message
+
+        def when_the_stored_fields_still_match():
+            def it_revives_the_event():
+                serde = NamespaceAwareSerde()
+
+                revived = serde.loads_typed(
+                    synthesize_legacy_payload(
+                        FieldShape.__module__,
+                        "FieldShape.Persisted",
+                        {"reason": "kept"},
+                    )
+                )
+
+                assert isinstance(revived, FieldShape.Persisted)
+                assert revived.reason == "kept"
 
     def describe_encode_fallback():
         # ``NamespaceAwareSerde._default`` is a strict superset of upstream's
