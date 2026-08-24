@@ -313,9 +313,9 @@ def catch_any(event: HandlerRaised) -> Recovered:
     return Recovered(reason=str(event.exception))
 
 
-def _budget(seconds: float = 30.0) -> float:
-    """A deadline *seconds* from now, on the clock the router reads."""
-    return time.monotonic() + seconds
+def _budget() -> float:
+    """A deadline 30s from now, on the clock the router reads."""
+    return time.monotonic() + 30.0
 
 
 @pytest.fixture
