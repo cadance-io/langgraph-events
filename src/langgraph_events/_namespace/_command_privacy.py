@@ -3,7 +3,7 @@
 Two symmetric rules, applied at ``EventGraph`` construction:
 
 - A ``Command.handle()`` may only emit ``DomainEvent``s nested under that
-  same Command (or under a parent Command, for inheritance).
+  same Command.
 - An ``@on(...)`` reactor must not emit a ``DomainEvent`` nested inside any
   Command — those are private to their owning Command's ``handle()``.
 
@@ -61,8 +61,9 @@ def enforce_command_privacy(
             event_owner: type[Command] | None = getattr(event_cls, "__command__", None)
             if owner is not None:
                 # Inline Command.handle: must emit only events nested under
-                # itself (or under a parent Command, for inheritance).
-                if event_owner is None or not issubclass(owner, event_owner):
+                # itself. A concrete Command may not be subclassed, so the
+                # owning Command is always exactly one class.
+                if event_owner is not owner:
                     raise CommandPrivacyError(
                         _unnested_outcome_msg(owner, event_cls, event_owner)
                     )

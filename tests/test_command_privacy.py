@@ -3,7 +3,7 @@
 Two symmetric rules:
 
 - A ``Command.handle()`` may only emit ``DomainEvent``s nested under that same
-  Command (or a parent Command, for inheritance).
+  Command.
 - An ``@on(...)`` reactor may only emit namespace-level ``DomainEvent``s —
   Command-private outcomes are off-limits.
 """
@@ -115,39 +115,6 @@ class _PrivPause(Namespace):
             return Interrupted(reason="waiting")
 
 
-class _PrivInherit(Namespace):
-    """Child Command inherits its parent's private outcome (legal)."""
-
-    class Parent(Command):
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> _PrivInherit.Parent.Done:
-            return _PrivInherit.Parent.Done()
-
-    class Child(Parent):
-        def handle(self) -> _PrivInherit.Parent.Done:
-            return _PrivInherit.Parent.Done()
-
-
-class _PrivInheritAdd(Namespace):
-    """Child Command adds its own private outcome alongside the parent's."""
-
-    class Parent(Command):
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> _PrivInheritAdd.Parent.Done:
-            return _PrivInheritAdd.Parent.Done()
-
-    class Child(Parent):
-        class Other(DomainEvent):
-            pass
-
-        def handle(self) -> _PrivInheritAdd.Child.Other:
-            return _PrivInheritAdd.Child.Other()
-
-
 class _PrivLeaky(Namespace):
     """Reactor that emits a Command-private event from outside its owner."""
 
@@ -209,17 +176,6 @@ def describe_command_privacy():
         def when_handle_returns_Interrupted():
             def it_builds_the_graph():
                 EventGraph([_PrivPause.Wait])  # no raise
-
-        def when_child_command_handle_returns_a_private_event_of_its_parent():
-            def it_builds_the_graph():
-                EventGraph([_PrivInherit.Child])  # no raise
-
-        def when_child_command_adds_a_new_outcome():
-            def it_admits_the_new_outcome():
-                EventGraph([_PrivInheritAdd.Child])  # no raise
-
-            def it_synthesises_a_fresh_outcomes_alias():
-                assert _PrivInheritAdd.Child.Outcomes is _PrivInheritAdd.Child.Other
 
     def describe_reactor():
         def when_reactor_returns_a_command_private_event():

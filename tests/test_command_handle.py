@@ -282,24 +282,6 @@ class Vault2(Namespace):
             return _VaultPause()
 
 
-# Parent/Child pair: ``previously`` is a historic node-identity claim and must
-# NOT be inherited (contrast with ``invariants``/``raises``, which are
-# behavioral contracts and do inherit).
-class _Lineage(Namespace):
-    class Parent(Command):
-        previously: ClassVar = ("legacy_save",)
-
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> _Lineage.Parent.Done:
-            return _Lineage.Parent.Done()
-
-    class Child(Parent):
-        def handle(self) -> _Lineage.Parent.Done:
-            return _Lineage.Parent.Done()
-
-
 def describe_Command_handle():
 
     def describe_class_creation():
@@ -432,32 +414,6 @@ def describe_Command_handle():
                     )
                     assert not log.has(InvariantViolated)
                     assert log.has(_StaleInvariants.Cmd.Done)
-
-        def when_invariants_inherited_from_a_parent_command():
-            def it_evaluates_the_inherited_predicate():
-                class _BlockedInheritedInv(Invariant):
-                    pass
-
-                class _InlineInherit(Namespace):
-                    class Parent(Command):
-                        invariants: ClassVar = {
-                            _BlockedInheritedInv: lambda log: False,
-                        }
-
-                        class Done(DomainEvent):
-                            pass
-
-                        def handle(self) -> _InlineInherit.Parent.Done:
-                            return _InlineInherit.Parent.Done()
-
-                    class Child(Parent):
-                        def handle(self) -> _InlineInherit.Parent.Done:
-                            return _InlineInherit.Parent.Done()
-
-                graph = EventGraph([_InlineInherit.Child])
-                log = graph.invoke(_InlineInherit.Child())
-                assert log.has(InvariantViolated)
-                assert not log.has(_InlineInherit.Parent.Done)
 
         def when_raises_set_as_class_attribute():
             def it_routes_the_exception_to_HandlerRaised():
@@ -806,19 +762,6 @@ def describe_Command_handle():
 
                             def handle(self) -> None:
                                 return None
-
-        def when_a_parent_command_declares_previously():
-            # A historic node name belongs to exactly one class. Were the
-            # attribute read through the MRO, Child would claim Parent's
-            # checkpoints — and registering both would trip the
-            # duplicate-alias build error for code the user never wrote.
-            def it_is_not_inherited_by_a_subclass():
-                metas = EventGraph([_Lineage.Parent, _Lineage.Child])._handler_metas
-                aliases = {m.node_name: m.previous_names for m in metas}
-                assert aliases == {
-                    "_Lineage.Parent": ("legacy_save",),
-                    "_Lineage.Child": (),
-                }
 
     def describe_EventGraph_registration():
 

@@ -237,36 +237,6 @@ class QuietRetry(Namespace):
             return QuietRetry.Cmd.Done()
 
 
-class InheritedRetry(Namespace):
-    """A child Command inheriting ``raises``/``retry`` through the MRO."""
-
-    class Parent(Command):
-        raises: ClassVar = (FlakyError,)
-        retry: ClassVar = RetryPolicy(max_attempts=2, base_delay=0.4, jitter=False)
-
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> InheritedRetry.Parent.Done:
-            return InheritedRetry.Parent.Done()
-
-    class Child(Parent):
-        def handle(self) -> InheritedRetry.Parent.Done:
-            if not _INLINE.tick():
-                raise FlakyError("transient")
-            return InheritedRetry.Parent.Done()
-
-    class Overriding(Parent):
-        """Replaces the policy it would otherwise inherit from ``Parent``."""
-
-        retry: ClassVar = RetryPolicy(max_attempts=2, base_delay=0.05, jitter=False)
-
-        def handle(self) -> InheritedRetry.Parent.Done:
-            if not _INLINE.tick():
-                raise FlakyError("transient")
-            return InheritedRetry.Parent.Done()
-
-
 @pytest.fixture
 def inline_attempts():
     """Reset the counter the module-level inline-command scenarios share.
@@ -629,27 +599,6 @@ def describe_retry():
                 assert log.has(DeclaredRetry.Cmd.Done)
                 assert attempts.calls == 3
                 assert slept == [0.1, 0.2]
-
-        def when_inherited_from_a_parent_command():
-            def it_applies_the_inherited_policy(slept, inline_attempts):
-                inline_attempts.succeed_on = 2
-
-                log = EventGraph([InheritedRetry.Child, gave_up]).invoke(
-                    InheritedRetry.Child()
-                )
-                assert log.has(InheritedRetry.Parent.Done)
-                assert slept == [0.4]
-
-        def when_a_child_overrides_the_inherited_policy():
-            def it_uses_the_child_policy(slept, inline_attempts):
-                inline_attempts.succeed_on = 2
-
-                log = EventGraph([InheritedRetry.Overriding, gave_up]).invoke(
-                    InheritedRetry.Overriding()
-                )
-                assert log.has(InheritedRetry.Parent.Done)
-                # Parent declares base_delay=0.4; the child's own policy wins.
-                assert slept == [0.05]
 
         def when_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():
