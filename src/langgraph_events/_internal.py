@@ -452,12 +452,11 @@ def _next_delay_or_give_up(
         )
         return None
     if policy.observe == "emit":
-        # The breadcrumb outlives the attempt, so it must not carry the
-        # attempt's frames: max_attempts copies of a handler's locals would
-        # otherwise be retained for the rest of the run. Safe to mutate here
+        # Why the breadcrumb must not carry the attempt's frames is in
+        # _detach_traceback. Mutating the caller's exception is safe *here*
         # because the next attempt re-raises into a fresh traceback, so the
         # terminal HandlerRaised still gets one even when a handler re-raises
-        # a single cached exception instance.
+        # a single cached instance.
         _detach_traceback(exc)
         new_events.append(
             HandlerRetried(

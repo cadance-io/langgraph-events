@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import logging
 import time
+import traceback
 import weakref
 from typing import ClassVar
 
@@ -50,12 +51,7 @@ class Payload:
 
 def _frame_names(exc: BaseException) -> list[str]:
     """The function names of every frame *exc*'s traceback keeps reachable."""
-    names = []
-    tb = exc.__traceback__
-    while tb is not None:
-        names.append(tb.tb_frame.f_code.co_name)
-        tb = tb.tb_next
-    return names
+    return [frame.name for frame in traceback.extract_tb(exc.__traceback__)]
 
 
 class RateLimitedError(FlakyError):
