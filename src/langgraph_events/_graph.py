@@ -663,6 +663,9 @@ def _expand_command_handlers(
                 )
             cmd_raises = getattr(h, "raises", ())
             cmd_invariants = getattr(h, "invariants", None)
+            # MRO lookup, like raises/invariants: a retry policy is
+            # inheritable *behavior*, unlike ``previously`` below.
+            cmd_retry = getattr(h, "retry", None)
             # Own-class read on purpose: ``previously`` is a historic *node
             # identity* claim, not inheritable behavior like raises/invariants
             # — a subclass must not capture its parent's checkpoints (nor trip
@@ -676,6 +679,7 @@ def _expand_command_handlers(
                 raises=cmd_raises,
                 invariants=cmd_invariants,
                 previously=cmd_previously,
+                retry=cmd_retry,
             )(fn)
             fn._inline_command = h
             expanded.append(fn)
@@ -824,8 +828,7 @@ class EventGraph:
             )
 
         enforce_command_privacy(self._handler_metas, self._return_info)
-        self._verify_raises_coverage()
-        self._verify_invariants_coverage()
+        self._verify_error_handling()
 
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.
@@ -976,6 +979,17 @@ class EventGraph:
 
         return self._compiled_graph
 
+    def _verify_error_handling(self) -> None:
+        """Run the construction-time error-handling gates, in dependency order.
+
+        ``retry=`` is validated against ``raises=``, so coverage is checked
+        first and the whole group is kept together here rather than inline in
+        ``__init__``.
+        """
+        self._verify_raises_coverage()
+        self._verify_retry_policies()
+        self._verify_invariants_coverage()
+
     def _verify_raises_coverage(self) -> None:
         """Ensure every declared ``raises=`` entry has a matching catcher.
 
@@ -1029,6 +1043,44 @@ class EventGraph:
                         f"type from raises=. Note: catchers with non-exception "
                         f"field matchers (e.g. source_event=SomeType) do not "
                         f"count toward coverage."
+                    )
+
+    def _verify_retry_policies(self) -> None:
+        """Ensure every declared ``retry=`` policy can actually fire.
+
+        A ``RetryPolicy`` only ever sees exceptions the framework catches, and
+        the framework only catches what ``raises=`` declares. So two shapes are
+        dead on arrival and are rejected at construction rather than silently
+        doing nothing at runtime:
+
+        - ``retry=`` with an empty ``raises=`` — nothing is ever caught.
+        - an ``on=`` entry absent from ``raises=`` — that exception propagates
+          out of the handler and crashes the run before the policy is consulted.
+
+        Raises ``TypeError``.
+        """
+        for meta in self._handler_metas:
+            policy = meta.retry
+            if policy is None:
+                continue
+            is_inline = getattr(meta.fn, "_inline_command", None) is not None
+            claimant = meta.node_name if is_inline else meta.name
+            if not meta.raises:
+                raise TypeError(
+                    f"Handler {claimant!r} declares retry= but no raises=. A "
+                    f"retry policy only sees exceptions the framework catches; "
+                    f"add raises=(YourError,) or drop the policy."
+                )
+            for exc_type in policy.on:
+                if not issubclass(exc_type, meta.raises):
+                    declared = ", ".join(t.__name__ for t in meta.raises)
+                    raise TypeError(
+                        f"Handler {claimant!r} declares "
+                        f"retry=RetryPolicy(on={exc_type.__name__}), but "
+                        f"{exc_type.__name__} is not covered by "
+                        f"raises=({declared}). An exception outside raises= is "
+                        f"never caught, so the policy can never retry it — add "
+                        f"it to raises= or remove it from on=."
                     )
 
     def _verify_invariants_coverage(self) -> None:

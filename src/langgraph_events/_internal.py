@@ -7,6 +7,8 @@ that implement the hub-and-spoke reactive loop on top of LangGraph's StateGraph.
 from __future__ import annotations
 
 import asyncio
+import itertools
+import logging
 import operator
 import time
 from collections.abc import Callable, Coroutine  # noqa: TC003
@@ -21,12 +23,14 @@ if TYPE_CHECKING:
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
+from langgraph_events import _retry
 from langgraph_events._custom_event import _reset_custom_emitters, _set_custom_emitters
 from langgraph_events._event import (
     Cancelled,
     Event,
     Halted,
     HandlerRaised,
+    HandlerRetried,
     InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
@@ -37,6 +41,8 @@ from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
+
+_logger = logging.getLogger("langgraph_events")
 
 # ---------------------------------------------------------------------------
 # Internal state — users never see this
@@ -357,6 +363,51 @@ def _make_handler_raised(
     )
 
 
+def _next_delay(
+    meta: HandlerMeta,
+    event: Event,
+    exc: Exception,
+    attempt: int,
+    new_events: list[Event],
+) -> float | None:
+    """Seconds to wait before re-invoking *meta*, or ``None`` to give up.
+
+    ``None`` means the caller must emit ``HandlerRaised`` — no policy, the
+    budget is spent, or this exception is out of the policy's ``on=`` scope.
+    Otherwise the attempt is recorded per ``policy.observe`` (append a
+    ``HandlerRetried``, log a warning, or stay quiet) and the delay returned.
+
+    Shared by both dispatch paths; only the sleep call itself differs between
+    them.
+    """
+    policy = meta.retry
+    if policy is None or attempt >= policy.max_attempts:
+        return None
+    if not policy.retries(exc, meta.raises):
+        return None
+    delay = policy.delay_for(attempt, exc)
+    if policy.observe == "emit":
+        new_events.append(
+            HandlerRetried(
+                handler=meta.name,
+                source_event=event,
+                exception=exc,
+                attempt=attempt,
+                delay_seconds=delay,
+            )
+        )
+    elif policy.observe == "log":
+        _logger.warning(
+            "Handler %r attempt %d raised %s: %s — retrying in %.3fs",
+            meta.name,
+            attempt,
+            type(exc).__name__,
+            exc,
+            delay,
+        )
+    return delay
+
+
 def _find_failing_invariant(meta: HandlerMeta, log: EventLog) -> type | None:
     """Return the first invariant whose predicate fails against *log*, else None.
 
@@ -491,14 +542,20 @@ def _process_events_sync(
             new_events.append(violation)
             continue
         call_inject = _inject_fields(meta, event, inject)
-        try:
-            result = _invoke_sync_path(meta, event, call_inject)
-        except meta.raises as exc:
-            new_events.append(_make_handler_raised(meta, event, exc))
-            continue
-        _collect_and_check(
-            result, new_events, lg_interrupt, meta, state, event, return_contract
-        )
+        for attempt in itertools.count(1):
+            try:
+                result = _invoke_sync_path(meta, event, call_inject)
+            except meta.raises as exc:
+                delay = _next_delay(meta, event, exc, attempt, new_events)
+                if delay is None:
+                    new_events.append(_make_handler_raised(meta, event, exc))
+                    break
+                _retry._sleep(delay)
+                continue
+            _collect_and_check(
+                result, new_events, lg_interrupt, meta, state, event, return_contract
+            )
+            break
 
 
 async def _process_events_async(
@@ -517,14 +574,20 @@ async def _process_events_async(
             new_events.append(violation)
             continue
         call_inject = _inject_fields(meta, event, inject)
-        try:
-            result = await _invoke_async_path(meta, event, call_inject)
-        except meta.raises as exc:
-            new_events.append(_make_handler_raised(meta, event, exc))
-            continue
-        _collect_and_check(
-            result, new_events, lg_interrupt, meta, state, event, return_contract
-        )
+        for attempt in itertools.count(1):
+            try:
+                result = await _invoke_async_path(meta, event, call_inject)
+            except meta.raises as exc:
+                delay = _next_delay(meta, event, exc, attempt, new_events)
+                if delay is None:
+                    new_events.append(_make_handler_raised(meta, event, exc))
+                    break
+                await _retry._asleep(delay)
+                continue
+            _collect_and_check(
+                result, new_events, lg_interrupt, meta, state, event, return_contract
+            )
+            break
 
 
 def make_handler_node(

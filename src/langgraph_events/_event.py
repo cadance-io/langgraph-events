@@ -368,7 +368,7 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
         )
 
 
-_RESERVED_MODIFIERS = ("previously", "raises", "invariants")
+_RESERVED_MODIFIERS = ("previously", "raises", "invariants", "retry")
 """Class-level modifier names on ``Command`` that must never become
 dataclass fields — they configure the framework, not the event payload."""
 
@@ -740,6 +740,34 @@ class HandlerRaised(SystemEvent):
     exception: Exception | None = None
 
 
+class HandlerRetried(SystemEvent):
+    """Emitted before each backoff wait when a ``RetryPolicy`` re-invokes a handler.
+
+    One per *retry*, not per attempt: a policy with ``max_attempts=3`` that
+    fails twice then succeeds emits two ``HandlerRetried`` events and no
+    ``HandlerRaised``.  Exhausting the budget emits the final ``HandlerRaised``
+    instead of a third ``HandlerRetried``.
+
+    Fields (framework-populated at emit time):
+
+    - ``handler``: name of the handler that raised.
+    - ``source_event``: the event the raising handler was processing.
+    - ``exception``: the caught exception instance for this attempt.
+    - ``attempt``: 1-based index of the attempt that just failed.
+    - ``delay_seconds``: the backoff about to be slept.
+
+    Suppress it with ``RetryPolicy(observe="log")`` or ``observe="silent"``.
+    ``source_event`` is named as on :class:`HandlerRaised`, for the same
+    field-matcher reason.
+    """
+
+    handler: str = ""
+    source_event: Event | None = None
+    exception: Exception | None = None
+    attempt: int = 0
+    delay_seconds: float = 0.0
+
+
 class Invariant:
     """Marker base for typed invariants.
 
@@ -807,6 +835,7 @@ class InvariantViolated(SystemEvent):
 # sources for the static model, e.g. includes ``Resumed``).
 _ANOMALY_EVENT_TYPES: tuple[type[SystemEvent], ...] = (
     HandlerRaised,
+    HandlerRetried,
     InvariantViolated,
     Halted,
     Interrupted,

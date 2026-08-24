@@ -16,6 +16,7 @@ from langgraph_events._event_log import (
     EventLog,
 )
 from langgraph_events._identity import command_identity
+from langgraph_events._retry import RetryPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -195,6 +196,7 @@ def _build_on_decorator(
     field_matchers: dict[str, type[Event] | type[Exception] | type[Invariant] | str],
     node_name: str | None = None,
     previous_names: tuple[str, ...] = (),
+    retry: RetryPolicy | None = None,
 ) -> Callable[[F], F]:
     """Validate arguments and return the decorator that stamps attributes."""
     for et in event_types:
@@ -216,6 +218,13 @@ def _build_on_decorator(
                 f"SystemExit, GeneratorExit, asyncio.CancelledError) are not "
                 f"allowed — they are runtime/exit signals, not domain errors."
             )
+
+    if retry is not None and not isinstance(retry, RetryPolicy):
+        raise TypeError(
+            f"@on() retry= must be a RetryPolicy instance, got {retry!r}. "
+            f"Import it as 'from langgraph_events import RetryPolicy' — note "
+            f"this is not langgraph.types.RetryPolicy, which is node-level."
+        )
 
     invariants_tuple = _validate_invariants(invariants)
 
@@ -274,6 +283,10 @@ def _build_on_decorator(
         # ``previously`` declaration — a conditional stamp would let a stale
         # value from an earlier build keep a removed alias alive.
         fn._previous_names = previous_names  # type: ignore[attr-defined]
+        # Unconditional for the same reason as ``_previous_names`` above: a
+        # conditional stamp would keep a policy alive after it was removed
+        # from the Command between two EventGraph builds.
+        fn._retry = retry  # type: ignore[attr-defined]
         return fn
 
     return decorator
@@ -285,6 +298,7 @@ def on(
     invariants: dict[type[Invariant], Callable[..., bool]] | None = None,
     node_name: str | None = None,
     previously: str | tuple[str, ...] = (),
+    retry: RetryPolicy | None = None,
     **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
 ) -> Any:
     """Subscribe a handler to one or more event types.
@@ -337,6 +351,7 @@ def on(
         and not field_matchers
         and node_name is None
         and not previous_names
+        and retry is None
     )
     sole_arg_is_function = len(event_types) == 1 and (
         inspect.isfunction(event_types[0]) or inspect.ismethod(event_types[0])
@@ -344,7 +359,9 @@ def on(
 
     if sole_arg_is_function and no_modifiers:
         fn = event_types[0]
-        return _build_on_decorator((_infer_event_type(fn),), (), None, {}, None, ())(fn)
+        return _build_on_decorator(
+            (_infer_event_type(fn),), (), None, {}, None, (), None
+        )(fn)
 
     if not event_types:
 
@@ -356,12 +373,19 @@ def on(
                 dict(field_matchers),
                 node_name,
                 previous_names,
+                retry,
             )(fn)
 
         return inferring
 
     return _build_on_decorator(
-        event_types, raises, invariants, dict(field_matchers), node_name, previous_names
+        event_types,
+        raises,
+        invariants,
+        dict(field_matchers),
+        node_name,
+        previous_names,
+        retry,
     )
 
 
@@ -404,6 +428,9 @@ class HandlerMeta:
     ] = ()
     field_inject_params: frozenset[str] = frozenset()
     raises: tuple[type[Exception], ...] = ()
+    # Declared via ``@on(retry=...)`` or a ``retry`` class attribute on a
+    # Command. ``None`` means one attempt, the pre-retry behaviour.
+    retry: RetryPolicy | None = None
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
     # (param_name, registered_service_type) for params whose annotation is a
     # base class of (or identical to) a service type registered on
@@ -635,6 +662,9 @@ def extract_handler_meta(
     # Extract declared raises
     raises: tuple[type[Exception], ...] = getattr(fn, "_raises", ())
 
+    # Extract the declared retry policy
+    retry: RetryPolicy | None = getattr(fn, "_retry", None)
+
     # Extract declared invariants
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = getattr(
         fn, "_invariants", ()
@@ -693,6 +723,7 @@ def extract_handler_meta(
         field_matchers=field_matchers,
         field_inject_params=field_inject_params,
         raises=raises,
+        retry=retry,
         invariants=invariants,
         service_params=service_params,
         service_name_params=service_name_params,

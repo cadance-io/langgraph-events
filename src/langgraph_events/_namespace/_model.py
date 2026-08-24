@@ -33,6 +33,7 @@ from langgraph_events._namespace._smells import (
 if TYPE_CHECKING:
     from langgraph_events._graph import ReturnInfo
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._retry import RetryPolicy
 
 
 View = Literal["structure", "choreography"]
@@ -230,6 +231,7 @@ class NamespaceModel:
         raises: tuple[type[Exception], ...]
         invariants: tuple[type[InvariantBase], ...]
         field_matchers: tuple[tuple[str, str], ...]
+        retry: RetryPolicy | None
         inline: bool
         side_effect: bool
         has_annotation: bool
@@ -245,6 +247,7 @@ class NamespaceModel:
         raises: tuple[type[Exception], ...]
         invariants: tuple[type[InvariantBase], ...]
         field_matchers: tuple[tuple[str, str], ...]
+        retry: RetryPolicy | None
         side_effect: bool
         has_annotation: bool
 
@@ -555,6 +558,7 @@ def _build_domain_model(  # noqa: PLR0912
                 raises=tuple(meta.raises),
                 invariants=invariants,
                 field_matchers=field_matchers,
+                retry=meta.retry,
                 inline=getattr(meta.fn, "_inline_command", None) is not None,
                 side_effect=side_effect,
                 has_annotation=info.has_annotation,
@@ -578,6 +582,7 @@ def _build_domain_model(  # noqa: PLR0912
                 raises=tuple(meta.raises),
                 invariants=invariants,
                 field_matchers=field_matchers,
+                retry=meta.retry,
                 side_effect=side_effect,
                 has_annotation=info.has_annotation,
             )

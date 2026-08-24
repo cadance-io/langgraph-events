@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Declarative retry with exponential backoff (`RetryPolicy`)** — declare `retry=RetryPolicy(...)`
+  next to `raises=`, either as a class attribute on a `Command` or via `retry=` on `@on(...)`, and
+  the framework re-invokes the handler in place with full-jitter exponential backoff. `HandlerRaised`
+  now fires only once the retry budget is spent, so catchers stop counting attempts and re-emitting
+  commands and become pure escalation handlers.
+
+  ```python
+  class Ask(Command):
+      raises = (RateLimitError,)
+      retry = RetryPolicy(max_attempts=3, base_delay=0.1, max_delay=10.0)
+  ```
+
+  `max_attempts` counts the initial call. Delay before retry *n* is `base_delay * 2 ** (n - 1)`
+  capped at `max_delay`, sampled uniformly from `[0, ceiling]` when `jitter=True` (the default);
+  `strategy="constant"` waits flat. `on=` narrows which exceptions retry and must be a subset of
+  `raises=`; `respect_retry_after=True` prefers a server-supplied `exception.retry_after`.
+  Declaring `retry=` without `raises=`, or an `on=` entry outside `raises=`, is a `TypeError` at
+  graph construction — such a policy could never fire.
+
+  Retries run inside the handler node: they consume no `max_rounds` budget and write no checkpoint
+  between attempts. **Retried handlers must be idempotent** — the handler re-runs from the top,
+  including any `emit_custom` it fired before raising. The backoff is not interruptible by
+  `deadline=`, which is only checked between dispatch rounds.
+
+  Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
+
+- **`HandlerRetried`** — a `SystemEvent` emitted before each backoff wait, carrying `handler`,
+  `source_event`, `exception`, `attempt` (1-based, the call that failed) and `delay_seconds`. Part
+  of the anomaly set the reflection surface reports. Suppress it with `RetryPolicy(observe="log")`
+  for a `WARNING` instead, or `observe="silent"` for neither.
+
+- **`retry` is a reserved class-level modifier on `Command`** — annotating it (rather than using
+  `ClassVar` or a bare assignment) raises `TypeError` at class creation, same guard as
+  `raises`/`invariants`/`previously`, so a policy can never become a dataclass field serialized
+  into every checkpoint.
+
 ## [0.24.0] - 2026-08-23
 
 ### Added

@@ -209,6 +209,8 @@ Position `deadline` strictly tighter than whichever hard cancellation the caller
 
 `RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
 
+The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. That includes [`RetryPolicy`](#retries) backoff: size `max_delay * max_attempts` well under your deadline budget, or a run can overshoot the soft boundary and trip the hard cancellation instead.
+
 ### Surfacing the pause inline
 
 A `RunPaused` is just an event in the log. To turn it into a user-visible system message in the same channel as your chat history, register a custom reducer that handles both `MessageEvent` and `RunPaused`:
@@ -291,5 +293,44 @@ def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.Ask:
 - Only `Exception` subclasses allowed — `BaseException`/`KeyboardInterrupt`/`SystemExit`/`GeneratorExit`/`asyncio.CancelledError` rejected. `CancelledError` surfaces as `Cancelled` (a `Halted` subtype).
 - Unhandled raises propagate and crash the run. Catchers can themselves declare `raises=` to escalate.
 - Use `HandlerRaised.source_event` (not `event`) for the triggering event — avoids kwarg collision.
+
+## Retries
+
+Declare `retry=RetryPolicy(...)` alongside `raises=` — on a `Command` as a class attribute, or via `retry=` on `@on(...)`. The framework re-invokes the handler in place with exponential backoff; `HandlerRaised` fires only once the budget is spent, so catchers become pure escalation handlers.
+
+```python
+from langgraph_events import RetryPolicy
+
+
+class Question(Namespace):
+    class Ask(Command):
+        question: str = ""
+
+        raises = (RateLimitError,)
+        retry = RetryPolicy(max_attempts=3, base_delay=0.1, max_delay=10.0)
+
+        class Answered(DomainEvent):
+            answer: str = ""
+
+        def handle(self) -> Question.Ask.Answered:
+            if upstream_rate_limited():
+                raise RateLimitError(retry_after=0.2)
+            return Question.Ask.Answered(answer=...)
+
+
+@on(HandlerRaised, exception=RateLimitError)
+def give_up(event: HandlerRaised) -> Question.GaveUp:
+    return Question.GaveUp(reason=str(event.exception))  # budget spent
+```
+
+- `max_attempts` counts the **initial call**: `3` means one call plus two retries.
+- Delay before retry *n* is `base_delay * 2 ** (n - 1)`, capped at `max_delay`. With `jitter=True` (the default) the wait is sampled uniformly from `[0, that ceiling]` — full jitter, against thundering herds. `strategy="constant"` waits `base_delay` flat.
+- `on=(...)` narrows which exceptions retry; it must be a subset of `raises=`. Anything declared in `raises=` but excluded from `on=` surfaces on its first raise — that is how a non-transient error stays non-transient.
+- `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve (still capped by `max_delay`, never jittered).
+- Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). Use `observe="log"` for a `WARNING` instead, or `observe="silent"` for neither.
+- Declaring `retry=` without `raises=`, or an `on=` entry outside `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
+- **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
+- Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts. The backoff is *not* interruptible by `deadline=`, which is only checked between rounds — keep `max_delay * max_attempts` well under your deadline budget.
+- Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node. Import this one from `langgraph_events`.
 
 See the [Error Recovery pattern](patterns.md#error-recovery).
