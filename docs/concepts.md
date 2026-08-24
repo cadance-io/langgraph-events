@@ -38,7 +38,7 @@ class Order(Namespace):
 
 Nesting is syntactic only — `Order.Place.Placed` is a `DomainEvent` with a `__command__` back-reference, not a subclass of `Place`.
 
-A *declared* command is also a leaf: `class Place(Command)` declares one, but `class Rush(Place)` raises `TypeError`. One `Command` is one intent, with its own handler, outcomes and node identity — two intents are two commands, sharing whatever they have in common through a helper function rather than a base class. (`DomainEvent` subclassing is unaffected: refining an event — `class FastPlaced(Order.Place.Placed)` — keeps working, as does subclassing a `Namespace` to inherit its reducers.)
+A *declared* command is also a leaf of the class hierarchy: `class Place(Command)` declares one, but `class Rush(Order.Place)` raises `TypeError`. One `Command` is one intent, with its own handler, outcomes and node identity — two intents are two commands, sharing whatever they have in common through a helper function rather than a base class. Every other subclassing axis is unaffected: refining an event — `class FastPlaced(Order.Place.Placed)` — keeps working, as does subclassing a `Namespace` to inherit its reducers, or `Interrupted` / `IntegrationEvent` / `Halted` to declare your own.
 
 ### `Command.Outcomes`
 

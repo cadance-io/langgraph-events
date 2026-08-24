@@ -97,11 +97,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`retry: ClassVar = SHARED_POLICY`), and declare the second command independently.
 
   `raises`, `invariants`, `retry` and `previously` are still read off the command class — but never
-  from a parent, so the documented asymmetry between them is gone: `previously` was read from the
-  class's own `__dict__` precisely because the other three were MRO-inherited, and with no parent
-  to inherit from all four read the same way. The `Command.handle()` privacy rule loses its
-  parent-Command case for the same reason: an outcome is private to exactly the one Command it is
-  nested under.
+  from a parent Command, so the documented asymmetry between them is gone: `previously` was read
+  from the class's own `__dict__` precisely because the other three were MRO-inherited, and with no
+  parent Command to inherit from all four read the same way. The `Command.handle()` privacy rule
+  loses its parent-Command case for the same reason: an outcome is private to exactly the one
+  Command it is nested under.
 
   Untouched: `Namespace` subclassing (child domains still inherit parent reducers via the MRO),
   `DomainEvent` subclassing another `DomainEvent` (refining an event keeps its namespace and
