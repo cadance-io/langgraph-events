@@ -727,7 +727,11 @@ class HandlerRaised(SystemEvent):
 
     - ``handler``: name of the handler that raised.
     - ``source_event``: the event the raising handler was processing.
-    - ``exception``: the caught exception instance.
+    - ``exception``: the caught exception instance, traceback intact.
+
+    This is the *terminal* failure, so it keeps its traceback — the framework
+    retains exactly one live traceback per failing invocation, and this is it.
+    The :class:`HandlerRetried` breadcrumbs leading up to it do not.
 
     ``source_event`` is named as such (rather than ``event``) to keep the
     handler's own ``event`` parameter free when this field is used as a
@@ -752,9 +756,16 @@ class HandlerRetried(SystemEvent):
 
     - ``handler``: name of the handler that raised.
     - ``source_event``: the event the raising handler was processing.
-    - ``exception``: the caught exception instance for this attempt.
+    - ``exception``: the caught exception instance for this attempt, with its
+      traceback detached.
     - ``attempt``: 1-based index of the attempt that just failed.
     - ``delay_seconds``: the backoff about to be slept.
+
+    The exception instance itself is live — matchers and field injection work
+    on it — but its ``__traceback__`` (and that of its ``__cause__`` /
+    ``__context__`` chain and any group members) is cleared, so a breadcrumb
+    never pins the failed attempt's frame for the lifetime of the run.  The
+    terminal :class:`HandlerRaised` keeps its traceback.
 
     Suppress it with ``RetryPolicy(observe="log")`` or ``observe="silent"``.
     ``source_event`` is named as on :class:`HandlerRaised`, for the same
