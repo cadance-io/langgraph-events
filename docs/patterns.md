@@ -44,9 +44,9 @@ graph LR
     DomainEvent -->|"reactor [orchestrate]"| Command
     Command -->|"[chain]"| Command
     Command -.->|"(retry)"| SystemEvent
-    linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
-    linkStyle 2 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
-    linkStyle 3 stroke:#9ca3af,stroke-dasharray:3 3
+    linkStyle 2 stroke:#6b7280,stroke-dasharray:3 3
+    linkStyle 3 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
+    linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
     linkStyle 5,6 stroke:#c2410c,stroke-dasharray:4 2
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
@@ -431,7 +431,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
 ## Retries & escalation (Question namespace) { #error-recovery }
 
 - `Question.Ask` declares `raises=(RateLimitError,)`; its inline `handle()` may raise.
-- `Ask` also declares `retry=RetryPolicy(...)`, so the framework re-invokes `handle()` in place with full-jitter exponential backoff — each wait is announced as a [`HandlerRetried`](control-flow.md#retries).
+- `Ask` also declares `retry=RetryPolicy(...)`, so the framework re-invokes `handle()` in place with full-jitter exponential backoff — each wait is announced as a [`HandlerRetried`](control-flow.md#retries), the finely dotted cyan `(retry)` arrow below. That is why `Ask` carries two framework-signal arrows in the diagram: `(retry)` for every absorbed failure, `(raises)` for the one that escalates. `observe="log"`/`"silent"` would suppress the event and its arrow alike.
 - Only once the budget is spent does `HandlerRaised` reach `give_up`, which escalates to `Question.GaveUp` ([`Halted`](concepts.md#system-events) subtype). The catcher counts nothing and schedules nothing.
 
 <!-- autogen:start:error_recovery -->

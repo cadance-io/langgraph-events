@@ -45,12 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.Policy`, a `retry` object in `.to_dict()`, and a `retry xN` annotation in `.text()`. A policy
   that actually emits (`observe="emit"`, the default) also contributes a first-class
   `NamespaceModel.Edge` of `kind="retry"` from the handler's subscribed events to `HandlerRetried`,
-  so `HandlerRetried` has a visible producer in every renderer — mermaid draws it as a finely
-  dotted cyan arrow, distinct from the grey dashed `raises` escalation. `observe="log"`/`"silent"`
-  never write the event to the log and so get no edge: the diagram tracks what the log will
-  contain, not what was merely declared. Pure additions, so `SCHEMA_VERSION` is unchanged — no
-  existing field is removed, renamed, or given a new meaning, and consumers that switch on
-  `Edge.kind` should already treat an unrecognised kind as opaque.
+  so a reactor on `HandlerRetried` no longer renders as a source with nothing producing it.
+  Mermaid draws that edge as a finely dotted cyan arrow, distinct from the grey dashed `raises`
+  escalation, and `to_dict()`/`json()` carry it beside the `raises` one; `.text()` keeps reporting
+  the policy as the `retry xN` annotation above and grows no edge of its own.
+  `observe="log"`/`"silent"` never write the event to the log and so get no edge: the diagram
+  tracks what the log will contain, not what was merely declared. Pure additions, so
+  `SCHEMA_VERSION` is unchanged — no existing field is removed, renamed, or given a new meaning,
+  and consumers that switch on `Edge.kind` should already treat an unrecognised kind as opaque.
 
   Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node.
 
@@ -83,6 +85,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   catcher for a type nobody declares. Both are now stamped unconditionally, matching `previously`
   and `retry`. `node_name` stays conditional on purpose — it has no class-level declaration surface,
   so an unconditional stamp would erase an explicit `@on(node_name=...)` pin rather than refresh it.
+
+- **Legend diagram taught the wrong colour for four arrow kinds.** The hand-written "Diagram
+  vocabulary" legend — rendered into `docs/patterns.md` and the top of every
+  `examples/*.graph.md`, and the key readers use to decode all the other diagrams — numbered its
+  `linkStyle` directives one short of the edges they described. Mermaid counts edges from 0 in
+  declaration order, including the invisible entry `==>` seed and *each hop* of a chained
+  `A -.-> B -.-> C` line, so the legend declares ten edges (0–9) — but `raises` grey was pinned
+  to 1, `scatter` purple to 2 and ownership grey to 3. The plain `-->` return arrow therefore
+  wore `raises` grey, `(raises)` wore `scatter` purple, `scatter` wore ownership grey, and the
+  ownership `-.-` arrow was left unstyled. Indices are now correct and pinned by a test that
+  recovers every legend edge in mermaid's own order and asserts the style landing on it is the
+  constant the renderer uses for that edge kind. Only the legend was affected — the per-example
+  diagrams resolve their indices in `MermaidFlowchart.render`, which counts seeds and chained
+  hops correctly by construction, and were always right.
 
 ## [0.24.0] - 2026-08-23
 
