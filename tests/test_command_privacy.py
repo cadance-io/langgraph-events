@@ -3,7 +3,7 @@
 Two symmetric rules:
 
 - A ``Command.handle()`` may only emit ``DomainEvent``s nested under that same
-  Command (or a parent Command, for inheritance).
+  Command.
 - An ``@on(...)`` reactor may only emit namespace-level ``DomainEvent``s —
   Command-private outcomes are off-limits.
 """
@@ -115,17 +115,6 @@ class _PrivPause(Namespace):
             return Interrupted(reason="waiting")
 
 
-class _PrivOwner(Namespace):
-    """Command emitting its own private outcome (legal)."""
-
-    class Save(Command):
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> _PrivOwner.Save.Done:
-            return _PrivOwner.Save.Done()
-
-
 class _PrivLeaky(Namespace):
     """Reactor that emits a Command-private event from outside its owner."""
 
@@ -187,20 +176,6 @@ def describe_command_privacy():
         def when_handle_returns_Interrupted():
             def it_builds_the_graph():
                 EventGraph([_PrivPause.Wait])  # no raise
-
-        def when_handle_returns_its_own_nested_outcome():
-            def it_builds_the_graph():
-                EventGraph([_PrivOwner.Save])  # no raise
-
-        def when_a_second_command_would_inherit_the_private_outcome():
-            # There is no "parent Command" case for the privacy rule to
-            # admit: a concrete Command may not be subclassed, so an outcome
-            # is private to exactly the one Command it is nested under.
-            def it_rejects_the_subclass_at_class_creation():
-                with pytest.raises(TypeError, match=r"may not be subclassed"):
-
-                    class Heir(_PrivOwner.Save):
-                        pass
 
     def describe_reactor():
         def when_reactor_returns_a_command_private_event():

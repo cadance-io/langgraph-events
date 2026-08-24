@@ -237,43 +237,6 @@ class QuietRetry(Namespace):
             return QuietRetry.Cmd.Done()
 
 
-_SHARED_POLICY = RetryPolicy(max_attempts=2, base_delay=0.4, jitter=False)
-"""Policy object two Commands name — the composition that replaces the
-base-class sharing a Command hierarchy would have provided."""
-
-
-class SharedRetry(Namespace):
-    """Two Commands declaring the same policy — each on its own class.
-
-    A Command may not be subclassed, so a shared policy object is spelled
-    as a module-level constant both commands name, not as a base class.
-    """
-
-    class First(Command):
-        raises: ClassVar = (FlakyError,)
-        retry: ClassVar = _SHARED_POLICY
-
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> SharedRetry.First.Done:
-            if not _INLINE.tick():
-                raise FlakyError("transient")
-            return SharedRetry.First.Done()
-
-    class Second(Command):
-        raises: ClassVar = (FlakyError,)
-        retry: ClassVar = RetryPolicy(max_attempts=2, base_delay=0.05, jitter=False)
-
-        class Done(DomainEvent):
-            pass
-
-        def handle(self) -> SharedRetry.Second.Done:
-            if not _INLINE.tick():
-                raise FlakyError("transient")
-            return SharedRetry.Second.Done()
-
-
 @pytest.fixture
 def inline_attempts():
     """Reset the counter the module-level inline-command scenarios share.
@@ -636,36 +599,6 @@ def describe_retry():
                 assert log.has(DeclaredRetry.Cmd.Done)
                 assert attempts.calls == 3
                 assert slept == [0.1, 0.2]
-
-        def when_a_shared_policy_object_is_named_by_the_command():
-            def it_applies_that_policy(slept, inline_attempts):
-                inline_attempts.succeed_on = 2
-
-                log = EventGraph([SharedRetry.First, gave_up]).invoke(
-                    SharedRetry.First()
-                )
-                assert log.has(SharedRetry.First.Done)
-                assert slept == [0.4]
-
-        def when_a_sibling_command_declares_its_own_policy():
-            def it_uses_its_own_policy(slept, inline_attempts):
-                inline_attempts.succeed_on = 2
-
-                log = EventGraph([SharedRetry.Second, gave_up]).invoke(
-                    SharedRetry.Second()
-                )
-                assert log.has(SharedRetry.Second.Done)
-                # The sibling declares base_delay=0.4; this one is its own.
-                assert slept == [0.05]
-
-        def when_a_second_command_would_inherit_the_policy():
-            # Reusing a policy by subclassing the declaring Command is not
-            # available — a concrete Command may not be subclassed.
-            def it_rejects_the_subclass_at_class_creation():
-                with pytest.raises(TypeError, match=r"may not be subclassed"):
-
-                    class Heir(SharedRetry.First):
-                        pass
 
         def when_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():

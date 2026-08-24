@@ -396,17 +396,16 @@ def _reject_command_subclassing(cls: type) -> None:
     a ``Command`` subclass cannot have one deeper in its own MRO.
     """
     for base in cls.__bases__:
-        if base is Command or not issubclass(base, Command):
-            continue
-        raise TypeError(
-            f"Command {cls.__qualname__!r} subclasses Command "
-            f"{base.__qualname__!r}. A concrete Command may not be "
-            f"subclassed — one Command is one intent, with its own handler, "
-            f"outcomes and node identity. Declare {cls.__name__!r} as its "
-            f"own Command nested in a Namespace, and share whatever the two "
-            f"have in common through a helper function (or a private method "
-            f"on each)."
-        )
+        if base is not Command and issubclass(base, Command):
+            raise TypeError(
+                f"Command {cls.__qualname__!r} subclasses Command "
+                f"{base.__qualname__!r}. A concrete Command may not be "
+                f"subclassed — one Command is one intent, with its own "
+                f"handler, outcomes and node identity. Declare "
+                f"{cls.__name__!r} as its own Command nested in a Namespace, "
+                f"and share whatever the two have in common through a helper "
+                f"function."
+            )
 
 
 class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
@@ -472,8 +471,8 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                 if name in own_annotations and f"field {name} " in str(exc):
                     raise _reserved_modifier_error(cls, name) from None
             raise
-        # ``previously``/``raises``/``invariants`` are reserved class-level
-        # modifiers. An annotated non-ClassVar declaration would silently
+        # ``previously``/``raises``/``invariants``/``retry`` are reserved
+        # class-level modifiers. An annotated non-ClassVar would silently
         # become a frozen dataclass field serialized into every checkpoint
         # payload while the modifier still appears to work — reject it at
         # class creation. dc_fields reflects dataclasses' own ClassVar
