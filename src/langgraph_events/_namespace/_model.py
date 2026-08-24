@@ -660,6 +660,18 @@ def _reaction_edges(meta: HandlerMeta, info: ReturnInfo) -> list[NamespaceModel.
     causation needs no name map.
     """
     is_inline = getattr(meta.fn, "_inline_command", None) is not None
+
+    # Two families, differing only in whether the edge carries a causal role.
+    # What the handler *returns* does; the framework signals it can *trigger*
+    # do not — nobody chose to produce a HandlerRaised. One raises edge per
+    # declared exception (renderers dedupe); at most one retry edge.
+    produced: list[tuple[type[Event], Literal["solid", "scatter"]]] = [
+        *((tgt, "solid") for tgt in info.event_types),
+        *((tgt, "scatter") for tgt in info.scatter_types),
+    ]
+    signals: list[tuple[type[Event], Literal["raises", "retry"]]] = [
+        (HandlerRaised, "raises") for _exc in meta.raises
+    ]
     # A retry policy that emits puts ``HandlerRetried`` in the log, so the
     # model owes it a producer — otherwise a reactor on ``HandlerRetried``
     # renders as a source with no inbound edge (#132). ``observe="log"`` /
@@ -667,45 +679,25 @@ def _reaction_edges(meta: HandlerMeta, info: ReturnInfo) -> list[NamespaceModel.
     # tracks what the log will actually contain, not what was merely
     # declared. The cost of that choice is a diagram that shifts with an
     # observability setting.
-    emits_retried = meta.retry is not None and meta.retry.observe == "emit"
+    if meta.retry is not None and meta.retry.observe == "emit":
+        signals.append((HandlerRetried, "retry"))
+
     out: list[NamespaceModel.Edge] = []
     for src_type in meta.event_types:
-        for tgt in info.event_types:
+        for tgt, produced_kind in produced:
             out.append(
                 NamespaceModel.Edge(
                     source=src_type,
                     via=meta.name,
                     target=tgt,
-                    kind="solid",
+                    kind=produced_kind,
                     causation=_edge_causation(is_inline, tgt),
                 )
             )
-        for tgt in info.scatter_types:
+        for tgt, signal_kind in signals:
             out.append(
                 NamespaceModel.Edge(
-                    source=src_type,
-                    via=meta.name,
-                    target=tgt,
-                    kind="scatter",
-                    causation=_edge_causation(is_inline, tgt),
-                )
-            )
-        for _exc in meta.raises:
-            out.append(
-                NamespaceModel.Edge(
-                    source=src_type,
-                    via=meta.name,
-                    target=HandlerRaised,
-                    kind="raises",
-                )
-            )
-        if emits_retried:
-            out.append(
-                NamespaceModel.Edge(
-                    source=src_type,
-                    via=meta.name,
-                    target=HandlerRetried,
-                    kind="retry",
+                    source=src_type, via=meta.name, target=tgt, kind=signal_kind
                 )
             )
     return out
