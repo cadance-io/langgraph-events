@@ -16,8 +16,14 @@ from langgraph_events import (
     HandlerRaised,
     HandlerRetried,
     IntegrationEvent,
+    Interrupted,
+    Invariant,
+    InvariantViolated,
+    MaxRoundsExceeded,
     Namespace,
+    Resumed,
     RetryPolicy,
+    Scatter,
     on,
 )
 from langgraph_events import _retry as _retry_mod
@@ -213,6 +219,16 @@ class InheritedRetry(Namespace):
                 raise FlakyError("transient")
             return InheritedRetry.Parent.Done()
 
+    class Overriding(Parent):
+        """Replaces the policy it would otherwise inherit from ``Parent``."""
+
+        retry: ClassVar = RetryPolicy(max_attempts=2, base_delay=0.05, jitter=False)
+
+        def handle(self) -> InheritedRetry.Parent.Done:
+            if not _INLINE.tick():
+                raise FlakyError("transient")
+            return InheritedRetry.Parent.Done()
+
 
 @pytest.fixture
 def inline_attempts():
@@ -224,6 +240,32 @@ def inline_attempts():
         return _INLINE
 
     return configure
+
+
+class Item(IntegrationEvent):
+    """One unit of fan-out work."""
+
+    n: int = 0
+
+
+class FanOut(IntegrationEvent):
+    """Seed that scatters into several ``Item``s."""
+
+
+class Handled(IntegrationEvent):
+    """Successful outcome of processing an ``Item``."""
+
+    n: int = 0
+
+
+class MustHold(Invariant):
+    """Predicate evaluated around dispatch, never per retry attempt."""
+
+
+class NeedsInput(Interrupted):
+    """Human-in-the-loop pause returned by a retryable handler."""
+
+    question: str = ""
 
 
 @pytest.fixture
@@ -285,6 +327,21 @@ def describe_retry():
                     return Recovered(reason="caught")
 
                 EventGraph([handler, catcher])  # must not raise
+
+        def when_an_inline_command_declares_it():
+            def it_names_the_command_not_the_method():
+                # ``handle`` is useless for locating the offender; the error
+                # must say ``_BadInline.Cmd``.
+                with pytest.raises(TypeError, match=r"_BadInline\.Cmd.*raises="):
+
+                    class _BadInline(Namespace):
+                        class Cmd(Command):
+                            retry: ClassVar = RetryPolicy()
+
+                            def handle(self) -> None:
+                                return None
+
+                    EventGraph([_BadInline.Cmd])
 
         def when_retry_is_not_a_policy():
             def it_rejects():
@@ -407,6 +464,30 @@ def describe_retry():
             assert log.latest(Ended) == Ended(result="async recovered")
             assert slept == [0.5]
 
+    def describe_runtime_async_exhaustion():
+        async def it_emits_handler_raised_and_breadcrumbs(slept):
+            attempts = _Attempts(succeed_on=99)
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.25, jitter=False),
+            )
+            async def handler(event: Item) -> Handled:
+                attempts.tick()
+                raise FlakyError("always")
+
+            @on(HandlerRaised, exception=FlakyError)
+            async def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason=str(event.exception))
+
+            log = await EventGraph([handler, catcher]).ainvoke(Item(n=1))
+            assert attempts.calls == 3
+            assert slept == [0.25, 0.5]
+            assert [e.attempt for e in log.filter(HandlerRetried)] == [1, 2]
+            assert log.count(HandlerRaised) == 1
+            assert log.latest(Recovered) == Recovered(reason="always")
+
     def describe_observe():
         def when_log():
             def it_does_not_emit_handler_retried(slept, caplog):
@@ -528,6 +609,21 @@ def describe_retry():
                 assert log.has(InheritedRetry.Parent.Done)
                 assert slept == [0.4]
 
+        def when_a_child_overrides_the_inherited_policy():
+            def it_uses_the_child_policy(slept, inline_attempts):
+                inline_attempts(succeed_on=2)
+
+                @on(HandlerRaised, exception=FlakyError)
+                def catcher(event: HandlerRaised) -> Recovered:
+                    return Recovered(reason="gave up")
+
+                log = EventGraph([InheritedRetry.Overriding, catcher]).invoke(
+                    InheritedRetry.Overriding()
+                )
+                assert log.has(InheritedRetry.Parent.Done)
+                # Parent declares base_delay=0.4; the child's own policy wins.
+                assert slept == [0.05]
+
         def when_declared_as_a_dataclass_field():
             def it_rejects_at_class_creation():
                 # An annotated (non-ClassVar) ``retry`` would become a frozen
@@ -542,6 +638,225 @@ def describe_retry():
 
                             def handle(self) -> None:
                                 return None
+
+
+def describe_retry_scope():
+    def describe_attempt_budget():
+        def when_several_events_match_one_handler():
+            def it_gives_each_event_its_own_budget(slept):
+                # The attempt loop is nested inside the per-event loop, so a
+                # budget spent on Item(0) must not shorten Item(1)'s.
+                seen: list[int] = []
+
+                @on(FanOut)
+                def split(event: FanOut) -> Scatter[Item]:
+                    return Scatter([Item(n=i) for i in range(3)])
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=2, base_delay=0.1, jitter=False),
+                )
+                def work(event: Item) -> Handled:
+                    seen.append(event.n)
+                    if seen.count(event.n) < 2:
+                        raise FlakyError(f"transient {event.n}")
+                    return Handled(n=event.n)
+
+                @on(HandlerRaised, exception=FlakyError)
+                def catcher(event: HandlerRaised) -> Recovered:
+                    return Recovered(reason="gave up")
+
+                log = EventGraph([split, work, catcher]).invoke(FanOut())
+                assert sorted(e.n for e in log.filter(Handled)) == [0, 1, 2]
+                assert not log.has(HandlerRaised)
+                assert len(slept) == 3
+
+        def when_max_attempts_is_one():
+            def it_never_retries(slept):
+                attempts = _Attempts(succeed_on=99)
+
+                @on(Item, raises=FlakyError, retry=RetryPolicy(max_attempts=1))
+                def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    raise FlakyError("always")
+
+                @on(HandlerRaised, exception=FlakyError)
+                def catcher(event: HandlerRaised) -> Recovered:
+                    return Recovered(reason="gave up")
+
+                log = EventGraph([handler, catcher]).invoke(Item(n=1))
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                assert log.count(HandlerRaised) == 1
+
+    def describe_dispatch_rounds():
+        def it_does_not_spend_the_round_budget(slept):
+            # Retries happen inside the handler node, so six attempts fit
+            # inside a two-round budget without tripping MaxRoundsExceeded.
+            attempts = _Attempts(succeed_on=6)
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=6, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                if not attempts.tick():
+                    raise FlakyError("transient")
+                return Handled(n=99)
+
+            @on(HandlerRaised, exception=FlakyError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            graph = EventGraph([handler, catcher], max_rounds=2)
+            log = graph.invoke(Item(n=1))
+            assert attempts.calls == 6
+            assert log.latest(Handled) == Handled(n=99)
+            assert not log.has(MaxRoundsExceeded)
+
+    def describe_invariants():
+        def it_evaluates_the_predicate_once_per_dispatch(slept):
+            # ``_check_invariants`` sits outside the attempt loop: the pre and
+            # post checks run once each, not once per retry.
+            attempts = _Attempts(succeed_on=3)
+            evaluations: list[int] = []
+
+            @on(
+                Item,
+                raises=FlakyError,
+                invariants={MustHold: lambda log: not evaluations.append(1)},
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                if not attempts.tick():
+                    raise FlakyError("transient")
+                return Handled(n=1)
+
+            @on(HandlerRaised, exception=FlakyError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            @on(InvariantViolated)
+            def violated(event: InvariantViolated) -> None:
+                return None
+
+            log = EventGraph([handler, catcher, violated]).invoke(Item(n=1))
+            assert attempts.calls == 3
+            assert len(evaluations) == 2
+            assert log.latest(Handled) == Handled(n=1)
+
+    def describe_interrupts():
+        def it_does_not_retry_a_pause(slept):
+            # ``_collect_and_check`` runs outside the try/except, so the
+            # GraphInterrupt it raises is never mistaken for a failed attempt.
+            from langgraph.checkpoint.memory import MemorySaver
+
+            attempts = _Attempts(succeed_on=99)
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def pauser(event: Item) -> NeedsInput:
+                attempts.tick()
+                return NeedsInput(question="ok?")
+
+            @on(HandlerRaised, exception=FlakyError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            @on(Resumed, interrupted=NeedsInput)
+            def after(event: Resumed) -> None:
+                return None
+
+            graph = EventGraph([pauser, catcher, after], checkpointer=MemorySaver())
+            config = {"configurable": {"thread_id": "retry-interrupt"}}
+            graph.invoke(Item(n=1), config=config)
+            assert graph.get_state(config).is_interrupted
+            assert attempts.calls == 1
+            assert slept == []
+
+    def describe_async_handler_on_the_sync_path():
+        def it_retries_across_the_asyncio_run_boundary(slept):
+            # An async handler reached through ``invoke()`` is driven by
+            # ``asyncio.run`` per attempt — a distinct path from ``ainvoke``.
+            attempts = _Attempts(succeed_on=3)
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.2, jitter=False),
+            )
+            async def handler(event: Item) -> Handled:
+                if not attempts.tick():
+                    raise FlakyError("transient")
+                return Handled(n=5)
+
+            @on(HandlerRaised, exception=FlakyError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            log = EventGraph([handler, catcher]).invoke(Item(n=1))
+            assert attempts.calls == 3
+            assert log.latest(Handled) == Handled(n=5)
+            assert slept == [0.2, 0.4]
+
+    def describe_retry_after():
+        def it_sleeps_the_exception_hint(slept):
+            attempts = _Attempts(succeed_on=2)
+
+            @on(
+                Item,
+                raises=RateLimitedError,
+                retry=RetryPolicy(
+                    max_attempts=2, base_delay=0.1, respect_retry_after=True
+                ),
+            )
+            def handler(event: Item) -> Handled:
+                if not attempts.tick():
+                    raise RateLimitedError(retry_after=1.5)
+                return Handled(n=1)
+
+            @on(HandlerRaised, exception=RateLimitedError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            log = EventGraph([handler, catcher]).invoke(Item(n=1))
+            assert slept == [1.5]
+            assert log.latest(HandlerRetried).delay_seconds == 1.5
+
+
+def describe_handler_retried():
+    def describe_subscription():
+        def it_matches_on_the_exception_field(slept):
+            attempts = _Attempts(succeed_on=3)
+            noticed: list[int] = []
+
+            @on(
+                Item,
+                raises=FlakyError,
+                retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+            )
+            def handler(event: Item) -> Handled:
+                if not attempts.tick():
+                    raise FlakyError("transient")
+                return Handled(n=1)
+
+            @on(HandlerRetried, exception=FlakyError)
+            def watch(event: HandlerRetried, exception: FlakyError) -> Recovered:
+                noticed.append(event.attempt)
+                return Recovered(reason=str(exception))
+
+            @on(HandlerRaised, exception=FlakyError)
+            def catcher(event: HandlerRaised) -> Recovered:
+                return Recovered(reason="gave up")
+
+            EventGraph([handler, watch, catcher]).invoke(Item(n=1))
+            assert noticed == [1, 2]
 
 
 def describe_namespace_model():
