@@ -45,6 +45,7 @@ from langgraph_events._internal import (
     _BASE_FIELDS,
     _inject_deadline_keys,
     _InputState,
+    _leaf_node,
     _OutputState,
     build_state_schema,
     make_dispatch,
@@ -65,6 +66,7 @@ if TYPE_CHECKING:
 
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
+    from langgraph_events._types import StateDict
 
 
 class OrphanedEventWarning(UserWarning):
@@ -910,8 +912,18 @@ class EventGraph:
         router_node = make_router_node(self._max_rounds)
         dispatch_fn = make_dispatch(self._handler_metas)
 
-        graph.add_node("__seed__", cast("Any", seed_node))
-        graph.add_node("__router__", cast("Any", router_node))
+        async def aseed(state: StateDict) -> StateDict:
+            return seed_node(state)
+
+        async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
+            return router_node(state, config)
+
+        graph.add_node(
+            "__seed__", cast("Any", _leaf_node(seed_node, aseed, "__seed__"))
+        )
+        graph.add_node(
+            "__router__", cast("Any", _leaf_node(router_node, arouter, "__router__"))
+        )
 
         handler_names: list[str] = []
         for meta in self._handler_metas:

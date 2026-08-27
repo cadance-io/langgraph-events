@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`EventGraph.compiled` is about five times cheaper** — LangGraph read the source of every
+  node function at compile time to look for nested graphs. An EventGraph node never holds one,
+  so every node now declares no dependencies and the read is skipped. A consumer that builds a
+  fresh `EventGraph` per test, or per schema change, sees compile drop from ~11 ms to ~2 ms for
+  ten handlers (~50 ms to ~10 ms for thirty). No API change.
+
 ## [0.25.0] - 2026-08-24
 
 ### Added

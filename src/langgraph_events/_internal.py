@@ -112,6 +112,24 @@ def build_state_schema(reducers: dict[str, BaseReducer]) -> type:
 # ---------------------------------------------------------------------------
 
 
+def _leaf_node(func: Any, afunc: Any, name: str) -> RunnableLambda:
+    """Wrap a node whose source LangGraph need not read.
+
+    LangGraph reads a node function's source to find nested graphs. No
+    EventGraph node holds one, so the read is pure cost, paid again by every
+    new EventGraph over the same handlers. A node that declares no
+    dependencies skips it.
+    """
+    from langchain_core.runnables import RunnableLambda  # noqa: PLC0415
+
+    class _LeafNode(RunnableLambda):
+        @property
+        def deps(self) -> list[Any]:
+            return []
+
+    return _LeafNode(func=func, afunc=afunc, name=name)
+
+
 def make_seed_node(
     reducers: dict[str, BaseReducer] | None = None,
 ) -> Callable[[StateDict], StateDict]:
@@ -700,7 +718,6 @@ def make_handler_node(
         adispatch_custom_event,
         dispatch_custom_event,
     )
-    from langchain_core.runnables import RunnableLambda  # noqa: PLC0415
     from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
     reds = reducers or {}
@@ -795,11 +812,7 @@ def make_handler_node(
             _reset_custom_emitters(tokens)
         return _finalize(new_events)
 
-    return RunnableLambda(
-        func=_run_handler_sync,
-        afunc=_run_handler_async,
-        name=meta.name,
-    )
+    return _leaf_node(_run_handler_sync, _run_handler_async, meta.name)
 
 
 def _collect_result(
