@@ -1,11 +1,11 @@
 """Tests for Event base class, Auditable, and MessageEvent."""
 
-import dataclasses
 import warnings
 
 import pytest
 from conftest import SET_NAME_ERRORS, set_name_cause
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from pydantic import ValidationError
 
 from langgraph_events import (
     Auditable,
@@ -37,7 +37,7 @@ def describe_Event():
 
             e = MyEvent(x=42)
             assert e.x == 42
-            with pytest.raises(Exception):  # AttributeError (dataclass) or ValidationError (pydantic)
+            with pytest.raises((AttributeError, ValidationError)):
                 e.x = 99  # type: ignore
 
         def it_auto_applies_dataclass():
@@ -46,7 +46,7 @@ def describe_Event():
 
             e = AutoEvent(value="hello")
             assert e.value == "hello"
-            with pytest.raises(Exception):  # AttributeError (dataclass) or ValidationError (pydantic)
+            with pytest.raises((AttributeError, ValidationError)):
                 e.value = "nope"  # type: ignore
 
         def it_is_a_pydantic_model():
@@ -269,7 +269,7 @@ def describe_MessageEvent():
             e = Leaf(message=msg, content="extra")
             assert e.content == "extra"
             assert e.as_messages() == [msg]
-            with pytest.raises(Exception):  # AttributeError or pydantic ValidationError
+            with pytest.raises((AttributeError, ValidationError)):
                 e.content = "nope"  # type: ignore
 
 

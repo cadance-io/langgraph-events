@@ -870,6 +870,9 @@ class EventGraph:
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
         event_store: Any | None = None,
+        # pyES EventStore — when supplied, events are appended to a stream
+        # keyed by config["configurable"]["thread_id"] after every invoke/resume.
+        # Use EventLog.from_store(event_store, StreamId(...)) to read them back.
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
@@ -1321,7 +1324,9 @@ class EventGraph:
             if config is not None
             else None
         )
-        stream_id = StreamId(name=str(thread_id) if thread_id is not None else "default")
+        stream_id = StreamId(
+            name=str(thread_id) if thread_id is not None else "default"
+        )
         # Determine how many events are already in the store to avoid
         # duplicating events across runs when a checkpointer is used
         # (result["events"] always returns the full history).

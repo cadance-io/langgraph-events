@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import functools
 import inspect
 import operator
@@ -12,12 +11,20 @@ import weakref
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from event_sourcery import Event as _ESBaseEvent
-from langchain_core.messages import BaseMessage, SystemMessage
-from pydantic import ConfigDict
-from pydantic._internal._model_construction import ModelMetaclass
+from langchain_core.messages import BaseMessage, SystemMessage  # noqa: TC002
+from pydantic import BaseModel, ConfigDict
 
+# ModelMetaclass is not public API. At runtime we derive it from BaseModel
+# to avoid depending on pydantic internals. For mypy we import the real class
+# under TYPE_CHECKING so the metaclass hierarchy resolves correctly.
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from pydantic._internal._model_construction import (
+        ModelMetaclass as _ModelMetaclass,
+    )
+else:
+    _ModelMetaclass = type(BaseModel)
 
 
 OUTCOMES_ATTR = "Outcomes"
@@ -58,7 +65,7 @@ class Event(_ESBaseEvent):
             def model_post_init(self: Any, __context: Any = None) -> None:
                 _post_init(self)
 
-            cls.model_post_init = model_post_init  # type: ignore[attr-defined]
+            cls.model_post_init = model_post_init  # type: ignore[method-assign]
 
     def _collect_into(
         self,
@@ -302,7 +309,7 @@ def _attach_command_outcomes(namespace_cls: type) -> None:
             # User-declared matches; leave as-is (mypy-visible).
             continue
 
-        cmd.Outcomes = (  # type: ignore[attr-defined]
+        cmd.Outcomes = (
             outcomes[0]
             if len(outcomes) == 1
             else functools.reduce(operator.or_, outcomes)
@@ -347,7 +354,7 @@ def _is_nested_in_class(cls: type) -> bool:
     return len(relevant) >= 2
 
 
-class _NestedEventMeta(ModelMetaclass):
+class _NestedEventMeta(_ModelMetaclass):
     """Metaclass that validates domain-nesting when a nested class is
     assigned to its enclosing class.
 
@@ -358,31 +365,31 @@ class _NestedEventMeta(ModelMetaclass):
     module globals.
     """
 
-    def __set_name__(cls, owner: type, name: str) -> None:
-        if issubclass(cls, Command):
+    def __set_name__(self, owner: type, name: str) -> None:
+        if issubclass(self, Command):
             if not (isinstance(owner, type) and issubclass(owner, Namespace)):
                 raise TypeError(
-                    f"Command {cls.__name__!r} must be nested inside a "
+                    f"Command {self.__name__!r} must be nested inside a "
                     f"Namespace subclass, got owner {owner.__name__!r}"
                 )
-            _stamp_namespace(cls, owner)
-        elif issubclass(cls, DomainEvent):
+            _stamp_namespace(self, owner)
+        elif issubclass(self, DomainEvent):
             if isinstance(owner, type) and issubclass(owner, Namespace):
-                _stamp_namespace(cls, owner)
-                cls.__command__ = None
+                _stamp_namespace(self, owner)
+                self.__command__ = None
             elif isinstance(owner, type) and issubclass(owner, Command):
-                cls.__command__ = owner
+                self.__command__ = owner
                 # __namespace__ filled in by Namespace.__init_subclass__ — at this
                 # point Command.__namespace__ isn't known yet.
             else:
                 raise TypeError(
-                    f"DomainEvent {cls.__name__!r} must be nested inside a "
+                    f"DomainEvent {self.__name__!r} must be nested inside a "
                     f"Namespace or Command, got owner {owner.__name__!r}"
                 )
-        elif issubclass(cls, IntegrationEvent):
+        elif issubclass(self, IntegrationEvent):
             if isinstance(owner, type) and issubclass(owner, (Namespace, Command)):
                 raise TypeError(
-                    f"IntegrationEvent {cls.__name__!r} must live at module "
+                    f"IntegrationEvent {self.__name__!r} must live at module "
                     f"level — it crosses a context boundary by definition. "
                     f"Move it out of {owner.__name__!r}."
                 )
@@ -497,7 +504,7 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     # Outcome alias set by _attach_command_outcomes after class creation.
     Outcomes: ClassVar[Any] = None
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # noqa: PLR0912
         # Checked first: the shape is wrong regardless of what the body
         # declares.
         _reject_command_subclassing(cls)
@@ -556,7 +563,7 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                     )
                     if resolved is ClassVar or typing.get_origin(resolved) is ClassVar:
                         continue
-                except Exception:
+                except Exception:  # noqa: S110 — resolution failure = treat as non-ClassVar
                     pass
                 raise _reserved_modifier_error(cls, name)
         if not _is_nested_in_class(cls):
@@ -700,7 +707,7 @@ class Auditable:
         """Return a compact, human-readable summary of this event."""
         name = type(self).__name__
         parts = []
-        for f_name in type(self).model_fields:
+        for f_name in getattr(type(self), "model_fields", {}):
             val = getattr(self, f_name)
             if isinstance(val, str) and len(val) > 80:
                 val = val[:80] + "..."
@@ -1013,7 +1020,7 @@ class SystemPromptSet(IntegrationEvent, MessageEvent):
         """Create from a plain string, wrapping it in a ``SystemMessage``."""
         from langchain_core.messages import SystemMessage as SysMsg  # noqa: PLC0415
 
-        return cls(message=SysMsg(content=content))
+        return cls(message=SysMsg(content=content))  # type: ignore[call-arg]
 
 
 class Scatter:

@@ -7,7 +7,6 @@ querying agent correlates; this module only joins.
 
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import Event

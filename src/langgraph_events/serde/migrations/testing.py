@@ -110,7 +110,7 @@ def _required_field_placeholders(
     return {}
 
 
-def _pydantic_placeholder(annotation: object) -> object:
+def _pydantic_placeholder(annotation: object) -> object:  # noqa: PLR0911
     """Return a minimal valid value for a pydantic field annotation."""
     import typing  # noqa: PLC0415
 

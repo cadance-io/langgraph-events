@@ -363,7 +363,7 @@ class AGUIAdapter:
         filtered = self._extract_frontend_state(input_data)
         if filtered is None:
             return seed_list
-        return [FrontendStateMutated(state=filtered), *seed_list]
+        return [FrontendStateMutated(state=filtered), *seed_list]  # type: ignore[call-arg]
 
     async def _resume_event_stream(
         self,
@@ -412,7 +412,7 @@ class AGUIAdapter:
         filtered = self._extract_frontend_state(input_data)
         if filtered is None:
             return None
-        return FrontendStateMutated(state=filtered)
+        return FrontendStateMutated(state=filtered)  # type: ignore[call-arg]
 
     async def _commit_resume_frontend_state(
         self, fsm: FrontendStateMutated, config: Any

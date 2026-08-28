@@ -8,7 +8,8 @@ Covers:
 from __future__ import annotations
 
 import pytest
-from event_sourcery import Event as ESEvent, StreamId
+from event_sourcery import Event as ESEvent
+from event_sourcery import StreamId
 from event_sourcery.backend import InMemoryBackend
 
 from langgraph_events import (
@@ -19,9 +20,7 @@ from langgraph_events import (
     EventLog,
     IntegrationEvent,
     Namespace,
-    on,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared event fixtures
@@ -35,7 +34,7 @@ class OrderNS(Namespace):
         class Placed(DomainEvent):
             order_id: str = ""
 
-        def place(self) -> "OrderNS.Place.Placed":
+        def place(self) -> OrderNS.Place.Placed:
             return OrderNS.Place.Placed(order_id="o1")
 
 
@@ -88,11 +87,6 @@ def describe_event_graph_with_event_store():
     @pytest.fixture
     def stream_id():
         return StreamId(name="thread-1")
-
-    def it_persists_events_to_store(backend, stream_id):
-        @on(OrderNS.Place)
-        def handle_place(event: OrderNS.Place) -> OrderNS.Place.Placed:
-            return event.place()
 
     def it_persists_events_to_store(backend, stream_id):
         graph = EventGraph(

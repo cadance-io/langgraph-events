@@ -14,7 +14,6 @@ compatible LangGraph version.
 
 from __future__ import annotations
 
-import dataclasses
 from typing import TYPE_CHECKING, Any
 
 import ormsgpack
@@ -214,7 +213,7 @@ def _make_ext_hook(
         )
         try:
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
-        except (ImportError, AttributeError, TypeError, Exception) as exc:
+        except Exception as exc:
             # ``TypeError``/``ValidationError`` is the field-shape mismatch:
             # the identity resolves, but the stored kwargs carry a key the
             # live class has dropped, or omit a field it has gained with no

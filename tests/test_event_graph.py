@@ -765,8 +765,10 @@ def describe_EventGraph():
                     assert msgs[0].content == "You are helpful"
 
                 def it_is_frozen():
+                    from pydantic import ValidationError
+
                     event = SystemPromptSet.from_str("test")
-                    with pytest.raises(Exception):  # AttributeError or pydantic ValidationError
+                    with pytest.raises((AttributeError, ValidationError)):
                         event.message = SystemMessage(  # type: ignore
                             content="changed"
                         )
