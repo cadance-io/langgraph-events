@@ -873,6 +873,9 @@ class EventGraph:
         # pyES EventStore — when supplied, events are appended to a stream
         # keyed by config["configurable"]["thread_id"] after every invoke/resume.
         # Use EventLog.from_store(event_store, StreamId(...)) to read them back.
+        outbox: Any | None = None,
+        # pyES EventStore from a with_outbox() backend — only IntegrationEvents
+        # are appended here, enabling reliable external publishing via Outbox.run().
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
@@ -886,6 +889,7 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._store = store
         self._event_store = event_store
+        self._outbox = outbox
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
         _discover_namespace_reducers(self._namespaces, self._reducers)
@@ -1314,10 +1318,12 @@ class EventGraph:
         return log
 
     def _persist_to_event_store(self, log: EventLog, config: Any) -> None:
-        """Append new events from this run to the pyES EventStore."""
-        if self._event_store is None or not log:
+        """Append new events from this run to the pyES EventStore and/or Outbox."""
+        if (self._event_store is None and self._outbox is None) or not log:
             return
         from event_sourcery import StreamId  # noqa: PLC0415
+
+        from langgraph_events._event import IntegrationEvent  # noqa: PLC0415
 
         thread_id = (
             (config or {}).get("configurable", {}).get("thread_id")
@@ -1327,17 +1333,33 @@ class EventGraph:
         stream_id = StreamId(
             name=str(thread_id) if thread_id is not None else "default"
         )
-        # Determine how many events are already in the store to avoid
-        # duplicating events across runs when a checkpointer is used
-        # (result["events"] always returns the full history).
-        already_stored = len(self._event_store.load_stream(stream_id))
-        new_events = log.events[already_stored:]
-        if new_events:
-            self._event_store.append(
-                *new_events,
-                stream_id=stream_id,
-                expected_version=already_stored,
-            )
+
+        if self._event_store is not None:
+            # Determine how many events are already in the store to avoid
+            # duplicating events across runs when a checkpointer is used
+            # (result["events"] always returns the full history).
+            already_stored = len(self._event_store.load_stream(stream_id))
+            new_events = log.events[already_stored:]
+            if new_events:
+                self._event_store.append(
+                    *new_events,
+                    stream_id=stream_id,
+                    expected_version=already_stored,
+                )
+
+        if self._outbox is not None:
+            # Only IntegrationEvents cross bounded-context boundaries.
+            already_in_outbox = len(self._outbox.load_stream(stream_id))
+            integration_events = [
+                e for e in log.events if isinstance(e, IntegrationEvent)
+            ]
+            new_outbox_events = integration_events[already_in_outbox:]
+            if new_outbox_events:
+                self._outbox.append(
+                    *new_outbox_events,
+                    stream_id=stream_id,
+                    expected_version=already_in_outbox,
+                )
 
     @classmethod
     def from_namespaces(
