@@ -15,6 +15,9 @@ class Trading(Namespace):
         fn=lambda e: getattr(e, "sym", None),
     )
 
+    class Noted(DomainEvent):
+        sym: str
+
     class Place(Command):
         sym: str
 

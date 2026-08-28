@@ -26,9 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The uniqueness guard moves to where ambiguity actually causes harm. Two *different* namespaces of
   the same name reaching one graph is still a `TypeError`, now naming both classes with their
   modules — reducer discovery and `graph.namespaces()` group by name, so within a graph the name
-  must resolve to one class. Nested events carry a `__namespace_cls__` stamp alongside
-  `__namespace__`, and `NamespaceModel.Namespace` gains a `cls` field (absent from `to_dict()` /
-  `json()`, so `schema_version` is unchanged).
+  must resolve to one class. Subscribed *and* produced event types are checked, so a handler
+  emitting another lifetime's class is caught too. Nested events carry a `__namespace_cls__` stamp
+  alongside `__namespace__`, namespace-scoped reducers match on that class rather than the name,
+  and `NamespaceModel.Namespace` gains a `cls` field (absent from `to_dict()` / `json()`, so
+  `schema_version` is unchanged).
 
   Lifetimes are **sequential, not concurrent**: checkpointed events are keyed by
   `(__module__, __qualname__)` and resolved by import, so two lifetimes of the same module share

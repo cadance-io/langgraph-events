@@ -63,8 +63,10 @@ class Event:
 
 
 _FINALIZED_ATTR = "__lge_namespace_finalized__"
-"""Marker set on a Namespace once ``__init_subclass__`` has run far enough for
-``on_namespace_finalize`` callbacks to see a fully stamped class. Read via
+"""Marker set on a Namespace at the point ``__init_subclass__`` reaches the
+stamping passes — the same point the old process-global registry recorded the
+class, so ``on_namespace_finalize`` fires immediately from exactly where it
+always did. Not a claim that stamping has finished: it has not. Read via
 ``__dict__`` so subclasses never inherit it."""
 
 

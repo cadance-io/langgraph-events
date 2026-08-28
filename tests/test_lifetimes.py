@@ -6,8 +6,6 @@ the end-to-end proof: a lifetime runs, checkpoints, ends, and a fresh lifetime
 resumes the same log against freshly-defined classes.
 """
 
-from __future__ import annotations
-
 import importlib
 
 import _lifetime_namespaces
@@ -15,6 +13,7 @@ import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import Command, DomainEvent, EventGraph, Namespace, on
+from langgraph_events._reducer import _matches_namespace
 from langgraph_events.serde import NamespaceAwareSerde
 
 
@@ -125,6 +124,49 @@ def describe_namespaces_reaching_one_graph():
             ):
                 EventGraph([handle_one, handle_two])
 
+    def when_a_produced_type_belongs_to_another_lifetime():
+
+        # Subscribed types alone are not enough: a handler can subscribe to
+        # one lifetime and *return* another's class, which merges the two
+        # silently in the model and makes reflection answer from the wrong
+        # lifetime.
+        def it_raises():
+            first = _next_lifetime()
+            second = _next_lifetime()
+
+            @on(first.Noted)
+            def react(event: object) -> second.Place:
+                return second.Place(sym="AAPL")
+
+            with pytest.raises(
+                TypeError, match=r"Two different namespaces named 'Trading'"
+            ):
+                EventGraph([react])
+
+    def when_both_definitions_come_from_one_module():
+
+        # Two lifetimes of one module render identically as
+        # module.qualname, so the message has to say more than that or it
+        # names the same string twice and explains nothing.
+        def it_does_not_name_the_same_string_twice():
+            first = _next_lifetime()
+            second = _next_lifetime()
+
+            @on(first.Place)
+            def handle_one(event: object) -> None:
+                return None
+
+            @on(second.Place)
+            def handle_two(event: object) -> None:
+                return None
+
+            with pytest.raises(TypeError) as exc:
+                EventGraph([handle_one, handle_two])
+
+            label = f"{first.__module__}.{first.__qualname__}"
+            assert f"{label} and {label}" not in str(exc.value)
+            assert "reloaded" in str(exc.value)
+
     def when_two_handlers_share_one_namespace():
 
         def it_does_not_raise():
@@ -139,3 +181,26 @@ def describe_namespaces_reaching_one_graph():
                 return None
 
             assert EventGraph([handle_a, handle_b])._namespaces["Trading"] is one
+
+
+def describe_namespace_scoped_reducers():
+
+    # A declarative reducer on a Namespace folds only that namespace's
+    # events. Membership is the namespace *object*, not its name — with
+    # names no longer unique process-wide, a name match would let one
+    # lifetime's reducer fold another's event. Tested at the predicate
+    # because the graph-build guards make an end-to-end repro unreachable.
+    def when_the_event_belongs_to_another_lifetime():
+
+        def it_does_not_match():
+            first = _next_lifetime()
+            second = _next_lifetime()
+
+            assert not _matches_namespace(first.Place.Placed(sym="AAPL"), second)
+
+    def when_the_event_belongs_to_that_namespace():
+
+        def it_matches():
+            first = _next_lifetime()
+
+            assert _matches_namespace(first.Place.Placed(sym="AAPL"), first)

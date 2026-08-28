@@ -223,6 +223,8 @@ EventGraph([one.Place, two.Place])
 # app.a.Trading and app.b.Trading. Namespace names must be unique within a graph.
 ```
 
+A namespace reached only through a handler's *return* type counts too, so a handler that subscribes to one lifetime and emits another's class is rejected the same way.
+
 Across graphs the name is free. That is what lets one process run several independent engine lifetimes in sequence — a test that runs a scenario, ends it, and starts a fresh one against the same checkpointed log:
 
 ```python

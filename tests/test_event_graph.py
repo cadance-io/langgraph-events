@@ -3908,6 +3908,28 @@ def describe_OrphanedEventWarning():
             with pytest.warns(OrphanedEventWarning, match="Orphan"):
                 EventGraph([produce_orphan])
 
+        def it_points_at_user_code_not_library_internals():
+            # Regression guard: stacklevel must walk past the library frames
+            # so the warning surfaces the user's `EventGraph(...)` line. Went
+            # unpinned until the emit moved out of __init__ into a helper and
+            # the stale stacklevel anchored the warning at `sys:1`.
+            class AnchorOrphan(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def produce_orphan(event: Started) -> AnchorOrphan:
+                return AnchorOrphan()
+
+            with pytest.warns(OrphanedEventWarning) as captured:
+                EventGraph([produce_orphan])
+
+            filename = captured[0].filename
+            assert "langgraph_events" not in filename, (
+                f"warning anchored to library file {filename!r}; expected user "
+                f"code. Check stacklevel in _register_produced_types."
+            )
+            assert filename.endswith("test_event_graph.py")
+
         def it_warns_for_orphaned_scatter_types():
             class ScatterOrphan(IntegrationEvent):
                 pass
