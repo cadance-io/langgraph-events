@@ -381,3 +381,37 @@ def describe_one_class_reached_twice():
             )
 
             assert serde._origin_addfield_table
+
+
+class _Alef(IntegrationEvent):
+    sym: str
+
+
+class _Bet(IntegrationEvent):
+    sym: str
+
+
+def describe_loose_event_ordering():
+
+    # The loose events come out of set arithmetic, whose iteration order
+    # varies per process. That order reaches migration collection and decides
+    # which class a collision diagnostic names first, so a message must not
+    # change between runs of the same code.
+    def when_a_graph_touches_several():
+
+        def it_returns_them_sorted_and_deduplicated():
+            @on(_Alef)
+            def one(event: _Alef) -> _Bet:
+                return _Bet(sym=event.sym)
+
+            @on(_Bet)
+            def two(event: _Bet) -> None:
+                return None
+
+            loose = EventGraph([one, two])._loose_events
+
+            assert list(loose) == sorted(
+                set(loose), key=lambda c: (c.__module__, c.__qualname__)
+            )
+            assert len(loose) == len(set(loose))
+            assert set(loose) == {_Alef, _Bet}
