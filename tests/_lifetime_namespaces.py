@@ -48,3 +48,10 @@ class Filled(Namespace):
         @migrate_from("Filled.Ancient", backfill={"note": ""})
         class Done(DomainEvent):
             note: str = ""
+
+
+class Audited(Namespace):
+    """Reaches a graph only through `handlers=`, never through `namespaces=`."""
+
+    class Logged(DomainEvent):
+        sym: str

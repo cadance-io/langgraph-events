@@ -51,7 +51,7 @@ from langgraph_events._internal import (
     make_router_node,
     make_seed_node,
 )
-from langgraph_events._labels import distinct_labels
+from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
 from langgraph_events._warn import warn_user
@@ -404,17 +404,20 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     # already correct. Qualify the names when they collide (#151).
     collision = bool({o.__name__ for o in missing} & {c.__name__ for c in covered})
 
-    # Not ``distinct_labels``: that answers "tell these *two* apart", and
-    # here a whole list is rendered against a shared verdict. Same escalation
-    # rule, applied uniformly.
+    # ``escalating_labels`` over the whole cast, not ``distinct_labels``:
+    # this renders a list against one shared verdict rather than telling a
+    # single pair apart. Same escalation rule, so two lifetimes of one module
+    # — identical module *and* qualname — still separate.
+    labels = escalating_labels((*covered, *missing, *nested_outcomes))
+
     def label(t: type) -> str:
-        return t.__qualname__ if collision else t.__name__
+        return labels[t]
 
     declared = " | ".join(label(t) for t in covered) or "(no types)"
     missing_names = ", ".join(label(o) for o in missing)
     hint = (
         f"Add them to the annotation (e.g. `-> "
-        f"{' | '.join(o.__name__ for o in nested_outcomes)}`) or drop "
+        f"{' | '.join(label(o) for o in nested_outcomes)}`) or drop "
         f"the annotation to let Outcomes drive the contract."
     )
     if collision:
@@ -527,10 +530,18 @@ def _register_produced_types(
             OrphanedEventWarning,
         )
 
+    # ``subscribed``/``produced`` are sets, so their iteration order varies
+    # per process. It reaches migration collection, and from there decides
+    # which class a collision diagnostic names first — keep it reproducible.
     return tuple(
-        t
-        for t in (*subscribed, *produced)
-        if getattr(t, "__namespace_cls__", None) is None
+        dict.fromkeys(
+            t
+            for t in sorted(
+                (*subscribed, *produced),
+                key=lambda c: (c.__module__, c.__qualname__),
+            )
+            if getattr(t, "__namespace_cls__", None) is None
+        )
     )
 
 
@@ -1338,8 +1349,13 @@ class EventGraph:
 
             serde = getattr(checkpointer, "serde", None)
             if serde is not None and not isinstance(serde, NamespaceAwareSerde):
+                # Not ``domains``: a namespace can reach the graph through
+                # ``handlers=`` alone, and its events would then keep
+                # resolving by import — the bleed #155 exists to close.
+                # ``graph._namespaces`` is the full set.
                 checkpointer.serde = NamespaceAwareSerde(
-                    namespaces=domains, events=graph._loose_events
+                    namespaces=tuple(graph._namespaces.values()),
+                    events=graph._loose_events,
                 )
 
         return graph

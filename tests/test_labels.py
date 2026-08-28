@@ -1,6 +1,6 @@
 """Two classes named in one diagnostic must be told apart."""
 
-from langgraph_events._labels import distinct_labels
+from langgraph_events._labels import distinct_labels, escalating_labels
 
 
 class Alpha:
@@ -50,3 +50,26 @@ def describe_distinct_labels():
             # Equal, and stated plainly — not "mod.Alpha (0x..) and
             # mod.Alpha (0x..)", which reads as two things that are one.
             assert here == there == "Alpha"
+
+
+def describe_escalating_labels():
+
+    def when_two_share_a_module_and_a_qualname():
+
+        # Two engine lifetimes of one module: nothing textual separates
+        # them, so a message naming both by qualname prints one string
+        # twice. This is the case the escalation exists for.
+        def it_still_tells_them_apart():
+            twin = type("Alpha", (), {"__qualname__": Alpha.__qualname__})
+            twin.__module__ = Alpha.__module__
+
+            labels = escalating_labels((Alpha, twin))
+
+            assert labels[Alpha] != labels[twin]
+
+    def when_every_name_is_unique():
+
+        def it_stays_on_bare_names():
+            labels = escalating_labels((Alpha, Holder))
+
+            assert set(labels.values()) == {"Alpha", "Holder"}

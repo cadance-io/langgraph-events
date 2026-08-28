@@ -781,7 +781,9 @@ def _collect_decorated_migrations(
                 f"events=) claim the same event identity "
                 f"{current[0]}.{current[1]}: {here} and {there}. Most "
                 f"likely two engine lifetimes of one module — give each "
-                f"lifetime its own NamespaceAwareSerde."
+                f"lifetime its own serde, and its own EventGraph if this "
+                f"came from EventGraph.from_namespaces, which builds one "
+                f"for you."
             )
         # ``__dict__.get`` (not ``getattr``) — neither marker may leak
         # through MRO when a subclass inherits from a decorated parent.

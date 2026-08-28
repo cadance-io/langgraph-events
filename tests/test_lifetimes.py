@@ -325,6 +325,26 @@ def describe_from_namespaces_auto_wiring():
             ids = graph._checkpointer.serde.revivable_identities()
             assert (ping.__module__, "Ping") in ids
 
+        def it_scopes_namespaces_reached_only_through_handlers():
+            # A namespace can arrive via handlers= rather than namespaces=.
+            # Passing only the declared domains would leave its events
+            # resolving by import — the bleed this all exists to close.
+            from langgraph.checkpoint.memory import MemorySaver
+
+            first = _next_lifetime()
+            audited = _lifetime_namespaces.Audited
+
+            @on(first.Place.Placed)
+            def log(event: object) -> _lifetime_namespaces.Audited.Logged:
+                return audited.Logged(sym="AAPL")
+
+            graph = EventGraph.from_namespaces(
+                first, handlers=[log], checkpointer=MemorySaver()
+            )
+
+            ids = graph._checkpointer.serde.revivable_identities()
+            assert (audited.__module__, "Audited.Logged") in ids
+
         def it_does_not_consume_the_namespace_model_cache():
             # Deriving the loose events from a NamespaceModel would fire its
             # design-smell warnings from inside the library and populate the

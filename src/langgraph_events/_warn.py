@@ -21,23 +21,13 @@ _PACKAGE_ROOT = Path(__file__).parent
 """Frames under this directory are library frames, and never the anchor."""
 
 
-def warn_user(
-    message: str,
-    category: type[Warning] = UserWarning,
-    *,
-    extra_depth: int = 0,
-) -> None:
-    """Emit *message* anchored at the nearest frame outside this package.
-
-    ``extra_depth`` skips that many additional frames, for the rare case
-    where the immediate caller is itself user code that should not be
-    blamed — a class body executing during ``__init_subclass__``, say.
-    """
+def warn_user(message: str, category: type[Warning] = UserWarning) -> None:
+    """Emit *message* anchored at the nearest frame outside this package."""
     depth, frame = 2, inspect.currentframe()
     frame = frame.f_back if frame is not None else None
     while frame is not None and _is_library_frame(frame.f_code.co_filename):
         frame, depth = frame.f_back, depth + 1
-    warnings.warn(message, category, stacklevel=depth + extra_depth)
+    warnings.warn(message, category, stacklevel=depth)
 
 
 def _is_library_frame(filename: str) -> bool:
