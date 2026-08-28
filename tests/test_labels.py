@@ -23,11 +23,12 @@ def describe_distinct_labels():
 
     def when_only_the_qualnames_differ():
 
-        def it_escalates_to_qualnames():
+        def it_escalates_to_qualnames_and_no_further():
             here, there = distinct_labels(Alpha, Holder.Alpha)
 
-            assert here != there
-            assert "Holder.Alpha" in there
+            # Qualnames already separate them, so no identity noise.
+            assert here == f"{Alpha.__module__}.{Alpha.__qualname__}"
+            assert there == f"{Holder.__module__}.{Holder.Alpha.__qualname__}"
 
     def when_even_the_qualnames_match():
 
@@ -46,4 +47,6 @@ def describe_distinct_labels():
         def it_does_not_invent_a_difference():
             here, there = distinct_labels(Alpha, Alpha)
 
-            assert here == there
+            # Equal, and stated plainly — not "mod.Alpha (0x..) and
+            # mod.Alpha (0x..)", which reads as two things that are one.
+            assert here == there == "Alpha"
