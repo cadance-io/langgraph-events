@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`NamespaceAwareSerde` now resolves event identity through its own `namespaces=` scope** before
+  falling back to a module import. The read path built the `(module, qualname)` map on the encode
+  side already (`legacy_write`'s `oldest_historic`) but never consulted the scope on the way back
+  in, so a namespace whose qualname carries `<locals>` — the normal shape for in-process
+  behavioural tests, notebooks, and REPL work — could be checkpointed and never revived, and two
+  engine lifetimes of one module silently shared their classes: once lifetime 2 existed, lifetime
+  1's serde revived into lifetime 2's classes
+  ([#150](https://github.com/cadance-io/langgraph-events/issues/150)).
+
+  ```python
+  def lifetime():
+      class Trading(Namespace):
+          class Place(Command):
+              sym: str
+              class Placed(DomainEvent):
+                  sym: str
+      return Trading
+
+  T = lifetime()
+  serde = NamespaceAwareSerde(namespaces=[T])
+  serde.loads_typed(serde.dumps_typed(T.Place.Placed(sym="AAPL")))   # was ValueError
+  ```
+
+  Migration validation and the test gates ask the same "does this identity reach a live class?"
+  question, so they now answer it the same way: `@migrate_from` / `@backfill` on a function-local
+  class no longer fails serde construction as a dead-end chain or an unresolvable `AddField`
+  target, `assert_all_baselined_resolve` and `assert_all_baselined_revive` resolve scope-first, and
+  the shadowing guard sees a rename source that is still live *in scope* — an error that an
+  import-only probe could not detect. `revivable_identities()` and
+  `assert_all_baselined_cover` are unchanged: both were always keyed on the namespace walk rather
+  than on imports, and widening them to count whatever happens to be importable would weaken the
+  gate. `assert_all_baselined_handlers_cover` is untouched — handler names are graph topology, not
+  event identity.
+
+  Events reached by no namespace walk — module-level `IntegrationEvent`s, framework
+  `SystemEvent`s — still resolve by import, unchanged.
+
 ## [0.26.0] - 2026-08-28
 
 ### Changed

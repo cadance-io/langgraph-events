@@ -89,6 +89,24 @@ def describe_sequential_lifetimes():
             assert type(revived) is second.Place.Placed
             assert type(revived) is not first.Place.Placed
 
+    def when_an_earlier_lifetimes_serde_reads_its_own_checkpoint():
+
+        # Both lifetimes render as the same ``(module, qualname)``, so an
+        # import walk hands lifetime one's serde lifetime two's classes —
+        # a silent cross-lifetime bleed. The serde resolves through its own
+        # ``namespaces=`` scope first, which the two do not share (#150).
+        def it_revives_into_that_lifetimes_classes():
+            first = _next_lifetime()
+            serde_one = NamespaceAwareSerde(namespaces=[first])
+            blob = serde_one.dumps_typed(first.Place.Placed(sym="AAPL"))
+
+            second = _next_lifetime()
+
+            revived = serde_one.loads_typed(blob)
+
+            assert type(revived) is first.Place.Placed
+            assert type(revived) is not second.Place.Placed
+
     def when_reflection_queries_the_second_lifetime():
 
         def it_resolves_names_to_that_lifetimes_classes():

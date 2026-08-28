@@ -527,6 +527,51 @@ def _persisted_payload(**kwargs: Any) -> Any:
     )
 
 
+def _local_trading() -> Any:
+    """A ``Namespace`` built inside a function — its qualname carries
+    ``<locals>``, so no import walk can ever reach the nested classes."""
+
+    class Trading(Namespace):
+        class Place(Command):
+            sym: str
+
+            class Placed(DomainEvent):
+                sym: str
+
+    return Trading
+
+
+def _local_migrated_trading() -> Any:
+    """``_local_trading`` after a rename: the ``@migrate_from`` chain
+    terminates on a class no import walk can reach."""
+
+    class Trading(Namespace):
+        class Place(Command):
+            sym: str
+
+            @migrate_from("Trading.Place.Filled")
+            class Placed(DomainEvent):
+                sym: str
+
+    return Trading
+
+
+def _local_backfilled_trading() -> Any:
+    """``_local_trading`` after gaining a field: the ``@backfill`` target is
+    a class no import walk can reach."""
+
+    class Trading(Namespace):
+        class Place(Command):
+            sym: str
+
+            @backfill("venue", default="NYSE")
+            class Placed(DomainEvent):
+                sym: str
+                venue: str
+
+    return Trading
+
+
 @dataclasses.dataclass
 class PlainPayload:
     name: str
@@ -1889,6 +1934,82 @@ def describe_NamespaceAwareSerde():
                     assert b"ScopeFixtureA.Persist.Persisted" in payload
                     assert b"ScopeFixtureA.Persisted" not in payload
 
+    def describe_scope_first_identity_resolution():
+        # Revival consults the serde's own ``namespaces=`` scope before it
+        # falls back to importing the module and walking the qualname. The
+        # scope is the authority on what this serde can revive; the import
+        # walk is the fallback for identities the walk never reached
+        # (module-level IntegrationEvents, framework SystemEvents). See #150.
+
+        def when_the_namespace_is_defined_inside_a_function():
+            def it_revives_the_event():
+                trading = _local_trading()
+                serde = NamespaceAwareSerde(namespaces=[trading])
+
+                revived = serde.loads_typed(
+                    serde.dumps_typed(trading.Place.Placed(sym="AAPL"))
+                )
+
+                assert type(revived) is trading.Place.Placed
+                assert revived.sym == "AAPL"
+
+        def when_a_scoped_class_carries_migrate_from():
+            def it_revives_the_historic_payload():
+                # Migration validation runs at construction and asks the
+                # same question the read path asks — so it, too, must see
+                # the scope, or a rename chain that terminates on a
+                # function-local class reads as a dead end.
+                trading = _local_migrated_trading()
+                serde = NamespaceAwareSerde(namespaces=[trading])
+
+                revived = serde.loads_typed(
+                    synthesize_legacy_payload(
+                        __name__, "Trading.Place.Filled", {"sym": "AAPL"}
+                    )
+                )
+
+                assert type(revived) is trading.Place.Placed
+                assert revived.sym == "AAPL"
+
+        def when_a_scoped_class_carries_backfill():
+            def it_injects_the_default_into_the_older_payload():
+                # The AddField target lands in the post-rename bucket only
+                # if it resolves — and its field is validated against the
+                # live class. Both questions need the scope.
+                trading = _local_backfilled_trading()
+                serde = NamespaceAwareSerde(namespaces=[trading])
+
+                revived = serde.loads_typed(
+                    synthesize_legacy_payload(
+                        trading.Place.Placed.__module__,
+                        trading.Place.Placed.__qualname__,
+                        {"sym": "AAPL"},
+                    )
+                )
+
+                assert type(revived) is trading.Place.Placed
+                assert revived.venue == "NYSE"
+
+        def when_a_rename_source_is_still_live_in_scope():
+            def it_raises_to_prevent_shadowing_the_live_class():
+                # The rename runs before resolution, so it shadows the live
+                # class whether or not that class is importable. An
+                # import-only shadow check simply cannot see a
+                # function-local one, and lets the rewrite through.
+                trading = _local_trading()
+                migrations = [
+                    _rename_migration(
+                        "shadows-scoped",
+                        old_module=trading.Place.Placed.__module__,
+                        old_qualname=trading.Place.Placed.__qualname__,
+                        new_module=Persona.__module__,
+                        new_qualname="Persona.Approve.Approved",
+                    ),
+                ]
+
+                with pytest.raises(ValueError, match=r"resolves to a currently-live"):
+                    NamespaceAwareSerde(namespaces=[trading], migrations=migrations)
+
     def describe_revivable_identities():
         # The set of ``(module, qualname)`` this serde will accept on a
         # read: live classes in scope, plus every historic identity a
@@ -2059,6 +2180,29 @@ def describe_NamespaceAwareSerde():
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persisted" not in str(excinfo.value)
 
+        def when_a_baselined_identity_is_only_reachable_in_scope():
+            def it_revives_through_the_scope(tmp_path: Any):
+                # ``loads_typed`` already resolves scope-first, but the
+                # required-field placeholders the gate synthesizes must be
+                # read off the same class the reader will build — otherwise
+                # a function-local ``Placed(sym=...)`` is constructed with
+                # no kwargs and the gate reports a synthetic TypeError.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                trading = _local_trading()
+                serde = NamespaceAwareSerde(namespaces=[trading])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (
+                        trading.Place.Placed.__module__,
+                        trading.Place.Placed.__qualname__,
+                    ),
+                )
+
+                assert_all_baselined_revive(serde, baseline)
+
         def when_the_live_class_has_required_fields():
             def it_does_not_spuriously_fail(tmp_path: Any):
                 # NestedPersist.Persist.Persisted has a required
@@ -2108,6 +2252,28 @@ def describe_NamespaceAwareSerde():
                 baseline = _baseline_file(
                     tmp_path,
                     (DecoReorg.__module__, "DecoReorg.Persisted"),
+                )
+
+                assert_all_baselined_resolve(serde, baseline)
+
+        def when_a_baselined_identity_is_only_reachable_in_scope():
+            def it_resolves_through_the_scope(tmp_path: Any):
+                # The gate answers "would the read path reach a live Event"
+                # — so it has to resolve the way the read path does, scope
+                # first. Import-only, a function-local namespace fails a
+                # gate its own serde revives perfectly well (#150).
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                )
+
+                trading = _local_trading()
+                serde = NamespaceAwareSerde(namespaces=[trading])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (
+                        trading.Place.Placed.__module__,
+                        trading.Place.Placed.__qualname__,
+                    ),
                 )
 
                 assert_all_baselined_resolve(serde, baseline)
