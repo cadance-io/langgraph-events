@@ -18,6 +18,7 @@ from langgraph_events import (
     Command,
     DomainEvent,
     EventGraph,
+    Halted,
     IntegrationEvent,
     Interrupted,
     Namespace,
@@ -429,6 +430,53 @@ class FactoryScoped(Namespace):
     class Persisted(DomainEvent):
         tags: list[str]
         note: str = ""
+
+
+# Fixture that carries one of every member shape a ``Namespace`` body can
+# hold, so ``revivable_identities`` can be pinned as an exact set rather
+# than by membership. Set membership is what makes an OVER-BROAD identity
+# set invisible, and an over-broad set is the direction that silently
+# weakens ``assert_all_baselined_cover`` (#154). Deliberately carries no
+# ``@migrate_from``: the walk and the rename table are pinned separately.
+class WalkShapes(Namespace):
+    # Not a class at all — the walk must step over it.
+    LABEL = "not-an-event"
+
+    # A class that is not an ``Event`` — likewise stepped over.
+    class Helper:
+        pass
+
+    # DomainEvent nested directly in the Namespace.
+    class Recorded(DomainEvent):
+        note: str = ""
+
+    # Non-DomainEvent event nested in the Namespace for locality. The
+    # metaclass never fires for these, so only the walk reaches them.
+    class Blocked(Halted):
+        reason: str = ""
+
+    # Single-outcome Command: ``Outcomes`` is the nested class itself, the
+    # alias ``_iter_nested_events`` skips so it is not re-visited.
+    class Record(Command):
+        note: str = ""
+
+        # Reached only because the walk recurses into Commands.
+        class Stored(DomainEvent):
+            note: str = ""
+
+        # Non-DomainEvent nested inside a Command — same recursion.
+        class Stalled(Halted):
+            reason: str = ""
+
+    # Multi-outcome Command: ``Outcomes`` is a ``UnionType``, not a class.
+    class Amend(Command):
+        note: str = ""
+
+        class Amended(DomainEvent):
+            note: str = ""
+
+        class Rejected(DomainEvent):
+            reason: str = ""
 
 
 # Namespace whose nested ``Reviewed`` is an ``Interrupted`` subclass. This is
@@ -2017,23 +2065,83 @@ def describe_NamespaceAwareSerde():
         # unioned — users want one question answered, "will this revive?",
         # not "live or migrated?").
 
-        def it_returns_every_revivable_identity():
+        def it_equals_the_identities_the_namespace_walk_reaches():
+            # Exact equality, not membership: the gate that consumes this
+            # set (``assert_all_baselined_cover``) only asks whether a
+            # baselined identity is present, so an identity the walk never
+            # reached would make the gate pass on a checkpoint the read
+            # path cannot actually revive (#154).
+            module = WalkShapes.__module__
 
+            ids = NamespaceAwareSerde(namespaces=[WalkShapes]).revivable_identities()
+
+            assert ids == {
+                # DomainEvent nested directly in the Namespace.
+                (module, "WalkShapes.Recorded"),
+                # Non-DomainEvent nested in the Namespace for locality.
+                (module, "WalkShapes.Blocked"),
+                # The Command classes themselves — they are Events too, and
+                # a checkpointed command is as revivable as its outcomes.
+                (module, "WalkShapes.Record"),
+                (module, "WalkShapes.Amend"),
+                # Nested inside a Command: reached only by the
+                # ``recurse_commands=True`` descent.
+                (module, "WalkShapes.Record.Stored"),
+                (module, "WalkShapes.Record.Stalled"),
+                (module, "WalkShapes.Amend.Amended"),
+                (module, "WalkShapes.Amend.Rejected"),
+            }
+            # The namespace itself and its non-event members contribute
+            # nothing — asserted by the equality above, called out here
+            # because each is a distinct branch of the walk.
+            #
+            # The ``Outcomes`` aliases are NOT pinned here, and this set
+            # cannot pin them: for single-outcome ``Record`` the alias is the
+            # same class object as ``Stored``, which set semantics absorb,
+            # and for multi-outcome ``Amend`` it is a ``UnionType`` that
+            # fails the walk's ``isinstance(attr, type)`` guard on its own.
+            # The ``OUTCOMES_ATTR`` skip earns its keep in the walk's *list*
+            # (double-visited callbacks, double-applied AddFields), which
+            # ``it_lists_the_outcome_only_once`` covers.
+            assert (module, "WalkShapes") not in ids
+            assert (module, "WalkShapes.Helper") not in ids
+
+        def it_unions_the_walk_and_every_rename_source():
+            # The other half of the set: historic identities are revivable
+            # because a rename rewrites them, from either source of
+            # migrations. Exact equality again — AddField targets and
+            # rename *destinations* must add nothing of their own.
+            #
+            # The AddField is keyed on a live class OUTSIDE namespaces=, so
+            # it lands in _addfield_table with no overlap against the walk or
+            # the rename sources. Without it the claim about AddField targets
+            # would be a comment rather than an assertion: an empty table
+            # cannot distinguish "not unioned in" from "nothing to union".
             serde = NamespaceAwareSerde(
                 namespaces=[DecoReorg],
                 migrations=[
                     _persona_rename("legacy-rename"),
+                    _add_field_migration(
+                        "out-of-scope-fill",
+                        module=Persona.__module__,
+                        qualname="Persona.Approve.Approved",
+                        field="note",
+                        default="",
+                    ),
                 ],
             )
 
             ids = serde.revivable_identities()
 
-            # Live class reached by the namespace walk.
-            assert (DecoReorg.__module__, "DecoReorg.Persist.Persisted") in ids
-            # Decorator-driven historic source.
-            assert (DecoReorg.__module__, "DecoReorg.Persisted") in ids
-            # Hand-authored historic source.
-            assert ("legacy.persona", "Legacy.Approved") in ids
+            assert ids == {
+                # Live classes reached by the namespace walk.
+                (DecoReorg.__module__, "DecoReorg.Persist"),
+                (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                # Decorator-driven historic source.
+                (DecoReorg.__module__, "DecoReorg.Persisted"),
+                # Hand-authored historic source.
+                ("legacy.persona", "Legacy.Approved"),
+            }
 
         def it_returns_a_read_only_frozenset():
             serde = NamespaceAwareSerde(namespaces=[DecoReorg])
