@@ -2757,8 +2757,6 @@ def describe_renamed_inline_command_resume():
             def it_resumes_a_checkpoint_paused_under_the_old_class():
                 import sys
 
-                from langgraph_events._event import _NAMESPACE_REGISTRY
-
                 @on(_RelockGo)
                 def go(event: _RelockGo) -> None:
                     return None
@@ -2775,7 +2773,6 @@ def describe_renamed_inline_command_resume():
                     # The new release: the old class definition is gone, the
                     # surviving class declares both rename tracks.
                     delattr(mod, "OldLocker")
-                    _NAMESPACE_REGISTRY.pop("OldLocker", None)
                     saver.serde = NamespaceAwareSerde(namespaces=[Locker])
                     after = EventGraph([Locker.Persist, go], checkpointer=saver)
 
@@ -2786,7 +2783,6 @@ def describe_renamed_inline_command_resume():
                     assert log.has(Locker.Persist)
                 finally:
                     mod.OldLocker = old_ns
-                    _NAMESPACE_REGISTRY["OldLocker"] = old_ns
 
 
 def describe_assert_all_baselined_handlers_cover():

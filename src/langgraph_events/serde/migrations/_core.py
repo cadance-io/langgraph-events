@@ -534,9 +534,10 @@ def migrate_from(
 
     Metadata is stashed on the class as ``__lge_migrate_from__`` (and
     ``__lge_origin_backfill__`` for the per-origin fills).
-    :class:`NamespaceAwareSerde` walks ``_NAMESPACE_REGISTRY`` at
-    construction and assembles a :class:`Migration` per decorated class
-    automatically — no separate collection step is required.
+    :class:`NamespaceAwareSerde` walks the namespaces passed to its
+    ``namespaces=`` argument at construction and assembles a
+    :class:`Migration` per decorated class automatically — no separate
+    collection step is required.
     """
     if not old_qualnames:
         raise ValueError("@migrate_from requires at least one historic qualname.")

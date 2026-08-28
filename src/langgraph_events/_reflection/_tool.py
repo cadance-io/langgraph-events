@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._event import (
-    _NAMESPACE_REGISTRY,
     Command,
     DomainEvent,
     Event,
@@ -56,14 +55,13 @@ class QueryTool:
 
 
 def _model_classes(model: NamespaceModel, log: EventLog) -> list[type[Event]]:
-    """Every event class queryable by name: registered namespaces (walked via
-    the framework's blessed nested-event iterator), model-only namespaces,
-    integration/system events, and anything present in the log."""
+    """Every event class queryable by name: namespaces that carry their class
+    (walked via the framework's blessed nested-event iterator), model-only
+    namespaces, integration/system events, and anything present in the log."""
     classes: list[type[Event]] = []
-    for name, namespace in model.namespaces.items():
-        registered = _NAMESPACE_REGISTRY.get(name)
-        if registered is not None:
-            classes.extend(_iter_nested_events(registered, recurse_commands=True))
+    for namespace in model.namespaces.values():
+        if namespace.cls is not None:
+            classes.extend(_iter_nested_events(namespace.cls, recurse_commands=True))
         else:
             for command in namespace.commands.values():
                 classes.append(command.cls)

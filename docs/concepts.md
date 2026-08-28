@@ -213,6 +213,37 @@ A `Namespace` is where related features attach:
 !!! note "On `Namespace`"
     `Namespace` is a namespace — for grouping. A richer construct (with identity and size discipline) may layer on top in a future release.
 
+### Namespace names are scoped to a graph { #namespace-scope }
+
+A namespace name identifies one namespace **within a graph**, not within the process. Two namespaces of the same name reaching a single graph is an error — reducer discovery and `graph.namespaces()` both group by name, so the name has to resolve to one class:
+
+```python
+EventGraph([one.Place, two.Place])
+# TypeError: Two different namespaces named 'Trading' reached this graph:
+# app.a.Trading and app.b.Trading. Namespace names must be unique within a graph.
+```
+
+Across graphs the name is free. That is what lets one process run several independent engine lifetimes in sequence — a test that runs a scenario, ends it, and starts a fresh one against the same checkpointed log:
+
+```python
+import importlib
+import app.trading
+
+first = app.trading.Trading
+saver.serde = NamespaceAwareSerde(namespaces=[first])
+EventGraph([first.Place], checkpointer=saver).invoke(first.Place(sym="AAPL"), config=config)
+
+importlib.reload(app.trading)          # lifetime 2
+second = app.trading.Trading
+saver.serde = NamespaceAwareSerde(namespaces=[second])
+graph = EventGraph([second.Place], checkpointer=saver)
+
+graph.get_state(config).events.latest(second.Place.Placed)   # revived as lifetime 2's class
+```
+
+!!! warning "Sequential, not concurrent"
+    Checkpointed events are keyed by `(__module__, __qualname__)`, and that identity resolves through a module import. Two lifetimes of the same module therefore share it: once the second lifetime exists, the first one's graph no longer revives its own events. Run lifetimes one after another, not side by side. Namespaces must also be importable at module scope — one defined inside a function cannot be revived at all ([#150](https://github.com/cadance-io/langgraph-events/issues/150)).
+
 ## System events
 
 `SystemEvent` subclasses control runtime flow; subscribe like any event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed`, `HandlerRaised`, `HandlerRetried`, `InvariantViolated`. Full table in [API](api.md#system-events).

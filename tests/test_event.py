@@ -289,16 +289,42 @@ def describe_Namespace():
 
     def when_redefined():
 
+        # Namespace names are scoped to the graph that uses them, not to the
+        # process — a second engine lifetime redefining the same name is
+        # valid. The collision that matters (two classes, one name, one
+        # graph) is caught at graph build. See issue #148.
         def with_colliding_name():
 
-            def it_raises():
+            def it_does_not_raise():
                 class Widget(Namespace):
                     pass
 
-                with pytest.raises(TypeError, match=r"already defined"):
+                first = Widget
 
-                    class Widget(Namespace):
+                class Widget(Namespace):
+                    pass
+
+                assert Widget is not first
+
+    def when_nested_events_are_stamped():
+
+        def it_records_the_owning_namespace_class():
+            class Widget(Namespace):
+                class Build(Command):
+                    class Built(DomainEvent):
                         pass
+
+            assert Widget.Build.__namespace_cls__ is Widget
+            assert Widget.Build.Built.__namespace_cls__ is Widget
+
+        def it_keeps_both_stamps_in_step():
+            class Widget(Namespace):
+                class Build(Command):
+                    class Built(DomainEvent):
+                        pass
+
+            for cls in (Widget.Build, Widget.Build.Built):
+                assert cls.__namespace__ == cls.__namespace_cls__.__name__
 
 
 def describe_Command():

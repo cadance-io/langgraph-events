@@ -15,7 +15,6 @@ from langgraph.types import Command as LGCommand
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
-    _NAMESPACE_REGISTRY,
     OUTCOMES_ATTR,
     Command,
     DomainEvent,
@@ -402,15 +401,52 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     )
 
 
-def _discover_namespace_reducers(
+def _collect_graph_namespaces(
     handlers: list[Callable[..., Any]],
+) -> dict[str, type[Namespace]]:
+    """Name → Namespace class for every namespace this graph touches.
+
+    The graph's own registry. Namespaces are stamped onto their nested events
+    at class-definition time (``__namespace_cls__``), so the map is derived
+    from the handlers rather than from process-global state — which is what
+    lets several independent engine lifetimes coexist in one process (#148).
+
+    Two *distinct* classes sharing a name is rejected here: reducer discovery
+    and reflection both group by name, so within a single graph the name must
+    identify one class. Across graphs it need not, and does not.
+
+    Scope: subscribed event types, the same reach reducer discovery has. A
+    collision visible only through *produced* types surfaces later, in the
+    model — return-type introspection has not run at this point.
+    """
+    found: dict[str, type[Namespace]] = {}
+    for fn in handlers:
+        for et in getattr(fn, "_event_types", ()):
+            namespace_cls = getattr(et, "__namespace_cls__", None)
+            if namespace_cls is None:
+                continue
+            existing = found.setdefault(namespace_cls.__name__, namespace_cls)
+            if existing is not namespace_cls:
+                raise TypeError(
+                    f"Two different namespaces named {namespace_cls.__name__!r} "
+                    f"reached this graph: "
+                    f"{existing.__module__}.{existing.__qualname__} and "
+                    f"{namespace_cls.__module__}.{namespace_cls.__qualname__}. "
+                    f"Namespace names must be unique within a graph."
+                )
+    return found
+
+
+def _discover_namespace_reducers(
+    namespaces: dict[str, type[Namespace]],
     explicit_reducers: dict[str, BaseReducer],
 ) -> None:
-    """Auto-register reducers declared on domains referenced by handlers.
+    """Auto-register reducers declared on the graph's namespaces.
 
-    Walks each handler's ``_event_types`` (set by ``@on(...)``), finds the
-    owning domain via ``__namespace__`` + ``_NAMESPACE_REGISTRY``, and unions that
-    domain's ``__reducers__`` into *explicit_reducers*.
+    Unions each namespace's ``__reducers__`` into *explicit_reducers*.
+    *namespaces* is the graph's own registry from
+    ``_collect_graph_namespaces``, so discovery never reaches a same-named
+    namespace belonging to another graph.
 
     Collisions:
     - Two different discovered reducers with the same name → ``TypeError``.
@@ -418,23 +454,16 @@ def _discover_namespace_reducers(
       one → explicit wins; discovered one is skipped silently.
     """
     discovered: dict[str, BaseReducer] = {}
-    for fn in handlers:
-        for et in getattr(fn, "_event_types", ()):
-            namespace_name = getattr(et, "__namespace__", None)
-            if not namespace_name:
-                continue
-            namespace_cls = _NAMESPACE_REGISTRY.get(namespace_name)
-            if namespace_cls is None:
-                continue
-            for r in namespace_cls.__reducers__:
-                existing = discovered.get(r.name)
-                if existing is None:
-                    discovered[r.name] = r
-                elif existing is not r:
-                    raise TypeError(
-                        f"Reducer name {r.name!r} collides between domains: "
-                        f"{existing!r} and {r!r}"
-                    )
+    for namespace_cls in namespaces.values():
+        for r in namespace_cls.__reducers__:
+            existing = discovered.get(r.name)
+            if existing is None:
+                discovered[r.name] = r
+            elif existing is not r:
+                raise TypeError(
+                    f"Reducer name {r.name!r} collides between domains: "
+                    f"{existing!r} and {r!r}"
+                )
     # Merge into explicit; explicit wins on name conflict.
     for name, r in discovered.items():
         explicit_reducers.setdefault(name, r)
@@ -730,7 +759,8 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
-        _discover_namespace_reducers(handlers, self._reducers)
+        self._namespaces = _collect_graph_namespaces(handlers)
+        _discover_namespace_reducers(self._namespaces, self._reducers)
         conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
         if conflicts:
             raise ValueError(

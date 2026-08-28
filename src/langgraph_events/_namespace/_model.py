@@ -203,11 +203,18 @@ class NamespaceModel:
         ``events`` holds any ``Event`` nested in the domain that is not an
         outcome of one of its commands — typically free-standing DomainEvents,
         but also ``Halted`` subtypes nested in the domain for locality.
+
+        ``cls`` is the Namespace class itself, carried so consumers can walk
+        the real class body for nested events no handler references. ``None``
+        for a namespace reconstructed without one. Deliberately absent from
+        ``to_dict()`` / ``json()`` — a class object has no place in a JSON
+        snapshot.
         """
 
         name: str
         commands: dict[str, NamespaceModel.Command]
         events: tuple[type[Event], ...]
+        cls: type | None = None
 
     @dataclass(frozen=True)
     class Command:
@@ -397,6 +404,21 @@ Reaction: TypeAlias = NamespaceModel.CommandHandler | NamespaceModel.Policy
 # ---------------------------------------------------------------------------
 
 
+def _namespace_entry(
+    namespaces: dict[str, dict[str, Any]], name: str, event_type: type
+) -> dict[str, Any]:
+    """Bucket for *name*, recording the owning Namespace class on first sight.
+
+    The class comes off the event's ``__namespace_cls__`` stamp rather than a
+    global lookup, so a model built from one graph's handlers never resolves a
+    same-named namespace belonging to another (#148).
+    """
+    entry = namespaces.setdefault(name, {"commands": {}, "events": [], "cls": None})
+    if entry["cls"] is None:
+        entry["cls"] = getattr(event_type, "__namespace_cls__", None)
+    return entry
+
+
 def _classify_event_bucket(  # noqa: PLR0911, PLR0912
     event_type: type[Event],
     namespaces: dict[str, dict[str, Any]],
@@ -425,7 +447,7 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
         namespace_name = getattr(event_type, "__namespace__", None)
         if namespace_name is None:
             return
-        entry = namespaces.setdefault(namespace_name, {"commands": {}, "events": []})
+        entry = _namespace_entry(namespaces, namespace_name, event_type)
         cmd_entry = entry["commands"].setdefault(
             event_type.__name__, {"type": event_type, "outcomes": []}
         )
@@ -446,7 +468,7 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
         namespace_name = getattr(event_type, "__namespace__", None)
         if namespace_name is None:
             return
-        entry = namespaces.setdefault(namespace_name, {"commands": {}, "events": []})
+        entry = _namespace_entry(namespaces, namespace_name, event_type)
         cmd = getattr(event_type, "__command__", None)
         if cmd is not None:
             cmd_entry = entry["commands"].setdefault(
@@ -462,7 +484,7 @@ def _classify_event_bucket(  # noqa: PLR0911, PLR0912
     # membership beats IntegrationEvent/SystemEvent classification.
     namespace_name = getattr(event_type, "__namespace__", None)
     if namespace_name is not None:
-        entry = namespaces.setdefault(namespace_name, {"commands": {}, "events": []})
+        entry = _namespace_entry(namespaces, namespace_name, event_type)
         if event_type not in entry["events"]:
             entry["events"].append(event_type)
         return
@@ -615,6 +637,7 @@ def _build_domain_model(  # noqa: PLR0912
             name=namespace_name,
             commands=commands,
             events=tuple(raw["events"]),
+            cls=raw["cls"],
         )
 
     # Seed events: sources that never appear as targets, excluding
