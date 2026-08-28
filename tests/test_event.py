@@ -746,6 +746,39 @@ def describe_on_namespace_finalize():
 
             assert captured == [LateRefNs.Sibling]
 
+    def when_registered_while_the_enclosing_Namespace_is_still_being_created():
+        def it_queues_rather_than_firing_on_a_half_built_class():
+            # A nested class is stamped with __namespace_cls__ by
+            # __set_name__, which runs *before* the Namespace's
+            # __init_subclass__. Anything running in that window — here a
+            # sibling descriptor's own __set_name__ — must still queue: the
+            # enclosing class has not attached Command.Outcomes yet, which
+            # is the whole reason this hook exists.
+            seen_outcomes: list[object] = []
+
+            class Sentinel:
+                def __set_name__(self, owner, name):
+                    cmd = owner.__dict__["Cmd"]
+                    assert getattr(cmd, "__namespace_cls__", None) is not None
+                    on_namespace_finalize(
+                        cmd,
+                        lambda c, ns: seen_outcomes.append(
+                            getattr(c, "Outcomes", None)
+                        ),
+                    )
+                    # Firing now would hand the callback a Command with no
+                    # Outcomes attached.
+                    assert seen_outcomes == []
+
+            class MidBuildNs(Namespace):
+                class Cmd(Command):
+                    class Done(DomainEvent):
+                        pass
+
+                sentinel = Sentinel()
+
+            assert seen_outcomes == [MidBuildNs.Cmd.Done]
+
     def when_registered_after_the_enclosing_Namespace_finalized():
         def it_fires_immediately_instead_of_silently_dropping():
             class FinishedNs(Namespace):
