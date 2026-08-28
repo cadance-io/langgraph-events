@@ -13,6 +13,7 @@ from langgraph_events import (
     Namespace,
     ScalarReducer,
 )
+from langgraph_events.serde.migrations import migrate_from
 
 
 class Trading(Namespace):
@@ -38,3 +39,12 @@ class Ping(IntegrationEvent):
     """Module-level, outside any namespace — reaches the serde via events=."""
 
     sym: str
+
+
+class Filled(Namespace):
+    """A nested event whose decorator produces an AddField fill."""
+
+    class Do(Command):
+        @migrate_from("Filled.Ancient", backfill={"note": ""})
+        class Done(DomainEvent):
+            note: str = ""

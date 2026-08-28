@@ -11,6 +11,7 @@ import re
 
 import _lifetime_namespaces
 import pytest
+from _lifetime_namespaces import Filled as _Filled
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -318,3 +319,21 @@ def describe_from_namespaces_auto_wiring():
 
             ids = graph._checkpointer.serde.revivable_identities()
             assert (ping.__module__, "Ping") in ids
+
+
+def describe_one_class_reached_twice():
+
+    # namespaces= and events= can name the same class. Collecting it twice
+    # would collect its @migrate_from twice, and a duplicated AddField is
+    # rejected by _flatten_and_validate as a double fill.
+    def when_a_nested_event_is_also_passed_directly():
+
+        def it_is_collected_once():
+            # Collecting twice would declare the same fill twice, which
+            # _flatten_and_validate rejects as a duplicate AddField.
+            serde = NamespaceAwareSerde(
+                namespaces=[_Filled],
+                events=[_Filled.Do.Done],
+            )
+
+            assert serde._origin_addfield_table
