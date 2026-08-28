@@ -7,6 +7,7 @@ resumes the same log against freshly-defined classes.
 """
 
 import importlib
+import re
 
 import _lifetime_namespaces
 import pytest
@@ -88,6 +89,24 @@ def describe_sequential_lifetimes():
             assert revived.sym == "AAPL"
             assert type(revived) is second.Place.Placed
             assert type(revived) is not first.Place.Placed
+
+    def when_an_earlier_lifetimes_serde_reads_its_own_checkpoint():
+
+        # Both lifetimes render as the same ``(module, qualname)``, so an
+        # import walk hands lifetime one's serde lifetime two's classes —
+        # a silent cross-lifetime bleed. The serde resolves through its own
+        # ``namespaces=`` scope first, which the two do not share (#150).
+        def it_revives_into_that_lifetimes_classes():
+            first = _next_lifetime()
+            serde_one = NamespaceAwareSerde(namespaces=[first])
+            blob = serde_one.dumps_typed(first.Place.Placed(sym="AAPL"))
+
+            second = _next_lifetime()
+
+            revived = serde_one.loads_typed(blob)
+
+            assert type(revived) is first.Place.Placed
+            assert type(revived) is not second.Place.Placed
 
     def when_reflection_queries_the_second_lifetime():
 
@@ -204,3 +223,33 @@ def describe_namespace_scoped_reducers():
             first = _next_lifetime()
 
             assert _matches_namespace(first.Place.Placed(sym="AAPL"), first)
+
+
+def describe_a_serde_given_more_than_one_lifetime():
+
+    # The scope map is keyed by (module, qualname), which two lifetimes of one
+    # module share. Binding last-wins would make revival depend on the order of
+    # a sequence that reads as insignificant. EventGraph rejects the same
+    # mistake; so should the serde.
+    def when_two_namespaces_contribute_one_identity():
+
+        def it_raises_rather_than_binding_silently():
+            first = _next_lifetime()
+            second = _next_lifetime()
+
+            with pytest.raises(ValueError, match=r"same event identity") as exc:
+                NamespaceAwareSerde(namespaces=[first, second])
+
+            # Both classes render identically — sharing (module, qualname) is
+            # the trigger — so whatever the message names them by, the two
+            # halves must differ rather than printing one string twice.
+            pair = re.search(r"\((.+?) and (.+?)\)", str(exc.value))
+            assert pair is not None, str(exc.value)
+            assert pair.group(1) != pair.group(2), str(exc.value)
+
+    def when_the_same_namespace_is_passed_twice():
+
+        def it_is_accepted():
+            first = _next_lifetime()
+
+            assert NamespaceAwareSerde(namespaces=[first, first]) is not None

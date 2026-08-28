@@ -283,7 +283,7 @@ Three free functions assert that every identity in a committed baseline still ho
 | Gate | Per identity it… | Constructs? | Scope |
 |---|---|---|---|
 | `assert_all_baselined_cover` | is in `revivable_identities()` (set membership) | no | namespace-walk ∪ rename table |
-| `assert_all_baselined_resolve` | imports to a live `Event` (rename-aware) | no | every identity in the baseline |
+| `assert_all_baselined_resolve` | resolves to a live `Event` (rename-aware) | no | every identity in the baseline |
 | `assert_all_baselined_revive` | revives through the real read path | yes | every identity in the baseline |
 
 ```python
@@ -309,6 +309,8 @@ def test_baseline_coverage():
 - **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders — except fields the migration table back-fills, which get the *real* injected value so a broken fill fails the gate. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
 - **`resolve`** — when the baseline contains events `revive` can't placeholder-construct: construction-time validation (`__post_init__`) on non-back-filled fields, framework `SystemEvents`, or module-level `IntegrationEvents`. Proves the identity still resolves without ever calling `__init__`/`__post_init__`, so a full-graph baseline passes with no filtering and still fails loudly on an uncovered rename/removal.
 - **`cover`** — the fast set-membership smoke check. Namespace-walk-scoped, so it misses module-level identities a full-graph baseline emits — use `resolve` for those. Raises `MigrationCoverageError` (an `AssertionError`) whose `.uncovered` lists the offending identities.
+
+`resolve` and `revive` answer the same question the read path answers, and answer it the same way. Identity resolution is **scope-first**: the serde looks the `(module, qualname)` up in the namespaces it was constructed with, then falls back to importing the module and walking the qualname. So `resolve` and `revive` pass for a namespace defined inside a function (whose `<locals>` qualname no import reaches) and stay pinned to the serde's own classes when a second engine lifetime redefines them. `cover` is unaffected — it never resolved anything, being a set-membership check against the namespace walk, which is why it still misses module-level identities that `resolve` and the read path handle fine.
 
 `NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets add no extra identities — post-rename fills key on live classes, origin-scoped fills on rename sources already in the set).
 
@@ -463,7 +465,7 @@ Library-private; read directly if introspection needed (neither is MRO-inherited
 Errors raised at serde construction (not at first production read):
 
 - Duplicate `old_*` keys (ambiguous rewrites) — `ValueError`
-- Dead-end chains (migration target doesn't resolve to an importable class) — `ValueError`
+- Dead-end chains (migration target doesn't resolve to a live class, by serde scope or import) — `ValueError`
 - `old_qualname` shadowing a currently-live class — `ValueError`
 - Cycles (`A→B` then `B→A`) — `ValueError`
 - `AddField` targets that neither resolve to a live class nor match a rename-covered historic identity — `ValueError`

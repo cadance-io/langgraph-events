@@ -146,8 +146,13 @@ def _make_ext_hook(
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
+    scope: dict[tuple[str, str], type],
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
+
+    *scope* is the serde's ``namespaces=`` map, consulted ahead of the
+    import walk so revival lands on the classes this serde was built with
+    — the read-side mirror of the encoder's ``oldest_historic`` map.
 
     ormsgpack swallows the original exception from an ext-hook and re-raises
     a generic ``ValueError("ext_hook failed")``. The error list lets
@@ -205,7 +210,7 @@ def _make_ext_hook(
             origin_addfield_table,
         )
         try:
-            return _resolve_identity(module_name, qualname)(**kwargs)
+            return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
         except (ImportError, AttributeError, TypeError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
@@ -253,13 +258,13 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         # diagnostic, when a user-passed hand-authored entry conflicts,
         # names the user's migration as the second (more actionable than
         # naming the auto-collected one).
-        decorated, oldest_historic, live = _collect_decorated_migrations(namespaces)
+        decorated, oldest_historic, scope = _collect_decorated_migrations(namespaces)
         all_migrations = (*decorated, *migrations)
         (
             self._rename_table,
             self._addfield_table,
             self._origin_addfield_table,
-        ) = _flatten_and_validate(all_migrations)
+        ) = _flatten_and_validate(all_migrations, scope)
         # Origin-scoped fills are the fan-in signal, and a fan-in cannot
         # ride legacy_write: writes would relabel EVERY instance under the
         # oldest historic identity, collapsing the per-origin distinction
@@ -274,7 +279,11 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 "read-only compatibility. See 'Consolidating N classes into "
                 "one' in docs/event-migrations.md."
             )
-        self._live_identities = live
+        # The read path resolves through ``_scope`` before it falls back to
+        # importing — see ``_resolve_identity``. ``_live_identities`` is its
+        # key set: the identities revivable with no migration at all.
+        self._scope = scope
+        self._live_identities = frozenset(scope)
         self._legacy_write = legacy_write
         self._encode_default = _make_default(legacy_write, oldest_historic)
 
@@ -323,6 +332,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._rename_table,
                     self._addfield_table,
                     self._origin_addfield_table,
+                    self._scope,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )

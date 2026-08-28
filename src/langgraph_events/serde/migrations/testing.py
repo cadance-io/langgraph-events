@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 import ormsgpack
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from langgraph_events import EventGraph
     from langgraph_events._event_log import EventLog
@@ -64,10 +64,17 @@ def synthesize_legacy_payload(
 
 
 def _required_field_placeholders(
-    module: str, qualname: str, *, skip: frozenset[str] = frozenset()
+    module: str,
+    qualname: str,
+    *,
+    skip: frozenset[str] = frozenset(),
+    scope: Mapping[tuple[str, str], type] | None = None,
 ) -> dict[str, Any]:
     """``{name: None}`` for every required (no-default) field of the live
     class at ``(module, qualname)``, except those in *skip*.
+
+    Reads the fields off whichever class the read path would build — hence
+    *scope*, the serde's ``namespaces=`` map, ahead of the import walk.
 
     The helper only proves the identity reaches a constructible live
     class, not field semantics — ``None`` placeholders suffice unless the
@@ -80,7 +87,7 @@ def _required_field_placeholders(
     read path and actually exercises the injection.
     """
     try:
-        obj = _resolve_identity(module, qualname)
+        obj = _resolve_identity(module, qualname, scope=scope)
     except (ImportError, AttributeError):
         return {}
     if not dataclasses.is_dataclass(obj):
@@ -211,12 +218,17 @@ def _resolve_check(
     serde: NamespaceAwareSerde, module: str, qualname: str
 ) -> str | None:
     """Failure string if ``(module, qualname)`` no longer resolves (rename-
-    aware) to a live ``Event`` subclass, else ``None``. Never constructs."""
+    aware) to a live ``Event`` subclass, else ``None``. Never constructs.
+
+    Resolves through *serde*'s own scope first, exactly as its read path
+    does — the gate asks "would a checkpoint revive", and answering it with
+    a different resolution rule than the reader uses makes it wrong in both
+    directions."""
     target_module, target_qualname = _resolve_rename(
         module, qualname, serde._rename_table
     )
     try:
-        obj = _resolve_identity(target_module, target_qualname)
+        obj = _resolve_identity(target_module, target_qualname, scope=serde._scope)
     except (ImportError, AttributeError) as exc:
         return f"{module}:{qualname} -> {type(exc).__name__}: {exc}"
     if not (isinstance(obj, type) and issubclass(obj, Event)):
@@ -246,7 +258,7 @@ def _revive_check(serde: NamespaceAwareSerde, module: str, qualname: str) -> str
         )
     )
     kwargs = _required_field_placeholders(
-        target_module, target_qualname, skip=backfilled
+        target_module, target_qualname, skip=backfilled, scope=serde._scope
     )
     try:
         revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))

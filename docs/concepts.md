@@ -243,8 +243,10 @@ graph = EventGraph([second.Place], checkpointer=saver)
 graph.get_state(config).events.latest(second.Place.Placed)   # revived as lifetime 2's class
 ```
 
-!!! warning "Sequential, not concurrent"
-    Checkpointed events are keyed by `(__module__, __qualname__)`, and that identity resolves through a module import. Two lifetimes of the same module therefore share it: once the second lifetime exists, the first one's graph no longer revives its own events. Run lifetimes one after another, not side by side. Namespaces must also be importable at module scope — one defined inside a function cannot be revived at all ([#150](https://github.com/cadance-io/langgraph-events/issues/150)).
+!!! note "Give every lifetime its own serde"
+    Checkpointed events are keyed by `(__module__, __qualname__)`, which two lifetimes of one module share. What keeps them apart is the serde: identity resolution is **scope-first**, consulting the namespaces the serde was constructed with before falling back to a module import. So each lifetime needs its own `NamespaceAwareSerde(namespaces=[...])`, as above — then lifetime 1's serde keeps reviving lifetime 1's classes even after lifetime 2 exists, and a namespace defined inside a function revives too, `<locals>` qualname and all ([#150](https://github.com/cadance-io/langgraph-events/issues/150)).
+
+    Events *outside* any namespace — module-level `IntegrationEvent`s, framework `SystemEvent`s — are not in that scope and still resolve by import, so two lifetimes of one module do share those.
 
 ## System events
 

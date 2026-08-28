@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from langgraph_events._event import Event, _iter_nested_events
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from langgraph_events._reducer import BaseReducer
 
@@ -223,6 +223,7 @@ def _target_identity(
 
 def _flatten_and_validate(
     migrations: Sequence[Migration],
+    scope: Mapping[tuple[str, str], type] | None = None,
 ) -> tuple[
     dict[tuple[str, str], tuple[str, str]],
     dict[tuple[str, str], tuple[AddField, ...]],
@@ -238,7 +239,11 @@ def _flatten_and_validate(
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
-    worst possible time to discover it.
+    worst possible time to discover it. It asks the same "does this
+    identity reach a live class?" question the read path asks, so it takes
+    the same *scope* map and answers it the same way (see
+    :func:`_resolve_identity`); validating import-only would reject a
+    chain that terminates on a class the reader resolves perfectly well.
 
     Raises:
         ValueError: on duplicate rename sources, dead-end chains, cycles,
@@ -282,10 +287,10 @@ def _flatten_and_validate(
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
     for start in list(rename_edges):
-        rename_table[start] = _resolve_chain_terminus(start, rename_edges)
+        rename_table[start] = _resolve_chain_terminus(start, rename_edges, scope)
 
     addfield_table, origin_addfield_table = _bucket_addfields(
-        addfield_ops, rename_table
+        addfield_ops, rename_table, scope
     )
     return rename_table, addfield_table, origin_addfield_table
 
@@ -293,6 +298,7 @@ def _flatten_and_validate(
 def _bucket_addfields(
     addfield_ops: Sequence[tuple[AddField, str]],
     rename_table: dict[tuple[str, str], tuple[str, str]],
+    scope: Mapping[tuple[str, str], type] | None = None,
 ) -> tuple[
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], tuple[AddField, ...]],
@@ -310,19 +316,20 @@ def _bucket_addfields(
     fill_source: dict[tuple[tuple[str, str], str], str] = {}
     for op, migration_name in addfield_ops:
         target = (op.module, op.qualname)
-        # Rename-table membership decides the bucket BEFORE the import
+        # Rename-table membership decides the bucket BEFORE the resolve
         # probe: a rename source can never resolve live (the chain walk
         # rejects shadowing), so the buckets are disjoint by construction.
         if target in rename_table:
             bucket = origin_addfield_table
             live_identity = rename_table[target]
-        elif _resolves(*target):
+        elif _resolves(*target, scope=scope):
             bucket = addfield_table
             live_identity = target
         else:
             raise ValueError(
                 f"AddField target {op.module}:{op.qualname!r} neither "
-                f"resolves to a currently importable class nor matches a "
+                f"resolves to a live class — by this serde's namespace "
+                f"scope or by import — nor matches a "
                 f"historic identity covered by a rename migration. Either "
                 f"the target was deleted after the migration was authored, "
                 f"the module/qualname has a typo, or the historic identity "
@@ -333,7 +340,7 @@ def _bucket_addfields(
         # typo here instead. ``live_identity`` always resolves: post-rename
         # targets were just probed, origin targets point at a chain
         # terminus ``_resolve_chain_terminus`` already validated.
-        live_cls = _resolve_identity(*live_identity)
+        live_cls = _resolve_identity(*live_identity, scope=scope)
         if is_dataclass(live_cls) and op.field not in {
             f.name for f in fields(live_cls)
         }:
@@ -369,6 +376,7 @@ def _bucket_addfields(
 def _resolve_chain_terminus(
     start: tuple[str, str],
     rename_edges: dict[tuple[str, str], tuple[str, str]],
+    scope: Mapping[tuple[str, str], type] | None = None,
 ) -> tuple[str, str]:
     """Walk *start* through *rename_edges* and return the terminus.
 
@@ -396,22 +404,24 @@ def _resolve_chain_terminus(
                 f"{start[0]}:{start[1]!r}. Migrations must form a DAG."
             )
         seen.add(current)
-    if not _resolves(*current):
+    if not _resolves(*current, scope=scope):
         raise ValueError(
             f"Migration chain from {start[0]}:{start[1]!r} terminates at "
             f"{current[0]}:{current[1]!r}, which does not resolve to a "
-            f"currently importable class. Either the chain target was "
+            f"live class — by this serde's namespace scope or by import. "
+            f"Either the chain target was "
             f"renamed/deleted after the migration was authored, or the "
             f"new module/qualname has a typo."
         )
     # Reject migrations whose old name shadows a class that still exists
     # — would silently rewrite live payloads on read.
-    if _resolves(*start):
+    if _resolves(*start, scope=scope):
         raise ValueError(
             f"Migration source {start[0]}:{start[1]!r} resolves to a "
-            f"currently-live class. A rename whose old name is still "
-            f"importable would shadow the live class on read. Remove "
-            f"the old class definition before declaring this migration."
+            f"currently-live class — reachable through this serde's "
+            f"namespace scope, or by import. A rename whose old name is "
+            f"still live would shadow it on read. Remove the old class, "
+            f"or drop it from namespaces=, before declaring this migration."
         )
     return current
 
@@ -421,24 +431,52 @@ def _migration_label(name: str) -> str:
     return f"migration {name!r}" if name else "an unnamed migration"
 
 
-def _resolve_identity(module: str, qualname: str) -> Any:
-    """Import *module* and walk *qualname* to the live object.
+def _resolve_identity(
+    module: str,
+    qualname: str,
+    *,
+    scope: Mapping[tuple[str, str], type] | None = None,
+) -> Any:
+    """Resolve an event identity to its live class — *scope* first, import
+    walk as the fallback.
+
+    *scope* is the ``(module, qualname) → class`` map a serde builds from
+    its own ``namespaces=`` walk, the mirror of the encode-side
+    ``oldest_historic`` map. It wins over the import walk because it is
+    the authority on which classes THIS serde speaks for: it reaches
+    classes no import can (a namespace defined inside a function carries
+    ``<locals>`` in its qualname) and it keeps two lifetimes of one module
+    apart, which ``(module, qualname)`` alone cannot (#150).
+
+    The import walk still covers every identity the namespace walk never
+    reached — module-level ``IntegrationEvent``s, framework
+    ``SystemEvent``s, and anything outside ``namespaces=``.
 
     Raises ``ImportError`` if the module is gone, ``AttributeError`` if the
     qualname no longer resolves — callers decide which to treat as
     "missing". Single source of truth for the identity → live-class walk
     shared by the read path, ``_resolves``, and the test helpers.
     """
+    if scope is not None and (in_scope := scope.get((module, qualname))) is not None:
+        return in_scope
     obj: Any = importlib.import_module(module)
     for part in qualname.split("."):
         obj = getattr(obj, part)
     return obj
 
 
-def _resolves(module: str, qualname: str) -> bool:
-    """``True`` iff ``module`` imports and ``qualname`` walks to an attribute."""
+def _resolves(
+    module: str,
+    qualname: str,
+    *,
+    scope: Mapping[tuple[str, str], type] | None = None,
+) -> bool:
+    """``True`` iff ``(module, qualname)`` reaches a live class — found in
+    *scope*, or importable and walkable. Mirrors :func:`_resolve_identity`
+    exactly, so "resolvable" means the same thing to migration validation
+    as it does to the read path."""
     try:
-        _resolve_identity(module, qualname)
+        _resolve_identity(module, qualname, scope=scope)
     except (ImportError, AttributeError):
         return False
     return True
@@ -663,7 +701,7 @@ def _collect_decorated_migrations(
 ) -> tuple[
     tuple[Migration, ...],
     dict[tuple[str, str], tuple[str, str]],
-    frozenset[tuple[str, str]],
+    dict[tuple[str, str], type],
 ]:
     """Walk *namespaces* and assemble a :class:`Migration` per
     ``@migrate_from``-decorated class, plus an ``oldest_historic`` map for
@@ -685,19 +723,36 @@ def _collect_decorated_migrations(
     relabelled — bytes always go out under a name the read-side rename
     table knows how to migrate back.
 
-    The third element is the frozenset of every live ``(module, qualname)``
-    the namespace walk reached — events that revive directly with no
-    migration. ``NamespaceAwareSerde`` stores it for
-    ``assert_all_baselined_cover`` / ``revivable_identities``; the walk
-    already happens here so the set is free.
+    The third element is the serde's *scope*: every live ``(module,
+    qualname)`` the namespace walk reached, mapped to the class object
+    itself. Events in it revive directly with no migration.
+    ``NamespaceAwareSerde`` stores it as the read path's first port of call
+    (:func:`_resolve_identity`) and derives its ``revivable_identities`` /
+    ``assert_all_baselined_cover`` key set from it; the walk already
+    happens here so the map is free.
     """
     out: list[Migration] = []
     oldest_historic: dict[tuple[str, str], tuple[str, str]] = {}
-    live: set[tuple[str, str]] = set()
+    scope: dict[tuple[str, str], type] = {}
     for namespace_cls in namespaces:
         for cls in _iter_nested_events(namespace_cls, recurse_commands=True):
             current = (cls.__module__, cls.__qualname__)
-            live.add(current)
+            claimed = scope.setdefault(current, cls)
+            if claimed is not cls:
+                # Two lifetimes of one module share (module, qualname), so
+                # last-wins would make revival depend on the order of a
+                # sequence that reads as insignificant. Each lifetime gets
+                # its own serde — EventGraph rejects the same mistake at
+                # graph build. Naming both classes would print one string
+                # twice: sharing the identity is the trigger, so their reprs
+                # are always identical. The ids are what tells them apart.
+                raise ValueError(
+                    f"Two namespaces passed to this serde claim the same "
+                    f"event identity {current[0]}.{current[1]} — distinct "
+                    f"classes ({id(claimed):#x} and {id(cls):#x}), most "
+                    f"likely two engine lifetimes of one module. Give each "
+                    f"lifetime its own NamespaceAwareSerde(namespaces=[...])."
+                )
             # ``__dict__.get`` (not ``getattr``) — neither marker may leak
             # through MRO when a subclass inherits from a decorated parent.
             history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
@@ -751,7 +806,7 @@ def _collect_decorated_migrations(
                     operations=tuple(ops),
                 )
             )
-    return tuple(out), oldest_historic, frozenset(live)
+    return tuple(out), oldest_historic, scope
 
 
 def replay_reducer(reducer: BaseReducer, events: Iterable[Event]) -> Any:
