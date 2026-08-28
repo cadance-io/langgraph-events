@@ -2091,10 +2091,18 @@ def describe_NamespaceAwareSerde():
                 (module, "WalkShapes.Amend.Amended"),
                 (module, "WalkShapes.Amend.Rejected"),
             }
-            # The namespace itself, its non-event members and the synthesized
-            # ``Outcomes`` aliases contribute nothing — asserted by the
-            # equality above, called out here because each is a distinct
-            # branch of the walk.
+            # The namespace itself and its non-event members contribute
+            # nothing — asserted by the equality above, called out here
+            # because each is a distinct branch of the walk.
+            #
+            # The ``Outcomes`` aliases are NOT pinned here, and this set
+            # cannot pin them: for single-outcome ``Record`` the alias is the
+            # same class object as ``Stored``, which set semantics absorb,
+            # and for multi-outcome ``Amend`` it is a ``UnionType`` that
+            # fails the walk's ``isinstance(attr, type)`` guard on its own.
+            # The ``OUTCOMES_ATTR`` skip earns its keep in the walk's *list*
+            # (double-visited callbacks, double-applied AddFields), which
+            # ``it_lists_the_outcome_only_once`` covers.
             assert (module, "WalkShapes") not in ids
             assert (module, "WalkShapes.Helper") not in ids
 
@@ -2103,10 +2111,23 @@ def describe_NamespaceAwareSerde():
             # because a rename rewrites them, from either source of
             # migrations. Exact equality again — AddField targets and
             # rename *destinations* must add nothing of their own.
+            #
+            # The AddField is keyed on a live class OUTSIDE namespaces=, so
+            # it lands in _addfield_table with no overlap against the walk or
+            # the rename sources. Without it the claim about AddField targets
+            # would be a comment rather than an assertion: an empty table
+            # cannot distinguish "not unioned in" from "nothing to union".
             serde = NamespaceAwareSerde(
                 namespaces=[DecoReorg],
                 migrations=[
                     _persona_rename("legacy-rename"),
+                    _add_field_migration(
+                        "out-of-scope-fill",
+                        module=Persona.__module__,
+                        qualname="Persona.Approve.Approved",
+                        field="note",
+                        default="",
+                    ),
                 ],
             )
 
