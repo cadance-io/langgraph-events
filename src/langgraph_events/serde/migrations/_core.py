@@ -328,7 +328,8 @@ def _bucket_addfields(
         else:
             raise ValueError(
                 f"AddField target {op.module}:{op.qualname!r} neither "
-                f"resolves to a currently importable class nor matches a "
+                f"resolves to a live class — by this serde's namespace "
+                f"scope or by import — nor matches a "
                 f"historic identity covered by a rename migration. Either "
                 f"the target was deleted after the migration was authored, "
                 f"the module/qualname has a typo, or the historic identity "
@@ -407,7 +408,8 @@ def _resolve_chain_terminus(
         raise ValueError(
             f"Migration chain from {start[0]}:{start[1]!r} terminates at "
             f"{current[0]}:{current[1]!r}, which does not resolve to a "
-            f"currently importable class. Either the chain target was "
+            f"live class — by this serde's namespace scope or by import. "
+            f"Either the chain target was "
             f"renamed/deleted after the migration was authored, or the "
             f"new module/qualname has a typo."
         )
@@ -416,9 +418,10 @@ def _resolve_chain_terminus(
     if _resolves(*start, scope=scope):
         raise ValueError(
             f"Migration source {start[0]}:{start[1]!r} resolves to a "
-            f"currently-live class. A rename whose old name is still "
-            f"importable would shadow the live class on read. Remove "
-            f"the old class definition before declaring this migration."
+            f"currently-live class — reachable through this serde's "
+            f"namespace scope, or by import. A rename whose old name is "
+            f"still live would shadow it on read. Remove the old class, "
+            f"or drop it from namespaces=, before declaring this migration."
         )
     return current
 
@@ -734,7 +737,22 @@ def _collect_decorated_migrations(
     for namespace_cls in namespaces:
         for cls in _iter_nested_events(namespace_cls, recurse_commands=True):
             current = (cls.__module__, cls.__qualname__)
-            scope[current] = cls
+            claimed = scope.setdefault(current, cls)
+            if claimed is not cls:
+                # Two lifetimes of one module share (module, qualname), so
+                # last-wins would make revival depend on the order of a
+                # sequence that reads as insignificant. Each lifetime gets
+                # its own serde — EventGraph rejects the same mistake at
+                # graph build. Naming both classes would print one string
+                # twice: sharing the identity is the trigger, so their reprs
+                # are always identical. The ids are what tells them apart.
+                raise ValueError(
+                    f"Two namespaces passed to this serde claim the same "
+                    f"event identity {current[0]}.{current[1]} — distinct "
+                    f"classes ({id(claimed):#x} and {id(cls):#x}), most "
+                    f"likely two engine lifetimes of one module. Give each "
+                    f"lifetime its own NamespaceAwareSerde(namespaces=[...])."
+                )
             # ``__dict__.get`` (not ``getattr``) — neither marker may leak
             # through MRO when a subclass inherits from a decorated parent.
             history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())

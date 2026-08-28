@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A serde handed two engine lifetimes now raises instead of binding silently** — the scope map is
+  keyed by `(module, qualname)`, which two lifetimes of one module share, so
+  `NamespaceAwareSerde(namespaces=[first.Trading, second.Trading])` used to bind every shared
+  identity to whichever came last and make revival depend on argument order. It now raises
+  `ValueError`, matching `EventGraph`, which rejects the same mistake at graph build. Give each
+  lifetime its own serde.
+
+  Migration-validation diagnostics also stopped saying "importable": with scope-first resolution a
+  class reachable only through `namespaces=` is live too, so a chain terminus, an `AddField`
+  target, and a shadowing rename source now all say "by this serde's namespace scope or by import".
+
 ### Fixed
 
 - **`NamespaceAwareSerde` now resolves event identity through its own `namespaces=` scope** before
