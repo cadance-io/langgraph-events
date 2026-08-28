@@ -7,6 +7,7 @@ resumes the same log against freshly-defined classes.
 """
 
 import importlib
+import re
 
 import _lifetime_namespaces
 import pytest
@@ -240,9 +241,11 @@ def describe_a_serde_given_more_than_one_lifetime():
                 NamespaceAwareSerde(namespaces=[first, second])
 
             # Both classes render identically — sharing (module, qualname) is
-            # the trigger — so the message must distinguish them some other
-            # way rather than printing one string twice.
-            assert f"{first.Place!r} and {first.Place!r}" not in str(exc.value)
+            # the trigger — so whatever the message names them by, the two
+            # halves must differ rather than printing one string twice.
+            pair = re.search(r"\((.+?) and (.+?)\)", str(exc.value))
+            assert pair is not None, str(exc.value)
+            assert pair.group(1) != pair.group(2), str(exc.value)
 
     def when_the_same_namespace_is_passed_twice():
 
