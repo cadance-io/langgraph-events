@@ -62,10 +62,12 @@ class Event:
         new_events.append(self)
 
 
-_NAMESPACE_REGISTRY: dict[str, type[Namespace]] = {}
-"""Maps ``__namespace_name__`` -> Namespace class. Populated in
-``Namespace.__init_subclass__``. Used by ``EventGraph`` to auto-discover
-declarative reducers via a handler's subscribed event types."""
+_FINALIZED_ATTR = "__lge_namespace_finalized__"
+"""Marker set on a Namespace at the point ``__init_subclass__`` reaches the
+stamping passes — the same point the old process-global registry recorded the
+class, so ``on_namespace_finalize`` fires immediately from exactly where it
+always did. Not a claim that stamping has finished: it has not. Read via
+``__dict__`` so subclasses never inherit it."""
 
 
 _NAMESPACE_FINALIZE_CALLBACKS: weakref.WeakKeyDictionary[
@@ -92,17 +94,34 @@ def on_namespace_finalize(cls: type, callback: Callable[[type, type], None]) -> 
     references via ``vars(namespace_cls)`` without touching private state.
     Multiple callbacks for the same class fire in registration order.
 
+    "Already finalized" is read from a marker set inside
+    ``Namespace.__init_subclass__`` via ``__dict__`` rather than ``getattr``,
+    so a child Namespace mid-definition does not inherit its parent's marker
+    and fire callbacks early.
+
     If the enclosing Namespace has *already* finalized when this hook is
     called (e.g. a decorator applied post-hoc to an existing class), the
     callback fires immediately rather than queueing into a slot that will
     never drain.
     """
-    namespace_name = getattr(cls, "__namespace__", None)
-    namespace_cls = _NAMESPACE_REGISTRY.get(namespace_name) if namespace_name else None
-    if namespace_cls is not None:
+    namespace_cls = getattr(cls, "__namespace_cls__", None)
+    if namespace_cls is not None and namespace_cls.__dict__.get(_FINALIZED_ATTR):
         callback(cls, namespace_cls)
         return
     _NAMESPACE_FINALIZE_CALLBACKS.setdefault(cls, []).append(callback)
+
+
+def _stamp_namespace(cls: type, namespace_cls: type) -> None:
+    """Record the owning namespace on *cls*, as both a name and a class.
+
+    The two stamps are always written together and never separately: the name
+    is what renderers and the model group by, the class is what reducer
+    discovery and reflection resolve through. Letting them drift would make a
+    graph silently attribute an event to a different namespace of the same
+    name.
+    """
+    cls.__namespace__ = namespace_cls.__name__  # type: ignore[attr-defined]
+    cls.__namespace_cls__ = namespace_cls  # type: ignore[attr-defined]
 
 
 def _iter_nested_events(container: type, *, recurse_commands: bool) -> list[type]:
@@ -183,20 +202,16 @@ class Namespace:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        existing = _NAMESPACE_REGISTRY.get(cls.__name__)
-        if existing is not None and existing is not cls:
-            raise TypeError(
-                f"Namespace {cls.__name__!r} is already defined at "
-                f"{existing.__module__}.{existing.__qualname__}. Namespace "
-                f"class names must be unique within a process."
-            )
         cls.__namespace_name__ = cls.__name__
         cls.__reducers__ = _collect_namespace_reducers(cls)
-        _NAMESPACE_REGISTRY[cls.__namespace_name__] = cls
+        # Marks the point from which ``on_namespace_finalize`` fires callbacks
+        # immediately instead of queueing them. Set before the stamping passes
+        # below, matching the sequence callers have always observed.
+        setattr(cls, _FINALIZED_ATTR, True)
         # Second-pass stamp: DomainEvents nested inside a Command have their
         # __namespace__ left as None by the metaclass (Command.__namespace__ isn't
         # known at that point). Fill them in now.
-        _stamp_nested_namespace(cls, cls.__name__)
+        _stamp_nested_namespace(cls, cls)
         _attach_command_outcomes(cls)
         _drain_namespace_finalize(cls, cls)
 
@@ -257,9 +272,9 @@ def _attach_command_outcomes(namespace_cls: type) -> None:
         )
 
 
-def _stamp_nested_namespace(container: type, namespace_name: str) -> None:
-    """Walk ``container`` and set ``__namespace__`` on any nested ``Event``
-    subclass that doesn't have one yet.
+def _stamp_nested_namespace(container: type, namespace_cls: type) -> None:
+    """Walk ``container`` and stamp the owning namespace on any nested
+    ``Event`` subclass that doesn't have one yet.
 
     Covers DomainEvents nested inside a Command (their metaclass runs before
     the Command's ``__namespace__`` is known), and non-DomainEvent events
@@ -273,9 +288,9 @@ def _stamp_nested_namespace(container: type, namespace_name: str) -> None:
         if not issubclass(attr, Event):
             continue
         if getattr(attr, "__namespace__", None) is None:
-            attr.__namespace__ = namespace_name  # type: ignore[attr-defined]
+            _stamp_namespace(attr, namespace_cls)
         if issubclass(attr, Command):
-            _stamp_nested_namespace(attr, namespace_name)
+            _stamp_nested_namespace(attr, namespace_cls)
 
 
 def _is_nested_in_class(cls: type) -> bool:
@@ -313,10 +328,10 @@ class _NestedEventMeta(type):
                     f"Command {cls.__name__!r} must be nested inside a "
                     f"Namespace subclass, got owner {owner.__name__!r}"
                 )
-            cls.__namespace__ = owner.__name__
+            _stamp_namespace(cls, owner)
         elif issubclass(cls, DomainEvent):
             if isinstance(owner, type) and issubclass(owner, Namespace):
-                cls.__namespace__ = owner.__name__
+                _stamp_namespace(cls, owner)
                 cls.__command__ = None
             elif isinstance(owner, type) and issubclass(owner, Command):
                 cls.__command__ = owner
@@ -433,6 +448,7 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     """
 
     __namespace__: ClassVar[str | None] = None
+    __namespace_cls__: ClassVar[type | None] = None
     __command_handler__: ClassVar[Any] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -533,6 +549,7 @@ class DomainEvent(Event, _event_base=True, metaclass=_NestedEventMeta):
     """
 
     __namespace__: ClassVar[str | None] = None
+    __namespace_cls__: ClassVar[type | None] = None
     __command__: ClassVar[type | None] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

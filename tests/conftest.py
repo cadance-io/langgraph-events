@@ -110,20 +110,3 @@ def linear_chain():
         return Ended(result=f"done:{event.data}")
 
     return EventGraph([step1, step2])
-
-
-@pytest.fixture(autouse=True)
-def _reset_domain_registry():
-    """Restore ``_NAMESPACE_REGISTRY`` after each test.
-
-    Namespace names are enforced unique process-wide. Tests that define their
-    own ``class X(Namespace)`` would otherwise leak into the registry and
-    collide with later tests using the same short name. conftest-scoped
-    domains (e.g. ``Order``) are captured in the snapshot and survive.
-    """
-    from langgraph_events import _event as _e
-
-    snapshot = dict(_e._NAMESPACE_REGISTRY)
-    yield
-    _e._NAMESPACE_REGISTRY.clear()
-    _e._NAMESPACE_REGISTRY.update(snapshot)

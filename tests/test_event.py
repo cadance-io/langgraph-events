@@ -289,16 +289,42 @@ def describe_Namespace():
 
     def when_redefined():
 
+        # Namespace names are scoped to the graph that uses them, not to the
+        # process — a second engine lifetime redefining the same name is
+        # valid. The collision that matters (two classes, one name, one
+        # graph) is caught at graph build. See issue #148.
         def with_colliding_name():
 
-            def it_raises():
+            def it_does_not_raise():
                 class Widget(Namespace):
                     pass
 
-                with pytest.raises(TypeError, match=r"already defined"):
+                first = Widget
 
-                    class Widget(Namespace):
+                class Widget(Namespace):
+                    pass
+
+                assert Widget is not first
+
+    def when_nested_events_are_stamped():
+
+        def it_records_the_owning_namespace_class():
+            class Widget(Namespace):
+                class Build(Command):
+                    class Built(DomainEvent):
                         pass
+
+            assert Widget.Build.__namespace_cls__ is Widget
+            assert Widget.Build.Built.__namespace_cls__ is Widget
+
+        def it_keeps_both_stamps_in_step():
+            class Widget(Namespace):
+                class Build(Command):
+                    class Built(DomainEvent):
+                        pass
+
+            for cls in (Widget.Build, Widget.Build.Built):
+                assert cls.__namespace__ == cls.__namespace_cls__.__name__
 
 
 def describe_Command():
@@ -719,6 +745,39 @@ def describe_on_namespace_finalize():
                     pass
 
             assert captured == [LateRefNs.Sibling]
+
+    def when_registered_while_the_enclosing_Namespace_is_still_being_created():
+        def it_queues_rather_than_firing_on_a_half_built_class():
+            # A nested class is stamped with __namespace_cls__ by
+            # __set_name__, which runs *before* the Namespace's
+            # __init_subclass__. Anything running in that window — here a
+            # sibling descriptor's own __set_name__ — must still queue: the
+            # enclosing class has not attached Command.Outcomes yet, which
+            # is the whole reason this hook exists.
+            seen_outcomes: list[object] = []
+
+            class Sentinel:
+                def __set_name__(self, owner, name):
+                    cmd = owner.__dict__["Cmd"]
+                    assert getattr(cmd, "__namespace_cls__", None) is not None
+                    on_namespace_finalize(
+                        cmd,
+                        lambda c, ns: seen_outcomes.append(
+                            getattr(c, "Outcomes", None)
+                        ),
+                    )
+                    # Firing now would hand the callback a Command with no
+                    # Outcomes attached.
+                    assert seen_outcomes == []
+
+            class MidBuildNs(Namespace):
+                class Cmd(Command):
+                    class Done(DomainEvent):
+                        pass
+
+                sentinel = Sentinel()
+
+            assert seen_outcomes == [MidBuildNs.Cmd.Done]
 
     def when_registered_after_the_enclosing_Namespace_finalized():
         def it_fires_immediately_instead_of_silently_dropping():

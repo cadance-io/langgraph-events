@@ -4,7 +4,7 @@
 
 | Export | Type | Description |
 |---|---|---|
-| `Namespace` | Base class | Namespace for nested commands and outcomes; exposes `__namespace_name__`, `__reducers__` |
+| `Namespace` | Base class | Namespace for nested commands and outcomes; exposes `__namespace_name__`, `__reducers__`. Names are unique per *graph*, not per process — see [namespace scope](concepts.md#namespace-scope) |
 | `Command` | Base class | Imperative intent; must be nested inside a `Namespace`, and may not itself be subclassed once declared (`class Rush(Order.Place)` is a `TypeError`). Auto-exposes `.Outcomes` — union of nested `DomainEvent`s. A `handle` method on the class registers as the command's inline handler when passed to `EventGraph` |
 | `DomainEvent` | Base class | Fact inside the domain; must be nested inside a `Namespace` or `Command` |
 | `IntegrationEvent` | Base class | Cross-boundary fact; top-level |

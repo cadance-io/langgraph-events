@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Namespace names are scoped to the graph, not the process** — `Namespace` no longer keeps a
+  process-global registry, so redefining a name a previous namespace used is valid. This lets one
+  process run several independent engine lifetimes in sequence: run a scenario, end it, and start a
+  fresh one that resumes the same checkpointed log, with no subprocess and no file hand-off
+  ([#148](https://github.com/cadance-io/langgraph-events/issues/148)).
+
+  ```python
+  importlib.reload(app.trading)          # lifetime 2 redefines Trading
+  second = app.trading.Trading
+  saver.serde = NamespaceAwareSerde(namespaces=[second])
+  graph = EventGraph([second.Place], checkpointer=saver)
+  graph.get_state(config).events.latest(second.Place.Placed)   # lifetime 1's log, lifetime 2's class
+  ```
+
+  The uniqueness guard moves to where ambiguity actually causes harm. Two *different* namespaces of
+  the same name reaching one graph is still a `TypeError`, now naming both classes with their
+  modules — reducer discovery and `graph.namespaces()` group by name, so within a graph the name
+  must resolve to one class. Subscribed *and* produced event types are checked, so a handler
+  emitting another lifetime's class is caught too. Nested events carry a `__namespace_cls__` stamp
+  alongside `__namespace__`, namespace-scoped reducers match on that class rather than the name,
+  and `NamespaceModel.Namespace` gains a `cls` field (absent from `to_dict()` / `json()`, so
+  `schema_version` is unchanged).
+
+  Lifetimes are **sequential, not concurrent**: checkpointed events are keyed by
+  `(__module__, __qualname__)` and resolved by import, so two lifetimes of the same module share
+  that identity. Namespaces must be importable at module scope
+  ([#150](https://github.com/cadance-io/langgraph-events/issues/150)).
+
+  The only behaviour lost is the import-time `TypeError` on a duplicate namespace name. Code that
+  worked before had at most one class per name, so nothing that passed starts failing — unless it
+  deliberately asserted on that error.
+
 ## [0.25.1] - 2026-08-27
 
 ### Changed

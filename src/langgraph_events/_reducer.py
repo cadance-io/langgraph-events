@@ -79,10 +79,15 @@ def _last_write_wins(existing: Any, new: Any) -> Any:
 
 
 def _matches_namespace(event: Any, dom: type[Namespace] | None) -> bool:
-    """Return True if *event* belongs to *dom* (or *dom* is None = no filter)."""
+    """Return True if *event* belongs to *dom* (or *dom* is None = no filter).
+
+    Membership is the namespace *object*. Names are unique only within a
+    graph, so matching on ``__namespace__`` would let one engine lifetime's
+    reducer fold an event from another lifetime of the same module (#148).
+    """
     if dom is None:
         return True
-    return getattr(type(event), "__namespace__", None) == dom.__namespace_name__
+    return getattr(type(event), "__namespace_cls__", None) is dom
 
 
 class BaseReducer(ABC):

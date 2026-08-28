@@ -15,7 +15,6 @@ from langgraph.types import Command as LGCommand
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
-    _NAMESPACE_REGISTRY,
     OUTCOMES_ATTR,
     Command,
     DomainEvent,
@@ -57,7 +56,14 @@ from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+    from collections.abc import (
+        AsyncIterator,
+        Callable,
+        Iterable,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
 
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
@@ -402,15 +408,127 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     )
 
 
-def _discover_namespace_reducers(
+def _register_graph_namespaces(
+    event_types: Iterable[type], found: dict[str, type[Namespace]]
+) -> None:
+    """Record each event's owning namespace into *found*, rejecting collisions.
+
+    Two *distinct* classes sharing a name is rejected: reducer discovery and
+    reflection both group by name, so within a single graph the name must
+    identify one class. Across graphs it need not, and does not — that is what
+    lets several independent engine lifetimes coexist in one process (#148).
+
+    Called once for subscribed types and again for produced ones. A handler
+    subscribing to one lifetime and returning another's class would otherwise
+    merge the two silently, and reflection would answer from whichever arrived
+    first.
+    """
+    for et in event_types:
+        namespace_cls = getattr(et, "__namespace_cls__", None)
+        if namespace_cls is None:
+            continue
+        existing = found.setdefault(namespace_cls.__name__, namespace_cls)
+        if existing is namespace_cls:
+            continue
+        # Two lifetimes of one module render identically as module.qualname,
+        # which is precisely the case this check exists for — say what
+        # actually differs instead of printing one string twice.
+        here = f"{existing.__module__}.{existing.__qualname__}"
+        there = f"{namespace_cls.__module__}.{namespace_cls.__qualname__}"
+        detail = (
+            f"{here} and {there}"
+            if here != there
+            else (
+                f"two distinct definitions of {here} "
+                f"({id(existing):#x} and {id(namespace_cls):#x}) — most likely "
+                f"one module reloaded between engine lifetimes"
+            )
+        )
+        raise TypeError(
+            f"Two different namespaces named {namespace_cls.__name__!r} "
+            f"reached this graph: {detail}. Namespace names must be unique "
+            f"within a graph."
+        )
+
+
+def _register_produced_types(
+    handler_metas: list[HandlerMeta],
+    return_info: dict[str, ReturnInfo],
+    namespaces: dict[str, type[Namespace]],
+) -> None:
+    """Fold handlers' return types into the graph's namespace registry, then
+    warn about events produced but never consumed.
+
+    Both jobs need the same subscribed/produced split, and both are only
+    possible once return-type introspection has run. Registering here completes
+    the registry: a namespace reachable only through a handler's return type is
+    as much part of this graph as a subscribed one, and just as able to collide.
+    """
+    subscribed: set[type[Event]] = set()
+    for meta in handler_metas:
+        subscribed.update(meta.event_types)
+    produced: set[type[Event]] = set()
+    for info in return_info.values():
+        produced.update(info.event_types)
+        produced.update(info.scatter_types)
+
+    _register_graph_namespaces(produced, namespaces)
+
+    orphaned = {
+        t
+        for t in produced
+        if not issubclass(t, (Halted, Interrupted))
+        # A DomainEvent owned by a Namespace or Command — as an outcome
+        # (__command__ set) or as a free-standing domain fact
+        # (__namespace__ set) — is a terminal by design; having no
+        # subscriber is idiomatic, not an orphan.
+        and not (
+            issubclass(t, DomainEvent)
+            and (
+                getattr(t, "__command__", None) is not None
+                or getattr(t, "__namespace__", None) is not None
+            )
+        )
+        and not any(issubclass(t, s) for s in subscribed)
+    }
+    if orphaned:
+        names = ", ".join(sorted(t.__name__ for t in orphaned))
+        warnings.warn(
+            f"Event type(s) {names} are returned by handlers but no handler "
+            f"subscribes to them. These events will be produced but never "
+            f"processed.",
+            category=OrphanedEventWarning,
+            # __init__ calls this helper, so the user's EventGraph(...) call
+            # site is one frame further out than it was inline.
+            stacklevel=3,
+        )
+
+
+def _collect_graph_namespaces(
     handlers: list[Callable[..., Any]],
+) -> dict[str, type[Namespace]]:
+    """Name → Namespace class for the namespaces this graph's handlers subscribe to.
+
+    The graph's own registry, seeded from the ``__namespace_cls__`` stamps
+    rather than from process-global state. Produced types are folded in later
+    in ``EventGraph.__init__``, once return-type introspection has run.
+    """
+    found: dict[str, type[Namespace]] = {}
+    for fn in handlers:
+        _register_graph_namespaces(getattr(fn, "_event_types", ()), found)
+    return found
+
+
+def _discover_namespace_reducers(
+    namespaces: dict[str, type[Namespace]],
     explicit_reducers: dict[str, BaseReducer],
 ) -> None:
-    """Auto-register reducers declared on domains referenced by handlers.
+    """Auto-register reducers declared on the graph's namespaces.
 
-    Walks each handler's ``_event_types`` (set by ``@on(...)``), finds the
-    owning domain via ``__namespace__`` + ``_NAMESPACE_REGISTRY``, and unions that
-    domain's ``__reducers__`` into *explicit_reducers*.
+    Unions each namespace's ``__reducers__`` into *explicit_reducers*.
+    *namespaces* is the graph's own registry from
+    ``_collect_graph_namespaces``, so discovery never reaches a same-named
+    namespace belonging to another graph.
 
     Collisions:
     - Two different discovered reducers with the same name → ``TypeError``.
@@ -418,23 +536,16 @@ def _discover_namespace_reducers(
       one → explicit wins; discovered one is skipped silently.
     """
     discovered: dict[str, BaseReducer] = {}
-    for fn in handlers:
-        for et in getattr(fn, "_event_types", ()):
-            namespace_name = getattr(et, "__namespace__", None)
-            if not namespace_name:
-                continue
-            namespace_cls = _NAMESPACE_REGISTRY.get(namespace_name)
-            if namespace_cls is None:
-                continue
-            for r in namespace_cls.__reducers__:
-                existing = discovered.get(r.name)
-                if existing is None:
-                    discovered[r.name] = r
-                elif existing is not r:
-                    raise TypeError(
-                        f"Reducer name {r.name!r} collides between domains: "
-                        f"{existing!r} and {r!r}"
-                    )
+    for namespace_cls in namespaces.values():
+        for r in namespace_cls.__reducers__:
+            existing = discovered.get(r.name)
+            if existing is None:
+                discovered[r.name] = r
+            elif existing is not r:
+                raise TypeError(
+                    f"Reducer name {r.name!r} collides between domains: "
+                    f"{existing!r} and {r!r}"
+                )
     # Merge into explicit; explicit wins on name conflict.
     for name, r in discovered.items():
         explicit_reducers.setdefault(name, r)
@@ -730,7 +841,8 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
-        _discover_namespace_reducers(handlers, self._reducers)
+        self._namespaces = _collect_graph_namespaces(handlers)
+        _discover_namespace_reducers(self._namespaces, self._reducers)
         conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
         if conflicts:
             raise ValueError(
@@ -787,40 +899,9 @@ class EventGraph:
             self._return_contracts[meta.name] = _compute_return_contract(meta, info)
             _verify_inline_outcome_coverage(meta, info)
 
-        # Warn about event types that are produced but never consumed
-        subscribed: set[type[Event]] = set()
-        for meta in self._handler_metas:
-            subscribed.update(meta.event_types)
-        produced: set[type[Event]] = set()
-        for info in self._return_info.values():
-            produced.update(info.event_types)
-            produced.update(info.scatter_types)
-        orphaned = {
-            t
-            for t in produced
-            if not issubclass(t, (Halted, Interrupted))
-            # A DomainEvent owned by a Namespace or Command — as an outcome
-            # (__command__ set) or as a free-standing domain fact
-            # (__namespace__ set) — is a terminal by design; having no
-            # subscriber is idiomatic, not an orphan.
-            and not (
-                issubclass(t, DomainEvent)
-                and (
-                    getattr(t, "__command__", None) is not None
-                    or getattr(t, "__namespace__", None) is not None
-                )
-            )
-            and not any(issubclass(t, s) for s in subscribed)
-        }
-        if orphaned:
-            names = ", ".join(sorted(t.__name__ for t in orphaned))
-            warnings.warn(
-                f"Event type(s) {names} are returned by handlers but no handler "
-                f"subscribes to them. These events will be produced but never "
-                f"processed.",
-                category=OrphanedEventWarning,
-                stacklevel=2,
-            )
+        _register_produced_types(
+            self._handler_metas, self._return_info, self._namespaces
+        )
 
         enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_error_handling()
