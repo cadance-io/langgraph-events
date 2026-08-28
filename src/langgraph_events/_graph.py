@@ -6,7 +6,6 @@ import dataclasses
 import inspect
 import types
 import typing
-import warnings
 from collections.abc import Mapping as _Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
@@ -52,8 +51,10 @@ from langgraph_events._internal import (
     make_router_node,
     make_seed_node,
 )
+from langgraph_events._labels import distinct_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -211,10 +212,9 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     try:
         hints = _resolve_type_hints(fn)
     except Exception as exc:
-        warnings.warn(
+        warn_user(
             f"Failed to resolve return type hints for handler {fn.__qualname__!r}; "
             f"treating as unannotated for topology parsing. ({exc})",
-            stacklevel=3,
         )
         hints = {}
 
@@ -404,6 +404,9 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     # already correct. Qualify the names when they collide (#151).
     collision = bool({o.__name__ for o in missing} & {c.__name__ for c in covered})
 
+    # Not ``distinct_labels``: that answers "tell these *two* apart", and
+    # here a whole list is rendered against a shared verdict. Same escalation
+    # rule, applied uniformly.
     def label(t: type) -> str:
         return t.__qualname__ if collision else t.__name__
 
@@ -459,24 +462,11 @@ def _register_graph_namespaces(
         existing = found.setdefault(namespace_cls.__name__, namespace_cls)
         if existing is namespace_cls:
             continue
-        # Two lifetimes of one module render identically as module.qualname,
-        # which is precisely the case this check exists for — say what
-        # actually differs instead of printing one string twice.
-        here = f"{existing.__module__}.{existing.__qualname__}"
-        there = f"{namespace_cls.__module__}.{namespace_cls.__qualname__}"
-        detail = (
-            f"{here} and {there}"
-            if here != there
-            else (
-                f"two distinct definitions of {here} "
-                f"({id(existing):#x} and {id(namespace_cls):#x}) — most likely "
-                f"one module reloaded between engine lifetimes"
-            )
-        )
+        here, there = distinct_labels(existing, namespace_cls)
         raise TypeError(
             f"Two different namespaces named {namespace_cls.__name__!r} "
-            f"reached this graph: {detail}. Namespace names must be unique "
-            f"within a graph."
+            f"reached this graph: {here} and {there}. Namespace names must "
+            f"be unique within a graph."
         )
 
 
@@ -530,14 +520,11 @@ def _register_produced_types(
     }
     if orphaned:
         names = ", ".join(sorted(t.__name__ for t in orphaned))
-        warnings.warn(
+        warn_user(
             f"Event type(s) {names} are returned by handlers but no handler "
             f"subscribes to them. These events will be produced but never "
             f"processed.",
-            category=OrphanedEventWarning,
-            # __init__ calls this helper, so the user's EventGraph(...) call
-            # site is one frame further out than it was inline.
-            stacklevel=3,
+            OrphanedEventWarning,
         )
 
     return tuple(
@@ -1443,7 +1430,7 @@ class EventGraph:
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message())
         if self._on_unresumable == "warn":
-            warnings.warn(self._unresumable_message(), stacklevel=4)
+            warn_user(self._unresumable_message())
             return True
         return False
 
@@ -1594,10 +1581,9 @@ class EventGraph:
         if include_reducers:  # non-empty list
             unknown = set(include_reducers) - set(self._reducers.keys())
             if unknown:
-                warnings.warn(
+                warn_user(
                     f"Unknown reducer name(s) {unknown} in include_reducers; "
                     f"available: {set(self._reducers.keys())}",
-                    stacklevel=2,
                 )
             return [n for n in include_reducers if n in self._reducers]
         return []

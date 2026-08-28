@@ -66,6 +66,7 @@ from langgraph_events._retry import RetryPolicy
 from langgraph_events._types import (
     HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
+from langgraph_events._warn import warn_user
 
 # --- Deprecated top-level aliases ----------------------------------------
 # Kept callable for one minor version; emits ``DeprecationWarning`` per access.
@@ -81,14 +82,12 @@ def __getattr__(name: str) -> Any:
     if target_module is None:
         raise AttributeError(f"module 'langgraph_events' has no attribute {name!r}")
     import importlib  # noqa: PLC0415
-    import warnings  # noqa: PLC0415
 
-    warnings.warn(
+    warn_user(
         f"'langgraph_events.{name}' has moved to '{target_module}.{name}'. "
         f"Update imports to 'from {target_module} import {name}'. The "
         f"top-level alias will be removed in a future release.",
         DeprecationWarning,
-        stacklevel=2,
     )
     return getattr(importlib.import_module(target_module), name)
 

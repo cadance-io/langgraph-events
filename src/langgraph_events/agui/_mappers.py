@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import warnings
 from collections.abc import Mapping
 from functools import cache
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -27,6 +26,7 @@ from langgraph_events._event import (
     Resumed,
     SystemPromptSet,
 )
+from langgraph_events._warn import warn_user
 
 from ._events import (
     FrontendStateMutated,
@@ -74,11 +74,10 @@ class UnmappedEventError(TypeError):
 def _warn_missing_agui_dict(cls: type) -> None:
     if cls not in _warned_classes:
         _warned_classes.add(cls)
-        warnings.warn(
+        warn_user(
             f"{cls.__name__} does not implement agui_dict(); "
             f"skipping AG-UI serialization. Implement AGUISerializable "
             f"to include this event in the AG-UI stream.",
-            stacklevel=3,
         )
 
 
@@ -107,10 +106,9 @@ def _warn_dropped_extras(cls: type, kind: str, detail: str) -> None:
     if key in _warned_extras:
         return
     _warned_extras.add(key)
-    warnings.warn(
+    warn_user(
         f"Dropping AG-UI passthrough fields from a {cls.__name__}: {detail} "
         f"The rest of the message is unchanged.",
-        stacklevel=3,
     )
 
 

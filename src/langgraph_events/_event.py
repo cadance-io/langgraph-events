@@ -12,6 +12,8 @@ import weakref
 from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any, ClassVar, dataclass_transform
 
+from langgraph_events._warn import warn_user
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -217,8 +219,6 @@ class Namespace:
             and issubclass(base, Namespace)
             for base in cls.__bases__
         ):
-            import warnings  # noqa: PLC0415
-
             inherited = ", ".join(
                 b.__name__
                 for b in cls.__bases__
@@ -226,7 +226,7 @@ class Namespace:
                 and isinstance(b, type)
                 and issubclass(b, Namespace)
             )
-            warnings.warn(
+            warn_user(
                 f"Namespace subclassing is deprecated: {cls.__name__!r} "
                 f"inherits from {inherited}. Only reducers inherit — nested "
                 f"commands and events do not, so the child namespace is "
@@ -237,9 +237,6 @@ class Namespace:
                 f"bound to the parent and would fold nothing. Support will "
                 f"be removed in a future release.",
                 DeprecationWarning,
-                # __init_subclass__ is called from type.__new__, which is C
-                # and adds no Python frame, so 2 is the class-definition site.
-                stacklevel=2,
             )
         cls.__namespace_name__ = cls.__name__
         cls.__reducers__ = _collect_namespace_reducers(cls)

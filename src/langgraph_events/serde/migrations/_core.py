@@ -14,6 +14,7 @@ from dataclasses import dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._event import Event, _iter_nested_events
+from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -773,16 +774,14 @@ def _collect_decorated_migrations(
             # last-wins would make revival depend on the order of a
             # sequence that reads as insignificant. Each lifetime gets
             # its own serde — EventGraph rejects the same mistake at
-            # graph build. Naming both classes would print one string
-            # twice: sharing the identity is the trigger, so their reprs
-            # are always identical. The ids are what tells them apart.
+            # graph build.
+            here, there = distinct_labels(claimed, cls)
             raise ValueError(
                 f"Two classes passed to this serde (via namespaces= or "
                 f"events=) claim the same event identity "
-                f"{current[0]}.{current[1]} — distinct classes "
-                f"({id(claimed):#x} and {id(cls):#x}), most likely two "
-                f"engine lifetimes of one module. Give each lifetime its "
-                f"own NamespaceAwareSerde."
+                f"{current[0]}.{current[1]}: {here} and {there}. Most "
+                f"likely two engine lifetimes of one module — give each "
+                f"lifetime its own NamespaceAwareSerde."
             )
         # ``__dict__.get`` (not ``getattr``) — neither marker may leak
         # through MRO when a subclass inherits from a decorated parent.

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Warnings anchor at your code, not the library's.** Every warning the library raises now
+  computes its own `stacklevel` by walking out to the first frame outside the package, instead of
+  carrying a hand-counted number. Twelve call sites carried six different values, and each was
+  correct only for the exact call depth it was written at — two had already gone stale and pointed
+  at library internals or at the importing module's `import` line.
+
 - **`NamespaceAwareSerde(events=[...])`** — event classes that live outside every namespace
   (module-level `IntegrationEvent`s, framework `SystemEvent`s) now reach the serde's scope. Without
   them those identities resolved by import and so were shared between two engine lifetimes of one

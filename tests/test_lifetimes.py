@@ -45,6 +45,13 @@ def _make_trading():
     return Trading
 
 
+def _labelled_pair(message: str) -> tuple[str, str]:
+    """The `X and Y` pair a collision diagnostic names, as two strings."""
+    match = re.search(r"[: ]([^:]+?) and (.+?)\.", message)
+    assert match is not None, message
+    return match.group(1), match.group(2)
+
+
 def describe_sequential_lifetimes():
 
     def when_a_second_lifetime_redefines_the_same_namespace_name():
@@ -190,9 +197,8 @@ def describe_namespaces_reaching_one_graph():
             with pytest.raises(TypeError) as exc:
                 EventGraph([handle_one, handle_two])
 
-            label = f"{first.__module__}.{first.__qualname__}"
-            assert f"{label} and {label}" not in str(exc.value)
-            assert "reloaded" in str(exc.value)
+            here, there = _labelled_pair(str(exc.value))
+            assert here != there
 
     def when_two_handlers_share_one_namespace():
 
@@ -251,9 +257,8 @@ def describe_a_serde_given_more_than_one_lifetime():
             # Both classes render identically — sharing (module, qualname) is
             # the trigger — so whatever the message names them by, the two
             # halves must differ rather than printing one string twice.
-            pair = re.search(r"\((.+?) and (.+?)\)", str(exc.value))
-            assert pair is not None, str(exc.value)
-            assert pair.group(1) != pair.group(2), str(exc.value)
+            here, there = _labelled_pair(str(exc.value))
+            assert here != there
 
     def when_the_same_namespace_is_passed_twice():
 
