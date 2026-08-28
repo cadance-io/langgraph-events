@@ -6,7 +6,14 @@ return annotations resolve at runtime. See tests/test_lifetimes.py.
 
 from __future__ import annotations
 
-from langgraph_events import Command, DomainEvent, Namespace, ScalarReducer
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    IntegrationEvent,
+    Namespace,
+    ScalarReducer,
+)
+from langgraph_events.serde.migrations import migrate_from
 
 
 class Trading(Namespace):
@@ -26,3 +33,25 @@ class Trading(Namespace):
 
         def handle(self) -> Trading.Place.Placed:
             return Trading.Place.Placed(sym=self.sym)
+
+
+class Ping(IntegrationEvent):
+    """Module-level, outside any namespace — reaches the serde via events=."""
+
+    sym: str
+
+
+class Filled(Namespace):
+    """A nested event whose decorator produces an AddField fill."""
+
+    class Do(Command):
+        @migrate_from("Filled.Ancient", backfill={"note": ""})
+        class Done(DomainEvent):
+            note: str = ""
+
+
+class Audited(Namespace):
+    """Reaches a graph only through `handlers=`, never through `namespaces=`."""
+
+    class Logged(DomainEvent):
+        sym: str

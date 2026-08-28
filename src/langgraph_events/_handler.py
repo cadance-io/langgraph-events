@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import types
 import typing
-import warnings
 from collections import abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -18,6 +17,7 @@ from langgraph_events._event_log import (
 from langgraph_events._identity import command_identity
 from langgraph_events._retry import RetryPolicy
 from langgraph_events._validate import normalize_exception_tuple
+from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -514,11 +514,10 @@ def _warn_on_unknown_reducer_params(
     ]
     if not unknown:
         return
-    warnings.warn(
+    warn_user(
         f"Handler {fn.__qualname__!r} has parameter(s) {unknown} that "
         f"don't match any reducer. "
         f"Available reducers: {sorted(reducer_names)}. Typo?",
-        stacklevel=4,
     )
 
 
@@ -648,10 +647,9 @@ def extract_handler_meta(
     try:
         hints = _resolve_type_hints(fn)
     except Exception as exc:
-        warnings.warn(
+        warn_user(
             f"Failed to resolve type hints for handler {fn.__qualname__!r}; "
             f"falling back to signature-only detection. ({exc})",
-            stacklevel=3,
         )
         hints = {}
 

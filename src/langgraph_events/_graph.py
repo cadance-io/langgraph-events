@@ -6,7 +6,6 @@ import dataclasses
 import inspect
 import types
 import typing
-import warnings
 from collections.abc import Mapping as _Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
@@ -52,8 +51,10 @@ from langgraph_events._internal import (
     make_router_node,
     make_seed_node,
 )
+from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -211,10 +212,9 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     try:
         hints = _resolve_type_hints(fn)
     except Exception as exc:
-        warnings.warn(
+        warn_user(
             f"Failed to resolve return type hints for handler {fn.__qualname__!r}; "
             f"treating as unannotated for topology parsing. ({exc})",
-            stacklevel=3,
         )
         hints = {}
 
@@ -397,14 +397,49 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     missing = [o for o in nested_outcomes if not any(issubclass(c, o) for c in covered)]
     if not missing:
         return
-    declared = " | ".join(t.__name__ for t in covered) or "(no types)"
-    missing_names = ", ".join(o.__name__ for o in missing)
+    # Coverage is decided by identity (issubclass), so a declared class and a
+    # missing outcome can share a __name__ and still not match. Rendering both
+    # by name then reads as a tautology — "declares `Placed` but does not
+    # cover Placed" — and sends the reader to edit an annotation that is
+    # already correct. Qualify the names when they collide (#151).
+    collision = bool({o.__name__ for o in missing} & {c.__name__ for c in covered})
+
+    # ``escalating_labels`` over the whole cast, not ``distinct_labels``:
+    # this renders a list against one shared verdict rather than telling a
+    # single pair apart. Same escalation rule, so two lifetimes of one module
+    # — identical module *and* qualname — still separate.
+    labels = escalating_labels((*covered, *missing, *nested_outcomes))
+
+    def label(t: type) -> str:
+        return labels[t]
+
+    declared = " | ".join(label(t) for t in covered) or "(no types)"
+    missing_names = ", ".join(label(o) for o in missing)
+    hint = (
+        f"Add them to the annotation (e.g. `-> "
+        f"{' | '.join(label(o) for o in nested_outcomes)}`) or drop "
+        f"the annotation to let Outcomes drive the contract."
+    )
+    if collision:
+        local = [t for t in (*covered, *missing) if "<locals>" in t.__qualname__]
+        # Appended, not substituted: a collision on one name says nothing
+        # about the other outcomes, which may be genuinely uncovered and
+        # still need the annotation edit.
+        hint += (
+            " Note that some names above collide: those are different classes "
+            "that happen to share a name, so the annotation already names "
+            "something else."
+        ) + (
+            " A `<locals>` qualname means a class defined inside a function, "
+            "whose string annotation resolved to a different object — declare "
+            "event classes at module level."
+            if local
+            else ""
+        )
     raise TypeError(
         f"Inline handler {handler_name!r} on {cmd.__qualname__} declares "
         f"return type `{declared}` but does not cover outcome(s): "
-        f"{missing_names}. Add them to the annotation (e.g. `-> "
-        f"{' | '.join(o.__name__ for o in nested_outcomes)}`) or drop "
-        f"the annotation to let Outcomes drive the contract."
+        f"{missing_names}. {hint}"
     )
 
 
@@ -430,24 +465,11 @@ def _register_graph_namespaces(
         existing = found.setdefault(namespace_cls.__name__, namespace_cls)
         if existing is namespace_cls:
             continue
-        # Two lifetimes of one module render identically as module.qualname,
-        # which is precisely the case this check exists for — say what
-        # actually differs instead of printing one string twice.
-        here = f"{existing.__module__}.{existing.__qualname__}"
-        there = f"{namespace_cls.__module__}.{namespace_cls.__qualname__}"
-        detail = (
-            f"{here} and {there}"
-            if here != there
-            else (
-                f"two distinct definitions of {here} "
-                f"({id(existing):#x} and {id(namespace_cls):#x}) — most likely "
-                f"one module reloaded between engine lifetimes"
-            )
-        )
+        here, there = distinct_labels(existing, namespace_cls)
         raise TypeError(
             f"Two different namespaces named {namespace_cls.__name__!r} "
-            f"reached this graph: {detail}. Namespace names must be unique "
-            f"within a graph."
+            f"reached this graph: {here} and {there}. Namespace names must "
+            f"be unique within a graph."
         )
 
 
@@ -455,9 +477,17 @@ def _register_produced_types(
     handler_metas: list[HandlerMeta],
     return_info: dict[str, ReturnInfo],
     namespaces: dict[str, type[Namespace]],
-) -> None:
-    """Fold handlers' return types into the graph's namespace registry, then
-    warn about events produced but never consumed.
+) -> tuple[type[Event], ...]:
+    """Fold handlers' return types into the graph's namespace registry, warn
+    about events produced but never consumed, and return the event types this
+    graph touches that belong to no namespace.
+
+    Those loose types — module-level ``IntegrationEvent``s, framework
+    ``SystemEvent``s — are what a serde needs in ``events=`` to keep them out
+    of import-resolution. Computed here because the subscribed/produced split
+    is already in hand; building a ``NamespaceModel`` to recover them would
+    fire its design-smell warnings from inside the library and populate the
+    model cache, so a later ``graph.namespaces()`` would never warn at all.
 
     Both jobs need the same subscribed/produced split, and both are only
     possible once return-type introspection has run. Registering here completes
@@ -493,15 +523,26 @@ def _register_produced_types(
     }
     if orphaned:
         names = ", ".join(sorted(t.__name__ for t in orphaned))
-        warnings.warn(
+        warn_user(
             f"Event type(s) {names} are returned by handlers but no handler "
             f"subscribes to them. These events will be produced but never "
             f"processed.",
-            category=OrphanedEventWarning,
-            # __init__ calls this helper, so the user's EventGraph(...) call
-            # site is one frame further out than it was inline.
-            stacklevel=3,
+            OrphanedEventWarning,
         )
+
+    # ``subscribed``/``produced`` are sets, so their iteration order varies
+    # per process. It reaches migration collection, and from there decides
+    # which class a collision diagnostic names first — keep it reproducible.
+    return tuple(
+        dict.fromkeys(
+            t
+            for t in sorted(
+                (*subscribed, *produced),
+                key=lambda c: (c.__module__, c.__qualname__),
+            )
+            if getattr(t, "__namespace_cls__", None) is None
+        )
+    )
 
 
 def _collect_graph_namespaces(
@@ -899,7 +940,7 @@ class EventGraph:
             self._return_contracts[meta.name] = _compute_return_contract(meta, info)
             _verify_inline_outcome_coverage(meta, info)
 
-        _register_produced_types(
+        self._loose_events = _register_produced_types(
             self._handler_metas, self._return_info, self._namespaces
         )
 
@@ -1293,15 +1334,31 @@ class EventGraph:
         # namespaces. A user-supplied NamespaceAwareSerde (possibly
         # carrying hand-authored migrations=) is left untouched — that is
         # the opt-out. The serde still owns coverage; we own construction.
+        graph = cls(collected, **kwargs)
+
+        # Wired after construction, not before: the events that live outside
+        # every namespace — module-level IntegrationEvents, framework
+        # SystemEvents — are only knowable once the graph has parsed its
+        # handlers' subscriptions and return types. Without them those
+        # identities resolve by import and are shared between engine
+        # lifetimes of one module. ``compiled`` is lazy, so the serde is in
+        # place well before anything reads it.
         checkpointer = kwargs.get("checkpointer")
         if checkpointer is not None:
             from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
 
             serde = getattr(checkpointer, "serde", None)
             if serde is not None and not isinstance(serde, NamespaceAwareSerde):
-                checkpointer.serde = NamespaceAwareSerde(namespaces=domains)
+                # Not ``domains``: a namespace can reach the graph through
+                # ``handlers=`` alone, and its events would then keep
+                # resolving by import — the bleed #155 exists to close.
+                # ``graph._namespaces`` is the full set.
+                checkpointer.serde = NamespaceAwareSerde(
+                    namespaces=tuple(graph._namespaces.values()),
+                    events=graph._loose_events,
+                )
 
-        return cls(collected, **kwargs)
+        return graph
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph synchronously with one or more seed events.
@@ -1389,7 +1446,7 @@ class EventGraph:
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message())
         if self._on_unresumable == "warn":
-            warnings.warn(self._unresumable_message(), stacklevel=4)
+            warn_user(self._unresumable_message())
             return True
         return False
 
@@ -1540,10 +1597,9 @@ class EventGraph:
         if include_reducers:  # non-empty list
             unknown = set(include_reducers) - set(self._reducers.keys())
             if unknown:
-                warnings.warn(
+                warn_user(
                     f"Unknown reducer name(s) {unknown} in include_reducers; "
                     f"available: {set(self._reducers.keys())}",
-                    stacklevel=2,
                 )
             return [n for n in include_reducers if n in self._reducers]
         return []

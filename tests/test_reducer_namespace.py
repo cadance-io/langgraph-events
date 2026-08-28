@@ -131,11 +131,17 @@ def describe_Namespace():
         def when_subclass_domain_adds_more():
 
             def it_inherits_parent_reducers_and_adds_child():
+                # Namespace subclassing is deprecated — only reducers ever
+                # inherited, which is what makes a child namespace incomplete.
+                # Behaviour is kept for one minor version, so the assertion
+                # stands alongside the warning it now raises.
                 class Parent(Namespace):
                     shared = ScalarReducer(event_type=Event, fn=lambda e: None)
 
-                class Child(Parent):
-                    extra = ScalarReducer(event_type=Event, fn=lambda e: None)
+                with pytest.deprecated_call(match=r"Namespace subclassing"):
+
+                    class Child(Parent):
+                        extra = ScalarReducer(event_type=Event, fn=lambda e: None)
 
                 names = {r.name for r in Child.__reducers__}
                 assert names == {"shared", "extra"}

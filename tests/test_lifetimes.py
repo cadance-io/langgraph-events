@@ -11,9 +11,17 @@ import re
 
 import _lifetime_namespaces
 import pytest
+from _lifetime_namespaces import Filled as _Filled
 from langgraph.checkpoint.memory import MemorySaver
 
-from langgraph_events import Command, DomainEvent, EventGraph, Namespace, on
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    EventGraph,
+    IntegrationEvent,
+    Namespace,
+    on,
+)
 from langgraph_events._reducer import _matches_namespace
 from langgraph_events.serde import NamespaceAwareSerde
 
@@ -35,6 +43,13 @@ def _make_trading():
                 sym: str
 
     return Trading
+
+
+def _labelled_pair(message: str) -> tuple[str, str]:
+    """The `X and Y` pair a collision diagnostic names, as two strings."""
+    match = re.search(r"[: ]([^:]+?) and (.+?)\.", message)
+    assert match is not None, message
+    return match.group(1), match.group(2)
 
 
 def describe_sequential_lifetimes():
@@ -182,9 +197,8 @@ def describe_namespaces_reaching_one_graph():
             with pytest.raises(TypeError) as exc:
                 EventGraph([handle_one, handle_two])
 
-            label = f"{first.__module__}.{first.__qualname__}"
-            assert f"{label} and {label}" not in str(exc.value)
-            assert "reloaded" in str(exc.value)
+            here, there = _labelled_pair(str(exc.value))
+            assert here != there
 
     def when_two_handlers_share_one_namespace():
 
@@ -243,9 +257,8 @@ def describe_a_serde_given_more_than_one_lifetime():
             # Both classes render identically — sharing (module, qualname) is
             # the trigger — so whatever the message names them by, the two
             # halves must differ rather than printing one string twice.
-            pair = re.search(r"\((.+?) and (.+?)\)", str(exc.value))
-            assert pair is not None, str(exc.value)
-            assert pair.group(1) != pair.group(2), str(exc.value)
+            here, there = _labelled_pair(str(exc.value))
+            assert here != there
 
     def when_the_same_namespace_is_passed_twice():
 
@@ -253,3 +266,152 @@ def describe_a_serde_given_more_than_one_lifetime():
             first = _next_lifetime()
 
             assert NamespaceAwareSerde(namespaces=[first, first]) is not None
+
+
+def describe_events_outside_a_namespace():
+
+    # Module-level IntegrationEvents are not reached by the namespace walk,
+    # so before #155 they resolved by import and bled across lifetimes.
+    def when_the_serde_is_given_them_explicitly():
+
+        def it_keeps_each_lifetimes_own_class():
+            first = _next_lifetime()
+            first_ping = _lifetime_namespaces.Ping
+            serde = NamespaceAwareSerde(namespaces=[first], events=[first_ping])
+            blob = serde.dumps_typed({"e": first_ping(sym="AAPL")})
+
+            second = _next_lifetime()
+
+            revived = serde.loads_typed(blob)["e"]
+            assert type(revived) is first_ping
+            assert type(revived) is not _lifetime_namespaces.Ping
+            assert second is not first
+
+    def when_a_decorator_records_history_on_one():
+
+        def it_collects_the_migration(self=None):
+            from langgraph_events.serde.migrations import migrate_from
+
+            @migrate_from("Ancient")
+            class Loose(IntegrationEvent):
+                sym: str
+
+            serde = NamespaceAwareSerde(namespaces=[], events=[Loose])
+
+            assert serde._rename_table  # decorator on a loose event is honoured
+
+
+def describe_from_namespaces_auto_wiring():
+
+    # The auto-wired serde should cover every event the graph touches, not
+    # just the namespaced ones — the caller passed namespaces, not an event
+    # inventory, so anything else has to be derived.
+    def when_a_handler_produces_an_event_outside_the_namespaces():
+
+        def it_scopes_that_event_too():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            first = _next_lifetime()
+            ping = _lifetime_namespaces.Ping
+
+            @on(first.Place.Placed)
+            def echo(event: object) -> _lifetime_namespaces.Ping:
+                return ping(sym="AAPL")
+
+            graph = EventGraph.from_namespaces(
+                first, handlers=[echo], checkpointer=MemorySaver()
+            )
+
+            ids = graph._checkpointer.serde.revivable_identities()
+            assert (ping.__module__, "Ping") in ids
+
+        def it_scopes_namespaces_reached_only_through_handlers():
+            # A namespace can arrive via handlers= rather than namespaces=.
+            # Passing only the declared domains would leave its events
+            # resolving by import — the bleed this all exists to close.
+            from langgraph.checkpoint.memory import MemorySaver
+
+            first = _next_lifetime()
+            audited = _lifetime_namespaces.Audited
+
+            @on(first.Place.Placed)
+            def log(event: object) -> _lifetime_namespaces.Audited.Logged:
+                return audited.Logged(sym="AAPL")
+
+            graph = EventGraph.from_namespaces(
+                first, handlers=[log], checkpointer=MemorySaver()
+            )
+
+            ids = graph._checkpointer.serde.revivable_identities()
+            assert (audited.__module__, "Audited.Logged") in ids
+
+        def it_does_not_consume_the_namespace_model_cache():
+            # Deriving the loose events from a NamespaceModel would fire its
+            # design-smell warnings from inside the library and populate the
+            # cache, so a user's later graph.namespaces() would never warn.
+            from langgraph.checkpoint.memory import MemorySaver
+
+            first = _next_lifetime()
+            ping = _lifetime_namespaces.Ping
+
+            @on(first.Place.Placed)
+            def echo(event: object) -> _lifetime_namespaces.Ping:
+                return ping(sym="AAPL")
+
+            graph = EventGraph.from_namespaces(
+                first, handlers=[echo], checkpointer=MemorySaver()
+            )
+
+            assert graph._namespaces_cache is None
+
+
+def describe_one_class_reached_twice():
+
+    # namespaces= and events= can name the same class. Collecting it twice
+    # would collect its @migrate_from twice, and a duplicated AddField is
+    # rejected by _flatten_and_validate as a double fill.
+    def when_a_nested_event_is_also_passed_directly():
+
+        def it_is_collected_once():
+            # Collecting twice would declare the same fill twice, which
+            # _flatten_and_validate rejects as a duplicate AddField.
+            serde = NamespaceAwareSerde(
+                namespaces=[_Filled],
+                events=[_Filled.Do.Done],
+            )
+
+            assert serde._origin_addfield_table
+
+
+class _Alef(IntegrationEvent):
+    sym: str
+
+
+class _Bet(IntegrationEvent):
+    sym: str
+
+
+def describe_loose_event_ordering():
+
+    # The loose events come out of set arithmetic, whose iteration order
+    # varies per process. That order reaches migration collection and decides
+    # which class a collision diagnostic names first, so a message must not
+    # change between runs of the same code.
+    def when_a_graph_touches_several():
+
+        def it_returns_them_sorted_and_deduplicated():
+            @on(_Alef)
+            def one(event: _Alef) -> _Bet:
+                return _Bet(sym=event.sym)
+
+            @on(_Bet)
+            def two(event: _Bet) -> None:
+                return None
+
+            loose = EventGraph([one, two])._loose_events
+
+            assert list(loose) == sorted(
+                set(loose), key=lambda c: (c.__module__, c.__qualname__)
+            )
+            assert len(loose) == len(set(loose))
+            assert set(loose) == {_Alef, _Bet}

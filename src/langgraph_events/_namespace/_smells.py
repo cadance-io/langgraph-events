@@ -15,11 +15,11 @@ standard Python warnings machinery::
 
 from __future__ import annotations
 
-import warnings
 from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from langgraph_events._identity import command_identity
+from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from langgraph_events._event import Event
@@ -66,13 +66,12 @@ def emit_command_chain_warnings(model: NamespaceModel) -> None:
     for edge in model.edges:
         if edge.causation != "chain":
             continue
-        warnings.warn(
+        warn_user(
             f"{_qualname(edge.source)}.{edge.via}() emits "
             f"{_qualname(edge.target)}, another Command "
             f"(causation='chain'). Prefer emitting a DomainEvent and "
             f"reacting to it, or collapse the two intents into one command.",
-            category=CommandChainWarning,
-            stacklevel=5,
+            CommandChainWarning,
         )
 
 
@@ -120,4 +119,4 @@ def emit_domain_pattern_warnings(model: NamespaceModel) -> None:
             f"target set {targets_repr}: {pairs_repr}. Consider unifying these "
             "reactors or extracting a shared base event."
         )
-        warnings.warn(msg, category=DomainPatternWarning, stacklevel=5)
+        warn_user(msg, DomainPatternWarning)
