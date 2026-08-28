@@ -25,6 +25,17 @@ class EventLog:
         self._events = tuple(events)
 
     @classmethod
+    def from_store(
+        cls,
+        event_store: Any,
+        stream_id: Any,
+        start: int | None = None,
+    ) -> EventLog:
+        """Load an EventLog from a pyES EventStore stream."""
+        recorded = event_store.load_stream(stream_id, start=start)
+        return cls._from_owned([r.event for r in recorded])
+
+    @classmethod
     def _from_owned(cls, events: list[Any] | tuple[Any, ...]) -> EventLog:
         """Create an EventLog from an already-built events sequence."""
         obj = object.__new__(cls)

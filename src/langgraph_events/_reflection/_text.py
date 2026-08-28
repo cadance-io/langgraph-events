@@ -46,9 +46,9 @@ def safe_repr(value: Any, *, max_len: int = _MAX_DETAIL_VALUE_LEN) -> str:
 def event_line(index: int, event: Event) -> str:
     """Render one event as ``#3 Placed(order_id='o1')`` with truncated values."""
     parts = []
-    for f in dataclasses.fields(event):  # type: ignore[arg-type]
-        value = safe_repr(getattr(event, f.name), max_len=_MAX_VALUE_LEN)
-        parts.append(f"{f.name}={value}")
+    for f_name in type(event).model_fields:
+        value = safe_repr(getattr(event, f_name), max_len=_MAX_VALUE_LEN)
+        parts.append(f"{f_name}={value}")
     return f"#{index} {type(event).__name__}({', '.join(parts)})"
 
 
@@ -157,8 +157,8 @@ def render_event_detail(index: int, log: EventLog) -> str:
     """
     event = log[index]
     lines = [f"#{index} {type(event).__name__}"]
-    for f in dataclasses.fields(event):  # type: ignore[arg-type]
-        lines.append(f"  {f.name}: {safe_repr(getattr(event, f.name))}")
+    for f_name in type(event).model_fields:
+        lines.append(f"  {f_name}: {safe_repr(getattr(event, f_name))}")
     lines.append(f"  kind: {kind_of(event)}")
     namespace = getattr(type(event), "__namespace__", None)
     if namespace is not None:

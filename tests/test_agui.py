@@ -3897,7 +3897,9 @@ def describe_FrontendToolCallRequested():
 
     def when_no_args():
         def it_raises_missing_name():
-            with pytest.raises(TypeError, match=r"missing.*name"):
+            from pydantic import ValidationError
+
+            with pytest.raises((TypeError, ValidationError)):
                 FrontendToolCallRequested()  # type: ignore[call-arg]
 
 

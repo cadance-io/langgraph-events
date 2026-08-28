@@ -45,15 +45,15 @@ def _indices(indices: list[int]) -> str:
 def _explicit_link_lines(index: int, event: Event, log: EventLog) -> list[str]:
     """One line per event-valued field, resolved to its position in the log."""
     lines = []
-    for f in dataclasses.fields(event):  # type: ignore[arg-type]
-        value = getattr(event, f.name)
+    for f_name in type(event).model_fields:
+        value = getattr(event, f_name)
         if not isinstance(value, Event):
             continue
         j = find_index(log, value, equality_before=index)
         if j is None or j == index:
             continue
         marker = "" if log[j] is value else " (equality match)"
-        lines.append(f"  {f.name}: #{j} {type(value).__name__}{marker}")
+        lines.append(f"  {f_name}: #{j} {type(value).__name__}{marker}")
     return lines
 
 

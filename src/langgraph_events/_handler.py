@@ -246,7 +246,7 @@ def _build_on_decorator(
             )
         # Check that at least one event type declares this field
         has_field = any(
-            field_name in getattr(et, "__dataclass_fields__", {}) for et in event_types
+            field_name in getattr(et, "model_fields", {}) for et in event_types
         )
         if not has_field:
             type_names = ", ".join(t.__name__ for t in event_types)

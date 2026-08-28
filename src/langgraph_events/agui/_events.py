@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import field
 from typing import Any, Generic, TypeVar
+
+from pydantic import Field, model_validator
 
 from langgraph_events import IntegrationEvent
 from langgraph_events._event import Interrupted
@@ -44,7 +45,7 @@ class FrontendStateMutated(IntegrationEvent):
     effects.
     """
 
-    state: dict[str, Any] = field(default_factory=dict)
+    state: dict[str, Any] = Field(default_factory=dict)
 
 
 PayloadT = TypeVar("PayloadT")
@@ -106,16 +107,18 @@ class FrontendToolCallRequested(Interrupted):
     """
 
     name: str
-    args: dict[str, Any] = field(default_factory=dict)
-    tool_call_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    args: dict[str, Any] = Field(default_factory=dict)
+    tool_call_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _validate_name(self) -> FrontendToolCallRequested:
         if not self.name or not self.name.strip():
             raise ValueError(
                 "FrontendToolCallRequested.name must be a non-empty tool name; "
                 "got empty/whitespace. Pass the same `name` your "
                 "useFrontendTool({ name: ... }) registration declares."
             )
+        return self
 
     def agui_dict(self) -> dict[str, Any]:
         return {

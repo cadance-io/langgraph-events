@@ -869,6 +869,7 @@ class EventGraph:
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
+        event_store: Any | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
@@ -881,6 +882,7 @@ class EventGraph:
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._store = store
+        self._event_store = event_store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
         _discover_namespace_reducers(self._namespaces, self._reducers)
@@ -946,6 +948,21 @@ class EventGraph:
 
         enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_error_handling()
+
+        # Auto-wire NamespaceAwareSerde when a bare checkpointer is supplied.
+        # With pydantic events (pyES base), LangGraph's default serde loses
+        # subclass information for nested Event fields typed as base classes
+        # (e.g. ``Resumed.interrupted: Interrupted``). NamespaceAwareSerde
+        # stores module+qualname and reconstructs the exact subclass.
+        if checkpointer is not None:
+            from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
+
+            serde = getattr(checkpointer, "serde", None)
+            if serde is not None and not isinstance(serde, NamespaceAwareSerde):
+                checkpointer.serde = NamespaceAwareSerde(
+                    namespaces=tuple(self._namespaces.values()),
+                    events=self._loose_events,
+                )
 
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.
@@ -1281,13 +1298,41 @@ class EventGraph:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
-        return EventLog._from_owned(result["events"])
+        log = EventLog._from_owned(result["events"])
+        self._persist_to_event_store(log, kwargs.get("config"))
+        return log
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
-        return EventLog._from_owned(result["events"])
+        log = EventLog._from_owned(result["events"])
+        self._persist_to_event_store(log, kwargs.get("config"))
+        return log
+
+    def _persist_to_event_store(self, log: EventLog, config: Any) -> None:
+        """Append new events from this run to the pyES EventStore."""
+        if self._event_store is None or not log:
+            return
+        from event_sourcery import StreamId  # noqa: PLC0415
+
+        thread_id = (
+            (config or {}).get("configurable", {}).get("thread_id")
+            if config is not None
+            else None
+        )
+        stream_id = StreamId(name=str(thread_id) if thread_id is not None else "default")
+        # Determine how many events are already in the store to avoid
+        # duplicating events across runs when a checkpointer is used
+        # (result["events"] always returns the full history).
+        already_stored = len(self._event_store.load_stream(stream_id))
+        new_events = log.events[already_stored:]
+        if new_events:
+            self._event_store.append(
+                *new_events,
+                stream_id=stream_id,
+                expected_version=already_stored,
+            )
 
     @classmethod
     def from_namespaces(

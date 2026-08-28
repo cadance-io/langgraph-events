@@ -90,15 +90,52 @@ def _required_field_placeholders(
         obj = _resolve_identity(module, qualname, scope=scope)
     except (ImportError, AttributeError):
         return {}
-    if not dataclasses.is_dataclass(obj):
+    if dataclasses.is_dataclass(obj):
+        return {
+            f.name: None
+            for f in dataclasses.fields(obj)
+            if f.name not in skip
+            and f.default is dataclasses.MISSING
+            and f.default_factory is dataclasses.MISSING
+        }
+    # pydantic model — use model_fields to find required fields
+    from pydantic import BaseModel  # noqa: PLC0415
+
+    if isinstance(obj, type) and issubclass(obj, BaseModel):
+        return {
+            name: _pydantic_placeholder(field.annotation)
+            for name, field in obj.model_fields.items()
+            if name not in skip and field.is_required()
+        }
+    return {}
+
+
+def _pydantic_placeholder(annotation: object) -> object:
+    """Return a minimal valid value for a pydantic field annotation."""
+    import typing  # noqa: PLC0415
+
+    origin = typing.get_origin(annotation)
+    # Optional[X] / X | None — use None
+    if origin is typing.Union:
+        args = typing.get_args(annotation)
+        if type(None) in args:
+            return None
+    # Common scalar types
+    if annotation is str:
+        return ""
+    if annotation is int:
+        return 0
+    if annotation is bool:
+        return False
+    if annotation is float:
+        return 0.0
+    # Sequences
+    if origin in (list, tuple):
+        return [] if origin is list else ()
+    if origin is dict:
         return {}
-    return {
-        f.name: None
-        for f in dataclasses.fields(obj)
-        if f.name not in skip
-        and f.default is dataclasses.MISSING
-        and f.default_factory is dataclasses.MISSING
-    }
+    # Default — try None (works for Optional or arbitrary_types_allowed)
+    return None
 
 
 def assert_all_baselined_cover(

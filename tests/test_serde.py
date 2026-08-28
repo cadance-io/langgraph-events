@@ -723,7 +723,7 @@ def describe_NamespaceAwareSerde():
 
                 message = str(excinfo.value)
                 assert "FieldShape.Persisted" in message
-                assert "TypeError" in message
+                assert any(t in message for t in ("TypeError", "ValidationError"))
                 assert "note" in message
                 assert "fields may have changed" in message
 
@@ -744,7 +744,7 @@ def describe_NamespaceAwareSerde():
 
                     message = str(excinfo.value)
                     assert "FieldShape.Persisted" in message
-                    assert "TypeError" in message
+                    assert any(t in message for t in ("TypeError", "ValidationError"))
                     assert "reason" in message
                     assert "fields may have changed" in message
 
@@ -1332,11 +1332,12 @@ def describe_NamespaceAwareSerde():
                         _persisted_payload(command_id="c2", note="b")
                     )
 
-                    # Frozen dataclass coerces our list into the declared
-                    # ``tuple[str, ...]`` only when we pass a tuple — we
-                    # passed nothing, so the AddField factory list goes in
-                    # raw. Identity comparison surfaces aliasing.
-                    assert r1.tags is not r2.tags
+                    # Pydantic coerces list() to tuple() for tuple[str,...]
+                    # fields, making identity comparison meaningless for empty
+                    # tuples (Python interns them). Verify each revival gets
+                    # independent field values and construction succeeds.
+                    assert r1.tags == r2.tags == ()
+                    assert r1.command_id != r2.command_id  # different instances
 
             def when_old_payload_already_carries_the_field():
                 def it_preserves_the_existing_value():

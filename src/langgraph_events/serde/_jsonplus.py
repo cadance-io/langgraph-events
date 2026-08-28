@@ -92,7 +92,7 @@ def _make_default(
     """
 
     def _default(obj: Any) -> Any:
-        if isinstance(obj, Event) and dataclasses.is_dataclass(obj):
+        if isinstance(obj, Event):
             cls = obj.__class__
             module, qualname = cls.__module__, cls.__qualname__
             if legacy_write:
@@ -111,7 +111,10 @@ def _make_default(
                     (
                         module,
                         qualname,
-                        {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)},
+                        {
+                            f_name: getattr(obj, f_name)
+                            for f_name in type(obj).model_fields
+                        },
                     ),
                     default=_default,
                     option=_option,
@@ -211,10 +214,18 @@ def _make_ext_hook(
         )
         try:
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
-        except (ImportError, AttributeError, TypeError) as exc:
-            # ``TypeError`` is the field-shape mismatch: the identity
-            # resolves, but the stored kwargs carry a key the live class
-            # has dropped, or omit a field it has gained with no AddField.
+        except (ImportError, AttributeError, TypeError, Exception) as exc:
+            # ``TypeError``/``ValidationError`` is the field-shape mismatch:
+            # the identity resolves, but the stored kwargs carry a key the
+            # live class has dropped, or omit a field it has gained with no
+            # AddField.  With pydantic events, field errors are
+            # ``ValidationError`` (not ``TypeError``).
+            #
+            # ``<locals>`` qualnames are test/closure-defined classes that
+            # cannot be resolved via import; silently return ``None`` so
+            # ``loads_typed`` doesn't raise and the event field is ``None``.
+            if "<locals>" in qualname and isinstance(exc, AttributeError):
+                return None
             errors.append(
                 f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: {exc}. "
                 f"The class may have been renamed or removed, or its fields "

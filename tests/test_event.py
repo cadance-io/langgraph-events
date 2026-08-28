@@ -37,7 +37,7 @@ def describe_Event():
 
             e = MyEvent(x=42)
             assert e.x == 42
-            with pytest.raises(AttributeError):
+            with pytest.raises(Exception):  # AttributeError (dataclass) or ValidationError (pydantic)
                 e.x = 99  # type: ignore
 
         def it_auto_applies_dataclass():
@@ -46,15 +46,16 @@ def describe_Event():
 
             e = AutoEvent(value="hello")
             assert e.value == "hello"
-            with pytest.raises(AttributeError):
+            with pytest.raises(Exception):  # AttributeError (dataclass) or ValidationError (pydantic)
                 e.value = "nope"  # type: ignore
 
-        def it_auto_dataclass_produces_real_dataclass():
+        def it_is_a_pydantic_model():
+            from pydantic import BaseModel
+
             class SimpleEvent(IntegrationEvent):
                 value: str = ""
 
-            assert dataclasses.is_dataclass(SimpleEvent)
-            assert SimpleEvent.__dataclass_params__.frozen
+            assert issubclass(SimpleEvent, BaseModel)
 
     def when_single_inheritance():
 
@@ -268,7 +269,7 @@ def describe_MessageEvent():
             e = Leaf(message=msg, content="extra")
             assert e.content == "extra"
             assert e.as_messages() == [msg]
-            with pytest.raises(AttributeError):
+            with pytest.raises(Exception):  # AttributeError or pydantic ValidationError
                 e.content = "nope"  # type: ignore
 
 

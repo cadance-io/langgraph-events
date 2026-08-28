@@ -9,13 +9,15 @@ import operator
 import types
 import typing
 import weakref
-from dataclasses import fields as dc_fields
-from typing import TYPE_CHECKING, Any, ClassVar, dataclass_transform
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from event_sourcery import Event as _ESBaseEvent
+from langchain_core.messages import BaseMessage, SystemMessage
+from pydantic import ConfigDict
+from pydantic._internal._model_construction import ModelMetaclass
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from langchain_core.messages import BaseMessage, SystemMessage
 
 
 OUTCOMES_ATTR = "Outcomes"
@@ -26,8 +28,7 @@ during ``__dict__`` walks (it shares a class object with a directly-nested
 DomainEvent for single-outcome Commands) or look it up by attribute access."""
 
 
-@dataclass_transform(frozen_default=True)
-class Event:
+class Event(_ESBaseEvent):
     """Internal base class for all events.
 
     Not intended for direct subclassing — use ``DomainEvent``,
@@ -38,10 +39,10 @@ class Event:
     filter (``event_type=Event`` catches all events).
     """
 
+    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+
     def __init_subclass__(cls, *, _event_base: bool = False, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        if "__dataclass_fields__" not in cls.__dict__:
-            dataclasses.dataclass(frozen=True)(cls)
         if Event in cls.__bases__ and not _event_base:
             raise TypeError(
                 f"{cls.__name__!r} subclasses Event directly. Use one of: "
@@ -49,6 +50,15 @@ class Event:
                 f"(cross-boundary facts), Command (inside Namespace), or "
                 f"compose with Auditable / MessageEvent."
             )
+        # Auto-wire __post_init__ as pydantic model_post_init so that
+        # dataclass-style validation hooks are preserved.
+        if "__post_init__" in cls.__dict__ and "model_post_init" not in cls.__dict__:
+            _post_init = cls.__dict__["__post_init__"]
+
+            def model_post_init(self: Any, __context: Any = None) -> None:
+                _post_init(self)
+
+            cls.model_post_init = model_post_init  # type: ignore[attr-defined]
 
     def _collect_into(
         self,
@@ -337,7 +347,7 @@ def _is_nested_in_class(cls: type) -> bool:
     return len(relevant) >= 2
 
 
-class _NestedEventMeta(type):
+class _NestedEventMeta(ModelMetaclass):
     """Metaclass that validates domain-nesting when a nested class is
     assigned to its enclosing class.
 
@@ -478,6 +488,15 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     __namespace_cls__: ClassVar[type | None] = None
     __command_handler__: ClassVar[Any] = None
 
+    # Reserved class-level modifiers — must be ClassVar so pydantic
+    # doesn't treat them as model fields when set on subclasses.
+    raises: ClassVar[tuple[type[Exception], ...]] = ()
+    invariants: ClassVar[tuple[Any, ...]] = ()
+    previously: ClassVar[str | tuple[str, ...]] = ()
+    retry: ClassVar[Any] = None
+    # Outcome alias set by _attach_command_outcomes after class creation.
+    Outcomes: ClassVar[Any] = None
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         # Checked first: the shape is wrong regardless of what the body
         # declares.
@@ -515,14 +534,30 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
                     raise _reserved_modifier_error(cls, name) from None
             raise
         # ``previously``/``raises``/``invariants``/``retry`` are reserved
-        # class-level modifiers. An annotated non-ClassVar would silently
-        # become a frozen dataclass field serialized into every checkpoint
-        # payload while the modifier still appears to work — reject it at
-        # class creation. dc_fields reflects dataclasses' own ClassVar
-        # verdict, so legitimate spellings (incl. module-level ClassVar
-        # aliases under PEP 563) never trip this.
+        # class-level modifiers. An annotated non-ClassVar is forbidden.
+        # pydantic model_fields catches resolved annotations; we also check
+        # PEP 563 string annotations by resolving them via the module globals
+        # so that ClassVar aliases (``CV = ClassVar``) are accepted.
         for name in _RESERVED_MODIFIERS:
-            if any(f.name == name for f in dc_fields(cls)):
+            if name in cls.model_fields:
+                raise _reserved_modifier_error(cls, name)
+            ann = own_annotations.get(name)
+            if ann is None:
+                continue
+            if ann is ClassVar or typing.get_origin(ann) is ClassVar:
+                continue
+            if isinstance(ann, str):
+                import sys  # noqa: PLC0415
+
+                try:
+                    resolved = eval(  # noqa: S307
+                        ann,
+                        {**sys.modules.get(cls.__module__, object).__dict__},
+                    )
+                    if resolved is ClassVar or typing.get_origin(resolved) is ClassVar:
+                        continue
+                except Exception:
+                    pass
                 raise _reserved_modifier_error(cls, name)
         if not _is_nested_in_class(cls):
             raise TypeError(
@@ -665,8 +700,8 @@ class Auditable:
         """Return a compact, human-readable summary of this event."""
         name = type(self).__name__
         parts = []
-        for f in dc_fields(self):  # type: ignore[arg-type]
-            val = getattr(self, f.name)
+        for f_name in type(self).model_fields:
+            val = getattr(self, f_name)
             if isinstance(val, str) and len(val) > 80:
                 val = val[:80] + "..."
             elif isinstance(val, tuple) and len(val) > 3:
@@ -674,7 +709,7 @@ class Auditable:
             s = repr(val)
             if len(s) > 80:
                 s = s[:77] + "..."
-            parts.append(f"{f.name}={s}")
+            parts.append(f"{f_name}={s}")
         return f"[{name}] {', '.join(parts)}"
 
 

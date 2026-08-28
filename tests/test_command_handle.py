@@ -298,15 +298,17 @@ def describe_Command_handle():
 
         def when_handle_is_not_callable():
 
-            def it_leaves___command_handler___as_None():
-                class Odd(Namespace):
-                    class Cmd(Command):
-                        handle = "not a function"
+            def it_raises_at_class_creation():
+                """With pydantic, unannotated non-callable attribute is a hard error."""
+                from pydantic import PydanticUserError
 
-                        class Outcome(DomainEvent):
-                            pass
+                with pytest.raises((TypeError, PydanticUserError)):
+                    class Odd(Namespace):
+                        class Cmd(Command):
+                            handle = "not a function"
 
-                assert Odd.Cmd.__command_handler__ is None
+                            class Outcome(DomainEvent):
+                                pass
 
         def when_command_has_a_meaningfully_named_public_method():
             # The handler can be named anything meaningful — not just

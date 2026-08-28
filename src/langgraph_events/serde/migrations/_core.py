@@ -342,9 +342,12 @@ def _bucket_addfields(
         # targets were just probed, origin targets point at a chain
         # terminus ``_resolve_chain_terminus`` already validated.
         live_cls = _resolve_identity(*live_identity, scope=scope)
-        if is_dataclass(live_cls) and op.field not in {
-            f.name for f in fields(live_cls)
-        }:
+        _known_fields: set[str] | None = None
+        if is_dataclass(live_cls):
+            _known_fields = {f.name for f in fields(live_cls)}
+        elif hasattr(live_cls, "model_fields"):
+            _known_fields = set(live_cls.model_fields.keys())
+        if _known_fields is not None and op.field not in _known_fields:
             raise ValueError(
                 f"AddField({op.module}:{op.qualname!r}, {op.field!r}) in "
                 f"{_migration_label(migration_name)}: the live class "

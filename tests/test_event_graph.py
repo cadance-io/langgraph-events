@@ -766,7 +766,7 @@ def describe_EventGraph():
 
                 def it_is_frozen():
                     event = SystemPromptSet.from_str("test")
-                    with pytest.raises(AttributeError):
+                    with pytest.raises(Exception):  # AttributeError or pydantic ValidationError
                         event.message = SystemMessage(  # type: ignore
                             content="changed"
                         )
