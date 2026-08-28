@@ -12,8 +12,6 @@ import weakref
 from dataclasses import fields as dc_fields
 from typing import TYPE_CHECKING, Any, ClassVar, dataclass_transform
 
-from langgraph_events._warn import warn_user
-
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -207,36 +205,28 @@ class Namespace:
         # Subclassing one Namespace from another was never a designed
         # capability — it fell out of the MRO walk that collects declarative
         # reducers, and only reducers ever inherited. Nested commands and
-        # events do not, which makes a child namespace quietly incomplete:
-        # its inherited commands are skipped by ``EventGraph.from_namespaces``
-        # and its inherited events fall outside a serde's scope, reviving by
+        # events did not, which left a child namespace quietly incomplete:
+        # its inherited commands skipped by ``EventGraph.from_namespaces``
+        # and its inherited events outside a serde's scope, reviving by
         # import and so bleeding across engine lifetimes (#148, #150).
-        # Deprecated rather than widened: the library moved toward
-        # composition, and #141 forbade Command inheritance outright.
-        if any(
-            base is not Namespace
+        # Deprecated in 0.27.0, removed here. A non-Namespace mixin is
+        # unaffected — that is composition, not a second namespace.
+        inherited = [
+            base
+            for base in cls.__bases__
+            if base is not Namespace
             and isinstance(base, type)
             and issubclass(base, Namespace)
-            for base in cls.__bases__
-        ):
-            inherited = ", ".join(
-                b.__name__
-                for b in cls.__bases__
-                if b is not Namespace
-                and isinstance(b, type)
-                and issubclass(b, Namespace)
-            )
-            warn_user(
-                f"Namespace subclassing is deprecated: {cls.__name__!r} "
-                f"inherits from {inherited}. Only reducers inherit — nested "
-                f"commands and events do not, so the child namespace is "
-                f"incomplete for graph building and serde scoping. Declare "
-                f"the namespace independently. To share a reducer, declare "
-                f"it free-standing (no owning namespace) and pass it via "
-                f"`reducers=[...]` — a reducer declared on the parent stays "
-                f"bound to the parent and would fold nothing. Support will "
-                f"be removed in a future release.",
-                DeprecationWarning,
+        ]
+        if inherited:
+            names = ", ".join(b.__name__ for b in inherited)
+            raise TypeError(
+                f"Namespace subclassing is not supported: {cls.__name__!r} "
+                f"inherits from {names}. Only reducers ever inherited, which "
+                f"left the child incomplete for graph building and serde "
+                f"scoping. Declare each namespace independently; to share a "
+                f"reducer, declare it free-standing (no owning namespace) "
+                f"and pass it via `reducers=[...]`."
             )
         cls.__namespace_name__ = cls.__name__
         cls.__reducers__ = _collect_namespace_reducers(cls)
@@ -255,7 +245,8 @@ class Namespace:
 def _collect_namespace_reducers(cls: type) -> tuple[Any, ...]:
     """Walk the MRO and collect declarative reducers from class bodies.
 
-    Child domains inherit parent domain's reducers; dedup by name.
+    Namespaces cannot inherit from one another, so the walk only ever reaches
+    *cls* itself and any non-Namespace mixins it composes. Dedup by name.
     Runtime import of ``BaseReducer`` to avoid module-level circular
     dependency with ``_reducer``.
     """

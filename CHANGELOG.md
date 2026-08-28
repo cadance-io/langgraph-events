@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Namespace subclassing** — `class Child(Base)` where `Base` is a `Namespace` now raises
+  `TypeError`. Deprecated in 0.27.0 with a one-minor-version grace period, removed here.
+
+  Only reducers ever inherited. Nested commands and events did not, which left a child namespace
+  quietly incomplete: `EventGraph.from_namespaces` skipped its inherited inline handlers, and its
+  inherited events fell outside a serde's scope and bled across engine lifetimes
+  ([#157](https://github.com/cadance-io/langgraph-events/issues/157)).
+
+  Declare each namespace independently. To share a reducer, declare it free-standing — with no
+  owning namespace — and pass it via `reducers=[...]`. A reducer declared on the old parent stays
+  bound to that parent and folds nothing for anyone else.
+
+  Composing a non-`Namespace` mixin (`class Task(Namespace, Auditable)`) is unaffected.
+
 ## [0.27.0] - 2026-08-28
 
 ### Added
