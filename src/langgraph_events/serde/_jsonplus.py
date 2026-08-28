@@ -240,7 +240,13 @@ class NamespaceAwareSerde(JsonPlusSerializer):
     subclasses.
 
     Pass ``namespaces=`` to scope decorator-driven (``@migrate_from``)
-    collection to the namespaces in play for this graph. Pass
+    collection to the namespaces in play for this graph. Pass ``events=``
+    for event classes that live outside every namespace — module-level
+    ``IntegrationEvent``s and framework ``SystemEvent``s — which the
+    namespace walk cannot reach; without them those identities resolve by
+    import and so are shared between engine lifetimes of one module.
+    ``EventGraph.from_namespaces`` fills this in automatically from the
+    graph it builds. Pass
     ``migrations=`` for hand-authored cross-module renames or composite
     operations; the two compose. See :mod:`langgraph_events.serde.migrations`.
     """
@@ -250,6 +256,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         migrations: Sequence[Migration] = (),
         *,
         namespaces: Sequence[type] = (),
+        events: Sequence[type] = (),
         legacy_write: bool = False,
         **kwargs: Any,
     ) -> None:
@@ -258,7 +265,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         # diagnostic, when a user-passed hand-authored entry conflicts,
         # names the user's migration as the second (more actionable than
         # naming the auto-collected one).
-        decorated, oldest_historic, scope = _collect_decorated_migrations(namespaces)
+        decorated, oldest_historic, scope = _collect_decorated_migrations(
+            namespaces, events
+        )
         all_migrations = (*decorated, *migrations)
         (
             self._rename_table,

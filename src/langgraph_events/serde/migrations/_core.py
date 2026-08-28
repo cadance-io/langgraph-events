@@ -696,8 +696,39 @@ def backfill(
     return _wrap
 
 
+def _serde_event_classes(
+    namespaces: Sequence[type], events: Sequence[type]
+) -> list[type]:
+    """Every event class a serde speaks for, in order, without repeats.
+
+    The namespace walk plus any loose events passed directly — module-level
+    ``IntegrationEvent``s and framework ``SystemEvent``s live outside every
+    namespace, so nothing else reaches them.
+
+    De-duplicated by class object: one class reached twice would have its
+    ``@migrate_from`` migration collected twice, and a duplicated ``AddField``
+    is rejected by ``_flatten_and_validate`` as a double fill.
+    """
+    seen: set[int] = set()
+    out: list[type] = []
+    for source in (
+        (
+            cls
+            for ns in namespaces
+            for cls in _iter_nested_events(ns, recurse_commands=True)
+        ),
+        events,
+    ):
+        for cls in source:
+            if id(cls) not in seen:
+                seen.add(id(cls))
+                out.append(cls)
+    return out
+
+
 def _collect_decorated_migrations(
     namespaces: Sequence[type],
+    events: Sequence[type] = (),
 ) -> tuple[
     tuple[Migration, ...],
     dict[tuple[str, str], tuple[str, str]],
@@ -734,78 +765,77 @@ def _collect_decorated_migrations(
     out: list[Migration] = []
     oldest_historic: dict[tuple[str, str], tuple[str, str]] = {}
     scope: dict[tuple[str, str], type] = {}
-    for namespace_cls in namespaces:
-        for cls in _iter_nested_events(namespace_cls, recurse_commands=True):
-            current = (cls.__module__, cls.__qualname__)
-            claimed = scope.setdefault(current, cls)
-            if claimed is not cls:
-                # Two lifetimes of one module share (module, qualname), so
-                # last-wins would make revival depend on the order of a
-                # sequence that reads as insignificant. Each lifetime gets
-                # its own serde — EventGraph rejects the same mistake at
-                # graph build. Naming both classes would print one string
-                # twice: sharing the identity is the trigger, so their reprs
-                # are always identical. The ids are what tells them apart.
-                raise ValueError(
-                    f"Two namespaces passed to this serde claim the same "
-                    f"event identity {current[0]}.{current[1]} — distinct "
-                    f"classes ({id(claimed):#x} and {id(cls):#x}), most "
-                    f"likely two engine lifetimes of one module. Give each "
-                    f"lifetime its own NamespaceAwareSerde(namespaces=[...])."
-                )
-            # ``__dict__.get`` (not ``getattr``) — neither marker may leak
-            # through MRO when a subclass inherits from a decorated parent.
-            history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
-            backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
-            origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
-            if not history and not backfills and not origin_backfills:
-                continue
-            ops: list[Operation] = []
-            if history:
-                oldest_historic[current] = history[0]
-                chain = [*history, current]
-                for (old_mod, old_qn), (new_mod, new_qn) in itertools.pairwise(chain):
-                    ops.append(
-                        RenameEvent(
-                            old_module=old_mod,
-                            old_qualname=old_qn,
-                            new_module=new_mod,
-                            new_qualname=new_qn,
-                        )
-                    )
-            # Class-global AddField keys on the CURRENT identity — the same
-            # identity the rename chain (if any) resolves to — so renames and
-            # back-fills on one class compose with no extra logic. ``AddField``
-            # runs its own ``__post_init__`` validation (mutable-default guard).
-            for bf in backfills:
+    for cls in _serde_event_classes(namespaces, events):
+        current = (cls.__module__, cls.__qualname__)
+        claimed = scope.setdefault(current, cls)
+        if claimed is not cls:
+            # Two lifetimes of one module share (module, qualname), so
+            # last-wins would make revival depend on the order of a
+            # sequence that reads as insignificant. Each lifetime gets
+            # its own serde — EventGraph rejects the same mistake at
+            # graph build. Naming both classes would print one string
+            # twice: sharing the identity is the trigger, so their reprs
+            # are always identical. The ids are what tells them apart.
+            raise ValueError(
+                f"Two namespaces passed to this serde claim the same "
+                f"event identity {current[0]}.{current[1]} — distinct "
+                f"classes ({id(claimed):#x} and {id(cls):#x}), most "
+                f"likely two engine lifetimes of one module. Give each "
+                f"lifetime its own NamespaceAwareSerde(namespaces=[...])."
+            )
+        # ``__dict__.get`` (not ``getattr``) — neither marker may leak
+        # through MRO when a subclass inherits from a decorated parent.
+        history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
+        backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
+        origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
+        if not history and not backfills and not origin_backfills:
+            continue
+        ops: list[Operation] = []
+        if history:
+            oldest_historic[current] = history[0]
+            chain = [*history, current]
+            for (old_mod, old_qn), (new_mod, new_qn) in itertools.pairwise(chain):
                 ops.append(
-                    AddField(
-                        module=cls.__module__,
-                        qualname=cls.__qualname__,
-                        field=bf["field"],
-                        default=bf["default"],
-                        default_factory=bf["default_factory"],
+                    RenameEvent(
+                        old_module=old_mod,
+                        old_qualname=old_qn,
+                        new_module=new_mod,
+                        new_qualname=new_qn,
                     )
                 )
-            # Origin-scoped fills key on the HISTORIC identity the decorator
-            # was declared with — applied before the rename on the read path,
-            # so each collapsed origin can pin its own value.
-            for (origin_module, origin_qualname), fill_fields in origin_backfills:
-                for field_name, default in fill_fields.items():
-                    ops.append(
-                        AddField(
-                            module=origin_module,
-                            qualname=origin_qualname,
-                            field=field_name,
-                            default=default,
-                        )
-                    )
-            out.append(
-                Migration(
-                    name=f"{cls.__module__}:{cls.__qualname__}",
-                    operations=tuple(ops),
+        # Class-global AddField keys on the CURRENT identity — the same
+        # identity the rename chain (if any) resolves to — so renames and
+        # back-fills on one class compose with no extra logic. ``AddField``
+        # runs its own ``__post_init__`` validation (mutable-default guard).
+        for bf in backfills:
+            ops.append(
+                AddField(
+                    module=cls.__module__,
+                    qualname=cls.__qualname__,
+                    field=bf["field"],
+                    default=bf["default"],
+                    default_factory=bf["default_factory"],
                 )
             )
+        # Origin-scoped fills key on the HISTORIC identity the decorator
+        # was declared with — applied before the rename on the read path,
+        # so each collapsed origin can pin its own value.
+        for (origin_module, origin_qualname), fill_fields in origin_backfills:
+            for field_name, default in fill_fields.items():
+                ops.append(
+                    AddField(
+                        module=origin_module,
+                        qualname=origin_qualname,
+                        field=field_name,
+                        default=default,
+                    )
+                )
+        out.append(
+            Migration(
+                name=f"{cls.__module__}:{cls.__qualname__}",
+                operations=tuple(ops),
+            )
+        )
     return tuple(out), oldest_historic, scope
 
 

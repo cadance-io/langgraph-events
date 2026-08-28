@@ -41,7 +41,7 @@ graph = EventGraph([Order.Place])   # reducer auto-discovered from Order
 ```
 
 - Only sees events whose `__namespace__` matches.
-- Child namespaces inherit parent reducers (dedup by name).
+- Child namespaces inherit parent reducers (dedup by name). **Deprecated** — subclassing a `Namespace` emits a `DeprecationWarning` and will be removed. Only reducers ever inherited; nested commands and events do not, so a child namespace is incomplete for graph building and serde scoping. Declare each namespace independently and share reducers by passing `reducers=[...]`.
 - Cross-namespace name collisions raise `TypeError` at graph construction.
 - Explicit `reducers=[...]` wins on conflict with an auto-discovered reducer.
 

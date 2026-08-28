@@ -1270,6 +1270,29 @@ def describe_Command_handle():
                 ):
                     EventGraph([Shop6.Buy])
 
+        def when_the_declared_type_and_missing_outcome_share_a_name():
+
+            # Two distinct classes of the same name render identically, so
+            # the message read "declares return type `Placed` but does not
+            # cover outcome(s): Placed" — advice already satisfied. Usually a
+            # function-local class whose string annotation resolved to a
+            # different object (issue #151).
+            def it_distinguishes_them_and_names_the_cause():
+                class Twin(Namespace):
+                    class Do(Command):
+                        class Placed(DomainEvent):
+                            pass
+
+                        def handle(self) -> _Decoy.Do.Placed:
+                            return _Decoy.Do.Placed()
+
+                with pytest.raises(TypeError) as exc:
+                    EventGraph([Twin.Do])
+
+                msg = str(exc.value)
+                assert "`Placed` but does not cover outcome(s): Placed" not in msg
+                assert "Twin.Do.Placed" in msg
+
         def when_annotation_covers_all_outcomes():
 
             def it_accepts():
@@ -1314,3 +1337,11 @@ def describe_handle_aliased_across_commands():
             EventGraph([LeftAgg.Do])
             with pytest.raises(TypeError, match=r"already bound"):
                 EventGraph([RightAgg.Do])
+
+
+class _Decoy(Namespace):
+    """Carries a second class also called ``Placed`` — the #151 collision."""
+
+    class Do(Command):
+        class Placed(DomainEvent):
+            pass

@@ -397,14 +397,39 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     missing = [o for o in nested_outcomes if not any(issubclass(c, o) for c in covered)]
     if not missing:
         return
-    declared = " | ".join(t.__name__ for t in covered) or "(no types)"
-    missing_names = ", ".join(o.__name__ for o in missing)
+    # Coverage is decided by identity (issubclass), so a declared class and a
+    # missing outcome can share a __name__ and still not match. Rendering both
+    # by name then reads as a tautology — "declares `Placed` but does not
+    # cover Placed" — and sends the reader to edit an annotation that is
+    # already correct. Qualify the names when they collide (#151).
+    collision = bool({o.__name__ for o in missing} & {c.__name__ for c in covered})
+
+    def label(t: type) -> str:
+        return t.__qualname__ if collision else t.__name__
+
+    declared = " | ".join(label(t) for t in covered) or "(no types)"
+    missing_names = ", ".join(label(o) for o in missing)
+    hint = (
+        f"Add them to the annotation (e.g. `-> "
+        f"{' | '.join(o.__name__ for o in nested_outcomes)}`) or drop "
+        f"the annotation to let Outcomes drive the contract."
+    )
+    if collision:
+        local = [t for t in (*covered, *missing) if "<locals>" in t.__qualname__]
+        hint = (
+            "These are different classes that happen to share a name, so the "
+            "annotation already names something else."
+        ) + (
+            " A `<locals>` qualname above means a class defined inside a "
+            "function, whose string annotation resolved to a different "
+            "object — declare event classes at module level."
+            if local
+            else " Check which class the annotation actually resolves to."
+        )
     raise TypeError(
         f"Inline handler {handler_name!r} on {cmd.__qualname__} declares "
         f"return type `{declared}` but does not cover outcome(s): "
-        f"{missing_names}. Add them to the annotation (e.g. `-> "
-        f"{' | '.join(o.__name__ for o in nested_outcomes)}`) or drop "
-        f"the annotation to let Outcomes drive the contract."
+        f"{missing_names}. {hint}"
     )
 
 
@@ -1293,15 +1318,28 @@ class EventGraph:
         # namespaces. A user-supplied NamespaceAwareSerde (possibly
         # carrying hand-authored migrations=) is left untouched — that is
         # the opt-out. The serde still owns coverage; we own construction.
+        graph = cls(collected, **kwargs)
+
+        # Wired after construction, not before: the events that live outside
+        # every namespace — module-level IntegrationEvents, framework
+        # SystemEvents — are only knowable once the graph has parsed its
+        # handlers' subscriptions and return types. Without them those
+        # identities resolve by import and are shared between engine
+        # lifetimes of one module. ``compiled`` is lazy, so the serde is in
+        # place well before anything reads it.
         checkpointer = kwargs.get("checkpointer")
         if checkpointer is not None:
             from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
 
             serde = getattr(checkpointer, "serde", None)
             if serde is not None and not isinstance(serde, NamespaceAwareSerde):
-                checkpointer.serde = NamespaceAwareSerde(namespaces=domains)
+                model = graph.namespaces()
+                checkpointer.serde = NamespaceAwareSerde(
+                    namespaces=domains,
+                    events=(*model.integration_events, *model.system_events),
+                )
 
-        return cls(collected, **kwargs)
+        return graph
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph synchronously with one or more seed events.

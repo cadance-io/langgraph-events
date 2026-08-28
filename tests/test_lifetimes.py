@@ -13,7 +13,14 @@ import _lifetime_namespaces
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
-from langgraph_events import Command, DomainEvent, EventGraph, Namespace, on
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    EventGraph,
+    IntegrationEvent,
+    Namespace,
+    on,
+)
 from langgraph_events._reducer import _matches_namespace
 from langgraph_events.serde import NamespaceAwareSerde
 
@@ -253,3 +260,61 @@ def describe_a_serde_given_more_than_one_lifetime():
             first = _next_lifetime()
 
             assert NamespaceAwareSerde(namespaces=[first, first]) is not None
+
+
+def describe_events_outside_a_namespace():
+
+    # Module-level IntegrationEvents are not reached by the namespace walk,
+    # so before #155 they resolved by import and bled across lifetimes.
+    def when_the_serde_is_given_them_explicitly():
+
+        def it_keeps_each_lifetimes_own_class():
+            first = _next_lifetime()
+            first_ping = _lifetime_namespaces.Ping
+            serde = NamespaceAwareSerde(namespaces=[first], events=[first_ping])
+            blob = serde.dumps_typed({"e": first_ping(sym="AAPL")})
+
+            second = _next_lifetime()
+
+            revived = serde.loads_typed(blob)["e"]
+            assert type(revived) is first_ping
+            assert type(revived) is not _lifetime_namespaces.Ping
+            assert second is not first
+
+    def when_a_decorator_records_history_on_one():
+
+        def it_collects_the_migration(self=None):
+            from langgraph_events.serde.migrations import migrate_from
+
+            @migrate_from("Ancient")
+            class Loose(IntegrationEvent):
+                sym: str
+
+            serde = NamespaceAwareSerde(namespaces=[], events=[Loose])
+
+            assert serde._rename_table  # decorator on a loose event is honoured
+
+
+def describe_from_namespaces_auto_wiring():
+
+    # The auto-wired serde should cover every event the graph touches, not
+    # just the namespaced ones — the caller passed namespaces, not an event
+    # inventory, so anything else has to be derived.
+    def when_a_handler_produces_an_event_outside_the_namespaces():
+
+        def it_scopes_that_event_too():
+            from langgraph.checkpoint.memory import MemorySaver
+
+            first = _next_lifetime()
+            ping = _lifetime_namespaces.Ping
+
+            @on(first.Place.Placed)
+            def echo(event: object) -> _lifetime_namespaces.Ping:
+                return ping(sym="AAPL")
+
+            graph = EventGraph.from_namespaces(
+                first, handlers=[echo], checkpointer=MemorySaver()
+            )
+
+            ids = graph._checkpointer.serde.revivable_identities()
+            assert (ping.__module__, "Ping") in ids

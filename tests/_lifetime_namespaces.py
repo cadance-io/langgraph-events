@@ -6,7 +6,13 @@ return annotations resolve at runtime. See tests/test_lifetimes.py.
 
 from __future__ import annotations
 
-from langgraph_events import Command, DomainEvent, Namespace, ScalarReducer
+from langgraph_events import (
+    Command,
+    DomainEvent,
+    IntegrationEvent,
+    Namespace,
+    ScalarReducer,
+)
 
 
 class Trading(Namespace):
@@ -26,3 +32,9 @@ class Trading(Namespace):
 
         def handle(self) -> Trading.Place.Placed:
             return Trading.Place.Placed(sym=self.sym)
+
+
+class Ping(IntegrationEvent):
+    """Module-level, outside any namespace — reaches the serde via events=."""
+
+    sym: str

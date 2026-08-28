@@ -1,6 +1,7 @@
 """Tests for Event base class, Auditable, and MessageEvent."""
 
 import dataclasses
+import warnings
 
 import pytest
 from conftest import SET_NAME_ERRORS, set_name_cause
@@ -21,6 +22,7 @@ from langgraph_events import (
     Namespace,
     Resumed,
     RunPaused,
+    ScalarReducer,
     SystemEvent,
     on_namespace_finalize,
 )
@@ -281,11 +283,46 @@ def describe_Namespace():
 
             assert Widget.__namespace_name__ == "Widget"
 
+        def it_does_not_warn():
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", DeprecationWarning)
+
+                class Widget(Namespace):
+                    pass
+
+            assert Widget.__namespace_name__ == "Widget"
+
         def it_is_not_an_event():
             class Widget(Namespace):
                 pass
 
             assert not issubclass(Widget, Event)
+
+    def when_subclassing_another_namespace():
+
+        # Namespace inheritance was never a requested capability — the MRO
+        # walk that grants it arrived incidentally, and the library moved
+        # toward composition instead (see #141 forbidding Command
+        # inheritance). Deprecated; reducers still inherit meanwhile.
+        def it_warns_that_inheritance_is_deprecated():
+            class Parent(Namespace):
+                pass
+
+            with pytest.deprecated_call(match=r"Namespace subclassing"):
+
+                class Kid(Parent):
+                    pass
+
+        def it_still_inherits_parent_reducers_meanwhile():
+            class Stock(Namespace):
+                shared = ScalarReducer(event_type=Event, fn=lambda e: None)
+
+            with pytest.deprecated_call():
+
+                class Bond(Stock):
+                    pass
+
+            assert [r.name for r in Bond.__reducers__] == ["shared"]
 
     def when_redefined():
 

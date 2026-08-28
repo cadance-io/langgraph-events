@@ -202,6 +202,37 @@ class Namespace:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        # Subclassing one Namespace from another was never a designed
+        # capability — it fell out of the MRO walk that collects declarative
+        # reducers, and only reducers ever inherited. Nested commands and
+        # events do not, which makes a child namespace quietly incomplete:
+        # its inherited commands are skipped by ``EventGraph.from_namespaces``
+        # and its inherited events fall outside a serde's scope, reviving by
+        # import and so bleeding across engine lifetimes (#148, #150).
+        # Deprecated rather than widened: the library moved toward
+        # composition, and #141 forbade Command inheritance outright.
+        if any(
+            base is not Namespace
+            and isinstance(base, type)
+            and issubclass(base, Namespace)
+            for base in cls.__bases__
+        ):
+            import warnings  # noqa: PLC0415
+
+            inherited = ", ".join(
+                b.__name__ for b in cls.__bases__ if b is not Namespace
+            )
+            warnings.warn(
+                f"Namespace subclassing is deprecated: {cls.__name__!r} "
+                f"inherits from {inherited}. Only reducers inherit — nested "
+                f"commands and events do not, so the child namespace is "
+                f"incomplete for graph building and serde scoping. Declare "
+                f"the namespace independently and share reducers via "
+                f"`reducers=[...]`. Support will be removed in a future "
+                f"release.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
         cls.__namespace_name__ = cls.__name__
         cls.__reducers__ = _collect_namespace_reducers(cls)
         # Marks the point from which ``on_namespace_finalize`` fires callbacks

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`NamespaceAwareSerde(events=[...])`** — event classes that live outside every namespace
+  (module-level `IntegrationEvent`s, framework `SystemEvent`s) now reach the serde's scope. Without
+  them those identities resolved by import and so were shared between two engine lifetimes of one
+  module — the bleed #150 fixed for namespaced events. `@migrate_from` on such a class was also
+  silently ignored; it is now collected ([#155](https://github.com/cadance-io/langgraph-events/issues/155)).
+
+  `EventGraph.from_namespaces` fills `events=` in automatically from the graph it builds, so the
+  auto-wired path needs no change. The serde is now wired after graph construction rather than
+  before — the loose events are only knowable once handlers' subscriptions and return types have
+  been parsed.
+
+### Changed
+
+- **Namespace subclassing is deprecated** — `class Child(Base)` where `Base` is a `Namespace` now
+  emits a `DeprecationWarning`. Only reducers ever inherited; nested commands and events do not, so
+  a child namespace is quietly incomplete: `EventGraph.from_namespaces` skips its inherited inline
+  handlers, and its inherited events fall outside a serde's scope and bleed across engine lifetimes
+  ([#157](https://github.com/cadance-io/langgraph-events/issues/157)). Declare each namespace
+  independently and share reducers via `reducers=[...]`. Behaviour is unchanged for one minor
+  version.
+
+- **The inline-outcome-coverage error no longer contradicts itself** — coverage is decided by class
+  identity but was reported by `__name__`, so two distinct same-named classes produced "declares
+  return type `Placed` but does not cover outcome(s): `Placed`", advice already satisfied. Colliding
+  names are now qualified, and a `<locals>` qualname is called out as the usual cause — a class
+  defined inside a function whose string annotation resolved elsewhere
+  ([#151](https://github.com/cadance-io/langgraph-events/issues/151)).
+
 ### Changed
 
 - **A serde handed two engine lifetimes now raises instead of binding silently** — the scope map is
