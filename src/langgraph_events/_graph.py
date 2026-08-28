@@ -416,15 +416,19 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     )
     if collision:
         local = [t for t in (*covered, *missing) if "<locals>" in t.__qualname__]
-        hint = (
-            "These are different classes that happen to share a name, so the "
-            "annotation already names something else."
+        # Appended, not substituted: a collision on one name says nothing
+        # about the other outcomes, which may be genuinely uncovered and
+        # still need the annotation edit.
+        hint += (
+            " Note that some names above collide: those are different classes "
+            "that happen to share a name, so the annotation already names "
+            "something else."
         ) + (
-            " A `<locals>` qualname above means a class defined inside a "
-            "function, whose string annotation resolved to a different "
-            "object — declare event classes at module level."
+            " A `<locals>` qualname means a class defined inside a function, "
+            "whose string annotation resolved to a different object — declare "
+            "event classes at module level."
             if local
-            else " Check which class the annotation actually resolves to."
+            else ""
         )
     raise TypeError(
         f"Inline handler {handler_name!r} on {cmd.__qualname__} declares "
@@ -480,9 +484,17 @@ def _register_produced_types(
     handler_metas: list[HandlerMeta],
     return_info: dict[str, ReturnInfo],
     namespaces: dict[str, type[Namespace]],
-) -> None:
-    """Fold handlers' return types into the graph's namespace registry, then
-    warn about events produced but never consumed.
+) -> tuple[type[Event], ...]:
+    """Fold handlers' return types into the graph's namespace registry, warn
+    about events produced but never consumed, and return the event types this
+    graph touches that belong to no namespace.
+
+    Those loose types — module-level ``IntegrationEvent``s, framework
+    ``SystemEvent``s — are what a serde needs in ``events=`` to keep them out
+    of import-resolution. Computed here because the subscribed/produced split
+    is already in hand; building a ``NamespaceModel`` to recover them would
+    fire its design-smell warnings from inside the library and populate the
+    model cache, so a later ``graph.namespaces()`` would never warn at all.
 
     Both jobs need the same subscribed/produced split, and both are only
     possible once return-type introspection has run. Registering here completes
@@ -527,6 +539,12 @@ def _register_produced_types(
             # site is one frame further out than it was inline.
             stacklevel=3,
         )
+
+    return tuple(
+        t
+        for t in (*subscribed, *produced)
+        if getattr(t, "__namespace_cls__", None) is None
+    )
 
 
 def _collect_graph_namespaces(
@@ -924,7 +942,7 @@ class EventGraph:
             self._return_contracts[meta.name] = _compute_return_contract(meta, info)
             _verify_inline_outcome_coverage(meta, info)
 
-        _register_produced_types(
+        self._loose_events = _register_produced_types(
             self._handler_metas, self._return_info, self._namespaces
         )
 
@@ -1333,10 +1351,8 @@ class EventGraph:
 
             serde = getattr(checkpointer, "serde", None)
             if serde is not None and not isinstance(serde, NamespaceAwareSerde):
-                model = graph.namespaces()
                 checkpointer.serde = NamespaceAwareSerde(
-                    namespaces=domains,
-                    events=(*model.integration_events, *model.system_events),
+                    namespaces=domains, events=graph._loose_events
                 )
 
         return graph

@@ -320,6 +320,25 @@ def describe_from_namespaces_auto_wiring():
             ids = graph._checkpointer.serde.revivable_identities()
             assert (ping.__module__, "Ping") in ids
 
+        def it_does_not_consume_the_namespace_model_cache():
+            # Deriving the loose events from a NamespaceModel would fire its
+            # design-smell warnings from inside the library and populate the
+            # cache, so a user's later graph.namespaces() would never warn.
+            from langgraph.checkpoint.memory import MemorySaver
+
+            first = _next_lifetime()
+            ping = _lifetime_namespaces.Ping
+
+            @on(first.Place.Placed)
+            def echo(event: object) -> _lifetime_namespaces.Ping:
+                return ping(sym="AAPL")
+
+            graph = EventGraph.from_namespaces(
+                first, handlers=[echo], checkpointer=MemorySaver()
+            )
+
+            assert graph._namespaces_cache is None
+
 
 def describe_one_class_reached_twice():
 

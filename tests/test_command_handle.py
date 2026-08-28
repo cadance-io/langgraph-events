@@ -1293,6 +1293,27 @@ def describe_Command_handle():
                 assert "`Placed` but does not cover outcome(s): Placed" not in msg
                 assert "Twin.Do.Placed" in msg
 
+            def it_keeps_the_annotation_advice_for_genuinely_missing_outcomes():
+                # A collision on one name says nothing about the others: an
+                # outcome that is simply uncovered still needs the edit.
+                class Pair(Namespace):
+                    class Do(Command):
+                        class Placed(DomainEvent):
+                            pass
+
+                        class Rejected(DomainEvent):
+                            pass
+
+                        def handle(self) -> _Decoy.Do.Placed:
+                            return _Decoy.Do.Placed()
+
+                with pytest.raises(TypeError) as exc:
+                    EventGraph([Pair.Do])
+
+                msg = str(exc.value)
+                assert "Rejected" in msg
+                assert "Add them to the annotation" in msg
+
         def when_annotation_covers_all_outcomes():
 
             def it_accepts():

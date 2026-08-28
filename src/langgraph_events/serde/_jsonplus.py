@@ -298,8 +298,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
 
     def revivable_identities(self) -> frozenset[tuple[str, str]]:
         """Every ``(module, qualname)`` this serde can revive — either still
-        live in the namespaces it was constructed with, or covered by a
-        rename migration (``@migrate_from`` decorators in ``namespaces=``
+        live in the namespaces and loose events it was constructed with
+        (``namespaces=`` / ``events=``), or covered by a rename
+        migration (``@migrate_from`` decorators in ``namespaces=``
         and hand-authored ``migrations=``).
 
         Read-only view. AddField targets are not added: a fill modifies

@@ -37,7 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defined inside a function whose string annotation resolved elsewhere
   ([#151](https://github.com/cadance-io/langgraph-events/issues/151)).
 
-### Changed
 
 - **A serde handed two engine lifetimes now raises instead of binding silently** — the scope map is
   keyed by `(module, qualname)`, which two lifetimes of one module share, so

@@ -313,6 +313,35 @@ def describe_Namespace():
                 class Kid(Parent):
                     pass
 
+        def it_blames_the_class_definition_not_the_importer():
+            # __init_subclass__ runs from type.__new__, which is C and adds
+            # no Python frame. An off-by-one here attributes the warning to
+            # the importing module's `import` line.
+            import _deprecated_namespace_fixture as fixture
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                fixture.define_child()
+
+            assert caught
+            assert caught[0].filename.endswith("_deprecated_namespace_fixture.py")
+
+        def it_names_only_the_namespace_bases():
+            class Mixin:
+                pass
+
+            class Root(Namespace):
+                pass
+
+            with pytest.deprecated_call() as caught:
+
+                class Kid(Mixin, Root):
+                    pass
+
+            message = str(caught[0].message)
+            assert "Root" in message
+            assert "Mixin" not in message
+
         def it_still_inherits_parent_reducers_meanwhile():
             class Stock(Namespace):
                 shared = ScalarReducer(event_type=Event, fn=lambda e: None)

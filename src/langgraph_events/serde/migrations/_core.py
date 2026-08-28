@@ -777,11 +777,12 @@ def _collect_decorated_migrations(
             # twice: sharing the identity is the trigger, so their reprs
             # are always identical. The ids are what tells them apart.
             raise ValueError(
-                f"Two namespaces passed to this serde claim the same "
-                f"event identity {current[0]}.{current[1]} — distinct "
-                f"classes ({id(claimed):#x} and {id(cls):#x}), most "
-                f"likely two engine lifetimes of one module. Give each "
-                f"lifetime its own NamespaceAwareSerde(namespaces=[...])."
+                f"Two classes passed to this serde (via namespaces= or "
+                f"events=) claim the same event identity "
+                f"{current[0]}.{current[1]} — distinct classes "
+                f"({id(claimed):#x} and {id(cls):#x}), most likely two "
+                f"engine lifetimes of one module. Give each lifetime its "
+                f"own NamespaceAwareSerde."
             )
         # ``__dict__.get`` (not ``getattr``) — neither marker may leak
         # through MRO when a subclass inherits from a decorated parent.

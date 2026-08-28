@@ -220,18 +220,26 @@ class Namespace:
             import warnings  # noqa: PLC0415
 
             inherited = ", ".join(
-                b.__name__ for b in cls.__bases__ if b is not Namespace
+                b.__name__
+                for b in cls.__bases__
+                if b is not Namespace
+                and isinstance(b, type)
+                and issubclass(b, Namespace)
             )
             warnings.warn(
                 f"Namespace subclassing is deprecated: {cls.__name__!r} "
                 f"inherits from {inherited}. Only reducers inherit — nested "
                 f"commands and events do not, so the child namespace is "
                 f"incomplete for graph building and serde scoping. Declare "
-                f"the namespace independently and share reducers via "
-                f"`reducers=[...]`. Support will be removed in a future "
-                f"release.",
+                f"the namespace independently. To share a reducer, declare "
+                f"it free-standing (no owning namespace) and pass it via "
+                f"`reducers=[...]` — a reducer declared on the parent stays "
+                f"bound to the parent and would fold nothing. Support will "
+                f"be removed in a future release.",
                 DeprecationWarning,
-                stacklevel=3,
+                # __init_subclass__ is called from type.__new__, which is C
+                # and adds no Python frame, so 2 is the class-definition site.
+                stacklevel=2,
             )
         cls.__namespace_name__ = cls.__name__
         cls.__reducers__ = _collect_namespace_reducers(cls)

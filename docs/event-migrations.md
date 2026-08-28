@@ -282,7 +282,7 @@ Three free functions assert that every identity in a committed baseline still ho
 
 | Gate | Per identity it… | Constructs? | Scope |
 |---|---|---|---|
-| `assert_all_baselined_cover` | is in `revivable_identities()` (set membership) | no | namespace-walk ∪ rename table |
+| `assert_all_baselined_cover` | is in `revivable_identities()` (set membership) | no | namespace-walk ∪ `events=` ∪ rename table |
 | `assert_all_baselined_resolve` | resolves to a live `Event` (rename-aware) | no | every identity in the baseline |
 | `assert_all_baselined_revive` | revives through the real read path | yes | every identity in the baseline |
 
@@ -315,7 +315,7 @@ def test_baseline_coverage():
 `NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets add no extra identities — post-rename fills key on live classes, origin-scoped fills on rename sources already in the set).
 
 !!! tip "Which serde / graph do I pass the gate?"
-    In tests, construct a **standalone** `NamespaceAwareSerde(namespaces=(...))` for the event gates — it mirrors what `from_namespaces(..., checkpointer=...)` auto-wires; the gate does **not** need the graph's internal serde instance. The **handler** gate is different: it takes the `graph` (`assert_all_baselined_handlers_cover(graph, BASELINE)`), because handler identity is a graph-topology concern, not a serde one.
+    In tests, construct a **standalone** `NamespaceAwareSerde(namespaces=(...), events=(...))` for the event gates — it mirrors what `from_namespaces(..., checkpointer=...)` auto-wires; the gate does **not** need the graph's internal serde instance. The **handler** gate is different: it takes the `graph` (`assert_all_baselined_handlers_cover(graph, BASELINE)`), because handler identity is a graph-topology concern, not a serde one. Pass `events=` too: the auto-wired serde now carries the graph's `IntegrationEvent`s and `SystemEvent`s, so a hand-built one that omits them will fail `cover` on a baseline that includes those identities.
 
 ### Handler coverage gate
 
