@@ -11,6 +11,7 @@ import ormsgpack
 import pytest
 from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Interrupt
 from pydantic import BaseModel
 
@@ -701,10 +702,32 @@ def describe_NamespaceAwareSerde():
                 with pytest.raises(ValueError, match=r"GhostClass|Persona\.Approve"):
                     serde.loads_typed((kind, tampered))
 
+        def when_the_class_is_local_to_a_function():
+            def it_roundtrips_with_the_serde_that_encoded_it():
+                class LocalEvent(IntegrationEvent):
+                    note: str
+
+                serde = NamespaceAwareSerde()
+                encoded = serde.dumps_typed(LocalEvent(note="kept"))
+
+                revived = serde.loads_typed(encoded)
+
+                assert isinstance(revived, LocalEvent)
+                assert revived.note == "kept"
+
+            def it_raises_through_a_fresh_unscoped_serde():
+                class LocalEvent(IntegrationEvent):
+                    note: str
+
+                encoded = NamespaceAwareSerde().dumps_typed(LocalEvent(note="ghost"))
+
+                with pytest.raises(ValueError, match=r"<locals>.*LocalEvent"):
+                    NamespaceAwareSerde().loads_typed(encoded)
+
     def describe_revival_of_a_changed_class():
         # Sibling of the missing-class case above. The identity still
-        # resolves, but the stored kwargs no longer match the live
-        # ``__init__``, so the frozen dataclass raises ``TypeError``.
+        # resolves, but the stored kwargs no longer match the live Pydantic
+        # model, so validation fails.
 
         def when_a_field_was_removed_from_the_class():
             def it_names_the_identity_and_the_rejected_field():
@@ -2576,6 +2599,16 @@ def describe_from_namespaces_serde_auto_wiring():
             # Opt-out: a user-constructed serde (possibly carrying
             # hand-authored migrations=) must win over auto-wiring.
             own = NamespaceAwareSerde(namespaces=[DecoReorg])
+
+            graph = EventGraph.from_namespaces(
+                DecoReorg, checkpointer=MemorySaver(serde=own)
+            )
+
+            assert graph._checkpointer.serde is own
+
+    def when_the_user_supplies_their_own_plain_serde():
+        def it_is_left_untouched():
+            own = JsonPlusSerializer(pickle_fallback=True)
 
             graph = EventGraph.from_namespaces(
                 DecoReorg, checkpointer=MemorySaver(serde=own)

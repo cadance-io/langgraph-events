@@ -30,6 +30,7 @@ dependencies = [
     # the first release exposing ``allowed_msgpack_modules`` on the
     # constructor (which the regression tests rely on).
     "langgraph-checkpoint>=4.0.3",
+    "python-event-sourcery>=0.5.2",
 ]
 
 [project.urls]
@@ -40,9 +41,6 @@ Changelog = "https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.
 
 [project.optional-dependencies]
 agui = ["ag-ui-protocol>=0.1.0"]
-event-sourcing = [
-    "python-event-sourcery>=0.5.2",
-]
 
 [dependency-groups]
 dev = [

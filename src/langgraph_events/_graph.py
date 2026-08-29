@@ -9,6 +9,7 @@ import typing
 from collections.abc import Mapping as _Mapping
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
+from event_sourcery import StreamId
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 
@@ -66,6 +67,7 @@ if TYPE_CHECKING:
         Sequence,
     )
 
+    from event_sourcery import EventStore
     from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
@@ -869,13 +871,12 @@ class EventGraph:
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
-        event_store: Any | None = None,
-        # pyES EventStore — when supplied, events are appended to a stream
-        # keyed by config["configurable"]["thread_id"] after every invoke/resume.
-        # Use EventLog.from_store(event_store, StreamId(...)) to read them back.
-        outbox: Any | None = None,
-        # pyES EventStore from a with_outbox() backend — only IntegrationEvents
-        # are appended here, enabling reliable external publishing via Outbox.run().
+        event_store: EventStore | None = None,
+        # pyES EventStore — appends every completed run to the stream named by
+        # config["configurable"]["thread_id"].
+        outbox: EventStore | None = None,
+        # EventStore from a pyES with_outbox() backend — appends only
+        # IntegrationEvents for external publication.
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
@@ -956,16 +957,15 @@ class EventGraph:
         enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_error_handling()
 
-        # Auto-wire NamespaceAwareSerde when a bare checkpointer is supplied.
-        # With pydantic events (pyES base), LangGraph's default serde loses
-        # subclass information for nested Event fields typed as base classes
-        # (e.g. ``Resumed.interrupted: Interrupted``). NamespaceAwareSerde
-        # stores module+qualname and reconstructs the exact subclass.
+        # Pydantic events require qualname-aware checkpoint serialization.
+        # Replace only the untouched class-level default; an explicitly
+        # supplied serializer may carry encryption or an allowlist and must win.
         if checkpointer is not None:
             from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
 
             serde = getattr(checkpointer, "serde", None)
-            if serde is not None and not isinstance(serde, NamespaceAwareSerde):
+            default_serde = getattr(type(checkpointer), "serde", None)
+            if serde is default_serde:
                 checkpointer.serde = NamespaceAwareSerde(
                     namespaces=tuple(self._namespaces.values()),
                     events=self._loose_events,
@@ -1303,63 +1303,94 @@ class EventGraph:
 
     def _run(self, inp: Any, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
+        stream_id = self._persistence_stream_id(kwargs.get("config"))
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         log = EventLog._from_owned(result["events"])
-        self._persist_to_event_store(log, kwargs.get("config"))
+        self._persist_to_event_store(log, stream_id)
         return log
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
+        stream_id = self._persistence_stream_id(kwargs.get("config"))
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         log = EventLog._from_owned(result["events"])
-        self._persist_to_event_store(log, kwargs.get("config"))
+        self._persist_to_event_store(log, stream_id)
         return log
 
-    def _persist_to_event_store(self, log: EventLog, config: Any) -> None:
-        """Append new events from this run to the pyES EventStore and/or Outbox."""
-        if (self._event_store is None and self._outbox is None) or not log:
+    def _persistence_stream_id(self, config: Any) -> StreamId | None:
+        """Resolve the configured pyES stream before execution starts."""
+        if self._event_store is None and self._outbox is None:
+            return None
+        thread_id = (config or {}).get("configurable", {}).get("thread_id")
+        if thread_id is None:
+            raise ValueError(
+                "EventGraph persistence requires "
+                "config={'configurable': {'thread_id': ...}}; no default "
+                "stream is used because unrelated runs must not share history."
+            )
+        return StreamId(name=str(thread_id))
+
+    @staticmethod
+    def _append_pending_events(
+        event_store: EventStore,
+        stream_id: StreamId,
+        events: tuple[Event, ...],
+        *,
+        cumulative: bool,
+        destination: str,
+    ) -> None:
+        """Append one run, or the missing suffix of checkpoint history."""
+        recorded = event_store.load_stream(stream_id)
+        expected_version = len(recorded)
+        if cumulative:
+            if expected_version > len(events) or any(
+                record.event != events[index] for index, record in enumerate(recorded)
+            ):
+                raise RuntimeError(
+                    f"{destination} stream {stream_id.name!r} is not a prefix "
+                    "of the graph's checkpoint history. Refusing to infer a "
+                    "delta from divergent histories."
+                )
+            pending = events[expected_version:]
+        else:
+            pending = events
+        if pending:
+            event_store.append(
+                *pending,
+                stream_id=stream_id,
+                expected_version=expected_version,
+            )
+
+    def _persist_to_event_store(
+        self,
+        log: EventLog,
+        stream_id: StreamId | None,
+    ) -> None:
+        """Persist a completed run to the configured pyES destinations."""
+        if stream_id is None or not log:
             return
-        from event_sourcery import StreamId  # noqa: PLC0415
-
-        from langgraph_events._event import IntegrationEvent  # noqa: PLC0415
-
-        thread_id = (
-            (config or {}).get("configurable", {}).get("thread_id")
-            if config is not None
-            else None
-        )
-        stream_id = StreamId(
-            name=str(thread_id) if thread_id is not None else "default"
-        )
-
+        cumulative = self._checkpointer is not None
         if self._event_store is not None:
-            # Determine how many events are already in the store to avoid
-            # duplicating events across runs when a checkpointer is used
-            # (result["events"] always returns the full history).
-            already_stored = len(self._event_store.load_stream(stream_id))
-            new_events = log.events[already_stored:]
-            if new_events:
-                self._event_store.append(
-                    *new_events,
-                    stream_id=stream_id,
-                    expected_version=already_stored,
-                )
-
+            self._append_pending_events(
+                self._event_store,
+                stream_id,
+                log.events,
+                cumulative=cumulative,
+                destination="EventStore",
+            )
         if self._outbox is not None:
-            # Only IntegrationEvents cross bounded-context boundaries.
-            already_in_outbox = len(self._outbox.load_stream(stream_id))
-            integration_events = [
-                e for e in log.events if isinstance(e, IntegrationEvent)
-            ]
-            new_outbox_events = integration_events[already_in_outbox:]
-            if new_outbox_events:
-                self._outbox.append(
-                    *new_outbox_events,
-                    stream_id=stream_id,
-                    expected_version=already_in_outbox,
-                )
+            integration_events = tuple(
+                event for event in log.events if isinstance(event, IntegrationEvent)
+            )
+            self._append_pending_events(
+                self._outbox,
+                stream_id,
+                integration_events,
+                cumulative=cumulative,
+                destination="Outbox",
+            )
 
     @classmethod
     def from_namespaces(
@@ -1400,37 +1431,7 @@ class EventGraph:
         if handlers:
             collected.extend(handlers)
 
-        # Auto-wire migration-aware deserialization: the user only writes
-        # @migrate_from on the class. We have both the domains and the
-        # checkpointer here, so scope a NamespaceAwareSerde to these
-        # namespaces. A user-supplied NamespaceAwareSerde (possibly
-        # carrying hand-authored migrations=) is left untouched — that is
-        # the opt-out. The serde still owns coverage; we own construction.
-        graph = cls(collected, **kwargs)
-
-        # Wired after construction, not before: the events that live outside
-        # every namespace — module-level IntegrationEvents, framework
-        # SystemEvents — are only knowable once the graph has parsed its
-        # handlers' subscriptions and return types. Without them those
-        # identities resolve by import and are shared between engine
-        # lifetimes of one module. ``compiled`` is lazy, so the serde is in
-        # place well before anything reads it.
-        checkpointer = kwargs.get("checkpointer")
-        if checkpointer is not None:
-            from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
-
-            serde = getattr(checkpointer, "serde", None)
-            if serde is not None and not isinstance(serde, NamespaceAwareSerde):
-                # Not ``domains``: a namespace can reach the graph through
-                # ``handlers=`` alone, and its events would then keep
-                # resolving by import — the bleed #155 exists to close.
-                # ``graph._namespaces`` is the full set.
-                checkpointer.serde = NamespaceAwareSerde(
-                    namespaces=tuple(graph._namespaces.values()),
-                    events=graph._loose_events,
-                )
-
-        return graph
+        return cls(collected, **kwargs)
 
     def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
         """Run the graph synchronously with one or more seed events.
@@ -1864,6 +1865,14 @@ class EventGraph:
                 else:
                     yield event
 
+    @staticmethod
+    def _event_from_stream_item(item: StreamItem) -> Event | None:
+        if isinstance(item, Event):
+            return item
+        if isinstance(item, StreamFrame):
+            return item.event
+        return None
+
     def _stream_sync(
         self,
         inp: Any,
@@ -1873,12 +1882,18 @@ class EventGraph:
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
         kwargs = self._apply_deadline_kwarg(kwargs)
+        stream_id = self._persistence_stream_id(kwargs.get("config"))
         compiled = self._compile()
+        emitted: list[Event] = []
         if not reducer_names:
-            yield from seeds
+            for seed in seeds:
+                emitted.append(seed)
+                yield seed
             seen: set[int] = set()
             for chunk in compiled.stream(inp, stream_mode="updates", **kwargs):
-                yield from self._events_from_chunk(chunk, seen)
+                for event in self._events_from_chunk(chunk, seen):
+                    emitted.append(event)
+                    yield event
         else:
             prev_count = 0
             first = True
@@ -1889,7 +1904,16 @@ class EventGraph:
                 prev_count, frames = self._frames_from_values(
                     state, prev_count, reducer_names
                 )
-                yield from frames
+                for frame in frames:
+                    emitted.append(frame.event)
+                    yield frame
+        if stream_id is not None:
+            log = (
+                self.get_state(kwargs.get("config")).events
+                if self._checkpointer is not None
+                else EventLog._from_owned(emitted)
+            )
+            self._persist_to_event_store(log, stream_id)
 
     async def _astream_core(
         self,
@@ -1973,6 +1997,10 @@ class EventGraph:
         self._require_checkpointer("stream_resume")
         if not self._resume_is_pending(kwargs):
             log = self._apply_unresumable_policy(value, kwargs)  # raises for raise
+            self._persist_to_event_store(
+                log,
+                self._persistence_stream_id(kwargs.get("config")),
+            )
             if self._on_unresumable == "halt":
                 latest = log.latest(Unresumable)
                 if latest is not None:
@@ -1997,6 +2025,7 @@ class EventGraph:
         """Shared async-stream dispatcher — picks v2 vs core based on flags."""
         kwargs.pop("stream_mode", None)
         kwargs = self._apply_deadline_kwarg(kwargs)
+        stream_id = self._persistence_stream_id(kwargs.get("config"))
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(
@@ -2010,8 +2039,18 @@ class EventGraph:
             if include_llm_tokens or include_custom_events
             else self._astream_core(inp, seeds, reducer_names, **kwargs)
         )
+        emitted: list[Event] = []
         async for item in delegate:
+            if (event := self._event_from_stream_item(item)) is not None:
+                emitted.append(event)
             yield item
+        if stream_id is not None:
+            log = (
+                (await self.aget_state(kwargs.get("config"))).events
+                if self._checkpointer is not None
+                else EventLog._from_owned(emitted)
+            )
+            self._persist_to_event_store(log, stream_id)
 
     async def astream_resume(
         self,
@@ -2049,6 +2088,10 @@ class EventGraph:
         if not await self._aresume_is_pending(kwargs):
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
+            self._persist_to_event_store(
+                log,
+                self._persistence_stream_id(kwargs.get("config")),
+            )
             if self._on_unresumable == "halt":
                 latest = log.latest(Unresumable)
                 if latest is not None:

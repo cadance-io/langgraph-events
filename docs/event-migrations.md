@@ -46,7 +46,8 @@ graph = EventGraph.from_namespaces(
 
 ## Adding a field with a default
 
-**No migration needed.** Events are frozen dataclasses; a new field with a default (or `default_factory`) simply uses it when an old payload omits the key:
+**No migration needed.** Events are frozen Pydantic models; a new field with a default (or
+`Field(default_factory=...)`) supplies that value when an old payload omits the key:
 
 ```python
 class Persisted(DomainEvent):
@@ -380,7 +381,7 @@ def test_revives_release_N_payloads(module, qualname, kwargs, expected_cls):
     assert isinstance(revived, expected_cls)
 ```
 
-A failing test = dataclass `TypeError` on the missing field — exactly where you want a field-shape regression caught.
+A failing test produces a Pydantic `ValidationError` naming the missing field — exactly where you want a field-shape regression caught.
 
 ### Release N → N+1 walkthrough
 

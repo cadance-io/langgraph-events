@@ -42,10 +42,11 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 
 | Export | Type | Description |
 |---|---|---|
-| `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle`. `services=[...]` (type-keyed) or `services={...}` (name-keyed) injects project dependencies into handler params (see [Concepts › Signature injection](concepts.md#signature-injection)). `on_unresumable="raise"\|"halt"\|"warn"` (default `"raise"`) governs `resume()` on a thread not awaiting input |
+| `EventGraph` | Class | Build and run the event-driven graph; accepts `@on`-decorated functions and/or `Command` subclasses with inline `handle`. `services=[...]` (type-keyed) or `services={...}` (name-keyed) injects project dependencies into handler params (see [Concepts › Signature injection](concepts.md#signature-injection)). `on_unresumable="raise"\|"halt"\|"warn"` (default `"raise"`) governs `resume()` on a thread not awaiting input. `event_store=` persists every event and `outbox=` persists only `IntegrationEvent`s through python-event-sourcery |
 | `EventGraph.from_namespaces()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers. With `checkpointer=MemorySaver()` auto-wires a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` decorator on those classes. Opt out by passing `MemorySaver(serde=<custom>)` — a user-supplied serde always wins |
-| `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog` |
+| `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog`. When persistence is configured, `config["configurable"]["thread_id"]` is required |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
+| `EventGraph.stream_events()` / `.astream_events()` | Method | Stream emitted events. Persistence commits only after the stream is fully consumed successfully; closing or cancelling it early does not persist a partial run |
 | `EventGraph.get_state()` | Method | `GraphState` for a checkpointed thread |
 | `EventGraph.namespaces()` | Method | Code-derived snapshot — domains, commands, outcomes, handlers, policies, edges, seeds. Returns a `NamespaceModel` |
 | `NamespaceModel.text(view=...)` | Method | Human-readable tree; `view="structure"` or `"choreography"` (default) |
@@ -59,8 +60,25 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `EventGraph.reflect(log)` | Method | Deterministic query surface over a run — returns a `Reflection` (see [Reflection](reflection.md)) |
 | `Reflection` | Class | Facts-only read-model: `context()`, `tool()`, `overview()`, `event(i)`, `evidence(i)`, `schema()`, `state()`, `.log`. Injectable into handlers by parameter annotation, like `EventLog` |
 | `QueryTool` | Frozen dataclass | The `query_log` LLM tool: `name` / `description` / `parameters` (JSON Schema) / `run(...) -> str`. Maps 1:1 to Anthropic / LangChain tool shapes |
-| `EventLog` | Class | Immutable query container (see [Concepts](concepts.md#eventlog)) |
+| `EventLog` | Class | Immutable query container (see [Concepts](concepts.md#eventlog)); `from_store(event_store, stream_id, start=None)` loads a python-event-sourcery stream |
 | `GraphState` | NamedTuple | `(events, is_interrupted, interrupted)` |
+
+### python-event-sourcery persistence
+
+`event_store=` and `outbox=` accept `event_sourcery.EventStore` instances. Both use
+`StreamId(name=str(config["configurable"]["thread_id"]))`; there is no implicit default stream.
+The stream identity is validated before any handler runs.
+
+With a checkpointer, the checkpoint log is cumulative. The persisted stream must be an exact
+prefix of that history; the graph appends only the missing suffix and raises on divergence. Without
+a checkpointer, each successful call is an independent batch and is appended in full, including
+repeated runs on one stream.
+
+`outbox=` filters the batch to `IntegrationEvent` instances before append. A
+python-event-sourcery backend configured with `with_outbox=True` then publishes those records via
+its outbox runner. If both `event_store=` and `outbox=` are supplied, their two appends are ordered
+but not atomic across separate backends: the full event store is written first, and a retry uses
+prefix validation to avoid duplicating it.
 
 ## System Events
 

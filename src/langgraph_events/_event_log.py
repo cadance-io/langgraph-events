@@ -9,6 +9,8 @@ from langgraph_events._event import Event
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
 
+    from event_sourcery import EventStore, StreamId
+
 T = TypeVar("T", bound=Event)
 
 
@@ -27,11 +29,11 @@ class EventLog:
     @classmethod
     def from_store(
         cls,
-        event_store: Any,
-        stream_id: Any,
+        event_store: EventStore,
+        stream_id: StreamId,
         start: int | None = None,
     ) -> EventLog:
-        """Load an EventLog from a pyES EventStore stream."""
+        """Load events from a python-event-sourcery stream."""
         recorded = event_store.load_stream(stream_id, start=start)
         return cls._from_owned([r.event for r in recorded])
 

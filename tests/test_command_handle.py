@@ -303,6 +303,7 @@ def describe_Command_handle():
                 from pydantic import PydanticUserError
 
                 with pytest.raises((TypeError, PydanticUserError)):
+
                     class Odd(Namespace):
                         class Cmd(Command):
                             handle = "not a function"

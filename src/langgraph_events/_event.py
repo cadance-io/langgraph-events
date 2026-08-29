@@ -5,6 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 import operator
+import sys
 import types
 import typing
 import weakref
@@ -354,6 +355,73 @@ def _is_nested_in_class(cls: type) -> bool:
     return len(relevant) >= 2
 
 
+_RESERVED_MODIFIERS = ("previously", "raises", "invariants", "retry")
+"""Class-level ``Command`` modifiers that must never become payload fields."""
+
+
+def _reserved_modifier_error(command_name: str, name: str) -> TypeError:
+    return TypeError(
+        f"Command {command_name!r}: {name!r} is a reserved "
+        f"class-level modifier, not an event field. Annotate it as "
+        f"ClassVar ({name}: ClassVar = ...) or drop the annotation."
+    )
+
+
+def _is_classvar_annotation(
+    annotation: Any,
+    *,
+    module_name: str,
+    namespace: dict[str, Any],
+) -> bool:
+    """Resolve one annotation before pydantic consumes the class namespace."""
+    if annotation is ClassVar or typing.get_origin(annotation) is ClassVar:
+        return True
+    if not isinstance(annotation, str):
+        return False
+    module = sys.modules.get(module_name)
+    globalns = vars(module) if module is not None else {}
+    try:
+        resolved = eval(annotation, globalns, namespace)  # noqa: S307
+    except Exception:
+        return False
+    return resolved is ClassVar or typing.get_origin(resolved) is ClassVar
+
+
+def _raw_annotations(namespace: dict[str, Any]) -> dict[str, Any]:
+    annotations = namespace.get("__annotations__")
+    if annotations is not None:
+        return annotations
+    annotate = namespace.get("__annotate_func__")
+    if not callable(annotate):
+        return {}
+    # Python 3.14 stores class annotations in a PEP 649 function. Requesting
+    # strings avoids evaluating unrelated forward references before the
+    # enclosing Namespace exists.
+    import annotationlib  # type: ignore[import-not-found]  # noqa: PLC0415
+
+    return annotationlib.call_annotate_function(
+        annotate,
+        annotationlib.Format.STRING,
+    )
+
+
+def _validate_reserved_modifier_annotations(
+    command_name: str,
+    namespace: dict[str, Any],
+) -> None:
+    """Reject payload annotations for class-level ``Command`` modifiers."""
+    annotations = _raw_annotations(namespace)
+    for name in _RESERVED_MODIFIERS:
+        if name not in annotations:
+            continue
+        if not _is_classvar_annotation(
+            annotations[name],
+            module_name=namespace.get("__module__", ""),
+            namespace=namespace,
+        ):
+            raise _reserved_modifier_error(command_name, name)
+
+
 class _NestedEventMeta(_ModelMetaclass):
     """Metaclass that validates domain-nesting when a nested class is
     assigned to its enclosing class.
@@ -364,6 +432,26 @@ class _NestedEventMeta(_ModelMetaclass):
     the time user code triggers ``__set_name__``, both names resolve via
     module globals.
     """
+
+    def __new__(
+        mcls,
+        name: str,
+        bases: tuple[type, ...],
+        namespace: dict[str, Any],
+        **kwargs: Any,
+    ) -> Any:
+        # Pydantic 2.13 consumes annotations before ``__init_subclass__``.
+        # Validate the raw namespace here, while ClassVar vs model field is
+        # still observable.
+        command_base = globals().get("Command")
+        if command_base is not None and any(
+            command_base in base.__mro__ for base in bases
+        ):
+            _validate_reserved_modifier_annotations(
+                namespace.get("__qualname__", name),
+                namespace,
+            )
+        return super().__new__(mcls, name, bases, namespace, **kwargs)
 
     def __set_name__(self, owner: type, name: str) -> None:
         if issubclass(self, Command):
@@ -433,19 +521,6 @@ def _validate_handle_signature(cls: type, handle: Any) -> None:
         )
 
 
-_RESERVED_MODIFIERS = ("previously", "raises", "invariants", "retry")
-"""Class-level modifier names on ``Command`` that must never become
-dataclass fields — they configure the framework, not the event payload."""
-
-
-def _reserved_modifier_error(cls: type, name: str) -> TypeError:
-    return TypeError(
-        f"Command {cls.__qualname__!r}: {name!r} is a reserved "
-        f"class-level modifier, not an event field. Annotate it as "
-        f"ClassVar ({name}: ClassVar = ...) or drop the annotation."
-    )
-
-
 def _reject_command_subclassing(cls: type) -> None:
     """Reject *cls* if any of its bases is an already-declared ``Command``.
 
@@ -504,68 +579,11 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
     # Outcome alias set by _attach_command_outcomes after class creation.
     Outcomes: ClassVar[Any] = None
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:  # noqa: PLR0912
+    def __init_subclass__(cls, **kwargs: Any) -> None:
         # Checked first: the shape is wrong regardless of what the body
         # declares.
         _reject_command_subclassing(cls)
-        own_annotations = cls.__dict__.get("__annotations__", {})
-        # Real (non-string) annotations can be judged directly and rejected
-        # before any dataclass processing. PEP 563 string annotations are
-        # deliberately NOT judged here — dataclasses resolves them through
-        # the module globals (handling e.g. module-level ClassVar aliases),
-        # and a framework-side heuristic would risk rejecting spellings
-        # dataclasses correctly accepts; those fall through to the
-        # translation / dc_fields checks below, where dataclasses' own
-        # verdict decides.
-        for name in _RESERVED_MODIFIERS:
-            ann = own_annotations.get(name)
-            if ann is None or isinstance(ann, str):
-                continue
-            if ann is ClassVar or typing.get_origin(ann) is ClassVar:
-                continue
-            raise _reserved_modifier_error(cls, name)
-        try:
-            super().__init_subclass__(**kwargs)
-        except ValueError as exc:
-            # ``Event.__init_subclass__`` applies ``dataclass(frozen=True)``,
-            # so an annotated reserved modifier with a mutable default (e.g.
-            # ``invariants: dict = {...}``) dies in there — before the
-            # dc_fields guard below could run — with stdlib advice ("use
-            # default_factory") that would silently disable the modifier
-            # (factory fields have no class attribute to read). Translate
-            # when the error provably concerns a reserved name; otherwise
-            # re-raise untouched. ``from None``: chaining would display the
-            # very default_factory advice the guard exists to override.
-            for name in _RESERVED_MODIFIERS:
-                if name in own_annotations and f"field {name} " in str(exc):
-                    raise _reserved_modifier_error(cls, name) from None
-            raise
-        # ``previously``/``raises``/``invariants``/``retry`` are reserved
-        # class-level modifiers. An annotated non-ClassVar is forbidden.
-        # pydantic model_fields catches resolved annotations; we also check
-        # PEP 563 string annotations by resolving them via the module globals
-        # so that ClassVar aliases (``CV = ClassVar``) are accepted.
-        for name in _RESERVED_MODIFIERS:
-            if name in cls.model_fields:
-                raise _reserved_modifier_error(cls, name)
-            ann = own_annotations.get(name)
-            if ann is None:
-                continue
-            if ann is ClassVar or typing.get_origin(ann) is ClassVar:
-                continue
-            if isinstance(ann, str):
-                import sys  # noqa: PLC0415
-
-                try:
-                    resolved = eval(  # noqa: S307
-                        ann,
-                        {**sys.modules.get(cls.__module__, object).__dict__},
-                    )
-                    if resolved is ClassVar or typing.get_origin(resolved) is ClassVar:
-                        continue
-                except Exception:  # noqa: S110 — resolution failure = treat as non-ClassVar
-                    pass
-                raise _reserved_modifier_error(cls, name)
+        super().__init_subclass__(**kwargs)
         if not _is_nested_in_class(cls):
             raise TypeError(
                 f"Command {cls.__name__!r} must be nested inside a Namespace "

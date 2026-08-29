@@ -1,10 +1,10 @@
 """``NamespaceAwareSerde`` — qualname-keyed roundtrip for nested events.
 
-LangGraph's ``JsonPlusSerializer`` encodes dataclass identity by
+LangGraph's ``JsonPlusSerializer`` encodes Pydantic identity by
 ``(__module__, __name__)``. For events nested inside a ``Namespace``,
 ``__name__`` is leaf-only (e.g. ``"Approved"`` for ``Persona.Approve.Approved``)
-and therefore collides across namespaces. We override the dataclass branch
-to encode by ``(__module__, __qualname__)`` and revive via attribute walk.
+and therefore collides across namespaces. We encode by
+``(__module__, __qualname__)`` and revive via attribute walk.
 
 We depend on a few private helpers from
 ``langgraph.checkpoint.serde.jsonplus`` (``_msgpack_default``, ``_option``).
@@ -76,6 +76,7 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
 def _make_default(
     legacy_write: bool,
     oldest_historic: dict[tuple[str, str], tuple[str, str]],
+    scope: dict[tuple[str, str], type],
 ) -> Callable[[Any], Any]:
     """Build the ``default=`` hook ormsgpack uses for unknown types.
 
@@ -94,6 +95,19 @@ def _make_default(
         if isinstance(obj, Event):
             cls = obj.__class__
             module, qualname = cls.__module__, cls.__qualname__
+            identity = (module, qualname)
+            if "<locals>" in qualname:
+                bound = scope.get(identity)
+                if bound is None:
+                    # A checkpoint serde is process-local state too. Bind a
+                    # function-local event when this exact serde first writes
+                    # it, so the same graph can revive its next checkpoint.
+                    scope[identity] = cls
+                elif bound is not cls:
+                    raise ValueError(
+                        "NamespaceAwareSerde cannot bind two different event "
+                        f"classes to {module}.{qualname}"
+                    )
             if legacy_write:
                 # Consult the serde's scoped map (not ``__lge_migrate_from__``
                 # on the class) so encode/decode scope stays symmetric: bytes
@@ -220,11 +234,6 @@ def _make_ext_hook(
             # AddField.  With pydantic events, field errors are
             # ``ValidationError`` (not ``TypeError``).
             #
-            # ``<locals>`` qualnames are test/closure-defined classes that
-            # cannot be resolved via import; silently return ``None`` so
-            # ``loads_typed`` doesn't raise and the event field is ``None``.
-            if "<locals>" in qualname and isinstance(exc, AttributeError):
-                return None
             errors.append(
                 f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: {exc}. "
                 f"The class may have been renamed or removed, or its fields "
@@ -299,12 +308,14 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 "one' in docs/event-migrations.md."
             )
         # The read path resolves through ``_scope`` before it falls back to
-        # importing — see ``_resolve_identity``. ``_live_identities`` is its
-        # key set: the identities revivable with no migration at all.
+        # importing — see ``_resolve_identity``.
         self._scope = scope
-        self._live_identities = frozenset(scope)
         self._legacy_write = legacy_write
-        self._encode_default = _make_default(legacy_write, oldest_historic)
+        self._encode_default = _make_default(
+            legacy_write,
+            oldest_historic,
+            self._scope,
+        )
 
     def revivable_identities(self) -> frozenset[tuple[str, str]]:
         """Every ``(module, qualname)`` this serde can revive — either still
@@ -317,7 +328,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         kwargs for an identity revived by other means (a live class or a
         rename), it does not make an identity revivable by itself.
         """
-        return self._live_identities | frozenset(self._rename_table.keys())
+        return frozenset(self._scope) | frozenset(self._rename_table.keys())
 
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):

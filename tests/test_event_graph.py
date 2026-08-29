@@ -3925,7 +3925,12 @@ def describe_OrphanedEventWarning():
             with pytest.warns(OrphanedEventWarning) as captured:
                 EventGraph([produce_orphan])
 
-            filename = captured[0].filename
+            warning = next(
+                item
+                for item in captured
+                if issubclass(item.category, OrphanedEventWarning)
+            )
+            filename = warning.filename
             assert "langgraph_events" not in filename, (
                 f"warning anchored to library file {filename!r}; expected user "
                 f"code. Check stacklevel in _register_produced_types."

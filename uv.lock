@@ -579,14 +579,12 @@ source = { editable = "." }
 dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
+    { name = "python-event-sourcery" },
 ]
 
 [package.optional-dependencies]
 agui = [
     { name = "ag-ui-protocol" },
-]
-event-sourcing = [
-    { name = "python-event-sourcery" },
 ]
 
 [package.dev-dependencies]
@@ -614,9 +612,9 @@ requires-dist = [
     { name = "ag-ui-protocol", marker = "extra == 'agui'", specifier = ">=0.1.0" },
     { name = "langgraph", specifier = ">=0.2.0" },
     { name = "langgraph-checkpoint", specifier = ">=4.0.3" },
-    { name = "python-event-sourcery", marker = "extra == 'event-sourcing'", specifier = ">=0.5.2" },
+    { name = "python-event-sourcery", specifier = ">=0.5.2" },
 ]
-provides-extras = ["agui", "event-sourcing"]
+provides-extras = ["agui"]
 
 [package.metadata.requires-dev]
 dev = [

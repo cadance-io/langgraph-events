@@ -11,6 +11,7 @@ import pytest
 from event_sourcery import Event as ESEvent
 from event_sourcery import StreamId
 from event_sourcery.backend import InMemoryBackend
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     Command,
@@ -117,9 +118,11 @@ def describe_event_graph_with_outbox():
 
         published: list[IntegrationEvent] = []
         outbox_backend.outbox.run(
-            lambda record: published.append(record.wrapped_event.event)
-            if isinstance(record.wrapped_event.event, IntegrationEvent)
-            else None
+            lambda record: (
+                published.append(record.wrapped_event.event)
+                if isinstance(record.wrapped_event.event, IntegrationEvent)
+                else None
+            )
         )
         assert any(isinstance(e, PaymentConfirmed) for e in published)
 
@@ -141,6 +144,30 @@ def describe_event_graph_with_outbox():
         )
         domain_in_outbox = [e for e in published if isinstance(e, DomainEvent)]
         assert domain_in_outbox == []
+
+    def it_publishes_integration_events_from_streaming(outbox_backend, stream_id):
+        @on(OrderNS.Place.Placed)
+        def confirm(
+            event: OrderNS.Place.Placed,
+        ) -> PaymentConfirmed:
+            return PaymentConfirmed(transaction_id="tx-stream")
+
+        graph = EventGraph(
+            [OrderNS.Place, confirm],
+            outbox=outbox_backend.event_store,
+        )
+        list(
+            graph.stream_events(
+                OrderNS.Place(customer_id="c1"),
+                config={"configurable": {"thread_id": stream_id.name}},
+            )
+        )
+
+        published: list[IntegrationEvent] = []
+        outbox_backend.outbox.run(
+            lambda record: published.append(record.wrapped_event.event)
+        )
+        assert any(isinstance(e, PaymentConfirmed) for e in published)
 
 
 def describe_event_graph_with_event_store():
@@ -184,9 +211,7 @@ def describe_event_graph_with_event_store():
         graph = EventGraph(
             [OrderNS.Place],
             event_store=backend.event_store,
-            checkpointer=__import__(
-                "langgraph.checkpoint.memory", fromlist=["MemorySaver"]
-            ).MemorySaver(),
+            checkpointer=MemorySaver(),
         )
         cfg = {"configurable": {"thread_id": "thread-1"}}
         graph.invoke(OrderNS.Place(customer_id="c1"), config=cfg)
@@ -194,3 +219,65 @@ def describe_event_graph_with_event_store():
 
         log = EventLog.from_store(backend.event_store, stream_id)
         assert log.count(OrderNS.Place.Placed) == 2
+
+    def it_persists_each_stateless_run(backend, stream_id):
+        graph = EventGraph([OrderNS.Place], event_store=backend.event_store)
+        cfg = {"configurable": {"thread_id": stream_id.name}}
+
+        graph.invoke(OrderNS.Place(customer_id="c1"), config=cfg)
+        graph.invoke(OrderNS.Place(customer_id="c2"), config=cfg)
+
+        log = EventLog.from_store(backend.event_store, stream_id)
+        assert log.count(OrderNS.Place.Placed) == 2
+
+    def it_requires_an_explicit_thread_id(backend):
+        graph = EventGraph([OrderNS.Place], event_store=backend.event_store)
+
+        with pytest.raises(ValueError, match="thread_id"):
+            graph.invoke(OrderNS.Place(customer_id="c1"))
+
+    def it_persists_sync_streams(backend, stream_id):
+        graph = EventGraph([OrderNS.Place], event_store=backend.event_store)
+
+        list(
+            graph.stream_events(
+                OrderNS.Place(customer_id="c1"),
+                config={"configurable": {"thread_id": stream_id.name}},
+            )
+        )
+
+        assert EventLog.from_store(backend.event_store, stream_id).has(
+            OrderNS.Place.Placed
+        )
+
+    async def it_persists_async_streams(backend, stream_id):
+        graph = EventGraph([OrderNS.Place], event_store=backend.event_store)
+
+        [
+            event
+            async for event in graph.astream_events(
+                OrderNS.Place(customer_id="c1"),
+                config={"configurable": {"thread_id": stream_id.name}},
+            )
+        ]
+
+        assert EventLog.from_store(backend.event_store, stream_id).has(
+            OrderNS.Place.Placed
+        )
+
+    def it_rejects_a_divergent_checkpoint_history(backend, stream_id):
+        backend.event_store.append(
+            OrderShipped(tracking="existing"),
+            stream_id=stream_id,
+        )
+        graph = EventGraph(
+            [OrderNS.Place],
+            event_store=backend.event_store,
+            checkpointer=MemorySaver(),
+        )
+
+        with pytest.raises(RuntimeError, match="not a prefix"):
+            graph.invoke(
+                OrderNS.Place(customer_id="c1"),
+                config={"configurable": {"thread_id": stream_id.name}},
+            )

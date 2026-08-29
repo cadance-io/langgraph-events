@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **python-event-sourcery persistence** — `EventGraph(event_store=...)` appends completed
+  `invoke` / `ainvoke` runs to the stream named by
+  `config["configurable"]["thread_id"]`; `outbox=...` appends only
+  `IntegrationEvent`s for publication. Sync and async event streams persist after they are fully
+  consumed. `EventLog.from_store(...)` restores a stored stream.
+
+### Changed
+
+- **BREAKING: events are frozen Pydantic models backed by
+  `python-event-sourcery.Event`.** Construction now uses Pydantic validation and exposes its model
+  APIs instead of the dataclass protocol. `python-event-sourcery>=0.5.2` is therefore a required
+  dependency rather than an optional extra.
+- **Persistence requires an explicit `thread_id`.** A graph configured with `event_store=` or
+  `outbox=` now fails before execution when no stream identity is present. With a checkpointer,
+  persistence verifies the stored events are a prefix of checkpoint history and appends only the
+  missing suffix; without one, each completed run is appended as a new batch.
+
+### Fixed
+
+- **Streaming, stateless repeats, and custom checkpoint serializers are no longer lost.** Both
+  streaming APIs now execute the same persistence path as `invoke`; repeated runs without a
+  checkpointer append their events instead of treating a matching count as already persisted; and
+  `EventGraph` replaces only LangGraph's untouched default serializer, never a caller-supplied
+  serializer.
+- **Serde and model guards fail explicitly.** A function-local event is bound to the serde that
+  encodes it so the same graph can read its next checkpoint; a fresh serde with no matching scope
+  raises a named revival error instead of decoding to `None`. Reserved `Command` modifiers are
+  rejected as payload fields before Pydantic model creation, including under Python 3.14's deferred
+  annotation storage.
+
 ## [0.28.0] - 2026-08-28
 
 ### Removed
