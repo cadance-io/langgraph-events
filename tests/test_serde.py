@@ -4129,6 +4129,19 @@ def describe_TransformFields():
             with pytest.raises(ValueError, match="Duplicate TransformFields"):
                 NamespaceAwareSerde(namespaces=[Reshaped], migrations=[conflicting])
 
+        def with_two_stacked_decorators():
+            def it_is_rejected_at_decoration_time():
+                # Same treatment as a duplicate origin on ``@migrate_from``:
+                # refuse where the duplication happens, not at construction
+                # with a message naming one migration twice.
+                with pytest.raises(ValueError, match="one transform per class"):
+
+                    class Stacked(Namespace):
+                        @transform_fields(_int_count)
+                        @transform_fields(_drop_legacy_flag)
+                        class Persisted(DomainEvent):
+                            note: str = ""
+
     def when_the_transform_is_not_callable():
         def it_is_rejected_at_serde_construction():
             from langgraph_events.serde.migrations import Migration

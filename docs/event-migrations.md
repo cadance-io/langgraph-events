@@ -683,7 +683,7 @@ Library-private; read directly if introspection needed (neither is MRO-inherited
 - `__lge_migrate_from__` — set by `@migrate_from`; tuple of `(module, qualname)` pairs, oldest first.
 - `__lge_backfill__` — set by `@backfill`; accumulated field/default entries.
 - `__lge_origin_backfill__` — set by `@migrate_from(backfill=...)`; accumulated `((module, qualname), {field: default})` entries.
-- `__lge_transform__` — set by `@transform_fields`; accumulated transform callables.
+- `__lge_transform__` — set by `@transform_fields`; the one transform callable.
 - `__lge_origin_transform__` — set by `@migrate_from(transform=...)`; accumulated `((module, qualname), transform)` entries.
 
 ## Validation guarantees

@@ -928,15 +928,23 @@ def transform_fields(
     ``migrate_from(..., transform=...)``.
 
     Metadata is stashed as ``__lge_transform__``. One transform per class:
-    compose several steps in one callable.
+    a second decorator is rejected at decoration. Compose several steps in
+    one callable.
     """
 
     def _wrap(cls: type) -> type:
-        # ``cls.__dict__.get`` (not ``getattr``) so the marker doesn't leak
+        # ``cls.__dict__`` (not ``getattr``) so the marker doesn't leak
         # through MRO when a subclass inherits a decorated parent — same
-        # contract as ``_BACKFILL_ATTR``.
-        existing = cls.__dict__.get(_TRANSFORM_ATTR, ())
-        setattr(cls, _TRANSFORM_ATTR, (*existing, transform))
+        # contract as ``_BACKFILL_ATTR``. A second decorator would surface
+        # at serde construction as a "Duplicate TransformFields" naming the
+        # same auto-migration twice — say it here, where it happens.
+        if _TRANSFORM_ATTR in cls.__dict__:
+            raise ValueError(
+                f"@transform_fields: {cls.__qualname__} already carries a "
+                f"transform: one transform per class; compose in code, in "
+                f"one callable."
+            )
+        setattr(cls, _TRANSFORM_ATTR, transform)
         return cls
 
     return _wrap
@@ -1147,9 +1155,9 @@ def _collect_decorated_migrations(
         history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
         backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
-        transforms = cls.__dict__.get(_TRANSFORM_ATTR, ())
+        transform = cls.__dict__.get(_TRANSFORM_ATTR)
         origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
-        if not (history or backfills or origin_backfills or transforms):
+        if not (history or backfills or origin_backfills or transform):
             continue
         ops: list[Operation] = []
         if history:
@@ -1202,14 +1210,14 @@ def _collect_decorated_migrations(
         )
         # Class-global transform keys on the CURRENT identity, like the
         # class-global AddField above.
-        ops.extend(
-            TransformFields(
-                module=cls.__module__,
-                qualname=cls.__qualname__,
-                transform=transform,
+        if transform is not None:
+            ops.append(
+                TransformFields(
+                    module=cls.__module__,
+                    qualname=cls.__qualname__,
+                    transform=transform,
+                )
             )
-            for transform in transforms
-        )
         out.append(
             Migration(
                 name=f"{cls.__module__}:{cls.__qualname__}",
