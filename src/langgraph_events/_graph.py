@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
+from langgraph.types import StateUpdate
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
@@ -1450,41 +1451,100 @@ class EventGraph:
             return True
         return False
 
+    @staticmethod
+    def _settle_supersteps(
+        events: EventLog, terminal: Event
+    ) -> list[list[StateUpdate]]:
+        """Build the clear/append/clear supersteps that settle a thread onto
+        *terminal* at rest.
+
+        A plain single-superstep ``update_state`` re-runs routing against
+        whatever the checkpoint's ``_pending`` state key still holds — stale
+        once a node genuinely interrupted without ever writing its own
+        state update — re-scheduling that node for a later resume. It also
+        leaves ``_cursor`` behind the newly appended event, so the very next
+        dispatch treats *terminal* as freshly pending and, if it is a
+        ``Halted``, trips the halt gate silently.
+
+        Three supersteps fix both: the leading ``clear`` (``values=None,
+        as_node=END`` — LangGraph's documented "clear all tasks" branch,
+        which skips ``ERROR``/``INTERRUPT`` pending writes) discharges any
+        stale pending task *before* anything is appended, so a fanned-out
+        sibling's already-completed write is preserved rather than
+        superseded by a checkpoint that carries none of it. The middle
+        superstep appends *terminal* while resetting ``_cursor`` to the
+        post-append event count and clearing ``_pending``, so nothing is
+        left scheduled and the next run's cursor starts past *terminal*.
+        The trailing ``clear`` empties ``next``.
+        """
+        return [
+            [StateUpdate(None, END)],
+            [
+                StateUpdate(
+                    {
+                        "events": [terminal],
+                        "_cursor": len(events) + 1,
+                        "_pending": [],
+                    },
+                    "__seed__",
+                )
+            ],
+            [StateUpdate(None, END)],
+        ]
+
+    def _settle(self, config: Any, terminal: Event) -> EventLog:
+        """Append *terminal* and settle the thread to a clean rest state.
+
+        Runs the three-superstep clear/append/clear recipe (see
+        :meth:`_settle_supersteps`) through the sync checkpoint API, so the
+        thread ends with nothing scheduled and no stale ``_pending`` to
+        re-arm routing on a later resume, while preserving any sibling
+        writes from a fanned-out superstep.
+        """
+        events = self.get_state(config).events
+        self._compile().bulk_update_state(
+            cast("RunnableConfig", config),
+            self._settle_supersteps(events, terminal),
+        )
+        return self.get_state(config).events
+
+    async def _asettle(self, config: Any, terminal: Event) -> EventLog:
+        """Async sibling of :meth:`_settle` — every checkpoint read/write
+        uses the async API (``aget_state``/``abulk_update_state``) so
+        async-only checkpointers aren't driven synchronously."""
+        events = (await self.aget_state(config)).events
+        await self._compile().abulk_update_state(
+            cast("RunnableConfig", config),
+            self._settle_supersteps(events, terminal),
+        )
+        return (await self.aget_state(config)).events
+
     def _apply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
         """Sync ``on_unresumable`` for a resume that would be a no-op.
 
         Called only when :meth:`_resume_is_pending` is ``False``. The ``halt``
-        arm appends a terminal ``Unresumable(Halted)`` so the abandoned thread
-        ends observably; the thread is already inert (not pending), so
-        ``update_state`` only records the event.
+        arm settles the thread onto a terminal ``Unresumable(Halted)`` (see
+        :meth:`_settle`) so the abandoned thread ends observably, with
+        nothing left scheduled and no stale pending state to trip on a
+        later resume or dispatch.
         """
         config = kwargs.get("config")
         if self._unresumable_short_circuits():
             return self.get_state(config).events
-        self._compile().update_state(
-            cast("RunnableConfig", config),
-            {"events": [self._unresumable_event(value)]},
-            as_node="__seed__",
-        )
-        return self.get_state(config).events
+        return self._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
         """Async sibling of :meth:`_apply_unresumable_policy` — every checkpoint
-        read/write uses the async API (``aget_state``/``aupdate_state``) so
+        read/write uses the async API (``aget_state``/``_asettle``) so
         async-only checkpointers aren't driven synchronously."""
         config = kwargs.get("config")
         if self._unresumable_short_circuits():
             return (await self.aget_state(config)).events
-        await self._compile().aupdate_state(
-            cast("RunnableConfig", config),
-            {"events": [self._unresumable_event(value)]},
-            as_node="__seed__",
-        )
-        return (await self.aget_state(config)).events
+        return await self._asettle(config, self._unresumable_event(value))
 
     @staticmethod
     def _unresumable_event(value: Event) -> Unresumable:
