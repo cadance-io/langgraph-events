@@ -15,9 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   qualnames it can no longer revive. It collects every identity the serde degraded, wherever it
   sat: the settled `events` history, a pending interrupt, a completed sibling write, or a field
   nested inside a live event. Empty when every thread revives. The baseline coverage gates
-  compare the topology to a committed snapshot and never read a checkpoint, so after
-  `write_baseline(..., allow_removed=True)` they stay green while a settled thread still raises
-  `Cannot revive`. This method reads that thread. Replaces the hand-rolled step 4 recipe in
+  compare the topology to a committed snapshot and never read a checkpoint, so they cannot
+  tell whether a settled thread still raises `Cannot revive`. This method reads that thread. Replaces the hand-rolled step 4 recipe in
   *Retiring an Interrupted subclass*, whose own warning admitted a stale string literal would
   report "safe". Requires a checkpointer with a `NamespaceAwareSerde`, and raises `ValueError`
   otherwise. Cost is O(all checkpoints), like `threads_paused_on()`.
@@ -82,6 +81,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scan, so an unrelated engine lifetime's decorated classes are never flagged.
 
 [#164]: https://github.com/cadance-io/langgraph-events/issues/164
+
+- **Baseline v3: recorded fields and a `retired` list.** Item 2 of
+  [#159](https://github.com/cadance-io/langgraph-events/issues/159). Each `events` entry now
+  records the `fields` of its class, the init fields only, the same set the serde writes. The
+  record is cumulative: a field an earlier baseline
+  recorded stays in the record after the live class drops it. A `retired` list holds every
+  identity a write dropped from `events`, with the fields last recorded for it. The reader
+  rejects a v3 entry without `fields`, and rejects an identity listed under both `events` and
+  `retired`. A v1 or v2 file still loads, with no recorded fields and an empty `retired` list.
+  Regenerate the baseline once to record the fields. A hand-added `events` entry needs `fields`
+  too: a test that appends `{"module", "qualname"}` to `events` and expects an `AssertionError`
+  from a gate gets a `ValueError` from the reader instead. See *When to commit the baseline* in
+  `docs/event-migrations.md` for the file shape and the hand-added `retired` entry for an
+  identity erased before v3.
+
+- **`MigrationCoverageError.retired`.** The subset of `.uncovered` the baseline lists as retired.
+
+### Changed
+
+- **`write_baseline` never erases an identity.** An identity the old baseline recorded and
+  the graph no longer reaches moves to `retired` instead. The entry persists across later
+  writes and leaves the list when the identity is live again. Removing it is a hand edit, done
+  once every thread that names it is settled. `BaselineRegressionError` is no longer raised.
+
+- **The three event gates walk `retired`.** `assert_all_baselined_cover`, `_resolve` and
+  `_revive` sweep the baseline's `events` and `retired` lists both. A retired identity must
+  revive through a migration onto a surviving class or a tombstone. A failure on one says it is
+  retired and names the remedy.
+
+- **`assert_all_baselined_revive` exercises a dropped field.** The gate sends a placeholder for
+  every recorded field the live class no longer accepts as an init kwarg, plus the required
+  placeholders it sent before. A recorded field the class still accepts gets none, so a
+  defaulted field with a `__post_init__` validator stays green. The failure line names the
+  dropped field. Before this, the gate stayed green while every stored payload for the class
+  raised `Cannot revive`.
+
+### Deprecated
+
+- **`write_baseline(allow_removed=...)`.** The flag does nothing. Passing `True` emits a
+  `DeprecationWarning`. It will be removed in a later release.
+
+- **`BaselineRegressionError`.** Retained for one release so an existing `except` clause still
+  imports. Nothing raises it.
 
 ### Fixed
 

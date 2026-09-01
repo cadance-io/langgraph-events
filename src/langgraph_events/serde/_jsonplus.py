@@ -63,11 +63,16 @@ EXT_NAMESPACE_AWARE_EVENT = 100
 # which is hardcoded to ``default=_msgpack_default`` and would bypass us.
 EXT_INTERRUPT = 101
 
-# Imported AFTER the EXT constants and ``_option`` are bound: ``_core``
-# pulls in the ``serde.migrations`` package whose ``__init__`` re-exports
-# ``testing.synthesize_legacy_payload``, which imports the two names above
-# back from this module. Defining them first lets that re-entry resolve
-# against a partially-initialized ``_jsonplus`` without a circular import.
+# The dataclass ``TypeError`` for a kwarg the class does not declare.
+# ``_revival_remedy`` and the revive gate's failure hint both read the
+# field name out of it.
+_UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
+
+# Imported AFTER the EXT constants, ``_UNEXPECTED_KWARG_RE`` and ``_option``
+# are bound: ``_core`` pulls in the ``serde.migrations`` package whose
+# ``__init__`` re-exports ``testing``, which imports those names back from
+# this module. Defining them first lets that re-entry resolve against a
+# partially-initialized ``_jsonplus`` without a circular import.
 from langgraph_events.serde.migrations._core import (  # noqa: E402
     _apply_identity_migrations,
     _collect_decorated_migrations,
@@ -96,9 +101,6 @@ class UnrevivedIdentity(NamedTuple):
 
     module: str
     qualname: str
-
-
-_UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 
 
 def _revival_remedy(qualname: str, exc: Exception) -> str:
@@ -132,7 +134,7 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     return (
         f"{qualname} does not declare the field {field!r} the stored "
         f"payload carries. Add {field!r} to the class, matching the "
-        f"retired class's shape, or drop it from the payload with a "
+        f"old class's shape, or drop it from the payload with a "
         f"migration."
     )
 
