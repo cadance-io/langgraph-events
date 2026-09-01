@@ -490,6 +490,19 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 "'Dropping, merging or retyping a field' in "
                 "docs/event-migrations.md."
             )
+        # A split has no inverse either: an old release has no class for
+        # the target, and select only runs on read.
+        if legacy_write and self._split_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a SplitEvent "
+                "(split_event, Migration.split_event or a hand-authored "
+                "SplitEvent). A split runs on read and has no inverse, so an "
+                "old release cannot read what this one writes. Drain "
+                "in-flight threads before the cutover, or drop legacy_write "
+                "and accept read-only compatibility. See 'Splitting one "
+                "stored event into two on a payload value' in "
+                "docs/event-migrations.md."
+            )
         # The read path resolves through ``_scope`` before it falls back to
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
         # key set: the identities revivable with no migration at all.

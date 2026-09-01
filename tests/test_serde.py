@@ -4605,3 +4605,84 @@ def describe_SplitEvent():
                 _prefix + "TypeError: select returned kwargs of type list, "
                 "expected dict"
             )
+
+    def when_the_declaration_is_wrong():
+        # Every refusal here would otherwise surface on the first
+        # production read. Same strictness as TransformFields.
+
+        def _split(name: str = "bad-split", **overrides: Any) -> Any:
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            fields: dict[str, Any] = {
+                "module": Work.__module__,
+                "qualname": "Work.Completed",
+                "select": _select_failed,
+                "targets": (Work.Failed,),
+            }
+            fields.update(overrides)
+            return Migration(name=name, operations=(SplitEvent(**fields),))
+
+        def it_refuses_a_source_that_is_a_rename_source():
+            # The rename table cannot host a split: the source stays live,
+            # and a rename source never resolves live.
+            keyed_on_origin = _split(
+                module=WorkStaged.__module__,
+                qualname="WorkStaged.OldCompleted",
+                targets=(WorkStaged.Failed,),
+            )
+
+            with pytest.raises(ValueError, match="split on the live target"):
+                NamespaceAwareSerde(
+                    namespaces=[WorkStaged], migrations=[keyed_on_origin]
+                )
+
+        def it_refuses_a_source_that_does_not_resolve():
+            ghost = _split(module="ghost.mod", qualname="Ghost.Gone")
+
+            with pytest.raises(ValueError, match=r"SplitEvent source ghost\.mod"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[ghost])
+
+        def it_refuses_a_target_that_is_not_an_Event():
+            not_an_event = _split(targets=(dict,))
+
+            with pytest.raises(ValueError, match="SplitEvent target dict"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[not_an_event])
+
+        def it_refuses_a_target_that_does_not_resolve():
+            # A class nested in a function carries ``<locals>`` in its
+            # qualname. Outside ``namespaces=`` nothing reaches it.
+            class Local(Namespace):
+                class Unreachable(DomainEvent):
+                    reason: str = ""
+
+            unreachable = _split(targets=(Local.Unreachable,))
+
+            with pytest.raises(ValueError, match=r"SplitEvent target .*Unreachable"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[unreachable])
+
+        def it_refuses_empty_targets():
+            empty = _split(targets=())
+
+            with pytest.raises(ValueError, match=r"targets.*at least one"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[empty])
+
+        def it_refuses_a_select_that_is_not_callable():
+            not_callable = _split(select="select_failed")
+
+            with pytest.raises(TypeError, match=r"Work\.Completed.*callable"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[not_callable])
+
+        def it_refuses_two_splits_on_one_identity():
+            # The read path runs one split per identity. A second one
+            # would be silently ignored. Compose the cases in one select.
+            with pytest.raises(ValueError, match="Duplicate SplitEvent"):
+                NamespaceAwareSerde(
+                    namespaces=[Work], migrations=[_split(), _split(name="again")]
+                )
+
+        def it_refuses_legacy_write():
+            # A split has no inverse, the same rule as a transform.
+            with pytest.raises(ValueError, match=r"legacy_write.*SplitEvent"):
+                NamespaceAwareSerde(
+                    namespaces=[Work], migrations=[_split()], legacy_write=True
+                )

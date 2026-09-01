@@ -418,11 +418,92 @@ def _bucket_splits(
     rename_table: dict[tuple[str, str], tuple[str, str]],
     scope: Mapping[tuple[str, str], type] | None = None,
 ) -> dict[tuple[str, str], SplitEvent]:
-    """Key SplitEvent ops on their source identity and validate each one."""
+    """Key SplitEvent ops on their source identity and validate each one.
+
+    A split has the class stage only, so the source must resolve live.
+    A rename source never resolves live (the chain walk rejects
+    shadowing), so a split keyed on one is refused with a pointer at the
+    live target. Every declared target must be an ``Event`` subclass that
+    the read path resolves to that same class object, by *scope* or by
+    import. One split per identity: the read path runs one, so a second
+    would be ignored in silence.
+    """
     split_table: dict[tuple[str, str], SplitEvent] = {}
-    for op, _migration_name in split_ops:
-        split_table[(op.module, op.qualname)] = op
+    source: dict[tuple[str, str], str] = {}
+    for op, migration_name in split_ops:
+        key = (op.module, op.qualname)
+        label = (
+            f"SplitEvent({op.module}:{op.qualname!r}) in "
+            f"{_migration_label(migration_name)}"
+        )
+        if not callable(op.select):
+            raise TypeError(
+                f"{label}: `select` must be callable, got {type(op.select).__name__}."
+            )
+        if key in rename_table:
+            live_module, live_qualname = rename_table[key]
+            raise ValueError(
+                f"SplitEvent source {op.module}:{op.qualname!r} is a rename "
+                f"source. A split keys on a live identity, and the rename "
+                f"already moves that payload to {live_module}:"
+                f"{live_qualname!r}. Declare the split on the live target "
+                f"instead: it runs after the rename, on every era."
+            )
+        if not _resolves(*key, scope=scope):
+            raise ValueError(
+                f"SplitEvent source {op.module}:{op.qualname!r} does not "
+                f"resolve to a live class — by this serde's namespace scope "
+                f"or by import. A split keys on the live identity that stays "
+                f"stored. Either the module/qualname has a typo, or the class "
+                f"was deleted after the migration was authored."
+            )
+        if not op.targets:
+            raise ValueError(
+                f"{label}: `targets` must list at least one class `select` can return."
+            )
+        for target in op.targets:
+            _validate_split_target(label, target, scope)
+        if key in source:
+            raise ValueError(
+                f"Duplicate SplitEvent: {op.module}:{op.qualname!r} is split "
+                f"{_declared_by(source[key], migration_name)}. Each identity "
+                f"may carry at most one split. Compose the cases in one "
+                f"select."
+            )
+        split_table[key] = op
+        source[key] = migration_name
     return split_table
+
+
+def _validate_split_target(
+    label: str,
+    target: Any,
+    scope: Mapping[tuple[str, str], type] | None,
+) -> None:
+    """Refuse *target* unless it is an ``Event`` subclass the read path
+    resolves to that same object. The read path builds the class it
+    resolves for ``(target.__module__, target.__qualname__)``, so a
+    different object there would build a class the author never named.
+    """
+    name = getattr(target, "__qualname__", repr(target))
+    if not (isinstance(target, type) and issubclass(target, Event)):
+        raise ValueError(
+            f"{label}: SplitEvent target {name} is not an Event subclass. "
+            f"`targets` lists the event classes `select` can return."
+        )
+    try:
+        resolved = _resolve_identity(
+            target.__module__, target.__qualname__, scope=scope
+        )
+    except (ImportError, AttributeError):
+        resolved = None
+    if resolved is not target:
+        raise ValueError(
+            f"{label}: SplitEvent target {target.__module__}:{name} does not "
+            f"resolve to that class — by this serde's namespace scope or by "
+            f"import. Nest it inside a Namespace passed via namespaces=, or "
+            f"pass it directly in events=."
+        )
 
 
 def _bucket_transforms(
@@ -469,16 +550,7 @@ def _bucket_transforms(
                 f"missing its @migrate_from / RenameEvent."
             )
         if target in source:
-            first_label = _migration_label(source[target])
-            second_label = _migration_label(migration_name)
-            # Two blank names would read "by both an unnamed migration and
-            # an unnamed migration", which names nothing. Say so, and ask
-            # for names.
-            by = (
-                "by two unnamed migrations. Pass name= to each to tell them apart"
-                if first_label == second_label
-                else f"by both {first_label} and {second_label}"
-            )
+            by = _declared_by(source[target], migration_name)
             raise ValueError(
                 f"Duplicate TransformFields: {op.module}:{op.qualname!r} is "
                 f"transformed {by}. Each identity may carry at most one "
@@ -487,6 +559,19 @@ def _bucket_transforms(
         bucket[target] = op
         source[target] = migration_name
     return transform_table, origin_transform_table
+
+
+def _declared_by(first_name: str, second_name: str) -> str:
+    """The "by ..." clause of a duplicate-operation diagnostic.
+
+    Two blank names would read "by both an unnamed migration and an
+    unnamed migration", which names nothing. Say so, and ask for names.
+    """
+    first_label = _migration_label(first_name)
+    second_label = _migration_label(second_name)
+    if first_label == second_label:
+        return "by two unnamed migrations. Pass name= to each to tell them apart"
+    return f"by both {first_label} and {second_label}"
 
 
 def _bucket_addfields(
