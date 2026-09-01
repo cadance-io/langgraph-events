@@ -218,6 +218,41 @@ class Migration:
             ),
         )
 
+    @classmethod
+    def transform_fields(
+        cls,
+        name: str = "",
+        *,
+        target: type | None = None,
+        module: str | None = None,
+        qualname: str | None = None,
+        transform: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> Migration:
+        """Single-op transform sugar.
+
+        ``name`` labels the migration. ``transform`` rewrites the stored
+        kwargs. Pass the live class as ``target=<class>`` for the
+        class-global stage. Pass ``module``/``qualname`` for a class that
+        cannot be imported at authoring time, and for the origin-scoped
+        stage keyed on a HISTORIC identity. Same convention as
+        :class:`TransformFields` and :meth:`add_field`.
+        """
+        module, qualname = _target_identity(
+            "Migration.transform_fields",
+            "target",
+            ("module", "qualname"),
+            "target",
+            target,
+            module,
+            qualname,
+        )
+        return cls(
+            name=name,
+            operations=(
+                TransformFields(module=module, qualname=qualname, transform=transform),
+            ),
+        )
+
 
 def _target_identity(
     method: str,

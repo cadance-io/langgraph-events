@@ -3743,11 +3743,24 @@ def _drop_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
     return kw
 
 
+def _merge_name(kw: dict[str, Any]) -> dict[str, Any]:
+    first = kw.pop("first", None)
+    last = kw.pop("last", None)
+    if first is not None or last is not None:
+        kw["name"] = f"{first or ''} {last or ''}".strip()
+    return kw
+
+
 class Reshaped(Namespace):
     class Trimmed(DomainEvent):
         """Dropped ``legacy_flag``."""
 
         note: str = ""
+
+    class Named(DomainEvent):
+        """Merged ``first`` and ``last`` into ``name``."""
+
+        name: str = ""
 
 
 def describe_TransformFields():
@@ -3788,3 +3801,28 @@ def describe_TransformFields():
 
             assert isinstance(revived, Reshaped.Trimmed)
             assert revived.note == "n"
+
+    def when_two_stored_fields_merge_into_one():
+        def it_revives_holding_the_merged_value():
+            # ``Migration.transform_fields`` is the single-op sugar, beside
+            # ``Migration.rename`` and ``Migration.add_field``.
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(
+                        target=Reshaped.Named, transform=_merge_name
+                    )
+                ],
+            )
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Reshaped.__module__,
+                    "Reshaped.Named",
+                    {"first": "Ada", "last": "Lovelace"},
+                )
+            )
+
+            assert revived == Reshaped.Named(name="Ada Lovelace")
