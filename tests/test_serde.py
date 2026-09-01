@@ -35,6 +35,7 @@ from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payloa
 from langgraph_events.serde._jsonplus import (
     EXT_INTERRUPT,
     EXT_NAMESPACE_AWARE_EVENT,
+    UnrevivedIdentity,
     _option,
 )
 from langgraph_events.serde.migrations import backfill, migrate_from
@@ -1037,6 +1038,27 @@ def describe_NamespaceAwareSerde():
                     serde = NamespaceAwareSerde(**opt_in_unsafe_fallback)
                     with pytest.raises(ormsgpack.MsgpackEncodeError):
                         serde.dumps_typed(Unencodable())
+
+    def describe_unrevived_identity_on_write():
+        # #170: ``UnrevivedIdentity`` is a read-side placeholder for the
+        # retirement tools. Upstream's default hook would encode it as a
+        # named tuple by class name, so it would round-trip as a stored
+        # value a strict read cannot tell from a real event. The serde
+        # must refuse to write it, whatever caller passes it.
+
+        def when_a_placeholder_is_in_the_payload():
+            def it_raises_naming_the_identity_and_the_remedy():
+                serde = NamespaceAwareSerde()
+                placeholder = UnrevivedIdentity(module="app.events", qualname="Gone")
+
+                with pytest.raises(
+                    ValueError,
+                    match=(
+                        r"app\.events\.Gone.*placeholder.*never.*stored.*"
+                        r"tombstone.*Recovering a delete-first deployment"
+                    ),
+                ):
+                    serde.dumps_typed([placeholder])
 
     def describe_event_nested_in_langgraph_Interrupt():
         # Regression for #60: every namespaced ``Interrupted`` subclass that

@@ -142,12 +142,19 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
 def _make_default(
     legacy_write: bool,
     oldest_historic: dict[tuple[str, str], tuple[str, str]],
+    refusals: list[str],
 ) -> Callable[[Any], Any]:
     """Build the ``default=`` hook ormsgpack uses for unknown types.
 
     Closure so the per-serde ``legacy_write`` flag and ``oldest_historic``
     map thread down into recursive sub-encodes (Interrupt-wrapped values,
     etc.) without relying on module-level state.
+
+    *refusals* collects the message of every write this hook refuses.
+    ormsgpack swallows an exception raised inside ``default`` and raises
+    its own ``MsgpackEncodeError`` with no cause chained. The caller
+    reads *refusals* after that error to raise the real ``ValueError``.
+    This mirrors *errors* in :func:`_make_ext_hook` on the read path.
 
     ``oldest_historic`` is built at construction from the serde's
     ``namespaces=`` scope. Encoding under an oldest historic identity is
@@ -160,6 +167,19 @@ def _make_default(
     """
 
     def _default(obj: Any) -> Any:
+        if isinstance(obj, UnrevivedIdentity):
+            # #170: a read-side placeholder must never become a stored
+            # value. Upstream's hook would encode this named tuple by
+            # class name, so it would round-trip and a strict read could
+            # not tell it from a real event.
+            refusals.append(
+                f"Refusing to store {obj.module}.{obj.qualname}: it is an "
+                f"UnrevivedIdentity placeholder, and a placeholder must never "
+                f"be stored. Recover the class with a tombstone, see "
+                f"'Recovering a delete-first deployment' in "
+                f"docs/event-migrations.md."
+            )
+            raise ValueError(refusals[-1])
         if isinstance(obj, Event) and dataclasses.is_dataclass(obj):
             cls = obj.__class__
             module, qualname = cls.__module__, cls.__qualname__
@@ -412,7 +432,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         self._scope = scope
         self._live_identities = frozenset(scope)
         self._legacy_write = legacy_write
-        self._encode_default = _make_default(legacy_write, oldest_historic)
+        self._oldest_historic = oldest_historic
         self._tolerant_depth = 0
         self._unresolved: list[UnrevivedIdentity] | None = None
         for cls in _unreachable_migrate_from_siblings(scope):
@@ -483,19 +503,28 @@ class NamespaceAwareSerde(JsonPlusSerializer):
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):
             return super().dumps_typed(obj)
-        # ``_encode_default`` is a strict superset of upstream's
-        # ``_msgpack_default``: anything upstream encodes, we encode the
-        # same way. So an ``MsgpackEncodeError`` here is genuinely
-        # unencodable. The old behaviour warned and called
+        # The hook from ``_make_default`` is a strict superset of
+        # upstream's ``_msgpack_default``: anything upstream encodes, we
+        # encode the same way. So an ``MsgpackEncodeError`` here is
+        # genuinely unencodable, unless the hook refused the write on
+        # purpose (#170). The old behaviour warned and called
         # ``super().dumps_typed`` — which in the default config simply
         # re-raised, and with the parent's binary-fallback kwarg enabled
         # would silently emit unsafe-binary bytes that bypass the
         # migration table. Let the encode error propagate at the source
         # so the caller widens ``_default`` or removes the payload from
         # state explicitly.
-        return "msgpack", ormsgpack.packb(
-            obj, default=self._encode_default, option=_option
-        )
+        #
+        # The hook is built per call so *refusals* is local to this
+        # write. A per-instance list would leak across concurrent writes.
+        refusals: list[str] = []
+        default = _make_default(self._legacy_write, self._oldest_historic, refusals)
+        try:
+            return "msgpack", ormsgpack.packb(obj, default=default, option=_option)
+        except ormsgpack.MsgpackEncodeError as exc:
+            if refusals:
+                raise ValueError(refusals[-1]) from exc
+            raise
 
     def loads_typed(self, data: tuple[str, bytes]) -> Any:
         type_, data_ = data

@@ -1840,27 +1840,39 @@ class EventGraph:
     def _require_revivable_history(
         cls,
         method: str,
+        events: Iterable[Any],
         unresolved: Iterable[UnrevivedIdentity],
         pending: _PendingInterrupts,
         config: RunnableConfig,
     ) -> None:
-        """Raise ``ValueError`` if the tolerant read degraded an identity
-        other than the thread's pending interrupt (#170).
+        """Raise ``ValueError`` if the thread's settled history holds an
+        identity the serde could not revive (#170).
 
-        *unresolved* is the collector :meth:`_tolerant_read` yields. A
+        *events* is the log the settle rewrites, read inside
+        :meth:`_tolerant_read`. Any ``UnrevivedIdentity`` entry in it
+        refuses the settle, even when its qualname matches the pending
+        interrupt: a thread paused twice on one deleted class carries
+        that class in both places. *unresolved* is the collector the
+        same read yields. It is the extra guard for a placeholder nested
+        inside a live event's field, where the log walk cannot see it.
+        There, the pending interrupt's own qualname is excused: a
         degraded pending interrupt is the documented delete-first
-        recovery: ``abandon()`` records its qualname in ``discarded``
-        and never writes it back. Any other degraded identity sits in
-        the settled ``events`` history, or nested in a live event there.
-        Settling re-serializes that history, so the placeholder would
-        become a stored value. A strict read then returns it with no
-        error and ``unrevivable_threads()`` stops reporting the thread.
+        recovery, recorded in ``discarded`` and never written back.
+
+        The serde refuses to store a placeholder in any case. This check
+        runs first to name the thread and to write nothing at all.
         """
-        names = [
-            name
-            for name in cls._unrevived_qualnames(unresolved)
-            if name not in pending.unresolved_names
+        from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
+            UnrevivedIdentity,
+        )
+
+        stored = [entry for entry in events if isinstance(entry, UnrevivedIdentity)]
+        nested = [
+            identity
+            for identity in unresolved
+            if identity.qualname not in pending.unresolved_names
         ]
+        names = cls._unrevived_qualnames([*stored, *nested])
         if not names:
             return
         thread_id = config.get("configurable", {}).get("thread_id")
@@ -1893,10 +1905,10 @@ class EventGraph:
         ``Interrupted`` subclass already deleted from the codebase,
         recording the class's last-known qualname in ``discarded``
         instead of a live instance. Raises ``ValueError`` instead when
-        the settled history names a deleted class: settling would write
-        a placeholder into the log, so recover that thread with a
-        tombstone (see "Recovering a delete-first deployment" in
-        ``docs/event-migrations.md``).
+        the settled history holds a deleted class: settling would write
+        a placeholder into the log, and the serde refuses to store one.
+        Recover that thread with a tombstone (see "Recovering a
+        delete-first deployment" in ``docs/event-migrations.md``).
 
         Requires a checkpointer. Raises ``ValueError`` if the thread has
         no events to settle (never run, or only ``pre_seed``ed). Ignores
@@ -1913,7 +1925,9 @@ class EventGraph:
             pending = self._read_pending_interrupts(config, "abandon")
             if require_interrupt:
                 self._require_pending_interrupt("abandon", pending, config)
-            self._require_revivable_history("abandon", unresolved, pending, config)
+            self._require_revivable_history(
+                "abandon", snapshot.values["events"], unresolved, pending, config
+            )
             discarded = ", ".join(
                 (
                     *(type(v).__qualname__ for v in pending.events),
@@ -1937,7 +1951,9 @@ class EventGraph:
             pending = await self._aread_pending_interrupts(config, "aabandon")
             if require_interrupt:
                 self._require_pending_interrupt("aabandon", pending, config)
-            self._require_revivable_history("aabandon", unresolved, pending, config)
+            self._require_revivable_history(
+                "aabandon", snapshot.values["events"], unresolved, pending, config
+            )
             discarded = ", ".join(
                 (
                     *(type(v).__qualname__ for v in pending.events),
