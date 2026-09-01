@@ -1836,6 +1836,54 @@ class EventGraph:
             "Pass require_interrupt=False to settle it anyway."
         )
 
+    @classmethod
+    def _require_revivable_history(
+        cls,
+        method: str,
+        events: Iterable[Any],
+        unresolved: Iterable[UnrevivedIdentity],
+        pending: _PendingInterrupts,
+        config: RunnableConfig,
+    ) -> None:
+        """Raise ``ValueError`` if the thread's settled history holds an
+        identity the serde could not revive (#170).
+
+        *events* is the log the settle rewrites, read inside
+        :meth:`_tolerant_read`. Any ``UnrevivedIdentity`` entry in it
+        refuses the settle, even when its qualname matches the pending
+        interrupt: a thread paused twice on one deleted class carries
+        that class in both places. *unresolved* is the collector the
+        same read yields. It is the extra guard for a placeholder nested
+        inside a live event's field, where the log walk cannot see it.
+        There, the pending interrupt's own qualname is excused: a
+        degraded pending interrupt is the documented delete-first
+        recovery, recorded in ``discarded`` and never written back.
+
+        The serde refuses to store a placeholder in any case. This check
+        runs first to name the thread and to write nothing at all.
+        """
+        from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
+            UnrevivedIdentity,
+        )
+
+        stored = [entry for entry in events if isinstance(entry, UnrevivedIdentity)]
+        nested = [
+            identity
+            for identity in unresolved
+            if identity.qualname not in pending.unresolved_names
+        ]
+        names = cls._unrevived_qualnames([*stored, *nested])
+        if not names:
+            return
+        thread_id = config.get("configurable", {}).get("thread_id")
+        raise ValueError(
+            f"{method}() refuses to settle thread {thread_id!r}: its settled "
+            f"history names {', '.join(names)}, which the checkpointer's serde "
+            f"cannot revive. Settling would write a placeholder into the log. "
+            f"Map each identity onto a tombstone with @migrate_from instead. "
+            f"See 'Recovering a delete-first deployment' in docs/event-migrations.md."
+        )
+
     def abandon(
         self,
         config: RunnableConfig,
@@ -1856,7 +1904,11 @@ class EventGraph:
         Settles a thread even when the pending interrupt names an
         ``Interrupted`` subclass already deleted from the codebase,
         recording the class's last-known qualname in ``discarded``
-        instead of a live instance.
+        instead of a live instance. Raises ``ValueError`` instead when
+        the settled history holds a deleted class: settling would write
+        a placeholder into the log, and the serde refuses to store one.
+        Recover that thread with a tombstone (see "Recovering a
+        delete-first deployment" in ``docs/event-migrations.md``).
 
         Requires a checkpointer. Raises ``ValueError`` if the thread has
         no events to settle (never run, or only ``pre_seed``ed). Ignores
@@ -1867,12 +1919,15 @@ class EventGraph:
         ``graph.get_state(config).events`` for it.
         """
         self._require_checkpointer("abandon")
-        with self._tolerant_read():
+        with self._tolerant_read() as unresolved:
             snapshot = self._compile().get_state(config)
             self._require_settleable("abandon", snapshot, config)
             pending = self._read_pending_interrupts(config, "abandon")
             if require_interrupt:
                 self._require_pending_interrupt("abandon", pending, config)
+            self._require_revivable_history(
+                "abandon", snapshot.values["events"], unresolved, pending, config
+            )
             discarded = ", ".join(
                 (
                     *(type(v).__qualname__ for v in pending.events),
@@ -1890,12 +1945,15 @@ class EventGraph:
     ) -> None:
         """Async version of :meth:`abandon`."""
         self._require_checkpointer("aabandon")
-        with self._tolerant_read():
+        with self._tolerant_read() as unresolved:
             snapshot = await self._compile().aget_state(config)
             self._require_settleable("aabandon", snapshot, config)
             pending = await self._aread_pending_interrupts(config, "aabandon")
             if require_interrupt:
                 self._require_pending_interrupt("aabandon", pending, config)
+            self._require_revivable_history(
+                "aabandon", snapshot.values["events"], unresolved, pending, config
+            )
             discarded = ", ".join(
                 (
                     *(type(v).__qualname__ for v in pending.events),

@@ -5297,6 +5297,87 @@ def _paused_unrevivable_pair(saver, tid: str):
     return EventGraph([_completes], checkpointer=saver), cfg
 
 
+def _settled_unrevivable_pair(saver, tid: str):
+    """A thread that *answered* an interrupt on a class since deleted:
+    the retired identity sits in its settled history, not in a
+    pending write, so threads_paused_on() never reaches it. Shared by
+    describe_delete_first_retirement and describe_unrevivable_threads."""
+    from langgraph_events.serde import NamespaceAwareSerde
+
+    class _Retired(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _Retired:
+        return _Retired()
+
+    cfg = {"configurable": {"thread_id": tid}}
+    saver.serde = NamespaceAwareSerde(events=(Started, _Retired))
+    graph = EventGraph([wait, _go_ends], checkpointer=saver)
+    graph.invoke(Started(data="x"), config=cfg)
+    graph.resume(_Go(), config=cfg)
+    assert graph.get_state(cfg).events.has(Ended)
+
+    # "Deletion": see describe_delete_first_retirement.
+    saver.serde = NamespaceAwareSerde(events=(Started,))
+    return EventGraph([_completes], checkpointer=saver), cfg
+
+
+async def _asettled_unrevivable_pair(saver, tid: str):
+    """Async sibling of _settled_unrevivable_pair."""
+    from langgraph_events.serde import NamespaceAwareSerde
+
+    class _ARetired(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _ARetired:
+        return _ARetired()
+
+    cfg = {"configurable": {"thread_id": tid}}
+    saver.serde = NamespaceAwareSerde(events=(Started, _ARetired))
+    graph = EventGraph([wait, _go_ends], checkpointer=saver)
+    await graph.ainvoke(Started(data="x"), config=cfg)
+    await graph.aresume(_Go(), config=cfg)
+
+    saver.serde = NamespaceAwareSerde(events=(Started,))
+    return EventGraph([_completes], checkpointer=saver), cfg
+
+
+def _twice_paused_unrevivable_pair(saver, tid: str):
+    """A thread paused on a class since deleted, whose settled history
+    already holds that same class from an earlier answer (#170). The
+    pending interrupt and the settled history share one qualname."""
+    from langgraph_events.serde import NamespaceAwareSerde
+
+    class _Again(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _Again:
+        return _Again()
+
+    @on(_Go)
+    def wait_again(event: _Go) -> _Again:
+        return _Again()
+
+    cfg = {"configurable": {"thread_id": tid}}
+    saver.serde = NamespaceAwareSerde(events=(Started, _Again))
+    graph = EventGraph([wait, wait_again], checkpointer=saver)
+    graph.invoke(Started(data="x"), config=cfg)
+    graph.resume(_Go(), config=cfg)
+    assert graph.get_state(cfg).is_interrupted
+
+    saver.serde = NamespaceAwareSerde(events=(Started,))
+    return EventGraph([_completes], checkpointer=saver), cfg
+
+
+def _tolerant_log_types(saver, graph, cfg) -> list[str]:
+    """The thread's log as type names, read with the placeholder allowed."""
+    with saver.serde.tolerate_unresolved():
+        return [type(e).__name__ for e in graph.get_state(cfg).events]
+
+
 def describe_delete_first_retirement():
     # The full delete-first scenario (#164): pause a thread on an
     # Interrupted subclass, then delete the class so it no longer
@@ -5335,6 +5416,63 @@ def describe_delete_first_retirement():
             log = graph.get_state(cfg).events
             assert log.latest(Abandoned).discarded  # carries the recorded name
             assert graph.threads_paused_on() == []
+
+    def when_the_settled_history_names_a_deleted_class():
+        # #170: the retired identity sits in the settled log, not in a
+        # pending write. Settling would re-serialize that log with the
+        # placeholder in it. abandon() must refuse, not write it.
+
+        def it_raises_naming_the_thread_and_the_qualname():
+            graph, cfg = _settled_unrevivable_pair(MemorySaver(), "delete-first-refuse")
+
+            with pytest.raises(
+                ValueError,
+                match=(
+                    r"abandon\(\).*'delete-first-refuse'.*"
+                    r"_settled_unrevivable_pair\.<locals>\._Retired.*"
+                    r"Recovering a delete-first deployment"
+                ),
+            ):
+                graph.abandon(cfg, require_interrupt=False)
+
+        def it_leaves_the_log_unchanged():
+            saver = MemorySaver()
+            graph, cfg = _settled_unrevivable_pair(saver, "delete-first-intact")
+            before = _tolerant_log_types(saver, graph, cfg)
+
+            with pytest.raises(ValueError):
+                graph.abandon(cfg, require_interrupt=False)
+
+            assert _tolerant_log_types(saver, graph, cfg) == before
+            assert list(graph.unrevivable_threads()) == ["delete-first-intact"]
+
+    def when_the_pending_interrupt_and_the_settled_history_share_a_deleted_class():
+        # #170 review: subtracting the pending interrupt's qualname from
+        # the collector excuses the history's copy too. The pre-check
+        # must read the log abandon() rewrites, not only the collector.
+
+        def it_raises_naming_the_thread_and_the_qualname():
+            graph, cfg = _twice_paused_unrevivable_pair(MemorySaver(), "twice-refuse")
+
+            with pytest.raises(
+                ValueError,
+                match=(
+                    r"abandon\(\).*'twice-refuse'.*"
+                    r"_twice_paused_unrevivable_pair\.<locals>\._Again"
+                ),
+            ):
+                graph.abandon(cfg)
+
+        def it_leaves_the_log_unchanged():
+            saver = MemorySaver()
+            graph, cfg = _twice_paused_unrevivable_pair(saver, "twice-intact")
+            before = _tolerant_log_types(saver, graph, cfg)
+
+            with pytest.raises(ValueError):
+                graph.abandon(cfg)
+
+            assert _tolerant_log_types(saver, graph, cfg) == before
+            assert list(graph.unrevivable_threads()) == ["twice-intact"]
 
     async def _apaused_unrevivable_pair(saver, tid: str):
         from langgraph_events.serde import NamespaceAwareSerde
@@ -5380,6 +5518,23 @@ def describe_delete_first_retirement():
             log = (await graph.aget_state(cfg)).events
             assert log.latest(Abandoned).discarded
 
+    def when_the_settled_history_names_a_deleted_class_async():
+        @pytest.mark.asyncio
+        async def it_raises_naming_the_thread_and_the_qualname():
+            graph, cfg = await _asettled_unrevivable_pair(
+                MemorySaver(), "delete-first-arefuse"
+            )
+
+            with pytest.raises(
+                ValueError,
+                match=(
+                    r"aabandon\(\).*'delete-first-arefuse'.*"
+                    r"_asettled_unrevivable_pair\.<locals>\._ARetired.*"
+                    r"Recovering a delete-first deployment"
+                ),
+            ):
+                await graph.aabandon(cfg, require_interrupt=False)
+
 
 def describe_unrevivable_threads():
     # The store-walking gate (#159): the baseline gates compare the
@@ -5388,39 +5543,12 @@ def describe_unrevivable_threads():
     # a settled thread's history still names a deleted class. This sweep
     # reads the real store instead.
 
-    def _settled_unrevivable_pair(saver, tid: str):
-        """A thread that *answered* an interrupt on a class since deleted:
-        the retired identity sits in its settled history, not in a
-        pending write, so threads_paused_on() never reaches it."""
-        from langgraph_events.serde import NamespaceAwareSerde
-
-        class _Retired(Interrupted):
-            pass
-
-        @on(Started)
-        def wait(event: Started) -> _Retired:
-            return _Retired()
-
-        cfg = {"configurable": {"thread_id": tid}}
-        saver.serde = NamespaceAwareSerde(events=(Started, _Retired))
-        graph = EventGraph([wait, _go_ends], checkpointer=saver)
-        graph.invoke(Started(data="x"), config=cfg)
-        graph.resume(_Go(), config=cfg)
-        assert graph.get_state(cfg).events.has(Ended)
-
-        # "Deletion": see describe_delete_first_retirement.
-        saver.serde = NamespaceAwareSerde(events=(Started,))
-        return EventGraph([_completes], checkpointer=saver), cfg
-
     def when_a_settled_history_names_a_deleted_class():
         def it_reports_the_thread_naming_the_qualname():
             graph, _cfg = _settled_unrevivable_pair(MemorySaver(), "unrev-settled")
 
             assert graph.unrevivable_threads() == {
-                "unrev-settled": [
-                    "describe_unrevivable_threads.<locals>."
-                    "_settled_unrevivable_pair.<locals>._Retired"
-                ]
+                "unrev-settled": ["_settled_unrevivable_pair.<locals>._Retired"]
             }
 
     def when_every_thread_revives():
@@ -5566,24 +5694,9 @@ def describe_aunrevivable_threads():
     def when_a_settled_history_names_a_deleted_class():
         @pytest.mark.asyncio
         async def it_reports_the_thread():
-            from langgraph_events.serde import NamespaceAwareSerde
-
-            class _ARetired(Interrupted):
-                pass
-
-            @on(Started)
-            def wait(event: Started) -> _ARetired:
-                return _ARetired()
-
-            saver = MemorySaver()
-            cfg = {"configurable": {"thread_id": "aunrev-settled"}}
-            saver.serde = NamespaceAwareSerde(events=(Started, _ARetired))
-            graph = EventGraph([wait, _go_ends], checkpointer=saver)
-            await graph.ainvoke(Started(data="x"), config=cfg)
-            await graph.aresume(_Go(), config=cfg)
-
-            saver.serde = NamespaceAwareSerde(events=(Started,))
-            graph = EventGraph([_completes], checkpointer=saver)
+            graph, _cfg = await _asettled_unrevivable_pair(
+                MemorySaver(), "aunrev-settled"
+            )
 
             assert list(await graph.aunrevivable_threads()) == ["aunrev-settled"]
 
