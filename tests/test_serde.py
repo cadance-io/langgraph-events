@@ -3758,6 +3758,16 @@ def _dropping(key: str) -> Any:
 _drop_legacy_flag = _dropping("legacy_flag")
 
 
+def _recording(calls: list[str], label: str) -> Any:
+    """A transform that appends *label* to *calls* and changes nothing."""
+
+    def _transform(kw: dict[str, Any]) -> dict[str, Any]:
+        calls.append(label)
+        return kw
+
+    return _transform
+
+
 def _merge_name(kw: dict[str, Any]) -> dict[str, Any]:
     first = kw.pop("first", None)
     last = kw.pop("last", None)
@@ -3933,6 +3943,25 @@ def describe_TransformFields():
 
             assert revived.interrupted == Gate.Reviewed(draft="D")
 
+        def it_runs_once_per_read():
+            # A live identity with no rename has the same key before and
+            # after the rename step. The class stage must still run once.
+            from langgraph_events.serde.migrations import Migration
+
+            calls: list[str] = []
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(
+                        target=Reshaped.Trimmed, transform=_recording(calls, "T")
+                    )
+                ],
+            )
+
+            serde.loads_typed(serde.dumps_typed(Reshaped.Trimmed(note="n")))
+
+            assert calls == ["T"]
+
     def when_the_transform_is_keyed_on_a_rename_source():
         # The origin stage, declared with ``migrate_from(transform=...)``.
 
@@ -3966,8 +3995,12 @@ def describe_TransformFields():
                     class Ambiguous(DomainEvent):
                         note: str = ""
 
-    def when_transforms_sit_on_both_stages_of_a_chain():
-        def _serde() -> NamespaceAwareSerde:
+    def when_transforms_sit_on_every_step_of_a_chain():
+        # Chain A -> B -> Persisted, with a transform keyed on each step.
+        # A and B are origin stages, Persisted is the class stage. The run
+        # list per era pins which stages run, and in which order.
+
+        def _serde(calls: list[str]) -> NamespaceAwareSerde:
             from langgraph_events.serde.migrations import (
                 Migration,
                 TransformFields,
@@ -3978,29 +4011,39 @@ def describe_TransformFields():
                 namespaces=[ChainTransform],
                 migrations=[
                     Migration(
-                        name="both-stages",
-                        operations=(
-                            TransformFields(module, "ChainTransform.A", _dropping("a")),
-                            TransformFields(
-                                module, "ChainTransform.Persisted", _dropping("c")
-                            ),
+                        name="every-step",
+                        operations=tuple(
+                            TransformFields(module, qualname, _recording(calls, label))
+                            for qualname, label in (
+                                ("ChainTransform.A", "T(A)"),
+                                ("ChainTransform.B", "T(B)"),
+                                ("ChainTransform.Persisted", "T(C)"),
+                            )
                         ),
                     )
                 ],
             )
 
-        def _revive(qualname: str, **kwargs: Any) -> Any:
-            return _serde().loads_typed(
-                synthesize_legacy_payload(ChainTransform.__module__, qualname, kwargs)
+        def _runs_for(qualname: str) -> list[str]:
+            calls: list[str] = []
+            _serde(calls).loads_typed(
+                synthesize_legacy_payload(ChainTransform.__module__, qualname, {})
             )
+            return calls
 
-        def it_runs_the_origin_stage_then_the_class_stage_on_an_A_era_payload():
-            assert _revive("ChainTransform.A", a=1, c=3) == ChainTransform.Persisted()
+        def it_runs_the_A_origin_then_the_class_stage_on_an_A_era_payload():
+            assert _runs_for("ChainTransform.A") == ["T(A)", "T(C)"]
 
-        def it_runs_only_the_class_stage_on_a_B_era_payload():
-            assert _revive("ChainTransform.B", c=3) == ChainTransform.Persisted()
-            with pytest.raises(ValueError, match="'a'"):
-                _revive("ChainTransform.B", a=1)
+        def it_runs_the_B_origin_then_the_class_stage_on_a_B_era_payload():
+            assert _runs_for("ChainTransform.B") == ["T(B)", "T(C)"]
+
+        def it_runs_the_class_stage_once_on_a_live_payload():
+            calls: list[str] = []
+            serde = _serde(calls)
+
+            serde.loads_typed(serde.dumps_typed(ChainTransform.Persisted()))
+
+            assert calls == ["T(C)"]
 
     def when_the_transform_raises():
         # ormsgpack swallows an exception raised inside the ext-hook and

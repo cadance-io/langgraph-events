@@ -234,6 +234,7 @@ def _make_ext_hook(
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     transform_table: dict[tuple[str, str], TransformFields],
+    origin_transform_table: dict[tuple[str, str], TransformFields],
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
@@ -310,6 +311,7 @@ def _make_ext_hook(
                 addfield_table,
                 origin_addfield_table,
                 transform_table,
+                origin_transform_table,
             )
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
         except (ImportError, AttributeError, TypeError, TransformError) as exc:
@@ -419,6 +421,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._addfield_table,
             self._origin_addfield_table,
             self._transform_table,
+            self._origin_transform_table,
         ) = _flatten_and_validate(all_migrations, scope)
         # Origin-scoped fills are the fan-in signal, and a fan-in cannot
         # ride legacy_write: writes would relabel EVERY instance under the
@@ -438,7 +441,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         # historic identity would carry the CURRENT shape, which the old
         # release's class does not accept, and the transform only runs on
         # read. Refuse at construction, like the origin-fill case above.
-        if legacy_write and self._transform_table:
+        if legacy_write and (self._transform_table or self._origin_transform_table):
             raise ValueError(
                 "legacy_write=True cannot be combined with a TransformFields "
                 "(transform_fields, migrate_from(transform=...) or a "
@@ -557,6 +560,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._addfield_table,
                     self._origin_addfield_table,
                     self._transform_table,
+                    self._origin_transform_table,
                     self._scope,
                     unresolved=self._unresolved,
                 ),
