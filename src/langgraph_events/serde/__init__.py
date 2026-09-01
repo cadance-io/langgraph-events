@@ -38,16 +38,18 @@ from langgraph_events.serde.migrations import (
     backfill,
     migrate_from,
     replay_reducer,
+    split_event,
     synthesize_legacy_payload,
     transform_fields,
 )
 
-# Raw RenameEvent / AddField / TransformFields are deliberately NOT
-# re-exported here. The common path is decorator-first (@migrate_from,
-# @backfill, @transform_fields) plus Migration.rename / Migration.add_field /
-# Migration.transform_fields sugar. The raw operation constructors remain
-# importable from ``langgraph_events.serde.migrations`` for the rare
-# composite multi-op Migration — keeping the top-level surface small.
+# Raw RenameEvent / AddField / TransformFields / SplitEvent are deliberately
+# NOT re-exported here. The common path is decorator-first (@migrate_from,
+# @backfill, @transform_fields, @split_event) plus Migration.rename /
+# Migration.add_field / Migration.transform_fields / Migration.split_event
+# sugar. The raw operation constructors remain importable from
+# ``langgraph_events.serde.migrations`` for the rare composite multi-op
+# Migration — keeping the top-level surface small.
 __all__ = [
     "CoverageError",
     "HandlerCoverageError",
@@ -63,6 +65,7 @@ __all__ = [
     "backfill",
     "migrate_from",
     "replay_reducer",
+    "split_event",
     "synthesize_legacy_payload",
     "transform_fields",
 ]

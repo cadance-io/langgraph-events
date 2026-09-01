@@ -281,6 +281,44 @@ class Migration:
             ),
         )
 
+    @classmethod
+    def split_event(
+        cls,
+        name: str = "",
+        *,
+        source: type | None = None,
+        module: str | None = None,
+        qualname: str | None = None,
+        select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None],
+        targets: tuple[type, ...],
+    ) -> Migration:
+        """Single-op split sugar.
+
+        ``name`` labels the migration. ``select`` picks the target and
+        shapes its kwargs, and ``targets`` lists every class it can
+        return. Pass the live source class as ``source=<class>``. Pass
+        ``module``/``qualname`` for a class that cannot be imported at
+        authoring time. Same convention as :class:`SplitEvent` and
+        :meth:`transform_fields`.
+        """
+        module, qualname = _target_identity(
+            "Migration.split_event",
+            "source",
+            ("module", "qualname"),
+            "source",
+            source,
+            module,
+            qualname,
+        )
+        return cls(
+            name=name,
+            operations=(
+                SplitEvent(
+                    module=module, qualname=qualname, select=select, targets=targets
+                ),
+            ),
+        )
+
 
 def _target_identity(
     method: str,
@@ -1167,6 +1205,46 @@ def transform_fields(
     return _wrap
 
 
+_SPLIT_ATTR = "__lge_split__"
+
+
+def split_event(
+    select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None],
+    *,
+    targets: tuple[type, ...],
+) -> Callable[[type], type]:
+    """Split payloads stored under this class onto ``targets`` by a
+    payload value.
+
+    Apply it to the SOURCE class, the one whose identity stays stored.
+    The class-scoped, auto-collected sibling of :func:`transform_fields`.
+    The metadata becomes a :class:`SplitEvent` keyed on this class's
+    current identity. ``select`` receives a copy of the stored kwargs and
+    returns ``None`` to keep this class, or ``(target_class, kwargs)`` to
+    build one of ``targets`` instead. It runs after any ``@migrate_from``
+    rename and any ``@transform_fields``, on payloads from every era,
+    including the payloads the current release writes.
+
+    Metadata is stashed as ``__lge_split__``. One split per class: a
+    second decorator is rejected at decoration. Compose the cases in one
+    ``select``.
+    """
+
+    def _wrap(cls: type) -> type:
+        # ``cls.__dict__`` (not ``getattr``) so the marker doesn't leak
+        # through MRO when a subclass inherits a decorated parent — same
+        # contract as ``_TRANSFORM_ATTR``.
+        if _SPLIT_ATTR in cls.__dict__:
+            raise ValueError(
+                f"@split_event: {cls.__qualname__} already carries a split: "
+                f"one split per class; compose the cases in one select."
+            )
+        setattr(cls, _SPLIT_ATTR, (select, tuple(targets)))
+        return cls
+
+    return _wrap
+
+
 def _serde_event_classes(
     namespaces: Sequence[type], events: Sequence[type]
 ) -> list[type]:
@@ -1374,7 +1452,8 @@ def _collect_decorated_migrations(
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
         transform = cls.__dict__.get(_TRANSFORM_ATTR)
         origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
-        if not (history or backfills or origin_backfills or transform):
+        split = cls.__dict__.get(_SPLIT_ATTR)
+        if not (history or backfills or origin_backfills or transform or split):
             continue
         ops: list[Operation] = []
         if history:
@@ -1435,6 +1514,18 @@ def _collect_decorated_migrations(
                     module=cls.__module__,
                     qualname=cls.__qualname__,
                     transform=transform,
+                )
+            )
+        # The split keys on the CURRENT identity too: the source stays
+        # live, so it is the class stage by construction.
+        if split is not None:
+            select, targets = split
+            ops.append(
+                SplitEvent(
+                    module=cls.__module__,
+                    qualname=cls.__qualname__,
+                    select=select,
+                    targets=targets,
                 )
             )
         out.append(

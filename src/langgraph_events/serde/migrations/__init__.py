@@ -26,6 +26,7 @@ from langgraph_events.serde.migrations._core import (
     backfill,
     migrate_from,
     replay_reducer,
+    split_event,
     transform_fields,
 )
 from langgraph_events.serde.migrations.detect import (
@@ -59,6 +60,7 @@ __all__ = [
     "backfill",
     "migrate_from",
     "replay_reducer",
+    "split_event",
     "synthesize_legacy_payload",
     "transform_fields",
 ]

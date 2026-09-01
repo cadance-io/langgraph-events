@@ -38,7 +38,12 @@ from langgraph_events.serde._jsonplus import (
     UnrevivedIdentity,
     _option,
 )
-from langgraph_events.serde.migrations import backfill, migrate_from, transform_fields
+from langgraph_events.serde.migrations import (
+    backfill,
+    migrate_from,
+    split_event,
+    transform_fields,
+)
 
 
 def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
@@ -2986,6 +2991,7 @@ def describe_public_serde_surface():
             assert not hasattr(serde_pkg, "RenameEvent")
             assert not hasattr(serde_pkg, "AddField")
             assert not hasattr(serde_pkg, "TransformFields")
+            assert not hasattr(serde_pkg, "SplitEvent")
 
         def it_still_exposes_the_decorator_and_sugar_tier():
             import langgraph_events.serde as serde_pkg
@@ -2995,6 +3001,7 @@ def describe_public_serde_surface():
                 "Migration",
                 "migrate_from",
                 "transform_fields",
+                "split_event",
                 "synthesize_legacy_payload",
                 "assert_all_baselined_revive",
             ):
@@ -3005,12 +3012,14 @@ def describe_public_serde_surface():
             from langgraph_events.serde.migrations import (
                 AddField,
                 RenameEvent,
+                SplitEvent,
                 TransformFields,
             )
 
             assert RenameEvent is not None
             assert AddField is not None
             assert TransformFields is not None
+            assert SplitEvent is not None
 
 
 def describe_detect_cli():
@@ -4432,6 +4441,23 @@ class WorkStaged(Namespace):
         result: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+def _select_deco_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return WorkDeco.Failed, {"reason": result["message"]}
+
+
+# The decorator form, collected from ``namespaces=`` like ``@transform_fields``.
+class WorkDeco(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_deco_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
 def describe_SplitEvent():
     # One stored identity, two live classes. ``select`` owns the access
     # to the discriminating value and picks the target (#125).
@@ -4686,3 +4712,51 @@ def describe_SplitEvent():
                 NamespaceAwareSerde(
                     namespaces=[Work], migrations=[_split()], legacy_write=True
                 )
+
+    def when_the_source_carries_the_decorator():
+        def it_is_collected_from_namespaces():
+            serde = NamespaceAwareSerde(namespaces=[WorkDeco])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    WorkDeco.__module__, "WorkDeco.Completed", {"result": _ERROR}
+                )
+            )
+
+            assert revived == WorkDeco.Failed(reason="boom")
+
+        def with_two_stacked_decorators():
+            def it_is_rejected_at_decoration_time():
+                from langgraph_events.serde import split_event
+
+                with pytest.raises(ValueError, match="one split per class"):
+
+                    class Stacked(Namespace):
+                        class Failed(DomainEvent):
+                            reason: str = ""
+
+                        @split_event(_select_failed, targets=(Failed,))
+                        @split_event(_select_failed, targets=(Failed,))
+                        class Completed(DomainEvent):
+                            result: dict[str, Any] = dataclasses.field(
+                                default_factory=dict
+                            )
+
+    def when_authored_through_the_sugar():
+        def it_splits_like_the_raw_operation():
+            from langgraph_events.serde import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Work],
+                migrations=[
+                    Migration.split_event(
+                        source=Work.Completed,
+                        select=_select_failed,
+                        targets=(Work.Failed,),
+                    )
+                ],
+            )
+
+            assert _revive(serde, "Work.Completed", result=_ERROR) == Work.Failed(
+                reason="boom"
+            )
