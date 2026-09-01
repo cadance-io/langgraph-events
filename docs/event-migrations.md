@@ -132,8 +132,9 @@ def int_count(kw: dict) -> dict:
 |---|---|---|---|---|
 | Class stage | `@transform_fields(fn)`, `Migration.transform_fields(target=Class, transform=fn)` | the live class | after the rename, before the class fills | payloads from every era, including payloads the current release writes |
 | Origin stage | `@migrate_from("Old", transform=fn)`, `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` | a historic identity | before the rename, before the origin fills | payloads written under that exact origin only |
+| Split | `@split_event(fn, targets=(...))`, `Migration.split_event(source=Class, select=fn, targets=(...))` | the live class | after the class-stage transform, before the fills of the resulting identity | payloads from every era, including payloads the current release writes |
 
-Read-path order: the origin stage (transform, then origin fills), the rename, then the class stage (transform, then class fills). A transform runs before the fills of its stage. A fill still applies to a key the transform removed or never produced.
+Read-path order: the origin stage (transform, then origin fills), the rename, then the class stage (transform, then [split](#splitting-one-stored-event-into-two-on-a-payload-value), then class fills). A transform runs before the fills of its stage. A fill still applies to a key the transform removed or never produced.
 
 Semantics:
 
@@ -149,6 +150,75 @@ Semantics:
 
 !!! note "The revive gate sends `None` placeholders"
     A v3 baseline records the fields a class dropped. `assert_all_baselined_revive` sends `None` for each of them, so the transform runs through the real read path. A transform that reads a dropped value, for example `kw.pop("legacy_flag").upper()`, raises on `None` and fails the gate. The failure line says so. Guard the value in the transform, or pin a real payload with `synthesize_legacy_payload`.
+
+## Splitting one stored event into two on a payload value
+
+One stored identity can stand for two outcomes. `Job.Completed{result}` was written for every job, and `result` says whether the job failed. The current release has a `Job.Failed` class for that case, and `Job.Completed` stays live. A rename cannot host this split: a rename source must not resolve to a live class. `SplitEvent` can. It runs `select` on a copy of the stored kwargs. `select` returns `None` to keep the stored class and kwargs, or `(target_class, kwargs)` to build the target from those kwargs instead. The decorator form is `@split_event`, applied to the source class and auto-collected like `@transform_fields`:
+
+```python
+from dataclasses import field
+from typing import Any
+
+from langgraph_events import DomainEvent, Namespace
+from langgraph_events.serde import split_event
+
+
+def select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None  # keep Job.Completed
+    return Job.Failed, {"reason": result["message"]}
+
+
+class Job(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(select_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any] = field(default_factory=dict)
+```
+
+Pin each branch with real values through `synthesize_legacy_payload`:
+
+```python
+from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payload
+
+serde = NamespaceAwareSerde(namespaces=[Job])
+
+failed = serde.loads_typed(
+    synthesize_legacy_payload(
+        Job.__module__,
+        "Job.Completed",
+        {"result": {"status": "error", "message": "disk full"}},
+    )
+)
+assert failed == Job.Failed(reason="disk full")
+
+completed = serde.loads_typed(
+    synthesize_legacy_payload(
+        Job.__module__, "Job.Completed", {"result": {"status": "ok"}}
+    )
+)
+assert completed == Job.Completed(result={"status": "ok"})
+```
+
+**Order.** A split runs in the class stage only, keyed on the live source identity. Read-path order: the origin stage (transform, then origin fills), the rename, the class-stage transform, the split, then the fills of the resulting identity. When `select` returns a target, the target's class fills apply. The source's fills do not. When `select` returns `None`, the source's fills apply. A payload stored under a historic name that renames onto the source is split too. The table under [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field) lists every stage.
+
+Semantics:
+
+- **The class object is the target.** `select` returns the class, not a string, so an IDE rename follows it.
+- **`targets` lists every class `select` can return.** Each is validated at serde construction: it must be an `Event` subclass that resolves in the serde's scope or by import. A target `select` returns that is not in `targets` is refused at read time.
+- **One split per identity.** Compose the cases in one `select`. A second decorator is rejected at decoration. A second hand-authored op is rejected at serde construction.
+- **The source must resolve live.** A split keyed on a rename source is refused at serde construction. Declare the split on the live target instead: it runs after the rename, on every era.
+- **A `select` that raises, returns a value that is not `None` or a `(target, kwargs)` tuple, returns a target outside `targets`, or returns kwargs that are not a `dict`,** fails the read with `Cannot revive <stored identity>: SplitEvent raised <Type>: <message>` and a remedy. Under `serde.tolerate_unresolved()` the stored identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
+- **There is no dotted discriminator path.** A nested value normally arrives revived, so `result.status` means `getattr`. Under `LANGGRAPH_STRICT_MSGPACK=true`, or when the value's module is not in `allowed_msgpack_modules`, the same stored bytes arrive as a plain `dict`. A path resolver would have to try both, and a deployment that changes the allowlist would change which branch fires. The author's callable owns the access instead. A `KeyError` there is ordinary Python, and the traceback names that code.
+
+!!! warning "Splits cannot ride `legacy_write` (enforced)"
+    A split runs on read and has no inverse. An old release has no class for the target. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when any split is declared. Drain in-flight threads before the cutover, or accept read-only compatibility.
+
+!!! note "The revive gate sends `None` placeholders"
+    `assert_all_baselined_revive` sends `None` for every required field of the source, and for every recorded field it dropped. Return `None` from `select` when the discriminating value is absent or `None`. The gate then proves the source still constructs. A `select` that reads the placeholder, for example `kw["result"]["status"]`, raises and fails the gate. The failure line says so. Pin each branch with real values through `synthesize_legacy_payload`, as above.
 
 ## Consolidating N classes into one
 
@@ -195,6 +265,7 @@ For cross-module relocations or composite operations, drop to `langgraph_events.
 | Origin-scoped add field | `Migration.add_field(module=..., qualname="<historic>", field=..., default=...)` |
 | Transform fields | `Migration.transform_fields(target=Class, transform=fn)` |
 | Origin-scoped transform | `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` |
+| Split event | `Migration.split_event(source=Class, select=fn, targets=(Target, ...))` |
 | Cross-module rename | `Migration(name=..., operations=(RenameEvent(...),))` |
 | Multiple ops | `Migration(name=..., operations=(op1, op2, ...))` |
 
@@ -216,7 +287,7 @@ migrations = [
 ]
 ```
 
-Pass the live class for refactor safety; strings only for cross-module cases where the class can't be imported at authoring time. `name` is optional everywhere. Raw `RenameEvent` / `AddField` / `TransformFields` are imported from `langgraph_events.serde.migrations` (not re-exported at `langgraph_events.serde`).
+Pass the live class for refactor safety; strings only for cross-module cases where the class can't be imported at authoring time. `name` is optional everywhere. Raw `RenameEvent` / `AddField` / `TransformFields` / `SplitEvent` are imported from `langgraph_events.serde.migrations` (not re-exported at `langgraph_events.serde`).
 
 ## Rolling deploys
 
@@ -685,6 +756,7 @@ Library-private; read directly if introspection needed (neither is MRO-inherited
 - `__lge_origin_backfill__` — set by `@migrate_from(backfill=...)`; accumulated `((module, qualname), {field: default})` entries.
 - `__lge_transform__` — set by `@transform_fields`; the one transform callable.
 - `__lge_origin_transform__` — set by `@migrate_from(transform=...)`; accumulated `((module, qualname), transform)` entries.
+- `__lge_split__` — set by `@split_event`; the one `(select, targets)` pair.
 
 ## Validation guarantees
 
@@ -703,6 +775,11 @@ Errors raised at serde construction (not at first production read):
 - Two transforms on the same identity — `ValueError` naming both migrations
 - `legacy_write=True` combined with any transform — `ValueError` (a transform has no inverse)
 - `migrate_from(transform=...)` with a multi-qualname chain — `ValueError` at decoration
+- A `SplitEvent` source that is a rename source, or does not resolve to a live class — `ValueError`
+- A `SplitEvent` target that is not an `Event` subclass, or does not resolve to that class by scope or import — `ValueError`
+- `SplitEvent` with empty `targets` — `ValueError`. A `select` that is not callable — `TypeError`
+- Two splits on the same identity — `ValueError` naming both migrations. A second `@split_event` on one class — `ValueError` at decoration
+- `legacy_write=True` combined with any split — `ValueError` (a split has no inverse)
 - `migrate_from(backfill=...)` with a multi-qualname chain, an empty dict, or a mutable value (steers to the `Migration.add_field` escape hatch) — `ValueError` at decoration, even earlier
 - A duplicated origin qualname across stacked `@migrate_from` decorators (or within one multi-arg call) — `ValueError` at decoration
 - Unknown `Operation` type in `Migration.operations` — `TypeError`
