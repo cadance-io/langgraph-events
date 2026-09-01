@@ -128,20 +128,20 @@ def int_count(kw: dict) -> dict:
 
 **Two stages.** The identity picks the stage, the same rule as `AddField`:
 
-| Form | Keyed on | Runs | Applies to |
-|---|---|---|---|
-| `@transform_fields(fn)`, `Migration.transform_fields(target=Class, transform=fn)` | the live class | after the rename, before the class-global fills | payloads from every era, including payloads the current release writes |
-| `@migrate_from("Old", transform=fn)`, `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` | a historic identity | before the rename, before the origin fills | payloads written under that exact origin only |
+| Stage | Form | Keyed on | Runs | Applies to |
+|---|---|---|---|---|
+| Class stage | `@transform_fields(fn)`, `Migration.transform_fields(target=Class, transform=fn)` | the live class | after the rename, before the class fills | payloads from every era, including payloads the current release writes |
+| Origin stage | `@migrate_from("Old", transform=fn)`, `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` | a historic identity | before the rename, before the origin fills | payloads written under that exact origin only |
 
-Read-path order: origin transform, origin fills, rename, class transform, class fills. A transform runs before the fills of its stage. A fill still applies to a key the transform removed or never produced.
+Read-path order: the origin stage (transform, then origin fills), the rename, then the class stage (transform, then class fills). A transform runs before the fills of its stage. A fill still applies to a key the transform removed or never produced.
 
 Semantics:
 
 - **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. `transform=lambda kw: {}` discards every stored field.
-- **Idempotent.** A class-global transform sees current payloads for ever. Use `kw.pop("x", None)`. Do not use `del kw["x"]` or `kw["x"]`. A transform must accept a payload from every era.
-- **One transform per identity and stage.** Compose the steps in one callable. A second one is rejected at serde construction.
+- **Idempotent.** A class-stage transform sees current payloads for ever. Use `kw.pop("x", None)`. Do not use `del kw["x"]` or `kw["x"]`. A transform must accept a payload from every era.
+- **One transform per identity and stage.** Compose the steps in one callable. A second decorator is rejected at decoration. A second hand-authored op is rejected at serde construction.
 - **The target must resolve**, live or as a rename source, the same rule as `AddField`.
-- **A transform that raises, or returns a non-dict,** fails the read with `Cannot revive <stored identity>: TransformFields raised <Type>: <message>` and a remedy. Under `tolerate_unresolved()` the identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
+- **A transform that raises, or returns a non-dict,** fails the read with `Cannot revive <stored identity>: TransformFields raised <Type>: <message>` and a remedy. Under `serde.tolerate_unresolved()` the identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
 - `migrate_from(transform=...)` takes exactly one historic qualname per decorator, the same rule as `backfill=`. The two can sit on one decorator. The transform runs first.
 
 !!! warning "Transforms cannot ride `legacy_write` (enforced)"

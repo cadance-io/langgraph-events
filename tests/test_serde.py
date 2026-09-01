@@ -2622,7 +2622,10 @@ def describe_NamespaceAwareSerde():
                 message = str(excinfo.value)
                 assert "DecoReorg.Persist.Persisted" in message
                 assert "recorded 'legacy_flag'" in message
-                assert "Restore the field on the class" in message
+                # One remedy, from the read path: the gate adds the cause
+                # sentence and does not repeat it.
+                assert "drop it from the payload with @transform_fields" in message
+                assert message.count("from the payload") == 1
 
             def with_a_baseline_that_predates_v3():
                 def it_passes(tmp_path: Any):
@@ -3807,7 +3810,7 @@ def _upper_draft(kw: dict[str, Any]) -> dict[str, Any]:
     return kw
 
 
-# A class-global transform composed with a rename. The transform is keyed
+# A class-stage transform composed with a rename. The transform is keyed
 # on the live identity, so it runs on every era: the historic origin and
 # the payloads the current release writes.
 class Gate(Namespace):
@@ -3909,7 +3912,7 @@ def describe_TransformFields():
 
     def when_a_stored_field_changed_type():
         def it_revives_holding_the_retyped_value():
-            # ``@transform_fields`` is the class-global decorator form,
+            # ``@transform_fields`` is the class-stage decorator form,
             # collected from ``namespaces=`` like ``@backfill``.
             serde = NamespaceAwareSerde(namespaces=[Reshaped])
 
@@ -3922,7 +3925,7 @@ def describe_TransformFields():
             assert revived == Reshaped.Counted(count=3)
 
     def when_the_transform_is_keyed_on_the_live_identity():
-        # The class-global stage. It runs after the rename, on every era,
+        # The class stage. It runs after the rename, on every era,
         # so the transform must be idempotent.
 
         def it_runs_on_a_payload_the_current_release_wrote():
@@ -4089,7 +4092,9 @@ def describe_TransformFields():
                 f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
                 f"TransformFields raised KeyError: 'legacy_flag'."
             )
-            assert "kw.pop" in message
+            # The gate sends None for a dropped field, so the remedy must
+            # cover a key that is present but None, not only an absent one.
+            assert "kw.pop('x', None) and a None check" in message
 
         def with_tolerate_unresolved():
             def it_degrades_and_collects_the_identity():
@@ -4138,6 +4143,25 @@ def describe_TransformFields():
 
             with pytest.raises(ValueError, match="Duplicate TransformFields"):
                 NamespaceAwareSerde(namespaces=[Reshaped], migrations=[conflicting])
+
+        def with_two_unnamed_migrations():
+            def it_asks_for_names_instead_of_naming_nothing_twice():
+                from langgraph_events.serde.migrations import Migration
+
+                first = Migration.transform_fields(
+                    target=Reshaped.Trimmed, transform=_drop_legacy_flag
+                )
+                second = Migration.transform_fields(
+                    target=Reshaped.Trimmed, transform=_int_count
+                )
+
+                with pytest.raises(
+                    ValueError,
+                    match=r"by two unnamed migrations\. Pass name= to each",
+                ):
+                    NamespaceAwareSerde(
+                        namespaces=[Reshaped], migrations=[first, second]
+                    )
 
         def with_two_stacked_decorators():
             def it_is_rejected_at_decoration_time():
@@ -4289,8 +4313,8 @@ def describe_TransformFields_revive_gate():
                     )
 
                 message = str(excinfo.value)
-                assert "recorded field 'legacy_flag'" in message
-                assert "Add a TransformFields migration that drops it." in message
+                assert "The baseline recorded 'legacy_flag'." in message
+                assert "@transform_fields" in message
 
         def with_a_transform_that_drops_it():
             def it_passes(tmp_path: Any):

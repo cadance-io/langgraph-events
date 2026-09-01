@@ -99,13 +99,14 @@ class TransformFields:
     a stored value.
 
     The identity picks the stage, the same rule as :class:`AddField`.
-    Name a historic identity covered by a rename and the transform runs
-    BEFORE the rename, only on payloads written under that exact origin.
-    Name the live class and the transform runs AFTER any rename, on
-    payloads from every era, including payloads the current release
-    writes. A transform in the second stage must be idempotent: a key it
-    removes is absent on the next read. Use ``kw.pop("x", None)``, not
-    ``del kw["x"]``. A transform runs before the fills of its stage.
+    Name a historic identity covered by a rename and the transform is the
+    origin stage: it runs BEFORE the rename, only on payloads written
+    under that exact origin. Name the live class and the transform is the
+    class stage: it runs AFTER any rename, on payloads from every era,
+    including payloads the current release writes. A class-stage
+    transform must be idempotent: a key it removes is absent on the next
+    read. Use ``kw.pop("x", None)``, not ``del kw["x"]``. A transform
+    runs before the fills of its stage.
     """
 
     module: str
@@ -231,10 +232,10 @@ class Migration:
         """Single-op transform sugar.
 
         ``name`` labels the migration. ``transform`` rewrites the stored
-        kwargs. Pass the live class as ``target=<class>`` for the
-        class-global stage. Pass ``module``/``qualname`` for a class that
-        cannot be imported at authoring time, and for the origin-scoped
-        stage keyed on a HISTORIC identity. Same convention as
+        kwargs. Pass the live class as ``target=<class>`` for the class
+        stage. Pass ``module``/``qualname`` for a class that cannot be
+        imported at authoring time, and for the origin stage keyed on a
+        HISTORIC identity. Same convention as
         :class:`TransformFields` and :meth:`add_field`.
         """
         module, qualname = _target_identity(
@@ -423,11 +424,18 @@ def _bucket_transforms(
         if target in source:
             first_label = _migration_label(source[target])
             second_label = _migration_label(migration_name)
+            # Two blank names would read "by both an unnamed migration and
+            # an unnamed migration", which names nothing. Say so, and ask
+            # for names.
+            by = (
+                "by two unnamed migrations. Pass name= to each to tell them apart"
+                if first_label == second_label
+                else f"by both {first_label} and {second_label}"
+            )
             raise ValueError(
                 f"Duplicate TransformFields: {op.module}:{op.qualname!r} is "
-                f"transformed by both {first_label} and {second_label}. Each "
-                f"identity may carry at most one transform per stage. "
-                f"Compose the steps in one callable."
+                f"transformed {by}. Each identity may carry at most one "
+                f"transform per stage. Compose the steps in one callable."
             )
         bucket[target] = op
         source[target] = migration_name
@@ -663,7 +671,7 @@ class TransformError(Exception):
 
     Raised by the read path and caught by the serde's ext-hook, which
     turns it into the ``Cannot revive`` message or, under
-    ``tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is the
+    ``serde.tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is the
     transform that failed and ``cause`` is the exception it raised.
     """
 
@@ -712,9 +720,10 @@ def _apply_identity_migrations(
     """Run the read-side migration rule and return ``(module, qualname,
     kwargs)`` for the constructor.
 
-    Order: origin transform, origin-scoped fills, rename, class-global
-    transform, class-global fills. A transform runs before the fills of
-    its stage, and its return value replaces the kwargs. Origin fills run
+    Order: the origin stage (transform, then origin-scoped fills), the
+    rename, then the class stage (transform, then class-global fills). A
+    transform runs before the fills of its stage, and its return value
+    replaces the kwargs. Origin fills run
     before class fills so the precedence is: explicit payload value >
     origin-scoped fill > class-global fill (``setdefault`` never
     overwrites). An op lives in exactly one table — origin keys are rename
@@ -765,8 +774,9 @@ def migrate_from(
     the origin fills. It is the retirement tool for an identity with no
     field-compatible survivor: ``transform=lambda kw: {}`` maps it onto a
     tombstone or a sibling whose fields all have defaults. Same
-    one-qualname rule as ``backfill``. A transform for payloads from
-    *every* era is class-global :func:`transform_fields`'s job.
+    one-qualname rule as ``backfill``. This is the origin stage. A
+    transform for payloads from *every* era is the class stage,
+    :func:`transform_fields`'s job.
 
     Metadata is stashed on the class as ``__lge_migrate_from__`` (plus
     ``__lge_origin_backfill__`` for the per-origin fills and
@@ -783,8 +793,8 @@ def migrate_from(
             "@migrate_from(transform=...) requires exactly one historic "
             "qualname per decorator — a multi-qualname chain is ambiguous "
             "about which origin the transform belongs to. Stack one "
-            "decorator per origin, or use class-global @transform_fields for "
-            "a transform that applies to every era."
+            "decorator per origin, or use @transform_fields, the class stage, "
+            "for a transform that applies to every era."
         )
     if backfill is not None:
         if len(old_qualnames) != 1:
@@ -920,12 +930,12 @@ def transform_fields(
     The class-scoped, auto-collected sibling of :func:`backfill` for a
     field the class dropped, two fields merged into one, or a field whose
     type changed. The metadata becomes a :class:`TransformFields` keyed on
-    this class's current identity, so the transform runs AFTER any
+    this class's current identity: the class stage. It runs AFTER any
     ``@migrate_from`` rename, on payloads from every era, including the
     payloads the current release writes. It must be idempotent: use
     ``kw.pop("x", None)`` for a key that is absent after the first read.
-    For a transform that runs on one historic origin only, use
-    ``migrate_from(..., transform=...)``.
+    For the origin stage, a transform that runs on one historic origin
+    only, use ``migrate_from(..., transform=...)``.
 
     Metadata is stashed as ``__lge_transform__``. One transform per class:
     a second decorator is rejected at decoration. Compose several steps in
@@ -1204,9 +1214,11 @@ def _collect_decorated_migrations(
         # so ``history`` is non-empty whenever ``origin_transforms`` is.
         ops.extend(
             TransformFields(
-                module=origin_module, qualname=origin_qualname, transform=transform
+                module=origin_module,
+                qualname=origin_qualname,
+                transform=origin_transform,
             )
-            for (origin_module, origin_qualname), transform in origin_transforms
+            for (origin_module, origin_qualname), origin_transform in origin_transforms
         )
         # Class-global transform keys on the CURRENT identity, like the
         # class-global AddField above.

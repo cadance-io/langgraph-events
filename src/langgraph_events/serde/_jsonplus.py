@@ -125,9 +125,10 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
         op = exc.op
         return (
             f"The transform keyed on {op.module}.{op.qualname} must accept a "
-            f"payload from every era and return a dict. Use kw.pop('x', None) "
-            f"for a key that can be absent. See 'Dropping, merging or retyping "
-            f"a field' in docs/event-migrations.md."
+            f"payload from every era and return a dict. Guard a key that can "
+            f"be absent or None: kw.pop('x', None) and a None check. See "
+            f"'Dropping, merging or retyping a field' in "
+            f"docs/event-migrations.md."
         )
     if not isinstance(exc, TypeError):
         return (
@@ -149,8 +150,8 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     return (
         f"{qualname} does not declare the field {field!r} the stored "
         f"payload carries. Add {field!r} to the class, matching the "
-        f"old class's shape, or drop it from the payload with a "
-        f"migration."
+        f"old class's shape, or drop it from the payload with "
+        f"@transform_fields."
     )
 
 

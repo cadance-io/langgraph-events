@@ -325,12 +325,13 @@ def _revive_check(
 
 
 def _failure_hint(exc: Exception) -> str:
-    """The cause and the action that tie *exc* back to what the gate sent.
+    """The cause that ties *exc* back to what the gate sent.
 
     A kwarg the live class rejected: the baseline recorded it, the class
-    dropped it, and a stored payload still carries it. A transform that
-    raised: the gate sent a ``None`` placeholder for each dropped field,
-    and the transform may need a real value. Empty for every other
+    dropped it, and a stored payload still carries it. The remedy is
+    already in *exc*, so the sentence states the cause only. A transform
+    that raised: the gate sent a ``None`` placeholder for each dropped
+    field, and the transform may need a real value. Empty for every other
     failure.
     """
     text = str(exc)
@@ -344,10 +345,7 @@ def _failure_hint(exc: Exception) -> str:
     if match is None:
         return ""
     field = match.group(1)
-    return (
-        f" The baseline recorded {field!r}. Restore the field on the class, "
-        f"or add a migration that drops it from the payload."
-    )
+    return f" The baseline recorded {field!r}."
 
 
 def assert_all_baselined_revive(
