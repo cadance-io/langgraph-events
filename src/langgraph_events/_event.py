@@ -708,15 +708,18 @@ class Cancelled(Halted):
 
 
 class Abandoned(Halted):
-    """A paused thread was deliberately settled without an answer.
+    """A thread was deliberately settled by ``abandon()``/``aabandon()``.
 
-    Emitted by ``EventGraph.abandon()`` / ``aabandon()`` to end a thread's
-    pause without ever dispatching the pending ``Interrupted`` — the
-    opposite of ``resume()``, which answers it. Use this to retire an
+    Emitted by ``EventGraph.abandon()`` / ``aabandon()`` to end a thread
+    without ever dispatching whatever ``Interrupted`` it was paused on —
+    the opposite of ``resume()``, which answers it. Use this to retire an
     ``Interrupted`` subclass: answering a paused thread to drain it before
     deleting the class only makes things worse, since ``Interrupted``
     joins the event log on resume, appending the very identity being
-    retired. ``abandon()`` never does that.
+    retired. ``abandon()`` never does that. (``abandon()`` also accepts a
+    thread with no pending interrupt at all — an already-completed
+    thread, say — as a plain "settle this thread now" call; see
+    :meth:`EventGraph.abandon`.)
 
     ``discarded`` is the **type name** of the ``Interrupted`` subclass
     that was thrown away (a string, for diagnostics — mirroring how
@@ -727,7 +730,13 @@ class Abandoned(Halted):
     ``AttributeError``. A raw ``langgraph.types.interrupt("...")`` thrown
     from a handler (rather than an ``Interrupted`` subclass) leaves a bare
     string in its place instead, which carries no useful type name — the
-    type-name string is the whole point of this field.
+    type-name string is the whole point of this field. When a fanned-out
+    dispatch left more than one task paused, the discarded type names are
+    joined with ``", "`` (so a single-value equality check like
+    ``e.discarded == "OrderApprovalRequested"`` silently stops matching
+    once a second task is also pending — check ``in`` or split on ``", "``
+    if that is reachable in your graph). ``discarded`` is ``""`` when
+    there was no pending interrupt to discard.
 
     Like every terminal event produced by the settle paths (this one and
     ``Unresumable``), ``Abandoned`` is **recorded, not dispatched**:

@@ -25,6 +25,7 @@ from langchain_core.messages import (
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END
 from langgraph.types import StateUpdate
+from langgraph.types import interrupt as lg_interrupt
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
@@ -4236,6 +4237,42 @@ def _go_ends(event: _Go) -> Ended:
     return Ended(result="went")
 
 
+class _PauseA(Interrupted):
+    pass
+
+
+class _PauseB(Interrupted):
+    pass
+
+
+@on(Started)
+def _waiter_a(event: Started) -> _PauseA:
+    """Fans out alongside _waiter_b so two tasks pause in the same
+    superstep — pins abandon()'s discarded-name computation against
+    `tasks[0]`."""
+    return _PauseA()
+
+
+@on(Started)
+def _waiter_b(event: Started) -> _PauseB:
+    return _PauseB()
+
+
+@on(Started)
+def _completes(event: Started) -> None:
+    """Handler that ends the run with no interrupt at all."""
+    return None
+
+
+@on(Started)
+def _raw_pause(event: Started) -> None:
+    """Pauses via a bare `langgraph.types.interrupt(...)` rather than an
+    `Interrupted` subclass, leaving a non-Event payload on the task —
+    pins the `isinstance(value, Event)` filter in
+    `_discarded_interrupt_name`."""
+    lg_interrupt("raw payload")
+
+
 def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
     """A graph whose paused handler was removed, plus the paused thread config."""
     cfg = {"configurable": {"thread_id": tid}}
@@ -4445,6 +4482,51 @@ def describe_abandon():
             log = graph.get_state(cfg).events
             assert log.latest(Abandoned).discarded == "_Pause"
 
+        def it_joins_discarded_names_across_every_paused_task():
+            # Reverting `_discarded_interrupt_name` to `snapshot.tasks[0]`
+            # would silently drop `_PauseB` and leave this green with only
+            # `_PauseA` — asserting both names catches that regression.
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "abandon-multi-interrupt"}}
+            graph = EventGraph([_waiter_a, _waiter_b], checkpointer=saver)
+            graph.invoke(Started(data="x"), config=cfg)
+
+            graph.abandon(cfg)
+
+            log = graph.get_state(cfg).events
+            names = set(log.latest(Abandoned).discarded.split(", "))
+            assert names == {"_PauseA", "_PauseB"}
+
+        def it_leaves_discarded_empty_absent_a_pending_interrupt():
+            # abandon() on a thread that ran to completion without ever
+            # interrupting — `discarded` has nothing to name.
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "abandon-no-interrupt-at-all"}}
+            graph = EventGraph([_completes], checkpointer=saver)
+            graph.invoke(Started(data="x"), config=cfg)
+
+            graph.abandon(cfg)
+
+            log = graph.get_state(cfg).events
+            assert log.latest(Abandoned).discarded == ""
+
+        def it_ignores_a_non_event_interrupt_payload():
+            # A bare `langgraph.types.interrupt(...)` (not an `Interrupted`
+            # subclass) leaves a plain string on the task, not an Event.
+            # Dropping the `isinstance(value, Event)` filter would record
+            # "str" here instead of "" — the exact defect the brief's
+            # docstring paragraph on `Abandoned` exists to prevent.
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "abandon-raw-interrupt"}}
+            graph = EventGraph([_raw_pause], checkpointer=saver)
+            graph.invoke(Started(data="x"), config=cfg)
+            assert graph.get_state(cfg).is_interrupted
+
+            graph.abandon(cfg)
+
+            log = graph.get_state(cfg).events
+            assert log.latest(Abandoned).discarded == ""
+
         def it_records_the_reason():
             graph, cfg = _paused_pair(MemorySaver(), "abandon-reason")
 
@@ -4489,6 +4571,29 @@ def describe_abandon():
 
                 with pytest.raises(UnresumableError, match="abandon"):
                     graph.resume(_Go(), config=cfg)
+
+        def with_the_thread_later_reused():
+            def it_raises_the_generic_message():
+                # it_leaves_the_thread_usable proves a thread can be
+                # legitimately reused after abandon(). Once it is, the
+                # Abandoned that triggered the earlier message is no
+                # longer the *latest* Halted — resume() must fall back to
+                # the generic diagnostic, not keep claiming abandonment.
+                saver = MemorySaver()
+                cfg = {"configurable": {"thread_id": "abandon-resume-reused"}}
+                EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+                    Started(data="x"), config=cfg
+                )
+                v2 = EventGraph([_go_ends], checkpointer=saver)
+                v2.abandon(cfg)
+                v2.invoke(_Go(), config=cfg)
+
+                with pytest.raises(UnresumableError) as excinfo:
+                    v2.resume(_Go(), config=cfg)
+
+                message = str(excinfo.value)
+                assert "abandon" not in message.lower()
+                assert "not awaiting input" in message
 
         def with_halt_policy():
             def it_does_not_resurrect_the_retired_identity():
@@ -4690,6 +4795,22 @@ def describe_async_only_checkpointer():
                 assert result is None
                 state = await graph.compiled.aget_state(cfg)
                 assert state.next == ()
+
+            @pytest.mark.asyncio
+            async def it_leaves_no_pending_interrupt_write():
+                # The assertion that actually proves the class is
+                # retirable — mirrors the sync
+                # it_leaves_no_pending_interrupt_write, driven through
+                # _AsyncOnlySaver's async-only read path.
+                saver = _AsyncOnlySaver()
+                cfg = {"configurable": {"thread_id": "aabandon-pending-write"}}
+                graph = EventGraph([_waiter, _go_noop], checkpointer=saver)
+                await graph.ainvoke(Started(data="x"), config=cfg)
+
+                await graph.aabandon(cfg)
+
+                tup = await saver.aget_tuple(cfg)
+                assert tup.pending_writes == []
 
             @pytest.mark.asyncio
             async def it_records_the_discarded_type_name_and_reason():

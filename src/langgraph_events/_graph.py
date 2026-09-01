@@ -1429,26 +1429,40 @@ class EventGraph:
             return True
         return bool((await self._compile().aget_state(config)).next)
 
-    def _unresumable_message(self, log: EventLog | None = None) -> str:
+    def _unresumable_message(
+        self, log: EventLog | None = None, config: Any = None
+    ) -> str:
         """Build the diagnostic for a ``resume()`` that would be a no-op.
 
         *log* is the thread's event log, when the caller already has it (both
-        call sites do — see :meth:`_unresumable_short_circuits`). When its
-        latest ``Halted`` is an ``Abandoned``, the thread was deliberately
-        settled by ``abandon()``/``aabandon()`` rather than left pending by a
-        renamed/removed handler, so the message says that instead — the
-        likely real sequence is an operator abandoning threads while a stale
-        approval card elsewhere still posts its answer.
+        call sites do — see :meth:`_unresumable_short_circuits`). The
+        abandoned diagnosis is keyed on the *last* event being an
+        ``Abandoned``, not merely present anywhere in the log
+        (``log.latest(Halted)`` searches the whole log): a thread can be
+        legitimately reused after ``abandon()`` (see :meth:`abandon`), and
+        once it is, the earlier ``Abandoned`` is no longer the reason a
+        later ``resume()`` is a no-op — that reason is whatever actually
+        halted it since. When the thread *was* left abandoned, the message
+        says so — the likely real sequence is an operator abandoning
+        threads while a stale approval card elsewhere still posts its
+        answer — and surfaces the two facts the reader needs to act:
+        the thread id and, if one is recorded, the discarded interrupt's
+        type name(s).
         """
-        if log is not None:
-            latest = log.latest(Halted)
-            if isinstance(latest, Abandoned):
-                return (
-                    "resume() called on a thread that was abandoned via "
-                    f"abandon()/aabandon() (reason={latest.reason!r}). The "
-                    "thread was deliberately settled without an answer and "
-                    "is terminal; it cannot be resumed."
-                )
+        if log and isinstance(log[-1], Abandoned):
+            abandoned = log[-1]
+            thread_id = (config or {}).get("configurable", {}).get("thread_id")
+            detail = ""
+            if abandoned.reason:
+                detail += f" reason={abandoned.reason!r}."
+            if abandoned.discarded:
+                detail += f" discarded={abandoned.discarded!r}."
+            return (
+                f"resume() called on thread {thread_id!r}, which was "
+                f"abandoned via abandon()/aabandon().{detail} The thread was "
+                "deliberately settled without an answer and is terminal; it "
+                "cannot be resumed."
+            )
         return (
             "resume() called on a thread that is not awaiting input. The paused "
             "handler may have been renamed/removed, or the thread already "
@@ -1456,20 +1470,22 @@ class EventGraph:
             "handler, or set EventGraph(on_unresumable='halt'|'warn')."
         )
 
-    def _unresumable_short_circuits(self, log: EventLog | None = None) -> bool:
+    def _unresumable_short_circuits(
+        self, log: EventLog | None = None, config: Any = None
+    ) -> bool:
         """Apply the ``raise``/``warn`` arm of ``on_unresumable``; return whether
         the caller should short-circuit (``True`` for ``warn`` — return the log
         unchanged) rather than append a terminal event (``False`` for ``halt``).
-        ``raise`` raises. *log* is passed through to :meth:`_unresumable_message`
-        so the diagnostic can distinguish an abandoned thread; the read itself is
-        left to the caller so each path uses the matching reader (the async path
-        must ``await aget_state`` — an async-only checkpointer rejects sync reads
-        from the running loop).
+        ``raise`` raises. *log*/*config* are passed through to
+        :meth:`_unresumable_message` so the diagnostic can distinguish an
+        abandoned thread; the state read itself is left to the caller so each
+        path uses the matching reader (the async path must ``await aget_state``
+        — an async-only checkpointer rejects sync reads from the running loop).
         """
         if self._on_unresumable == "raise":
-            raise UnresumableError(self._unresumable_message(log))
+            raise UnresumableError(self._unresumable_message(log, config))
         if self._on_unresumable == "warn":
-            warn_user(self._unresumable_message(log))
+            warn_user(self._unresumable_message(log, config))
             return True
         return False
 
@@ -1538,7 +1554,7 @@ class EventGraph:
         """
         config = kwargs.get("config")
         log = self.get_state(config).events
-        if self._unresumable_short_circuits(log):
+        if self._unresumable_short_circuits(log, config):
             return log
         return self._settle(config, self._unresumable_event(value))
 
@@ -1548,7 +1564,7 @@ class EventGraph:
         """Async sibling of :meth:`_apply_unresumable_policy`."""
         config = kwargs.get("config")
         log = (await self.aget_state(config)).events
-        if self._unresumable_short_circuits(log):
+        if self._unresumable_short_circuits(log, config):
             return log
         return await self._asettle(config, self._unresumable_event(value))
 
@@ -1603,7 +1619,9 @@ class EventGraph:
         return ", ".join(names)
 
     @staticmethod
-    def _require_settleable(method: str, snapshot: StateSnapshot, config: Any) -> None:
+    def _require_settleable(
+        method: str, snapshot: StateSnapshot, config: RunnableConfig
+    ) -> None:
         """Guard ``abandon()``/``aabandon()`` against a thread with nothing
         to settle.
 
@@ -1615,14 +1633,14 @@ class EventGraph:
         """
         if snapshot.values.get("events"):
             return
-        thread_id = (config or {}).get("configurable", {}).get("thread_id")
+        thread_id = config.get("configurable", {}).get("thread_id")
         raise ValueError(
             f"{method}() has no events to settle on thread {thread_id!r}: the "
             "thread was never run (or only pre_seed()ed)."
         )
 
     def abandon(self, config: RunnableConfig, *, reason: str = "") -> None:
-        """Settle a paused thread without answering it, retiring its interrupt.
+        """Settle a thread without dispatching whatever it was paused on.
 
         Where :meth:`resume` answers a pending ``Interrupted`` and dispatches
         the answer, ``abandon()`` discards it: the thread ends on a terminal
@@ -1633,10 +1651,16 @@ class EventGraph:
         things worse, since the answer causes ``Interrupted`` to join the
         event log, appending the very identity being retired.
 
+        A thread with no pending interrupt at all — one that already ran
+        to completion, for instance — settles too: it is a quieter no-op,
+        recording an ``Abandoned`` with ``discarded=""`` rather than
+        raising, since there is nothing wrong with calling ``abandon()``
+        on a thread that turns out not to have needed it.
+
         Does **not** consult ``on_unresumable`` — that policy governs an
         accidental no-op ``resume()``; abandoning is deliberate. Requires a
         checkpointer. Raises ``ValueError`` if the thread has no events to
-        settle (never run, or only ``pre_seed``ed).
+        settle at all (never run, or only ``pre_seed``ed).
 
         Returns ``None`` — ``abandon()`` runs no graph, so there is no run
         log to hand back. Callers who want the log call
