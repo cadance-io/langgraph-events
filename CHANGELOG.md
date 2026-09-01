@@ -24,7 +24,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `resume()` on an already-abandoned thread now names the abandonment in its
   `UnresumableError` message instead of pointing at a handler rename/removal.
 
+- **`EventGraph.threads_paused_on()` / `.athreads_paused_on()`** — configs for every thread
+  whose latest checkpoint has a pending interrupt, optionally filtered to an `Interrupted`
+  class or subclass. Closes the discovery gap in the `abandon()` retirement workflow: a client
+  no longer needs `graph.compiled` or `snapshot.tasks[*].interrupts[*].value` to find the
+  threads to abandon. Requires a checkpointer. Reads every checkpoint the checkpointer holds —
+  O(all checkpoints), not O(paused threads); a large deployment should filter thread ids
+  server-side instead. Raises `ValueError` if the checkpointer's `list()`/`alist()` is
+  unimplemented, naming the method (closes part of [#164]).
+
+- **`abandon()` / `aabandon()` gained `require_interrupt: bool = True`.** By default, both now
+  raise `ValueError` on a thread with no pending interrupt, naming the thread and pointing at
+  `require_interrupt=False`. Previously they settled such a thread silently, recording
+  `Abandoned(discarded="")` — appending a terminal event onto settled business history with no
+  warning. Pass `require_interrupt=False` to keep the old behaviour (closes part of [#164]).
+
+[#164]: https://github.com/cadance-io/langgraph-events/issues/164
+
 ### Fixed
+
+- **`GraphState.interrupted` was `None` on a first pause.** `get_state().interrupted` read only
+  the event log, and an `Interrupted` joins the log only on resume — so a thread paused for the
+  first time reported `is_interrupted=True` with `interrupted=None`. The published
+  `docs/control-flow.md` example crashed on this (`AttributeError` reading `.order_id`). Now
+  falls back to the snapshot's pending interrupt payload when the log has none yet (closes part
+  of [#164]).
 
 - **`on_unresumable="halt"` re-armed the thread it was supposed to retire.** The policy appended
   its terminal `Unresumable(Halted)` event with a single `update_state` call. That call re-ran

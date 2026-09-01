@@ -458,15 +458,27 @@ The two tracks are independent — do both, in one PR:
 
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
-`abandon()` works on one thread at a time. The library has no helper to list or bulk-settle paused threads. Find the paused thread IDs yourself, for example from your own operational records.
+`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you — no need for your own operational records or a direct checkpointer query.
+
+!!! warning "This retires paused threads only — see [#159](https://github.com/cadance-io/langgraph-events/issues/159)"
+    A thread that already answered the interrupt holds the retired class in its *settled* history, not a pending one. `threads_paused_on()` does not find it, and `abandon()` does not touch it. Deleting the class then makes that thread raise `Cannot revive` on any read. There is no library tool yet for a settled-history identity — that gap is tracked as [#159](https://github.com/cadance-io/langgraph-events/issues/159). **Retirement is not complete until #159 lands**; until then, deleting the class is safe only if you can prove no thread's settled history references it.
 
 ### Sequence
 
-1. Find every thread paused on the class. There is no built-in lookup — use your own operational records or query the checkpointer directly.
-2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread.
+1. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass)`, **before** deleting the class — see the warning below.
+2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
 3. Verify: `graph.get_state(config).is_interrupted` is `False` for every thread.
 4. Delete the class from the codebase.
 5. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
+
+```python
+for config in graph.threads_paused_on(EventClass):
+    graph.abandon(config, reason="retiring EventClass")
+    assert not graph.get_state(config).is_interrupted
+```
+
+!!! warning "Enumerate and audit before you delete"
+    A stored checkpoint blob names its event classes by module and qualname. `saver.list()` — the mechanism behind `threads_paused_on()`, and anything else that walks the checkpointer — raises once a blob names a class the current codebase no longer imports. Run step 1 (and any wider audit of your own) **before** step 4, never after: deleting first breaks the very enumeration this sequence depends on.
 
 ### Why the baseline write needs `allow_removed=True`
 
@@ -475,6 +487,9 @@ Deleting the class drops an identity from the graph's topology. `write_baseline`
 Skip this step and the *next* baseline write for an unrelated change fails with the same error, pointing at the retired class. `abandon()` clearing the checkpoints is what makes the deletion safe; `allow_removed=True` is what makes the baseline write accept it.
 
 Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage gates](#coverage-gates) stop checking the retired identity — it is no longer in the baseline they read.
+
+!!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
+    Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips — this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE, allow_removed=True)` re-baselines both the event identity and the handler node in one write; no separate step is needed.
 
 ## Reserved attributes
 

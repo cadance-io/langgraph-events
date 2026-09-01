@@ -188,13 +188,20 @@ See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkp
 graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-`abandon()` settles one thread per call. The library has no helper to list the threads paused on a given `Interrupted`.
+`abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`):
+
+```python
+for config in graph.threads_paused_on(OrderConfirmationRequested):
+    graph.abandon(config, reason="retiring OrderConfirmationRequested")
+```
+
+Omit the class to get every paused thread. `threads_paused_on()` reads every checkpoint the checkpointer holds — cost is O(all checkpoints), not O(paused threads). A large deployment should filter thread IDs server-side instead of calling it directly.
 
 `abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass — resuming every paused thread first would append the very identity you are deleting.
 
 The thread is terminal afterwards. `abandon()` appends a terminal [`Abandoned`](api.md#system-events) event (a [`Halted`](concepts.md#system-events) subtype), leaves nothing scheduled, and preserves any completed sibling handler's writes from the same fanned-out superstep.
 
-`abandon()` raises `ValueError` if the thread has no events to settle — never run, or only `pre_seed()`ed. Abandoning a thread with no pending interrupt is legal: it records `Abandoned(discarded="")`. This makes a loop over candidate thread IDs safe — not every ID needs to be paused.
+`abandon()` raises `ValueError` if the thread has no events to settle — never run, or only `pre_seed()`ed. `abandon()` also raises `ValueError` if the thread has no pending interrupt, naming the thread — this catches a stray ID in a candidate list before it silently closes out settled business history. Pass `require_interrupt=False` to settle such a thread anyway; it records `Abandoned(discarded="")`.
 
 Like every event on this settle path, `Abandoned` is recorded, not dispatched — `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` and `.discarded`. `.reason` is the caller-supplied string, `""` if none. `.discarded` holds the discarded interrupts' type names, deduped and joined with `", "`, `""` if none. Match it with `in` or split on `", "` — never `==`. A fanned-out superstep can pause two interrupts, and `==` stops matching then.
 
