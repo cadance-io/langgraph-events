@@ -5204,6 +5204,110 @@ def describe_athreads_paused_on():
                 await graph.athreads_paused_on()
 
 
+def describe_delete_first_retirement():
+    # The full delete-first scenario (#164): pause a thread on an
+    # Interrupted subclass, then delete the class so it no longer
+    # imports — simulated with a locally-scoped class, which can never
+    # resolve via import + getattr, the same effect as deleting it and
+    # restarting the process. Discovery and abandon() must survive this:
+    # it is precisely the state a retirement caller is hunting, and the
+    # CI coverage gates never catch it (they compare the baseline to the
+    # topology, never read a checkpoint).
+
+    def _paused_unrevivable_pair(saver, tid: str):
+        from langgraph_events.serde import NamespaceAwareSerde
+
+        class _Retiring(Interrupted):
+            pass
+
+        @on(Started)
+        def wait(event: Started) -> _Retiring:
+            return _Retiring()
+
+        cfg = {"configurable": {"thread_id": tid}}
+        saver.serde = NamespaceAwareSerde(events=(Started, _Retiring))
+        EventGraph([wait], checkpointer=saver).invoke(Started(data="x"), config=cfg)
+
+        # "Deletion": a fresh serde whose scope and import walk can no
+        # longer reach `_Retiring` — it was never a module attribute to
+        # begin with.
+        saver.serde = NamespaceAwareSerde(events=(Started,))
+        return EventGraph([_completes], checkpointer=saver), cfg
+
+    def when_using_threads_paused_on():
+        def it_still_finds_the_thread():
+            graph, _cfg = _paused_unrevivable_pair(
+                MemorySaver(), "delete-first-discover"
+            )
+
+            found = graph.threads_paused_on()
+
+            assert [c["configurable"]["thread_id"] for c in found] == [
+                "delete-first-discover"
+            ]
+
+        def it_does_not_match_a_live_class_filter():
+            # There is no class object left to isinstance-check against
+            # — a filter must not claim a false match.
+            graph, _cfg = _paused_unrevivable_pair(MemorySaver(), "delete-first-filter")
+
+            assert graph.threads_paused_on(_Pause) == []
+
+    def when_using_abandon():
+        def it_settles_the_thread_under_the_default():
+            graph, cfg = _paused_unrevivable_pair(MemorySaver(), "delete-first-abandon")
+
+            graph.abandon(cfg)  # require_interrupt=True (default) must not raise
+
+            log = graph.get_state(cfg).events
+            assert log.latest(Abandoned).discarded  # carries the recorded name
+            assert graph.threads_paused_on() == []
+
+    async def _apaused_unrevivable_pair(saver, tid: str):
+        from langgraph_events.serde import NamespaceAwareSerde
+
+        class _ARetiring(Interrupted):
+            pass
+
+        @on(Started)
+        def wait(event: Started) -> _ARetiring:
+            return _ARetiring()
+
+        cfg = {"configurable": {"thread_id": tid}}
+        saver.serde = NamespaceAwareSerde(events=(Started, _ARetiring))
+        await EventGraph([wait], checkpointer=saver).ainvoke(
+            Started(data="x"), config=cfg
+        )
+
+        saver.serde = NamespaceAwareSerde(events=(Started,))
+        return EventGraph([_completes], checkpointer=saver), cfg
+
+    def when_using_athreads_paused_on():
+        @pytest.mark.asyncio
+        async def it_still_finds_the_thread():
+            graph, _cfg = await _apaused_unrevivable_pair(
+                MemorySaver(), "delete-first-adiscover"
+            )
+
+            found = await graph.athreads_paused_on()
+
+            assert [c["configurable"]["thread_id"] for c in found] == [
+                "delete-first-adiscover"
+            ]
+
+    def when_using_aabandon():
+        @pytest.mark.asyncio
+        async def it_settles_the_thread_under_the_default():
+            graph, cfg = await _apaused_unrevivable_pair(
+                MemorySaver(), "delete-first-aabandon"
+            )
+
+            await graph.aabandon(cfg)  # require_interrupt=True (default) must not raise
+
+            log = (await graph.aget_state(cfg)).events
+            assert log.latest(Abandoned).discarded
+
+
 def describe_assert_resume_recovers():
     # Convenience helper: collapses the interrupt -> rebuild -> resume recovery
     # proof for an @on(previously=) rename into one assertion — the handler

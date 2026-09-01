@@ -458,24 +458,34 @@ The two tracks are independent — do both, in one PR:
 
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
-`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you — no need for your own operational records or a direct checkpointer query. It reads each thread's checkpoint directly, so it still finds a thread whose handler has already been removed from the graph — retiring an `Interrupted` usually retires the handler that produced it too, and this is the common order to do it in.
+`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you — no need for your own operational records or a direct checkpointer query.
 
-!!! warning "This retires paused threads only — see [#159](https://github.com/cadance-io/langgraph-events/issues/159)"
-    A thread that already answered the interrupt holds the retired class in its *settled* history, not a pending one. `threads_paused_on()` does not find it, and `abandon()` does not touch it. Deleting the class then makes that thread raise `Cannot revive` on any read. There is no library tool yet for a settled-history identity — that gap is tracked as [#159](https://github.com/cadance-io/langgraph-events/issues/159). **Retirement is not complete until #159 lands**; until then, deleting the class is safe only if you can prove no thread's settled history references it.
+`threads_paused_on()` and `abandon()` read each thread's checkpoint directly, not the graph's compiled topology. Two deletions this survives, with different outcomes:
+
+- The **handler** that produced the interrupt is already removed from the graph. The class still imports, so the interrupt revives normally and a class filter still matches it. This is the common order: retiring an `Interrupted` usually retires the handler that produced it first.
+- The **class** itself is already deleted and no longer imports — the normal habit is to ship the class deletion in the same release as the handler's, and this section used to train that habit. The interrupt can't revive, so `threads_paused_on()` still returns the thread (call it with no filter — a class filter can never match an identity with no class) and `abandon()` still settles it, recording the interrupt's last-known qualname in `discarded` instead of a live instance.
+
+!!! warning "This covers paused threads only — see [#159](https://github.com/cadance-io/langgraph-events/issues/159)"
+    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not a pending one — a different read path than the one above, and it stays strict. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it; reading its history after the class is deleted still raises `Cannot revive`, with no degrade. There is no library tool yet for a settled-history identity — that gap is tracked as [#159](https://github.com/cadance-io/langgraph-events/issues/159). **Retirement is not complete until #159 lands**; until then, deleting the class is safe only if you can prove no thread's settled history references it, or you accept the recovery path below.
+
+`Cannot revive` states the fix directly: settle the thread with `abandon()`/`aabandon()` before deleting the class, or map the dead identity onto a tombstone with `@migrate_from` — see [Recovering a delete-first deployment](#recovering-a-delete-first-deployment) below.
 
 ### Sequence
 
 1. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass)`.
 2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
-3. Verify: `graph.get_state(config).is_interrupted` is `False` for every thread.
+3. Verify: `graph.threads_paused_on(EventClass) == []`.
 4. Delete the class from the codebase.
 5. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
 
 ```python
 for config in graph.threads_paused_on(EventClass):
     graph.abandon(config, reason="retiring EventClass")
-    assert not graph.get_state(config).is_interrupted
+assert graph.threads_paused_on(EventClass) == []
 ```
+
+!!! warning "Step 3 is not `assert not graph.get_state(config).is_interrupted`"
+    Once the handler is deleted (step 4, or already done — the common order), `get_state()`'s `is_interrupted` reads the graph's compiled topology and is `False` on a thread that is *still paused*: the check would pass without proving anything. `threads_paused_on()` reads the checkpoint directly and stays accurate regardless of which handlers this graph still registers.
 
 ### Why the baseline write needs `allow_removed=True`
 
@@ -487,6 +497,29 @@ Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage
 
 !!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
     Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips — this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE, allow_removed=True)` re-baselines both the event identity and the handler node in one write; no separate step is needed.
+
+!!! warning "`allow_removed=True` accepts every removal in the write, not just this one"
+    The flag is per-write, not per-identity. It tells `write_baseline` to accept **every** identity the new snapshot drops, not only the one you intend to retire. Review the diff `write_baseline` would apply before running it with `allow_removed=True` — an unrelated real regression bundled into the same write is rubber-stamped along with the intentional retirement, and nothing catches it afterward.
+
+### Recovering a delete-first deployment
+
+If the class was deleted before every paused thread was settled, `threads_paused_on()` and `abandon()` already recover the **paused** case on their own — see the two-deletions note above. A thread that had already **answered** the interrupt (the #159 case) needs the fix below too.
+
+Map the dead identity onto a tombstone class in a follow-up release:
+
+```python
+from langgraph_events import Interrupted
+from langgraph_events.serde import migrate_from
+
+
+@migrate_from("Order.ApprovalRequired")
+class RetiredGate(Interrupted):
+    pass
+```
+
+`in_module=` defaults to `RetiredGate.__module__` — pass it explicitly if `Order.ApprovalRequired` lived in a different module. `RetiredGate` must accept the same fields `Order.ApprovalRequired` did, or revival raises `TypeError`; a field-free tombstone works only if the retired class had no fields.
+
+`RetiredGate` is a plain module-level class, not inside a `Namespace` — pass it via the serde's `events=` (`from_namespaces(..., checkpointer=...)` does this for you if `RetiredGate` is collected some other way; a hand-built `NamespaceAwareSerde` needs `events=(..., RetiredGate)` explicitly). Redeploy, and every read recovers: `threads_paused_on()` lists the threads again — matched against a live `RetiredGate`, not a degraded identity — `abandon()` settles them, and a thread that had already answered the interrupt revives too. This closes the #159 gap for this one identity without waiting on the library-level fix.
 
 ## Reserved attributes
 

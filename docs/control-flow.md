@@ -205,6 +205,8 @@ The thread is terminal afterwards. `abandon()` appends a terminal [`Abandoned`](
 
 Like every event on this settle path, `Abandoned` is recorded, not dispatched — `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` and `.discarded`. `.reason` is the caller-supplied string, `""` if none. `.discarded` holds the discarded interrupts' type names, deduped and joined with `", "`, `""` if none. Match it with `in` or split on `", "` — never `==`. A fanned-out superstep can pause two interrupts, and `==` stops matching then.
 
+`threads_paused_on()` and `abandon()` still work if the `Interrupted` class itself has already been deleted, not just its handler — the delete-first mistake this library's docs used to train. Neither can construct the class anymore, so `discarded` then carries the interrupt's last-known qualname instead of a live instance. See [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment) to map that identity back onto a tombstone class — the fix also revives any thread that had already answered the interrupt.
+
 `abandon()` cleans only the live checkpoint — a historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#the-minimum-case-rename-inside-a-namespace).
 
 !!! warning "Concurrent runs"

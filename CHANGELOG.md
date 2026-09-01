@@ -45,6 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already gone from the graph. Pass `require_interrupt=False` to keep the old behaviour
   (closes part of [#164]).
 
+- **`threads_paused_on()`/`abandon()` now survive a deleted `Interrupted` class, not only a
+  removed handler.** A stored pending interrupt naming a class that no longer imports used to
+  raise `Cannot revive` from both — the exact tool meant to clean up that state was the thing
+  that broke on it. Both now degrade: the thread stays in `threads_paused_on()`'s result, and
+  `abandon()`/`aabandon()` settle it under the default `require_interrupt=True`, recording the
+  interrupt's last-known qualname in `Abandoned.discarded` instead of a live instance. Scoped to
+  these two operations only — every other read (`get_state()`, `resume()`, `invoke()`, …) stays
+  strict, so a genuine revival bug still raises. The `Cannot revive` message now states the
+  remedy: settle with `abandon()`/`aabandon()` before deleting the class, or map the identity
+  onto a tombstone with `@migrate_from()` — see [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment)
+  (closes part of [#164]).
+
 [#164]: https://github.com/cadance-io/langgraph-events/issues/164
 
 ### Fixed
