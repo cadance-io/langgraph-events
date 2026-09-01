@@ -175,6 +175,17 @@ class CoverageError(AssertionError):
     """
 
 
+MIGRATION_REMEDY = (
+    "For each: either add @migrate_from to the surviving class, append a "
+    "Migration to migrations=, or regenerate the baseline if the identity "
+    "is intentionally dropped."
+)
+"""Shared remedy line for every gate that fails on an unreachable event
+identity (``MigrationCoverageError`` and both ``_assert_baselined`` gates
+in ``testing.py``) — one wording, so a fix that works for one gate's
+failure reads the same for the others."""
+
+
 class MigrationCoverageError(CoverageError):
     """Raised when a baselined event identity has no migration and no live class.
 
@@ -187,12 +198,11 @@ class MigrationCoverageError(CoverageError):
         self.uncovered = uncovered
         joined = ", ".join(f"{m}:{q}" for m, q in uncovered)
         plural = "y" if len(uncovered) == 1 else "ies"
+        verb = "is" if len(uncovered) == 1 else "are"
         super().__init__(
-            f"{len(uncovered)} identit{plural} in the baseline are neither "
-            f"currently live nor covered by a migration: {joined}. For each: "
-            f"either add @migrate_from to the surviving class, append a "
-            f"Migration to migrations=, or regenerate the baseline if the "
-            f"identity is intentionally dropped."
+            f"{len(uncovered)} identit{plural} in the baseline {verb} neither "
+            f"currently live nor covered by a migration: {joined}. "
+            f"{MIGRATION_REMEDY}"
         )
 
 
@@ -209,9 +219,10 @@ class HandlerCoverageError(CoverageError):
         self.uncovered = uncovered
         joined = ", ".join(uncovered)
         plural = "" if len(uncovered) == 1 else "s"
+        verb = "resolves" if len(uncovered) == 1 else "resolve"
         hint = uncovered[0] if uncovered else "old_name"
         super().__init__(
-            f"{len(uncovered)} baselined handler{plural} no longer resolve to a "
+            f"{len(uncovered)} baselined handler{plural} no longer {verb} to a "
             f"live node: {joined}. For each: add @on(previously={hint!r}) to the "
             f"surviving handler, or regenerate the baseline if the handler is "
             f"intentionally removed."

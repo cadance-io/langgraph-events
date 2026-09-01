@@ -2191,6 +2191,9 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
+                # Grammar must agree with the count: one identity, not "are".
+                assert "1 identity in the baseline is neither" in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
 
         def when_unifying_the_gate_error_base():
             def it_is_an_assertion_error_subclass():
@@ -2287,6 +2290,7 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persisted" not in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
 
         def when_a_baselined_identity_is_only_reachable_in_scope():
             def it_revives_through_the_scope(tmp_path: Any):
@@ -2426,6 +2430,7 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persist.Persisted" not in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
 
 
 def describe_UnreachableMigrationWarning():
@@ -3163,6 +3168,8 @@ def describe_assert_all_baselined_handlers_cover():
                 # sibling of MigrationCoverageError under the shared base
                 assert isinstance(excinfo.value, CoverageError)
                 assert excinfo.value.uncovered == ("place",)
+                # Grammar must agree with the count: one handler, not "resolve".
+                assert "1 baselined handler no longer resolves to" in str(excinfo.value)
 
     def when_a_reactor_is_replaced_by_an_inline_command():
         # The command's ``previously`` class attribute feeds the same

@@ -80,8 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has no `events=` kwarg and never reaches a module-level class, so the recipe recovered
   nothing, silently. Replaced with a nested-in-`Namespace` recipe (the one
   `from_namespaces(...)` actually wires up) as the primary path, and the module-level form as a
-  separate, complete, hand-built-serde alternative. Both verified end to end across a real
-  process restart against persisted checkpoint bytes (closes part of [#164]).
+  separate, complete, hand-built-serde alternative. The tombstone in both was field-free —
+  correct only when the retired class also had no fields — and the alternative's
+  `EventGraph([...])` call dropped the inline `Order.Approve` command it needs, tripping
+  `OrphanedEventWarning`. Both snippets now carry the retired class's fields (with an inline
+  comment saying why) and register every handler they need; both verified end to end, warning-
+  free, across a real process restart against persisted checkpoint bytes (closes part of
+  [#164]).
+
+- **Two coverage-gate messages had no remedy line, and two had a grammar/count mismatch.**
+  `assert_all_baselined_resolve`/`assert_all_baselined_revive` named the broken identity but not
+  the fix; both now end with the same remedy line `MigrationCoverageError` already had.
+  `MigrationCoverageError`/`HandlerCoverageError` said "1 identity ... are neither" and "1
+  ... handler no longer resolve" regardless of count; the verb now agrees ("is"/"resolves" for
+  one, "are"/"resolve" for more than one).
 
 - **`GraphState.interrupted` was `None` on a first pause.** `get_state().interrupted` read only
   the event log, and an `Interrupted` joins the log only on resume — so a thread paused for the

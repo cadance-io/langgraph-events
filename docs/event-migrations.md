@@ -475,17 +475,29 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 1. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass)`.
 2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
 3. Verify: `graph.threads_paused_on(EventClass) == []`.
-4. Delete the class from the codebase.
-5. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
+4. Verify no *answered* thread's history still references the class (the #159 case — `threads_paused_on()`/`abandon()` never reach one). No library sweep exists for this; enumerate your own thread ids and check each one, **before** deleting the class — checking after would itself raise `Cannot revive`.
+5. Delete the class from the codebase.
+6. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
 
 ```python
 for config in graph.threads_paused_on(EventClass):
     graph.abandon(config, reason="retiring EventClass")
 assert graph.threads_paused_on(EventClass) == []
+
+# Step 4 — you supply my_thread_ids; there is no library enumeration.
+unsafe = [
+    tid
+    for tid in my_thread_ids
+    if any(
+        type(e).__qualname__ == "EventClass"
+        for e in graph.get_state({"configurable": {"thread_id": tid}}).events
+    )
+]
+assert not unsafe
 ```
 
 !!! warning "Step 3 is not `assert not graph.get_state(config).is_interrupted`"
-    Once the handler is deleted (step 4, or already done — the common order), `get_state()`'s `is_interrupted` reads the graph's compiled topology and is `False` on a thread that is *still paused*: the check would pass without proving anything. `threads_paused_on()` reads the checkpoint directly and stays accurate regardless of which handlers this graph still registers.
+    Once the handler is deleted (step 5, or already done — the common order), `get_state()`'s `is_interrupted` reads the graph's compiled topology and is `False` on a thread that is *still paused*: the check would pass without proving anything. `threads_paused_on()` reads the checkpoint directly and stays accurate regardless of which handlers this graph still registers.
 
 ### Why the baseline write needs `allow_removed=True`
 
@@ -508,7 +520,7 @@ Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage
 
 If the class was deleted before every paused thread was settled, `threads_paused_on()` and `abandon()` already recover the **paused** case on their own — see the two-deletions note above. A thread that had already **answered** the interrupt (the #159 case) needs the fix below too.
 
-Map the dead identity onto a tombstone class, in a follow-up release. **Nest the tombstone inside the same `Namespace`** — a domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
+Map the dead identity onto a tombstone class, in a follow-up release. **The tombstone must declare the same fields the retired class had** — an empty tombstone only works if the retired class had no fields; here `Order.ApprovalRequired` carries `order_id`, so `RetiredApprovalGate` does too, or revival raises `TypeError`. **Nest the tombstone inside the same `Namespace`** — a domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
 
 ```python
 from langgraph_events import Command, DomainEvent, Interrupted, Namespace, on
@@ -525,7 +537,10 @@ class Order(Namespace):
 
     @migrate_from("Order.ApprovalRequired")
     class RetiredApprovalGate(Interrupted):
-        pass
+        # Same fields as the retired Order.ApprovalRequired, or revival
+        # raises TypeError — an empty tombstone only works when the
+        # retired class had no fields either.
+        order_id: str = ""
 
 
 @on(ApprovalSubmitted)
@@ -540,12 +555,12 @@ graph = EventGraph.from_namespaces(
 
 Run this against a store that still holds a thread paused on `Order.ApprovalRequired` and an already-answered one: `graph.threads_paused_on()` lists the paused thread again — matched against the live `RetiredApprovalGate`, not a degraded identity — `graph.abandon(config)` settles it recording `discarded="Order.RetiredApprovalGate"`, and the already-answered thread's history revives too, closing the #159 gap for this one identity without waiting on the library-level fix. Verified end to end, across a real process restart against persisted checkpoint bytes (not just an in-process object), before this recipe was published.
 
-`in_module=` defaults to the decorated class's `__module__` — pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does. The tombstone must accept the same fields `Order.ApprovalRequired` did, or revival raises `TypeError`; a field-free tombstone works only if the retired class had none.
+`in_module=` defaults to the decorated class's `__module__` — pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does.
 
 !!! note "This relies on `Order` still being in play"
     `from_namespaces(...)` only wires a namespace into the auto-collected serde because some handler in `handlers=` still subscribes to or produces something inside it (`Order.Approve` above) — nesting the tombstone alone does not add `Order` to that set. If the *whole* namespace is retired too, or the tombstone has to live at module scope, hand-build the serde instead — see below.
 
-**Alternative: a module-level tombstone, with a hand-built serde.** Use this when the namespace itself has nothing else live, or the tombstone genuinely doesn't belong inside a `Namespace`. `from_namespaces(...)` has no way to reach a module-level class — pass it through `events=` on a `NamespaceAwareSerde` you build yourself:
+**Alternative: a module-level tombstone, with a hand-built serde.** Use this when the namespace itself has nothing else live, or the tombstone genuinely doesn't belong inside a `Namespace`. `from_namespaces(...)` has no way to reach a module-level class — pass it through `events=` on a `NamespaceAwareSerde` you build yourself. Same construction as the nested form otherwise — `Order.Approve` still needs to be in `handlers=` explicitly here, since without `from_namespaces(...)`'s namespace walk nothing else registers its inline `handle()`:
 
 ```python
 from langgraph_events import EventGraph, Interrupted
@@ -554,14 +569,17 @@ from langgraph_events.serde import NamespaceAwareSerde, migrate_from
 
 @migrate_from("Order.ApprovalRequired")
 class RetiredApprovalGate(Interrupted):
-    pass
+    # Same fields as the retired Order.ApprovalRequired, or revival
+    # raises TypeError — an empty tombstone only works when the
+    # retired class had no fields either.
+    order_id: str = ""
 
 
 checkpointer.serde = NamespaceAwareSerde(
     namespaces=(Order,),
     events=(Started, ApprovalSubmitted, RetiredApprovalGate),
 )
-graph = EventGraph([handle_approval], checkpointer=checkpointer)
+graph = EventGraph([Order.Approve, handle_approval], checkpointer=checkpointer)
 ```
 
 Recovers identically to the nested form above — verified the same way, end to end across a real restart. `events=` must still list every loose event class the graph touches (`Started`, `ApprovalSubmitted`, …), same as any hand-built `NamespaceAwareSerde` — the tombstone is one more entry, not a special case.
