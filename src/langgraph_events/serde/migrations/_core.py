@@ -295,6 +295,7 @@ def _flatten_and_validate(
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], TransformFields],
+    dict[tuple[str, str], TransformFields],
 ]:
     """Collapse all operations into per-purpose lookup tables.
 
@@ -303,9 +304,8 @@ def _flatten_and_validate(
     regardless of chain depth. AddField ops are bucketed by their target
     identity: a target that is a rename source goes into the origin table
     (applied pre-rename), a live target into the post-rename table.
-    TransformFields ops share one table. A rename source and a live
-    identity never collide, so the key alone tells the read path which
-    stage a transform belongs to.
+    TransformFields ops are bucketed the same way, into
+    ``(transform_table, origin_transform_table)``.
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
@@ -365,27 +365,46 @@ def _flatten_and_validate(
     addfield_table, origin_addfield_table = _bucket_addfields(
         addfield_ops, rename_table, scope
     )
-    transform_table = _table_transforms(transform_ops, rename_table, scope)
-    return rename_table, addfield_table, origin_addfield_table, transform_table
+    transform_table, origin_transform_table = _bucket_transforms(
+        transform_ops, rename_table, scope
+    )
+    return (
+        rename_table,
+        addfield_table,
+        origin_addfield_table,
+        transform_table,
+        origin_transform_table,
+    )
 
 
-def _table_transforms(
+def _bucket_transforms(
     transform_ops: Sequence[tuple[TransformFields, str]],
     rename_table: dict[tuple[str, str], tuple[str, str]],
     scope: Mapping[tuple[str, str], type] | None = None,
-) -> dict[tuple[str, str], TransformFields]:
-    """Key each TransformFields op on its target identity and validate it.
+) -> tuple[
+    dict[tuple[str, str], TransformFields],
+    dict[tuple[str, str], TransformFields],
+]:
+    """Bucket TransformFields ops by target kind and validate each one.
 
-    The target must be a rename source (origin stage) or resolve to a live
-    class (class stage), the same rule as :func:`_bucket_addfields`. One
-    transform per identity: the read path runs one per stage, so a second
-    would be ignored in silence.
+    Returns ``(post_rename_table, origin_table)``, the same shape as
+    :func:`_bucket_addfields`. A target that is a rename source goes into
+    the origin table, a live target into the post-rename table, and any
+    other target is rejected. The stage is explicit in the table, so a
+    live identity with no rename runs its transform once, not once per
+    lookup. One transform per identity: the read path runs one per stage,
+    so a second would be ignored in silence.
     """
-    table: dict[tuple[str, str], TransformFields] = {}
+    transform_table: dict[tuple[str, str], TransformFields] = {}
+    origin_transform_table: dict[tuple[str, str], TransformFields] = {}
     source: dict[tuple[str, str], str] = {}
     for op, migration_name in transform_ops:
         target = (op.module, op.qualname)
-        if target not in rename_table and not _resolves(*target, scope=scope):
+        if target in rename_table:
+            bucket = origin_transform_table
+        elif _resolves(*target, scope=scope):
+            bucket = transform_table
+        else:
             raise ValueError(
                 f"TransformFields target {op.module}:{op.qualname!r} neither "
                 f"resolves to a live class — by this serde's namespace "
@@ -395,7 +414,7 @@ def _table_transforms(
                 f"module/qualname has a typo, or the historic identity is "
                 f"missing its @migrate_from / RenameEvent."
             )
-        if target in table:
+        if target in source:
             first_label = _migration_label(source[target])
             second_label = _migration_label(migration_name)
             raise ValueError(
@@ -404,9 +423,9 @@ def _table_transforms(
                 f"identity may carry at most one transform per stage. "
                 f"Compose the steps in one callable."
             )
-        table[target] = op
+        bucket[target] = op
         source[target] = migration_name
-    return table
+    return transform_table, origin_transform_table
 
 
 def _bucket_addfields(
@@ -680,6 +699,7 @@ def _apply_identity_migrations(
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     transform_table: dict[tuple[str, str], TransformFields],
+    origin_transform_table: dict[tuple[str, str], TransformFields],
 ) -> tuple[str, str, dict[str, Any]]:
     """Run the read-side migration rule and return ``(module, qualname,
     kwargs)`` for the constructor.
@@ -690,10 +710,10 @@ def _apply_identity_migrations(
     before class fills so the precedence is: explicit payload value >
     origin-scoped fill > class-global fill (``setdefault`` never
     overwrites). An op lives in exactly one table — origin keys are rename
-    sources, post keys are live identities, disjoint by validation — so no
-    op is ever applied twice.
+    sources, post keys are live identities, disjoint by validation — and
+    each table is read at its own stage, so no op is ever applied twice.
     """
-    kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
+    kwargs = _transform_kwargs(origin_transform_table.get((module, qualname)), kwargs)
     _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
     module, qualname = _resolve_rename(module, qualname, rename_table)
     kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
