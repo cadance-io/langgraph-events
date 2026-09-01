@@ -597,15 +597,46 @@ def _inject_addfields(
             kwargs.setdefault(op.field, op.default)
 
 
+class TransformError(Exception):
+    """A :class:`TransformFields` raised, or returned a value that is not
+    a ``dict``.
+
+    Raised by the read path and caught by the serde's ext-hook, which
+    turns it into the ``Cannot revive`` message or, under
+    ``tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is the
+    transform that failed and ``cause`` is the exception it raised.
+    """
+
+    def __init__(self, op: TransformFields, cause: Exception) -> None:
+        super().__init__(f"TransformFields raised {type(cause).__name__}: {cause}")
+        self.op = op
+        self.cause = cause
+
+
 def _transform_kwargs(
     op: TransformFields | None,
     kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Run *op* on a copy of *kwargs* and return the result. No op: return
-    *kwargs* unchanged."""
+    *kwargs* unchanged.
+
+    Raises :class:`TransformError` when the transform raises or returns
+    a value that is not a ``dict``. The ext-hook catches that one type,
+    so no exception the transform raises can escape as a bare
+    ``ext_hook failed``.
+    """
     if op is None:
         return kwargs
-    return op.transform(dict(kwargs))
+    try:
+        out = op.transform(dict(kwargs))
+    except Exception as exc:
+        raise TransformError(op, exc) from exc
+    if not isinstance(out, dict):
+        raise TransformError(
+            op,
+            TypeError(f"transform returned {type(out).__name__}, expected dict"),
+        )
+    return out
 
 
 def _apply_identity_migrations(
