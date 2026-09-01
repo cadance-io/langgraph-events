@@ -23,6 +23,8 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END
+from langgraph.types import StateUpdate
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
@@ -4204,10 +4206,21 @@ class _Go(IntegrationEvent):
     pass
 
 
+class _SideDone(IntegrationEvent):
+    pass
+
+
 @on(Started)
 def _waiter(event: Started) -> _Pause:
     """Pauses the run so resume-policy suites have an interrupted thread."""
     return _Pause()
+
+
+@on(Started)
+def _side_effect(event: Started) -> _SideDone:
+    """Fan-out sibling of ``_waiter``. Completes normally in the same
+    superstep."""
+    return _SideDone()
 
 
 @on(_Go)
@@ -4229,6 +4242,26 @@ def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
         Started(data="x"), config=cfg
     )
     return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
+
+
+def _abandoned_pair(saver, tid: str, **kwargs: typing.Any):
+    """A genuinely-interrupted thread whose pending task was cleared out
+    from under it.
+
+    This is the shape a future ``abandon()`` will leave behind.
+    ``_pending`` still stale-references the still-registered paused node,
+    ``_waiter``. The checkpoint's own ``next`` reports empty. A bare
+    "clear all tasks" ``bulk_update_state`` call produces this state. The
+    call runs through LangGraph's public ``compiled`` property.
+
+    Returns the graph, still with ``_waiter`` registered, and the paused
+    thread config.
+    """
+    cfg = {"configurable": {"thread_id": tid}}
+    graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
+    graph.invoke(Started(data="x"), config=cfg)
+    graph.compiled.bulk_update_state(cfg, [[StateUpdate(None, END)]])
+    return graph, cfg
 
 
 def describe_on_unresumable():
@@ -4279,6 +4312,60 @@ def describe_on_unresumable():
             assert isinstance(log.latest(Unresumable), Unresumable)
             assert isinstance(log.latest(Unresumable), Halted)
             assert not v2.get_state(cfg).is_interrupted
+
+        def it_leaves_nothing_scheduled():
+            # `_abandoned_pair` sets up a thread where `_pending` still
+            # stale-references the still-registered paused node. A
+            # single-superstep write reschedules that node.
+            graph, cfg = _abandoned_pair(
+                MemorySaver(), "unres-halt-next", on_unresumable="halt"
+            )
+
+            graph.resume(_Go(), config=cfg)
+
+            assert graph.compiled.get_state(cfg).next == ()
+
+        def it_leaves_the_thread_usable():
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "unres-halt-usable"}}
+            EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+                Started(data="x"), config=cfg
+            )
+            v2 = EventGraph([_go_ends], checkpointer=saver, on_unresumable="halt")
+            v2.resume(_Go(), config=cfg)
+
+            log = v2.invoke(_Go(), config=cfg)
+
+            assert log.latest(Ended) == Ended(result="went")
+
+        def it_does_not_resurrect_the_retired_identity():
+            # Same `_abandoned_pair` stale-scheduling setup as
+            # `it_leaves_nothing_scheduled`. If the halt policy re-arms
+            # the paused node, a second `resume()` call passes
+            # `_resume_is_pending`. It then runs `_waiter` for real,
+            # writing the retired `_Pause` identity back into the log.
+            graph, cfg = _abandoned_pair(
+                MemorySaver(), "unres-halt-resurrect", on_unresumable="halt"
+            )
+            graph.resume(_Go(), config=cfg)
+
+            log = graph.resume(_Go(), config=cfg)
+
+            assert not any(isinstance(e, _Pause) for e in log)
+
+        def it_preserves_completed_sibling_writes():
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "unres-halt-sibling"}}
+            EventGraph([_waiter, _side_effect, _go_noop], checkpointer=saver).invoke(
+                Started(data="x"), config=cfg
+            )
+            v2 = EventGraph(
+                [_side_effect, _go_noop], checkpointer=saver, on_unresumable="halt"
+            )
+
+            log = v2.resume(_Go(), config=cfg)
+
+            assert log.has(_SideDone)
 
     def when_resumed_via_another_entrypoint():
         # Every resume entrypoint consults the same on_unresumable policy.
@@ -4359,6 +4446,20 @@ def describe_async_only_checkpointer():
         )
         return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
 
+    async def _aabandoned_pair(tid: str, **kwargs: typing.Any):
+        """Async mirror of ``_abandoned_pair``.
+
+        Builds a genuinely-interrupted thread whose pending task was
+        cleared out from under it. ``_waiter`` is still registered. The
+        setup runs through ``_AsyncOnlySaver``.
+        """
+        saver = _AsyncOnlySaver()
+        cfg = {"configurable": {"thread_id": tid}}
+        graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
+        await graph.ainvoke(Started(data="x"), config=cfg)
+        await graph.compiled.abulk_update_state(cfg, [[StateUpdate(None, END)]])
+        return graph, cfg
+
     def when_the_thread_is_genuinely_pending():
         def without_sync_checkpointer_access():
 
@@ -4404,6 +4505,21 @@ def describe_async_only_checkpointer():
             log = await v2.aresume(_Go(), config=cfg)
 
             assert log.latest(Unresumable) is not None
+
+        @pytest.mark.asyncio
+        async def it_aresume_halt_leaves_nothing_scheduled():
+            # Async mirror of the sync `it_leaves_nothing_scheduled`. It
+            # uses the same `_aabandoned_pair` stale-scheduling setup.
+            # The test runs through the async-only checkpointer to
+            # exercise `_asettle`.
+            graph, cfg = await _aabandoned_pair(
+                "async-only-halt-next", on_unresumable="halt"
+            )
+
+            await graph.aresume(_Go(), config=cfg)
+
+            state = await graph.compiled.aget_state(cfg)
+            assert state.next == ()
 
         @pytest.mark.asyncio
         async def it_astream_resume_halt_yields_the_terminal_event():

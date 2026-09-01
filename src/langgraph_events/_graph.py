@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
+from langgraph.types import StateUpdate
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
@@ -1450,41 +1451,82 @@ class EventGraph:
             return True
         return False
 
+    @staticmethod
+    def _settle_supersteps(
+        events: EventLog, terminal: Event
+    ) -> list[list[StateUpdate]]:
+        """Build the clear/append/clear supersteps that settle a thread onto
+        *terminal* at rest.
+
+        The leading clear (``values=None, as_node=END``, LangGraph's
+        clear-all-tasks branch) skips ``ERROR``/``INTERRUPT`` pending
+        writes, preserving an already-completed write from a fanned-out
+        sibling.
+
+        The suite pins the leading clear and the ``_cursor`` reset, each
+        with its own failing test. The trailing clear and
+        ``_pending: []`` are a second guard. Neither is pinned alone.
+        """
+        appended = [terminal]
+        return [
+            [StateUpdate(None, END)],
+            [
+                StateUpdate(
+                    {
+                        "events": appended,
+                        "_cursor": len(events) + len(appended),
+                        "_pending": [],
+                    },
+                    "__seed__",
+                )
+            ],
+            [StateUpdate(None, END)],
+        ]
+
+    def _settle(self, config: Any, terminal: Event) -> EventLog:
+        """Append *terminal* and settle the thread via :meth:`_settle_supersteps`."""
+        # `_cursor` is correct only because this reads via `get_state`,
+        # whose snapshot applies the same pending writes the leading
+        # clear commits. A direct checkpoint read undercounts `_cursor`
+        # without raising an error, and no test in this suite catches it.
+        events = self.get_state(config).events
+        self._compile().bulk_update_state(
+            cast("RunnableConfig", config),
+            self._settle_supersteps(events, terminal),
+        )
+        return self.get_state(config).events
+
+    async def _asettle(self, config: Any, terminal: Event) -> EventLog:
+        """Async sibling of :meth:`_settle`."""
+        # Same `_cursor` reasoning as `_settle`, via `aget_state`.
+        events = (await self.aget_state(config)).events
+        await self._compile().abulk_update_state(
+            cast("RunnableConfig", config),
+            self._settle_supersteps(events, terminal),
+        )
+        return (await self.aget_state(config)).events
+
     def _apply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
         """Sync ``on_unresumable`` for a resume that would be a no-op.
 
-        Called only when :meth:`_resume_is_pending` is ``False``. The ``halt``
-        arm appends a terminal ``Unresumable(Halted)`` so the abandoned thread
-        ends observably; the thread is already inert (not pending), so
-        ``update_state`` only records the event.
+        Runs only when :meth:`_resume_is_pending` is ``False``, so no
+        completed sibling write can be lost on this path.
         """
         config = kwargs.get("config")
         if self._unresumable_short_circuits():
             return self.get_state(config).events
-        self._compile().update_state(
-            cast("RunnableConfig", config),
-            {"events": [self._unresumable_event(value)]},
-            as_node="__seed__",
-        )
-        return self.get_state(config).events
+        return self._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
-        """Async sibling of :meth:`_apply_unresumable_policy` — every checkpoint
-        read/write uses the async API (``aget_state``/``aupdate_state``) so
-        async-only checkpointers aren't driven synchronously."""
+        """Async sibling of :meth:`_apply_unresumable_policy`."""
         config = kwargs.get("config")
         if self._unresumable_short_circuits():
             return (await self.aget_state(config)).events
-        await self._compile().aupdate_state(
-            cast("RunnableConfig", config),
-            {"events": [self._unresumable_event(value)]},
-            as_node="__seed__",
-        )
-        return (await self.aget_state(config)).events
+        return await self._asettle(config, self._unresumable_event(value))
 
     @staticmethod
     def _unresumable_event(value: Event) -> Unresumable:
