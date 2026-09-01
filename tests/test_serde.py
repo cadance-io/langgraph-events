@@ -4449,7 +4449,7 @@ def select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
     result = kw.get("result")
     if result is None or result.get("status") != "error":
         return None  # keep Job.Completed
-    return Job.Failed, {"reason": result["message"]}
+    return Job.Failed, {"reason": result["message"]}  # resolved at read time
 
 
 class Job(Namespace):

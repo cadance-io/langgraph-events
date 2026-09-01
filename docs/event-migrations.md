@@ -167,7 +167,7 @@ def select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
     result = kw.get("result")
     if result is None or result.get("status") != "error":
         return None  # keep Job.Completed
-    return Job.Failed, {"reason": result["message"]}
+    return Job.Failed, {"reason": result["message"]}  # resolved at read time
 
 
 class Job(Namespace):
@@ -211,7 +211,13 @@ Semantics:
 - **`targets` lists every class `select` can return.** Each is validated at serde construction: it must be an `Event` subclass that resolves in the serde's scope or by import. A target `select` returns that is not in `targets` is refused at read time.
 - **One split per identity.** Compose the cases in one `select`. A second decorator is rejected at decoration. A second hand-authored op is rejected at serde construction.
 - **The source must resolve live.** A split keyed on a rename source is refused at serde construction. Declare the split on the live target instead: it runs after the rename, on every era.
-- **A `select` that raises, returns a value that is not `None` or a `(target, kwargs)` tuple, returns a target outside `targets`, or returns kwargs that are not a `dict`,** fails the read with `Cannot revive <stored identity>: SplitEvent raised <Type>: <message>` and a remedy. Under `serde.tolerate_unresolved()` the stored identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
+- **A target is not split again.** A split runs once, on the stored identity. A target that is itself a split source keeps the kwargs `select` returned.
+- **A split changes what the retirement tools see.** `threads_paused_on(Source)` does not return a thread whose pending interrupt splits to a target. Filter on the target class instead.
+- **A `select` failure fails the read** with `Cannot revive <stored identity>: SplitEvent raised <Type>: <message>` and a remedy. Under `serde.tolerate_unresolved()` the stored identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it. The failure modes:
+    - `select` raises.
+    - `select` returns a value that is not `None` or a `(target, kwargs)` tuple.
+    - `select` returns a target outside `targets`.
+    - `select` returns kwargs that are not a `dict`.
 - **There is no dotted discriminator path.** A nested value normally arrives revived, so `result.status` means `getattr`. Under `LANGGRAPH_STRICT_MSGPACK=true`, or when the value's module is not in `allowed_msgpack_modules`, the same stored bytes arrive as a plain `dict`. A path resolver would have to try both, and a deployment that changes the allowlist would change which branch fires. The author's callable owns the access instead. A `KeyError` there is ordinary Python, and the traceback names that code.
 
 !!! warning "Splits cannot ride `legacy_write` (enforced)"

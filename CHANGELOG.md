@@ -11,27 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`SplitEvent`, `@split_event` and `Migration.split_event(...)`.** Closes
   [#125](https://github.com/cadance-io/langgraph-events/issues/125). One stored identity
-  can now revive as one of several live classes, picked by a payload value. The source
-  identity stays live, so a rename cannot host the split. `SplitEvent(module, qualname,
-  select, targets)` runs `select` on a copy of the stored kwargs. `select` returns `None` to
-  keep the stored class and kwargs, or `(target_class, kwargs)` to build that class instead.
-  The class object is the return value, so an IDE rename follows it. `targets` lists every
-  class `select` can return and is validated at serde construction: each must be an `Event`
-  subclass that resolves in the serde's scope or by import. The split runs in the class
-  stage only, after the class-stage transform and before the fills of the resulting
-  identity. Read-path order is now: the origin stage (transform, then origin fills), the
-  rename, then the class stage (transform, then split, then class fills). A `select` that
-  raises, returns the wrong shape, or returns a target outside `targets` fails the read
-  with `Cannot revive <stored identity>: SplitEvent raised <Type>: ...` and a remedy, and
-  degrades to `UnrevivedIdentity` under `serde.tolerate_unresolved()`. Refused at serde
-  construction: a source that is a rename source or does not resolve, a bad target, empty
-  `targets`, a `select` that is not callable, two splits on one identity, and
-  `legacy_write=True` with any split, because a split has no inverse. There is no dotted
-  discriminator path: the value can arrive as an object or a dict depending on the msgpack
-  allowlist, so the author's callable owns the access. The revive gate sends a `None`
+  revives as one of several live classes, picked by a payload value. The source identity
+  stays live, so a rename cannot host the split. The split runs in the class stage, after
+  the class-stage transform and before the fills of the resulting identity. See *Splitting
+  one stored event into two on a payload value* in `docs/event-migrations.md`.
+
+- **How to declare a split.** Put `@split_event(select, targets=(...))` on the source class,
+  or pass `Migration.split_event(source=Class, select=fn, targets=(...))`. `select` receives
+  a copy of the stored kwargs. It returns `None` to keep the source, or `(target_class,
+  kwargs)` to build that class instead. `targets` lists every class `select` can return and
+  is validated at serde construction. A `select` that raises or returns the wrong shape
+  fails the read with `Cannot revive <stored identity>: SplitEvent raised ...`, and
+  degrades to `UnrevivedIdentity` under `serde.tolerate_unresolved()`.
+
+- **Limits of a split.** `legacy_write=True` with any split is refused at serde
+  construction, because a split has no inverse. The revive gate sends a `None`
   placeholder, so `select` must return `None` when the discriminating value is absent or
-  `None`. See *Splitting one stored event into two on a payload value* in
-  `docs/event-migrations.md`.
+  `None`. Pin each branch with real values through `synthesize_legacy_payload`.
 
 - **`TransformFields`, `@transform_fields` and `migrate_from(transform=...)`.** Item 3 of
   [#159](https://github.com/cadance-io/langgraph-events/issues/159). A kwargs-to-kwargs
