@@ -361,14 +361,21 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             # the raw dump dict with no error. The event itself still
             # constructs around that dict, so nothing downstream notices.
             # Fail here, where the author can act (#167).
+            nested = "." in model.__qualname__
+            remedy = (
+                f"Move {model.__qualname__} to module scope in {model.__module__}."
+                if nested
+                else f"Bind it on module {model.__module__} under the name "
+                f"{model.__name__!r}. Alias a parametrized generic at module "
+                f"level, for example IntBox = Box[int]."
+            )
             raise ValueError(
                 f"{event_cls.__qualname__}.{field} is annotated with pydantic "
-                f"model {model.__qualname__}, but its checkpoint identity "
+                f"model {model.__qualname__}. Its checkpoint identity "
                 f"{model.__module__}.{model.__name__} does not import. The "
                 f"LangGraph serializer stores a pydantic payload by __name__ "
-                f"and resolves it with getattr on the module; on a miss it "
-                f"revives the payload as a raw dict with no error. Move "
-                f"{model.__qualname__} to module scope in {model.__module__}."
+                f"and revives it with getattr on the module. On a miss it "
+                f"returns a raw dict with no error. {remedy}"
             )
         all_migrations = (*decorated, *migrations)
         (

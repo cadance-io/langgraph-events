@@ -8,6 +8,7 @@ prior library versions — this is a read-side affordance only. See #70.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import itertools
 import sys
@@ -738,19 +739,84 @@ def _annotation_types(tp: Any) -> Iterator[Any]:
 
 def _is_pydantic_model(tp: Any) -> bool:
     """Duck-typed the same way the LangGraph serializer decides to write
-    a pydantic v2 ext record: a class with a callable ``model_dump``."""
-    return isinstance(tp, type) and callable(getattr(tp, "model_dump", None))
+    a pydantic ext record: a class with a callable ``model_dump`` (v2)
+    or a callable ``dict`` (v1). Both decode branches upstream revive by
+    ``__name__`` and return the dump dict on a miss."""
+    return isinstance(tp, type) and (
+        callable(getattr(tp, "model_dump", None)) or callable(getattr(tp, "dict", None))
+    )
 
 
 def _importable_by_name(cls: type) -> bool:
     """Whether ``getattr(import_module(cls.__module__), cls.__name__)`` is
     *cls*. That lookup is how the LangGraph serializer revives a pydantic
-    payload, so this is the exact condition for a silent raw-dict miss."""
+    payload, so this is the exact condition for a silent raw-dict miss.
+
+    Any import failure counts as a miss. Upstream catches ``Exception``
+    on the same call, and a serde constructor must not surface an
+    unrelated import-time traceback from the payload's module.
+    """
     try:
         module = importlib.import_module(cls.__module__)
-    except ImportError:
+    except Exception:
         return False
     return getattr(module, cls.__name__, None) is cls
+
+
+def _enclosing_names(cls: type) -> dict[str, Any]:
+    """Names visible from *cls*'s enclosing class bodies, outermost first.
+
+    ``typing.get_type_hints`` resolves a forward reference against the
+    module only. A field typed as a sibling nested in the same
+    ``Namespace`` needs the enclosing class's names as ``localns``. Stops
+    at the first level it cannot walk, such as ``<locals>``.
+    """
+    names: dict[str, Any] = {}
+    obj: Any = sys.modules.get(cls.__module__)
+    for part in cls.__qualname__.split(".")[:-1]:
+        obj = getattr(obj, part, None) if obj is not None else None
+        if obj is None:
+            break
+        names.update(vars(obj))
+    return names
+
+
+def _field_hints(cls: type) -> dict[str, Any]:
+    """Resolved annotation per dataclass field of *cls*.
+
+    Restricted to ``dataclasses.fields()``: a ``ClassVar`` or ``InitVar``
+    is never checkpointed, so it must not be checked. A forward
+    reference that cannot resolve is skipped one field at a time, not
+    one class at a time, and never raises here. The event class is the
+    caller's. This check must not turn its own annotation problem into
+    a serde build failure.
+    """
+    if not is_dataclass(cls):
+        return {}
+    names = {f.name for f in fields(cls)}
+    localns = _enclosing_names(cls)
+    try:
+        hints = typing.get_type_hints(cls, localns=localns)
+    except (NameError, TypeError):
+        hints = _hints_per_field(cls, localns)
+    return {name: tp for name, tp in hints.items() if name in names}
+
+
+def _hints_per_field(cls: type, localns: dict[str, Any]) -> dict[str, Any]:
+    """Fallback for :func:`_field_hints` when ``get_type_hints`` fails
+    as a whole: evaluate each annotation on its own and skip the ones
+    that fail, so one bad forward reference hides one field only."""
+    module = sys.modules.get(cls.__module__)
+    globalns = vars(module) if module is not None else {}
+    hints: dict[str, Any] = {}
+    for klass in reversed(cls.__mro__):
+        for name, raw in getattr(klass, "__annotations__", {}).items():
+            if not isinstance(raw, str):
+                hints[name] = raw
+                continue
+            with contextlib.suppress(Exception):
+                hints[name] = eval(raw, globalns, localns)  # noqa: S307
+    return hints
 
 
 def _unimportable_payload_models(
@@ -763,24 +829,13 @@ def _unimportable_payload_models(
     Walks generic arguments, so ``list[Holder.Cfg] | None`` reaches
     ``Holder.Cfg``. Does not descend into a model's own fields: a model
     nested inside another model is dumped and re-validated as a dict by
-    pydantic itself, so its identity is never stored.
-
-    A forward reference that ``typing.get_type_hints`` cannot resolve is
-    skipped rather than raising here. The event class is the caller's;
-    this check must not turn its own annotation problem into a serde
-    build failure.
+    pydantic itself, so its identity is never stored. A model held
+    behind ``Any`` or an untyped container is not reachable from an
+    annotation and is not checked.
     """
     out: list[tuple[type, str, type]] = []
     for cls in classes:
-        try:
-            hints = typing.get_type_hints(cls)
-        except (NameError, TypeError):
-            hints = {
-                name: tp
-                for name, tp in getattr(cls, "__annotations__", {}).items()
-                if not isinstance(tp, str)
-            }
-        for field, tp in hints.items():
+        for field, tp in _field_hints(cls).items():
             for inner in _annotation_types(tp):
                 if _is_pydantic_model(inner) and not _importable_by_name(inner):
                     out.append((cls, field, inner))
