@@ -182,7 +182,7 @@ No locks or transactions in the serde/migration layer. Safe by **idempotency** a
 - **Required-field addition is a two-release operation, like a rename** — pair with `@backfill` and ship over the N → N+1 cadence.
 - **Thread-level concurrency on a single `thread_id` is the checkpointer's job** (`MemorySaver` provides none; SQLite/Postgres savers bring their own).
 - **Recovery replay is idempotent** — `replay_reducer` overwrites with the same correct value from any number of concurrent runners.
-- **One unprotected spot: `write_baseline` is non-atomic.** Sequential divergent writers are caught by the regression guard (the second raises `BaselineRegressionError`), but a true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, never in parallel.
+- **One unprotected spot: `write_baseline` is non-atomic.** A write never erases a recorded identity, so a second divergent writer moves the first writer's additions to `retired` and the coverage gates report them. A true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, never in parallel.
 
 ## Reducer state migration
 
@@ -264,7 +264,7 @@ if report.has_changes():
 
 ### When to commit the baseline
 
-Commit the baseline **alongside** the migration that covers the change — never after. Enforced: `write_baseline` raises `BaselineRegressionError` (`.removed` lists dropped identities) if the new snapshot would drop identities the old baseline recorded.
+Commit the baseline **alongside** the migration that covers the change — never after. A write never erases. An identity the old baseline recorded and the graph no longer reaches moves to the `retired` list. The [coverage gates](#coverage-gates) keep walking it until a migration covers it or a hand edit removes it.
 
 Workflow:
 
@@ -272,7 +272,35 @@ Workflow:
 2. Author the migration (`@migrate_from` / `@backfill` on the surviving class, or hand-authored `Migration`).
 3. Run `write_baseline(graph, Path("migrations/baseline.json"))` and commit the regenerated JSON in the same PR.
 
-For intentional deletes (no replacement), pass `allow_removed=True`. The guard compares baseline ↔ topology only; *coverage* (does a migration exist?) is the [coverage gates](#coverage-gates)' job. The baseline file is versioned — a stale snapshot raises `ValueError`.
+#### What the file records
+
+```json
+{
+  "version": 3,
+  "events": [
+    {"module": "myapp.orders", "qualname": "Order.Place.Placed", "fields": ["order_id", "tracking"]}
+  ],
+  "handlers": [{"name": "handle_approval"}],
+  "retired": [
+    {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}
+  ]
+}
+```
+
+- **`events`** lists every identity the graph reaches. Each entry records the `fields` of its class. `fields` is mandatory on a v3 file. The reader rejects an entry without it and asks for a regenerate.
+- **`fields` is cumulative.** It holds every field ever recorded for the identity, not only the fields the live class declares today. A field that was ever recorded can sit in a checkpoint, so `assert_all_baselined_revive` must keep sending it. A plain rewrite never removes a field. Removing one is a hand edit, done when no checkpoint carries it.
+- **`retired`** lists every identity a write has dropped from `events`, with the `fields` last recorded for it. The entry has no `fields` key when the last record predates v3. An identity that is live again leaves `retired` on the next write. The gates walk `retired` too. A retired identity must revive through a migration onto a surviving class or a tombstone. Delete the entry by hand once every thread that names it is settled, verified with `graph.unrevivable_threads()`.
+- `events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. Only a hand edit can produce one.
+- The file is versioned. A v1 or v2 file still loads. Its `fields` are unknown and its `retired` list is empty. A file with an unknown version raises `ValueError`.
+
+!!! note "Upgrading a baseline recorded before v3"
+    A v1 or v2 baseline records no fields, so `assert_all_baselined_revive` sends required placeholders only and cannot see a dropped field. **Regenerate the baseline once** with `write_baseline(graph, BASELINE)` to record the fields. An identity that an earlier `allow_removed=True` write erased is not in the file, so no write can retire it. Add its `retired` entry by hand. Give it the fields the class had if you know them. Omit `fields` if you do not:
+
+    ```json
+    {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}
+    ```
+
+`allow_removed` is deprecated and does nothing. Passing `allow_removed=True` emits a `DeprecationWarning`. The write compares baseline ↔ topology only; *coverage* (does a migration exist?) is the [coverage gates](#coverage-gates)' job.
 
 ## Testing your migrations
 
@@ -285,6 +313,8 @@ Three free functions assert that every identity in a committed baseline still ho
 | `assert_all_baselined_cover` | is in `revivable_identities()` (set membership) | no | namespace-walk ∪ `events=` ∪ rename table |
 | `assert_all_baselined_resolve` | resolves to a live `Event` (rename-aware) | no | every identity in the baseline |
 | `assert_all_baselined_revive` | revives through the real read path | yes | every identity in the baseline |
+
+Every gate walks the baseline's `events` and `retired` lists both. A retired identity has no live class, so it must revive through a migration. A failure on one says it is retired and names the remedy: add a migration, or delete the `retired` entry by hand once every thread that names it is settled.
 
 ```python
 from pathlib import Path
@@ -306,7 +336,7 @@ def test_baseline_coverage():
 
 **Which one?**
 
-- **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders — except fields the migration table back-fills, which get the *real* injected value so a broken fill fails the gate. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
+- **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders — except fields the migration table back-fills, which get the *real* injected value so a broken fill fails the gate. A v3 baseline records the fields of each identity. A recorded field the live class no longer accepts is sent too, so a dropped field fails the gate the way a stored payload fails at read. The failure line names the field. A pre-v3 baseline sends required placeholders only. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
 - **`resolve`** — when the baseline contains events `revive` can't placeholder-construct: construction-time validation (`__post_init__`) on non-back-filled fields, framework `SystemEvents`, or module-level `IntegrationEvents`. Proves the identity still resolves without ever calling `__init__`/`__post_init__`, so a full-graph baseline passes with no filtering and still fails loudly on an uncovered rename/removal.
 - **`cover`** — the fast set-membership smoke check. Namespace-walk-scoped, so it misses module-level identities a full-graph baseline emits — use `resolve` for those. Raises `MigrationCoverageError` (an `AssertionError`) whose `.uncovered` lists the offending identities.
 
@@ -331,7 +361,7 @@ def test_handler_coverage():
 
 - Asserts every handler node name in the baseline is still a **live node** or covered by an `@on(previously=...)` alias — the static analog of event `cover`. Raises `HandlerCoverageError` (a `CoverageError`/`AssertionError`; `except CoverageError` catches the event gates too).
 - **Signature:** event gates take the `serde`; the handler gate (and `assert_resume_recovers` below) take the **graph**. Don't transpose them.
-- **One baseline covers both tracks.** A single `write_baseline(graph, BASELINE)` records event identities *and* handler node names (baseline v2; pre-v2 baselines still load with an empty handler set) — regenerate once, run both gates against it.
+- **One baseline covers both tracks.** A single `write_baseline(graph, BASELINE)` records event identities *and* handler node names (baseline v3; a pre-v2 baseline still loads with an empty handler set) — regenerate once, run both gates against it.
 
 ### Testing handler recovery
 
@@ -477,7 +507,7 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 3. Verify: `graph.threads_paused_on(EventClass) == []`.
 4. Delete the class from the codebase.
 5. Verify no *answered* thread's history still references the class: `graph.unrevivable_threads() == {}`, against the real store. `threads_paused_on()` and `abandon()` never reach such a thread. A non-empty result maps each thread id to the qualnames it can no longer revive. Recover each one with a [tombstone](#recovering-a-delete-first-deployment) before step 6.
-6. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
+6. Re-baseline: `write_baseline(graph, BASELINE)`. The retired identity moves to the baseline's `retired` list.
 
 ```python
 for config in graph.threads_paused_on(EventClass):
@@ -497,22 +527,15 @@ assert graph.unrevivable_threads() == {}
 !!! warning "Step 3 is not `assert not graph.get_state(config).is_interrupted`"
     Once the handler is deleted (step 4, or already done, which is the common order), `get_state()`'s `is_interrupted` reads the graph's compiled topology and is `False` on a thread that is *still paused*: the check would pass without proving anything. `threads_paused_on()` reads the checkpoint directly and stays accurate regardless of which handlers this graph still registers.
 
-### Why the baseline write needs `allow_removed=True`
+### What the baseline write records
 
-Deleting the class drops an identity from the graph's topology. `write_baseline` compares the new snapshot against the committed baseline and raises `BaselineRegressionError` if it would drop a recorded identity. Pass `allow_removed=True` to confirm the drop is intentional (see [When to commit the baseline](#when-to-commit-the-baseline)).
+Deleting the class drops an identity from the graph's topology. `write_baseline` moves it to the baseline's `retired` list, with the fields last recorded for it. The [coverage gates](#coverage-gates) keep walking a retired identity. `assert_all_baselined_cover` and `assert_all_baselined_revive` fail on it until a migration covers it. That is the gate doing its job. Once `unrevivable_threads()` reports nothing and every paused thread is settled, delete the `retired` entry by hand. From then on, no coverage gate checks the retired identity.
 
-Skip this step and the *next* baseline write for an unrelated change fails with the same error, pointing at the retired class. `abandon()` clearing the checkpoints is what makes the deletion safe. `allow_removed=True` is what makes the baseline write accept it.
-
-Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage gates](#coverage-gates) stop checking the retired identity — it is no longer in the baseline they read.
-
-!!! warning "After re-baselining, no coverage gate can see a remaining breakage"
-    The coverage gates read the baseline, and the retired identity is gone from it. `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. Re-baselining does not clear that risk: it means the baseline gates stop being able to tell you either way. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 5 above, and run it against the real store.
+!!! warning "After the hand edit, no coverage gate can see a remaining breakage"
+    The coverage gates read the baseline. Once the `retired` entry is gone, `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 5 above, and run it against the real store before the hand edit.
 
 !!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
-    Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips: this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE, allow_removed=True)` re-baselines both the event identity and the handler node in one write, so no separate step is needed.
-
-!!! warning "`allow_removed=True` accepts every removal in the write, not just this one"
-    The flag is per-write, not per-identity. It tells `write_baseline` to accept **every** identity the new snapshot drops, not only the one you intend to retire. Review the diff `write_baseline` would apply before running it with `allow_removed=True`: an unrelated real regression bundled into the same write is rubber-stamped along with the intentional retirement, and nothing catches it afterward.
+    Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips: this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE)` re-baselines both the event identity and the handler node in one write, so no separate step is needed. A handler name is not retired. The write drops it from `handlers` at once.
 
 ### Recovering a delete-first deployment
 
