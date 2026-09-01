@@ -24,6 +24,7 @@ Typical wiring (project-side pre-commit hook)::
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,10 +37,12 @@ if TYPE_CHECKING:
 
 from langgraph_events.serde.migrations._core import RenameEvent
 
-BASELINE_VERSION = 2
-# Readable versions: v1 had ``events`` only; v2 adds ``handlers`` (node names).
-# A v1 baseline still loads — its handler set is treated as empty.
-_SUPPORTED_BASELINE_VERSIONS = (1, 2)
+BASELINE_VERSION = 3
+# Readable versions: v1 had ``events`` only. v2 adds ``handlers`` (node
+# names). v3 adds ``fields`` on each event entry and the ``retired`` list.
+# A v1 or v2 baseline still loads: its handler set is empty, every
+# ``fields`` value is ``None`` and ``retired`` is empty.
+_SUPPORTED_BASELINE_VERSIONS = (1, 2, 3)
 
 
 @dataclass(frozen=True)
@@ -104,16 +107,20 @@ def write_baseline(
     ``baseline_path: Path | str``.
     """
     path = Path(path)
-    current = set(_enumerate_identities(graph))
+    live = {
+        (module, qualname): frozenset(f.name for f in dataclasses.fields(cls))
+        for module, qualname, cls in _enumerate_event_classes(graph)
+    }
+    current = set(live)
     if path.exists() and not allow_removed:
         removed = tuple(sorted(_load_baseline(path) - current))
         if removed:
             raise BaselineRegressionError(removed)
-    identities = sorted(current)
     payload = {
         "version": BASELINE_VERSION,
         "events": [
-            {"module": module, "qualname": qualname} for module, qualname in identities
+            {"module": module, "qualname": qualname, "fields": sorted(fields)}
+            for (module, qualname), fields in sorted(live.items())
         ],
         "handlers": [
             {"name": name} for name in sorted(_enumerate_handler_names(graph))
@@ -272,18 +279,30 @@ def _enumerate_identities(graph: EventGraph) -> Iterable[tuple[str, str]]:
     the serde encodes — anything reachable here is something that could
     appear in a checkpoint payload.
     """
+    for module, qualname, _cls in _enumerate_event_classes(graph):
+        yield (module, qualname)
+
+
+def _enumerate_event_classes(
+    graph: EventGraph,
+) -> Iterable[tuple[str, str, type]]:
+    """Yield ``(module, qualname, cls)`` for every event reachable from *graph*.
+
+    The class is the source of the ``fields`` a v3 baseline records.
+    :func:`_enumerate_identities` derives from this walk.
+    """
     model = graph.namespaces()
     for namespace in model.namespaces.values():
         for command in namespace.commands.values():
-            yield (command.cls.__module__, command.cls.__qualname__)
+            yield (command.cls.__module__, command.cls.__qualname__, command.cls)
             for outcome in command.outcomes:
-                yield (outcome.__module__, outcome.__qualname__)
+                yield (outcome.__module__, outcome.__qualname__, outcome)
         for event in namespace.events:
-            yield (event.__module__, event.__qualname__)
+            yield (event.__module__, event.__qualname__, event)
     for event in model.integration_events:
-        yield (event.__module__, event.__qualname__)
+        yield (event.__module__, event.__qualname__, event)
     for event in model.system_events:
-        yield (event.__module__, event.__qualname__)
+        yield (event.__module__, event.__qualname__, event)
 
 
 def _leaf(qualname: str) -> str:
