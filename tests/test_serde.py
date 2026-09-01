@@ -3727,6 +3727,16 @@ class DecoOriginTransform(Namespace):
         note: str = ""
 
 
+# ``transform=`` and ``backfill=`` on one decorator. The transform runs
+# first, then the origin fill supplies the required ``source``.
+class DecoOriginBoth(Namespace):
+    @migrate_from(
+        "DecoOriginBoth.Old", transform=_drop_legacy_flag, backfill={"source": "old"}
+    )
+    class Persisted(DomainEvent):
+        source: str
+
+
 # A chain A -> B -> Persisted for hand-authored transforms keyed on A (the
 # origin stage) and on Persisted (the class stage).
 class ChainTransform(Namespace):
@@ -4068,12 +4078,71 @@ def describe_TransformFields():
             with pytest.raises(ValueError, match="TransformFields target"):
                 NamespaceAwareSerde(migrations=[ghost])
 
+    def when_a_transform_and_a_fill_share_one_stage():
+        def it_runs_the_transform_first_and_the_fill_never_overwrites():
+            from langgraph_events.serde.migrations import (
+                AddField,
+                Migration,
+                TransformFields,
+            )
+
+            module = Reshaped.__module__
+
+            def note_from_flag(kw: dict[str, Any]) -> dict[str, Any]:
+                if kw.pop("legacy_flag", None):
+                    kw["note"] = "from-transform"
+                return kw
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration(
+                        name="transform-then-fill",
+                        operations=(
+                            TransformFields(module, "Reshaped.Trimmed", note_from_flag),
+                            AddField(module, "Reshaped.Trimmed", "note", "from-fill"),
+                        ),
+                    )
+                ],
+            )
+
+            def revive(**kwargs: Any) -> Any:
+                return serde.loads_typed(
+                    synthesize_legacy_payload(module, "Reshaped.Trimmed", kwargs)
+                )
+
+            assert revive(legacy_flag=True).note == "from-transform"
+            assert revive().note == "from-fill"
+
+    def when_one_decorator_carries_a_transform_and_a_backfill():
+        def it_runs_the_transform_then_the_origin_fill():
+            serde = NamespaceAwareSerde(namespaces=[DecoOriginBoth])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    DecoOriginBoth.__module__,
+                    "DecoOriginBoth.Old",
+                    {"legacy_flag": True},
+                )
+            )
+
+            assert revived == DecoOriginBoth.Persisted(source="old")
+
     def when_legacy_write_meets_a_transform():
-        def it_is_rejected_at_serde_construction():
-            # A transform has no inverse, so a payload written under the
-            # historic identity would not carry the shape old pods expect.
-            with pytest.raises(ValueError, match="legacy_write"):
-                NamespaceAwareSerde(namespaces=[Reshaped], legacy_write=True)
+        # A transform has no inverse, so a payload written under the
+        # historic identity would not carry the shape old pods expect.
+
+        def with_a_class_stage_transform():
+            def it_is_rejected_at_serde_construction():
+                with pytest.raises(ValueError, match="legacy_write"):
+                    NamespaceAwareSerde(namespaces=[Reshaped], legacy_write=True)
+
+        def with_an_origin_stage_transform():
+            def it_is_rejected_at_serde_construction():
+                with pytest.raises(ValueError, match="legacy_write"):
+                    NamespaceAwareSerde(
+                        namespaces=[DecoOriginTransform], legacy_write=True
+                    )
 
 
 def _upper_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
