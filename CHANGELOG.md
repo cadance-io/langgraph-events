@@ -85,6 +85,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An `init=False` dataclass field now round-trips through `NamespaceAwareSerde`.**
+  Closes [#172](https://github.com/cadance-io/langgraph-events/issues/172). The encoder wrote
+  every `dataclasses.fields()` name of an event. The constructor rejected an `init=False` field
+  on read with `Cannot revive ... unexpected keyword argument`. The encoder now writes only
+  fields with `init=True`. An `init=False` field is rebuilt by `__post_init__` on read.
+  `assert_all_baselined_revive` agrees: its placeholder helper gives an `init=False` field no
+  placeholder.
+
 - **A pydantic payload nested inside a class no longer revives silently as a raw `dict`.**
   Closes [#167](https://github.com/cadance-io/langgraph-events/issues/167). The LangGraph
   serializer stores a pydantic payload by `__name__` and revives it with one `getattr` on the
