@@ -210,7 +210,7 @@ def _make_ext_hook(
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     scope: dict[tuple[str, str], type],
     *,
-    tolerant: bool = False,
+    unresolved: list[UnrevivedIdentity] | None = None,
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -232,10 +232,11 @@ def _make_ext_hook(
     plain ``dict`` regardless of ``LANGGRAPH_STRICT_MSGPACK`` or the
     constructor's ``allowed_msgpack_modules`` argument (#68).
 
-    *tolerant*, when ``True``, degrades an unrevivable
-    ``EXT_NAMESPACE_AWARE_EVENT`` identity to an :class:`UnrevivedIdentity`
-    instead of raising. Only ``NamespaceAwareSerde.tolerate_unresolved``
-    sets this. Every other caller keeps the strict default.
+    *unresolved*, when not ``None``, is a collector. An unrevivable
+    ``EXT_NAMESPACE_AWARE_EVENT`` identity is then appended to it and
+    returned as an :class:`UnrevivedIdentity` instead of raising. Only
+    ``NamespaceAwareSerde.tolerate_unresolved`` passes one. Every other
+    caller keeps the strict default.
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
@@ -284,13 +285,16 @@ def _make_ext_hook(
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
             # has dropped, or omit a field it has gained with no AddField.
-            if tolerant:
-                # Retirement cleanup only (see the *tolerant* parameter
+            if unresolved is not None:
+                # Retirement cleanup only (see the *unresolved* parameter
                 # docstring above). The caller is a tool that exists to
                 # settle exactly this thread, not a normal read. Degrade
                 # instead of raising. Keep no partial kwargs: there is
-                # no live class to hold them.
-                return UnrevivedIdentity(module=module_name, qualname=qualname)
+                # no live class to hold them. The collector sees every
+                # degrade, however deep the identity sat in the blob.
+                placeholder = UnrevivedIdentity(module=module_name, qualname=qualname)
+                unresolved.append(placeholder)
+                return placeholder
             errors.append(
                 f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: "
                 f"{exc}. {_revival_remedy(qualname, exc)}"
@@ -377,6 +381,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         self._legacy_write = legacy_write
         self._encode_default = _make_default(legacy_write, oldest_historic)
         self._tolerant_depth = 0
+        self._unresolved: list[UnrevivedIdentity] | None = None
         for cls in _unreachable_migrate_from_siblings(scope):
             warn_user(
                 f"{cls.__qualname__} is decorated with @migrate_from, but "
@@ -388,37 +393,46 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 UnreachableMigrationWarning,
             )
 
-    @property
-    def _tolerant(self) -> bool:
-        return self._tolerant_depth > 0
-
     @contextlib.contextmanager
-    def tolerate_unresolved(self) -> Iterator[None]:
-        """Degrade an unrevivable interrupt identity to
+    def tolerate_unresolved(self) -> Iterator[list[UnrevivedIdentity]]:
+        """Degrade an unrevivable event identity to
         :class:`UnrevivedIdentity` instead of raising ``Cannot revive``,
         for the duration of the ``with`` block.
 
-        For ``EventGraph.threads_paused_on()``/``abandon()`` only. These
-        are the retirement tools that must keep working on a thread
-        whose paused class was already deleted. ``loads_typed()`` stays
-        strict outside this block, so a genuine revival bug elsewhere
-        still raises.
+        Yields a collector. Every identity degraded inside the block is
+        appended to it, in read order, wherever it sat in the blob: a
+        top-level event, a pending write, or a field nested inside a
+        live event. ``EventGraph.unrevivable_threads()`` reads this
+        collector. A reader that walked the checkpoint structure instead
+        would miss the nested shapes.
+
+        For the retirement tools only: ``EventGraph.threads_paused_on()``,
+        ``abandon()`` and ``unrevivable_threads()``. These must keep
+        working on a thread whose class was already deleted.
+        ``loads_typed()`` stays strict outside this block, so a genuine
+        revival bug elsewhere still raises.
 
         Reentrant: a depth counter, not a flag. ``abandon()`` opens this
         block and then calls a helper that opens it again for one read.
         The inner exit must not turn tolerance off out from under the
-        still-open outer block.
+        still-open outer block. An inner block shares the outer block's
+        collector.
 
         WARNING: toggles per-instance state. Do not read through this
         same serde instance from another thread/task while the block is
         open. This is the same caveat as calling ``abandon()``
         concurrently with another run on the thread it targets.
         """
+        collector = self._unresolved
+        if collector is None:
+            collector = self._unresolved = []
         self._tolerant_depth += 1
         try:
-            yield
+            yield collector
         finally:
             self._tolerant_depth -= 1
+            if self._tolerant_depth == 0:
+                self._unresolved = None
 
     def revivable_identities(self) -> frozenset[tuple[str, str]]:
         """Every ``(module, qualname)`` this serde can revive — either still
@@ -467,7 +481,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._addfield_table,
                     self._origin_addfield_table,
                     self._scope,
-                    tolerant=self._tolerant,
+                    unresolved=self._unresolved,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )

@@ -5254,6 +5254,49 @@ def describe_athreads_paused_on():
                 await graph.athreads_paused_on()
 
 
+class _Holder(IntegrationEvent):
+    """Carries another event in a field, so a deleted class can hide
+    inside a live one. Frozen dataclasses do not validate a field, so
+    the outer event constructs around an UnrevivedIdentity."""
+
+    inner: Event | None = None
+
+
+class _BrokenReadSaver(MemorySaver):
+    """Once ``broken`` is set, get_tuple raises for thread ``bad``, to
+    pin error attribution. Stays healthy while the thread is written."""
+
+    broken = False
+
+    def get_tuple(self, config):  # type: ignore[override]
+        if self.broken and config["configurable"].get("thread_id") == "bad":
+            raise RuntimeError("disk on fire")
+        return super().get_tuple(config)
+
+
+def _paused_unrevivable_pair(saver, tid: str):
+    """A thread paused on an Interrupted subclass since deleted. Shared by
+    describe_delete_first_retirement and describe_unrevivable_threads."""
+    from langgraph_events.serde import NamespaceAwareSerde
+
+    class _Retiring(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _Retiring:
+        return _Retiring()
+
+    cfg = {"configurable": {"thread_id": tid}}
+    saver.serde = NamespaceAwareSerde(events=(Started, _Retiring))
+    EventGraph([wait], checkpointer=saver).invoke(Started(data="x"), config=cfg)
+
+    # "Deletion": a fresh serde whose scope and import walk can no
+    # longer reach `_Retiring` — it was never a module attribute to
+    # begin with.
+    saver.serde = NamespaceAwareSerde(events=(Started,))
+    return EventGraph([_completes], checkpointer=saver), cfg
+
+
 def describe_delete_first_retirement():
     # The full delete-first scenario (#164): pause a thread on an
     # Interrupted subclass, then delete the class so it no longer
@@ -5263,26 +5306,6 @@ def describe_delete_first_retirement():
     # it is precisely the state a retirement caller is hunting, and the
     # CI coverage gates never catch it (they compare the baseline to the
     # topology, never read a checkpoint).
-
-    def _paused_unrevivable_pair(saver, tid: str):
-        from langgraph_events.serde import NamespaceAwareSerde
-
-        class _Retiring(Interrupted):
-            pass
-
-        @on(Started)
-        def wait(event: Started) -> _Retiring:
-            return _Retiring()
-
-        cfg = {"configurable": {"thread_id": tid}}
-        saver.serde = NamespaceAwareSerde(events=(Started, _Retiring))
-        EventGraph([wait], checkpointer=saver).invoke(Started(data="x"), config=cfg)
-
-        # "Deletion": a fresh serde whose scope and import walk can no
-        # longer reach `_Retiring` — it was never a module attribute to
-        # begin with.
-        saver.serde = NamespaceAwareSerde(events=(Started,))
-        return EventGraph([_completes], checkpointer=saver), cfg
 
     def when_using_threads_paused_on():
         def it_still_finds_the_thread():
@@ -5356,6 +5379,222 @@ def describe_delete_first_retirement():
 
             log = (await graph.aget_state(cfg)).events
             assert log.latest(Abandoned).discarded
+
+
+def describe_unrevivable_threads():
+    # The store-walking gate (#159): the baseline gates compare the
+    # topology to a committed snapshot and never read a checkpoint, so
+    # after a re-baseline with allow_removed=True they stay green while
+    # a settled thread's history still names a deleted class. This sweep
+    # reads the real store instead.
+
+    def _settled_unrevivable_pair(saver, tid: str):
+        """A thread that *answered* an interrupt on a class since deleted:
+        the retired identity sits in its settled history, not in a
+        pending write, so threads_paused_on() never reaches it."""
+        from langgraph_events.serde import NamespaceAwareSerde
+
+        class _Retired(Interrupted):
+            pass
+
+        @on(Started)
+        def wait(event: Started) -> _Retired:
+            return _Retired()
+
+        cfg = {"configurable": {"thread_id": tid}}
+        saver.serde = NamespaceAwareSerde(events=(Started, _Retired))
+        graph = EventGraph([wait, _go_ends], checkpointer=saver)
+        graph.invoke(Started(data="x"), config=cfg)
+        graph.resume(_Go(), config=cfg)
+        assert graph.get_state(cfg).events.has(Ended)
+
+        # "Deletion": see describe_delete_first_retirement.
+        saver.serde = NamespaceAwareSerde(events=(Started,))
+        return EventGraph([_completes], checkpointer=saver), cfg
+
+    def when_a_settled_history_names_a_deleted_class():
+        def it_reports_the_thread_naming_the_qualname():
+            graph, _cfg = _settled_unrevivable_pair(MemorySaver(), "unrev-settled")
+
+            assert graph.unrevivable_threads() == {
+                "unrev-settled": [
+                    "describe_unrevivable_threads.<locals>."
+                    "_settled_unrevivable_pair.<locals>._Retired"
+                ]
+            }
+
+    def when_every_thread_revives():
+        def it_returns_an_empty_mapping():
+            from langgraph_events.serde import NamespaceAwareSerde
+
+            saver = MemorySaver()
+            saver.serde = NamespaceAwareSerde(events=(Started,))
+            graph = EventGraph([_waiter, _go_ends], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "unrev-clean"}}
+            graph.invoke(Started(data="x"), config=cfg)
+            graph.resume(_Go(), config=cfg)
+
+            assert graph.unrevivable_threads() == {}
+
+    def when_a_pending_interrupt_names_a_deleted_class():
+        def it_reports_the_paused_thread_too():
+            # One sweep covers both shapes: the paused thread
+            # threads_paused_on() already finds, and the settled one it
+            # never reaches.
+            saver = MemorySaver()
+            graph, _cfg = _settled_unrevivable_pair(saver, "unrev-both-settled")
+            graph, _cfg = _paused_unrevivable_pair(saver, "unrev-both-paused")
+
+            assert set(graph.unrevivable_threads()) == {
+                "unrev-both-settled",
+                "unrev-both-paused",
+            }
+
+    def when_there_is_no_checkpointer():
+        def it_raises():
+            graph = EventGraph([_waiter])
+            with pytest.raises(
+                ValueError, match=r"unrevivable_threads.*requires a checkpointer"
+            ):
+                graph.unrevivable_threads()
+
+    def when_the_checkpointer_does_not_implement_list():
+        def it_raises_a_value_error_naming_the_method():
+            saver = _NoListSaver()
+            graph = EventGraph([_waiter], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "unrev-no-list"}}
+            graph.invoke(Started(data="x"), config=cfg)
+
+            with pytest.raises(ValueError, match=r"unrevivable_threads"):
+                graph.unrevivable_threads()
+
+    def when_a_completed_sibling_write_names_a_deleted_class():
+        def it_reports_the_thread():
+            # A handler interrupts while a sibling completes in the same
+            # superstep. The sibling's event is a pending write on the
+            # `events` channel, not yet in channel_values. Reading only
+            # channel_values misses it.
+            from langgraph_events.serde import NamespaceAwareSerde
+
+            class _Pausing(Interrupted):
+                pass
+
+            class _Gone(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def wait(event: Started) -> _Pausing:
+                return _Pausing()
+
+            @on(Started)
+            def side(event: Started) -> _Gone:
+                return _Gone()
+
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "unrev-sibling"}}
+            saver.serde = NamespaceAwareSerde(events=(Started, _Pausing, _Gone))
+            EventGraph([wait, side], checkpointer=saver).invoke(
+                Started(data="x"), config=cfg
+            )
+
+            # Only the sibling's class is deleted: the interrupt still revives.
+            saver.serde = NamespaceAwareSerde(events=(Started, _Pausing))
+            graph = EventGraph([_completes], checkpointer=saver)
+
+            assert list(graph.unrevivable_threads()) == ["unrev-sibling"]
+            assert graph.unrevivable_threads()["unrev-sibling"] == [_Gone.__qualname__]
+
+    def when_a_nested_payload_names_a_deleted_class():
+        def it_reports_the_thread():
+            from langgraph_events.serde import NamespaceAwareSerde
+
+            class _Gone(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def hold(event: Started) -> _Holder:
+                return _Holder(inner=_Gone())
+
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "unrev-nested"}}
+            saver.serde = NamespaceAwareSerde(events=(Started, _Holder, _Gone))
+            EventGraph([hold], checkpointer=saver).invoke(Started(data="x"), config=cfg)
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _Holder))
+            graph = EventGraph([_completes], checkpointer=saver)
+
+            assert graph.unrevivable_threads() == {"unrev-nested": [_Gone.__qualname__]}
+
+    def when_the_serde_is_not_namespace_aware():
+        def it_raises_naming_the_method():
+            # The default serde never degrades an identity, so the sweep
+            # would return {} while seeing nothing.
+            saver = MemorySaver()
+            graph = EventGraph([_completes], checkpointer=saver)
+            graph.invoke(
+                Started(data="x"), config={"configurable": {"thread_id": "unrev-js"}}
+            )
+
+            with pytest.raises(
+                ValueError, match=r"unrevivable_threads.*NamespaceAware"
+            ):
+                graph.unrevivable_threads()
+
+    def when_a_thread_checkpoint_cannot_be_read():
+        def it_names_the_thread():
+            from langgraph_events.serde import NamespaceAwareSerde
+
+            saver = _BrokenReadSaver()
+            saver.serde = NamespaceAwareSerde(events=(Started,))
+            graph = EventGraph([_completes], checkpointer=saver)
+            graph.invoke(
+                Started(data="x"), config={"configurable": {"thread_id": "bad"}}
+            )
+
+            saver.broken = True
+
+            with pytest.raises(
+                RuntimeError,
+                match=r"unrevivable_threads\(\) could not read thread 'bad'",
+            ):
+                graph.unrevivable_threads()
+
+
+def describe_aunrevivable_threads():
+    # Async mirror of describe_unrevivable_threads().
+
+    def when_a_settled_history_names_a_deleted_class():
+        @pytest.mark.asyncio
+        async def it_reports_the_thread():
+            from langgraph_events.serde import NamespaceAwareSerde
+
+            class _ARetired(Interrupted):
+                pass
+
+            @on(Started)
+            def wait(event: Started) -> _ARetired:
+                return _ARetired()
+
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "aunrev-settled"}}
+            saver.serde = NamespaceAwareSerde(events=(Started, _ARetired))
+            graph = EventGraph([wait, _go_ends], checkpointer=saver)
+            await graph.ainvoke(Started(data="x"), config=cfg)
+            await graph.aresume(_Go(), config=cfg)
+
+            saver.serde = NamespaceAwareSerde(events=(Started,))
+            graph = EventGraph([_completes], checkpointer=saver)
+
+            assert list(await graph.aunrevivable_threads()) == ["aunrev-settled"]
+
+    def when_there_is_no_checkpointer():
+        @pytest.mark.asyncio
+        async def it_raises():
+            graph = EventGraph([_waiter])
+            with pytest.raises(
+                ValueError, match=r"aunrevivable_threads.*requires a checkpointer"
+            ):
+                await graph.aunrevivable_threads()
 
 
 def describe_assert_resume_recovers():

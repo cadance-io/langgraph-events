@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     )
 
     from langchain_core.runnables import RunnableConfig
+    from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
     from langgraph.types import StateSnapshot
@@ -77,6 +78,7 @@ if TYPE_CHECKING:
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
     from langgraph_events._types import StateDict
+    from langgraph_events.serde._jsonplus import UnrevivedIdentity
 
 
 class OrphanedEventWarning(UserWarning):
@@ -1699,16 +1701,21 @@ class EventGraph:
             unresolved_names=unresolved_names,
         )
 
-    def _tolerant_read(self) -> contextlib.AbstractContextManager[None]:
-        """Context manager that degrades an unrevivable interrupt
-        identity instead of raising, for the checkpointer's current
-        serde: a no-op for any serde other than
+    def _tolerant_read(
+        self,
+    ) -> contextlib.AbstractContextManager[list[UnrevivedIdentity]]:
+        """Context manager that degrades an unrevivable event identity
+        instead of raising, for the checkpointer's current serde. Yields
+        the serde's collector of every identity degraded inside the
+        block. See ``NamespaceAwareSerde.tolerate_unresolved``.
+
+        A no-op yielding an empty list for any serde other than
         :class:`~langgraph_events.serde.NamespaceAwareSerde`, the only
         one this library ships that raises ``Cannot revive`` in the
         first place.
 
-        Used by :meth:`_read_pending_interrupts`/
-        :meth:`_aread_pending_interrupts` and by
+        Used by :meth:`_read_checkpoint_tuple`/
+        :meth:`_aread_checkpoint_tuple` and by
         :meth:`abandon`/:meth:`aabandon`, which must also read the
         thread's event log and settle it despite the same unrevivable
         identity.
@@ -1720,18 +1727,17 @@ class EventGraph:
         serde = getattr(self._checkpointer, "serde", None)
         if isinstance(serde, NamespaceAwareSerde):
             return serde.tolerate_unresolved()
-        return contextlib.nullcontext()
+        return contextlib.nullcontext([])
 
-    def _read_pending_interrupts(
+    def _read_checkpoint_tuple(
         self, config: RunnableConfig, method: str
-    ) -> _PendingInterrupts:
-        """*config*'s latest checkpoint's pending interrupt(s), read
-        straight from the checkpointer. See :meth:`_pending_interrupt_writes`.
+    ) -> tuple[CheckpointTuple | None, list[UnrevivedIdentity]]:
+        """*config*'s latest checkpoint tuple, read inside
+        :meth:`_tolerant_read`, with every identity that read degraded.
 
-        Read inside :meth:`_tolerant_read`: a stored write naming a class
-        that no longer imports degrades to an ``UnrevivedIdentity``
-        instead of raising, precisely on the thread a retirement caller
-        is hunting.
+        A stored blob naming a class that no longer imports degrades to
+        an ``UnrevivedIdentity`` instead of raising, precisely on the
+        thread a retirement caller is hunting.
 
         Any *other* checkpointer failure still propagates, re-raised
         naming *method* and the thread so the caller knows which one is
@@ -1741,36 +1747,55 @@ class EventGraph:
         """
         thread_id = config.get("configurable", {}).get("thread_id")
         try:
-            with self._tolerant_read():
+            with self._tolerant_read() as unresolved:
                 tup = self._checkpointer.get_tuple(config)
         except Exception as exc:
             raise RuntimeError(
                 f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
             ) from exc
-        if tup is None:
-            return _PendingInterrupts(
-                has_interrupt=False, events=[], unresolved_names=[]
-            )
-        return self._pending_interrupt_writes(tup.pending_writes)
+        return tup, list(unresolved)
 
-    async def _aread_pending_interrupts(
+    async def _aread_checkpoint_tuple(
         self, config: RunnableConfig, method: str
-    ) -> _PendingInterrupts:
-        """Async sibling of :meth:`_read_pending_interrupts`, via
+    ) -> tuple[CheckpointTuple | None, list[UnrevivedIdentity]]:
+        """Async sibling of :meth:`_read_checkpoint_tuple`, via
         ``aget_tuple``."""
         thread_id = config.get("configurable", {}).get("thread_id")
         try:
-            with self._tolerant_read():
+            with self._tolerant_read() as unresolved:
                 tup = await self._checkpointer.aget_tuple(config)
         except Exception as exc:
             raise RuntimeError(
                 f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
             ) from exc
+        return tup, list(unresolved)
+
+    def _read_pending_interrupts(
+        self, config: RunnableConfig, method: str
+    ) -> _PendingInterrupts:
+        """*config*'s latest checkpoint's pending interrupt(s), read
+        straight from the checkpointer through
+        :meth:`_read_checkpoint_tuple`. See
+        :meth:`_pending_interrupt_writes`.
+        """
+        tup, _unresolved = self._read_checkpoint_tuple(config, method)
         if tup is None:
             return _PendingInterrupts(
                 has_interrupt=False, events=[], unresolved_names=[]
             )
-        return self._pending_interrupt_writes(tup.pending_writes)
+        return self._pending_interrupt_writes(tup.pending_writes or ())
+
+    async def _aread_pending_interrupts(
+        self, config: RunnableConfig, method: str
+    ) -> _PendingInterrupts:
+        """Async sibling of :meth:`_read_pending_interrupts`, via
+        :meth:`_aread_checkpoint_tuple`."""
+        tup, _unresolved = await self._aread_checkpoint_tuple(config, method)
+        if tup is None:
+            return _PendingInterrupts(
+                has_interrupt=False, events=[], unresolved_names=[]
+            )
+        return self._pending_interrupt_writes(tup.pending_writes or ())
 
     @staticmethod
     def _require_settleable(
@@ -1991,6 +2016,101 @@ class EventGraph:
             if self._matches_event_type(pending, event_type):
                 configs.append(cfg)
         return configs
+
+    @staticmethod
+    def _unrevived_qualnames(unresolved: Iterable[UnrevivedIdentity]) -> list[str]:
+        """Qualnames of *unresolved*, deduped in discovery order."""
+        names: list[str] = []
+        for identity in unresolved:
+            if identity.qualname not in names:
+                names.append(identity.qualname)
+        return names
+
+    def _require_namespace_aware_serde(self, method: str) -> None:
+        """Raise ``ValueError`` naming *method* unless the checkpointer's
+        serde is a ``NamespaceAwareSerde``.
+
+        No other serde degrades an identity, so the sweep would return
+        an empty mapping while seeing nothing. The default LangGraph
+        serializer revives a deleted class as ``None`` with no error.
+        """
+        from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
+            NamespaceAwareSerde,
+        )
+
+        serde = getattr(self._checkpointer, "serde", None)
+        if isinstance(serde, NamespaceAwareSerde):
+            return
+        raise ValueError(
+            f"{method}() needs a NamespaceAwareSerde on the checkpointer, "
+            f"found {type(serde).__name__}. Only that serde can report an "
+            f"identity it cannot revive. Wire one with "
+            f"EventGraph.from_namespaces(..., checkpointer=...) or set "
+            f"checkpointer.serde = NamespaceAwareSerde(...)."
+        )
+
+    def unrevivable_threads(self) -> dict[str, list[str]]:
+        """Every thread whose latest checkpoint holds an event identity
+        the checkpointer's serde can no longer revive.
+
+        Returns a mapping of thread id to the qualnames that checkpoint
+        could not revive. Thread ids are sorted. Qualnames are deduped
+        in read order. The mapping is empty when every thread revives.
+
+        Reads the real store, not the baseline. The coverage gates
+        compare the topology to a committed baseline and never read a
+        checkpoint. After ``write_baseline(..., allow_removed=True)``
+        they stay green while a settled thread still raises
+        ``Cannot revive``. This method reads that thread.
+
+        Reads each thread's latest checkpoint through the serde's
+        tolerant path and collects every identity that path degraded.
+        So it reports an identity in the settled ``events`` history, in
+        a pending interrupt, in a completed sibling write, or nested in
+        a field of a live event. A thread that already *answered* an
+        interrupt on a deleted class is reported. :meth:`threads_paused_on`
+        never reaches that thread.
+
+        Reads the latest checkpoint of each thread only, under the root
+        checkpoint namespace. An older checkpoint version is not read.
+        A historic pending interrupt that ``abandon()`` already settled
+        can still raise on ``get_state_history()``. See *Ending a pause
+        without answering it* in ``docs/control-flow.md``. A checkpoint
+        written by this graph embedded as a subgraph lives under a child
+        namespace and is not read, the same as :meth:`threads_paused_on`.
+
+        WARNING: cost is O(all checkpoints), like
+        :meth:`threads_paused_on`.
+
+        Requires a checkpointer whose serde is a
+        :class:`~langgraph_events.serde.NamespaceAwareSerde`. Raises
+        ``ValueError`` otherwise, or if the checkpointer's ``list()`` is
+        unimplemented. Raises ``RuntimeError`` naming the thread if one
+        checkpoint cannot be read.
+        """
+        self._require_checkpointer("unrevivable_threads")
+        self._require_namespace_aware_serde("unrevivable_threads")
+        found: dict[str, list[str]] = {}
+        for tid in self._list_thread_ids("unrevivable_threads"):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            _tup, unresolved = self._read_checkpoint_tuple(cfg, "unrevivable_threads")
+            if unresolved:
+                found[tid] = self._unrevived_qualnames(unresolved)
+        return found
+
+    async def aunrevivable_threads(self) -> dict[str, list[str]]:
+        """Async version of :meth:`unrevivable_threads`."""
+        self._require_checkpointer("aunrevivable_threads")
+        self._require_namespace_aware_serde("aunrevivable_threads")
+        found: dict[str, list[str]] = {}
+        for tid in await self._alist_thread_ids("aunrevivable_threads"):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            _tup, unresolved = await self._aread_checkpoint_tuple(
+                cfg, "aunrevivable_threads"
+            )
+            if unresolved:
+                found[tid] = self._unrevived_qualnames(unresolved)
+        return found
 
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
