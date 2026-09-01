@@ -792,6 +792,39 @@ def backfill(
     return _wrap
 
 
+_TRANSFORM_ATTR = "__lge_transform__"
+
+
+def transform_fields(
+    transform: Callable[[dict[str, Any]], dict[str, Any]],
+) -> Callable[[type], type]:
+    """Rewrite the stored kwargs of every payload that revives as this class.
+
+    The class-scoped, auto-collected sibling of :func:`backfill` for a
+    field the class dropped, two fields merged into one, or a field whose
+    type changed. The metadata becomes a :class:`TransformFields` keyed on
+    this class's current identity, so the transform runs AFTER any
+    ``@migrate_from`` rename, on payloads from every era, including the
+    payloads the current release writes. It must be idempotent: use
+    ``kw.pop("x", None)`` for a key that is absent after the first read.
+    For a transform that runs on one historic origin only, use
+    ``migrate_from(..., transform=...)``.
+
+    Metadata is stashed as ``__lge_transform__``. One transform per class:
+    compose several steps in one callable.
+    """
+
+    def _wrap(cls: type) -> type:
+        # ``cls.__dict__.get`` (not ``getattr``) so the marker doesn't leak
+        # through MRO when a subclass inherits a decorated parent — same
+        # contract as ``_BACKFILL_ATTR``.
+        existing = cls.__dict__.get(_TRANSFORM_ATTR, ())
+        setattr(cls, _TRANSFORM_ATTR, (*existing, transform))
+        return cls
+
+    return _wrap
+
+
 def _serde_event_classes(
     namespaces: Sequence[type], events: Sequence[type]
 ) -> list[type]:
@@ -997,7 +1030,8 @@ def _collect_decorated_migrations(
         history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
         backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
-        if not history and not backfills and not origin_backfills:
+        transforms = cls.__dict__.get(_TRANSFORM_ATTR, ())
+        if not history and not backfills and not origin_backfills and not transforms:
             continue
         ops: list[Operation] = []
         if history:
@@ -1039,6 +1073,16 @@ def _collect_decorated_migrations(
                         default=default,
                     )
                 )
+        # Class-global transform keys on the CURRENT identity, like the
+        # class-global AddField above.
+        ops.extend(
+            TransformFields(
+                module=cls.__module__,
+                qualname=cls.__qualname__,
+                transform=transform,
+            )
+            for transform in transforms
+        )
         out.append(
             Migration(
                 name=f"{cls.__module__}:{cls.__qualname__}",

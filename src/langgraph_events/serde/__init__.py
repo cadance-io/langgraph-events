@@ -39,11 +39,13 @@ from langgraph_events.serde.migrations import (
     migrate_from,
     replay_reducer,
     synthesize_legacy_payload,
+    transform_fields,
 )
 
-# Raw RenameEvent / AddField are deliberately NOT re-exported here. The
-# common path is decorator-first (@migrate_from) plus Migration.rename /
-# Migration.add_field sugar. The raw operation constructors remain
+# Raw RenameEvent / AddField / TransformFields are deliberately NOT
+# re-exported here. The common path is decorator-first (@migrate_from,
+# @backfill, @transform_fields) plus Migration.rename / Migration.add_field /
+# Migration.transform_fields sugar. The raw operation constructors remain
 # importable from ``langgraph_events.serde.migrations`` for the rare
 # composite multi-op Migration — keeping the top-level surface small.
 __all__ = [
@@ -62,4 +64,5 @@ __all__ = [
     "migrate_from",
     "replay_reducer",
     "synthesize_legacy_payload",
+    "transform_fields",
 ]
