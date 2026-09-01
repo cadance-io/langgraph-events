@@ -78,6 +78,7 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
 from langgraph_events.serde.migrations._core import (  # noqa: E402
+    TransformError,
     _apply_identity_migrations,
     _collect_decorated_migrations,
     _flatten_and_validate,
@@ -111,13 +112,23 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     """The actionable second sentence of a ``Cannot revive`` message.
 
     *exc* is ``ImportError``/``AttributeError`` (the identity resolves to
-    no live class at all) or ``TypeError`` (it resolves, but the stored
-    kwargs and the class's fields disagree). The two need different
-    remedies. "Map onto a tombstone with @migrate_from" is right for the
-    first case: there is no live class yet. It is wrong for the second
-    case, where *qualname* may already **be** the tombstone:
-    redecorating it with the decorator it already carries fixes nothing.
+    no live class at all), ``TypeError`` (it resolves, but the stored
+    kwargs and the class's fields disagree), or ``TransformError`` (a
+    ``TransformFields`` raised, or returned a non-dict). The three need
+    different remedies. "Map onto a tombstone with @migrate_from" is
+    right for the first case: there is no live class yet. It is wrong
+    for the second case, where *qualname* may already **be** the
+    tombstone: redecorating it with the decorator it already carries
+    fixes nothing.
     """
+    if isinstance(exc, TransformError):
+        op = exc.op
+        return (
+            f"The transform keyed on {op.module}.{op.qualname} must accept a "
+            f"payload from every era and return a dict. Use kw.pop('x', None) "
+            f"for a key that can be absent. See 'Dropping, merging or retyping "
+            f"a field' in docs/event-migrations.md."
+        )
     if not isinstance(exc, TypeError):
         return (
             "The class may have been renamed or removed since the "
@@ -283,24 +294,29 @@ def _make_ext_hook(
             data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
         )
         module_name, qualname, kwargs = tup
-        # Rewrite historic identity to current, run any TransformFields and
-        # inject any AddField defaults — shared with the baseline test
-        # helper so the read-side migration rule lives in exactly one place.
-        module_name, qualname, kwargs = _apply_identity_migrations(
-            module_name,
-            qualname,
-            kwargs,
-            rename_table,
-            addfield_table,
-            origin_addfield_table,
-            transform_table,
-        )
         try:
+            # Rewrite historic identity to current, run any TransformFields
+            # and inject any AddField defaults — shared with the baseline
+            # test helper so the read-side migration rule lives in exactly
+            # one place. Inside the ``try``: a transform that raises must
+            # reach the ``errors`` channel like every other failure, or
+            # ormsgpack reports a bare ``ext_hook failed``. The identity
+            # stays the STORED one when the migration itself fails.
+            module_name, qualname, kwargs = _apply_identity_migrations(
+                module_name,
+                qualname,
+                kwargs,
+                rename_table,
+                addfield_table,
+                origin_addfield_table,
+                transform_table,
+            )
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
-        except (ImportError, AttributeError, TypeError) as exc:
+        except (ImportError, AttributeError, TypeError, TransformError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
             # has dropped, or omit a field it has gained with no AddField.
+            # ``TransformError`` wraps whatever a transform raised.
             if unresolved is not None:
                 # Retirement cleanup only (see the *unresolved* parameter
                 # docstring above). The caller is a tool that exists to
@@ -311,9 +327,14 @@ def _make_ext_hook(
                 placeholder = UnrevivedIdentity(module=module_name, qualname=qualname)
                 unresolved.append(placeholder)
                 return placeholder
+            failure = (
+                str(exc)
+                if isinstance(exc, TransformError)
+                else f"{type(exc).__name__}: {exc}"
+            )
             errors.append(
-                f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: "
-                f"{exc}. {_revival_remedy(qualname, exc)}"
+                f"Cannot revive {module_name}.{qualname}: {failure}. "
+                f"{_revival_remedy(qualname, exc)}"
             )
             raise
 

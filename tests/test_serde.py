@@ -3994,3 +3994,51 @@ def describe_TransformFields():
             assert _revive("ChainTransform.B", c=3) == ChainTransform.Persisted()
             with pytest.raises(ValueError, match="'a'"):
                 _revive("ChainTransform.B", a=1)
+
+    def when_the_transform_raises():
+        # ormsgpack swallows an exception raised inside the ext-hook and
+        # re-raises a bare ``ext_hook failed``. The transform runs inside
+        # the hook, so its failure must reach the same ``errors`` channel
+        # the resolve failure uses.
+
+        def _serde() -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import Migration
+
+            def broken(kw: dict[str, Any]) -> dict[str, Any]:
+                return {"note": kw["legacy_flag"]}
+
+            return NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(
+                        target=Reshaped.Trimmed, transform=broken
+                    )
+                ],
+            )
+
+        _payload = synthesize_legacy_payload(
+            Reshaped.__module__, "Reshaped.Trimmed", {"note": "n"}
+        )
+
+        def it_raises_naming_the_stored_identity_and_the_cause():
+            with pytest.raises(ValueError) as excinfo:
+                _serde().loads_typed(_payload)
+
+            message = str(excinfo.value)
+            assert message.startswith(
+                f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
+                f"TransformFields raised KeyError: 'legacy_flag'."
+            )
+            assert "kw.pop" in message
+
+        def with_tolerate_unresolved():
+            def it_degrades_and_collects_the_identity():
+                from langgraph_events.serde._jsonplus import UnrevivedIdentity
+
+                serde = _serde()
+                with serde.tolerate_unresolved() as unresolved:
+                    revived = serde.loads_typed(_payload)
+
+                placeholder = UnrevivedIdentity(Reshaped.__module__, "Reshaped.Trimmed")
+                assert revived == placeholder
+                assert unresolved == [placeholder]
