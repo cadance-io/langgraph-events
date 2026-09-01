@@ -688,6 +688,14 @@ def migrate_from(
     """
     if not old_qualnames:
         raise ValueError("@migrate_from requires at least one historic qualname.")
+    if transform is not None and len(old_qualnames) != 1:
+        raise ValueError(
+            "@migrate_from(transform=...) requires exactly one historic "
+            "qualname per decorator — a multi-qualname chain is ambiguous "
+            "about which origin the transform belongs to. Stack one "
+            "decorator per origin, or use class-global @transform_fields for "
+            "a transform that applies to every era."
+        )
     if backfill is not None:
         if len(old_qualnames) != 1:
             raise ValueError(

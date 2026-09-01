@@ -3738,9 +3738,17 @@ def describe_assert_all_baselined_handlers_cover():
 # field after payloads were written, so a stored payload no longer matches
 # the live constructor. The transforms are module-level so a decorator
 # fixture below can reuse them.
-def _drop_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
-    kw.pop("legacy_flag", None)
-    return kw
+def _dropping(key: str) -> Any:
+    """A transform that removes *key* when present."""
+
+    def _transform(kw: dict[str, Any]) -> dict[str, Any]:
+        kw.pop(key, None)
+        return kw
+
+    return _transform
+
+
+_drop_legacy_flag = _dropping("legacy_flag")
 
 
 def _merge_name(kw: dict[str, Any]) -> dict[str, Any]:
@@ -3796,6 +3804,14 @@ class Gate(Namespace):
 # written under ``DecoOriginTransform.Old`` only.
 class DecoOriginTransform(Namespace):
     @migrate_from("DecoOriginTransform.Old", transform=_drop_legacy_flag)
+    class Persisted(DomainEvent):
+        note: str = ""
+
+
+# A chain A -> B -> Persisted for hand-authored transforms keyed on A (the
+# origin stage) and on Persisted (the class stage).
+class ChainTransform(Namespace):
+    @migrate_from("ChainTransform.A", "ChainTransform.B")
     class Persisted(DomainEvent):
         note: str = ""
 
@@ -3932,3 +3948,49 @@ def describe_TransformFields():
                         {"legacy_flag": True},
                     )
                 )
+
+        def with_two_historic_qualnames():
+            def it_is_rejected_at_decoration_time():
+                # Same rule as ``backfill=``: a chain is ambiguous about
+                # which origin the transform belongs to.
+                with pytest.raises(ValueError, match="exactly one historic"):
+
+                    @migrate_from("Chain.A", "Chain.B", transform=_drop_legacy_flag)
+                    class Ambiguous(DomainEvent):
+                        note: str = ""
+
+    def when_transforms_sit_on_both_stages_of_a_chain():
+        def _serde() -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import (
+                Migration,
+                TransformFields,
+            )
+
+            module = ChainTransform.__module__
+            return NamespaceAwareSerde(
+                namespaces=[ChainTransform],
+                migrations=[
+                    Migration(
+                        name="both-stages",
+                        operations=(
+                            TransformFields(module, "ChainTransform.A", _dropping("a")),
+                            TransformFields(
+                                module, "ChainTransform.Persisted", _dropping("c")
+                            ),
+                        ),
+                    )
+                ],
+            )
+
+        def _revive(qualname: str, **kwargs: Any) -> Any:
+            return _serde().loads_typed(
+                synthesize_legacy_payload(ChainTransform.__module__, qualname, kwargs)
+            )
+
+        def it_runs_the_origin_stage_then_the_class_stage_on_an_A_era_payload():
+            assert _revive("ChainTransform.A", a=1, c=3) == ChainTransform.Persisted()
+
+        def it_runs_only_the_class_stage_on_a_B_era_payload():
+            assert _revive("ChainTransform.B", c=3) == ChainTransform.Persisted()
+            with pytest.raises(ValueError, match="'a'"):
+                _revive("ChainTransform.B", a=1)
