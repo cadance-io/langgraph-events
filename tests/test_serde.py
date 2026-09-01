@@ -3677,6 +3677,31 @@ class Reshaped(Namespace):
         count: int = 0
 
 
+def _upper_draft(kw: dict[str, Any]) -> dict[str, Any]:
+    """Idempotent, and visible on a payload the current release wrote."""
+    if "draft" in kw:
+        kw["draft"] = kw["draft"].upper()
+    return kw
+
+
+# A class-global transform composed with a rename. The transform is keyed
+# on the live identity, so it runs on every era: the historic origin and
+# the payloads the current release writes.
+class Gate(Namespace):
+    @transform_fields(_upper_draft)
+    @migrate_from("Gate.OldReviewed")
+    class Reviewed(Interrupted):
+        draft: str = ""
+
+
+# An origin-scoped transform: it runs before the rename, on payloads
+# written under ``DecoOriginTransform.Old`` only.
+class DecoOriginTransform(Namespace):
+    @migrate_from("DecoOriginTransform.Old", transform=_drop_legacy_flag)
+    class Persisted(DomainEvent):
+        note: str = ""
+
+
 def describe_TransformFields():
     # A kwargs-to-kwargs operation. A rename covers a moved class and an
     # AddField covers a gained field. A dropped, merged or retyped field
@@ -3754,3 +3779,58 @@ def describe_TransformFields():
             )
 
             assert revived == Reshaped.Counted(count=3)
+
+    def when_the_transform_is_keyed_on_the_live_identity():
+        # The class-global stage. It runs after the rename, on every era,
+        # so the transform must be idempotent.
+
+        def it_runs_on_a_payload_the_current_release_wrote():
+            serde = NamespaceAwareSerde(namespaces=[Gate])
+
+            revived = serde.loads_typed(serde.dumps_typed(Gate.Reviewed(draft="d")))
+
+            assert revived == Gate.Reviewed(draft="D")
+
+        def it_runs_on_a_payload_renamed_onto_the_class():
+            serde = NamespaceAwareSerde(namespaces=[Gate])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Gate.__module__, "Gate.OldReviewed", {"draft": "d"}
+                )
+            )
+
+            assert revived == Gate.Reviewed(draft="D")
+
+        def it_reaches_an_event_nested_inside_a_Resumed():
+            # ``Resumed.interrupted`` is one ext record inside another, so
+            # the transform runs through the hook's recursion.
+            serde = NamespaceAwareSerde(namespaces=[Gate])
+            stored = Resumed(interrupted=Gate.Reviewed(draft="d"))
+
+            revived = serde.loads_typed(serde.dumps_typed(stored))
+
+            assert revived.interrupted == Gate.Reviewed(draft="D")
+
+    def when_the_transform_is_keyed_on_a_rename_source():
+        # The origin stage, declared with ``migrate_from(transform=...)``.
+
+        def it_runs_for_that_origin_only():
+            serde = NamespaceAwareSerde(namespaces=[DecoOriginTransform])
+            module = DecoOriginTransform.__module__
+
+            old_era = serde.loads_typed(
+                synthesize_legacy_payload(
+                    module, "DecoOriginTransform.Old", {"legacy_flag": True}
+                )
+            )
+
+            assert old_era == DecoOriginTransform.Persisted()
+            with pytest.raises(ValueError, match="legacy_flag"):
+                serde.loads_typed(
+                    synthesize_legacy_payload(
+                        module,
+                        "DecoOriginTransform.Persisted",
+                        {"legacy_flag": True},
+                    )
+                )

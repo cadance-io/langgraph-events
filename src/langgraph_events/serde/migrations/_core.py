@@ -639,12 +639,14 @@ def _apply_identity_migrations(
 
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"
 _ORIGIN_BACKFILL_ATTR = "__lge_origin_backfill__"
+_ORIGIN_TRANSFORM_ATTR = "__lge_origin_transform__"
 
 
 def migrate_from(
     *old_qualnames: str,
     in_module: str | None = None,
     backfill: dict[str, Any] | None = None,
+    transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Callable[[type], type]:
     """Mark that this ``Event`` class formerly lived at ``old_qualnames``.
 
@@ -666,8 +668,17 @@ def migrate_from(
     ``default_factory`` hand-author ``Migration.add_field`` keyed on the
     historic identity.
 
-    Metadata is stashed on the class as ``__lge_migrate_from__`` (and
-    ``__lge_origin_backfill__`` for the per-origin fills).
+    ``transform`` rewrites the stored kwargs of payloads written under
+    this decorator's historic qualname ONLY, before the rename and before
+    the origin fills. It is the retirement tool for an identity with no
+    field-compatible survivor: ``transform=lambda kw: {}`` maps it onto a
+    tombstone or a sibling whose fields all have defaults. Same
+    one-qualname rule as ``backfill``. A transform for payloads from
+    *every* era is class-global :func:`transform_fields`'s job.
+
+    Metadata is stashed on the class as ``__lge_migrate_from__`` (plus
+    ``__lge_origin_backfill__`` for the per-origin fills and
+    ``__lge_origin_transform__`` for the per-origin transform).
     :class:`NamespaceAwareSerde` walks the namespaces passed to its
     ``namespaces=`` argument at construction and assembles a
     :class:`Migration` per decorated class automatically — no separate
@@ -736,6 +747,12 @@ def migrate_from(
             existing_fills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
             entry = ((module, old_qualnames[0]), dict(backfill))
             setattr(cls, _ORIGIN_BACKFILL_ATTR, (*existing_fills, entry))
+        if transform is not None:
+            existing_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
+            transform_entry = ((module, old_qualnames[0]), transform)
+            setattr(
+                cls, _ORIGIN_TRANSFORM_ATTR, (*existing_transforms, transform_entry)
+            )
         return cls
 
     return _wrap
@@ -1031,7 +1048,8 @@ def _collect_decorated_migrations(
         backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
         transforms = cls.__dict__.get(_TRANSFORM_ATTR, ())
-        if not history and not backfills and not origin_backfills and not transforms:
+        origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
+        if not (history or backfills or origin_backfills or transforms):
             continue
         ops: list[Operation] = []
         if history:
@@ -1073,6 +1091,15 @@ def _collect_decorated_migrations(
                         default=default,
                     )
                 )
+        # Origin-scoped transforms key on the HISTORIC identity, like the
+        # origin fills. An origin transform always rides a ``migrate_from``,
+        # so ``history`` is non-empty whenever ``origin_transforms`` is.
+        ops.extend(
+            TransformFields(
+                module=origin_module, qualname=origin_qualname, transform=transform
+            )
+            for (origin_module, origin_qualname), transform in origin_transforms
+        )
         # Class-global transform keys on the CURRENT identity, like the
         # class-global AddField above.
         ops.extend(
