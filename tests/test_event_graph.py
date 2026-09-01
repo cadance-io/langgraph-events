@@ -4243,6 +4243,23 @@ def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
     return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
 
 
+def _abandoned_pair(saver, tid: str, **kwargs: typing.Any):
+    """A genuinely-interrupted thread whose pending task was cleared out
+    from under it — the shape a future ``abandon()`` will leave behind.
+
+    ``_pending`` still stale-references the still-registered paused node
+    (``_waiter``), while the checkpoint's own ``next`` reports empty, via a
+    bare "clear all tasks" ``bulk_update_state`` through LangGraph's public
+    ``compiled`` property. Returns the graph (still with ``_waiter``
+    registered) and the paused thread config.
+    """
+    cfg = {"configurable": {"thread_id": tid}}
+    graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
+    graph.invoke(Started(data="x"), config=cfg)
+    graph.compiled.bulk_update_state(cfg, [[StateUpdate(None, END)]])
+    return graph, cfg
+
+
 def describe_on_unresumable():
     # resume() on a thread that is not awaiting input (paused handler removed,
     # already-finished, or double-resume) is governed by
@@ -4293,18 +4310,12 @@ def describe_on_unresumable():
             assert not v2.get_state(cfg).is_interrupted
 
         def it_leaves_nothing_scheduled():
-            # Simulates a thread whose pending interrupt was already cleared
-            # out from under it (the shape a future `abandon()` will leave
-            # behind): `_pending` still stales-references the still-
-            # registered paused node, which the buggy single-superstep
-            # write re-schedules.
-            saver = MemorySaver()
-            cfg = {"configurable": {"thread_id": "unres-halt-next"}}
-            graph = EventGraph(
-                [_waiter, _go_noop], checkpointer=saver, on_unresumable="halt"
+            # `_abandoned_pair`: `_pending` still stales-references the
+            # still-registered paused node, which the buggy single-
+            # superstep write re-schedules.
+            graph, cfg = _abandoned_pair(
+                MemorySaver(), "unres-halt-next", on_unresumable="halt"
             )
-            graph.invoke(Started(data="x"), config=cfg)
-            graph.compiled.bulk_update_state(cfg, [[StateUpdate(None, END)]])
 
             graph.resume(_Go(), config=cfg)
 
@@ -4324,17 +4335,14 @@ def describe_on_unresumable():
             assert log.latest(Ended) == Ended(result="went")
 
         def it_does_not_resurrect_the_retired_identity():
-            # Same stale-scheduling setup as `it_leaves_nothing_scheduled`.
-            # If the halt policy re-arms the paused node, a second resume()
-            # then passes `_resume_is_pending` and runs `_waiter` for real,
-            # writing the retired `_Pause` identity back into the log.
-            saver = MemorySaver()
-            cfg = {"configurable": {"thread_id": "unres-halt-resurrect"}}
-            graph = EventGraph(
-                [_waiter, _go_noop], checkpointer=saver, on_unresumable="halt"
+            # Same `_abandoned_pair` stale-scheduling setup as
+            # `it_leaves_nothing_scheduled`. If the halt policy re-arms the
+            # paused node, a second resume() then passes
+            # `_resume_is_pending` and runs `_waiter` for real, writing the
+            # retired `_Pause` identity back into the log.
+            graph, cfg = _abandoned_pair(
+                MemorySaver(), "unres-halt-resurrect", on_unresumable="halt"
             )
-            graph.invoke(Started(data="x"), config=cfg)
-            graph.compiled.bulk_update_state(cfg, [[StateUpdate(None, END)]])
             graph.resume(_Go(), config=cfg)
 
             log = graph.resume(_Go(), config=cfg)
@@ -4434,6 +4442,17 @@ def describe_async_only_checkpointer():
         )
         return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
 
+    async def _aabandoned_pair(tid: str, **kwargs: typing.Any):
+        """Async mirror of ``_abandoned_pair`` — a genuinely-interrupted
+        thread whose pending task was cleared out from under it, still
+        registering ``_waiter``, driven through ``_AsyncOnlySaver``."""
+        saver = _AsyncOnlySaver()
+        cfg = {"configurable": {"thread_id": tid}}
+        graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
+        await graph.ainvoke(Started(data="x"), config=cfg)
+        await graph.compiled.abulk_update_state(cfg, [[StateUpdate(None, END)]])
+        return graph, cfg
+
     def when_the_thread_is_genuinely_pending():
         def without_sync_checkpointer_access():
 
@@ -4483,15 +4502,11 @@ def describe_async_only_checkpointer():
         @pytest.mark.asyncio
         async def it_aresume_halt_leaves_nothing_scheduled():
             # Async mirror of the sync `it_leaves_nothing_scheduled` — same
-            # stale-scheduling setup, driven through the async-only
-            # checkpointer to exercise `_asettle`.
-            saver = _AsyncOnlySaver()
-            cfg = {"configurable": {"thread_id": "async-only-halt-next"}}
-            graph = EventGraph(
-                [_waiter, _go_noop], checkpointer=saver, on_unresumable="halt"
+            # `_aabandoned_pair` stale-scheduling setup, driven through the
+            # async-only checkpointer to exercise `_asettle`.
+            graph, cfg = await _aabandoned_pair(
+                "async-only-halt-next", on_unresumable="halt"
             )
-            await graph.ainvoke(Started(data="x"), config=cfg)
-            await graph.compiled.abulk_update_state(cfg, [[StateUpdate(None, END)]])
 
             await graph.aresume(_Go(), config=cfg)
 

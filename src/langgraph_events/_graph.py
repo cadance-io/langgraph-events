@@ -1466,24 +1466,37 @@ class EventGraph:
         dispatch treats *terminal* as freshly pending and, if it is a
         ``Halted``, trips the halt gate silently.
 
-        Three supersteps fix both: the leading ``clear`` (``values=None,
-        as_node=END`` — LangGraph's documented "clear all tasks" branch,
-        which skips ``ERROR``/``INTERRUPT`` pending writes) discharges any
-        stale pending task *before* anything is appended, so a fanned-out
-        sibling's already-completed write is preserved rather than
-        superseded by a checkpoint that carries none of it. The middle
-        superstep appends *terminal* while resetting ``_cursor`` to the
-        post-append event count and clearing ``_pending``, so nothing is
-        left scheduled and the next run's cursor starts past *terminal*.
-        The trailing ``clear`` empties ``next``.
+        The leading ``clear`` (``values=None, as_node=END`` — LangGraph's
+        documented "clear all tasks" branch, which skips ``ERROR``/
+        ``INTERRUPT`` pending writes) discharges any stale pending task
+        *before* anything is appended, so a fanned-out sibling's
+        already-completed write is preserved rather than superseded by a
+        checkpoint that carries none of it. The middle superstep appends
+        *terminal* while resetting ``_cursor`` to the post-append event
+        count, so the next run's cursor starts past *terminal* instead of
+        re-entering its pending window. These two are pinned by the test
+        suite: dropping either fails
+        ``it_preserves_completed_sibling_writes`` or
+        ``it_leaves_the_thread_usable`` respectively.
+
+        The trailing ``clear`` and clearing ``_pending`` alongside the
+        append are deliberate belt-and-braces against the stale-``_pending``
+        re-arming this primitive exists to fix, but neither is independently
+        pinned by the suite as it stands: ablating either one alone still
+        leaves every current test green (only dropping both fails). Kept
+        anyway — they're cheap, and the mechanism they guard against
+        (routing re-run against a stale ``_pending`` on some future
+        checkpointer/LangGraph combination this suite doesn't exercise) is
+        exactly what defect 1 was.
         """
+        appended = [terminal]
         return [
             [StateUpdate(None, END)],
             [
                 StateUpdate(
                     {
-                        "events": [terminal],
-                        "_cursor": len(events) + 1,
+                        "events": appended,
+                        "_cursor": len(events) + len(appended),
                         "_pending": [],
                     },
                     "__seed__",
@@ -1501,6 +1514,14 @@ class EventGraph:
         re-arm routing on a later resume, while preserving any sibling
         writes from a fanned-out superstep.
         """
+        # Must read through `get_state`, not the checkpoint directly: its
+        # snapshot applies pending writes the same way the leading clear in
+        # `_settle_supersteps` will commit them, so `len(events)` here
+        # matches what the leading clear actually lands. A direct
+        # checkpoint read (e.g. `checkpointer.get_tuple` or a `get_state`
+        # pinned to a `checkpoint_id`, either of which skips pending-write
+        # application) would undercount, leaving `_cursor` short and
+        # putting the terminal event back in the next run's pending window.
         events = self.get_state(config).events
         self._compile().bulk_update_state(
             cast("RunnableConfig", config),
@@ -1512,6 +1533,8 @@ class EventGraph:
         """Async sibling of :meth:`_settle` — every checkpoint read/write
         uses the async API (``aget_state``/``abulk_update_state``) so
         async-only checkpointers aren't driven synchronously."""
+        # See `_settle` — must read through `aget_state`, not the
+        # checkpoint directly, for the same pending-writes-applied reason.
         events = (await self.aget_state(config)).events
         await self._compile().abulk_update_state(
             cast("RunnableConfig", config),

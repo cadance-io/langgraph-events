@@ -20,10 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Halted` dispatch gate silently — a later `invoke()` on the same thread appended its event but
   never dispatched it, with no handler firing and no error raised.
 
-  Both are fixed by settling the thread through a three-superstep clear/append/clear write
-  (`clear` → append the terminal event with `_cursor`/`_pending` reset → `clear`) instead of a
-  single `update_state`, so a halted thread ends with nothing scheduled, no stale pending state,
-  and any completed sibling writes from a fanned-out superstep intact.
+Both are fixed by settling the thread through a three-superstep clear/append/clear write
+(`clear` → append the terminal event with `_cursor`/`_pending` reset → `clear`) instead of a
+single `update_state`, so a halted thread ends with nothing scheduled, no stale pending state,
+and any completed sibling writes from a fanned-out superstep intact.
 
 ## [0.28.0] - 2026-08-28
 
