@@ -397,6 +397,15 @@ class DecoBackfillTypoField(Namespace):
         note: str = ""
 
 
+# Fixture for #172. A fill on an ``init=False`` field is not a kwarg the
+# constructor accepts, so the serde must refuse it at construction.
+class DecoBackfillInitFalse(Namespace):
+    @backfill("derived", default=0)
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False, default=0)
+
+
 # Fixture proving the revive gate exercises origin fills instead of
 # masking them with ``None`` placeholders: ``__post_init__`` rejects
 # anything but a real discriminator, so the gate only passes if the
@@ -3005,6 +3014,13 @@ def describe_origin_scoped_backfill():
         def it_guards_the_class_global_decorator_too():
             with pytest.raises(ValueError, match="command_idd"):
                 NamespaceAwareSerde(namespaces=[DecoBackfillTypoField])
+
+    def when_a_fill_names_an_init_false_field():
+        def it_is_rejected_at_serde_construction():
+            # The encoder never writes the field and the constructor rejects
+            # it as a kwarg, so the fill can only break every read.
+            with pytest.raises(ValueError, match="has no field 'derived'"):
+                NamespaceAwareSerde(namespaces=[DecoBackfillInitFalse])
 
     def when_legacy_write_meets_origin_scoped_fills():
         def it_is_rejected_at_serde_construction():
