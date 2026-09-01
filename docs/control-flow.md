@@ -188,17 +188,24 @@ See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkp
 graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
+`abandon()` settles one thread per call. The library has no helper to list the threads paused on a given `Interrupted`.
+
 `abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass — resuming every paused thread first would append the very identity you are deleting.
 
-The thread is terminal afterwards. `abandon()` appends a terminal `Abandoned(Halted)` event, leaves nothing scheduled, and preserves any completed sibling handler's writes from the same fanned-out superstep.
+The thread is terminal afterwards. `abandon()` appends a terminal [`Abandoned`](api.md#system-events) event (a [`Halted`](concepts.md#system-events) subtype), leaves nothing scheduled, and preserves any completed sibling handler's writes from the same fanned-out superstep.
 
-Like every event on this settle path, `Abandoned` is recorded, not dispatched — `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` (the caller-supplied string, `""` if none) and `.discarded` (the type name of the interrupt thrown away, `""` if none).
+`abandon()` raises `ValueError` if the thread has no events to settle — never run, or only `pre_seed()`ed. Abandoning a thread with no pending interrupt is legal: it records `Abandoned(discarded="")`. This makes a loop over candidate thread IDs safe — not every ID needs to be paused.
 
-`abandon()` cleans only the live checkpoint — a historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#coverage-gates) (issue [#160](https://github.com/cadance-io/langgraph-events/issues/160)).
+Like every event on this settle path, `Abandoned` is recorded, not dispatched — `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` and `.discarded`. `.reason` is the caller-supplied string, `""` if none. `.discarded` holds the discarded interrupts' type names, deduped and joined with `", "`, `""` if none. Match it with `in` or split on `", "` — never `==`. A fanned-out superstep can pause two interrupts, and `==` stops matching then.
 
-WARNING: A run in flight on the thread will silently overwrite whatever `abandon()` did, or vice versa, depending on ordering. Call `abandon()` only on a thread that is genuinely at rest.
+`abandon()` cleans only the live checkpoint — a historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#the-minimum-case-rename-inside-a-namespace).
 
-`abandon()` does not consult `on_unresumable` — that policy governs an accidental no-op `resume()` (a renamed/removed handler, a double resume), not a deliberate abandonment. A later `resume()` on an abandoned thread still raises `UnresumableError` under the default policy, naming the abandonment instead of pointing at a handler rename.
+!!! warning "Concurrent runs"
+    A run in flight on the thread will silently overwrite whatever `abandon()` did,
+    or vice versa, depending on ordering. Call `abandon()` only on a thread that is
+    genuinely at rest.
+
+`abandon()` does not consult [`on_unresumable`](api.md#graph-execution) — that policy governs an accidental no-op `resume()` (a renamed/removed handler, a double resume), not a deliberate abandonment. A later `resume()` on an abandoned thread still raises [`UnresumableError`](api.md#warnings) under the default policy, naming the abandonment instead of pointing at a handler rename.
 
 ### Typed payloads — `InterruptedWithPayload`
 

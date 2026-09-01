@@ -252,6 +252,8 @@ graph.get_state(config).events.latest(second.Place.Placed)   # revived as lifeti
 
 `SystemEvent` subclasses control runtime flow; subscribe like any event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed`, `HandlerRaised`, `HandlerRetried`, `InvariantViolated`. Full table in [API](api.md#system-events).
 
+To retire an `Interrupted` subclass, settle its paused threads first with `graph.abandon(config)` / `.aabandon()` — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
+
 Custom halts subclass `Halted` and nest under their domain for locality; `graph.namespaces()` groups them with the domain's events rather than with framework system events:
 
 ```python

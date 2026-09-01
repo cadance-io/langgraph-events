@@ -46,7 +46,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `EventGraph.from_namespaces()` | Classmethod | Build a graph from domains' inline command handlers; `handlers=` appends external handlers. With `checkpointer=MemorySaver()` auto-wires a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` decorator on those classes. Opt out by passing `MemorySaver(serde=<custom>)` — a user-supplied serde always wins |
 | `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog` |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
-| `EventGraph.abandon()` / `.aabandon()` | Method | Settles a paused thread without answering its interrupt. Requires a checkpointer. Returns `None`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) |
+| `EventGraph.abandon()` / `.aabandon()` | Method | Settles a paused thread without answering its interrupt. Also settles a thread with no pending interrupt, recording `discarded=""`. Requires a checkpointer. Raises `ValueError` if the thread has no events to settle (never run, or only `pre_seed()`ed). Returns `None`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) |
 | `EventGraph.get_state()` | Method | `GraphState` for a checkpointed thread |
 | `EventGraph.namespaces()` | Method | Code-derived snapshot — domains, commands, outcomes, handlers, policies, edges, seeds. Returns a `NamespaceModel` |
 | `NamespaceModel.text(view=...)` | Method | Human-readable tree; `view="structure"` or `"choreography"` (default) |
@@ -70,8 +70,8 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `Halted` | Event | Signal immediate termination; subclass for domain-specific halts |
 | `MaxRoundsExceeded` | Event | `Halted` subtype when `max_rounds` is exceeded |
 | `Cancelled` | Event | `Halted` subtype when an async handler is cancelled |
-| `Abandoned` | Event | `Halted` subtype emitted by `EventGraph.abandon()` or `.aabandon()`. `.reason` is the caller-supplied reason. `.discarded` is the type name or names of the interrupt or interrupts thrown away. Recorded, not dispatched: `@on(Abandoned)` never fires |
-| `Unresumable` | Event | `Halted` subtype emitted by `EventGraph(on_unresumable="halt")` when `resume()` hits a thread not awaiting input. `.resume_value` is the resume event's type name. See [Handler renames](event-migrations.md#handler-renames) |
+| `Abandoned` | Event | `Halted` subtype emitted by `EventGraph.abandon()` or `.aabandon()`. `.reason` is the caller-supplied reason. `.discarded` holds the discarded interrupts' type names, deduped and joined with `", "` (`""` if none — match with `in` or `.split(", ")`, never `==`). Recorded, not dispatched: `@on(Abandoned)` never fires |
+| `Unresumable` | Event | `Halted` subtype emitted by `EventGraph(on_unresumable="halt")` when `resume()` hits a thread not awaiting input. `.resume_value` is the resume event's type name. See [Handler renames](event-migrations.md#handler-renames). For a deliberate settle instead of this runtime net, see [`abandon()`](control-flow.md#ending-a-pause-without-answering-it-abandon) |
 | `RunPaused` | Event | `SystemEvent` (not `Halted`) emitted by the router when a per-call `deadline=monotonic()+budget` expires between dispatch rounds. Emitted at most once per `/run` regardless of how many parallel handlers fan in past the deadline. Cursor is advanced past it so a fresh `/run` on the same `thread_id` continues normally. No default AG-UI wire mapping — register a custom `EventMapper` to surface it on the wire |
 | `Interrupted` | Base class | Subclass with typed fields to pause for human input. For frontend-discriminated payloads see `InterruptedWithPayload` in `langgraph_events.agui` |
 | `Resumed` | Event | Emitted on `resume()` with the dispatched event + `interrupted` backref |
@@ -126,7 +126,7 @@ from langgraph_events.stream import (
 | Export | Type | Description |
 |---|---|---|
 | `OrphanedEventWarning` | Warning | Issued at graph construction when a return type has no subscriber |
-| `UnresumableError` | RuntimeError subclass | Raised by `resume()` (default `EventGraph(on_unresumable="raise")`) when the thread is not awaiting input — paused handler renamed/removed, thread already finished, or double-resume. Declare `@on(previously=...)` to recover, or set `on_unresumable="halt"`/`"warn"`. See [Handler renames](event-migrations.md#handler-renames) |
+| `UnresumableError` | RuntimeError subclass | Raised by `resume()` (default `EventGraph(on_unresumable="raise")`) when the thread is not awaiting input — paused handler renamed/removed, thread already finished, double-resume, or a thread already settled by [`abandon()`](control-flow.md#ending-a-pause-without-answering-it-abandon). Declare `@on(previously=...)` to recover, or set `on_unresumable="halt"`/`"warn"`. See [Handler renames](event-migrations.md#handler-renames) |
 | `DomainPatternWarning` | Warning | A namespace has 2+ events fanning out to an identical target set — a missing shared abstraction |
 | `CommandChainWarning` | Warning | An inline `Command.handle()` emits another `Command` (a `chain`-causation edge) — prefer emitting a fact and reacting to it |
 

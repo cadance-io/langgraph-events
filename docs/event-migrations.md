@@ -421,9 +421,7 @@ class Persist(Command):
 
     The CI handler gate catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
 
-    To *retire* an `Interrupted` subclass means to delete it from the codebase entirely, after every thread still paused on it stops referencing it. `graph.abandon(config)` or `.aabandon()` (see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon)) settles one paused thread without answering it, so calling it on every affected thread leaves the retired class named by no live checkpoint.
-
-    `abandon()` works on one thread at a time — the library has no helper to list or bulk-settle threads. Find the paused thread IDs yourself (e.g. from your own operational records) and call `abandon()` on each one.
+    Retiring an `Interrupted` subclass is a related but separate move — see [Retiring an Interrupted subclass](#retiring-an-interrupted-subclass) below.
 
 ### Inline command handlers are keyed by the command qualname
 
@@ -455,6 +453,28 @@ The two tracks are independent — do both, in one PR:
 
 !!! warning "Renaming an inline Command is always both renames at once"
     The command class is simultaneously the node identity *and* the event class of the payload sitting in the paused checkpoint. The alias node dispatches by `isinstance` against the **new** class, so `previously` alone is not enough: the checkpointed command payload must also revive *as* the new class — `@migrate_from` on the command plus a namespace-aware serde on the checkpointer (`from_namespaces(..., checkpointer=...)` wires it automatically). With the default LangGraph serializer the alias node re-enters but sees no matching event and the resume silently no-ops — and this bypasses `on_unresumable`: the thread *is* still awaiting input, so the safety net never fires.
+
+## Retiring an Interrupted subclass
+
+To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
+
+`abandon()` works on one thread at a time. The library has no helper to list or bulk-settle paused threads. Find the paused thread IDs yourself, for example from your own operational records.
+
+### Sequence
+
+1. Find every thread paused on the class. There is no built-in lookup — use your own operational records or query the checkpointer directly.
+2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread.
+3. Verify: `graph.get_state(config).is_interrupted` is `False` for every thread.
+4. Delete the class from the codebase.
+5. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
+
+### Why the baseline write needs `allow_removed=True`
+
+Deleting the class drops an identity from the graph's topology. `write_baseline` compares the new snapshot against the committed baseline and raises `BaselineRegressionError` if it would drop a recorded identity — pass `allow_removed=True` to confirm the drop is intentional (see [When to commit the baseline](#when-to-commit-the-baseline)).
+
+Skip this step and the *next* baseline write for an unrelated change fails with the same error, pointing at the retired class. `abandon()` clearing the checkpoints is what makes the deletion safe; `allow_removed=True` is what makes the baseline write accept it.
+
+Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage gates](#coverage-gates) stop checking the retired identity — it is no longer in the baseline they read.
 
 ## Reserved attributes
 
