@@ -114,7 +114,34 @@ class TransformFields:
     transform: Callable[[dict[str, Any]], dict[str, Any]]
 
 
-Operation = RenameEvent | AddField | TransformFields
+@dataclass(frozen=True)
+class SplitEvent:
+    """Build one of several live classes from a stored identity, picked
+    by a payload value.
+
+    ``(module, qualname)`` is the stored identity. It stays LIVE: a
+    payload the current release writes carries it too. ``select``
+    receives a fresh copy of the stored kwargs. It returns ``None`` to
+    keep the stored class and kwargs unchanged, or ``(target_class,
+    new_kwargs)`` to build ``target_class`` from ``new_kwargs`` instead.
+    The class object is the return value, not a string, so an IDE rename
+    follows it. ``targets`` lists every class ``select`` can return, for
+    validation at serde construction.
+
+    A split runs in the class stage only, keyed on the live identity:
+    after the rename and the class-stage :class:`TransformFields`,
+    before the fills. The fills applied afterwards are those of the
+    RESULTING identity. A split has no inverse, so ``legacy_write=True``
+    is refused with one declared.
+    """
+
+    module: str
+    qualname: str
+    select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None]
+    targets: tuple[type, ...]
+
+
+Operation = RenameEvent | AddField | TransformFields | SplitEvent
 
 
 @dataclass(frozen=True)
@@ -297,6 +324,7 @@ def _flatten_and_validate(
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], TransformFields],
     dict[tuple[str, str], TransformFields],
+    dict[tuple[str, str], SplitEvent],
 ]:
     """Collapse all operations into per-purpose lookup tables.
 
@@ -306,7 +334,8 @@ def _flatten_and_validate(
     identity: a target that is a rename source goes into the origin table
     (applied pre-rename), a live target into the post-rename table.
     TransformFields ops are bucketed the same way, into
-    ``(transform_table, origin_transform_table)``.
+    ``(transform_table, origin_transform_table)``. SplitEvent ops have
+    the class stage only, so they fill one ``split_table``.
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
@@ -328,6 +357,7 @@ def _flatten_and_validate(
     # AddField ops carry their migration's name for the same reason.
     addfield_ops: list[tuple[AddField, str]] = []
     transform_ops: list[tuple[TransformFields, str]] = []
+    split_ops: list[tuple[SplitEvent, str]] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -349,6 +379,8 @@ def _flatten_and_validate(
                 addfield_ops.append((op, migration.name))
             elif isinstance(op, TransformFields):
                 transform_ops.append((op, migration.name))
+            elif isinstance(op, SplitEvent):
+                split_ops.append((op, migration.name))
             else:
                 # ``Operation`` is closed by design. Silently ignoring an
                 # unknown type hides authoring errors — surface them at
@@ -356,7 +388,8 @@ def _flatten_and_validate(
                 raise TypeError(
                     f"Unknown migration operation type "
                     f"{type(op).__name__!r} in {_migration_label(migration.name)}. "
-                    f"Expected RenameEvent, AddField or TransformFields."
+                    f"Expected RenameEvent, AddField, TransformFields or "
+                    f"SplitEvent."
                 )
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
@@ -369,13 +402,27 @@ def _flatten_and_validate(
     transform_table, origin_transform_table = _bucket_transforms(
         transform_ops, rename_table, scope
     )
+    split_table = _bucket_splits(split_ops, rename_table, scope)
     return (
         rename_table,
         addfield_table,
         origin_addfield_table,
         transform_table,
         origin_transform_table,
+        split_table,
     )
+
+
+def _bucket_splits(
+    split_ops: Sequence[tuple[SplitEvent, str]],
+    rename_table: dict[tuple[str, str], tuple[str, str]],
+    scope: Mapping[tuple[str, str], type] | None = None,
+) -> dict[tuple[str, str], SplitEvent]:
+    """Key SplitEvent ops on their source identity and validate each one."""
+    split_table: dict[tuple[str, str], SplitEvent] = {}
+    for op, _migration_name in split_ops:
+        split_table[(op.module, op.qualname)] = op
+    return split_table
 
 
 def _bucket_transforms(
@@ -707,6 +754,25 @@ def _transform_kwargs(
     return out
 
 
+def _split_kwargs(
+    op: SplitEvent | None,
+    module: str,
+    qualname: str,
+    kwargs: dict[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    """Run *op* on a copy of *kwargs* and return the resulting identity
+    and kwargs. No op, or ``select`` returns ``None``: return the input
+    unchanged.
+    """
+    if op is None:
+        return module, qualname, kwargs
+    out = op.select(dict(kwargs))
+    if out is None:
+        return module, qualname, kwargs
+    target, new_kwargs = out
+    return target.__module__, target.__qualname__, new_kwargs
+
+
 def _apply_identity_migrations(
     module: str,
     qualname: str,
@@ -716,24 +782,30 @@ def _apply_identity_migrations(
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     transform_table: dict[tuple[str, str], TransformFields],
     origin_transform_table: dict[tuple[str, str], TransformFields],
+    split_table: dict[tuple[str, str], SplitEvent],
 ) -> tuple[str, str, dict[str, Any]]:
     """Run the read-side migration rule and return ``(module, qualname,
     kwargs)`` for the constructor.
 
     Order: the origin stage (transform, then origin-scoped fills), the
-    rename, then the class stage (transform, then class-global fills). A
-    transform runs before the fills of its stage, and its return value
-    replaces the kwargs. Origin fills run
-    before class fills so the precedence is: explicit payload value >
-    origin-scoped fill > class-global fill (``setdefault`` never
-    overwrites). An op lives in exactly one table — origin keys are rename
-    sources, post keys are live identities, disjoint by validation — and
-    each table is read at its own stage, so no op is ever applied twice.
+    rename, then the class stage (transform, then split, then class-global
+    fills). A transform runs before the fills of its stage, and its return
+    value replaces the kwargs. A split can change the identity, so the
+    class fills applied after it are those of the RESULTING identity.
+    Origin fills run before class fills so the precedence is: explicit
+    payload value > origin-scoped fill > class-global fill (``setdefault``
+    never overwrites). An op lives in exactly one table — origin keys are
+    rename sources, post keys are live identities, disjoint by validation
+    — and each table is read at its own stage, so no op is ever applied
+    twice.
     """
     kwargs = _transform_kwargs(origin_transform_table.get((module, qualname)), kwargs)
     _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
     module, qualname = _resolve_rename(module, qualname, rename_table)
     kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
+    module, qualname, kwargs = _split_kwargs(
+        split_table.get((module, qualname)), module, qualname, kwargs
+    )
     _inject_addfields(addfield_table.get((module, qualname), ()), kwargs)
     return module, qualname, kwargs
 

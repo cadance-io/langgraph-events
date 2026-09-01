@@ -4374,3 +4374,63 @@ def describe_TransformFields_revive_gate():
                 assert "TransformFields raised AttributeError" in message
                 assert "None placeholder" in message
                 assert "synthesize_legacy_payload" in message
+
+
+# Fixtures for ``SplitEvent``. ``Work.Completed`` stays live and keeps its
+# stored identity. A payload whose ``result`` says error builds
+# ``Work.Failed`` instead (#125). ``result`` is a plain dict, so the
+# payload needs no msgpack allowlist entry.
+def _select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return Work.Failed, {"reason": result["message"]}
+
+
+class Work(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    class Completed(DomainEvent):
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+_ERROR = {"status": "error", "message": "boom"}
+_OK = {"status": "ok", "message": ""}
+
+
+def describe_SplitEvent():
+    # One stored identity, two live classes. ``select`` owns the access
+    # to the discriminating value and picks the target (#125).
+
+    def _serde(**kwargs: Any) -> NamespaceAwareSerde:
+        from langgraph_events.serde.migrations import Migration, SplitEvent
+
+        return NamespaceAwareSerde(
+            namespaces=[Work],
+            migrations=[
+                Migration(
+                    name="split-failed",
+                    operations=(
+                        SplitEvent(
+                            module=Work.__module__,
+                            qualname="Work.Completed",
+                            select=_select_failed,
+                            targets=(Work.Failed,),
+                        ),
+                    ),
+                )
+            ],
+            **kwargs,
+        )
+
+    def _revive(serde: NamespaceAwareSerde, qualname: str, **kwargs: Any) -> Any:
+        return serde.loads_typed(
+            synthesize_legacy_payload(Work.__module__, qualname, kwargs)
+        )
+
+    def when_select_returns_a_target():
+        def it_builds_the_target_from_the_returned_kwargs():
+            revived = _revive(_serde(), "Work.Completed", result=_ERROR)
+
+            assert revived == Work.Failed(reason="boom")

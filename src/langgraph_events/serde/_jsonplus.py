@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from langgraph_events.serde.migrations._core import (
         AddField,
         Migration,
+        SplitEvent,
         TransformFields,
     )
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -256,6 +257,7 @@ def _make_ext_hook(
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     transform_table: dict[tuple[str, str], TransformFields],
     origin_transform_table: dict[tuple[str, str], TransformFields],
+    split_table: dict[tuple[str, str], SplitEvent],
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
@@ -333,6 +335,7 @@ def _make_ext_hook(
                 origin_addfield_table,
                 transform_table,
                 origin_transform_table,
+                split_table,
             )
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
         except (ImportError, AttributeError, TypeError, TransformError) as exc:
@@ -443,6 +446,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._origin_addfield_table,
             self._transform_table,
             self._origin_transform_table,
+            self._split_table,
         ) = _flatten_and_validate(all_migrations, scope)
         # Origin-scoped fills are the fan-in signal, and a fan-in cannot
         # ride legacy_write: writes would relabel EVERY instance under the
@@ -591,6 +595,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._origin_addfield_table,
                     self._transform_table,
                     self._origin_transform_table,
+                    self._split_table,
                     self._scope,
                     unresolved=self._unresolved,
                 ),
