@@ -14,7 +14,7 @@ import itertools
 import sys
 import typing
 from dataclasses import dataclass, fields, is_dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from langgraph_events._event import Event, _iter_nested_events
 from langgraph_events._labels import distinct_labels
@@ -712,20 +712,36 @@ def _inject_addfields(
             kwargs.setdefault(op.field, op.default)
 
 
-class TransformError(Exception):
-    """A :class:`TransformFields` raised, or returned a value that is not
-    a ``dict``.
+class _CallableError(Exception):
+    """A migration callable raised, or returned a value of the wrong shape.
 
     Raised by the read path and caught by the serde's ext-hook, which
     turns it into the ``Cannot revive`` message or, under
-    ``serde.tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is the
-    transform that failed and ``cause`` is the exception it raised.
+    ``serde.tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is
+    the operation that failed and ``cause`` is the exception it raised.
+    ``label`` names the operation type in the message.
     """
 
-    def __init__(self, op: TransformFields, cause: Exception) -> None:
-        super().__init__(f"TransformFields raised {type(cause).__name__}: {cause}")
+    label: ClassVar[str]
+
+    def __init__(self, op: TransformFields | SplitEvent, cause: Exception) -> None:
+        super().__init__(f"{self.label} raised {type(cause).__name__}: {cause}")
         self.op = op
         self.cause = cause
+
+
+class TransformError(_CallableError):
+    """A :class:`TransformFields` raised, or returned a value that is not
+    a ``dict``."""
+
+    label = "TransformFields"
+
+
+class SplitError(_CallableError):
+    """A :class:`SplitEvent` raised, or returned a value that is not
+    ``None`` or a ``(target, kwargs)`` tuple with a declared target."""
+
+    label = "SplitEvent"
 
 
 def _transform_kwargs(
@@ -763,10 +779,17 @@ def _split_kwargs(
     """Run *op* on a copy of *kwargs* and return the resulting identity
     and kwargs. No op, or ``select`` returns ``None``: return the input
     unchanged.
+
+    Raises :class:`SplitError` when ``select`` raises. The ext-hook
+    catches that type, so no exception ``select`` raises can escape as a
+    bare ``ext_hook failed``.
     """
     if op is None:
         return module, qualname, kwargs
-    out = op.select(dict(kwargs))
+    try:
+        out = op.select(dict(kwargs))
+    except Exception as exc:
+        raise SplitError(op, exc) from exc
     if out is None:
         return module, qualname, kwargs
     target, new_kwargs = out

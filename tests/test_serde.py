@@ -4399,6 +4399,39 @@ _ERROR = {"status": "error", "message": "boom"}
 _OK = {"status": "ok", "message": ""}
 
 
+def _outcome_to_result(kw: dict[str, Any]) -> dict[str, Any]:
+    """Class-stage transform: ``outcome`` was renamed to ``result``."""
+    if "outcome" in kw:
+        kw["result"] = kw.pop("outcome")
+    return kw
+
+
+def _select_staged_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return WorkStaged.Failed, {"reason": result["message"]}
+
+
+# The source carries a rename, a class-stage transform and a class fill.
+# The target carries its own class fill. The read order is: rename,
+# transform, split, then the fills of the RESULTING identity only. A
+# source fill applied after a split would reach ``Failed``, which has no
+# ``attempt`` field, and fail the read.
+class WorkStaged(Namespace):
+    @backfill("severity", default="high")
+    class Failed(DomainEvent):
+        severity: str
+        reason: str = ""
+
+    @backfill("attempt", default=1)
+    @transform_fields(_outcome_to_result)
+    @migrate_from("WorkStaged.OldCompleted")
+    class Completed(DomainEvent):
+        attempt: int
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
 def describe_SplitEvent():
     # One stored identity, two live classes. ``select`` owns the access
     # to the discriminating value and picks the target (#125).
@@ -4434,3 +4467,107 @@ def describe_SplitEvent():
             revived = _revive(_serde(), "Work.Completed", result=_ERROR)
 
             assert revived == Work.Failed(reason="boom")
+
+    def when_select_returns_None():
+        def it_keeps_the_stored_class_and_kwargs():
+            revived = _revive(_serde(), "Work.Completed", result=_OK)
+
+            assert revived == Work.Completed(result=_OK)
+
+    def when_the_current_release_wrote_the_source():
+        def it_round_trips_unchanged():
+            serde = _serde()
+            stored = Work.Completed(result=_OK)
+
+            assert serde.loads_typed(serde.dumps_typed(stored)) == stored
+
+    def when_the_source_carries_a_transform_and_both_classes_carry_a_fill():
+        def _staged_serde() -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            return NamespaceAwareSerde(
+                namespaces=[WorkStaged],
+                migrations=[
+                    Migration(
+                        operations=(
+                            SplitEvent(
+                                module=WorkStaged.__module__,
+                                qualname="WorkStaged.Completed",
+                                select=_select_staged_failed,
+                                targets=(WorkStaged.Failed,),
+                            ),
+                        )
+                    )
+                ],
+            )
+
+        def _revive_staged(qualname: str, **kwargs: Any) -> Any:
+            return _staged_serde().loads_typed(
+                synthesize_legacy_payload(WorkStaged.__module__, qualname, kwargs)
+            )
+
+        def it_runs_the_transform_then_the_split_then_the_target_fills():
+            revived = _revive_staged("WorkStaged.Completed", outcome=_ERROR)
+
+            assert revived == WorkStaged.Failed(severity="high", reason="boom")
+
+        def it_runs_the_source_fills_on_a_payload_select_keeps():
+            revived = _revive_staged("WorkStaged.Completed", outcome=_OK)
+
+            assert revived == WorkStaged.Completed(attempt=1, result=_OK)
+
+        def it_splits_a_payload_stored_under_a_historic_name():
+            revived = _revive_staged("WorkStaged.OldCompleted", outcome=_ERROR)
+
+            assert revived == WorkStaged.Failed(severity="high", reason="boom")
+
+    def _broken_serde(select: Any) -> NamespaceAwareSerde:
+        from langgraph_events.serde.migrations import Migration, SplitEvent
+
+        return NamespaceAwareSerde(
+            namespaces=[Work],
+            migrations=[
+                Migration(
+                    operations=(
+                        SplitEvent(
+                            module=Work.__module__,
+                            qualname="Work.Completed",
+                            select=select,
+                            targets=(Work.Failed,),
+                        ),
+                    )
+                )
+            ],
+        )
+
+    _stored = synthesize_legacy_payload(
+        Work.__module__, "Work.Completed", {"result": _ERROR}
+    )
+    _prefix = f"Cannot revive {Work.__module__}.Work.Completed: SplitEvent raised "
+
+    def when_select_raises():
+        # ormsgpack swallows an exception raised inside the ext-hook and
+        # re-raises a bare ``ext_hook failed``. The split runs inside the
+        # hook, so its failure must reach the ``errors`` channel, the
+        # same one a TransformFields failure uses.
+
+        def _raising(kw: dict[str, Any]) -> Any:
+            return Work.Failed, {"reason": kw["missing"]}
+
+        def it_raises_naming_the_stored_identity_and_the_cause():
+            with pytest.raises(ValueError) as excinfo:
+                _broken_serde(_raising).loads_typed(_stored)
+
+            message = str(excinfo.value)
+            assert message.startswith(_prefix + "KeyError: 'missing'.")
+            assert "return None" in message
+
+        def with_tolerate_unresolved():
+            def it_degrades_and_collects_the_stored_identity():
+                serde = _broken_serde(_raising)
+                with serde.tolerate_unresolved() as unresolved:
+                    revived = serde.loads_typed(_stored)
+
+                placeholder = UnrevivedIdentity(Work.__module__, "Work.Completed")
+                assert revived == placeholder
+                assert unresolved == [placeholder]
