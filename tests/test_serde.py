@@ -3732,3 +3732,59 @@ def describe_assert_all_baselined_handlers_cover():
             baseline.write_text(json.dumps({"version": 1, "events": []}))
 
             _assert_handlers_cover(EventGraph([place]), baseline)
+
+
+# Fixtures for ``TransformFields``. Each class dropped, merged or retyped a
+# field after payloads were written, so a stored payload no longer matches
+# the live constructor. The transforms are module-level so a decorator
+# fixture below can reuse them.
+def _drop_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
+    kw.pop("legacy_flag", None)
+    return kw
+
+
+class Reshaped(Namespace):
+    class Trimmed(DomainEvent):
+        """Dropped ``legacy_flag``."""
+
+        note: str = ""
+
+
+def describe_TransformFields():
+    # A kwargs-to-kwargs operation. A rename covers a moved class and an
+    # AddField covers a gained field. A dropped, merged or retyped field
+    # has no operation without this one (#159).
+
+    def when_a_stored_payload_carries_a_dropped_field():
+        def it_revives_after_the_transform_drops_it():
+            from langgraph_events.serde.migrations import (
+                Migration,
+                TransformFields,
+            )
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration(
+                        name="drop-legacy-flag",
+                        operations=(
+                            TransformFields(
+                                module=Reshaped.__module__,
+                                qualname="Reshaped.Trimmed",
+                                transform=_drop_legacy_flag,
+                            ),
+                        ),
+                    )
+                ],
+            )
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Reshaped.__module__,
+                    "Reshaped.Trimmed",
+                    {"note": "n", "legacy_flag": True},
+                )
+            )
+
+            assert isinstance(revived, Reshaped.Trimmed)
+            assert revived.note == "n"

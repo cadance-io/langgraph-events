@@ -25,7 +25,11 @@ from langgraph.types import Interrupt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
-    from langgraph_events.serde.migrations._core import AddField, Migration
+    from langgraph_events.serde.migrations._core import (
+        AddField,
+        Migration,
+        TransformFields,
+    )
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 try:
@@ -218,6 +222,7 @@ def _make_ext_hook(
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
+    transform_table: dict[tuple[str, str], TransformFields],
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
@@ -278,16 +283,17 @@ def _make_ext_hook(
             data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
         )
         module_name, qualname, kwargs = tup
-        # Rewrite historic identity to current and inject any AddField
-        # defaults — shared with the baseline test helper so the read-side
-        # migration rule lives in exactly one place.
-        module_name, qualname = _apply_identity_migrations(
+        # Rewrite historic identity to current, run any TransformFields and
+        # inject any AddField defaults — shared with the baseline test
+        # helper so the read-side migration rule lives in exactly one place.
+        module_name, qualname, kwargs = _apply_identity_migrations(
             module_name,
             qualname,
             kwargs,
             rename_table,
             addfield_table,
             origin_addfield_table,
+            transform_table,
         )
         try:
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
@@ -391,6 +397,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._rename_table,
             self._addfield_table,
             self._origin_addfield_table,
+            self._transform_table,
         ) = _flatten_and_validate(all_migrations, scope)
         # Origin-scoped fills are the fan-in signal, and a fan-in cannot
         # ride legacy_write: writes would relabel EVERY instance under the
@@ -513,6 +520,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._rename_table,
                     self._addfield_table,
                     self._origin_addfield_table,
+                    self._transform_table,
                     self._scope,
                     unresolved=self._unresolved,
                 ),

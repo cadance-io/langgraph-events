@@ -86,7 +86,34 @@ class AddField:
             )
 
 
-Operation = RenameEvent | AddField
+@dataclass(frozen=True)
+class TransformFields:
+    """Rewrite the stored kwargs of events with this identity.
+
+    ``transform`` receives a fresh copy of the stored kwargs and returns
+    the kwargs the class constructor receives. The return value replaces
+    the stored kwargs. It does not merge with them. Use it for a field the
+    class dropped, two fields merged into one, or a field whose type
+    changed. A :class:`RenameEvent` moves the identity and an
+    :class:`AddField` fills a gained field. Neither can remove or reshape
+    a stored value.
+
+    The identity picks the stage, the same rule as :class:`AddField`.
+    Name a historic identity covered by a rename and the transform runs
+    BEFORE the rename, only on payloads written under that exact origin.
+    Name the live class and the transform runs AFTER any rename, on
+    payloads from every era, including payloads the current release
+    writes. A transform in the second stage must be idempotent: a key it
+    removes is absent on the next read. Use ``kw.pop("x", None)``, not
+    ``del kw["x"]``. A transform runs before the fills of its stage.
+    """
+
+    module: str
+    qualname: str
+    transform: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+Operation = RenameEvent | AddField | TransformFields
 
 
 @dataclass(frozen=True)
@@ -232,6 +259,7 @@ def _flatten_and_validate(
     dict[tuple[str, str], tuple[str, str]],
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], tuple[AddField, ...]],
+    dict[tuple[str, str], TransformFields],
 ]:
     """Collapse all operations into per-purpose lookup tables.
 
@@ -240,6 +268,9 @@ def _flatten_and_validate(
     regardless of chain depth. AddField ops are bucketed by their target
     identity: a target that is a rename source goes into the origin table
     (applied pre-rename), a live target into the post-rename table.
+    TransformFields ops share one table. A rename source and a live
+    identity never collide, so the key alone tells the read path which
+    stage a transform belongs to.
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
@@ -260,6 +291,7 @@ def _flatten_and_validate(
     edge_origin: dict[tuple[str, str], str] = {}
     # AddField ops carry their migration's name for the same reason.
     addfield_ops: list[tuple[AddField, str]] = []
+    transform_ops: list[tuple[TransformFields, str]] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -279,14 +311,16 @@ def _flatten_and_validate(
                 edge_origin[old_key] = migration.name
             elif isinstance(op, AddField):
                 addfield_ops.append((op, migration.name))
+            elif isinstance(op, TransformFields):
+                transform_ops.append((op, migration.name))
             else:
-                # ``Operation`` is closed by design (RenameEvent | AddField).
-                # Silently ignoring an unknown type hides authoring errors —
-                # surface them at construction with a targeted diagnostic.
+                # ``Operation`` is closed by design. Silently ignoring an
+                # unknown type hides authoring errors — surface them at
+                # construction with a targeted diagnostic.
                 raise TypeError(
                     f"Unknown migration operation type "
                     f"{type(op).__name__!r} in {_migration_label(migration.name)}. "
-                    f"Expected RenameEvent or AddField."
+                    f"Expected RenameEvent, AddField or TransformFields."
                 )
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
@@ -296,7 +330,15 @@ def _flatten_and_validate(
     addfield_table, origin_addfield_table = _bucket_addfields(
         addfield_ops, rename_table, scope
     )
-    return rename_table, addfield_table, origin_addfield_table
+    transform_table = _table_transforms(transform_ops)
+    return rename_table, addfield_table, origin_addfield_table, transform_table
+
+
+def _table_transforms(
+    transform_ops: Sequence[tuple[TransformFields, str]],
+) -> dict[tuple[str, str], TransformFields]:
+    """Key each TransformFields op on its target identity."""
+    return {(op.module, op.qualname): op for op, _name in transform_ops}
 
 
 def _bucket_addfields(
@@ -522,6 +564,17 @@ def _inject_addfields(
             kwargs.setdefault(op.field, op.default)
 
 
+def _transform_kwargs(
+    op: TransformFields | None,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Run *op* on a copy of *kwargs* and return the result. No op: return
+    *kwargs* unchanged."""
+    if op is None:
+        return kwargs
+    return op.transform(dict(kwargs))
+
+
 def _apply_identity_migrations(
     module: str,
     qualname: str,
@@ -529,22 +582,26 @@ def _apply_identity_migrations(
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-) -> tuple[str, str]:
-    """Inject origin-scoped AddField defaults keyed on the PRE-rename
-    identity, resolve *module*/*qualname* through the rename table, then
-    inject post-rename AddField defaults — all into *kwargs* in place.
-    Returns the post-rename identity.
+    transform_table: dict[tuple[str, str], TransformFields],
+) -> tuple[str, str, dict[str, Any]]:
+    """Run the read-side migration rule and return ``(module, qualname,
+    kwargs)`` for the constructor.
 
-    Origin fills run first so the precedence is: explicit payload value >
+    Order: origin transform, origin-scoped fills, rename, class-global
+    transform, class-global fills. A transform runs before the fills of
+    its stage, and its return value replaces the kwargs. Origin fills run
+    before class fills so the precedence is: explicit payload value >
     origin-scoped fill > class-global fill (``setdefault`` never
     overwrites). An op lives in exactly one table — origin keys are rename
     sources, post keys are live identities, disjoint by validation — so no
     op is ever applied twice.
     """
+    kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
     _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
     module, qualname = _resolve_rename(module, qualname, rename_table)
+    kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
     _inject_addfields(addfield_table.get((module, qualname), ()), kwargs)
-    return module, qualname
+    return module, qualname, kwargs
 
 
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"
