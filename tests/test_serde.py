@@ -4571,3 +4571,37 @@ def describe_SplitEvent():
                 placeholder = UnrevivedIdentity(Work.__module__, "Work.Completed")
                 assert revived == placeholder
                 assert unresolved == [placeholder]
+
+    def when_select_returns_the_wrong_shape():
+        # ``targets`` was validated at construction. A target outside it
+        # would build a class the serde never validated, so the read
+        # refuses it like every other bad return value.
+
+        def _message(select: Any) -> str:
+            with pytest.raises(ValueError) as excinfo:
+                _broken_serde(select).loads_typed(_stored)
+            return str(excinfo.value)
+
+        def it_refuses_a_target_outside_targets():
+            message = _message(lambda kw: (Work.Completed, kw))
+
+            assert message.startswith(
+                _prefix + "ValueError: select returned Work.Completed, which is "
+                "not in targets="
+            )
+
+        def it_refuses_a_return_value_that_is_not_a_tuple():
+            message = _message(lambda kw: {"reason": "boom"})
+
+            assert message.startswith(
+                _prefix + "TypeError: select returned dict, expected None or a "
+                "(target, kwargs) tuple"
+            )
+
+        def it_refuses_kwargs_that_are_not_a_dict():
+            message = _message(lambda kw: (Work.Failed, ["boom"]))
+
+            assert message.startswith(
+                _prefix + "TypeError: select returned kwargs of type list, "
+                "expected dict"
+            )

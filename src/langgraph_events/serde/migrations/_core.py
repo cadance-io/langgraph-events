@@ -780,9 +780,11 @@ def _split_kwargs(
     and kwargs. No op, or ``select`` returns ``None``: return the input
     unchanged.
 
-    Raises :class:`SplitError` when ``select`` raises. The ext-hook
-    catches that type, so no exception ``select`` raises can escape as a
-    bare ``ext_hook failed``.
+    Raises :class:`SplitError` when ``select`` raises, returns a value
+    that is not ``None`` or a ``(target, kwargs)`` tuple, returns a target
+    outside ``op.targets``, or returns kwargs that are not a ``dict``. The
+    ext-hook catches that type, so no exception ``select`` raises can
+    escape as a bare ``ext_hook failed``.
     """
     if op is None:
         return module, qualname, kwargs
@@ -792,7 +794,32 @@ def _split_kwargs(
         raise SplitError(op, exc) from exc
     if out is None:
         return module, qualname, kwargs
+    if not (isinstance(out, tuple) and len(out) == 2):
+        raise SplitError(
+            op,
+            TypeError(
+                f"select returned {type(out).__name__}, expected None or a "
+                f"(target, kwargs) tuple"
+            ),
+        )
     target, new_kwargs = out
+    if target not in op.targets:
+        raise SplitError(
+            op,
+            ValueError(
+                f"select returned {getattr(target, '__qualname__', target)}, "
+                f"which is not in targets="
+                f"{tuple(t.__qualname__ for t in op.targets)}"
+            ),
+        )
+    if not isinstance(new_kwargs, dict):
+        raise SplitError(
+            op,
+            TypeError(
+                f"select returned kwargs of type {type(new_kwargs).__name__}, "
+                f"expected dict"
+            ),
+        )
     return target.__module__, target.__qualname__, new_kwargs
 
 
