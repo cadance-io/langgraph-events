@@ -38,7 +38,12 @@ from langgraph_events.serde._jsonplus import (
     UnrevivedIdentity,
     _option,
 )
-from langgraph_events.serde.migrations import backfill, migrate_from, transform_fields
+from langgraph_events.serde.migrations import (
+    backfill,
+    migrate_from,
+    split_event,
+    transform_fields,
+)
 
 
 def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
@@ -2986,6 +2991,7 @@ def describe_public_serde_surface():
             assert not hasattr(serde_pkg, "RenameEvent")
             assert not hasattr(serde_pkg, "AddField")
             assert not hasattr(serde_pkg, "TransformFields")
+            assert not hasattr(serde_pkg, "SplitEvent")
 
         def it_still_exposes_the_decorator_and_sugar_tier():
             import langgraph_events.serde as serde_pkg
@@ -2995,6 +3001,7 @@ def describe_public_serde_surface():
                 "Migration",
                 "migrate_from",
                 "transform_fields",
+                "split_event",
                 "synthesize_legacy_payload",
                 "assert_all_baselined_revive",
             ):
@@ -3005,12 +3012,14 @@ def describe_public_serde_surface():
             from langgraph_events.serde.migrations import (
                 AddField,
                 RenameEvent,
+                SplitEvent,
                 TransformFields,
             )
 
             assert RenameEvent is not None
             assert AddField is not None
             assert TransformFields is not None
+            assert SplitEvent is not None
 
 
 def describe_detect_cli():
@@ -4374,3 +4383,504 @@ def describe_TransformFields_revive_gate():
                 assert "TransformFields raised AttributeError" in message
                 assert "None placeholder" in message
                 assert "synthesize_legacy_payload" in message
+
+
+# Fixtures for ``SplitEvent``. ``Work.Completed`` stays live and keeps its
+# stored identity. A payload whose ``result`` says error builds
+# ``Work.Failed`` instead (#125). ``result`` is a plain dict, so the
+# payload needs no msgpack allowlist entry.
+def _select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return Work.Failed, {"reason": result["message"]}
+
+
+class Work(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    class Completed(DomainEvent):
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+_ERROR = {"status": "error", "message": "boom"}
+_OK = {"status": "ok", "message": ""}
+
+
+def _outcome_to_result(kw: dict[str, Any]) -> dict[str, Any]:
+    """Class-stage transform: ``outcome`` was renamed to ``result``."""
+    if "outcome" in kw:
+        kw["result"] = kw.pop("outcome")
+    return kw
+
+
+def _select_staged_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return WorkStaged.Failed, {"reason": result["message"]}
+
+
+# The source carries a rename, a class-stage transform and a class fill.
+# The target carries its own class fill. The read order is: rename,
+# transform, split, then the fills of the RESULTING identity only. A
+# source fill applied after a split would reach ``Failed``, which has no
+# ``attempt`` field, and fail the read.
+class WorkStaged(Namespace):
+    @backfill("severity", default="high")
+    class Failed(DomainEvent):
+        severity: str
+        reason: str = ""
+
+    @backfill("attempt", default=1)
+    @transform_fields(_outcome_to_result)
+    @migrate_from("WorkStaged.OldCompleted")
+    class Completed(DomainEvent):
+        attempt: int
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+# The decorator form, collected from ``namespaces=`` like ``@transform_fields``.
+# ``select_failed`` and ``Job`` are the example in docs/event-migrations.md,
+# "Splitting one stored event into two on a payload value". Keep them in
+# step: ``describe_SplitEvent_docs_example`` runs the docs snippet verbatim.
+def select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None  # keep Job.Completed
+    return Job.Failed, {"reason": result["message"]}  # resolved at read time
+
+
+class Job(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(select_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def _select_gate_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return GateSplit.Failed, {"reason": result["message"]}
+
+
+def _select_reading_placeholder(kw: dict[str, Any]) -> tuple[type, dict[str, Any]]:
+    """Raises ``TypeError`` on the gate's ``None`` placeholder."""
+    return GateSplitStrict.Failed, {"reason": kw["result"]["message"]}
+
+
+# ``result`` is required, so the revive gate sends a ``None`` placeholder
+# for it and the select sees it.
+class GateSplit(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_gate_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any]
+
+
+class GateSplitStrict(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_reading_placeholder, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any]
+
+
+def describe_SplitEvent():
+    # One stored identity, two live classes. ``select`` owns the access
+    # to the discriminating value and picks the target (#125).
+
+    def _serde(**kwargs: Any) -> NamespaceAwareSerde:
+        from langgraph_events.serde.migrations import Migration, SplitEvent
+
+        return NamespaceAwareSerde(
+            namespaces=[Work],
+            migrations=[
+                Migration(
+                    name="split-failed",
+                    operations=(
+                        SplitEvent(
+                            module=Work.__module__,
+                            qualname="Work.Completed",
+                            select=_select_failed,
+                            targets=(Work.Failed,),
+                        ),
+                    ),
+                )
+            ],
+            **kwargs,
+        )
+
+    def _revive(serde: NamespaceAwareSerde, qualname: str, **kwargs: Any) -> Any:
+        return serde.loads_typed(
+            synthesize_legacy_payload(Work.__module__, qualname, kwargs)
+        )
+
+    def when_select_returns_a_target():
+        def it_builds_the_target_from_the_returned_kwargs():
+            revived = _revive(_serde(), "Work.Completed", result=_ERROR)
+
+            assert revived == Work.Failed(reason="boom")
+
+    def when_select_returns_None():
+        def it_keeps_the_stored_class_and_kwargs():
+            revived = _revive(_serde(), "Work.Completed", result=_OK)
+
+            assert revived == Work.Completed(result=_OK)
+
+    def when_the_current_release_wrote_the_source():
+        def it_round_trips_unchanged():
+            serde = _serde()
+            stored = Work.Completed(result=_OK)
+
+            assert serde.loads_typed(serde.dumps_typed(stored)) == stored
+
+    def when_the_source_carries_a_transform_and_both_classes_carry_a_fill():
+        def _staged_serde() -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            return NamespaceAwareSerde(
+                namespaces=[WorkStaged],
+                migrations=[
+                    Migration(
+                        operations=(
+                            SplitEvent(
+                                module=WorkStaged.__module__,
+                                qualname="WorkStaged.Completed",
+                                select=_select_staged_failed,
+                                targets=(WorkStaged.Failed,),
+                            ),
+                        )
+                    )
+                ],
+            )
+
+        def _revive_staged(qualname: str, **kwargs: Any) -> Any:
+            return _staged_serde().loads_typed(
+                synthesize_legacy_payload(WorkStaged.__module__, qualname, kwargs)
+            )
+
+        def it_runs_the_transform_then_the_split_then_the_target_fills():
+            revived = _revive_staged("WorkStaged.Completed", outcome=_ERROR)
+
+            assert revived == WorkStaged.Failed(severity="high", reason="boom")
+
+        def it_runs_the_source_fills_on_a_payload_select_keeps():
+            revived = _revive_staged("WorkStaged.Completed", outcome=_OK)
+
+            assert revived == WorkStaged.Completed(attempt=1, result=_OK)
+
+        def it_splits_a_payload_stored_under_a_historic_name():
+            revived = _revive_staged("WorkStaged.OldCompleted", outcome=_ERROR)
+
+            assert revived == WorkStaged.Failed(severity="high", reason="boom")
+
+    def _broken_serde(select: Any) -> NamespaceAwareSerde:
+        from langgraph_events.serde.migrations import Migration, SplitEvent
+
+        return NamespaceAwareSerde(
+            namespaces=[Work],
+            migrations=[
+                Migration(
+                    operations=(
+                        SplitEvent(
+                            module=Work.__module__,
+                            qualname="Work.Completed",
+                            select=select,
+                            targets=(Work.Failed,),
+                        ),
+                    )
+                )
+            ],
+        )
+
+    _stored = synthesize_legacy_payload(
+        Work.__module__, "Work.Completed", {"result": _ERROR}
+    )
+    _prefix = f"Cannot revive {Work.__module__}.Work.Completed: SplitEvent raised "
+
+    def when_select_raises():
+        # ormsgpack swallows an exception raised inside the ext-hook and
+        # re-raises a bare ``ext_hook failed``. The split runs inside the
+        # hook, so its failure must reach the ``errors`` channel, the
+        # same one a TransformFields failure uses.
+
+        def _raising(kw: dict[str, Any]) -> Any:
+            return Work.Failed, {"reason": kw["missing"]}
+
+        def it_raises_naming_the_stored_identity_and_the_cause():
+            with pytest.raises(ValueError) as excinfo:
+                _broken_serde(_raising).loads_typed(_stored)
+
+            message = str(excinfo.value)
+            assert message.startswith(_prefix + "KeyError: 'missing'.")
+            assert "return None" in message
+
+        def with_tolerate_unresolved():
+            def it_degrades_and_collects_the_stored_identity():
+                serde = _broken_serde(_raising)
+                with serde.tolerate_unresolved() as unresolved:
+                    revived = serde.loads_typed(_stored)
+
+                placeholder = UnrevivedIdentity(Work.__module__, "Work.Completed")
+                assert revived == placeholder
+                assert unresolved == [placeholder]
+
+    def when_select_returns_the_wrong_shape():
+        # ``targets`` was validated at construction. A target outside it
+        # would build a class the serde never validated, so the read
+        # refuses it like every other bad return value.
+
+        def _message(select: Any) -> str:
+            with pytest.raises(ValueError) as excinfo:
+                _broken_serde(select).loads_typed(_stored)
+            return str(excinfo.value)
+
+        def it_refuses_a_target_outside_targets():
+            message = _message(lambda kw: (Work.Completed, kw))
+
+            assert message.startswith(
+                _prefix + "ValueError: select returned Work.Completed, which is "
+                "not in targets="
+            )
+
+        def it_refuses_a_return_value_that_is_not_a_tuple():
+            message = _message(lambda kw: {"reason": "boom"})
+
+            assert message.startswith(
+                _prefix + "TypeError: select returned dict, expected None or a "
+                "(target, kwargs) tuple"
+            )
+
+        def it_refuses_kwargs_that_are_not_a_dict():
+            message = _message(lambda kw: (Work.Failed, ["boom"]))
+
+            assert message.startswith(
+                _prefix + "TypeError: select returned kwargs of type list, "
+                "expected dict"
+            )
+
+    def when_the_declaration_is_wrong():
+        # Every refusal here would otherwise surface on the first
+        # production read. Same strictness as TransformFields.
+
+        def _split(name: str = "bad-split", **overrides: Any) -> Any:
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            fields: dict[str, Any] = {
+                "module": Work.__module__,
+                "qualname": "Work.Completed",
+                "select": _select_failed,
+                "targets": (Work.Failed,),
+            }
+            fields.update(overrides)
+            return Migration(name=name, operations=(SplitEvent(**fields),))
+
+        def it_refuses_a_source_that_is_a_rename_source():
+            # The rename table cannot host a split: the source stays live,
+            # and a rename source never resolves live.
+            keyed_on_origin = _split(
+                module=WorkStaged.__module__,
+                qualname="WorkStaged.OldCompleted",
+                targets=(WorkStaged.Failed,),
+            )
+
+            with pytest.raises(ValueError, match="split on the live target"):
+                NamespaceAwareSerde(
+                    namespaces=[WorkStaged], migrations=[keyed_on_origin]
+                )
+
+        def it_refuses_a_source_that_does_not_resolve():
+            ghost = _split(module="ghost.mod", qualname="Ghost.Gone")
+
+            with pytest.raises(ValueError, match=r"SplitEvent source ghost\.mod"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[ghost])
+
+        def it_refuses_a_target_that_is_not_an_Event():
+            not_an_event = _split(targets=(dict,))
+
+            with pytest.raises(ValueError, match="SplitEvent target dict"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[not_an_event])
+
+        def it_refuses_a_target_that_does_not_resolve():
+            # A class nested in a function carries ``<locals>`` in its
+            # qualname. Outside ``namespaces=`` nothing reaches it.
+            class Local(Namespace):
+                class Unreachable(DomainEvent):
+                    reason: str = ""
+
+            unreachable = _split(targets=(Local.Unreachable,))
+
+            with pytest.raises(ValueError, match=r"SplitEvent target .*Unreachable"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[unreachable])
+
+        def it_refuses_empty_targets():
+            # Refused where the op is built, before any serde sees it.
+            with pytest.raises(ValueError, match=r"targets.*at least one"):
+                _split(targets=())
+
+        def it_refuses_a_select_that_is_not_callable():
+            not_callable = _split(select="select_failed")
+
+            with pytest.raises(TypeError, match=r"Work\.Completed.*callable"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[not_callable])
+
+        def it_refuses_two_splits_on_one_identity():
+            # The read path runs one split per identity. A second one
+            # would be silently ignored. Compose the cases in one select.
+            with pytest.raises(ValueError, match="Duplicate SplitEvent"):
+                NamespaceAwareSerde(
+                    namespaces=[Work], migrations=[_split(), _split(name="again")]
+                )
+
+        def it_refuses_legacy_write():
+            # A split has no inverse, the same rule as a transform.
+            with pytest.raises(ValueError, match=r"legacy_write.*SplitEvent"):
+                NamespaceAwareSerde(
+                    namespaces=[Work], migrations=[_split()], legacy_write=True
+                )
+
+    def when_targets_is_a_list():
+        def it_normalises_to_a_tuple_and_stays_hashable():
+            # The decorator, the sugar and the raw op all pass through one
+            # normalisation, so a list author gets the same op as a tuple
+            # author, and the frozen op stays usable as a dict key.
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            raw = SplitEvent(
+                module=Work.__module__,
+                qualname="Work.Completed",
+                select=_select_failed,
+                targets=[Work.Failed],
+            )
+            sugared = Migration.split_event(
+                source=Work.Completed, select=_select_failed, targets=[Work.Failed]
+            ).operations[0]
+
+            assert raw.targets == (Work.Failed,)
+            assert sugared == raw
+            assert hash(raw) == hash(sugared)
+
+    def when_the_source_carries_the_decorator():
+        def it_is_collected_from_namespaces():
+            serde = NamespaceAwareSerde(namespaces=[Job])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Job.__module__, "Job.Completed", {"result": _ERROR}
+                )
+            )
+
+            assert revived == Job.Failed(reason="boom")
+
+        def with_two_stacked_decorators():
+            def it_is_rejected_at_decoration_time():
+                from langgraph_events.serde import split_event
+
+                with pytest.raises(ValueError, match="one split per class"):
+
+                    class Stacked(Namespace):
+                        class Failed(DomainEvent):
+                            reason: str = ""
+
+                        @split_event(_select_failed, targets=(Failed,))
+                        @split_event(_select_failed, targets=(Failed,))
+                        class Completed(DomainEvent):
+                            result: dict[str, Any] = dataclasses.field(
+                                default_factory=dict
+                            )
+
+    def when_authored_through_the_sugar():
+        def it_splits_like_the_raw_operation():
+            from langgraph_events.serde import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Work],
+                migrations=[
+                    Migration.split_event(
+                        source=Work.Completed,
+                        select=_select_failed,
+                        targets=(Work.Failed,),
+                    )
+                ],
+            )
+
+            assert _revive(serde, "Work.Completed", result=_ERROR) == Work.Failed(
+                reason="boom"
+            )
+
+
+def describe_SplitEvent_revive_gate():
+    # The gate sends a ``None`` placeholder for a required field. A select
+    # must return None on it, so the gate proves the source still
+    # constructs. Each branch is pinned with real values through
+    # ``synthesize_legacy_payload`` instead.
+
+    def when_select_returns_None_on_the_placeholder():
+        def it_passes(tmp_path: Any):
+            from langgraph_events.serde.migrations import assert_all_baselined_revive
+
+            baseline = _baseline_v3_file(
+                tmp_path,
+                events=((GateSplit.__module__, "GateSplit.Completed", ["result"]),),
+            )
+
+            assert_all_baselined_revive(
+                NamespaceAwareSerde(namespaces=[GateSplit]), baseline
+            )
+
+    def when_select_reads_the_placeholder():
+        def it_fails_naming_the_placeholder_contract(tmp_path: Any):
+            from langgraph_events.serde.migrations import assert_all_baselined_revive
+
+            baseline = _baseline_v3_file(
+                tmp_path,
+                events=(
+                    (
+                        GateSplitStrict.__module__,
+                        "GateSplitStrict.Completed",
+                        ["result"],
+                    ),
+                ),
+            )
+
+            with pytest.raises(AssertionError) as excinfo:
+                assert_all_baselined_revive(
+                    NamespaceAwareSerde(namespaces=[GateSplitStrict]), baseline
+                )
+
+            message = str(excinfo.value)
+            assert "SplitEvent raised TypeError" in message
+            assert "None placeholder" in message
+            assert "synthesize_legacy_payload" in message
+
+
+def describe_SplitEvent_docs_example():
+    # The snippet under "Splitting one stored event into two on a payload
+    # value" in docs/event-migrations.md, verbatim.
+
+    def it_pins_both_branches():
+        serde = NamespaceAwareSerde(namespaces=[Job])
+
+        failed = serde.loads_typed(
+            synthesize_legacy_payload(
+                Job.__module__,
+                "Job.Completed",
+                {"result": {"status": "error", "message": "disk full"}},
+            )
+        )
+        assert failed == Job.Failed(reason="disk full")
+
+        completed = serde.loads_typed(
+            synthesize_legacy_payload(
+                Job.__module__, "Job.Completed", {"result": {"status": "ok"}}
+            )
+        )
+        assert completed == Job.Completed(result={"status": "ok"})

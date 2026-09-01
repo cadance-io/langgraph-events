@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from langgraph_events.serde.migrations._core import (
         AddField,
         Migration,
+        SplitEvent,
         TransformFields,
     )
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -78,8 +79,10 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
 from langgraph_events.serde.migrations._core import (  # noqa: E402
+    SplitError,
     TransformError,
     _apply_identity_migrations,
+    _CallableError,
     _collect_decorated_migrations,
     _flatten_and_validate,
     _resolve_identity,
@@ -113,14 +116,24 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
 
     *exc* is ``ImportError``/``AttributeError`` (the identity resolves to
     no live class at all), ``TypeError`` (it resolves, but the stored
-    kwargs and the class's fields disagree), or ``TransformError`` (a
-    ``TransformFields`` raised, or returned a non-dict). The three need
-    different remedies. "Map onto a tombstone with @migrate_from" is
-    right for the first case: there is no live class yet. It is wrong
-    for the second case, where *qualname* may already **be** the
-    tombstone: redecorating it with the decorator it already carries
-    fixes nothing.
+    kwargs and the class's fields disagree), ``TransformError`` (a
+    ``TransformFields`` raised, or returned a non-dict), or
+    ``SplitError`` (a ``SplitEvent`` raised, or returned the wrong
+    shape). Each needs a different remedy. "Map onto a tombstone with
+    @migrate_from" is right for the first case: there is no live class
+    yet. It is wrong for the second case, where *qualname* may already
+    **be** the tombstone: redecorating it with the decorator it already
+    carries fixes nothing.
     """
+    if isinstance(exc, SplitError):
+        op = exc.op
+        return (
+            f"The select keyed on {op.module}.{op.qualname} must accept a "
+            f"payload of every era. It must return None when the "
+            f"discriminating value is absent or None, or a (target, kwargs) "
+            f"tuple whose target is in targets=. See 'Splitting one stored "
+            f"event into two on a payload value' in docs/event-migrations.md."
+        )
     if isinstance(exc, TransformError):
         op = exc.op
         return (
@@ -256,6 +269,7 @@ def _make_ext_hook(
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     transform_table: dict[tuple[str, str], TransformFields],
     origin_transform_table: dict[tuple[str, str], TransformFields],
+    split_table: dict[tuple[str, str], SplitEvent],
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
@@ -333,13 +347,15 @@ def _make_ext_hook(
                 origin_addfield_table,
                 transform_table,
                 origin_transform_table,
+                split_table,
             )
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
-        except (ImportError, AttributeError, TypeError, TransformError) as exc:
+        except (ImportError, AttributeError, TypeError, _CallableError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
             # has dropped, or omit a field it has gained with no AddField.
-            # ``TransformError`` wraps whatever a transform raised.
+            # ``_CallableError`` wraps whatever a transform or a select
+            # raised.
             if unresolved is not None:
                 # Retirement cleanup only (see the *unresolved* parameter
                 # docstring above). The caller is a tool that exists to
@@ -352,7 +368,7 @@ def _make_ext_hook(
                 return placeholder
             failure = (
                 str(exc)
-                if isinstance(exc, TransformError)
+                if isinstance(exc, _CallableError)
                 else f"{type(exc).__name__}: {exc}"
             )
             errors.append(
@@ -443,6 +459,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._origin_addfield_table,
             self._transform_table,
             self._origin_transform_table,
+            self._split_table,
         ) = _flatten_and_validate(all_migrations, scope)
         # Origin-scoped fills are the fan-in signal, and a fan-in cannot
         # ride legacy_write: writes would relabel EVERY instance under the
@@ -471,6 +488,19 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 "writes. Drain in-flight threads before the cutover, or drop "
                 "legacy_write and accept read-only compatibility. See "
                 "'Dropping, merging or retyping a field' in "
+                "docs/event-migrations.md."
+            )
+        # A split has no inverse either: an old release has no class for
+        # the target, and select only runs on read.
+        if legacy_write and self._split_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a SplitEvent "
+                "(split_event, Migration.split_event or a hand-authored "
+                "SplitEvent). A split runs on read and has no inverse, so an "
+                "old release cannot read what this one writes. Drain "
+                "in-flight threads before the cutover, or drop legacy_write "
+                "and accept read-only compatibility. See 'Splitting one "
+                "stored event into two on a payload value' in "
                 "docs/event-migrations.md."
             )
         # The read path resolves through ``_scope`` before it falls back to
@@ -591,6 +621,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._origin_addfield_table,
                     self._transform_table,
                     self._origin_transform_table,
+                    self._split_table,
                     self._scope,
                     unresolved=self._unresolved,
                 ),

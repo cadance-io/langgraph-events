@@ -14,7 +14,7 @@ import itertools
 import sys
 import typing
 from dataclasses import dataclass, fields, is_dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from langgraph_events._event import Event, _iter_nested_events
 from langgraph_events._labels import distinct_labels
@@ -114,7 +114,47 @@ class TransformFields:
     transform: Callable[[dict[str, Any]], dict[str, Any]]
 
 
-Operation = RenameEvent | AddField | TransformFields
+@dataclass(frozen=True)
+class SplitEvent:
+    """Build one of several live classes from a stored identity, picked
+    by a payload value.
+
+    ``(module, qualname)`` is the stored identity. It stays LIVE: a
+    payload the current release writes carries it too. ``select``
+    receives a fresh copy of the stored kwargs. It returns ``None`` to
+    keep the stored class and kwargs unchanged, or ``(target_class,
+    new_kwargs)`` to build ``target_class`` from ``new_kwargs`` instead.
+    The class object is the return value, not a string, so an IDE rename
+    follows it. ``targets`` lists every class ``select`` can return, for
+    validation at serde construction. Any iterable is accepted and
+    normalised to a tuple. An empty one is refused here.
+
+    A split runs in the class stage only, keyed on the live identity:
+    after the rename and the class-stage :class:`TransformFields`,
+    before the fills. The fills applied afterwards are those of the
+    RESULTING identity. A split has no inverse, so ``legacy_write=True``
+    is refused with one declared.
+    """
+
+    module: str
+    qualname: str
+    select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None]
+    targets: Iterable[type]
+
+    def __post_init__(self) -> None:
+        # One normalisation point for the decorator, the sugar and the raw
+        # op: a list author gets the same op as a tuple author, and the
+        # frozen op stays hashable. ``object.__setattr__`` because frozen.
+        targets = tuple(self.targets)
+        if not targets:
+            raise ValueError(
+                f"SplitEvent({self.module}:{self.qualname!r}): `targets` must "
+                f"list at least one class `select` can return."
+            )
+        object.__setattr__(self, "targets", targets)
+
+
+Operation = RenameEvent | AddField | TransformFields | SplitEvent
 
 
 @dataclass(frozen=True)
@@ -254,6 +294,44 @@ class Migration:
             ),
         )
 
+    @classmethod
+    def split_event(
+        cls,
+        name: str = "",
+        *,
+        source: type | None = None,
+        module: str | None = None,
+        qualname: str | None = None,
+        select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None],
+        targets: Iterable[type],
+    ) -> Migration:
+        """Single-op split sugar.
+
+        ``name`` labels the migration. ``select`` picks the target and
+        shapes its kwargs, and ``targets`` lists every class it can
+        return. Pass the live source class as ``source=<class>``. Pass
+        ``module``/``qualname`` for a class that cannot be imported at
+        authoring time. Same convention as :class:`SplitEvent` and
+        :meth:`transform_fields`.
+        """
+        module, qualname = _target_identity(
+            "Migration.split_event",
+            "source",
+            ("module", "qualname"),
+            "source",
+            source,
+            module,
+            qualname,
+        )
+        return cls(
+            name=name,
+            operations=(
+                SplitEvent(
+                    module=module, qualname=qualname, select=select, targets=targets
+                ),
+            ),
+        )
+
 
 def _target_identity(
     method: str,
@@ -297,6 +375,7 @@ def _flatten_and_validate(
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], TransformFields],
     dict[tuple[str, str], TransformFields],
+    dict[tuple[str, str], SplitEvent],
 ]:
     """Collapse all operations into per-purpose lookup tables.
 
@@ -306,7 +385,8 @@ def _flatten_and_validate(
     identity: a target that is a rename source goes into the origin table
     (applied pre-rename), a live target into the post-rename table.
     TransformFields ops are bucketed the same way, into
-    ``(transform_table, origin_transform_table)``.
+    ``(transform_table, origin_transform_table)``. SplitEvent ops have
+    the class stage only, so they fill one ``split_table``.
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
@@ -328,6 +408,7 @@ def _flatten_and_validate(
     # AddField ops carry their migration's name for the same reason.
     addfield_ops: list[tuple[AddField, str]] = []
     transform_ops: list[tuple[TransformFields, str]] = []
+    split_ops: list[tuple[SplitEvent, str]] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -349,6 +430,8 @@ def _flatten_and_validate(
                 addfield_ops.append((op, migration.name))
             elif isinstance(op, TransformFields):
                 transform_ops.append((op, migration.name))
+            elif isinstance(op, SplitEvent):
+                split_ops.append((op, migration.name))
             else:
                 # ``Operation`` is closed by design. Silently ignoring an
                 # unknown type hides authoring errors — surface them at
@@ -356,7 +439,8 @@ def _flatten_and_validate(
                 raise TypeError(
                     f"Unknown migration operation type "
                     f"{type(op).__name__!r} in {_migration_label(migration.name)}. "
-                    f"Expected RenameEvent, AddField or TransformFields."
+                    f"Expected RenameEvent, AddField, TransformFields or "
+                    f"SplitEvent."
                 )
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
@@ -369,13 +453,104 @@ def _flatten_and_validate(
     transform_table, origin_transform_table = _bucket_transforms(
         transform_ops, rename_table, scope
     )
+    split_table = _bucket_splits(split_ops, rename_table, scope)
     return (
         rename_table,
         addfield_table,
         origin_addfield_table,
         transform_table,
         origin_transform_table,
+        split_table,
     )
+
+
+def _bucket_splits(
+    split_ops: Sequence[tuple[SplitEvent, str]],
+    rename_table: dict[tuple[str, str], tuple[str, str]],
+    scope: Mapping[tuple[str, str], type] | None = None,
+) -> dict[tuple[str, str], SplitEvent]:
+    """Key SplitEvent ops on their source identity and validate each one.
+
+    A split has the class stage only, so the source must resolve live.
+    A rename source never resolves live (the chain walk rejects
+    shadowing), so a split keyed on one is refused with a pointer at the
+    live target. Every declared target must be an ``Event`` subclass that
+    the read path resolves to that same class object, by *scope* or by
+    import. One split per identity: the read path runs one, so a second
+    would be ignored in silence.
+    """
+    split_table: dict[tuple[str, str], SplitEvent] = {}
+    source: dict[tuple[str, str], str] = {}
+    for op, migration_name in split_ops:
+        key = (op.module, op.qualname)
+        label = (
+            f"SplitEvent({op.module}:{op.qualname!r}) in "
+            f"{_migration_label(migration_name)}"
+        )
+        if not callable(op.select):
+            raise TypeError(
+                f"{label}: `select` must be callable, got {type(op.select).__name__}."
+            )
+        if key in rename_table:
+            live_module, live_qualname = rename_table[key]
+            raise ValueError(
+                f"SplitEvent source {op.module}:{op.qualname!r} is a rename "
+                f"source. A split keys on a live identity, and the rename "
+                f"already moves that payload to {live_module}:"
+                f"{live_qualname!r}. Declare the split on the live target "
+                f"instead: it runs after the rename, on every era."
+            )
+        if not _resolves(*key, scope=scope):
+            raise ValueError(
+                f"SplitEvent source {op.module}:{op.qualname!r} does not "
+                f"resolve to a live class — by this serde's namespace scope "
+                f"or by import. A split keys on the live identity that stays "
+                f"stored. Either the module/qualname has a typo, or the class "
+                f"was deleted after the migration was authored."
+            )
+        for target in op.targets:
+            _validate_split_target(label, target, scope)
+        if key in source:
+            raise ValueError(
+                f"Duplicate SplitEvent: {op.module}:{op.qualname!r} is split "
+                f"{_declared_by(source[key], migration_name)}. Each identity "
+                f"may carry at most one split. Compose the cases in one "
+                f"select."
+            )
+        split_table[key] = op
+        source[key] = migration_name
+    return split_table
+
+
+def _validate_split_target(
+    label: str,
+    target: Any,
+    scope: Mapping[tuple[str, str], type] | None,
+) -> None:
+    """Refuse *target* unless it is an ``Event`` subclass the read path
+    resolves to that same object. The read path builds the class it
+    resolves for ``(target.__module__, target.__qualname__)``, so a
+    different object there would build a class the author never named.
+    """
+    name = getattr(target, "__qualname__", repr(target))
+    if not (isinstance(target, type) and issubclass(target, Event)):
+        raise ValueError(
+            f"{label}: SplitEvent target {name} is not an Event subclass. "
+            f"`targets` lists the event classes `select` can return."
+        )
+    try:
+        resolved = _resolve_identity(
+            target.__module__, target.__qualname__, scope=scope
+        )
+    except (ImportError, AttributeError):
+        resolved = None
+    if resolved is not target:
+        raise ValueError(
+            f"{label}: SplitEvent target {target.__module__}:{name} does not "
+            f"resolve to that class — by this serde's namespace scope or by "
+            f"import. Nest it inside a Namespace passed via namespaces=, or "
+            f"pass it directly in events=."
+        )
 
 
 def _bucket_transforms(
@@ -422,16 +597,7 @@ def _bucket_transforms(
                 f"missing its @migrate_from / RenameEvent."
             )
         if target in source:
-            first_label = _migration_label(source[target])
-            second_label = _migration_label(migration_name)
-            # Two blank names would read "by both an unnamed migration and
-            # an unnamed migration", which names nothing. Say so, and ask
-            # for names.
-            by = (
-                "by two unnamed migrations. Pass name= to each to tell them apart"
-                if first_label == second_label
-                else f"by both {first_label} and {second_label}"
-            )
+            by = _declared_by(source[target], migration_name)
             raise ValueError(
                 f"Duplicate TransformFields: {op.module}:{op.qualname!r} is "
                 f"transformed {by}. Each identity may carry at most one "
@@ -440,6 +606,19 @@ def _bucket_transforms(
         bucket[target] = op
         source[target] = migration_name
     return transform_table, origin_transform_table
+
+
+def _declared_by(first_name: str, second_name: str) -> str:
+    """The "by ..." clause of a duplicate-operation diagnostic.
+
+    Two blank names would read "by both an unnamed migration and an
+    unnamed migration", which names nothing. Say so, and ask for names.
+    """
+    first_label = _migration_label(first_name)
+    second_label = _migration_label(second_name)
+    if first_label == second_label:
+        return "by two unnamed migrations. Pass name= to each to tell them apart"
+    return f"by both {first_label} and {second_label}"
 
 
 def _bucket_addfields(
@@ -665,20 +844,36 @@ def _inject_addfields(
             kwargs.setdefault(op.field, op.default)
 
 
-class TransformError(Exception):
-    """A :class:`TransformFields` raised, or returned a value that is not
-    a ``dict``.
+class _CallableError(Exception):
+    """A migration callable raised, or returned a value of the wrong shape.
 
     Raised by the read path and caught by the serde's ext-hook, which
     turns it into the ``Cannot revive`` message or, under
-    ``serde.tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is the
-    transform that failed and ``cause`` is the exception it raised.
+    ``serde.tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is
+    the operation that failed and ``cause`` is the exception it raised.
+    ``label`` names the operation type in the message.
     """
 
-    def __init__(self, op: TransformFields, cause: Exception) -> None:
-        super().__init__(f"TransformFields raised {type(cause).__name__}: {cause}")
+    label: ClassVar[str]
+
+    def __init__(self, op: TransformFields | SplitEvent, cause: Exception) -> None:
+        super().__init__(f"{self.label} raised {type(cause).__name__}: {cause}")
         self.op = op
         self.cause = cause
+
+
+class TransformError(_CallableError):
+    """A :class:`TransformFields` raised, or returned a value that is not
+    a ``dict``."""
+
+    label = "TransformFields"
+
+
+class SplitError(_CallableError):
+    """A :class:`SplitEvent` raised, or returned a value that is not
+    ``None`` or a ``(target, kwargs)`` tuple with a declared target."""
+
+    label = "SplitEvent"
 
 
 def _transform_kwargs(
@@ -707,6 +902,59 @@ def _transform_kwargs(
     return out
 
 
+def _split_kwargs(
+    op: SplitEvent | None,
+    module: str,
+    qualname: str,
+    kwargs: dict[str, Any],
+) -> tuple[str, str, dict[str, Any]]:
+    """Run *op* on a copy of *kwargs* and return the resulting identity
+    and kwargs. No op, or ``select`` returns ``None``: return the input
+    unchanged.
+
+    Raises :class:`SplitError` when ``select`` raises, returns a value
+    that is not ``None`` or a ``(target, kwargs)`` tuple, returns a target
+    outside ``op.targets``, or returns kwargs that are not a ``dict``. The
+    ext-hook catches that type, so no exception ``select`` raises can
+    escape as a bare ``ext_hook failed``.
+    """
+    if op is None:
+        return module, qualname, kwargs
+    try:
+        out = op.select(dict(kwargs))
+    except Exception as exc:
+        raise SplitError(op, exc) from exc
+    if out is None:
+        return module, qualname, kwargs
+    if not (isinstance(out, tuple) and len(out) == 2):
+        raise SplitError(
+            op,
+            TypeError(
+                f"select returned {type(out).__name__}, expected None or a "
+                f"(target, kwargs) tuple"
+            ),
+        )
+    target, new_kwargs = out
+    if target not in op.targets:
+        raise SplitError(
+            op,
+            ValueError(
+                f"select returned {getattr(target, '__qualname__', target)}, "
+                f"which is not in targets="
+                f"{tuple(t.__qualname__ for t in op.targets)}"
+            ),
+        )
+    if not isinstance(new_kwargs, dict):
+        raise SplitError(
+            op,
+            TypeError(
+                f"select returned kwargs of type {type(new_kwargs).__name__}, "
+                f"expected dict"
+            ),
+        )
+    return target.__module__, target.__qualname__, new_kwargs
+
+
 def _apply_identity_migrations(
     module: str,
     qualname: str,
@@ -716,24 +964,30 @@ def _apply_identity_migrations(
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     transform_table: dict[tuple[str, str], TransformFields],
     origin_transform_table: dict[tuple[str, str], TransformFields],
+    split_table: dict[tuple[str, str], SplitEvent],
 ) -> tuple[str, str, dict[str, Any]]:
     """Run the read-side migration rule and return ``(module, qualname,
     kwargs)`` for the constructor.
 
     Order: the origin stage (transform, then origin-scoped fills), the
-    rename, then the class stage (transform, then class-global fills). A
-    transform runs before the fills of its stage, and its return value
-    replaces the kwargs. Origin fills run
-    before class fills so the precedence is: explicit payload value >
-    origin-scoped fill > class-global fill (``setdefault`` never
-    overwrites). An op lives in exactly one table — origin keys are rename
-    sources, post keys are live identities, disjoint by validation — and
-    each table is read at its own stage, so no op is ever applied twice.
+    rename, then the class stage (transform, then split, then class-global
+    fills). A transform runs before the fills of its stage, and its return
+    value replaces the kwargs. A split can change the identity, so the
+    class fills applied after it are those of the RESULTING identity.
+    Origin fills run before class fills so the precedence is: explicit
+    payload value > origin-scoped fill > class-global fill (``setdefault``
+    never overwrites). An op lives in exactly one table — origin keys are
+    rename sources, post keys are live identities, disjoint by validation
+    — and each table is read at its own stage, so no op is ever applied
+    twice.
     """
     kwargs = _transform_kwargs(origin_transform_table.get((module, qualname)), kwargs)
     _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
     module, qualname = _resolve_rename(module, qualname, rename_table)
     kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
+    module, qualname, kwargs = _split_kwargs(
+        split_table.get((module, qualname)), module, qualname, kwargs
+    )
     _inject_addfields(addfield_table.get((module, qualname), ()), kwargs)
     return module, qualname, kwargs
 
@@ -960,6 +1214,47 @@ def transform_fields(
     return _wrap
 
 
+_SPLIT_ATTR = "__lge_split__"
+
+
+def split_event(
+    select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None],
+    *,
+    targets: Iterable[type],
+) -> Callable[[type], type]:
+    """Split payloads stored under this class onto ``targets`` by a
+    payload value.
+
+    Apply it to the SOURCE class, the one whose identity stays stored.
+    The class-scoped, auto-collected sibling of :func:`transform_fields`.
+    The metadata becomes a :class:`SplitEvent` keyed on this class's
+    current identity. ``select`` receives a copy of the stored kwargs and
+    returns ``None`` to keep this class, or ``(target_class, kwargs)`` to
+    build one of ``targets`` instead. It runs after any ``@migrate_from``
+    rename and any ``@transform_fields``, on payloads from every era,
+    including the payloads the current release writes.
+
+    Metadata is stashed as ``__lge_split__``. One split per class: a
+    second decorator is rejected at decoration. Compose the cases in one
+    ``select``. ``targets`` is normalised to a tuple, and refused when
+    empty, where the :class:`SplitEvent` is built at serde construction.
+    """
+
+    def _wrap(cls: type) -> type:
+        # ``cls.__dict__`` (not ``getattr``) so the marker doesn't leak
+        # through MRO when a subclass inherits a decorated parent — same
+        # contract as ``_TRANSFORM_ATTR``.
+        if _SPLIT_ATTR in cls.__dict__:
+            raise ValueError(
+                f"@split_event: {cls.__qualname__} already carries a split: "
+                f"one split per class; compose the cases in one select."
+            )
+        setattr(cls, _SPLIT_ATTR, (select, targets))
+        return cls
+
+    return _wrap
+
+
 def _serde_event_classes(
     namespaces: Sequence[type], events: Sequence[type]
 ) -> list[type]:
@@ -1167,7 +1462,8 @@ def _collect_decorated_migrations(
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
         transform = cls.__dict__.get(_TRANSFORM_ATTR)
         origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
-        if not (history or backfills or origin_backfills or transform):
+        split = cls.__dict__.get(_SPLIT_ATTR)
+        if not (history or backfills or origin_backfills or transform or split):
             continue
         ops: list[Operation] = []
         if history:
@@ -1228,6 +1524,18 @@ def _collect_decorated_migrations(
                     module=cls.__module__,
                     qualname=cls.__qualname__,
                     transform=transform,
+                )
+            )
+        # The split keys on the CURRENT identity too: the source stays
+        # live, so it is the class stage by construction.
+        if split is not None:
+            select, targets = split
+            ops.append(
+                SplitEvent(
+                    module=cls.__module__,
+                    qualname=cls.__qualname__,
+                    select=select,
+                    targets=targets,
                 )
             )
         out.append(
