@@ -294,7 +294,7 @@ Workflow:
 - The file is versioned. A v1 or v2 file still loads. Its `fields` are unknown and its `retired` list is empty. A file with an unknown version raises `ValueError`.
 
 !!! note "Upgrading a baseline recorded before v3"
-    A v1 or v2 baseline records no fields, so `assert_all_baselined_revive` sends required placeholders only and cannot see a dropped field. **Regenerate the baseline once** with `write_baseline(graph, BASELINE)` to record the fields. An identity that an earlier `allow_removed=True` write erased is not in the file, so no write can retire it. Add its `retired` entry by hand. Give it the fields the class had if you know them. Omit `fields` if you do not:
+    A v1 or v2 baseline records no fields, so `assert_all_baselined_revive` sends required placeholders only and cannot see a dropped field. **Regenerate the baseline once** with `write_baseline(graph, BASELINE)` to record the fields. An identity that an earlier `allow_removed=True` write erased is not in the file, so no write can retire it. Add its `retired` entry by hand. If you know the fields the class had, give them. If you do not, omit `fields`:
 
     ```json
     {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}

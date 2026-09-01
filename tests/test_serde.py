@@ -2838,6 +2838,25 @@ def describe_NamespaceAwareSerde():
 
                 assert_all_baselined_resolve(serde, baseline)
 
+        def when_the_baseline_lists_an_unmigrated_retired_identity():
+            def it_fails_naming_the_retired_remedy(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[Retiring])
+                baseline = _baseline_v3_file(
+                    tmp_path, retired=(("ghost.mod", "Ghost.Gone", ["x"]),)
+                )
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_resolve(serde, baseline)
+
+                message = str(excinfo.value)
+                assert "Ghost.Gone" in message
+                assert "retired" in message
+                assert "delete its `retired` entry" in message
+
         def when_a_baselined_identity_no_longer_resolves():
             def it_raises_naming_the_missing_identity(tmp_path: Any):
                 from langgraph_events.serde.migrations import (

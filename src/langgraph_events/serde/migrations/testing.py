@@ -320,15 +320,15 @@ def _revive_check(
 def _dropped_hint(exc: Exception) -> str:
     """One sentence when *exc* names a kwarg the live class rejected: the
     baseline recorded it, the class dropped it, and a stored payload
-    still carries it. Empty for every other failure."""
+    still carries it. The remedy is already in *exc*, so the sentence
+    states the cause only. Empty for every other failure."""
     match = _UNEXPECTED_KWARG_RE.search(str(exc))
     if match is None:
         return ""
     field = match.group(1)
     return (
         f" The baseline recorded field {field!r}, which the live class no "
-        f"longer accepts. Add a TransformFields migration that drops it, or "
-        f"restore the field on the class."
+        f"longer accepts."
     )
 
 
