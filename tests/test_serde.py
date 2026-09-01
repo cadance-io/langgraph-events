@@ -3944,3 +3944,146 @@ def describe_TransformFields():
                 placeholder = UnrevivedIdentity(Reshaped.__module__, "Reshaped.Trimmed")
                 assert revived == placeholder
                 assert unresolved == [placeholder]
+
+    def when_the_transform_returns_a_non_dict():
+        def it_raises_naming_the_stored_identity_and_the_type():
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(target=Reshaped.Trimmed, transform=list)
+                ],
+            )
+
+            with pytest.raises(ValueError) as excinfo:
+                serde.loads_typed(
+                    synthesize_legacy_payload(
+                        Reshaped.__module__, "Reshaped.Trimmed", {"note": "n"}
+                    )
+                )
+
+            assert str(excinfo.value).startswith(
+                f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
+                f"TransformFields raised TypeError: transform returned list"
+            )
+
+    def when_two_transforms_target_one_identity():
+        def it_is_rejected_at_serde_construction():
+            # The read path runs one transform per stage. A second one
+            # would be silently ignored. Compose the steps in one callable.
+            from langgraph_events.serde.migrations import Migration
+
+            conflicting = Migration.transform_fields(
+                name="second", target=Reshaped.Counted, transform=_drop_legacy_flag
+            )
+
+            with pytest.raises(ValueError, match="Duplicate TransformFields"):
+                NamespaceAwareSerde(namespaces=[Reshaped], migrations=[conflicting])
+
+    def when_the_target_is_unresolvable():
+        def it_is_rejected_at_serde_construction():
+            # Same rule as AddField: the target resolves live, or it is a
+            # rename source.
+            from langgraph_events.serde.migrations import Migration
+
+            ghost = Migration.transform_fields(
+                module="ghost.mod", qualname="Ghost.Gone", transform=_drop_legacy_flag
+            )
+
+            with pytest.raises(ValueError, match="TransformFields target"):
+                NamespaceAwareSerde(migrations=[ghost])
+
+    def when_legacy_write_meets_a_transform():
+        def it_is_rejected_at_serde_construction():
+            # A transform has no inverse, so a payload written under the
+            # historic identity would not carry the shape old pods expect.
+            with pytest.raises(ValueError, match="legacy_write"):
+                NamespaceAwareSerde(namespaces=[Reshaped], legacy_write=True)
+
+
+def _upper_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
+    """Raises ``AttributeError`` on the gate's ``None`` placeholder."""
+    kw["note"] = kw.pop("legacy_flag").upper()
+    return kw
+
+
+class GateTrimmed(Namespace):
+    """Dropped ``legacy_flag``, with a transform that reads its value."""
+
+    @transform_fields(_upper_legacy_flag)
+    class Persisted(DomainEvent):
+        note: str = ""
+
+
+def describe_TransformFields_revive_gate():
+    # A v3 baseline records a field the live class dropped. The gate sends
+    # a ``None`` placeholder for it, so the transform is exercised through
+    # the real read path.
+
+    def _baseline(tmp_path: Any, namespace: type) -> Any:
+        return _baseline_v3_file(
+            tmp_path,
+            events=(
+                (
+                    namespace.__module__,
+                    f"{namespace.__name__}.Persisted",
+                    ["legacy_flag", "note"],
+                ),
+            ),
+        )
+
+    def when_the_baseline_records_a_dropped_field():
+        def without_a_transform():
+            def it_fails_pointing_at_TransformFields(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoOriginTransform])
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_revive(
+                        serde, _baseline(tmp_path, DecoOriginTransform)
+                    )
+
+                message = str(excinfo.value)
+                assert "recorded field 'legacy_flag'" in message
+                assert "Add a TransformFields migration that drops it." in message
+
+        def with_a_transform_that_drops_it():
+            def it_passes(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    Migration,
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(
+                    namespaces=[DecoOriginTransform],
+                    migrations=[
+                        Migration.transform_fields(
+                            target=DecoOriginTransform.Persisted,
+                            transform=_drop_legacy_flag,
+                        )
+                    ],
+                )
+
+                assert_all_baselined_revive(
+                    serde, _baseline(tmp_path, DecoOriginTransform)
+                )
+
+        def with_a_transform_that_rejects_the_placeholder():
+            def it_fails_naming_the_placeholder_contract(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[GateTrimmed])
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_revive(serde, _baseline(tmp_path, GateTrimmed))
+
+                message = str(excinfo.value)
+                assert "TransformFields raised AttributeError" in message
+                assert "None placeholder" in message
+                assert "synthesize_legacy_payload" in message

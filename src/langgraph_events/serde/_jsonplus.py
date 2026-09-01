@@ -427,6 +427,21 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 "read-only compatibility. See 'Consolidating N classes into "
                 "one' in docs/event-migrations.md."
             )
+        # A transform has no inverse. A write relabelled under the oldest
+        # historic identity would carry the CURRENT shape, which the old
+        # release's class does not accept, and the transform only runs on
+        # read. Refuse at construction, like the origin-fill case above.
+        if legacy_write and self._transform_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a TransformFields "
+                "(transform_fields, migrate_from(transform=...) or a "
+                "hand-authored TransformFields). A transform runs on read and "
+                "has no inverse, so an old release cannot read what this one "
+                "writes. Drain in-flight threads before the cutover, or drop "
+                "legacy_write and accept read-only compatibility. See "
+                "'Dropping, merging or retyping a field' in "
+                "docs/event-migrations.md."
+            )
         # The read path resolves through ``_scope`` before it falls back to
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
         # key set: the identities revivable with no migration at all.
