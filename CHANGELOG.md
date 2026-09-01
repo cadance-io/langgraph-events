@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EventGraph.unrevivable_threads()` / `.aunrevivable_threads()`.** The store-walking gate
+  from [#159](https://github.com/cadance-io/langgraph-events/issues/159). Reads every thread's
+  latest checkpoint through the serde's tolerant path and returns a mapping of thread id to the
+  qualnames it can no longer revive, from the settled `events` history and the pending interrupt
+  both. Empty when every thread revives. The baseline coverage gates compare the topology to a
+  committed snapshot and never read a checkpoint, so after `write_baseline(..., allow_removed=True)`
+  they stay green while a settled thread still raises `Cannot revive`. This sweep is the one that
+  sees it. Replaces the hand-rolled step 4 recipe in *Retiring an Interrupted subclass*, whose own
+  warning admitted a stale string literal would report "safe". Requires a checkpointer. Cost is
+  O(all checkpoints), like `threads_paused_on()`.
+
 - **`EventGraph.abandon()` / `.aabandon()`.** Settles a paused thread without answering its
   pending `Interrupted`. Closes [#162](https://github.com/cadance-io/langgraph-events/issues/162).
   Ends the thread on a terminal `Abandoned(Halted)`, via the same three-superstep settle

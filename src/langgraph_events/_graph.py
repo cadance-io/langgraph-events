@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     )
 
     from langchain_core.runnables import RunnableConfig
+    from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
     from langgraph.types import StateSnapshot
@@ -1991,6 +1992,88 @@ class EventGraph:
             if self._matches_event_type(pending, event_type):
                 configs.append(cfg)
         return configs
+
+    @staticmethod
+    def _unrevived_names(tup: CheckpointTuple | None) -> list[str]:
+        """Qualname of every ``UnrevivedIdentity`` in *tup*'s latest
+        ``events`` channel and pending ``__interrupt__`` writes, deduped
+        in discovery order. Empty when *tup* is ``None``.
+
+        Only a read inside :meth:`_tolerant_read` can produce an
+        ``UnrevivedIdentity``: outside it the same identity raises.
+        """
+        from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
+            UnrevivedIdentity,
+        )
+
+        if tup is None:
+            return []
+        names: list[str] = []
+        stored = tup.checkpoint.get("channel_values", {}).get("events", [])
+        for entry in stored:
+            if isinstance(entry, UnrevivedIdentity) and entry.qualname not in names:
+                names.append(entry.qualname)
+        for name in EventGraph._pending_interrupt_writes(
+            tup.pending_writes or ()
+        ).unresolved_names:
+            if name not in names:
+                names.append(name)
+        return names
+
+    def unrevivable_threads(self) -> dict[str, list[str]]:
+        """Every thread whose latest checkpoint holds an event identity
+        this graph's serde can no longer revive, keyed by thread id and
+        sorted, each with the qualnames it could not revive, deduped in
+        discovery order. Empty when every thread revives.
+
+        Walks the real store, not the baseline. The coverage gates
+        compare the topology to a committed baseline and never read a
+        checkpoint, so after ``write_baseline(..., allow_removed=True)``
+        they stay green while a settled thread out there still raises
+        ``Cannot revive``. This is the sweep that sees it.
+
+        Reads both the settled ``events`` history and the pending
+        interrupt of each thread's latest checkpoint. So it reports a
+        thread that already *answered* an interrupt on a deleted class
+        (the #159 case, which :meth:`threads_paused_on` never reaches)
+        and a thread still paused on one. It does not walk older
+        checkpoint versions: a thread's latest history is a superset of
+        every earlier one.
+
+        Degrades only through
+        :class:`~langgraph_events.serde.NamespaceAwareSerde`. Any other
+        serde never degrades an identity: its read revives or raises as
+        it normally would, so nothing is reported.
+
+        WARNING: cost is O(all checkpoints), like
+        :meth:`threads_paused_on`.
+
+        Requires a checkpointer. Raises ``ValueError`` if the
+        checkpointer's ``list()`` is unimplemented.
+        """
+        self._require_checkpointer("unrevivable_threads")
+        found: dict[str, list[str]] = {}
+        for tid in self._list_thread_ids("unrevivable_threads"):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            with self._tolerant_read():
+                tup = self._checkpointer.get_tuple(cfg)
+            names = self._unrevived_names(tup)
+            if names:
+                found[tid] = names
+        return found
+
+    async def aunrevivable_threads(self) -> dict[str, list[str]]:
+        """Async version of :meth:`unrevivable_threads`."""
+        self._require_checkpointer("aunrevivable_threads")
+        found: dict[str, list[str]] = {}
+        for tid in await self._alist_thread_ids("aunrevivable_threads"):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            with self._tolerant_read():
+                tup = await self._checkpointer.aget_tuple(cfg)
+            names = self._unrevived_names(tup)
+            if names:
+                found[tid] = names
+        return found
 
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
