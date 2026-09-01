@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import itertools
 import sys
+import typing
 from dataclasses import dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -18,7 +19,7 @@ from langgraph_events._event import Event, _iter_nested_events
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from langgraph_events._reducer import BaseReducer
 
@@ -725,6 +726,64 @@ def _serde_event_classes(
             if id(cls) not in seen:
                 seen.add(id(cls))
                 out.append(cls)
+    return out
+
+
+def _annotation_types(tp: Any) -> Iterator[Any]:
+    """*tp* and every type argument under it, depth first."""
+    yield tp
+    for arg in typing.get_args(tp):
+        yield from _annotation_types(arg)
+
+
+def _is_pydantic_model(tp: Any) -> bool:
+    """Duck-typed the same way the LangGraph serializer decides to write
+    a pydantic v2 ext record: a class with a callable ``model_dump``."""
+    return isinstance(tp, type) and callable(getattr(tp, "model_dump", None))
+
+
+def _importable_by_name(cls: type) -> bool:
+    """Whether ``getattr(import_module(cls.__module__), cls.__name__)`` is
+    *cls*. That lookup is how the LangGraph serializer revives a pydantic
+    payload, so this is the exact condition for a silent raw-dict miss."""
+    try:
+        module = importlib.import_module(cls.__module__)
+    except ImportError:
+        return False
+    return getattr(module, cls.__name__, None) is cls
+
+
+def _unimportable_payload_models(
+    classes: Iterable[type],
+) -> list[tuple[type, str, type]]:
+    """``(event class, field name, model class)`` for every pydantic model
+    reachable from an event field annotation whose ``(module, __name__)``
+    does not resolve back to the model (#167).
+
+    Walks generic arguments, so ``list[Holder.Cfg] | None`` reaches
+    ``Holder.Cfg``. Does not descend into a model's own fields: a model
+    nested inside another model is dumped and re-validated as a dict by
+    pydantic itself, so its identity is never stored.
+
+    A forward reference that ``typing.get_type_hints`` cannot resolve is
+    skipped rather than raising here. The event class is the caller's;
+    this check must not turn its own annotation problem into a serde
+    build failure.
+    """
+    out: list[tuple[type, str, type]] = []
+    for cls in classes:
+        try:
+            hints = typing.get_type_hints(cls)
+        except (NameError, TypeError):
+            hints = {
+                name: tp
+                for name, tp in getattr(cls, "__annotations__", {}).items()
+                if not isinstance(tp, str)
+            }
+        for field, tp in hints.items():
+            for inner in _annotation_types(tp):
+                if _is_pydantic_model(inner) and not _importable_by_name(inner):
+                    out.append((cls, field, inner))
     return out
 
 

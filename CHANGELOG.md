@@ -85,6 +85,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pydantic payload nested inside a class no longer revives silently as a raw `dict`.**
+  Closes [#167](https://github.com/cadance-io/langgraph-events/issues/167). The LangGraph
+  serializer stores a pydantic payload by `__name__` and revives it with one `getattr` on the
+  module. A model nested inside a class, or defined inside a function, never resolves that way,
+  and every failure path there returns the dump dict with no error. `NamespaceAwareSerde` now
+  walks every event field annotation it speaks for, generic arguments included, and raises
+  `ValueError` at construction naming the event field and the model, with the instruction to move
+  the model to module scope. A model nested inside another model is not affected: pydantic
+  re-validates it from the dump itself.
+
 - **The retirement docs' step 4 sweep could never fail.** It compared
   `type(e).__qualname__` against `"EventClass"` (a placeholder inside a string literal, which
   never equals a real qualname). The snippet therefore always computed `unsafe == []`. It

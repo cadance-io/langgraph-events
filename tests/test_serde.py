@@ -633,6 +633,30 @@ class PydanticPayload(BaseModel):
     count: int
 
 
+class _ModelHolder:
+    """Nests a pydantic model inside a plain class (#167). Upstream stores
+    a pydantic payload by ``__name__`` and revives it with ``getattr`` on
+    the module, so ``Cfg`` never resolves and revives as a raw dict."""
+
+    class Cfg(BaseModel):
+        tag: str = "x"
+
+
+class _NestedPayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: _ModelHolder.Cfg
+
+
+class _NestedPayloadInGenericNs(Namespace):
+    class Placed(DomainEvent):
+        cfgs: list[_ModelHolder.Cfg] | None = None
+
+
+class _ModulePayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: PydanticPayload
+
+
 def describe_NamespaceAwareSerde():
     def describe_dumps_typed_loads_typed_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -1002,6 +1026,26 @@ def describe_NamespaceAwareSerde():
                 )
                 assert back.name == "x"
                 assert back.count == 42
+
+        def when_an_event_field_is_a_pydantic_model_nested_in_a_class():
+            # #167: the model class is live and unmodified, yet its
+            # checkpoint identity (module, __name__) does not import.
+            # Every upstream failure path returns the raw dump dict, so
+            # the miss is silent at read time. Fail at build instead.
+            def it_raises_at_construction_naming_the_model():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg") as exc:
+                    NamespaceAwareSerde(namespaces=(_NestedPayloadNs,))
+                msg = str(exc.value)
+                assert "_NestedPayloadNs.Placed.cfg" in msg
+                assert "module scope" in msg
+
+            def it_finds_the_model_inside_a_generic_annotation():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_NestedPayloadInGenericNs,))
+
+        def when_an_event_field_is_a_module_level_pydantic_model():
+            def it_constructs():
+                NamespaceAwareSerde(namespaces=(_ModulePayloadNs,))
 
         def when_constructor_allowlist_explicitly_admits_a_type():
             # Asymmetric guard that actually proves delegation: with strict
