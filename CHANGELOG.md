@@ -68,6 +68,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The retirement docs' step 4 sweep could never fail.** It compared
+  `type(e).__qualname__` against `"EventClass"` — a placeholder inside a string literal,
+  which never equals a real qualname — so the snippet always computed `unsafe == []` and
+  green-lit the delete regardless of what the store held. Now binds `RETIRING = EventClass`
+  and compares `type(e).__qualname__ == RETIRING.__qualname__`; verified against a store with
+  a genuinely unsafe answered thread, which the snippet now reports.
+
+- **`write_baseline` raised `AttributeError` on a `str` path.** Every sibling gate
+  (`assert_all_baselined_cover`/`_resolve`/`_revive`/`_handlers_cover`) already accepts
+  `Path | str`; `write_baseline` was the one outlier, and the retirement docs' own workflow
+  printed a bare string. Now accepts `Path | str` and coerces, matching its siblings.
+
+- **`Cannot revive`'s remedy misdirected on a field-shape `TypeError`.** When the identity
+  resolved to a live class — including a tombstone already carrying `@migrate_from` — but
+  construction failed on a field mismatch, the message still said to map the identity onto a
+  tombstone with `@migrate_from(...)`, naming the class that already **is** the tombstone. Now
+  says the target class doesn't declare the field the stored payload carries, naming the field.
+
+- **The nested tombstone recipe silently no-oped when the checkpointer already carried a
+  `NamespaceAwareSerde`** (e.g. reused from an earlier graph in the same process) —
+  `from_namespaces(...)`'s auto-wiring deliberately skips rebuilding one that's already there
+  (see `api.md`), so the tombstone never entered scope, with no error or warning. Documented
+  inline in the recipe, not only in a table three documents away.
+
 - **`Abandoned.discarded` recorded the leaf class name, not the qualname.** `"ApprovalRequested"`
   when the class was still live, but `"Order.ApprovalRequested"` (the qualname) once it was
   deleted — the same field changed shape under the exact axis a retirement changes, so a check

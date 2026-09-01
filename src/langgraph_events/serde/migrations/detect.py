@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
     from langgraph_events import EventGraph
 
@@ -82,7 +82,7 @@ class ChangeReport:
 
 
 def write_baseline(
-    graph: EventGraph, path: Path, *, allow_removed: bool = False
+    graph: EventGraph, path: Path | str, *, allow_removed: bool = False
 ) -> None:
     """Snapshot every event identity reachable from *graph* to *path*.
 
@@ -98,7 +98,11 @@ def write_baseline(
     to overwrite anyway (intentional deletes). This compares baseline ↔
     topology only; it never inspects the serde or migration table — coverage
     stays with ``assert_all_baselined_cover`` / ``assert_all_baselined_revive``.
+
+    *path* takes a ``str`` too — coerced to ``Path`` immediately, matching
+    every ``assert_all_baselined_*`` gate's ``baseline_path: Path | str``.
     """
+    path = Path(path)
     current = set(_enumerate_identities(graph))
     if path.exists() and not allow_removed:
         removed = tuple(sorted(_load_baseline(path) - current))

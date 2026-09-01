@@ -725,7 +725,29 @@ def describe_NamespaceAwareSerde():
                 assert "FieldShape.Persisted" in message
                 assert "TypeError" in message
                 assert "note" in message
-                assert "fields may have changed" in message
+
+            def it_says_the_class_is_missing_the_field_not_to_migrate_from_it():
+                # The identity resolved to a live class — possibly already
+                # a tombstone carrying @migrate_from — so "map onto a
+                # tombstone with @migrate_from" is nonsense advice here;
+                # that remedy belongs to the ImportError/AttributeError
+                # branch (identity doesn't resolve at all), not this one
+                # (identity resolves, __init__ rejects a stored field).
+                serde = NamespaceAwareSerde()
+
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept", "note": "dropped"},
+                )
+
+                with pytest.raises(ValueError) as excinfo:
+                    serde.loads_typed(payload)
+
+                message = str(excinfo.value)
+                assert "does not declare" in message
+                assert "'note'" in message
+                assert "@migrate_from" not in message
 
         def when_a_required_field_was_added_to_the_class():
             def without_a_migration():
@@ -746,7 +768,7 @@ def describe_NamespaceAwareSerde():
                     assert "FieldShape.Persisted" in message
                     assert "TypeError" in message
                     assert "reason" in message
-                    assert "fields may have changed" in message
+                    assert "fields no longer match the stored payload" in message
 
         def when_the_stored_fields_still_match():
             def it_revives_the_event():

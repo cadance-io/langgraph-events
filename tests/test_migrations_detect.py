@@ -151,6 +151,25 @@ def describe_write_baseline():
             # The Command itself is captured.
             assert (Order.__module__, "Order.Place") in identities
 
+        def it_accepts_a_str_path(tmp_path: Path):
+            # docs/event-migrations.md's workflow prints a bare string —
+            # a Path-only signature turns that into
+            # AttributeError: 'str' object has no attribute 'exists'
+            # with no guidance. Every sibling gate (assert_all_baselined_*)
+            # already accepts Path | str; write_baseline matches them.
+            from conftest import Order
+
+            from langgraph_events import EventGraph
+            from langgraph_events.serde.migrations.detect import write_baseline
+
+            graph = EventGraph([Order.Place])
+            target = tmp_path / "baseline.json"
+
+            write_baseline(graph, str(target))
+
+            assert target.exists()
+            assert json.loads(target.read_text())["version"] == 2
+
 
 def describe_write_baseline_regression_guard():
     # The prose rule "commit the baseline alongside the migration, never

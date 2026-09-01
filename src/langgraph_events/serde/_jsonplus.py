@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import ormsgpack
@@ -94,6 +95,45 @@ class UnrevivedIdentity(NamedTuple):
 
     module: str
     qualname: str
+
+
+_UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
+
+
+def _revival_remedy(qualname: str, exc: Exception) -> str:
+    """The actionable second sentence of a ``Cannot revive`` message.
+
+    *exc* is ``ImportError``/``AttributeError`` (the identity resolves to
+    no live class at all) or ``TypeError`` (it resolves, but the stored
+    kwargs and the class's fields disagree). The two need different
+    remedies: "map onto a tombstone with @migrate_from" is right for the
+    first — there's no live class yet — and wrong for the second, where
+    *qualname* may already **be** the tombstone: redecorating it with the
+    decorator it already carries fixes nothing.
+    """
+    if not isinstance(exc, TypeError):
+        return (
+            "The class may have been renamed or removed since the "
+            "checkpoint was written. Settle the thread with "
+            "abandon()/aabandon() before deleting the class, or map the "
+            f"dead identity onto a tombstone class with "
+            f"@migrate_from({qualname!r})."
+        )
+    match = _UNEXPECTED_KWARG_RE.search(str(exc))
+    if match is None:
+        return (
+            f"{qualname}'s fields no longer match the stored payload — "
+            f"the class may have gained a required field with no default "
+            f"and no AddField. Align the class with the payload's shape, "
+            f"or back-fill the field with a migration."
+        )
+    field = match.group(1)
+    return (
+        f"{qualname} does not declare the field {field!r} the stored "
+        f"payload carries. Add {field!r} to the class, matching the "
+        f"retired class's shape, or drop it from the payload with a "
+        f"migration."
+    )
 
 
 def _make_default(
@@ -252,12 +292,8 @@ def _make_ext_hook(
                 # no live class to hold them).
                 return UnrevivedIdentity(module=module_name, qualname=qualname)
             errors.append(
-                f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: {exc}. "
-                f"The class may have been renamed or removed, or its fields "
-                f"may have changed, since the checkpoint was written. Settle "
-                f"the thread with abandon()/aabandon() before deleting the "
-                f"class, or map the dead identity onto a tombstone class "
-                f"with @migrate_from({qualname!r})."
+                f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: "
+                f"{exc}. {_revival_remedy(qualname, exc)}"
             )
             raise
 

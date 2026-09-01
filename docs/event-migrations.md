@@ -270,7 +270,7 @@ Workflow:
 
 1. Open the branch that contains the rename.
 2. Author the migration (`@migrate_from` / `@backfill` on the surviving class, or hand-authored `Migration`).
-3. Run `write_baseline(graph, "migrations/baseline.json")` and commit the regenerated JSON in the same PR.
+3. Run `write_baseline(graph, Path("migrations/baseline.json"))` and commit the regenerated JSON in the same PR.
 
 For intentional deletes (no replacement), pass `allow_removed=True`. The guard compares baseline ↔ topology only; *coverage* (does a migration exist?) is the [coverage gates](#coverage-gates)' job. The baseline file is versioned — a stale snapshot raises `ValueError`.
 
@@ -485,11 +485,15 @@ for config in graph.threads_paused_on(EventClass):
 assert graph.threads_paused_on(EventClass) == []
 
 # Step 4 — you supply my_thread_ids; there is no library enumeration.
+# Bind the class, don't compare against its name as a string: a typo'd
+# or stale string literal here would silently never match anything,
+# and the sweep would report "safe" no matter what the store holds.
+RETIRING = EventClass
 unsafe = [
     tid
     for tid in my_thread_ids
     if any(
-        type(e).__qualname__ == "EventClass"
+        type(e).__qualname__ == RETIRING.__qualname__
         for e in graph.get_state({"configurable": {"thread_id": tid}}).events
     )
 ]
@@ -556,6 +560,9 @@ graph = EventGraph.from_namespaces(
 Run this against a store that still holds a thread paused on `Order.ApprovalRequired` and an already-answered one: `graph.threads_paused_on()` lists the paused thread again — matched against the live `RetiredApprovalGate`, not a degraded identity — `graph.abandon(config)` settles it recording `discarded="Order.RetiredApprovalGate"`, and the already-answered thread's history revives too, closing the #159 gap for this one identity without waiting on the library-level fix. Verified end to end, across a real process restart against persisted checkpoint bytes (not just an in-process object), before this recipe was published.
 
 `in_module=` defaults to the decorated class's `__module__` — pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does.
+
+!!! note "The checkpointer must not already carry a `NamespaceAwareSerde`"
+    `from_namespaces(...)` only builds a `NamespaceAwareSerde` when `checkpointer.serde` isn't already one — the deliberate opt-out for a hand-supplied serde (see [`api.md`](api.md)). Reuse the same checkpointer *object* across an earlier graph built in this process and this recovery graph, and the auto-wiring silently does nothing — no error, no warning, the tombstone never enters scope. Give the recovery graph a fresh checkpointer object (even against the same underlying store), or build the serde yourself, as in the alternative below.
 
 !!! note "This relies on `Order` still being in play"
     `from_namespaces(...)` only wires a namespace into the auto-collected serde because some handler in `handlers=` still subscribes to or produces something inside it (`Order.Approve` above) — nesting the tombstone alone does not add `Order` to that set. If the *whole* namespace is retired too, or the tombstone has to live at module scope, hand-build the serde instead — see below.
