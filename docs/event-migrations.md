@@ -90,6 +90,66 @@ class Persona(Namespace):
 - Stacked `@backfill` accumulate (one per added field).
 - `default`/`default_factory` follow the `AddField` convention; mutable `default=[]` raises `ValueError` at construction (use `default_factory=list`).
 
+## Dropping, merging or retyping a field
+
+A rename moves an identity. A back-fill adds a field a payload never carried. Neither can remove a stored value or change its shape. `TransformFields` can. It runs a callable on the stored kwargs, and the return value replaces them. The decorator form is `@transform_fields`, auto-collected like `@backfill`:
+
+```python
+from langgraph_events.serde import transform_fields
+
+
+def drop_legacy_flag(kw: dict) -> dict:
+    kw.pop("legacy_flag", None)   # tolerate an absent key
+    return kw
+
+
+class Order(Namespace):
+    class Place(Command):
+        @transform_fields(drop_legacy_flag)
+        class Placed(DomainEvent):
+            order_id: str = ""     # ``legacy_flag`` was dropped
+```
+
+A merge and a retype are the same operation with a different callable:
+
+```python
+def merge_name(kw: dict) -> dict:
+    first, last = kw.pop("first", None), kw.pop("last", None)
+    if first is not None or last is not None:
+        kw["name"] = f"{first or ''} {last or ''}".strip()
+    return kw
+
+
+def int_count(kw: dict) -> dict:
+    if isinstance(kw.get("count"), str):
+        kw["count"] = int(kw["count"])
+    return kw
+```
+
+**Two stages.** The identity picks the stage, the same rule as `AddField`:
+
+| Form | Keyed on | Runs | Applies to |
+|---|---|---|---|
+| `@transform_fields(fn)`, `Migration.transform_fields(target=Class, transform=fn)` | the live class | after the rename, before the class-global fills | payloads from every era, including payloads the current release writes |
+| `@migrate_from("Old", transform=fn)`, `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` | a historic identity | before the rename, before the origin fills | payloads written under that exact origin only |
+
+Read-path order: origin transform, origin fills, rename, class transform, class fills. A transform runs before the fills of its stage. A fill still applies to a key the transform removed or never produced.
+
+Semantics:
+
+- **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. `transform=lambda kw: {}` discards every stored field.
+- **Idempotent.** A class-global transform sees current payloads for ever. Use `kw.pop("x", None)`. Do not use `del kw["x"]` or `kw["x"]`. A transform must accept a payload from every era.
+- **One transform per identity and stage.** Compose the steps in one callable. A second one is rejected at serde construction.
+- **The target must resolve**, live or as a rename source, the same rule as `AddField`.
+- **A transform that raises, or returns a non-dict,** fails the read with `Cannot revive <stored identity>: TransformFields raised <Type>: <message>` and a remedy. Under `tolerate_unresolved()` the identity degrades to `UnrevivedIdentity` and is collected, so `unrevivable_threads()` reports it.
+- `migrate_from(transform=...)` takes exactly one historic qualname per decorator, the same rule as `backfill=`. The two can sit on one decorator. The transform runs first.
+
+!!! warning "Transforms cannot ride `legacy_write` (enforced)"
+    A transform runs on read and has no inverse. A write relabelled under the oldest historic identity would carry the current shape, which the old release's class does not accept. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when any transform is declared, in either stage. Drain in-flight threads before the cutover, or accept read-only compatibility.
+
+!!! note "The revive gate sends `None` placeholders"
+    A v3 baseline records the fields a class dropped. `assert_all_baselined_revive` sends `None` for each of them, so the transform runs through the real read path. A transform that reads a dropped value, for example `kw.pop("legacy_flag").upper()`, raises on `None` and fails the gate. The failure line says so. Guard the value in the transform, or pin a real payload with `synthesize_legacy_payload`.
+
 ## Consolidating N classes into one
 
 When several per-entity classes collapse into ONE shared class with a required discriminator, the correct value for each old payload is determined by **which historic identity** it was written under — something a class-global `@backfill` (one value for everyone) cannot express. Pin it per origin with `backfill=` on each `@migrate_from`:
@@ -133,6 +193,8 @@ For cross-module relocations or composite operations, drop to `langgraph_events.
 | Single rename | `Migration.rename(to=Class, ...)` |
 | Add field | `Migration.add_field(target=Class, field=..., default=...)` |
 | Origin-scoped add field | `Migration.add_field(module=..., qualname="<historic>", field=..., default=...)` |
+| Transform fields | `Migration.transform_fields(target=Class, transform=fn)` |
+| Origin-scoped transform | `Migration.transform_fields(module=..., qualname="<historic>", transform=fn)` |
 | Cross-module rename | `Migration(name=..., operations=(RenameEvent(...),))` |
 | Multiple ops | `Migration(name=..., operations=(op1, op2, ...))` |
 
@@ -154,7 +216,7 @@ migrations = [
 ]
 ```
 
-Pass the live class for refactor safety; strings only for cross-module cases where the class can't be imported at authoring time. `name` is optional everywhere. Raw `RenameEvent` / `AddField` are imported from `langgraph_events.serde.migrations` (not re-exported at `langgraph_events.serde`).
+Pass the live class for refactor safety; strings only for cross-module cases where the class can't be imported at authoring time. `name` is optional everywhere. Raw `RenameEvent` / `AddField` / `TransformFields` are imported from `langgraph_events.serde.migrations` (not re-exported at `langgraph_events.serde`).
 
 ## Rolling deploys
 
@@ -490,7 +552,7 @@ The two tracks are independent — do both, in one PR:
 ## Retiring an Interrupted subclass
 
 !!! warning "`threads_paused_on()` and `abandon()` cover paused threads only"
-    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads()` is the sweep that finds it: it reads every thread's latest checkpoint from the store and reports each identity that no longer revives, settled or pending. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. See [#159](https://github.com/cadance-io/langgraph-events/issues/159) for the field-shape half of that issue, which is still open.
+    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads()` is the sweep that finds it: it reads every thread's latest checkpoint from the store and reports each identity that no longer revives, settled or pending. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
 
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
@@ -544,7 +606,7 @@ Deleting the class drops an identity from the graph's topology. `write_baseline`
 
 If the class was deleted before every paused thread was settled, `threads_paused_on()` and `abandon()` already recover the **paused** case on their own — see the two-deletions note above. A thread that had already **answered** the interrupt (the #159 case) needs the fix below too.
 
-Map the dead identity onto a tombstone class, in a follow-up release. **The tombstone must declare the same fields the retired class had.** An empty tombstone only works if the retired class had no fields. Here `Order.ApprovalRequired` carries `order_id`, so `RetiredApprovalGate` does too, or revival raises `TypeError`. **Nest the tombstone inside the same `Namespace`.** A domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
+Map the dead identity onto a tombstone class, in a follow-up release. The tombstone does not need the retired fields: `transform=lambda kw: {}` discards every stored field before the rename, so an empty tombstone revives whatever `Order.ApprovalRequired` carried. **Keep the tombstone an `Interrupted` when the retired class was one.** `threads_paused_on()` and `abandon()` rely on it. **Nest the tombstone inside the same `Namespace`.** A domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
 
 ```python
 from langgraph_events import Command, DomainEvent, Interrupted, Namespace, on
@@ -559,12 +621,9 @@ class Order(Namespace):
         def handle(self) -> "Order.Approve.Approved":
             return Order.Approve.Approved()
 
-    @migrate_from("Order.ApprovalRequired")
+    @migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
     class RetiredApprovalGate(Interrupted):
-        # Same fields as the retired Order.ApprovalRequired, or revival
-        # raises TypeError. An empty tombstone only works when the
-        # retired class had no fields either.
-        order_id: str = ""
+        pass
 
 
 @on(ApprovalSubmitted)
@@ -581,6 +640,15 @@ Run this against a store that still holds a thread paused on `Order.ApprovalRequ
 
 `in_module=` defaults to the decorated class's `__module__`. Pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does.
 
+**Onto a sibling instead of a tombstone.** When a live class already stands for the retired one, and every one of its fields has a default, put the same decorator on the sibling. The stored fields are discarded, and the sibling constructs from its defaults. Do not map a stored field onto a sibling field that means something else, for example a message id onto an order id:
+
+```python
+class Order(Namespace):
+    @migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+    class ApprovalDismissed(DomainEvent):
+        id: str = field(default_factory=lambda: uuid4().hex)
+```
+
 !!! note "The checkpointer must not already carry a `NamespaceAwareSerde`"
     `from_namespaces(...)` only builds a `NamespaceAwareSerde` when `checkpointer.serde` is not already one: the deliberate opt-out for a hand-supplied serde (see [`api.md`](api.md)). Reuse the same checkpointer *object* across an earlier graph built in this process and this recovery graph, and the auto-wiring silently does nothing: no error, no warning, the tombstone never enters scope. Give the recovery graph a fresh checkpointer object (even against the same underlying store), or build the serde yourself, as in the alternative below.
 
@@ -594,12 +662,9 @@ from langgraph_events import EventGraph, Interrupted
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
 
 
-@migrate_from("Order.ApprovalRequired")
+@migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
 class RetiredApprovalGate(Interrupted):
-    # Same fields as the retired Order.ApprovalRequired, or revival
-    # raises TypeError. An empty tombstone only works when the
-    # retired class had no fields either.
-    order_id: str = ""
+    pass
 
 
 checkpointer.serde = NamespaceAwareSerde(
@@ -618,6 +683,8 @@ Library-private; read directly if introspection needed (neither is MRO-inherited
 - `__lge_migrate_from__` — set by `@migrate_from`; tuple of `(module, qualname)` pairs, oldest first.
 - `__lge_backfill__` — set by `@backfill`; accumulated field/default entries.
 - `__lge_origin_backfill__` — set by `@migrate_from(backfill=...)`; accumulated `((module, qualname), {field: default})` entries.
+- `__lge_transform__` — set by `@transform_fields`; accumulated transform callables.
+- `__lge_origin_transform__` — set by `@migrate_from(transform=...)`; accumulated `((module, qualname), transform)` entries.
 
 ## Validation guarantees
 
@@ -632,6 +699,10 @@ Errors raised at serde construction (not at first production read):
 - `AddField(default=<mutable>)` — `ValueError` (steers to `default_factory`); `@backfill` funnels into `AddField`, same guard
 - Two fills on the same `(identity, field)` pair — `ValueError` naming both migrations
 - `legacy_write=True` combined with origin-scoped fills — `ValueError` (consolidations cannot ride legacy writes)
+- `TransformFields` targets that neither resolve to a live class nor match a rename-covered historic identity — `ValueError`
+- Two transforms on the same identity — `ValueError` naming both migrations
+- `legacy_write=True` combined with any transform — `ValueError` (a transform has no inverse)
+- `migrate_from(transform=...)` with a multi-qualname chain — `ValueError` at decoration
 - `migrate_from(backfill=...)` with a multi-qualname chain, an empty dict, or a mutable value (steers to the `Migration.add_field` escape hatch) — `ValueError` at decoration, even earlier
 - A duplicated origin qualname across stacked `@migrate_from` decorators (or within one multi-arg call) — `ValueError` at decoration
 - Unknown `Operation` type in `Migration.operations` — `TypeError`
