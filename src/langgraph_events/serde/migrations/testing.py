@@ -318,17 +318,29 @@ def _revive_check(
     try:
         revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))
     except Exception as exc:  # report every failure, don't abort the sweep
-        return f"-> {type(exc).__name__}: {exc}" + _dropped_hint(exc)
+        return f"-> {type(exc).__name__}: {exc}" + _failure_hint(exc)
     if not isinstance(revived, Event):
         return f"revived as non-Event {revived!r}"
     return None
 
 
-def _dropped_hint(exc: Exception) -> str:
-    """The cause and the action when *exc* names a kwarg the live class
-    rejected: the baseline recorded it, the class dropped it, and a stored
-    payload still carries it. Empty for every other failure."""
-    match = _UNEXPECTED_KWARG_RE.search(str(exc))
+def _failure_hint(exc: Exception) -> str:
+    """The cause and the action that tie *exc* back to what the gate sent.
+
+    A kwarg the live class rejected: the baseline recorded it, the class
+    dropped it, and a stored payload still carries it. A transform that
+    raised: the gate sent a ``None`` placeholder for each dropped field,
+    and the transform may need a real value. Empty for every other
+    failure.
+    """
+    text = str(exc)
+    if "TransformFields raised" in text:
+        return (
+            " The gate sent a None placeholder for every recorded field the "
+            "live class no longer accepts. Pin real values with "
+            "synthesize_legacy_payload if the transform reads them."
+        )
+    match = _UNEXPECTED_KWARG_RE.search(text)
     if match is None:
         return ""
     field = match.group(1)

@@ -365,15 +365,48 @@ def _flatten_and_validate(
     addfield_table, origin_addfield_table = _bucket_addfields(
         addfield_ops, rename_table, scope
     )
-    transform_table = _table_transforms(transform_ops)
+    transform_table = _table_transforms(transform_ops, rename_table, scope)
     return rename_table, addfield_table, origin_addfield_table, transform_table
 
 
 def _table_transforms(
     transform_ops: Sequence[tuple[TransformFields, str]],
+    rename_table: dict[tuple[str, str], tuple[str, str]],
+    scope: Mapping[tuple[str, str], type] | None = None,
 ) -> dict[tuple[str, str], TransformFields]:
-    """Key each TransformFields op on its target identity."""
-    return {(op.module, op.qualname): op for op, _name in transform_ops}
+    """Key each TransformFields op on its target identity and validate it.
+
+    The target must be a rename source (origin stage) or resolve to a live
+    class (class stage), the same rule as :func:`_bucket_addfields`. One
+    transform per identity: the read path runs one per stage, so a second
+    would be ignored in silence.
+    """
+    table: dict[tuple[str, str], TransformFields] = {}
+    source: dict[tuple[str, str], str] = {}
+    for op, migration_name in transform_ops:
+        target = (op.module, op.qualname)
+        if target not in rename_table and not _resolves(*target, scope=scope):
+            raise ValueError(
+                f"TransformFields target {op.module}:{op.qualname!r} neither "
+                f"resolves to a live class — by this serde's namespace "
+                f"scope or by import — nor matches a historic identity "
+                f"covered by a rename migration. Either the target was "
+                f"deleted after the migration was authored, the "
+                f"module/qualname has a typo, or the historic identity is "
+                f"missing its @migrate_from / RenameEvent."
+            )
+        if target in table:
+            first_label = _migration_label(source[target])
+            second_label = _migration_label(migration_name)
+            raise ValueError(
+                f"Duplicate TransformFields: {op.module}:{op.qualname!r} is "
+                f"transformed by both {first_label} and {second_label}. Each "
+                f"identity may carry at most one transform per stage. "
+                f"Compose the steps in one callable."
+            )
+        table[target] = op
+        source[target] = migration_name
+    return table
 
 
 def _bucket_addfields(
