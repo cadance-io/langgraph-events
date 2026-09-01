@@ -230,6 +230,24 @@ class ValidatedDefault(Namespace):
             return ValidatedDefault.Persist.Persisted(name=self.name)
 
 
+# Fixture for an ``init=False`` field. The serde writes init fields only,
+# so the baseline must record the same set. A recorded ``length`` would
+# reach the constructor as a placeholder, and the constructor rejects it.
+class Derived(Namespace):
+    class Persist(Command):
+        note: str = ""
+
+        class Persisted(DomainEvent):
+            note: str = ""
+            length: int = dataclasses.field(init=False)
+
+            def __post_init__(self) -> None:
+                object.__setattr__(self, "length", len(self.note))
+
+        def handle(self) -> Derived.Persist.Persisted:
+            return Derived.Persist.Persisted(note=self.note)
+
+
 # Tombstones for identities a baseline lists under ``retired``. The
 # retired ``Retiring.ApprovalRequired`` recorded ``order_id``, so its
 # tombstone declares the same field. ``Retiring.ReviewRequired`` predates
@@ -2659,6 +2677,19 @@ def describe_NamespaceAwareSerde():
                 baseline = tmp_path / "baseline.json"
                 write_baseline(EventGraph.from_namespaces(ValidatedDefault), baseline)
                 serde = NamespaceAwareSerde(namespaces=[ValidatedDefault])
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_the_live_class_has_an_init_false_field():
+            def it_stays_green_after_a_v3_write(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                baseline = tmp_path / "baseline.json"
+                write_baseline(EventGraph.from_namespaces(Derived), baseline)
+                serde = NamespaceAwareSerde(namespaces=[Derived])
 
                 assert_all_baselined_revive(serde, baseline)
 

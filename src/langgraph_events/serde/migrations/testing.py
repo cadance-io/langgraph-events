@@ -81,8 +81,9 @@ def _placeholder_kwargs(
     """``{name: None}`` for every field the gate must send to the live class
     at ``(module, qualname)``, except those in *skip*.
 
-    Two kinds of field get a placeholder. A required (no-default) field of
-    the live class, so a healthy class constructs. A field in *recorded*,
+    Two kinds of field get a placeholder. A required (no-default) init
+    field of the live class, so a healthy class constructs. A field in
+    *recorded*,
     the baseline's record, that the live class no longer accepts as an init
     kwarg: a stored payload still carries it, so the gate must send it too.
     A recorded field the live class still accepts gets no placeholder. A
@@ -113,7 +114,9 @@ def _placeholder_kwargs(
     required = {
         f.name
         for f in fields
-        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+        if f.init
+        and f.default is dataclasses.MISSING
+        and f.default_factory is dataclasses.MISSING
     }
     dropped = (recorded or frozenset()) - accepted
     return dict.fromkeys(sorted((required | dropped) - skip))

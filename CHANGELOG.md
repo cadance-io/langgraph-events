@@ -84,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Baseline v3: recorded fields and a `retired` list.** Item 2 of
   [#159](https://github.com/cadance-io/langgraph-events/issues/159). Each `events` entry now
-  records the `fields` of its class, and the record is cumulative: a field an earlier baseline
+  records the `fields` of its class, the init fields only, the same set the serde writes. The
+  record is cumulative: a field an earlier baseline
   recorded stays in the record after the live class drops it. A `retired` list holds every
   identity a write dropped from `events`, with the fields last recorded for it. The reader
   rejects a v3 entry without `fields`, and rejects an identity listed under both `events` and

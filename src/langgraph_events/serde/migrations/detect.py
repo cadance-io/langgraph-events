@@ -94,7 +94,9 @@ def write_baseline(
     point this commit was authored?" — committed alongside migrations so
     diffs against future commits classify changes deterministically.
 
-    Each ``events`` entry records the ``fields`` of its class. The record
+    Each ``events`` entry records the ``fields`` of its class: the init
+    fields only, the same set the serde writes. An ``init=False`` field is
+    computed at construction and never sits in a payload. The record
     is cumulative: a field that an earlier baseline recorded stays in the
     record after the live class drops it. A recorded field can sit in a
     checkpoint, so the revive gate must keep exercising it. Removing a
@@ -125,7 +127,7 @@ def write_baseline(
         )
     path = Path(path)
     live = {
-        (module, qualname): frozenset(f.name for f in dataclasses.fields(cls))
+        (module, qualname): frozenset(f.name for f in dataclasses.fields(cls) if f.init)
         for module, qualname, cls in _enumerate_event_classes(graph)
     }
     current = set(live)

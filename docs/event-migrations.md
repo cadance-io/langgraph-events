@@ -287,7 +287,7 @@ Workflow:
 }
 ```
 
-- **`events`** lists every identity the graph reaches. Each entry records the `fields` of its class. `fields` is mandatory on a v3 file. The reader rejects an entry without it and asks for a regenerate.
+- **`events`** lists every identity the graph reaches. Each entry records the `fields` of its class: the init fields only, the same set the serde writes. An `init=False` field never sits in a payload, so it is not recorded. `fields` is mandatory on a v3 file. The reader rejects an entry without it and asks for a regenerate.
 - **`fields` is cumulative.** It holds every field ever recorded for the identity, not only the fields the live class declares today. A field that was ever recorded can sit in a checkpoint, so `assert_all_baselined_revive` must keep sending it. A plain rewrite never removes a field. Removing one is a hand edit, done when no checkpoint carries it.
 - **`retired`** lists every identity a write has dropped from `events`, with the `fields` last recorded for it. The entry has no `fields` key when the last record predates v3. An identity that is live again leaves `retired` on the next write. The gates walk `retired` too. A retired identity must revive through a migration onto a surviving class or a tombstone. Delete the entry by hand once every thread that names it is settled, verified with `graph.unrevivable_threads()`.
 - `events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. Only a hand edit can produce one.
