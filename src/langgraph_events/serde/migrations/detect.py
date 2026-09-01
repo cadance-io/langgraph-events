@@ -112,15 +112,22 @@ def write_baseline(
         for module, qualname, cls in _enumerate_event_classes(graph)
     }
     current = set(live)
+    recorded: dict[tuple[str, str], frozenset[str] | None] = {}
+    if path.exists():
+        recorded = _load_baseline_fields(path)
     if path.exists() and not allow_removed:
-        removed = tuple(sorted(_load_baseline(path) - current))
+        removed = tuple(sorted(set(recorded) - current))
         if removed:
             raise BaselineRegressionError(removed)
+    events = {
+        identity: fields | (recorded.get(identity) or frozenset())
+        for identity, fields in live.items()
+    }
     payload = {
         "version": BASELINE_VERSION,
         "events": [
             {"module": module, "qualname": qualname, "fields": sorted(fields)}
-            for (module, qualname), fields in sorted(live.items())
+            for (module, qualname), fields in sorted(events.items())
         ],
         "handlers": [
             {"name": name} for name in sorted(_enumerate_handler_names(graph))
@@ -147,6 +154,24 @@ def _load_baseline(baseline_path: Path) -> set[tuple[str, str]]:
     """
     raw = _read_baseline(baseline_path)
     return {(entry["module"], entry["qualname"]) for entry in raw["events"]}
+
+
+def _load_baseline_fields(
+    baseline_path: Path,
+) -> dict[tuple[str, str], frozenset[str] | None]:
+    """Parse a baseline file and map each ``events`` identity to its
+    recorded field names.
+
+    The value is ``None`` for a v1 or v2 baseline, which predates field
+    tracking. The revive gate then synthesizes required placeholders only.
+    """
+    raw = _read_baseline(baseline_path)
+    return {
+        (entry["module"], entry["qualname"]): (
+            frozenset(entry["fields"]) if "fields" in entry else None
+        )
+        for entry in raw["events"]
+    }
 
 
 def _load_baseline_handlers(baseline_path: Path) -> set[str]:
