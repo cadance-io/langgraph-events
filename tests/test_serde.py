@@ -2869,6 +2869,7 @@ def describe_public_serde_surface():
 
             assert not hasattr(serde_pkg, "RenameEvent")
             assert not hasattr(serde_pkg, "AddField")
+            assert not hasattr(serde_pkg, "TransformFields")
 
         def it_still_exposes_the_decorator_and_sugar_tier():
             import langgraph_events.serde as serde_pkg
@@ -2877,6 +2878,7 @@ def describe_public_serde_surface():
                 "NamespaceAwareSerde",
                 "Migration",
                 "migrate_from",
+                "transform_fields",
                 "synthesize_legacy_payload",
                 "assert_all_baselined_revive",
             ):
@@ -2884,10 +2886,15 @@ def describe_public_serde_surface():
 
     def when_the_composite_escape_hatch_is_needed():
         def it_keeps_raw_ops_importable_from_serde_migrations():
-            from langgraph_events.serde.migrations import AddField, RenameEvent
+            from langgraph_events.serde.migrations import (
+                AddField,
+                RenameEvent,
+                TransformFields,
+            )
 
             assert RenameEvent is not None
             assert AddField is not None
+            assert TransformFields is not None
 
 
 def describe_detect_cli():
