@@ -190,6 +190,43 @@ def describe_write_baseline():
             assert json.loads(target.read_text())["version"] == 3
 
 
+def describe_write_baseline_cumulative_fields():
+    # A field that was ever recorded can sit in a checkpoint. A plain
+    # rewrite must keep it, or the next unrelated write blinds the revive
+    # gate again. Removing a field from the record is a hand edit.
+
+    def when_the_live_class_dropped_a_recorded_field():
+        def it_keeps_the_field_in_the_record(tmp_path: Path):
+            from conftest import Order
+
+            from langgraph_events import EventGraph
+            from langgraph_events.serde.migrations.detect import write_baseline
+
+            target = tmp_path / "baseline.json"
+            target.write_text(
+                json.dumps(
+                    {
+                        "version": 3,
+                        "events": [
+                            {
+                                "module": Order.__module__,
+                                "qualname": "Order.Place.Placed",
+                                "fields": ["legacy_flag", "order_id"],
+                            }
+                        ],
+                    }
+                )
+            )
+
+            write_baseline(EventGraph([Order.Place]), target)
+
+            fields = {
+                e["qualname"]: e["fields"]
+                for e in json.loads(target.read_text())["events"]
+            }
+            assert fields["Order.Place.Placed"] == ["legacy_flag", "order_id"]
+
+
 def describe_write_baseline_regression_guard():
     # The prose rule "commit the baseline alongside the migration, never
     # after" is now enforced: silently overwriting away an identity the
