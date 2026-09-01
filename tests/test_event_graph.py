@@ -5297,6 +5297,32 @@ def _paused_unrevivable_pair(saver, tid: str):
     return EventGraph([_completes], checkpointer=saver), cfg
 
 
+def _settled_unrevivable_pair(saver, tid: str):
+    """A thread that *answered* an interrupt on a class since deleted:
+    the retired identity sits in its settled history, not in a
+    pending write, so threads_paused_on() never reaches it. Shared by
+    describe_delete_first_retirement and describe_unrevivable_threads."""
+    from langgraph_events.serde import NamespaceAwareSerde
+
+    class _Retired(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _Retired:
+        return _Retired()
+
+    cfg = {"configurable": {"thread_id": tid}}
+    saver.serde = NamespaceAwareSerde(events=(Started, _Retired))
+    graph = EventGraph([wait, _go_ends], checkpointer=saver)
+    graph.invoke(Started(data="x"), config=cfg)
+    graph.resume(_Go(), config=cfg)
+    assert graph.get_state(cfg).events.has(Ended)
+
+    # "Deletion": see describe_delete_first_retirement.
+    saver.serde = NamespaceAwareSerde(events=(Started,))
+    return EventGraph([_completes], checkpointer=saver), cfg
+
+
 def describe_delete_first_retirement():
     # The full delete-first scenario (#164): pause a thread on an
     # Interrupted subclass, then delete the class so it no longer
@@ -5388,39 +5414,12 @@ def describe_unrevivable_threads():
     # a settled thread's history still names a deleted class. This sweep
     # reads the real store instead.
 
-    def _settled_unrevivable_pair(saver, tid: str):
-        """A thread that *answered* an interrupt on a class since deleted:
-        the retired identity sits in its settled history, not in a
-        pending write, so threads_paused_on() never reaches it."""
-        from langgraph_events.serde import NamespaceAwareSerde
-
-        class _Retired(Interrupted):
-            pass
-
-        @on(Started)
-        def wait(event: Started) -> _Retired:
-            return _Retired()
-
-        cfg = {"configurable": {"thread_id": tid}}
-        saver.serde = NamespaceAwareSerde(events=(Started, _Retired))
-        graph = EventGraph([wait, _go_ends], checkpointer=saver)
-        graph.invoke(Started(data="x"), config=cfg)
-        graph.resume(_Go(), config=cfg)
-        assert graph.get_state(cfg).events.has(Ended)
-
-        # "Deletion": see describe_delete_first_retirement.
-        saver.serde = NamespaceAwareSerde(events=(Started,))
-        return EventGraph([_completes], checkpointer=saver), cfg
-
     def when_a_settled_history_names_a_deleted_class():
         def it_reports_the_thread_naming_the_qualname():
             graph, _cfg = _settled_unrevivable_pair(MemorySaver(), "unrev-settled")
 
             assert graph.unrevivable_threads() == {
-                "unrev-settled": [
-                    "describe_unrevivable_threads.<locals>."
-                    "_settled_unrevivable_pair.<locals>._Retired"
-                ]
+                "unrev-settled": ["_settled_unrevivable_pair.<locals>._Retired"]
             }
 
     def when_every_thread_revives():
