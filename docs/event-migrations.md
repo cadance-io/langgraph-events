@@ -421,6 +421,8 @@ class Persist(Command):
 
     The CI handler gate catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
 
+    To *retire* an `Interrupted` subclass — delete it from the codebase entirely — every thread still paused on it must first stop referencing it. `graph.abandon(config)` / `.aabandon()` ([Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon)) settles one paused thread without answering it, so the retired class ends up named by no live checkpoint. It's per-thread, with no bulk/enumeration helper — find the paused thread IDs yourself (e.g. from your own operational records) and call `abandon()` on each.
+
 ### Inline command handlers are keyed by the command qualname
 
 An inline `Command.handle()` handler's node identity is the **command's `__qualname__`** (e.g. `Order.Place`), not the method name — so it is stable and order-independent. Reordering the `handlers=[...]` list is safe, and you do **not** need `@on(node_name=...)` to pin it (that pin is for standalone `@on` functions, whose identity is otherwise the function name).
