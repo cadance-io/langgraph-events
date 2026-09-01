@@ -152,6 +152,9 @@ def _make_default(
     gated on the class being in this map — out-of-scope decorated classes
     fall through to their current qualname so bytes never reference a
     historic name the serde's own read path can't migrate back.
+
+    Only fields with ``init=True`` are written: an ``init=False`` field is
+    rebuilt by the constructor on read, which rejects it as a kwarg (#172).
     """
 
     def _default(obj: Any) -> Any:
@@ -174,7 +177,11 @@ def _make_default(
                     (
                         module,
                         qualname,
-                        {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)},
+                        {
+                            f.name: getattr(obj, f.name)
+                            for f in dataclasses.fields(obj)
+                            if f.init
+                        },
                     ),
                     default=_default,
                     option=_option,

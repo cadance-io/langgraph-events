@@ -72,7 +72,9 @@ def _required_field_placeholders(
     scope: Mapping[tuple[str, str], type] | None = None,
 ) -> dict[str, Any]:
     """``{name: None}`` for every required (no-default) field of the live
-    class at ``(module, qualname)``, except those in *skip*.
+    class at ``(module, qualname)``, except those in *skip*. An
+    ``init=False`` field gets no placeholder: the encoder does not write it
+    and the constructor rejects it as a kwarg (#172).
 
     Reads the fields off whichever class the read path would build — hence
     *scope*, the serde's ``namespaces=`` map, ahead of the import walk.
@@ -96,7 +98,8 @@ def _required_field_placeholders(
     return {
         f.name: None
         for f in dataclasses.fields(obj)
-        if f.name not in skip
+        if f.init
+        and f.name not in skip
         and f.default is dataclasses.MISSING
         and f.default_factory is dataclasses.MISSING
     }

@@ -116,6 +116,30 @@ class FieldShape(Namespace):
         reason: str
 
 
+# Fixture for #172. ``derived`` is ``init=False`` and is rebuilt in
+# ``__post_init__``. The serde must not write it: the constructor rejects it.
+class DerivedField(Namespace):
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False, default=0)
+
+        def __post_init__(self) -> None:
+            object.__setattr__(self, "derived", self.total * 2)
+
+
+# Fixture for the revive gate under #172. ``derived`` is ``init=False`` with
+# no default. The placeholder helper must not fill it: it is not a kwarg.
+# ``__post_init__`` does not read ``total``, so the ``None`` placeholder for
+# ``total`` is accepted, as the revive gate documents.
+class DerivedNoDefault(Namespace):
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False)
+
+        def __post_init__(self) -> None:
+            object.__setattr__(self, "derived", 2)
+
+
 # Fixtures for the decorator-driven migration tests. Module-level so their
 # qualnames resolve through ``importlib.import_module`` + dotted ``getattr``
 # at serde-construction validation time. Function-local classes acquire
@@ -709,6 +733,18 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(s_back, Persona.Approve.Approved)
                 assert p_back.note == "persona"
                 assert s_back.note == "story"
+
+        def when_an_event_has_an_init_false_field():
+            def it_round_trips_and_recomputes_the_derived_value():
+                serde = NamespaceAwareSerde(namespaces=(DerivedField,))
+                ev = DerivedField.Placed(total=1)
+                assert ev.derived == 2
+
+                back = serde.loads_typed(serde.dumps_typed(ev))
+
+                assert isinstance(back, DerivedField.Placed)
+                assert back.total == 1
+                assert back.derived == 2
 
     def describe_checkpoint_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -2382,6 +2418,20 @@ def describe_NamespaceAwareSerde():
                     tmp_path,
                     (DecoReorg.__module__, "DecoReorg.Persisted"),
                     (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                )
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_an_init_false_field_has_no_default():
+            def it_gives_that_field_no_placeholder(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DerivedNoDefault])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (DerivedNoDefault.__module__, "DerivedNoDefault.Placed"),
                 )
 
                 assert_all_baselined_revive(serde, baseline)
