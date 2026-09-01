@@ -72,6 +72,7 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
     _collect_decorated_migrations,
     _flatten_and_validate,
     _resolve_identity,
+    _unreachable_migrate_from_siblings,
 )
 
 
@@ -264,6 +265,12 @@ def _make_ext_hook(
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)
+from langgraph_events._warn import warn_user  # noqa: E402
+
+
+class UnreachableMigrationWarning(UserWarning):
+    """A ``@migrate_from``-decorated class was not collected into a
+    :class:`NamespaceAwareSerde`'s scope — its migration does nothing."""
 
 
 class NamespaceAwareSerde(JsonPlusSerializer):
@@ -334,6 +341,16 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         self._legacy_write = legacy_write
         self._encode_default = _make_default(legacy_write, oldest_historic)
         self._tolerant_depth = 0
+        for cls in _unreachable_migrate_from_siblings(scope):
+            warn_user(
+                f"{cls.__qualname__} is decorated with @migrate_from, but "
+                f"this serde's namespaces=/events= never reaches it — its "
+                f"migration will not be collected, so a payload under its "
+                f"historic identity will not revive. Nest it inside a "
+                f"Namespace passed via namespaces=, or pass it directly "
+                f"in events=.",
+                UnreachableMigrationWarning,
+            )
 
     @property
     def _tolerant(self) -> bool:

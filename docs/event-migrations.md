@@ -456,6 +456,9 @@ The two tracks are independent — do both, in one PR:
 
 ## Retiring an Interrupted subclass
 
+!!! warning "This covers paused threads only — see [#159](https://github.com/cadance-io/langgraph-events/issues/159)"
+    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not a pending one — a different read path than the sequence below, and it stays strict. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it; reading its history after the class is deleted still raises `Cannot revive`, with no degrade. There is no library tool yet for a settled-history identity — that gap is tracked as [#159](https://github.com/cadance-io/langgraph-events/issues/159). **Retirement is not complete until #159 lands**; until then, deleting the class is safe only if you can prove no thread's settled history references it, or you accept the recovery path below.
+
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
 `abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you — no need for your own operational records or a direct checkpointer query.
@@ -464,9 +467,6 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 
 - The **handler** that produced the interrupt is already removed from the graph. The class still imports, so the interrupt revives normally and a class filter still matches it. This is the common order: retiring an `Interrupted` usually retires the handler that produced it first.
 - The **class** itself is already deleted and no longer imports — the normal habit is to ship the class deletion in the same release as the handler's, and this section used to train that habit. The interrupt can't revive, so `threads_paused_on()` still returns the thread (call it with no filter — a class filter can never match an identity with no class) and `abandon()` still settles it, recording the interrupt's last-known qualname in `discarded` instead of a live instance.
-
-!!! warning "This covers paused threads only — see [#159](https://github.com/cadance-io/langgraph-events/issues/159)"
-    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not a pending one — a different read path than the one above, and it stays strict. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it; reading its history after the class is deleted still raises `Cannot revive`, with no degrade. There is no library tool yet for a settled-history identity — that gap is tracked as [#159](https://github.com/cadance-io/langgraph-events/issues/159). **Retirement is not complete until #159 lands**; until then, deleting the class is safe only if you can prove no thread's settled history references it, or you accept the recovery path below.
 
 `Cannot revive` states the fix directly: settle the thread with `abandon()`/`aabandon()` before deleting the class, or map the dead identity onto a tombstone with `@migrate_from` — see [Recovering a delete-first deployment](#recovering-a-delete-first-deployment) below.
 
@@ -495,6 +495,9 @@ Skip this step and the *next* baseline write for an unrelated change fails with 
 
 Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage gates](#coverage-gates) stop checking the retired identity — it is no longer in the baseline they read.
 
+!!! warning "After re-baselining, no gate can see a remaining #159 breakage"
+    The coverage gates read the baseline, and the retired identity is gone from it — `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still can't revive. Re-baselining does not mean the #159 risk is cleared; it means CI stops being able to tell you either way. Verify every *answered* thread yourself — read its history back, or run the recovery path below against it — **before** you re-baseline, not after.
+
 !!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
     Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips — this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE, allow_removed=True)` re-baselines both the event identity and the handler node in one write; no separate step is needed.
 
@@ -505,21 +508,63 @@ Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage
 
 If the class was deleted before every paused thread was settled, `threads_paused_on()` and `abandon()` already recover the **paused** case on their own — see the two-deletions note above. A thread that had already **answered** the interrupt (the #159 case) needs the fix below too.
 
-Map the dead identity onto a tombstone class in a follow-up release:
+Map the dead identity onto a tombstone class, in a follow-up release. **Nest the tombstone inside the same `Namespace`** — a domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
 
 ```python
-from langgraph_events import Interrupted
+from langgraph_events import Command, DomainEvent, Interrupted, Namespace, on
 from langgraph_events.serde import migrate_from
 
 
-@migrate_from("Order.ApprovalRequired")
-class RetiredGate(Interrupted):
-    pass
+class Order(Namespace):
+    class Approve(Command):
+        class Approved(DomainEvent):
+            pass
+
+        def handle(self) -> "Order.Approve.Approved":
+            return Order.Approve.Approved()
+
+    @migrate_from("Order.ApprovalRequired")
+    class RetiredApprovalGate(Interrupted):
+        pass
+
+
+@on(ApprovalSubmitted)
+def handle_approval(event: ApprovalSubmitted) -> Order.Approve:
+    return Order.Approve()
+
+
+graph = EventGraph.from_namespaces(
+    Order, handlers=[handle_approval], checkpointer=MemorySaver()
+)
 ```
 
-`in_module=` defaults to `RetiredGate.__module__` — pass it explicitly if `Order.ApprovalRequired` lived in a different module. `RetiredGate` must accept the same fields `Order.ApprovalRequired` did, or revival raises `TypeError`; a field-free tombstone works only if the retired class had no fields.
+Run this against a store that still holds a thread paused on `Order.ApprovalRequired` and an already-answered one: `graph.threads_paused_on()` lists the paused thread again — matched against the live `RetiredApprovalGate`, not a degraded identity — `graph.abandon(config)` settles it recording `discarded="Order.RetiredApprovalGate"`, and the already-answered thread's history revives too, closing the #159 gap for this one identity without waiting on the library-level fix. Verified end to end, across a real process restart against persisted checkpoint bytes (not just an in-process object), before this recipe was published.
 
-`RetiredGate` is a plain module-level class, not inside a `Namespace` — pass it via the serde's `events=` (`from_namespaces(..., checkpointer=...)` does this for you if `RetiredGate` is collected some other way; a hand-built `NamespaceAwareSerde` needs `events=(..., RetiredGate)` explicitly). Redeploy, and every read recovers: `threads_paused_on()` lists the threads again — matched against a live `RetiredGate`, not a degraded identity — `abandon()` settles them, and a thread that had already answered the interrupt revives too. This closes the #159 gap for this one identity without waiting on the library-level fix.
+`in_module=` defaults to the decorated class's `__module__` — pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does. The tombstone must accept the same fields `Order.ApprovalRequired` did, or revival raises `TypeError`; a field-free tombstone works only if the retired class had none.
+
+!!! note "This relies on `Order` still being in play"
+    `from_namespaces(...)` only wires a namespace into the auto-collected serde because some handler in `handlers=` still subscribes to or produces something inside it (`Order.Approve` above) — nesting the tombstone alone does not add `Order` to that set. If the *whole* namespace is retired too, or the tombstone has to live at module scope, hand-build the serde instead — see below.
+
+**Alternative: a module-level tombstone, with a hand-built serde.** Use this when the namespace itself has nothing else live, or the tombstone genuinely doesn't belong inside a `Namespace`. `from_namespaces(...)` has no way to reach a module-level class — pass it through `events=` on a `NamespaceAwareSerde` you build yourself:
+
+```python
+from langgraph_events import EventGraph, Interrupted
+from langgraph_events.serde import NamespaceAwareSerde, migrate_from
+
+
+@migrate_from("Order.ApprovalRequired")
+class RetiredApprovalGate(Interrupted):
+    pass
+
+
+checkpointer.serde = NamespaceAwareSerde(
+    namespaces=(Order,),
+    events=(Started, ApprovalSubmitted, RetiredApprovalGate),
+)
+graph = EventGraph([handle_approval], checkpointer=checkpointer)
+```
+
+Recovers identically to the nested form above — verified the same way, end to end across a real restart. `events=` must still list every loose event class the graph touches (`Started`, `ApprovalSubmitted`, …), same as any hand-built `NamespaceAwareSerde` — the tombstone is one more entry, not a special case.
 
 ## Reserved attributes
 

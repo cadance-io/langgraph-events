@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   abandonment). Returns `None` — callers who want the log call `graph.get_state(config).events`.
 
 - **`Abandoned`** — new `Halted` subtype recorded by `abandon()`/`aabandon()`. `.reason` is the
-  caller-supplied reason. `.discarded` is the type name(s) of the interrupt(s) thrown away.
+  caller-supplied reason. `.discarded` is the qualname(s) of the interrupt(s) thrown away.
 
 - A `resume()` on an already-abandoned thread now names the abandonment in its
   `UnresumableError` message instead of pointing at a handler rename/removal.
@@ -57,9 +57,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   onto a tombstone with `@migrate_from()` — see [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment)
   (closes part of [#164]).
 
+- **`serde.UnreachableMigrationWarning`** — `NamespaceAwareSerde` now warns at construction when
+  a `@migrate_from`-decorated class lives in a module its `namespaces=`/`events=` already
+  reaches, but was never itself passed in — its migration silently did nothing before this. The
+  warning names the class and says how to fix it (nest it in a passed `Namespace`, or add it to
+  `events=`). Scoped to modules already reachable through this construction, not a process-wide
+  scan, so an unrelated engine lifetime's decorated classes are never flagged.
+
 [#164]: https://github.com/cadance-io/langgraph-events/issues/164
 
 ### Fixed
+
+- **`Abandoned.discarded` recorded the leaf class name, not the qualname.** `"ApprovalRequested"`
+  when the class was still live, but `"Order.ApprovalRequested"` (the qualname) once it was
+  deleted — the same field changed shape under the exact axis a retirement changes, so a check
+  written before the deletion (`match with in or .split(", ")`) could stop matching after it.
+  Always the qualname now, live class or not: unambiguous under nesting and stable across the
+  deletion (closes part of [#164]).
+
+- **The published `@migrate_from` retirement recipe did not work.** It printed a module-level
+  tombstone class and claimed `EventGraph.from_namespaces(...)` would collect it — that method
+  has no `events=` kwarg and never reaches a module-level class, so the recipe recovered
+  nothing, silently. Replaced with a nested-in-`Namespace` recipe (the one
+  `from_namespaces(...)` actually wires up) as the primary path, and the module-level form as a
+  separate, complete, hand-built-serde alternative. Both verified end to end across a real
+  process restart against persisted checkpoint bytes (closes part of [#164]).
 
 - **`GraphState.interrupted` was `None` on a first pause.** `get_state().interrupted` read only
   the event log, and an `Interrupted` joins the log only on resume — so a thread paused for the

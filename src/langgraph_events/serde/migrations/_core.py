@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib
 import itertools
+import sys
 from dataclasses import dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -839,6 +840,42 @@ def _collect_decorated_migrations(
             )
         )
     return tuple(out), oldest_historic, scope
+
+
+def _unreachable_migrate_from_siblings(
+    scope: dict[tuple[str, str], type],
+) -> list[type]:
+    """``@migrate_from``-decorated classes that live in a module *scope*
+    already reaches, but were themselves never passed to the serde —
+    so their migration is silently never collected.
+
+    Scoped to modules ``scope`` already reaches, not a process-wide
+    class scan: a decorated class in a module this serde was never told
+    about is out of scope by design (e.g. a different engine lifetime),
+    not a bug — flagging it would be a false positive with no fix the
+    caller could act on.
+
+    The common trigger this catches: a tombstone class left at module
+    scope, in the same file as the namespace it retires an identity for,
+    passed via ``namespaces=`` alone with no ``events=`` to carry it.
+    """
+    reached_modules = {module_name for module_name, _qualname in scope}
+    seen: set[int] = set()
+    found: list[type] = []
+    for module_name in reached_modules:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        for value in vars(module).values():
+            if (
+                isinstance(value, type)
+                and id(value) not in seen
+                and _MIGRATE_FROM_ATTR in value.__dict__
+                and (value.__module__, value.__qualname__) not in scope
+            ):
+                seen.add(id(value))
+                found.append(value)
+    return found
 
 
 def replay_reducer(reducer: BaseReducer, events: Iterable[Event]) -> Any:

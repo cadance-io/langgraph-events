@@ -272,7 +272,7 @@ class _PendingInterrupts(NamedTuple):
     ``langgraph.types.interrupt("...")`` call) or an unrevivable one — this
     is what ``require_interrupt`` and ``event_type=None`` discovery gate
     on. ``events`` is the same set narrowed to successfully-revived
-    ``Event`` payloads, deduped by type name — this is what a class
+    ``Event`` payloads, deduped by qualname — this is what a class
     filter matches against. ``unresolved_names`` holds the recorded
     qualname of every interrupt whose class no longer imports (see
     ``EventGraph._read_pending_interrupts``), deduped in discovery order
@@ -1682,8 +1682,11 @@ class EventGraph:
             for entry in entries:
                 has_interrupt = True
                 payload = getattr(entry, "value", entry)
-                if isinstance(payload, Event) and type(payload).__name__ not in seen:
-                    seen.add(type(payload).__name__)
+                if (
+                    isinstance(payload, Event)
+                    and type(payload).__qualname__ not in seen
+                ):
+                    seen.add(type(payload).__qualname__)
                     events.append(payload)
                 elif (
                     isinstance(payload, UnrevivedIdentity)
@@ -1848,7 +1851,10 @@ class EventGraph:
             if require_interrupt:
                 self._require_pending_interrupt("abandon", pending, config)
             discarded = ", ".join(
-                (*(type(v).__name__ for v in pending.events), *pending.unresolved_names)
+                (
+                    *(type(v).__qualname__ for v in pending.events),
+                    *pending.unresolved_names,
+                )
             )
             self._settle(config, Abandoned(reason=reason, discarded=discarded))
 
@@ -1868,7 +1874,10 @@ class EventGraph:
             if require_interrupt:
                 self._require_pending_interrupt("aabandon", pending, config)
             discarded = ", ".join(
-                (*(type(v).__name__ for v in pending.events), *pending.unresolved_names)
+                (
+                    *(type(v).__qualname__ for v in pending.events),
+                    *pending.unresolved_names,
+                )
             )
             await self._asettle(config, Abandoned(reason=reason, discarded=discarded))
 

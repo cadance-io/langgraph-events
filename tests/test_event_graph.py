@@ -4296,6 +4296,21 @@ def _go_ends(event: _Go) -> Ended:
     return Ended(result="went")
 
 
+class _RetirementNs(Namespace):
+    """Nests an Interrupted subclass so its qualname differs from its
+    bare name — pins Abandoned.discarded to the qualname, not the leaf
+    name, which is ambiguous under nesting and the wrong format once a
+    deleted class's stored identity has to use qualname too."""
+
+    class NestedPause(Interrupted):
+        pass
+
+
+@on(Started)
+def _wait_nested(event: Started) -> _RetirementNs.NestedPause:
+    return _RetirementNs.NestedPause()
+
+
 class _PauseA(Interrupted):
     pass
 
@@ -4570,6 +4585,26 @@ def describe_abandon():
 
             log = graph.get_state(cfg).events
             assert log.latest(Abandoned).discarded == "_Pause"
+
+        def it_records_the_qualname_not_the_leaf_name():
+            # `_RetirementNs.NestedPause` — the leaf name alone
+            # (`NestedPause`) is ambiguous under nesting and is not what
+            # a deleted class's stored identity uses either.
+            # NamespaceAwareSerde is required for a nested class to
+            # round-trip at all — the default serde keys by bare name
+            # and can't resolve it as a module attribute.
+            from langgraph_events.serde import NamespaceAwareSerde
+
+            saver = MemorySaver()
+            saver.serde = NamespaceAwareSerde(namespaces=(_RetirementNs,))
+            cfg = {"configurable": {"thread_id": "abandon-qualname"}}
+            graph = EventGraph([_wait_nested, _go_noop], checkpointer=saver)
+            graph.invoke(Started(data="x"), config=cfg)
+
+            graph.abandon(cfg)
+
+            log = graph.get_state(cfg).events
+            assert log.latest(Abandoned).discarded == "_RetirementNs.NestedPause"
 
         def it_joins_discarded_names_across_every_paused_task():
             # Reverting to `snapshot.tasks[0]` would silently drop
@@ -4956,6 +4991,21 @@ def describe_async_only_checkpointer():
                 event = log.latest(Abandoned)
                 assert event.discarded == "_Pause"
                 assert event.reason == "retiring _Pause"
+
+            @pytest.mark.asyncio
+            async def it_records_the_qualname_not_the_leaf_name():
+                from langgraph_events.serde import NamespaceAwareSerde
+
+                saver = _AsyncOnlySaver()
+                saver.serde = NamespaceAwareSerde(namespaces=(_RetirementNs,))
+                cfg = {"configurable": {"thread_id": "aabandon-qualname"}}
+                graph = EventGraph([_wait_nested, _go_noop], checkpointer=saver)
+                await graph.ainvoke(Started(data="x"), config=cfg)
+
+                await graph.aabandon(cfg)
+
+                log = (await graph.aget_state(cfg)).events
+                assert log.latest(Abandoned).discarded == "_RetirementNs.NestedPause"
 
             @pytest.mark.asyncio
             async def it_leaves_the_thread_usable():

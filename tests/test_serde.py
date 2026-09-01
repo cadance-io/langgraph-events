@@ -2428,6 +2428,43 @@ def describe_NamespaceAwareSerde():
                 assert "DecoReorg.Persist.Persisted" not in str(excinfo.value)
 
 
+def describe_UnreachableMigrationWarning():
+    # A @migrate_from-decorated class that namespaces=/events= never
+    # reaches contributes nothing — no error, no warning, before this
+    # (#164). The fixture lives in its own module
+    # (_migrate_from_warning_fixture.py) so its module-level orphan
+    # class is never scanned by an unrelated test's serde construction.
+
+    def when_a_decorated_class_is_not_passed_to_the_serde():
+        def it_warns_naming_the_class():
+            import _migrate_from_warning_fixture as fx
+
+            from langgraph_events.serde import UnreachableMigrationWarning
+
+            with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
+                NamespaceAwareSerde(namespaces=(fx.Gate,))
+
+    def when_the_decorated_class_is_passed_via_events():
+        def it_does_not_warn():
+            import _migrate_from_warning_fixture as fx
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                NamespaceAwareSerde(namespaces=(fx.Gate,), events=(fx.OrphanTombstone,))
+
+    def when_no_namespace_reaches_the_decorated_classs_module():
+        def it_does_not_warn():
+            # The fixture module is never passed at all here — out of
+            # scope by design, not a bug; must not be flagged.
+            class _Unrelated(Namespace):
+                class Placeholder(Interrupted):
+                    pass
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                NamespaceAwareSerde(namespaces=(_Unrelated,))
+
+
 def describe_public_serde_surface():
     # The common evolution path is decorator-first: @migrate_from plus,
     # rarely, Migration.rename/.add_field sugar. Raw RenameEvent/AddField
