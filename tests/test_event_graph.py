@@ -28,6 +28,7 @@ from langgraph.types import StateUpdate
 
 from langgraph_events import (
     STATE_SNAPSHOT_EVENT_NAME,
+    Abandoned,
     Cancelled,
     Command,
     DomainEvent,
@@ -4244,6 +4245,17 @@ def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
     return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
 
 
+def _paused_pair(saver, tid: str, **kwargs: typing.Any):
+    """A genuinely-interrupted thread, ``_waiter`` still registered — the
+    "live" state ``abandon()`` itself is meant to settle, before anything
+    has cleared its pending task.
+    """
+    cfg = {"configurable": {"thread_id": tid}}
+    graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
+    graph.invoke(Started(data="x"), config=cfg)
+    return graph, cfg
+
+
 def _abandoned_pair(saver, tid: str, **kwargs: typing.Any):
     """A genuinely-interrupted thread whose pending task was cleared out
     from under it.
@@ -4257,9 +4269,7 @@ def _abandoned_pair(saver, tid: str, **kwargs: typing.Any):
     Returns the graph, still with ``_waiter`` registered, and the paused
     thread config.
     """
-    cfg = {"configurable": {"thread_id": tid}}
-    graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
-    graph.invoke(Started(data="x"), config=cfg)
+    graph, cfg = _paused_pair(saver, tid, **kwargs)
     graph.compiled.bulk_update_state(cfg, [[StateUpdate(None, END)]])
     return graph, cfg
 
@@ -4393,6 +4403,130 @@ def describe_on_unresumable():
             v2, cfg = _resumable_pair(MemorySaver(), tid)
             with pytest.raises(UnresumableError):
                 drive(v2, cfg)
+
+
+def describe_abandon():
+    # abandon() settles a genuinely-paused thread without ever answering
+    # its Interrupted — the tool for retiring an Interrupted subclass
+    # (#162). Contrast with on_unresumable="halt", which settles a thread
+    # that *shouldn't* still be paused (removed/renamed handler); abandon()
+    # acts deliberately on a thread that legitimately still is.
+
+    def when_a_thread_is_genuinely_paused():
+        def it_leaves_nothing_scheduled():
+            graph, cfg = _paused_pair(MemorySaver(), "abandon-next")
+
+            result = graph.abandon(cfg)
+
+            assert result is None
+            assert graph.compiled.get_state(cfg).next == ()
+
+        def it_leaves_no_pending_interrupt_write():
+            saver = MemorySaver()
+            graph, cfg = _paused_pair(saver, "abandon-pending-write")
+
+            graph.abandon(cfg)
+
+            assert saver.get_tuple(cfg).pending_writes == []
+
+        def it_does_not_record_the_interrupt():
+            graph, cfg = _paused_pair(MemorySaver(), "abandon-no-interrupt")
+
+            graph.abandon(cfg)
+
+            log = graph.get_state(cfg).events
+            assert not any(isinstance(e, _Pause) for e in log)
+
+        def it_records_the_discarded_type_name():
+            graph, cfg = _paused_pair(MemorySaver(), "abandon-discarded")
+
+            graph.abandon(cfg)
+
+            log = graph.get_state(cfg).events
+            assert log.latest(Abandoned).discarded == "_Pause"
+
+        def it_records_the_reason():
+            graph, cfg = _paused_pair(MemorySaver(), "abandon-reason")
+
+            graph.abandon(cfg, reason="retiring _Pause")
+
+            log = graph.get_state(cfg).events
+            assert log.latest(Abandoned).reason == "retiring _Pause"
+
+        def it_preserves_completed_sibling_writes():
+            # A fan-out where one handler (_waiter) interrupts and a
+            # sibling (_side_effect) completes in the same superstep.
+            # `_settle`'s leading clear must commit the sibling's already-
+            # written event rather than discard it along with the stale
+            # pending task.
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "abandon-sibling"}}
+            graph = EventGraph([_waiter, _side_effect, _go_noop], checkpointer=saver)
+            graph.invoke(Started(data="x"), config=cfg)
+
+            graph.abandon(cfg)
+
+            assert graph.get_state(cfg).events.has(_SideDone)
+
+        def it_leaves_the_thread_usable():
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "abandon-usable"}}
+            EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+                Started(data="x"), config=cfg
+            )
+            v2 = EventGraph([_go_ends], checkpointer=saver)
+            v2.abandon(cfg)
+
+            log = v2.invoke(_Go(), config=cfg)
+
+            assert log.latest(Ended) == Ended(result="went")
+
+    def when_resumed_after_abandoning():
+        def with_default_policy():
+            def it_raises_naming_the_abandonment():
+                graph, cfg = _paused_pair(MemorySaver(), "abandon-resume-raise")
+                graph.abandon(cfg, reason="retiring _Pause")
+
+                with pytest.raises(UnresumableError, match="abandon"):
+                    graph.resume(_Go(), config=cfg)
+
+        def with_halt_policy():
+            def it_does_not_resurrect_the_retired_identity():
+                graph, cfg = _paused_pair(
+                    MemorySaver(), "abandon-resume-halt", on_unresumable="halt"
+                )
+                graph.abandon(cfg)
+
+                graph.resume(_Go(), config=cfg)
+                log = graph.resume(_Go(), config=cfg)
+
+                assert not any(isinstance(e, _Pause) for e in log)
+
+    def when_the_thread_was_never_run():
+        def it_raises():
+            graph = EventGraph([_waiter, _go_noop], checkpointer=MemorySaver())
+            cfg = {"configurable": {"thread_id": "abandon-never-run"}}
+
+            with pytest.raises(ValueError, match=r"abandon"):
+                graph.abandon(cfg)
+
+    def when_only_pre_seeded():
+        def it_raises():
+            saver = MemorySaver()
+            graph = EventGraph([_waiter, _go_noop], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "abandon-pre-seeded"}}
+            graph.pre_seed(cfg, {})
+
+            with pytest.raises(ValueError, match=r"abandon"):
+                graph.abandon(cfg)
+
+    def when_there_is_no_checkpointer():
+        def it_raises():
+            graph = EventGraph([_waiter, _go_noop])
+            cfg = {"configurable": {"thread_id": "abandon-no-checkpointer"}}
+
+            with pytest.raises(ValueError, match=r"abandon.*requires a checkpointer"):
+                graph.abandon(cfg)
 
 
 class _AsyncOnlySaver(MemorySaver):
@@ -4529,6 +4663,87 @@ def describe_async_only_checkpointer():
             events = await _adrain(v2.astream_resume(_Go(), config=cfg))
 
             assert any(isinstance(e, Unresumable) for e in events)
+
+    def describe_aabandon():
+        # Async mirror of describe_abandon() (module scope), driven through
+        # _AsyncOnlySaver — the #95 contract: aabandon() must read/write
+        # exclusively via aget_state/_asettle, never falling back to a sync
+        # checkpoint read from the running event loop.
+
+        async def _apaused_live_pair(tid: str, **kwargs: typing.Any):
+            """Genuinely-interrupted async mirror of the module-level
+            `_paused_pair`, still registering `_waiter`, driven through
+            `_AsyncOnlySaver`."""
+            saver = _AsyncOnlySaver()
+            cfg = {"configurable": {"thread_id": tid}}
+            graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
+            await graph.ainvoke(Started(data="x"), config=cfg)
+            return graph, cfg
+
+        def when_a_thread_is_genuinely_paused():
+            @pytest.mark.asyncio
+            async def it_leaves_nothing_scheduled():
+                graph, cfg = await _apaused_live_pair("aabandon-next")
+
+                result = await graph.aabandon(cfg)
+
+                assert result is None
+                state = await graph.compiled.aget_state(cfg)
+                assert state.next == ()
+
+            @pytest.mark.asyncio
+            async def it_records_the_discarded_type_name_and_reason():
+                graph, cfg = await _apaused_live_pair("aabandon-discarded")
+
+                await graph.aabandon(cfg, reason="retiring _Pause")
+
+                log = (await graph.aget_state(cfg)).events
+                event = log.latest(Abandoned)
+                assert event.discarded == "_Pause"
+                assert event.reason == "retiring _Pause"
+
+            @pytest.mark.asyncio
+            async def it_leaves_the_thread_usable():
+                saver = _AsyncOnlySaver()
+                cfg = {"configurable": {"thread_id": "aabandon-usable"}}
+                await EventGraph([_waiter, _go_noop], checkpointer=saver).ainvoke(
+                    Started(data="x"), config=cfg
+                )
+                v2 = EventGraph([_go_ends], checkpointer=saver)
+                await v2.aabandon(cfg)
+
+                log = await v2.ainvoke(_Go(), config=cfg)
+
+                assert log.latest(Ended) == Ended(result="went")
+
+        def when_resumed_after_abandoning():
+            @pytest.mark.asyncio
+            async def it_raises_naming_the_abandonment():
+                graph, cfg = await _apaused_live_pair("aabandon-resume-raise")
+                await graph.aabandon(cfg)
+
+                with pytest.raises(UnresumableError, match="abandon"):
+                    await graph.aresume(_Go(), config=cfg)
+
+        def when_the_thread_was_never_run():
+            @pytest.mark.asyncio
+            async def it_raises():
+                graph = EventGraph([_waiter, _go_noop], checkpointer=_AsyncOnlySaver())
+                cfg = {"configurable": {"thread_id": "aabandon-never-run"}}
+
+                with pytest.raises(ValueError, match=r"aabandon"):
+                    await graph.aabandon(cfg)
+
+        def when_there_is_no_checkpointer():
+            @pytest.mark.asyncio
+            async def it_raises():
+                graph = EventGraph([_waiter, _go_noop])
+                cfg = {"configurable": {"thread_id": "aabandon-no-checkpointer"}}
+
+                with pytest.raises(
+                    ValueError, match=r"aabandon.*requires a checkpointer"
+                ):
+                    await graph.aabandon(cfg)
 
 
 def describe_assert_resume_recovers():

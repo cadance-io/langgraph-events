@@ -16,6 +16,7 @@ from langgraph.types import StateUpdate
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     OUTCOMES_ATTR,
+    Abandoned,
     Command,
     DomainEvent,
     Event,
@@ -1428,7 +1429,26 @@ class EventGraph:
             return True
         return bool((await self._compile().aget_state(config)).next)
 
-    def _unresumable_message(self) -> str:
+    def _unresumable_message(self, log: EventLog | None = None) -> str:
+        """Build the diagnostic for a ``resume()`` that would be a no-op.
+
+        *log* is the thread's event log, when the caller already has it (both
+        call sites do — see :meth:`_unresumable_short_circuits`). When its
+        latest ``Halted`` is an ``Abandoned``, the thread was deliberately
+        settled by ``abandon()``/``aabandon()`` rather than left pending by a
+        renamed/removed handler, so the message says that instead — the
+        likely real sequence is an operator abandoning threads while a stale
+        approval card elsewhere still posts its answer.
+        """
+        if log is not None:
+            latest = log.latest(Halted)
+            if isinstance(latest, Abandoned):
+                return (
+                    "resume() called on a thread that was abandoned via "
+                    f"abandon()/aabandon() (reason={latest.reason!r}). The "
+                    "thread was deliberately settled without an answer and "
+                    "is terminal; it cannot be resumed."
+                )
         return (
             "resume() called on a thread that is not awaiting input. The paused "
             "handler may have been renamed/removed, or the thread already "
@@ -1436,18 +1456,20 @@ class EventGraph:
             "handler, or set EventGraph(on_unresumable='halt'|'warn')."
         )
 
-    def _unresumable_short_circuits(self) -> bool:
+    def _unresumable_short_circuits(self, log: EventLog | None = None) -> bool:
         """Apply the ``raise``/``warn`` arm of ``on_unresumable``; return whether
         the caller should short-circuit (``True`` for ``warn`` — return the log
         unchanged) rather than append a terminal event (``False`` for ``halt``).
-        ``raise`` raises. The state read is left to the caller so each path uses
-        the matching reader (the async path must ``await aget_state`` — an
-        async-only checkpointer rejects sync reads from the running loop).
+        ``raise`` raises. *log* is passed through to :meth:`_unresumable_message`
+        so the diagnostic can distinguish an abandoned thread; the read itself is
+        left to the caller so each path uses the matching reader (the async path
+        must ``await aget_state`` — an async-only checkpointer rejects sync reads
+        from the running loop).
         """
         if self._on_unresumable == "raise":
-            raise UnresumableError(self._unresumable_message())
+            raise UnresumableError(self._unresumable_message(log))
         if self._on_unresumable == "warn":
-            warn_user(self._unresumable_message())
+            warn_user(self._unresumable_message(log))
             return True
         return False
 
@@ -1515,8 +1537,9 @@ class EventGraph:
         completed sibling write can be lost on this path.
         """
         config = kwargs.get("config")
-        if self._unresumable_short_circuits():
-            return self.get_state(config).events
+        log = self.get_state(config).events
+        if self._unresumable_short_circuits(log):
+            return log
         return self._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
@@ -1524,8 +1547,9 @@ class EventGraph:
     ) -> EventLog:
         """Async sibling of :meth:`_apply_unresumable_policy`."""
         config = kwargs.get("config")
-        if self._unresumable_short_circuits():
-            return (await self.aget_state(config)).events
+        log = (await self.aget_state(config)).events
+        if self._unresumable_short_circuits(log):
+            return log
         return await self._asettle(config, self._unresumable_event(value))
 
     @staticmethod
@@ -1555,6 +1579,87 @@ class EventGraph:
         if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
+
+    @staticmethod
+    def _discarded_interrupt_name(snapshot: StateSnapshot) -> str:
+        """Type name(s) of the interrupt(s) ``abandon()``/``aabandon()`` is
+        about to throw away.
+
+        Flattens ``interrupts`` across every task on the snapshot — a
+        fanned-out dispatch can leave more than one task paused, so taking
+        only ``tasks[0]`` would silently miss the others. Keeps only
+        payloads that are ``Event`` instances (a raw
+        ``langgraph.types.interrupt("...")`` thrown from a handler, rather
+        than an ``Interrupted`` subclass, leaves a bare string with no
+        useful type name) and joins their type names, deduped and in
+        discovery order. Empty when there is no pending interrupt at all.
+        """
+        names: list[str] = []
+        for task in snapshot.tasks:
+            for i in getattr(task, "interrupts", ()):
+                value = i.value
+                if isinstance(value, Event) and type(value).__name__ not in names:
+                    names.append(type(value).__name__)
+        return ", ".join(names)
+
+    @staticmethod
+    def _require_settleable(method: str, snapshot: StateSnapshot, config: Any) -> None:
+        """Guard ``abandon()``/``aabandon()`` against a thread with nothing
+        to settle.
+
+        Guards on an empty event log, not on ``snapshot.created_at is
+        None``: the latter reliably flags "no checkpoint at all", but a
+        thread that was only ever ``pre_seed``ed (never run) *has* a
+        checkpoint and would sail past that check, leaving a thread whose
+        entire log is ``[Abandoned()]``.
+        """
+        if snapshot.values.get("events"):
+            return
+        thread_id = (config or {}).get("configurable", {}).get("thread_id")
+        raise ValueError(
+            f"{method}() has no events to settle on thread {thread_id!r}: the "
+            "thread was never run (or only pre_seed()ed)."
+        )
+
+    def abandon(self, config: RunnableConfig, *, reason: str = "") -> None:
+        """Settle a paused thread without answering it, retiring its interrupt.
+
+        Where :meth:`resume` answers a pending ``Interrupted`` and dispatches
+        the answer, ``abandon()`` discards it: the thread ends on a terminal
+        ``Abandoned`` (see :class:`~langgraph_events.Abandoned`) with nothing
+        left scheduled, via the same settle primitive :meth:`resume` uses for
+        ``on_unresumable="halt"``. Use this to retire an ``Interrupted``
+        subclass — answering a paused thread to drain it first only makes
+        things worse, since the answer causes ``Interrupted`` to join the
+        event log, appending the very identity being retired.
+
+        Does **not** consult ``on_unresumable`` — that policy governs an
+        accidental no-op ``resume()``; abandoning is deliberate. Requires a
+        checkpointer. Raises ``ValueError`` if the thread has no events to
+        settle (never run, or only ``pre_seed``ed).
+
+        Returns ``None`` — ``abandon()`` runs no graph, so there is no run
+        log to hand back. Callers who want the log call
+        ``graph.get_state(config).events``.
+        """
+        self._require_checkpointer("abandon")
+        snapshot = self._compile().get_state(config)
+        self._require_settleable("abandon", snapshot, config)
+        discarded = self._discarded_interrupt_name(snapshot)
+        self._settle(config, Abandoned(reason=reason, discarded=discarded))
+
+    async def aabandon(self, config: RunnableConfig, *, reason: str = "") -> None:
+        """Async version of :meth:`abandon`.
+
+        Every checkpoint read/write uses the async API (``aget_state``/
+        ``_asettle``) so async-only checkpointers aren't driven
+        synchronously from the running event loop.
+        """
+        self._require_checkpointer("aabandon")
+        snapshot = await self._compile().aget_state(config)
+        self._require_settleable("aabandon", snapshot, config)
+        discarded = self._discarded_interrupt_name(snapshot)
+        await self._asettle(config, Abandoned(reason=reason, discarded=discarded))
 
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
