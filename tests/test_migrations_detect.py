@@ -143,13 +143,32 @@ def describe_write_baseline():
             write_baseline(graph, target)
             loaded = json.loads(target.read_text())
 
-            assert loaded["version"] == 2
+            assert loaded["version"] == 3
             identities = {(e["module"], e["qualname"]) for e in loaded["events"]}
             # Command outcomes nested inside Place are captured.
             assert (Order.__module__, "Order.Place.Placed") in identities
             assert (Order.__module__, "Order.Place.Rejected") in identities
             # The Command itself is captured.
             assert (Order.__module__, "Order.Place") in identities
+
+        def it_records_the_sorted_field_names_of_every_identity(tmp_path: Path):
+            # The revive gate synthesizes a payload from these names, so a
+            # field the live class later drops is still exercised.
+            from conftest import Order
+
+            from langgraph_events import EventGraph
+            from langgraph_events.serde.migrations.detect import write_baseline
+
+            target = tmp_path / "baseline.json"
+
+            write_baseline(EventGraph([Order.Place]), target)
+
+            fields = {
+                e["qualname"]: e["fields"]
+                for e in json.loads(target.read_text())["events"]
+            }
+            assert fields["Order.Place.Placed"] == ["order_id"]
+            assert fields["Order.Place"] == ["customer_id"]
 
         def it_accepts_a_str_path(tmp_path: Path):
             # docs/event-migrations.md's workflow prints a bare string —
@@ -168,7 +187,7 @@ def describe_write_baseline():
             write_baseline(graph, str(target))
 
             assert target.exists()
-            assert json.loads(target.read_text())["version"] == 2
+            assert json.loads(target.read_text())["version"] == 3
 
 
 def describe_write_baseline_regression_guard():
