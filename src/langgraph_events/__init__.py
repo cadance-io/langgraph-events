@@ -10,6 +10,7 @@ from langgraph_events._custom_event import (
     emit_state_snapshot,
 )
 from langgraph_events._event import (
+    Abandoned,
     Auditable,
     Cancelled,
     Command,
@@ -96,6 +97,7 @@ __all__ = [
     "RESET",
     "SKIP",
     "STATE_SNAPSHOT_EVENT_NAME",
+    "Abandoned",
     "Auditable",
     "BaseReducer",
     "Cancelled",

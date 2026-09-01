@@ -707,6 +707,43 @@ class Cancelled(Halted):
     """
 
 
+class Abandoned(Halted):
+    """A paused thread was deliberately settled without an answer.
+
+    Emitted by ``EventGraph.abandon()`` / ``aabandon()`` to end a thread's
+    pause without ever dispatching the pending ``Interrupted`` — the
+    opposite of ``resume()``, which answers it. Use this to retire an
+    ``Interrupted`` subclass: answering a paused thread to drain it before
+    deleting the class only makes things worse, since ``Interrupted``
+    joins the event log on resume, appending the very identity being
+    retired. ``abandon()`` never does that.
+
+    ``discarded`` is the **type name** of the ``Interrupted`` subclass
+    that was thrown away (a string, for diagnostics — mirroring how
+    ``Unresumable.resume_value`` stores a type name rather than an
+    instance). It is *not* the interrupt instance itself: once the class
+    is retired, an instance field would revive as ``None`` on replay,
+    leaving a non-event in the log where ``.trail()`` raises
+    ``AttributeError``. A raw ``langgraph.types.interrupt("...")`` thrown
+    from a handler (rather than an ``Interrupted`` subclass) leaves a bare
+    string in its place instead, which carries no useful type name — the
+    type-name string is the whole point of this field.
+
+    Like every terminal event produced by the settle paths (this one and
+    ``Unresumable``), ``Abandoned`` is **recorded, not dispatched**:
+    ``@on(Abandoned)`` never fires. Dispatch reads the ``_pending``
+    channel, and the ``Halted`` gate (``src/langgraph_events/_internal.py``,
+    the ``dispatch()`` conditional edge) routes straight to ``END`` before
+    any handler match is attempted. This is pre-existing behaviour shared
+    with ``Unresumable``, but a new public class invites the subscription
+    attempt more than a private one would — so it's worth stating plainly
+    here: don't write a handler expecting to react to an abandonment.
+    """
+
+    reason: str = ""
+    discarded: str = ""
+
+
 class Unresumable(Halted):
     """A ``resume()`` arrived for a thread that was not awaiting input.
 
