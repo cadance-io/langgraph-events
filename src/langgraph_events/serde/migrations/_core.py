@@ -86,7 +86,35 @@ class AddField:
             )
 
 
-Operation = RenameEvent | AddField
+@dataclass(frozen=True)
+class TransformFields:
+    """Rewrite the stored kwargs of events with this identity.
+
+    ``transform`` receives a fresh copy of the stored kwargs and returns
+    the kwargs the class constructor receives. The return value replaces
+    the stored kwargs. It does not merge with them. Use it for a field the
+    class dropped, two fields merged into one, or a field whose type
+    changed. A :class:`RenameEvent` moves the identity and an
+    :class:`AddField` fills a gained field. Neither can remove or reshape
+    a stored value.
+
+    The identity picks the stage, the same rule as :class:`AddField`.
+    Name a historic identity covered by a rename and the transform is the
+    origin stage: it runs BEFORE the rename, only on payloads written
+    under that exact origin. Name the live class and the transform is the
+    class stage: it runs AFTER any rename, on payloads from every era,
+    including payloads the current release writes. A class-stage
+    transform must be idempotent: a key it removes is absent on the next
+    read. Use ``kw.pop("x", None)``, not ``del kw["x"]``. A transform
+    runs before the fills of its stage.
+    """
+
+    module: str
+    qualname: str
+    transform: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+Operation = RenameEvent | AddField | TransformFields
 
 
 @dataclass(frozen=True)
@@ -191,6 +219,41 @@ class Migration:
             ),
         )
 
+    @classmethod
+    def transform_fields(
+        cls,
+        name: str = "",
+        *,
+        target: type | None = None,
+        module: str | None = None,
+        qualname: str | None = None,
+        transform: Callable[[dict[str, Any]], dict[str, Any]],
+    ) -> Migration:
+        """Single-op transform sugar.
+
+        ``name`` labels the migration. ``transform`` rewrites the stored
+        kwargs. Pass the live class as ``target=<class>`` for the class
+        stage. Pass ``module``/``qualname`` for a class that cannot be
+        imported at authoring time, and for the origin stage keyed on a
+        HISTORIC identity. Same convention as
+        :class:`TransformFields` and :meth:`add_field`.
+        """
+        module, qualname = _target_identity(
+            "Migration.transform_fields",
+            "target",
+            ("module", "qualname"),
+            "target",
+            target,
+            module,
+            qualname,
+        )
+        return cls(
+            name=name,
+            operations=(
+                TransformFields(module=module, qualname=qualname, transform=transform),
+            ),
+        )
+
 
 def _target_identity(
     method: str,
@@ -232,6 +295,8 @@ def _flatten_and_validate(
     dict[tuple[str, str], tuple[str, str]],
     dict[tuple[str, str], tuple[AddField, ...]],
     dict[tuple[str, str], tuple[AddField, ...]],
+    dict[tuple[str, str], TransformFields],
+    dict[tuple[str, str], TransformFields],
 ]:
     """Collapse all operations into per-purpose lookup tables.
 
@@ -240,6 +305,8 @@ def _flatten_and_validate(
     regardless of chain depth. AddField ops are bucketed by their target
     identity: a target that is a rename source goes into the origin table
     (applied pre-rename), a live target into the post-rename table.
+    TransformFields ops are bucketed the same way, into
+    ``(transform_table, origin_transform_table)``.
 
     Validation is intentionally strict — every error here would otherwise
     surface as a ``ValueError`` on first production read, which is the
@@ -260,6 +327,7 @@ def _flatten_and_validate(
     edge_origin: dict[tuple[str, str], str] = {}
     # AddField ops carry their migration's name for the same reason.
     addfield_ops: list[tuple[AddField, str]] = []
+    transform_ops: list[tuple[TransformFields, str]] = []
     for migration in migrations:
         for op in migration.operations:
             if isinstance(op, RenameEvent):
@@ -279,14 +347,16 @@ def _flatten_and_validate(
                 edge_origin[old_key] = migration.name
             elif isinstance(op, AddField):
                 addfield_ops.append((op, migration.name))
+            elif isinstance(op, TransformFields):
+                transform_ops.append((op, migration.name))
             else:
-                # ``Operation`` is closed by design (RenameEvent | AddField).
-                # Silently ignoring an unknown type hides authoring errors —
-                # surface them at construction with a targeted diagnostic.
+                # ``Operation`` is closed by design. Silently ignoring an
+                # unknown type hides authoring errors — surface them at
+                # construction with a targeted diagnostic.
                 raise TypeError(
                     f"Unknown migration operation type "
                     f"{type(op).__name__!r} in {_migration_label(migration.name)}. "
-                    f"Expected RenameEvent or AddField."
+                    f"Expected RenameEvent, AddField or TransformFields."
                 )
 
     rename_table: dict[tuple[str, str], tuple[str, str]] = {}
@@ -296,7 +366,80 @@ def _flatten_and_validate(
     addfield_table, origin_addfield_table = _bucket_addfields(
         addfield_ops, rename_table, scope
     )
-    return rename_table, addfield_table, origin_addfield_table
+    transform_table, origin_transform_table = _bucket_transforms(
+        transform_ops, rename_table, scope
+    )
+    return (
+        rename_table,
+        addfield_table,
+        origin_addfield_table,
+        transform_table,
+        origin_transform_table,
+    )
+
+
+def _bucket_transforms(
+    transform_ops: Sequence[tuple[TransformFields, str]],
+    rename_table: dict[tuple[str, str], tuple[str, str]],
+    scope: Mapping[tuple[str, str], type] | None = None,
+) -> tuple[
+    dict[tuple[str, str], TransformFields],
+    dict[tuple[str, str], TransformFields],
+]:
+    """Bucket TransformFields ops by target kind and validate each one.
+
+    Returns ``(post_rename_table, origin_table)``, the same shape as
+    :func:`_bucket_addfields`. A target that is a rename source goes into
+    the origin table, a live target into the post-rename table, and any
+    other target is rejected. The stage is explicit in the table, so a
+    live identity with no rename runs its transform once, not once per
+    lookup. One transform per identity: the read path runs one per stage,
+    so a second would be ignored in silence.
+    """
+    transform_table: dict[tuple[str, str], TransformFields] = {}
+    origin_transform_table: dict[tuple[str, str], TransformFields] = {}
+    source: dict[tuple[str, str], str] = {}
+    for op, migration_name in transform_ops:
+        target = (op.module, op.qualname)
+        if not callable(op.transform):
+            raise TypeError(
+                f"TransformFields({op.module}:{op.qualname!r}) in "
+                f"{_migration_label(migration_name)}: `transform` must be "
+                f"callable, got {type(op.transform).__name__}."
+            )
+        if target in rename_table:
+            bucket = origin_transform_table
+        elif _resolves(*target, scope=scope):
+            bucket = transform_table
+        else:
+            raise ValueError(
+                f"TransformFields target {op.module}:{op.qualname!r} neither "
+                f"resolves to a live class — by this serde's namespace "
+                f"scope or by import — nor matches a historic identity "
+                f"covered by a rename migration. Either the target was "
+                f"deleted after the migration was authored, the "
+                f"module/qualname has a typo, or the historic identity is "
+                f"missing its @migrate_from / RenameEvent."
+            )
+        if target in source:
+            first_label = _migration_label(source[target])
+            second_label = _migration_label(migration_name)
+            # Two blank names would read "by both an unnamed migration and
+            # an unnamed migration", which names nothing. Say so, and ask
+            # for names.
+            by = (
+                "by two unnamed migrations. Pass name= to each to tell them apart"
+                if first_label == second_label
+                else f"by both {first_label} and {second_label}"
+            )
+            raise ValueError(
+                f"Duplicate TransformFields: {op.module}:{op.qualname!r} is "
+                f"transformed {by}. Each identity may carry at most one "
+                f"transform per stage. Compose the steps in one callable."
+            )
+        bucket[target] = op
+        source[target] = migration_name
+    return transform_table, origin_transform_table
 
 
 def _bucket_addfields(
@@ -522,6 +665,48 @@ def _inject_addfields(
             kwargs.setdefault(op.field, op.default)
 
 
+class TransformError(Exception):
+    """A :class:`TransformFields` raised, or returned a value that is not
+    a ``dict``.
+
+    Raised by the read path and caught by the serde's ext-hook, which
+    turns it into the ``Cannot revive`` message or, under
+    ``serde.tolerate_unresolved()``, an ``UnrevivedIdentity``. ``op`` is the
+    transform that failed and ``cause`` is the exception it raised.
+    """
+
+    def __init__(self, op: TransformFields, cause: Exception) -> None:
+        super().__init__(f"TransformFields raised {type(cause).__name__}: {cause}")
+        self.op = op
+        self.cause = cause
+
+
+def _transform_kwargs(
+    op: TransformFields | None,
+    kwargs: dict[str, Any],
+) -> dict[str, Any]:
+    """Run *op* on a copy of *kwargs* and return the result. No op: return
+    *kwargs* unchanged.
+
+    Raises :class:`TransformError` when the transform raises or returns
+    a value that is not a ``dict``. The ext-hook catches that one type,
+    so no exception the transform raises can escape as a bare
+    ``ext_hook failed``.
+    """
+    if op is None:
+        return kwargs
+    try:
+        out = op.transform(dict(kwargs))
+    except Exception as exc:
+        raise TransformError(op, exc) from exc
+    if not isinstance(out, dict):
+        raise TransformError(
+            op,
+            TypeError(f"transform returned {type(out).__name__}, expected dict"),
+        )
+    return out
+
+
 def _apply_identity_migrations(
     module: str,
     qualname: str,
@@ -529,32 +714,40 @@ def _apply_identity_migrations(
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-) -> tuple[str, str]:
-    """Inject origin-scoped AddField defaults keyed on the PRE-rename
-    identity, resolve *module*/*qualname* through the rename table, then
-    inject post-rename AddField defaults — all into *kwargs* in place.
-    Returns the post-rename identity.
+    transform_table: dict[tuple[str, str], TransformFields],
+    origin_transform_table: dict[tuple[str, str], TransformFields],
+) -> tuple[str, str, dict[str, Any]]:
+    """Run the read-side migration rule and return ``(module, qualname,
+    kwargs)`` for the constructor.
 
-    Origin fills run first so the precedence is: explicit payload value >
+    Order: the origin stage (transform, then origin-scoped fills), the
+    rename, then the class stage (transform, then class-global fills). A
+    transform runs before the fills of its stage, and its return value
+    replaces the kwargs. Origin fills run
+    before class fills so the precedence is: explicit payload value >
     origin-scoped fill > class-global fill (``setdefault`` never
     overwrites). An op lives in exactly one table — origin keys are rename
-    sources, post keys are live identities, disjoint by validation — so no
-    op is ever applied twice.
+    sources, post keys are live identities, disjoint by validation — and
+    each table is read at its own stage, so no op is ever applied twice.
     """
+    kwargs = _transform_kwargs(origin_transform_table.get((module, qualname)), kwargs)
     _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
     module, qualname = _resolve_rename(module, qualname, rename_table)
+    kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
     _inject_addfields(addfield_table.get((module, qualname), ()), kwargs)
-    return module, qualname
+    return module, qualname, kwargs
 
 
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"
 _ORIGIN_BACKFILL_ATTR = "__lge_origin_backfill__"
+_ORIGIN_TRANSFORM_ATTR = "__lge_origin_transform__"
 
 
 def migrate_from(
     *old_qualnames: str,
     in_module: str | None = None,
     backfill: dict[str, Any] | None = None,
+    transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Callable[[type], type]:
     """Mark that this ``Event`` class formerly lived at ``old_qualnames``.
 
@@ -576,8 +769,18 @@ def migrate_from(
     ``default_factory`` hand-author ``Migration.add_field`` keyed on the
     historic identity.
 
-    Metadata is stashed on the class as ``__lge_migrate_from__`` (and
-    ``__lge_origin_backfill__`` for the per-origin fills).
+    ``transform`` rewrites the stored kwargs of payloads written under
+    this decorator's historic qualname ONLY, before the rename and before
+    the origin fills. It is the retirement tool for an identity with no
+    field-compatible survivor: ``transform=lambda kw: {}`` maps it onto a
+    tombstone or a sibling whose fields all have defaults. Same
+    one-qualname rule as ``backfill``. This is the origin stage. A
+    transform for payloads from *every* era is the class stage,
+    :func:`transform_fields`'s job.
+
+    Metadata is stashed on the class as ``__lge_migrate_from__`` (plus
+    ``__lge_origin_backfill__`` for the per-origin fills and
+    ``__lge_origin_transform__`` for the per-origin transform).
     :class:`NamespaceAwareSerde` walks the namespaces passed to its
     ``namespaces=`` argument at construction and assembles a
     :class:`Migration` per decorated class automatically — no separate
@@ -585,6 +788,14 @@ def migrate_from(
     """
     if not old_qualnames:
         raise ValueError("@migrate_from requires at least one historic qualname.")
+    if transform is not None and len(old_qualnames) != 1:
+        raise ValueError(
+            "@migrate_from(transform=...) requires exactly one historic "
+            "qualname per decorator — a multi-qualname chain is ambiguous "
+            "about which origin the transform belongs to. Stack one "
+            "decorator per origin, or use @transform_fields, the class stage, "
+            "for a transform that applies to every era."
+        )
     if backfill is not None:
         if len(old_qualnames) != 1:
             raise ValueError(
@@ -646,6 +857,12 @@ def migrate_from(
             existing_fills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
             entry = ((module, old_qualnames[0]), dict(backfill))
             setattr(cls, _ORIGIN_BACKFILL_ATTR, (*existing_fills, entry))
+        if transform is not None:
+            existing_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
+            transform_entry = ((module, old_qualnames[0]), transform)
+            setattr(
+                cls, _ORIGIN_TRANSFORM_ATTR, (*existing_transforms, transform_entry)
+            )
         return cls
 
     return _wrap
@@ -697,6 +914,47 @@ def backfill(
         # contract as ``_MIGRATE_FROM_ATTR``.
         existing = cls.__dict__.get(_BACKFILL_ATTR, ())
         setattr(cls, _BACKFILL_ATTR, (*existing, entry))
+        return cls
+
+    return _wrap
+
+
+_TRANSFORM_ATTR = "__lge_transform__"
+
+
+def transform_fields(
+    transform: Callable[[dict[str, Any]], dict[str, Any]],
+) -> Callable[[type], type]:
+    """Rewrite the stored kwargs of every payload that revives as this class.
+
+    The class-scoped, auto-collected sibling of :func:`backfill` for a
+    field the class dropped, two fields merged into one, or a field whose
+    type changed. The metadata becomes a :class:`TransformFields` keyed on
+    this class's current identity: the class stage. It runs AFTER any
+    ``@migrate_from`` rename, on payloads from every era, including the
+    payloads the current release writes. It must be idempotent: use
+    ``kw.pop("x", None)`` for a key that is absent after the first read.
+    For the origin stage, a transform that runs on one historic origin
+    only, use ``migrate_from(..., transform=...)``.
+
+    Metadata is stashed as ``__lge_transform__``. One transform per class:
+    a second decorator is rejected at decoration. Compose several steps in
+    one callable.
+    """
+
+    def _wrap(cls: type) -> type:
+        # ``cls.__dict__`` (not ``getattr``) so the marker doesn't leak
+        # through MRO when a subclass inherits a decorated parent — same
+        # contract as ``_BACKFILL_ATTR``. A second decorator would surface
+        # at serde construction as a "Duplicate TransformFields" naming the
+        # same auto-migration twice — say it here, where it happens.
+        if _TRANSFORM_ATTR in cls.__dict__:
+            raise ValueError(
+                f"@transform_fields: {cls.__qualname__} already carries a "
+                f"transform: one transform per class; compose in code, in "
+                f"one callable."
+            )
+        setattr(cls, _TRANSFORM_ATTR, transform)
         return cls
 
     return _wrap
@@ -907,7 +1165,9 @@ def _collect_decorated_migrations(
         history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
         backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
-        if not history and not backfills and not origin_backfills:
+        transform = cls.__dict__.get(_TRANSFORM_ATTR)
+        origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
+        if not (history or backfills or origin_backfills or transform):
             continue
         ops: list[Operation] = []
         if history:
@@ -949,6 +1209,27 @@ def _collect_decorated_migrations(
                         default=default,
                     )
                 )
+        # Origin-scoped transforms key on the HISTORIC identity, like the
+        # origin fills. An origin transform always rides a ``migrate_from``,
+        # so ``history`` is non-empty whenever ``origin_transforms`` is.
+        ops.extend(
+            TransformFields(
+                module=origin_module,
+                qualname=origin_qualname,
+                transform=origin_transform,
+            )
+            for (origin_module, origin_qualname), origin_transform in origin_transforms
+        )
+        # Class-global transform keys on the CURRENT identity, like the
+        # class-global AddField above.
+        if transform is not None:
+            ops.append(
+                TransformFields(
+                    module=cls.__module__,
+                    qualname=cls.__qualname__,
+                    transform=transform,
+                )
+            )
         out.append(
             Migration(
                 name=f"{cls.__module__}:{cls.__qualname__}",

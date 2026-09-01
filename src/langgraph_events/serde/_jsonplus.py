@@ -25,7 +25,11 @@ from langgraph.types import Interrupt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
-    from langgraph_events.serde.migrations._core import AddField, Migration
+    from langgraph_events.serde.migrations._core import (
+        AddField,
+        Migration,
+        TransformFields,
+    )
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 try:
@@ -74,6 +78,7 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
 from langgraph_events.serde.migrations._core import (  # noqa: E402
+    TransformError,
     _apply_identity_migrations,
     _collect_decorated_migrations,
     _flatten_and_validate,
@@ -107,13 +112,24 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     """The actionable second sentence of a ``Cannot revive`` message.
 
     *exc* is ``ImportError``/``AttributeError`` (the identity resolves to
-    no live class at all) or ``TypeError`` (it resolves, but the stored
-    kwargs and the class's fields disagree). The two need different
-    remedies. "Map onto a tombstone with @migrate_from" is right for the
-    first case: there is no live class yet. It is wrong for the second
-    case, where *qualname* may already **be** the tombstone:
-    redecorating it with the decorator it already carries fixes nothing.
+    no live class at all), ``TypeError`` (it resolves, but the stored
+    kwargs and the class's fields disagree), or ``TransformError`` (a
+    ``TransformFields`` raised, or returned a non-dict). The three need
+    different remedies. "Map onto a tombstone with @migrate_from" is
+    right for the first case: there is no live class yet. It is wrong
+    for the second case, where *qualname* may already **be** the
+    tombstone: redecorating it with the decorator it already carries
+    fixes nothing.
     """
+    if isinstance(exc, TransformError):
+        op = exc.op
+        return (
+            f"The transform keyed on {op.module}.{op.qualname} must accept a "
+            f"payload from every era and return a dict. Guard a key that can "
+            f"be absent or None: kw.pop('x', None) and a None check. See "
+            f"'Dropping, merging or retyping a field' in "
+            f"docs/event-migrations.md."
+        )
     if not isinstance(exc, TypeError):
         return (
             "The class may have been renamed or removed since the "
@@ -134,8 +150,8 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     return (
         f"{qualname} does not declare the field {field!r} the stored "
         f"payload carries. Add {field!r} to the class, matching the "
-        f"old class's shape, or drop it from the payload with a "
-        f"migration."
+        f"old class's shape, or drop it from the payload with "
+        f"@transform_fields."
     )
 
 
@@ -238,6 +254,8 @@ def _make_ext_hook(
     rename_table: dict[tuple[str, str], tuple[str, str]],
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
+    transform_table: dict[tuple[str, str], TransformFields],
+    origin_transform_table: dict[tuple[str, str], TransformFields],
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
@@ -298,23 +316,30 @@ def _make_ext_hook(
             data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
         )
         module_name, qualname, kwargs = tup
-        # Rewrite historic identity to current and inject any AddField
-        # defaults — shared with the baseline test helper so the read-side
-        # migration rule lives in exactly one place.
-        module_name, qualname = _apply_identity_migrations(
-            module_name,
-            qualname,
-            kwargs,
-            rename_table,
-            addfield_table,
-            origin_addfield_table,
-        )
         try:
+            # Rewrite historic identity to current, run any TransformFields
+            # and inject any AddField defaults — shared with the baseline
+            # test helper so the read-side migration rule lives in exactly
+            # one place. Inside the ``try``: a transform that raises must
+            # reach the ``errors`` channel like every other failure, or
+            # ormsgpack reports a bare ``ext_hook failed``. The identity
+            # stays the STORED one when the migration itself fails.
+            module_name, qualname, kwargs = _apply_identity_migrations(
+                module_name,
+                qualname,
+                kwargs,
+                rename_table,
+                addfield_table,
+                origin_addfield_table,
+                transform_table,
+                origin_transform_table,
+            )
             return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
-        except (ImportError, AttributeError, TypeError) as exc:
+        except (ImportError, AttributeError, TypeError, TransformError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
             # has dropped, or omit a field it has gained with no AddField.
+            # ``TransformError`` wraps whatever a transform raised.
             if unresolved is not None:
                 # Retirement cleanup only (see the *unresolved* parameter
                 # docstring above). The caller is a tool that exists to
@@ -325,9 +350,14 @@ def _make_ext_hook(
                 placeholder = UnrevivedIdentity(module=module_name, qualname=qualname)
                 unresolved.append(placeholder)
                 return placeholder
+            failure = (
+                str(exc)
+                if isinstance(exc, TransformError)
+                else f"{type(exc).__name__}: {exc}"
+            )
             errors.append(
-                f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: "
-                f"{exc}. {_revival_remedy(qualname, exc)}"
+                f"Cannot revive {module_name}.{qualname}: {failure}. "
+                f"{_revival_remedy(qualname, exc)}"
             )
             raise
 
@@ -411,6 +441,8 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._rename_table,
             self._addfield_table,
             self._origin_addfield_table,
+            self._transform_table,
+            self._origin_transform_table,
         ) = _flatten_and_validate(all_migrations, scope)
         # Origin-scoped fills are the fan-in signal, and a fan-in cannot
         # ride legacy_write: writes would relabel EVERY instance under the
@@ -425,6 +457,21 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 "the consolidation cutover, or drop legacy_write and accept "
                 "read-only compatibility. See 'Consolidating N classes into "
                 "one' in docs/event-migrations.md."
+            )
+        # A transform has no inverse. A write relabelled under the oldest
+        # historic identity would carry the CURRENT shape, which the old
+        # release's class does not accept, and the transform only runs on
+        # read. Refuse at construction, like the origin-fill case above.
+        if legacy_write and (self._transform_table or self._origin_transform_table):
+            raise ValueError(
+                "legacy_write=True cannot be combined with a TransformFields "
+                "(transform_fields, migrate_from(transform=...) or a "
+                "hand-authored TransformFields). A transform runs on read and "
+                "has no inverse, so an old release cannot read what this one "
+                "writes. Drain in-flight threads before the cutover, or drop "
+                "legacy_write and accept read-only compatibility. See "
+                "'Dropping, merging or retyping a field' in "
+                "docs/event-migrations.md."
             )
         # The read path resolves through ``_scope`` before it falls back to
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
@@ -542,6 +589,8 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._rename_table,
                     self._addfield_table,
                     self._origin_addfield_table,
+                    self._transform_table,
+                    self._origin_transform_table,
                     self._scope,
                     unresolved=self._unresolved,
                 ),

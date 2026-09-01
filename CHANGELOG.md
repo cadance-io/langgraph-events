@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TransformFields`, `@transform_fields` and `migrate_from(transform=...)`.** Item 3 of
+  [#159](https://github.com/cadance-io/langgraph-events/issues/159). A kwargs-to-kwargs
+  operation, decode side only. A rename moves an identity and an `AddField` fills a gained
+  field. Neither can remove or reshape a stored value. `TransformFields(module, qualname,
+  transform)` runs `transform` on a copy of the stored kwargs, and the return value replaces
+  them. The identity picks the stage, the same rule as `AddField`. The origin stage is keyed
+  on a historic identity and runs before the rename, on that origin only. The class stage is
+  keyed on the live class and runs after the rename, on every era, including payloads the
+  current release writes. Read-path order: the origin stage (transform, then origin fills),
+  the rename, then the class stage (transform, then class fills).
+  `Migration.transform_fields(...)` is the single-op sugar. A transform in the class stage
+  must be idempotent. A retired identity with
+  no field-compatible survivor now maps onto an empty tombstone or a sibling with
+  `migrate_from("Old", transform=lambda kw: {})`. Validation at serde construction: the target
+  resolves live or is a rename source, one transform per identity, and `legacy_write=True`
+  with any transform is refused because a transform has no inverse. `migrate_from(transform=)`
+  takes exactly one historic qualname. See *Dropping, merging or retyping a field* in
+  `docs/event-migrations.md`.
+
+- **The revive gate exercises a transform.** `assert_all_baselined_revive` sends a `None`
+  placeholder for every recorded field the live class dropped, so the transform runs through
+  the real read path. A transform that raises on the placeholder fails the gate with one
+  sentence on the `None` placeholders and `synthesize_legacy_payload`. The dropped-field
+  failure line now names the `TransformFields` remedy.
+
 - **`EventGraph.unrevivable_threads()` / `.aunrevivable_threads()`.** The store-walking gate
   from [#159](https://github.com/cadance-io/langgraph-events/issues/159). Reads every thread's
   latest checkpoint through the serde's tolerant path and returns a mapping of thread id to the
@@ -126,6 +151,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   imports. Nothing raises it.
 
 ### Fixed
+
+- **A migration step that raised surfaced as a bare `ext_hook failed`.** The read path ran the
+  identity migration outside the ext-hook's `try`, so an exception there reached `ormsgpack`
+  with no identity and no cause, and `serde.tolerate_unresolved()` raised instead of
+  degrading. The migration step now runs inside the `try`. A transform that raises, or returns
+  a non-dict, raises `ValueError("Cannot revive <module>.<qualname>: TransformFields raised
+  <Type>: ...")` with a remedy, and degrades to `UnrevivedIdentity` under
+  `serde.tolerate_unresolved()`.
 
 - **An `init=False` dataclass field now round-trips through `NamespaceAwareSerde`.**
   Closes [#172](https://github.com/cadance-io/langgraph-events/issues/172). The encoder wrote
