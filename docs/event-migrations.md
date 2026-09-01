@@ -298,7 +298,10 @@ Workflow:
 
     ```json
     {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}
+    {"module": "myapp.orders", "qualname": "Order.ApprovalRequired"}
     ```
+
+    A hand-added `events` entry needs `fields` too. A test that appends `{"module", "qualname"}` to `events` and expects an `AssertionError` from a gate gets a `ValueError` from the reader instead. Give the entry `"fields": []`.
 
 `allow_removed` is deprecated and does nothing. Passing `allow_removed=True` emits a `DeprecationWarning`. The write compares baseline ↔ topology only; *coverage* (does a migration exist?) is the [coverage gates](#coverage-gates)' job.
 

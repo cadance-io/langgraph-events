@@ -88,8 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded stays in the record after the live class drops it. A `retired` list holds every
   identity a write dropped from `events`, with the fields last recorded for it. The reader
   rejects a v3 entry without `fields`, and rejects an identity listed under both `events` and
-  `retired`. A v1 or v2 file still loads, with unknown fields and an empty `retired` list.
-  Regenerate the baseline once to record the fields. See *When to commit the baseline* in
+  `retired`. A v1 or v2 file still loads, with no recorded fields and an empty `retired` list.
+  Regenerate the baseline once to record the fields. A hand-added `events` entry needs `fields`
+  too: a test that appends `{"module", "qualname"}` to `events` and expects an `AssertionError`
+  from a gate gets a `ValueError` from the reader instead. See *When to commit the baseline* in
   `docs/event-migrations.md` for the file shape and the hand-added `retired` entry for an
   identity erased before v3.
 

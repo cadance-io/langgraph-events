@@ -246,6 +246,31 @@ def describe_write_baseline_cumulative_fields():
             }
             assert fields["Order.Place.Placed"] == ["legacy_flag", "order_id"]
 
+    def when_an_events_entry_has_empty_fields():
+        def it_fills_the_list_from_the_live_class(tmp_path: Path):
+            # The remedy for a hand-built file without ``fields`` is to add
+            # ``"fields": []`` and write. The union fills the list.
+            from conftest import Order
+
+            from langgraph_events import EventGraph
+            from langgraph_events.serde.migrations.detect import write_baseline
+
+            target = tmp_path / "baseline.json"
+            placed = {
+                "module": Order.__module__,
+                "qualname": "Order.Place.Placed",
+                "fields": [],
+            }
+            _write_v3(target, events=[placed])
+
+            write_baseline(EventGraph([Order.Place]), target)
+
+            fields = {
+                e["qualname"]: e["fields"]
+                for e in json.loads(target.read_text())["events"]
+            }
+            assert fields["Order.Place.Placed"] == ["order_id"]
+
 
 def describe_write_baseline_retirement():
     # A write never erases an identity the old baseline recorded. The
@@ -476,7 +501,7 @@ def describe_load_baseline():
             target = tmp_path / "baseline.json"
             _write_v3(target, events=[_ghost_entry()])
 
-            with pytest.raises(ValueError, match=r"fields.*by hand"):
+            with pytest.raises(ValueError, match=r'"fields": \[\].*write_baseline'):
                 _load_baseline(target)
 
     def when_an_identity_is_in_events_and_retired():
@@ -490,7 +515,9 @@ def describe_load_baseline():
             target = tmp_path / "baseline.json"
             _write_v3(target, events=[_ghost_entry([])], retired=[_ghost_entry([])])
 
-            with pytest.raises(ValueError, match=r"retired.*Ghost\.Gone"):
+            with pytest.raises(
+                ValueError, match=r"Ghost\.Gone.*Remove it from `retired`"
+            ):
                 _load_baseline(target)
 
     def when_version_mismatches():

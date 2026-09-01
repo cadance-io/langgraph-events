@@ -273,8 +273,8 @@ def _check_v3_shape(raw: dict[str, Any], baseline_path: Path) -> None:
         raise ValueError(
             f"Baseline at {baseline_path} is version {raw['version']} but "
             f"these events entries have no `fields`: {', '.join(incomplete)}. "
-            f"Add `fields` to each events entry by hand, or delete the file "
-            f"and run write_baseline()."
+            f'Give each entry "fields": [] and run write_baseline(). The '
+            f"write fills the list from the live class."
         )
     live = {(e["module"], e["qualname"]) for e in events}
     retired = {(e["module"], e["qualname"]) for e in raw.get("retired", [])}
@@ -283,9 +283,8 @@ def _check_v3_shape(raw: dict[str, Any], baseline_path: Path) -> None:
         joined = ", ".join(f"{m}:{q}" for m, q in overlap)
         raise ValueError(
             f"Baseline at {baseline_path} lists these identities under both "
-            f"`events` and `retired`: {joined}. Remove each one from one of "
-            f"the two lists by hand, or regenerate the baseline with "
-            f"write_baseline()."
+            f"`events` and `retired`: {joined}. Remove it from `retired` when "
+            f"the class is live, or from `events` when it is not."
         )
 
 
@@ -300,9 +299,8 @@ class CoverageError(AssertionError):
 
 
 MIGRATION_REMEDY = (
-    "For each: either add @migrate_from to the surviving class, append a "
-    "Migration to migrations=, or regenerate the baseline if the identity "
-    "is intentionally dropped."
+    "For each: add @migrate_from to the surviving class or a tombstone, or "
+    "append a Migration to migrations=."
 )
 """Shared remedy line for every gate that fails on an unreachable event
 identity (``MigrationCoverageError`` and both ``_assert_baselined``
@@ -311,14 +309,13 @@ gate's failure reads the same for the others."""
 
 
 RETIRED_REMEDY = (
-    "A retired identity has no live class and must revive through a "
-    "migration: add @migrate_from to a surviving class or a tombstone, or "
-    "delete its `retired` entry from the baseline by hand once every thread "
-    "that names it is settled."
+    "A write keeps a retired identity in the baseline: delete its `retired` "
+    "entry by hand once every thread that names it is settled "
+    "(graph.unrevivable_threads() == {})."
 )
-"""Remedy line for a gate failure on an identity the baseline lists under
-``retired``. Regenerating the baseline does not help there: a write keeps
-the entry."""
+"""The hand-delete rule for an identity the baseline lists under
+``retired``. Follows :data:`MIGRATION_REMEDY`, which names the migration
+fix. A write never removes the entry."""
 
 
 class MigrationCoverageError(CoverageError):
@@ -337,19 +334,27 @@ class MigrationCoverageError(CoverageError):
     ) -> None:
         self.uncovered = uncovered
         self.retired = retired
-        joined = ", ".join(f"{m}:{q}" for m, q in uncovered)
         plural = "y" if len(uncovered) == 1 else "ies"
         verb = "is" if len(uncovered) == 1 else "are"
         message = (
             f"{len(uncovered)} identit{plural} in the baseline {verb} neither "
-            f"currently live nor covered by a migration: {joined}. "
-            f"{MIGRATION_REMEDY}"
+            f"currently live nor covered by a migration"
         )
+        # Each identity is listed once: under ``retired`` when the baseline
+        # retires it, in the first sentence otherwise.
+        live_missing = tuple(i for i in uncovered if i not in retired)
+        if live_missing:
+            message += ": " + _join(live_missing)
+        message += f". {MIGRATION_REMEDY}"
         if retired:
-            joined = ", ".join(f"{m}:{q}" for m, q in retired)
-            message += f" Of these, the baseline lists as retired: {joined}. "
+            message += f" The baseline lists as retired: {_join(retired)}. "
             message += RETIRED_REMEDY
         super().__init__(message)
+
+
+def _join(identities: tuple[tuple[str, str], ...]) -> str:
+    """``module:qualname`` for each identity, comma separated."""
+    return ", ".join(f"{m}:{q}" for m, q in identities)
 
 
 class HandlerCoverageError(CoverageError):

@@ -134,7 +134,7 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     return (
         f"{qualname} does not declare the field {field!r} the stored "
         f"payload carries. Add {field!r} to the class, matching the "
-        f"retired class's shape, or drop it from the payload with a "
+        f"old class's shape, or drop it from the payload with a "
         f"migration."
     )
 

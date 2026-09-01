@@ -2436,9 +2436,12 @@ def describe_NamespaceAwareSerde():
                 with pytest.raises(MigrationCoverageError) as excinfo:
                     assert_all_baselined_cover(serde, baseline)
 
+                message = str(excinfo.value)
                 assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
-                assert "retired" in str(excinfo.value)
-                assert "delete its `retired` entry" in str(excinfo.value)
+                assert message.count("Ghost.Gone") == 1
+                assert "regenerate" not in message
+                assert "unrevivable_threads() == {}" in message
+                assert "delete its `retired` entry" in message
 
         def when_unifying_the_gate_error_base():
             def it_is_an_assertion_error_subclass():
@@ -2600,8 +2603,8 @@ def describe_NamespaceAwareSerde():
 
                 message = str(excinfo.value)
                 assert "DecoReorg.Persist.Persisted" in message
-                assert "recorded field 'legacy_flag'" in message
-                assert "no longer accepts" in message
+                assert "recorded 'legacy_flag'" in message
+                assert "Restore the field on the class" in message
 
             def with_a_baseline_that_predates_v3():
                 def it_passes(tmp_path: Any):
@@ -2698,8 +2701,7 @@ def describe_NamespaceAwareSerde():
                         assert_all_baselined_revive(serde, baseline)
 
                     message = str(excinfo.value)
-                    assert "Ghost.Gone" in message
-                    assert "retired" in message
+                    assert "ghost.mod:Ghost.Gone (retired) -> " in message
                     assert "delete its `retired` entry" in message
 
             def with_a_tombstone_declaring_the_recorded_fields():
@@ -2853,8 +2855,7 @@ def describe_NamespaceAwareSerde():
                     assert_all_baselined_resolve(serde, baseline)
 
                 message = str(excinfo.value)
-                assert "Ghost.Gone" in message
-                assert "retired" in message
+                assert "ghost.mod:Ghost.Gone (retired) -> " in message
                 assert "delete its `retired` entry" in message
 
         def when_a_baselined_identity_no_longer_resolves():

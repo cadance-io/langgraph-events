@@ -225,22 +225,28 @@ def _assert_baselined(
     :func:`assert_all_baselined_revive`: load → sweep (collecting *every*
     failure, never aborting early) → raise *header* plus one indented line
     per failure. *check* receives the fields the baseline recorded for the
-    identity, or ``None`` for a pre-v3 record. The sweep covers ``events``
-    and ``retired`` both. A failure line for a retired identity says so
-    and carries :data:`RETIRED_REMEDY`, because regenerating the baseline
-    cannot clear it. ``cover`` is a set-diff rather than a per-identity
-    sweep, so it stays separate.
+    identity, or ``None`` for a pre-v3 record, and returns the failure
+    detail. The driver prefixes it with the identity. The sweep covers
+    ``events`` and ``retired`` both. A retired identity's line carries a
+    ``(retired)`` marker after the identity, and the remedy then adds
+    :data:`RETIRED_REMEDY`, because a write never clears the entry.
+    ``cover`` is a set-diff rather than a per-identity sweep, so it stays
+    separate.
     """
     recorded = _load_baseline_fields(Path(baseline_path))
     retired = _load_baseline_retired(Path(baseline_path))
-    failures = [
-        failure if identity not in retired else f"{failure} (retired)"
-        for identity, fields in sorted((recorded | retired).items())
-        if (failure := check(serde, *identity, fields)) is not None
-    ]
+    failures: list[str] = []
+    any_retired = False
+    for (module, qualname), fields in sorted((recorded | retired).items()):
+        detail = check(serde, module, qualname, fields)
+        if detail is None:
+            continue
+        marker = " (retired)" if (module, qualname) in retired else ""
+        any_retired = any_retired or bool(marker)
+        failures.append(f"{module}:{qualname}{marker} {detail}")
     if failures:
         remedy = MIGRATION_REMEDY
-        if any(line.endswith("(retired)") for line in failures):
+        if any_retired:
             remedy += " " + RETIRED_REMEDY
         raise AssertionError(header + "\n  " + "\n  ".join(failures) + "\n" + remedy)
 
@@ -251,7 +257,7 @@ def _resolve_check(
     qualname: str,
     recorded_fields: frozenset[str] | None,
 ) -> str | None:
-    """Failure string if ``(module, qualname)`` no longer resolves (rename-
+    """Failure detail if ``(module, qualname)`` no longer resolves (rename-
     aware) to a live ``Event`` subclass, else ``None``. Never constructs.
 
     Resolves through *serde*'s own scope first, exactly as its read path
@@ -265,9 +271,9 @@ def _resolve_check(
     try:
         obj = _resolve_identity(target_module, target_qualname, scope=serde._scope)
     except (ImportError, AttributeError) as exc:
-        return f"{module}:{qualname} -> {type(exc).__name__}: {exc}"
+        return f"-> {type(exc).__name__}: {exc}"
     if not (isinstance(obj, type) and issubclass(obj, Event)):
-        return f"{module}:{qualname} resolved to non-Event {obj!r}"
+        return f"resolved to non-Event {obj!r}"
     return None
 
 
@@ -277,7 +283,7 @@ def _revive_check(
     qualname: str,
     recorded_fields: frozenset[str] | None,
 ) -> str | None:
-    """Failure string if a synthesized legacy payload for ``(module,
+    """Failure detail if a synthesized legacy payload for ``(module,
     qualname)`` does not revive to an ``Event`` through *serde*, else ``None``.
 
     Resolve the historic identity to its live target via the same rule the
@@ -309,26 +315,23 @@ def _revive_check(
     try:
         revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))
     except Exception as exc:  # report every failure, don't abort the sweep
-        return f"{module}:{qualname} -> {type(exc).__name__}: {exc}" + _dropped_hint(
-            exc
-        )
+        return f"-> {type(exc).__name__}: {exc}" + _dropped_hint(exc)
     if not isinstance(revived, Event):
-        return f"{module}:{qualname} revived as non-Event {revived!r}"
+        return f"revived as non-Event {revived!r}"
     return None
 
 
 def _dropped_hint(exc: Exception) -> str:
-    """One sentence when *exc* names a kwarg the live class rejected: the
-    baseline recorded it, the class dropped it, and a stored payload
-    still carries it. The remedy is already in *exc*, so the sentence
-    states the cause only. Empty for every other failure."""
+    """The cause and the action when *exc* names a kwarg the live class
+    rejected: the baseline recorded it, the class dropped it, and a stored
+    payload still carries it. Empty for every other failure."""
     match = _UNEXPECTED_KWARG_RE.search(str(exc))
     if match is None:
         return ""
     field = match.group(1)
     return (
-        f" The baseline recorded field {field!r}, which the live class no "
-        f"longer accepts."
+        f" The baseline recorded {field!r}. Restore the field on the class, "
+        f"or add a migration that drops it from the payload."
     )
 
 
