@@ -198,13 +198,7 @@ def _load_baseline_fields(
     The value is ``None`` for a v1 or v2 baseline, which predates field
     tracking. The revive gate then synthesizes required placeholders only.
     """
-    raw = _read_baseline(baseline_path)
-    return {
-        (entry["module"], entry["qualname"]): (
-            frozenset(entry["fields"]) if "fields" in entry else None
-        )
-        for entry in raw["events"]
-    }
+    return _fields_by_identity(_read_baseline(baseline_path)["events"])
 
 
 def _load_baseline_retired(
@@ -216,12 +210,19 @@ def _load_baseline_retired(
     A retired identity is one the topology no longer reaches. The value is
     ``None`` when its last record predates v3. Empty for a v1 or v2 file.
     """
-    raw = _read_baseline(baseline_path)
+    return _fields_by_identity(_read_baseline(baseline_path).get("retired", []))
+
+
+def _fields_by_identity(
+    entries: list[dict[str, Any]],
+) -> dict[tuple[str, str], frozenset[str] | None]:
+    """Map each entry's ``(module, qualname)`` to its ``fields``, or to
+    ``None`` when the entry has no ``fields`` key."""
     return {
         (entry["module"], entry["qualname"]): (
             frozenset(entry["fields"]) if "fields" in entry else None
         )
-        for entry in raw.get("retired", [])
+        for entry in entries
     }
 
 
