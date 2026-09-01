@@ -14,14 +14,16 @@ compatible LangGraph version.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
-from typing import TYPE_CHECKING, Any
+import re
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import ormsgpack
 from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from langgraph_events.serde.migrations._core import AddField, Migration
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -71,7 +73,67 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
     _collect_decorated_migrations,
     _flatten_and_validate,
     _resolve_identity,
+    _unreachable_migrate_from_siblings,
 )
+
+
+class UnrevivedIdentity(NamedTuple):
+    """Placeholder for an interrupt identity that could not be revived,
+    produced only inside :meth:`NamespaceAwareSerde.tolerate_unresolved`.
+
+    Carries the identity exactly as stored: ``module`` and ``qualname``.
+    None of the original fields carry over. There is no live class to
+    hold them. Not an ``Event`` subclass: a caller must never mistake
+    this for a real, dispatchable event.
+
+    Exists for ``EventGraph.threads_paused_on()``/``abandon()``. These
+    are the retirement tools that must keep working on a thread whose
+    paused class was deleted before every thread was settled. Every
+    other read path stays strict: an unrevivable identity there is a
+    genuine bug and must raise, not degrade silently.
+    """
+
+    module: str
+    qualname: str
+
+
+_UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
+
+
+def _revival_remedy(qualname: str, exc: Exception) -> str:
+    """The actionable second sentence of a ``Cannot revive`` message.
+
+    *exc* is ``ImportError``/``AttributeError`` (the identity resolves to
+    no live class at all) or ``TypeError`` (it resolves, but the stored
+    kwargs and the class's fields disagree). The two need different
+    remedies. "Map onto a tombstone with @migrate_from" is right for the
+    first case: there is no live class yet. It is wrong for the second
+    case, where *qualname* may already **be** the tombstone:
+    redecorating it with the decorator it already carries fixes nothing.
+    """
+    if not isinstance(exc, TypeError):
+        return (
+            "The class may have been renamed or removed since the "
+            "checkpoint was written. Settle the thread with "
+            "abandon()/aabandon() before deleting the class, or map the "
+            f"dead identity onto a tombstone class with "
+            f"@migrate_from({qualname!r})."
+        )
+    match = _UNEXPECTED_KWARG_RE.search(str(exc))
+    if match is None:
+        return (
+            f"{qualname}'s fields no longer match the stored payload — "
+            f"the class may have gained a required field with no default "
+            f"and no AddField. Align the class with the payload's shape, "
+            f"or back-fill the field with a migration."
+        )
+    field = match.group(1)
+    return (
+        f"{qualname} does not declare the field {field!r} the stored "
+        f"payload carries. Add {field!r} to the class, matching the "
+        f"retired class's shape, or drop it from the payload with a "
+        f"migration."
+    )
 
 
 def _make_default(
@@ -147,6 +209,8 @@ def _make_ext_hook(
     addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
     scope: dict[tuple[str, str], type],
+    *,
+    tolerant: bool = False,
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -167,6 +231,11 @@ def _make_ext_hook(
     (``allowed_modules=None``) and silently demotes non-event payloads to
     plain ``dict`` regardless of ``LANGGRAPH_STRICT_MSGPACK`` or the
     constructor's ``allowed_msgpack_modules`` argument (#68).
+
+    *tolerant*, when ``True``, degrades an unrevivable
+    ``EXT_NAMESPACE_AWARE_EVENT`` identity to an :class:`UnrevivedIdentity`
+    instead of raising. Only ``NamespaceAwareSerde.tolerate_unresolved``
+    sets this. Every other caller keeps the strict default.
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
@@ -215,10 +284,16 @@ def _make_ext_hook(
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
             # has dropped, or omit a field it has gained with no AddField.
+            if tolerant:
+                # Retirement cleanup only (see the *tolerant* parameter
+                # docstring above). The caller is a tool that exists to
+                # settle exactly this thread, not a normal read. Degrade
+                # instead of raising. Keep no partial kwargs: there is
+                # no live class to hold them.
+                return UnrevivedIdentity(module=module_name, qualname=qualname)
             errors.append(
-                f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: {exc}. "
-                f"The class may have been renamed or removed, or its fields "
-                f"may have changed, since the checkpoint was written."
+                f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: "
+                f"{exc}. {_revival_remedy(qualname, exc)}"
             )
             raise
 
@@ -226,6 +301,12 @@ def _make_ext_hook(
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)
+from langgraph_events._warn import warn_user  # noqa: E402
+
+
+class UnreachableMigrationWarning(UserWarning):
+    """A ``@migrate_from``-decorated class was not collected into a
+    :class:`NamespaceAwareSerde`'s scope. Its migration does nothing."""
 
 
 class NamespaceAwareSerde(JsonPlusSerializer):
@@ -295,6 +376,49 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         self._live_identities = frozenset(scope)
         self._legacy_write = legacy_write
         self._encode_default = _make_default(legacy_write, oldest_historic)
+        self._tolerant_depth = 0
+        for cls in _unreachable_migrate_from_siblings(scope):
+            warn_user(
+                f"{cls.__qualname__} is decorated with @migrate_from, but "
+                f"this serde's namespaces=/events= never reaches it — its "
+                f"migration will not be collected, so a payload under its "
+                f"historic identity will not revive. Nest it inside a "
+                f"Namespace passed via namespaces=, or pass it directly "
+                f"in events=.",
+                UnreachableMigrationWarning,
+            )
+
+    @property
+    def _tolerant(self) -> bool:
+        return self._tolerant_depth > 0
+
+    @contextlib.contextmanager
+    def tolerate_unresolved(self) -> Iterator[None]:
+        """Degrade an unrevivable interrupt identity to
+        :class:`UnrevivedIdentity` instead of raising ``Cannot revive``,
+        for the duration of the ``with`` block.
+
+        For ``EventGraph.threads_paused_on()``/``abandon()`` only. These
+        are the retirement tools that must keep working on a thread
+        whose paused class was already deleted. ``loads_typed()`` stays
+        strict outside this block, so a genuine revival bug elsewhere
+        still raises.
+
+        Reentrant: a depth counter, not a flag. ``abandon()`` opens this
+        block and then calls a helper that opens it again for one read.
+        The inner exit must not turn tolerance off out from under the
+        still-open outer block.
+
+        WARNING: toggles per-instance state. Do not read through this
+        same serde instance from another thread/task while the block is
+        open. This is the same caveat as calling ``abandon()``
+        concurrently with another run on the thread it targets.
+        """
+        self._tolerant_depth += 1
+        try:
+            yield
+        finally:
+            self._tolerant_depth -= 1
 
     def revivable_identities(self) -> frozenset[tuple[str, str]]:
         """Every ``(module, qualname)`` this serde can revive — either still
@@ -343,6 +467,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._addfield_table,
                     self._origin_addfield_table,
                     self._scope,
+                    tolerant=self._tolerant,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )

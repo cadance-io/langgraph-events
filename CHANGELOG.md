@@ -7,7 +7,125 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventGraph.abandon()` / `.aabandon()`.** Settles a paused thread without answering its
+  pending `Interrupted`. Closes [#162](https://github.com/cadance-io/langgraph-events/issues/162).
+  Ends the thread on a terminal `Abandoned(Halted)`, via the same three-superstep settle
+  primitive `on_unresumable="halt"` uses. The tool for retiring an `Interrupted` subclass:
+  resuming every paused thread first would instead append the retired identity back into the log.
+  Requires a checkpointer. Raises `ValueError` on a thread with no events to settle. Ignores
+  `on_unresumable` (that policy governs an *accidental* no-op resume, not a deliberate
+  abandonment). Returns `None`. Callers who want the log call `graph.get_state(config).events`.
+
+- **`Abandoned`.** New `Halted` subtype recorded by `abandon()`/`aabandon()`. `.reason` is the
+  caller-supplied reason. `.discarded` is the qualname(s) of the interrupt(s) thrown away.
+
+- A `resume()` on an already-abandoned thread now names the abandonment in its
+  `UnresumableError` message instead of pointing at a handler rename/removal.
+
+- **`EventGraph.threads_paused_on()` / `.athreads_paused_on()`.** Configs for every thread
+  whose latest checkpoint has a pending interrupt, optionally filtered to an `Interrupted`
+  class or subclass. Closes the discovery gap in the `abandon()` retirement workflow: a client
+  no longer needs `graph.compiled` or `snapshot.tasks[*].interrupts[*].value` to find the
+  threads to abandon. Reads the checkpoint's raw pending writes directly, not the graph's
+  compiled topology, so it still finds a thread paused on a handler already removed from the
+  graph, the common retirement shape (an `Interrupted` usually retires the handler that
+  produced it too). Requires a checkpointer. Reads every checkpoint the checkpointer holds:
+  cost is O(all checkpoints), not O(paused threads), so a large deployment should filter
+  thread ids server-side instead. Raises `ValueError` if the checkpointer's `list()`/`alist()`
+  is unimplemented, naming the method (closes part of [#164]).
+
+- **`abandon()` / `aabandon()` gained `require_interrupt: bool = True`.** By default, both now
+  raise `ValueError` on a thread with no pending interrupt, naming the thread and pointing at
+  `require_interrupt=False`. Previously they settled such a thread silently, recording
+  `Abandoned(discarded="")`. This appended a terminal event onto settled business history with
+  no warning. The pending-interrupt check reads the checkpoint directly, same as
+  `threads_paused_on()`, so it does not raise on a genuinely paused thread whose handler is
+  already gone from the graph. Pass `require_interrupt=False` to keep the old behaviour
+  (closes part of [#164]).
+
+- **`threads_paused_on()`/`abandon()` now survive a deleted `Interrupted` class, not only a
+  removed handler.** A stored pending interrupt naming a class that no longer imports used to
+  raise `Cannot revive` from both, the exact tool meant to clean up that state. Both now
+  degrade: the thread stays in `threads_paused_on()`'s result, and `abandon()`/`aabandon()`
+  settle it under the default `require_interrupt=True`, recording the interrupt's last-known
+  qualname in `Abandoned.discarded` instead of a live instance. Scoped to these two operations
+  only: every other read (`get_state()`, `resume()`, `invoke()`, …) stays strict, so a genuine
+  revival bug still raises. The `Cannot revive` message now states the remedy: settle with
+  `abandon()`/`aabandon()` before deleting the class, or map the identity onto a tombstone with
+  `@migrate_from()` — see [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment)
+  (closes part of [#164]).
+
+- **`serde.UnreachableMigrationWarning`.** `NamespaceAwareSerde` now warns at construction when
+  a `@migrate_from`-decorated class lives in a module its `namespaces=`/`events=` already
+  reaches, but was never itself passed in. Its migration silently did nothing before this. The
+  warning names the class and says how to fix it (nest it in a passed `Namespace`, or add it to
+  `events=`). Scoped to modules already reachable through this construction, not a process-wide
+  scan, so an unrelated engine lifetime's decorated classes are never flagged.
+
+[#164]: https://github.com/cadance-io/langgraph-events/issues/164
+
 ### Fixed
+
+- **The retirement docs' step 4 sweep could never fail.** It compared
+  `type(e).__qualname__` against `"EventClass"` (a placeholder inside a string literal, which
+  never equals a real qualname). The snippet therefore always computed `unsafe == []`. It
+  green-lit the delete regardless of what the store held. Now binds `RETIRING = EventClass`
+  and compares `type(e).__qualname__ == RETIRING.__qualname__`. Verified against a store with
+  a genuinely unsafe answered thread, which the snippet now reports.
+
+- **`write_baseline` raised `AttributeError` on a `str` path.** Every sibling gate
+  (`assert_all_baselined_cover`/`_resolve`/`_revive`/`_handlers_cover`) already accepts
+  `Path | str`. `write_baseline` was the one outlier, and the retirement docs' own workflow
+  printed a bare string. Now accepts `Path | str` and coerces, matching its siblings.
+
+- **`Cannot revive`'s remedy misdirected on a field-shape `TypeError`.** When the identity
+  resolved to a live class (including a tombstone already carrying `@migrate_from`) but
+  construction failed on a field mismatch, the message still said to map the identity onto a
+  tombstone with `@migrate_from(...)`, naming the class that already **is** the tombstone. Now
+  says the target class does not declare the field the stored payload carries, naming the
+  field.
+
+- **The nested tombstone recipe silently no-oped when the checkpointer already carried a
+  `NamespaceAwareSerde`** (e.g. reused from an earlier graph in the same process).
+  `from_namespaces(...)`'s auto-wiring deliberately skips rebuilding one that is already there
+  (see `api.md`), so the tombstone never entered scope, with no error or warning. Documented
+  inline in the recipe, not only in a table three documents away.
+
+- **`Abandoned.discarded` recorded the leaf class name, not the qualname.** `"ApprovalRequested"`
+  when the class was still live, but `"Order.ApprovalRequested"` (the qualname) once it was
+  deleted. The same field changed shape under the exact axis a retirement changes. A check
+  written before the deletion (`match with in or .split(", ")`) could stop matching after it.
+  Always the qualname now, live class or not: unambiguous under nesting and stable across the
+  deletion (closes part of [#164]).
+
+- **The published `@migrate_from` retirement recipe did not work.** It printed a module-level
+  tombstone class and claimed `EventGraph.from_namespaces(...)` would collect it. That method
+  has no `events=` kwarg and never reaches a module-level class, so the recipe recovered
+  nothing, silently. Replaced with a nested-in-`Namespace` recipe (the one
+  `from_namespaces(...)` actually wires up) as the primary path, and the module-level form as a
+  separate, complete, hand-built-serde alternative. The tombstone in both was field-free,
+  correct only when the retired class also had no fields, and the alternative's
+  `EventGraph([...])` call dropped the inline `Order.Approve` command it needs, tripping
+  `OrphanedEventWarning`. Both snippets now carry the retired class's fields (with an inline
+  comment saying why) and register every handler they need. Both were verified end to end,
+  warning-free, across a real process restart against persisted checkpoint bytes (closes part
+  of [#164]).
+
+- **Two coverage-gate messages had no remedy line, and two had a grammar/count mismatch.**
+  `assert_all_baselined_resolve`/`assert_all_baselined_revive` named the broken identity but not
+  the fix. Both now end with the same remedy line `MigrationCoverageError` already had.
+  `MigrationCoverageError`/`HandlerCoverageError` said "1 identity ... are neither" and "1
+  ... handler no longer resolve" regardless of count. The verb now agrees ("is"/"resolves" for
+  one, "are"/"resolve" for more than one).
+
+- **`GraphState.interrupted` was `None` on a first pause.** `get_state().interrupted` read only
+  the event log, and an `Interrupted` joins the log only on resume. A thread paused for the
+  first time therefore reported `is_interrupted=True` with `interrupted=None`. The published
+  `docs/control-flow.md` example crashed on this (`AttributeError` reading `.order_id`). Now
+  falls back to the snapshot's pending interrupt payload when the log has none yet (closes part
+  of [#164]).
 
 - **`on_unresumable="halt"` re-armed the thread it was supposed to retire.** The policy appended
   its terminal `Unresumable(Halted)` event with a single `update_state` call. That call re-ran

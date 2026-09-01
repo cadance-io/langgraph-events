@@ -180,6 +180,44 @@ log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 
 See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
 
+### Ending a pause without answering it — `abandon()`
+
+`graph.resume(event)` answers a pending `Interrupted`. `graph.abandon(config, reason=...)` or `aabandon()` ends the pause without ever answering it. Both require a checkpointer.
+
+```python
+graph.abandon(config, reason="retiring OrderConfirmationRequested")
+```
+
+`abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`):
+
+```python
+for config in graph.threads_paused_on(OrderConfirmationRequested):
+    graph.abandon(config, reason="retiring OrderConfirmationRequested")
+```
+
+Omit the class to get every paused thread. `threads_paused_on()` reads every checkpoint the checkpointer holds. Cost is O(all checkpoints), not O(paused threads). A large deployment should filter thread IDs server-side instead of calling it directly.
+
+`abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass. Resuming every paused thread first would append the very identity you are deleting.
+
+The thread is terminal afterwards. `abandon()` appends a terminal [`Abandoned`](api.md#system-events) event (a [`Halted`](concepts.md#system-events) subtype). It leaves nothing scheduled. It preserves any completed sibling handler's writes from the same fanned-out superstep.
+
+`abandon()` raises `ValueError` if the thread has no events to settle (never run, or only `pre_seed()`ed). `abandon()` also raises `ValueError` if the thread has no pending interrupt, naming the thread. This catches a stray ID in a candidate list before it silently closes out settled business history. Pass `require_interrupt=False` to settle such a thread anyway. It records `Abandoned(discarded="")`.
+
+Like every event on this settle path, `Abandoned` is recorded, not dispatched. `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` and `.discarded`. `.reason` is the caller-supplied string, `""` if none. `.discarded` holds the discarded interrupts' **qualnames**, for example `"Order.ApprovalRequested"` for a class nested in a `Namespace`, never the bare `"ApprovalRequested"`. Values are deduped and joined with `", "`, `""` if none. Match it with `in` or split on `", "`. Never use `==`. A fanned-out superstep can pause two interrupts, and `==` stops matching then.
+
+Always the qualname, never the bare class name: it stays unambiguous under nesting. For a plain retirement (handler deleted, or handler and class deleted together with no recovery), it also stays the *same string*: a check written before that retirement keeps matching after it. It does **not** stay the same string once the [tombstone recovery](event-migrations.md#recovering-a-delete-first-deployment) runs. `discarded` then holds the *tombstone's* qualname (e.g. `Order.RetiredApprovalGate`), not the retired class's (`Order.ApprovalRequired`). A check pinned to the original name stops matching from that point on.
+
+`threads_paused_on()` and `abandon()` still work if the `Interrupted` class itself has already been deleted, not just its handler. This is the delete-first mistake this library's docs used to train. Neither can construct the class anymore, so `discarded` then carries the interrupt's last-known qualname instead of a live instance. See [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment) to map that identity back onto a tombstone class. The fix also revives any thread that had already answered the interrupt.
+
+`abandon()` cleans only the live checkpoint. A historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#the-minimum-case-rename-inside-a-namespace).
+
+!!! warning "Concurrent runs"
+    A run in flight on the thread will silently overwrite whatever `abandon()` did,
+    or vice versa, depending on ordering. Call `abandon()` only on a thread that is
+    genuinely at rest.
+
+`abandon()` does not consult [`on_unresumable`](api.md#graph-execution). That policy governs an accidental no-op `resume()` (a renamed/removed handler, a double resume), not a deliberate abandonment. A later `resume()` on an abandoned thread still raises [`UnresumableError`](api.md#warnings) under the default policy, naming the abandonment instead of pointing at a handler rename.
+
 ### Typed payloads — `InterruptedWithPayload`
 
 For interrupts whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The AG-UI adapter recognises the contract directly — see [AG-UI](agui.md).

@@ -21,7 +21,10 @@ Pass ``migrations=`` to keep old checkpoints readable after a refactor —
 see :mod:`langgraph_events.serde.migrations` and ``docs/event-migrations.md``.
 """
 
-from langgraph_events.serde._jsonplus import NamespaceAwareSerde
+from langgraph_events.serde._jsonplus import (
+    NamespaceAwareSerde,
+    UnreachableMigrationWarning,
+)
 from langgraph_events.serde.migrations import (
     CoverageError,
     HandlerCoverageError,
@@ -49,6 +52,7 @@ __all__ = [
     "Migration",
     "MigrationCoverageError",
     "NamespaceAwareSerde",
+    "UnreachableMigrationWarning",
     "assert_all_baselined_cover",
     "assert_all_baselined_handlers_cover",
     "assert_all_baselined_resolve",

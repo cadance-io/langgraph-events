@@ -26,11 +26,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
-    from pathlib import Path
 
     from langgraph_events import EventGraph
 
@@ -82,7 +82,7 @@ class ChangeReport:
 
 
 def write_baseline(
-    graph: EventGraph, path: Path, *, allow_removed: bool = False
+    graph: EventGraph, path: Path | str, *, allow_removed: bool = False
 ) -> None:
     """Snapshot every event identity reachable from *graph* to *path*.
 
@@ -98,7 +98,12 @@ def write_baseline(
     to overwrite anyway (intentional deletes). This compares baseline ↔
     topology only; it never inspects the serde or migration table — coverage
     stays with ``assert_all_baselined_cover`` / ``assert_all_baselined_revive``.
+
+    *path* takes a ``str`` too. It is coerced to ``Path`` immediately,
+    matching every ``assert_all_baselined_*`` gate's
+    ``baseline_path: Path | str``.
     """
+    path = Path(path)
     current = set(_enumerate_identities(graph))
     if path.exists() and not allow_removed:
         removed = tuple(sorted(_load_baseline(path) - current))
@@ -175,6 +180,17 @@ class CoverageError(AssertionError):
     """
 
 
+MIGRATION_REMEDY = (
+    "For each: either add @migrate_from to the surviving class, append a "
+    "Migration to migrations=, or regenerate the baseline if the identity "
+    "is intentionally dropped."
+)
+"""Shared remedy line for every gate that fails on an unreachable event
+identity (``MigrationCoverageError`` and both ``_assert_baselined``
+gates in ``testing.py``). One wording, so a fix that works for one
+gate's failure reads the same for the others."""
+
+
 class MigrationCoverageError(CoverageError):
     """Raised when a baselined event identity has no migration and no live class.
 
@@ -187,12 +203,11 @@ class MigrationCoverageError(CoverageError):
         self.uncovered = uncovered
         joined = ", ".join(f"{m}:{q}" for m, q in uncovered)
         plural = "y" if len(uncovered) == 1 else "ies"
+        verb = "is" if len(uncovered) == 1 else "are"
         super().__init__(
-            f"{len(uncovered)} identit{plural} in the baseline are neither "
-            f"currently live nor covered by a migration: {joined}. For each: "
-            f"either add @migrate_from to the surviving class, append a "
-            f"Migration to migrations=, or regenerate the baseline if the "
-            f"identity is intentionally dropped."
+            f"{len(uncovered)} identit{plural} in the baseline {verb} neither "
+            f"currently live nor covered by a migration: {joined}. "
+            f"{MIGRATION_REMEDY}"
         )
 
 
@@ -209,9 +224,10 @@ class HandlerCoverageError(CoverageError):
         self.uncovered = uncovered
         joined = ", ".join(uncovered)
         plural = "" if len(uncovered) == 1 else "s"
+        verb = "resolves" if len(uncovered) == 1 else "resolve"
         hint = uncovered[0] if uncovered else "old_name"
         super().__init__(
-            f"{len(uncovered)} baselined handler{plural} no longer resolve to a "
+            f"{len(uncovered)} baselined handler{plural} no longer {verb} to a "
             f"live node: {joined}. For each: add @on(previously={hint!r}) to the "
             f"surviving handler, or regenerate the baseline if the handler is "
             f"intentionally removed."

@@ -36,6 +36,7 @@ from langgraph_events.serde.migrations._core import (
     _resolve_rename,
 )
 from langgraph_events.serde.migrations.detect import (
+    MIGRATION_REMEDY,
     HandlerCoverageError,
     MigrationCoverageError,
     _load_baseline,
@@ -211,7 +212,9 @@ def _assert_baselined(
         if (failure := check(serde, module, qualname)) is not None
     ]
     if failures:
-        raise AssertionError(header + "\n  " + "\n  ".join(failures))
+        raise AssertionError(
+            header + "\n  " + "\n  ".join(failures) + "\n" + MIGRATION_REMEDY
+        )
 
 
 def _resolve_check(

@@ -82,6 +82,7 @@ class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-loggi
 | Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
 | Fan out parallel work | `Scatter[Item]` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
+| Retire an `Interrupted` subclass | `graph.abandon(config)` / `.aabandon()` | [Control Flow](control-flow.md#ending-a-pause-without-answering-it-abandon) |
 | Stop the graph early | Return a `Halted` subclass | [Concepts](concepts.md#system-events) |
 | Catch handler exceptions | `raises` on the `Command` + `@on(HandlerRaised, ...)` | [Control Flow](control-flow.md#handler-exceptions) |
 | Retry a transient failure | `retry = RetryPolicy(...)` alongside `raises=` | [Control Flow](control-flow.md#retries) |

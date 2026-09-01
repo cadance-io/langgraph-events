@@ -725,7 +725,29 @@ def describe_NamespaceAwareSerde():
                 assert "FieldShape.Persisted" in message
                 assert "TypeError" in message
                 assert "note" in message
-                assert "fields may have changed" in message
+
+            def it_says_the_class_is_missing_the_field_not_to_migrate_from_it():
+                # The identity resolved to a live class — possibly already
+                # a tombstone carrying @migrate_from — so "map onto a
+                # tombstone with @migrate_from" is nonsense advice here;
+                # that remedy belongs to the ImportError/AttributeError
+                # branch (identity doesn't resolve at all), not this one
+                # (identity resolves, __init__ rejects a stored field).
+                serde = NamespaceAwareSerde()
+
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept", "note": "dropped"},
+                )
+
+                with pytest.raises(ValueError) as excinfo:
+                    serde.loads_typed(payload)
+
+                message = str(excinfo.value)
+                assert "does not declare" in message
+                assert "'note'" in message
+                assert "@migrate_from" not in message
 
         def when_a_required_field_was_added_to_the_class():
             def without_a_migration():
@@ -746,7 +768,7 @@ def describe_NamespaceAwareSerde():
                     assert "FieldShape.Persisted" in message
                     assert "TypeError" in message
                     assert "reason" in message
-                    assert "fields may have changed" in message
+                    assert "fields no longer match the stored payload" in message
 
         def when_the_stored_fields_still_match():
             def it_revives_the_event():
@@ -2191,6 +2213,9 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
+                # Grammar must agree with the count: one identity, not "are".
+                assert "1 identity in the baseline is neither" in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
 
         def when_unifying_the_gate_error_base():
             def it_is_an_assertion_error_subclass():
@@ -2287,6 +2312,7 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persisted" not in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
 
         def when_a_baselined_identity_is_only_reachable_in_scope():
             def it_revives_through_the_scope(tmp_path: Any):
@@ -2426,6 +2452,44 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persist.Persisted" not in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
+
+
+def describe_UnreachableMigrationWarning():
+    # A @migrate_from-decorated class that namespaces=/events= never
+    # reaches contributes nothing — no error, no warning, before this
+    # (#164). The fixture lives in its own module
+    # (_migrate_from_warning_fixture.py) so its module-level orphan
+    # class is never scanned by an unrelated test's serde construction.
+
+    def when_a_decorated_class_is_not_passed_to_the_serde():
+        def it_warns_naming_the_class():
+            import _migrate_from_warning_fixture as fx
+
+            from langgraph_events.serde import UnreachableMigrationWarning
+
+            with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
+                NamespaceAwareSerde(namespaces=(fx.Gate,))
+
+    def when_the_decorated_class_is_passed_via_events():
+        def it_does_not_warn():
+            import _migrate_from_warning_fixture as fx
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                NamespaceAwareSerde(namespaces=(fx.Gate,), events=(fx.OrphanTombstone,))
+
+    def when_no_namespace_reaches_the_decorated_classs_module():
+        def it_does_not_warn():
+            # The fixture module is never passed at all here — out of
+            # scope by design, not a bug; must not be flagged.
+            class _Unrelated(Namespace):
+                class Placeholder(Interrupted):
+                    pass
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                NamespaceAwareSerde(namespaces=(_Unrelated,))
 
 
 def describe_public_serde_surface():
@@ -3126,6 +3190,8 @@ def describe_assert_all_baselined_handlers_cover():
                 # sibling of MigrationCoverageError under the shared base
                 assert isinstance(excinfo.value, CoverageError)
                 assert excinfo.value.uncovered == ("place",)
+                # Grammar must agree with the count: one handler, not "resolve".
+                assert "1 baselined handler no longer resolves to" in str(excinfo.value)
 
     def when_a_reactor_is_replaced_by_an_inline_command():
         # The command's ``previously`` class attribute feeds the same
