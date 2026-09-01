@@ -99,8 +99,9 @@ def write_baseline(
     topology only; it never inspects the serde or migration table — coverage
     stays with ``assert_all_baselined_cover`` / ``assert_all_baselined_revive``.
 
-    *path* takes a ``str`` too — coerced to ``Path`` immediately, matching
-    every ``assert_all_baselined_*`` gate's ``baseline_path: Path | str``.
+    *path* takes a ``str`` too. It is coerced to ``Path`` immediately,
+    matching every ``assert_all_baselined_*`` gate's
+    ``baseline_path: Path | str``.
     """
     path = Path(path)
     current = set(_enumerate_identities(graph))
@@ -185,9 +186,9 @@ MIGRATION_REMEDY = (
     "is intentionally dropped."
 )
 """Shared remedy line for every gate that fails on an unreachable event
-identity (``MigrationCoverageError`` and both ``_assert_baselined`` gates
-in ``testing.py``) — one wording, so a fix that works for one gate's
-failure reads the same for the others."""
+identity (``MigrationCoverageError`` and both ``_assert_baselined``
+gates in ``testing.py``). One wording, so a fix that works for one
+gate's failure reads the same for the others."""
 
 
 class MigrationCoverageError(CoverageError):

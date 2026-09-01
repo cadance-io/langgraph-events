@@ -264,20 +264,19 @@ class GraphState(NamedTuple):
 
 
 class _PendingInterrupts(NamedTuple):
-    """Topology-independent read of a checkpoint's pending interrupt(s) —
-    see ``EventGraph._read_pending_interrupts``.
+    """Topology-independent read of a checkpoint's pending interrupt(s).
+    See ``EventGraph._read_pending_interrupts``.
 
-    ``has_interrupt`` is ``True`` for *any* pending ``__interrupt__``
+    ``has_interrupt`` is ``True`` for any pending ``__interrupt__``
     write, including a non-``Event`` payload (e.g. a raw
-    ``langgraph.types.interrupt("...")`` call) or an unrevivable one — this
-    is what ``require_interrupt`` and ``event_type=None`` discovery gate
-    on. ``events`` is the same set narrowed to successfully-revived
-    ``Event`` payloads, deduped by qualname — this is what a class
-    filter matches against. ``unresolved_names`` holds the recorded
-    qualname of every interrupt whose class no longer imports (see
-    ``EventGraph._read_pending_interrupts``), deduped in discovery order
-    — a class filter can never match one of these (there is no class to
-    check), but ``abandon()`` still folds them into ``discarded``.
+    ``langgraph.types.interrupt("...")`` call) or an unrevivable one:
+    what ``require_interrupt`` and ``event_type=None`` discovery gate
+    on. ``events`` narrows that set to successfully-revived ``Event``
+    payloads, deduped by qualname: what a class filter matches against.
+    ``unresolved_names`` holds the recorded qualname of every interrupt
+    whose class no longer imports, deduped in discovery order: no class
+    to check, so a filter can never match one, but ``abandon()`` still
+    folds them into ``discarded``.
     """
 
     has_interrupt: bool
@@ -1458,7 +1457,7 @@ class EventGraph:
         """Diagnostic for a ``resume()`` that would be a no-op.
 
         Keys the abandoned diagnosis on the *last* event, not
-        ``log.latest(Halted)`` (a whole-log search) — a thread reused
+        ``log.latest(Halted)`` (a whole-log search): a thread reused
         after :meth:`abandon` must fall back to the generic message once
         ``Abandoned`` is no longer latest.
         """
@@ -1486,13 +1485,13 @@ class EventGraph:
     def _unresumable_short_circuits(
         self, log: EventLog | None = None, config: Any = None
     ) -> bool:
-        """Apply ``on_unresumable``'s ``raise``/``warn`` arm — ``False``
-        means append a terminal event (``halt``), ``True`` means return
+        """Apply ``on_unresumable``'s ``raise``/``warn`` arm. ``False``
+        means append a terminal event (``halt``). ``True`` means return
         the log unchanged (``warn``). ``raise`` raises.
 
-        Caller supplies the state read — async path must ``await
-        aget_state`` (an async-only checkpointer rejects a sync read
-        from the running loop).
+        Caller supplies the state read. The async path must ``await
+        aget_state``: an async-only checkpointer rejects a sync read
+        from the running loop.
         """
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message(log, config))
@@ -1617,7 +1616,7 @@ class EventGraph:
         ``snapshot.next`` set.
 
         Topology-dependent: ``snapshot.tasks`` only reports a task the
-        graph that produced *snapshot* can still schedule — a thread
+        graph that produced *snapshot* can still schedule, so a thread
         paused on a handler this graph no longer registers looks
         uninterrupted here. Used only by :meth:`_graph_state`, reached
         through a caller's own working graph. Everywhere else
@@ -1632,11 +1631,11 @@ class EventGraph:
         """Event instance(s) behind every pending interrupt, deduped by
         type name, in discovery order. Empty if none.
 
-        Scans every task, not just ``tasks[0]`` — a fanned-out dispatch
+        Scans every task, not just ``tasks[0]``: a fanned-out dispatch
         can pause more than one. Skips a non-``Event`` payload, e.g. a
         raw ``langgraph.types.interrupt("...")`` call.
 
-        Topology-dependent, same caveat as :meth:`_is_interrupted` — used
+        Topology-dependent, same caveat as :meth:`_is_interrupted`: used
         only by :meth:`_graph_state`'s first-pause fallback.
         """
         seen: set[str] = set()
@@ -1654,14 +1653,14 @@ class EventGraph:
         """Read every pending ``__interrupt__`` checkpoint write into a
         :class:`_PendingInterrupts`.
 
-        Reads a checkpoint's raw ``pending_writes`` — topology-
-        independent, unlike :meth:`_pending_interrupt_events`. A thread
+        Reads a checkpoint's raw ``pending_writes``, topology-
+        independent unlike :meth:`_pending_interrupt_events`. A thread
         paused on a handler the current graph no longer registers still
-        carries this write; ``StateSnapshot.tasks`` would not show it.
+        carries this write: ``StateSnapshot.tasks`` would not show it.
         This is the mechanism behind discovery and ``abandon()``.
 
-        A write's value is one interrupt or a sequence of them
-        (framework detail; handled either way). A payload degraded to
+        A write's value is one interrupt or a sequence of them (a
+        framework detail, handled either way). A payload degraded to
         ``UnrevivedIdentity`` (only possible when the read ran inside
         ``NamespaceAwareSerde.tolerate_unresolved``) contributes its
         stored qualname to ``unresolved_names`` instead of ``events``.
@@ -1703,10 +1702,10 @@ class EventGraph:
     def _tolerant_read(self) -> contextlib.AbstractContextManager[None]:
         """Context manager that degrades an unrevivable interrupt
         identity instead of raising, for the checkpointer's current
-        serde — a no-op for any serde other than
-        :class:`~langgraph_events.serde.NamespaceAwareSerde` (the only
+        serde: a no-op for any serde other than
+        :class:`~langgraph_events.serde.NamespaceAwareSerde`, the only
         one this library ships that raises ``Cannot revive`` in the
-        first place).
+        first place.
 
         Used by :meth:`_read_pending_interrupts`/
         :meth:`_aread_pending_interrupts` and by
@@ -1727,18 +1726,18 @@ class EventGraph:
         self, config: RunnableConfig, method: str
     ) -> _PendingInterrupts:
         """*config*'s latest checkpoint's pending interrupt(s), read
-        straight from the checkpointer — see :meth:`_pending_interrupt_writes`.
+        straight from the checkpointer. See :meth:`_pending_interrupt_writes`.
 
         Read inside :meth:`_tolerant_read`: a stored write naming a class
         that no longer imports degrades to an ``UnrevivedIdentity``
-        instead of raising — the thread this happens on is precisely the
-        one a retirement caller is hunting.
+        instead of raising, precisely on the thread a retirement caller
+        is hunting.
 
         Any *other* checkpointer failure still propagates, re-raised
         naming *method* and the thread so the caller knows which one is
-        unreadable. Never swallowed — skipping it here would make that
-        thread silently invisible to every caller of this method
-        (discovery included).
+        unreadable. Never swallowed: skipping it here would make that
+        thread silently invisible to every caller of this method,
+        discovery included.
         """
         thread_id = config.get("configurable", {}).get("thread_id")
         try:
@@ -1779,7 +1778,7 @@ class EventGraph:
     ) -> None:
         """Raise ``ValueError`` if the thread has no events to settle.
 
-        Checks the event log, not ``snapshot.created_at is None`` — a
+        Checks the event log, not ``snapshot.created_at is None``: a
         ``pre_seed``ed-only thread has a checkpoint and would pass that
         check.
         """
@@ -1796,9 +1795,9 @@ class EventGraph:
         method: str, pending: _PendingInterrupts, config: RunnableConfig
     ) -> None:
         """Raise ``ValueError`` if *pending* (from
-        :meth:`_read_pending_interrupts`) has no interrupt at all —
+        :meth:`_read_pending_interrupts`) has no interrupt at all,
         including a non-``Event`` payload, which still genuinely pauses
-        the thread even though it can't be named in ``discarded``.
+        the thread even though ``discarded`` cannot name it.
 
         Guards the default ``require_interrupt=True``: without it,
         ``abandon()``/``aabandon()`` would silently settle an
@@ -1821,7 +1820,7 @@ class EventGraph:
     ) -> None:
         """Settle a thread onto a terminal ``Abandoned`` without
         dispatching whatever ``Interrupted`` it was paused on. Use this
-        to retire an ``Interrupted`` subclass — resuming every paused
+        to retire an ``Interrupted`` subclass: resuming every paused
         thread first would instead append that identity to the log.
 
         If ``require_interrupt`` is ``True`` (the default) and the thread
@@ -1830,17 +1829,16 @@ class EventGraph:
         anyway, recording ``Abandoned(discarded="")``.
 
         Settles a thread even when the pending interrupt names an
-        ``Interrupted`` subclass already deleted from the codebase —
-        that thread is exactly what this method exists to clean up.
-        ``discarded`` then records the class's last-known qualname
+        ``Interrupted`` subclass already deleted from the codebase,
+        recording the class's last-known qualname in ``discarded``
         instead of a live instance.
 
         Requires a checkpointer. Raises ``ValueError`` if the thread has
         no events to settle (never run, or only ``pre_seed``ed). Ignores
-        ``on_unresumable`` — that policy governs an accidental no-op
+        ``on_unresumable``: that policy governs an accidental no-op
         ``resume()``, not a deliberate abandonment.
 
-        Runs no graph, so returns no log — call
+        Runs no graph, so returns no log: call
         ``graph.get_state(config).events`` for it.
         """
         self._require_checkpointer("abandon")
@@ -1888,7 +1886,7 @@ class EventGraph:
         ``list()`` is unimplemented, instead of letting a bare
         ``NotImplementedError`` reach the caller.
 
-        Runs inside :meth:`_tolerant_read` — ``list()`` deserializes
+        Runs inside :meth:`_tolerant_read`: ``list()`` deserializes
         every checkpoint it walks, including old versions of threads
         already settled, so a thread whose pending interrupt names a
         deleted class must not break enumeration for every other thread.
@@ -1930,9 +1928,8 @@ class EventGraph:
         pending: _PendingInterrupts, event_type: type[Interrupted] | None
     ) -> bool:
         """Whether *pending* (from :meth:`_read_pending_interrupts`) has
-        an interrupt matching *event_type* — any pending interrupt at
-        all, including a non-``Event`` payload, if *event_type* is
-        ``None``."""
+        an interrupt matching *event_type*: with ``None``, any pending
+        interrupt matches, including a non-``Event`` payload."""
         if not pending.has_interrupt:
             return False
         if event_type is None:
@@ -1943,14 +1940,12 @@ class EventGraph:
         self, event_type: type[Interrupted] | None = None
     ) -> list[RunnableConfig]:
         """Configs for every thread whose latest checkpoint has a pending
-        interrupt.
+        interrupt. With *event_type*, keeps only threads paused on that
+        class or a subclass. With ``None``, returns every paused thread.
 
-        With *event_type*, keeps only threads paused on that class or a
-        subclass. With ``None``, returns every paused thread.
-
-        Reads each thread's raw checkpoint directly (see
-        :meth:`_read_pending_interrupts`), not this graph's compiled
-        topology. Two deletions this unlocks, with different outcomes:
+        Reads each thread's raw checkpoint directly, not this graph's
+        compiled topology. Two deletions this unlocks, with different
+        outcomes:
 
         - The **handler** that produced the interrupt is already removed
           from this graph. The class still imports, so the interrupt
@@ -1958,20 +1953,21 @@ class EventGraph:
           is the common order: retiring an ``Interrupted`` usually
           retires the handler that produced it first.
         - The **class** itself has been deleted and no longer imports.
-          The interrupt can't revive, so the thread is still returned
-          (with ``None``, or matched against nothing — a class filter can
-          never match an identity with no class), and ``abandon()``
-          records its last-known qualname in ``discarded`` instead of a
-          live instance.
+          The interrupt cannot revive. With no filter
+          (``event_type=None``), the thread is still returned. With a
+          class filter, it matches nothing: a filter can never match an
+          identity with no class. ``abandon()`` records the interrupt's
+          last-known qualname in ``discarded`` instead of a live
+          instance.
 
         WARNING: this reads every checkpoint the checkpointer holds and
-        deserializes every row — cost is O(all checkpoints), not O(paused
+        deserializes every row: cost is O(all checkpoints), not O(paused
         threads). A large deployment should filter thread ids server-side
         instead of calling this directly.
 
         Requires a checkpointer. Raises ``ValueError`` if the
         checkpointer's ``list()`` is unimplemented, or if a custom saver
-        requires a ``thread_id`` filter — enumerate thread ids yourself
+        requires a ``thread_id`` filter: enumerate thread ids yourself
         and call :meth:`get_state` on each in that case.
         """
         self._require_checkpointer("threads_paused_on")
@@ -2002,20 +1998,20 @@ class EventGraph:
         Shared by the sync :meth:`get_state` and async :meth:`aget_state` so
         the snapshot-to-state logic stays in one place across both paths.
 
-        Deliberately a pure function of *snapshot* — no checkpointer read
-        here. That keeps ``is_interrupted``/``interrupted`` topology-
-        dependent (see :meth:`_is_interrupted`): a caller holding a
-        ``GraphState`` reached it through its own working graph, unlike
-        discovery (:meth:`threads_paused_on`) or ``abandon()``, which
-        read the checkpoint directly for exactly this reason.
+        Deliberately a pure function of *snapshot*: no checkpointer read
+        happens here, which keeps ``is_interrupted``/``interrupted``
+        topology-dependent (see :meth:`_is_interrupted`). A caller
+        holding a ``GraphState`` reached it through its own working
+        graph, unlike discovery (:meth:`threads_paused_on`) or
+        ``abandon()``, which read the checkpoint directly.
         """
         all_events = snapshot.values.get("events", [])
         log = EventLog(all_events)
         is_interrupted = self._is_interrupted(snapshot)
         interrupted = log.latest(Interrupted) if is_interrupted else None
         if is_interrupted and interrupted is None:
-            # An Interrupted joins the log only on resume, so a first pause
-            # has none there yet — fall back to the snapshot's pending
+            # An Interrupted joins the log only on resume. A first pause
+            # has none there yet. Fall back to the snapshot's pending
             # interrupt payload.
             for value in self._pending_interrupt_events(snapshot):
                 if isinstance(value, Interrupted):

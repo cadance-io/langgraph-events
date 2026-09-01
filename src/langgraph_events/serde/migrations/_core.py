@@ -846,13 +846,13 @@ def _unreachable_migrate_from_siblings(
     scope: dict[tuple[str, str], type],
 ) -> list[type]:
     """``@migrate_from``-decorated classes that live in a module *scope*
-    already reaches, but were themselves never passed to the serde —
-    so their migration is silently never collected.
+    already reaches, but were themselves never passed to the serde.
+    Their migration is silently never collected.
 
     Scoped to modules ``scope`` already reaches, not a process-wide
-    class scan: a decorated class in a module this serde was never told
+    class scan. A decorated class in a module this serde was never told
     about is out of scope by design (e.g. a different engine lifetime),
-    not a bug — flagging it would be a false positive with no fix the
+    not a bug. Flagging it would be a false positive with no fix the
     caller could act on.
 
     The common trigger this catches: a tombstone class left at module

@@ -81,16 +81,16 @@ class UnrevivedIdentity(NamedTuple):
     """Placeholder for an interrupt identity that could not be revived,
     produced only inside :meth:`NamespaceAwareSerde.tolerate_unresolved`.
 
-    Carries the identity exactly as stored — ``module`` and ``qualname``
-    — with none of the original fields; there is no live class to hold
-    them. Not an ``Event`` subclass: a caller must never mistake this for
-    a real, dispatchable event.
+    Carries the identity exactly as stored: ``module`` and ``qualname``.
+    None of the original fields carry over. There is no live class to
+    hold them. Not an ``Event`` subclass: a caller must never mistake
+    this for a real, dispatchable event.
 
-    Exists for ``EventGraph.threads_paused_on()``/``abandon()`` — the
-    retirement tools that must keep working on a thread whose paused
-    class was deleted before every thread was settled. Every other read
-    path stays strict: an unrevivable identity there is a genuine bug and
-    must raise, not degrade silently.
+    Exists for ``EventGraph.threads_paused_on()``/``abandon()``. These
+    are the retirement tools that must keep working on a thread whose
+    paused class was deleted before every thread was settled. Every
+    other read path stays strict: an unrevivable identity there is a
+    genuine bug and must raise, not degrade silently.
     """
 
     module: str
@@ -106,10 +106,10 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     *exc* is ``ImportError``/``AttributeError`` (the identity resolves to
     no live class at all) or ``TypeError`` (it resolves, but the stored
     kwargs and the class's fields disagree). The two need different
-    remedies: "map onto a tombstone with @migrate_from" is right for the
-    first — there's no live class yet — and wrong for the second, where
-    *qualname* may already **be** the tombstone: redecorating it with the
-    decorator it already carries fixes nothing.
+    remedies. "Map onto a tombstone with @migrate_from" is right for the
+    first case: there is no live class yet. It is wrong for the second
+    case, where *qualname* may already **be** the tombstone:
+    redecorating it with the decorator it already carries fixes nothing.
     """
     if not isinstance(exc, TypeError):
         return (
@@ -235,7 +235,7 @@ def _make_ext_hook(
     *tolerant*, when ``True``, degrades an unrevivable
     ``EXT_NAMESPACE_AWARE_EVENT`` identity to an :class:`UnrevivedIdentity`
     instead of raising. Only ``NamespaceAwareSerde.tolerate_unresolved``
-    sets this — every other caller keeps the strict default.
+    sets this. Every other caller keeps the strict default.
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
@@ -286,10 +286,10 @@ def _make_ext_hook(
             # has dropped, or omit a field it has gained with no AddField.
             if tolerant:
                 # Retirement cleanup only (see the *tolerant* parameter
-                # docstring above): the caller is a tool that exists to
-                # settle exactly this thread, not a normal read — degrade
-                # instead of raising, and keep no partial kwargs (there is
-                # no live class to hold them).
+                # docstring above). The caller is a tool that exists to
+                # settle exactly this thread, not a normal read. Degrade
+                # instead of raising. Keep no partial kwargs: there is
+                # no live class to hold them.
                 return UnrevivedIdentity(module=module_name, qualname=qualname)
             errors.append(
                 f"Cannot revive {module_name}.{qualname}: {type(exc).__name__}: "
@@ -306,7 +306,7 @@ from langgraph_events._warn import warn_user  # noqa: E402
 
 class UnreachableMigrationWarning(UserWarning):
     """A ``@migrate_from``-decorated class was not collected into a
-    :class:`NamespaceAwareSerde`'s scope — its migration does nothing."""
+    :class:`NamespaceAwareSerde`'s scope. Its migration does nothing."""
 
 
 class NamespaceAwareSerde(JsonPlusSerializer):
@@ -398,20 +398,21 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         :class:`UnrevivedIdentity` instead of raising ``Cannot revive``,
         for the duration of the ``with`` block.
 
-        For ``EventGraph.threads_paused_on()``/``abandon()`` only — the
-        retirement tools that must keep working on a thread whose paused
-        class was already deleted. ``loads_typed()`` stays strict outside
-        this block, so a genuine revival bug elsewhere still raises.
+        For ``EventGraph.threads_paused_on()``/``abandon()`` only. These
+        are the retirement tools that must keep working on a thread
+        whose paused class was already deleted. ``loads_typed()`` stays
+        strict outside this block, so a genuine revival bug elsewhere
+        still raises.
 
-        Reentrant: a depth counter, not a flag — ``abandon()`` opens this
-        block and then calls a helper that opens it again for one read;
-        the inner exit must not turn tolerance off out from under the
+        Reentrant: a depth counter, not a flag. ``abandon()`` opens this
+        block and then calls a helper that opens it again for one read.
+        The inner exit must not turn tolerance off out from under the
         still-open outer block.
 
         WARNING: toggles per-instance state. Do not read through this
         same serde instance from another thread/task while the block is
-        open — the same caveat as calling ``abandon()`` concurrently with
-        another run on the thread it targets.
+        open. This is the same caveat as calling ``abandon()``
+        concurrently with another run on the thread it targets.
         """
         self._tolerant_depth += 1
         try:

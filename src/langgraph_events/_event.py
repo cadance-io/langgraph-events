@@ -714,19 +714,19 @@ class Abandoned(Halted):
     routes straight to ``END`` before any handler match. See
     :meth:`EventGraph.abandon`.
 
-    ``discarded`` is the discarded interrupt's **qualname**, never the
-    instance — a revived instance would leave a non-event in the log
-    once the class is deleted, and ``.trail()`` would raise
+    ``discarded`` is the discarded interrupt's **qualname**, not the
+    instance. A revived instance would leave a non-event in the log once
+    the class is deleted, and ``.trail()`` would then raise
     ``AttributeError``. Always the qualname, e.g. ``"Order.
     ApprovalRequested"`` for a class nested in a ``Namespace``, never the
-    bare ``"ApprovalRequested"`` — the qualname is unambiguous under
-    nesting and is what a checkpoint records, so it stays the same
+    bare ``"ApprovalRequested"``. The qualname stays unambiguous under
+    nesting. It is what a checkpoint records, so it stays the same
     whether the class still imports or was already deleted. ``""`` when
     there was no pending interrupt, including a raw
     ``langgraph.types.interrupt(...)`` call, which has no identity to
     record.
 
-    Joined with ``", "`` and deduped across a fanned-out dispatch — two
+    Joined with ``", "`` and deduped across a fanned-out dispatch. Two
     tasks paused on the same type add one name, not two. A single-value
     equality check stops matching once a second task is pending. Use
     ``in`` or split on ``", "`` instead.
