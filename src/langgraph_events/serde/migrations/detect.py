@@ -131,7 +131,10 @@ def write_baseline(
     current = set(live)
     recorded: dict[tuple[str, str], frozenset[str] | None] = {}
     if path.exists():
-        recorded = _load_baseline_retired(path) | _load_baseline_fields(path)
+        raw = _read_baseline(path)
+        recorded = _fields_by_identity(raw.get("retired", [])) | _fields_by_identity(
+            raw["events"]
+        )
     events = {
         identity: fields | (recorded.get(identity) or frozenset())
         for identity, fields in live.items()
@@ -270,7 +273,8 @@ def _check_v3_shape(raw: dict[str, Any], baseline_path: Path) -> None:
         raise ValueError(
             f"Baseline at {baseline_path} is version {raw['version']} but "
             f"these events entries have no `fields`: {', '.join(incomplete)}. "
-            f"Regenerate the baseline with write_baseline()."
+            f"Add `fields` to each events entry by hand, or delete the file "
+            f"and run write_baseline()."
         )
     live = {(e["module"], e["qualname"]) for e in events}
     retired = {(e["module"], e["qualname"]) for e in raw.get("retired", [])}

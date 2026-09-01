@@ -387,7 +387,7 @@ def describe_write_baseline_retirement():
     def when_allow_removed_is_set():
         def it_warns_that_the_flag_does_nothing(tmp_path: Path):
             # The flag once erased the dropped identity. A write now retires
-            # it whatever the flag says, and the flag is on its way out.
+            # it whatever the flag says, and the flag will be removed.
             import pytest
             from conftest import Order
 
@@ -476,7 +476,7 @@ def describe_load_baseline():
             target = tmp_path / "baseline.json"
             _write_v3(target, events=[_ghost_entry()])
 
-            with pytest.raises(ValueError, match=r"fields.*Regenerate"):
+            with pytest.raises(ValueError, match=r"fields.*by hand"):
                 _load_baseline(target)
 
     def when_an_identity_is_in_events_and_retired():

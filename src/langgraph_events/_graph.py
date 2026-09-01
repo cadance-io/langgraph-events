@@ -2059,8 +2059,7 @@ class EventGraph:
 
         Reads the real store, not the baseline. The coverage gates
         compare the topology to a committed baseline and never read a
-        checkpoint. After ``write_baseline(..., allow_removed=True)``
-        they stay green while a settled thread still raises
+        checkpoint, so they cannot see a settled thread that still raises
         ``Cannot revive``. This method reads that thread.
 
         Reads each thread's latest checkpoint through the serde's
