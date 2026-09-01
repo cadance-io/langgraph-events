@@ -343,10 +343,12 @@ def _bucket_addfields(
         # as a dataclass TypeError at first production read — catch the
         # typo here instead. ``live_identity`` always resolves: post-rename
         # targets were just probed, origin targets point at a chain
-        # terminus ``_resolve_chain_terminus`` already validated.
+        # terminus ``_resolve_chain_terminus`` already validated. Only
+        # ``init=True`` fields count: an ``init=False`` field is not a kwarg
+        # the constructor accepts, so a fill on it breaks every read (#172).
         live_cls = _resolve_identity(*live_identity, scope=scope)
         if is_dataclass(live_cls) and op.field not in {
-            f.name for f in fields(live_cls)
+            f.name for f in fields(live_cls) if f.init
         }:
             raise ValueError(
                 f"AddField({op.module}:{op.qualname!r}, {op.field!r}) in "

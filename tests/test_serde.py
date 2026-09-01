@@ -116,6 +116,30 @@ class FieldShape(Namespace):
         reason: str
 
 
+# Fixture for #172. ``derived`` is ``init=False`` and is rebuilt in
+# ``__post_init__``. The serde must not write it: the constructor rejects it.
+class DerivedField(Namespace):
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False, default=0)
+
+        def __post_init__(self) -> None:
+            object.__setattr__(self, "derived", self.total * 2)
+
+
+# Fixture for the revive gate under #172. ``derived`` is ``init=False`` with
+# no default. The placeholder helper must not fill it: it is not a kwarg.
+# ``__post_init__`` does not read ``total``, so the ``None`` placeholder for
+# ``total`` is accepted, as the revive gate documents.
+class DerivedNoDefault(Namespace):
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False)
+
+        def __post_init__(self) -> None:
+            object.__setattr__(self, "derived", 2)
+
+
 # Fixtures for the decorator-driven migration tests. Module-level so their
 # qualnames resolve through ``importlib.import_module`` + dotted ``getattr``
 # at serde-construction validation time. Function-local classes acquire
@@ -371,6 +395,15 @@ class DecoBackfillTypoField(Namespace):
     class Persisted(DomainEvent):
         command_id: str
         note: str = ""
+
+
+# Fixture for #172. A fill on an ``init=False`` field is not a kwarg the
+# constructor accepts, so the serde must refuse it at construction.
+class DecoBackfillInitFalse(Namespace):
+    @backfill("derived", default=0)
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False, default=0)
 
 
 # Fixture proving the revive gate exercises origin fills instead of
@@ -709,6 +742,18 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(s_back, Persona.Approve.Approved)
                 assert p_back.note == "persona"
                 assert s_back.note == "story"
+
+        def when_an_event_has_an_init_false_field():
+            def it_round_trips_and_recomputes_the_derived_value():
+                serde = NamespaceAwareSerde(namespaces=(DerivedField,))
+                ev = DerivedField.Placed(total=1)
+                assert ev.derived == 2
+
+                back = serde.loads_typed(serde.dumps_typed(ev))
+
+                assert isinstance(back, DerivedField.Placed)
+                assert back.total == 1
+                assert back.derived == 2
 
     def describe_checkpoint_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -2386,6 +2431,20 @@ def describe_NamespaceAwareSerde():
 
                 assert_all_baselined_revive(serde, baseline)
 
+        def when_an_init_false_field_has_no_default():
+            def it_gives_that_field_no_placeholder(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DerivedNoDefault])
+                baseline = _baseline_file(
+                    tmp_path,
+                    (DerivedNoDefault.__module__, "DerivedNoDefault.Placed"),
+                )
+
+                assert_all_baselined_revive(serde, baseline)
+
         def when_a_baselined_identity_is_neither_live_nor_migrated():
             def it_raises_naming_the_uncovered_identity(tmp_path: Any):
                 from langgraph_events.serde.migrations import (
@@ -2955,6 +3014,13 @@ def describe_origin_scoped_backfill():
         def it_guards_the_class_global_decorator_too():
             with pytest.raises(ValueError, match="command_idd"):
                 NamespaceAwareSerde(namespaces=[DecoBackfillTypoField])
+
+    def when_a_fill_names_an_init_false_field():
+        def it_is_rejected_at_serde_construction():
+            # The encoder never writes the field and the constructor rejects
+            # it as a kwarg, so the fill can only break every read.
+            with pytest.raises(ValueError, match="has no field 'derived'"):
+                NamespaceAwareSerde(namespaces=[DecoBackfillInitFalse])
 
     def when_legacy_write_meets_origin_scoped_fills():
         def it_is_rejected_at_serde_construction():
