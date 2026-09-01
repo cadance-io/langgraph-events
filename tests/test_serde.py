@@ -59,6 +59,38 @@ def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
     return target
 
 
+def _baseline_v3_file(
+    tmp_path: Any,
+    *,
+    events: tuple[tuple[str, str, list[str] | None], ...] = (),
+    retired: tuple[tuple[str, str, list[str] | None], ...] = (),
+) -> Any:
+    """Write a v3 baseline JSON and return its path.
+
+    Each entry is ``(module, qualname, fields)``. ``fields`` is ``None`` for
+    a retired entry whose record predates v3.
+    """
+    import json
+
+    def entry(module: str, qualname: str, fields: list[str] | None) -> dict[str, Any]:
+        record: dict[str, Any] = {"module": module, "qualname": qualname}
+        if fields is not None:
+            record["fields"] = fields
+        return record
+
+    target = tmp_path / "baseline.json"
+    target.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "events": [entry(*e) for e in events],
+                "retired": [entry(*r) for r in retired],
+            }
+        )
+    )
+    return target
+
+
 def _build_decoreorg_graph() -> Any:
     """Factory referenced by the detect-CLI tests via ``module:attr``."""
     return EventGraph.from_namespaces(DecoReorg)
@@ -2428,6 +2460,51 @@ def describe_NamespaceAwareSerde():
                 )
 
                 assert_all_baselined_revive(serde, baseline)
+
+        def when_the_live_class_dropped_a_recorded_field():
+            # The stored blob still carries the field. A v3 baseline records
+            # it, so the gate sends it and the live class rejects it: the
+            # failure a real checkpoint would raise.
+            def it_fails_naming_the_recorded_field(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                baseline = _baseline_v3_file(
+                    tmp_path,
+                    events=(
+                        (
+                            DecoReorg.__module__,
+                            "DecoReorg.Persist.Persisted",
+                            ["legacy_flag", "note"],
+                        ),
+                    ),
+                )
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_revive(serde, baseline)
+
+                message = str(excinfo.value)
+                assert "DecoReorg.Persist.Persisted" in message
+                assert "recorded field 'legacy_flag'" in message
+                assert "no longer accepts" in message
+
+            def with_a_baseline_that_predates_v3():
+                def it_passes(tmp_path: Any):
+                    # No field record, so nothing to send: the documented
+                    # degrade until the project re-baselines.
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                    baseline = _baseline_file(
+                        tmp_path,
+                        (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                    )
+
+                    assert_all_baselined_revive(serde, baseline)
 
         def when_the_live_class_has_required_fields():
             def it_does_not_spuriously_fail(tmp_path: Any):
