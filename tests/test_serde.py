@@ -4129,6 +4129,17 @@ def describe_TransformFields():
             with pytest.raises(ValueError, match="Duplicate TransformFields"):
                 NamespaceAwareSerde(namespaces=[Reshaped], migrations=[conflicting])
 
+    def when_the_transform_is_not_callable():
+        def it_is_rejected_at_serde_construction():
+            from langgraph_events.serde.migrations import Migration
+
+            broken = Migration.transform_fields(
+                target=Reshaped.Trimmed, transform="drop_legacy_flag"
+            )
+
+            with pytest.raises(TypeError, match=r"Reshaped\.Trimmed.*callable"):
+                NamespaceAwareSerde(namespaces=[Reshaped], migrations=[broken])
+
     def when_the_target_is_unresolvable():
         def it_is_rejected_at_serde_construction():
             # Same rule as AddField: the target resolves live, or it is a

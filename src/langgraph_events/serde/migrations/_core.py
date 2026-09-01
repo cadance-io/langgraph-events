@@ -400,6 +400,12 @@ def _bucket_transforms(
     source: dict[tuple[str, str], str] = {}
     for op, migration_name in transform_ops:
         target = (op.module, op.qualname)
+        if not callable(op.transform):
+            raise TypeError(
+                f"TransformFields({op.module}:{op.qualname!r}) in "
+                f"{_migration_label(migration_name)}: `transform` must be "
+                f"callable, got {type(op.transform).__name__}."
+            )
         if target in rename_table:
             bucket = origin_transform_table
         elif _resolves(*target, scope=scope):
