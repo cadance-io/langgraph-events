@@ -117,6 +117,12 @@ class _OtherEvent(IntegrationEvent):
     """Resume value that must *not* satisfy a ``_ReviewApproved`` matcher."""
 
 
+class _PauseRequested(Interrupted):
+    """Interrupt for the ``get_state().interrupted`` first-pause suite."""
+
+    order_id: str = ""
+
+
 class _UserMsgReceived(IntegrationEvent):
     """User turn in the shared ReAct-loop scenario."""
 
@@ -1121,6 +1127,59 @@ def describe_EventGraph():
                 for m in received_messages
             )
             assert log.latest(Ended) == Ended(result="done")
+
+    def describe_get_state():
+        # get_state().interrupted must expose the paused Interrupted instance
+        # on a first pause, not only after a resume re-adds it to the log —
+        # the published docs/control-flow.md example reads it before any
+        # resume() call.
+
+        def when_the_thread_is_on_its_first_pause():
+            def it_exposes_the_interrupted_instance():
+                from langgraph.checkpoint.memory import MemorySaver
+
+                @on(Started)
+                def need_input(event: Started) -> _PauseRequested:
+                    return _PauseRequested(order_id=event.data)
+
+                graph = EventGraph([need_input], checkpointer=MemorySaver())
+                config = {"configurable": {"thread_id": "get-state-first-pause"}}
+                graph.invoke(Started(data="A1"), config=config)
+
+                state = graph.get_state(config)
+
+                assert state.is_interrupted
+                assert isinstance(state.interrupted, _PauseRequested)
+                assert state.interrupted.order_id == "A1"
+
+        def when_the_thread_has_resumed_and_paused_again():
+            def it_keeps_reading_from_the_log():
+                # Today's behaviour, unchanged by the first-pause fix: once
+                # an Interrupted has joined the log (via a resume), a later
+                # pause is read from the log, not the snapshot fallback —
+                # the fallback only applies when the log has none at all.
+                from langgraph.checkpoint.memory import MemorySaver
+
+                @on(Started)
+                def need_input(event: Started) -> _PauseRequested:
+                    return _PauseRequested(order_id=event.data)
+
+                @on(_Go)
+                def pause_again(event: _Go) -> _PauseRequested:
+                    return _PauseRequested(order_id="A2")
+
+                graph = EventGraph(
+                    [need_input, pause_again], checkpointer=MemorySaver()
+                )
+                config = {"configurable": {"thread_id": "get-state-resumed-pause"}}
+                graph.invoke(Started(data="A1"), config=config)
+
+                graph.resume(_Go(), config=config)
+                state = graph.get_state(config)
+
+                assert state.is_interrupted
+                assert isinstance(state.interrupted, _PauseRequested)
+                assert state.interrupted.order_id == "A1"
 
     def describe_field_matchers():
 
@@ -4270,6 +4329,42 @@ def _raw_pause(event: Started) -> None:
     lg_interrupt("raw payload")
 
 
+class _StartOnA(IntegrationEvent):
+    """Seed for `_wait_on_a`, kept distinct from `_StartOnB` so two
+    threads_paused_on() threads pause on different classes."""
+
+
+class _StartOnB(IntegrationEvent):
+    """Seed for `_wait_on_b`."""
+
+
+class _PauseOnA(Interrupted):
+    """threads_paused_on() target class."""
+
+
+class _PauseOnB(Interrupted):
+    """threads_paused_on() sibling, must not match a `_PauseOnA` filter."""
+
+
+class _NarrowPauseOnA(_PauseOnA):
+    """Subclass of `_PauseOnA` — must still match a `_PauseOnA` filter."""
+
+
+@on(_StartOnA)
+def _wait_on_a(event: _StartOnA) -> _PauseOnA:
+    return _PauseOnA()
+
+
+@on(_StartOnB)
+def _wait_on_b(event: _StartOnB) -> _PauseOnB:
+    return _PauseOnB()
+
+
+@on(_StartOnA)
+def _wait_narrow(event: _StartOnA) -> _NarrowPauseOnA:
+    return _NarrowPauseOnA()
+
+
 def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
     """A graph whose paused handler was removed, plus the paused thread config."""
     cfg = {"configurable": {"thread_id": tid}}
@@ -4490,17 +4585,6 @@ def describe_abandon():
             names = set(log.latest(Abandoned).discarded.split(", "))
             assert names == {"_PauseA", "_PauseB"}
 
-        def it_leaves_discarded_empty_absent_a_pending_interrupt():
-            saver = MemorySaver()
-            cfg = {"configurable": {"thread_id": "abandon-no-interrupt-at-all"}}
-            graph = EventGraph([_completes], checkpointer=saver)
-            graph.invoke(Started(data="x"), config=cfg)
-
-            graph.abandon(cfg)
-
-            log = graph.get_state(cfg).events
-            assert log.latest(Abandoned).discarded == ""
-
         def it_ignores_a_non_event_interrupt_payload():
             # A bare `interrupt(...)` leaves a plain string, not an Event
             # — dropping the `isinstance` filter would record "str" here
@@ -4538,17 +4622,62 @@ def describe_abandon():
             assert graph.get_state(cfg).events.has(_SideDone)
 
         def it_leaves_the_thread_usable():
+            # v2 drops `_waiter`, so its own get_state() can no longer
+            # schedule that node — require_interrupt would see no pending
+            # interrupt here even though the thread is genuinely paused.
             saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "abandon-usable"}}
             EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
                 Started(data="x"), config=cfg
             )
             v2 = EventGraph([_go_ends], checkpointer=saver)
-            v2.abandon(cfg)
+            v2.abandon(cfg, require_interrupt=False)
 
             log = v2.invoke(_Go(), config=cfg)
 
             assert log.latest(Ended) == Ended(result="went")
+
+    def when_the_thread_has_no_pending_interrupt():
+        # require_interrupt defaults to True: a completed thread has no
+        # pending interrupt, so abandon() must not silently settle it —
+        # our docs call the loop "safe" and it must stay that way (#164).
+
+        def with_default_policy():
+            def it_raises_naming_the_thread():
+                saver = MemorySaver()
+                cfg = {"configurable": {"thread_id": "abandon-no-interrupt-raise"}}
+                graph = EventGraph([_completes], checkpointer=saver)
+                graph.invoke(Started(data="x"), config=cfg)
+
+                with pytest.raises(
+                    ValueError,
+                    match=r"abandon-no-interrupt-raise.*require_interrupt=False",
+                ):
+                    graph.abandon(cfg)
+
+            def it_does_not_settle_the_thread():
+                saver = MemorySaver()
+                cfg = {"configurable": {"thread_id": "abandon-no-interrupt-untouched"}}
+                graph = EventGraph([_completes], checkpointer=saver)
+                graph.invoke(Started(data="x"), config=cfg)
+
+                with pytest.raises(ValueError):
+                    graph.abandon(cfg)
+
+                log = graph.get_state(cfg).events
+                assert not log.has(Abandoned)
+
+        def with_require_interrupt_false():
+            def it_settles_the_thread():
+                saver = MemorySaver()
+                cfg = {"configurable": {"thread_id": "abandon-no-interrupt-forced"}}
+                graph = EventGraph([_completes], checkpointer=saver)
+                graph.invoke(Started(data="x"), config=cfg)
+
+                graph.abandon(cfg, require_interrupt=False)
+
+                log = graph.get_state(cfg).events
+                assert log.latest(Abandoned).discarded == ""
 
     def when_resumed_after_abandoning():
         def with_default_policy():
@@ -4571,7 +4700,7 @@ def describe_abandon():
                     Started(data="x"), config=cfg
                 )
                 v2 = EventGraph([_go_ends], checkpointer=saver)
-                v2.abandon(cfg)
+                v2.abandon(cfg, require_interrupt=False)
                 v2.invoke(_Go(), config=cfg)
 
                 with pytest.raises(UnresumableError) as excinfo:
@@ -4806,17 +4935,51 @@ def describe_async_only_checkpointer():
 
             @pytest.mark.asyncio
             async def it_leaves_the_thread_usable():
+                # v2 drops `_waiter`, so its own aget_state() can no longer
+                # schedule that node — require_interrupt would see no
+                # pending interrupt here even though the thread is
+                # genuinely paused.
                 saver = _AsyncOnlySaver()
                 cfg = {"configurable": {"thread_id": "aabandon-usable"}}
                 await EventGraph([_waiter, _go_noop], checkpointer=saver).ainvoke(
                     Started(data="x"), config=cfg
                 )
                 v2 = EventGraph([_go_ends], checkpointer=saver)
-                await v2.aabandon(cfg)
+                await v2.aabandon(cfg, require_interrupt=False)
 
                 log = await v2.ainvoke(_Go(), config=cfg)
 
                 assert log.latest(Ended) == Ended(result="went")
+
+        def when_the_thread_has_no_pending_interrupt():
+            def with_default_policy():
+                @pytest.mark.asyncio
+                async def it_raises_naming_the_thread():
+                    saver = _AsyncOnlySaver()
+                    cfg = {"configurable": {"thread_id": "aabandon-no-interrupt-raise"}}
+                    graph = EventGraph([_completes], checkpointer=saver)
+                    await graph.ainvoke(Started(data="x"), config=cfg)
+
+                    with pytest.raises(
+                        ValueError,
+                        match=r"aabandon-no-interrupt-raise.*require_interrupt=False",
+                    ):
+                        await graph.aabandon(cfg)
+
+            def with_require_interrupt_false():
+                @pytest.mark.asyncio
+                async def it_settles_the_thread():
+                    saver = _AsyncOnlySaver()
+                    cfg = {
+                        "configurable": {"thread_id": "aabandon-no-interrupt-forced"}
+                    }
+                    graph = EventGraph([_completes], checkpointer=saver)
+                    await graph.ainvoke(Started(data="x"), config=cfg)
+
+                    await graph.aabandon(cfg, require_interrupt=False)
+
+                    log = (await graph.aget_state(cfg)).events
+                    assert log.latest(Abandoned).discarded == ""
 
         def when_resumed_after_abandoning():
             @pytest.mark.asyncio
@@ -4846,6 +5009,158 @@ def describe_async_only_checkpointer():
                     ValueError, match=r"aabandon.*requires a checkpointer"
                 ):
                     await graph.aabandon(cfg)
+
+
+class _NoListSaver(MemorySaver):
+    """Checkpointer whose ``list()``/``alist()`` raise ``NotImplementedError``,
+    like a custom saver that requires a ``thread_id`` filter (#164)."""
+
+    def list(self, config, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+
+    async def alist(self, config, **kwargs):  # type: ignore[override]
+        raise NotImplementedError
+        yield  # pragma: no cover - keeps this an async generator function
+
+
+def describe_threads_paused_on():
+    # Discovery over the checkpointer: which threads are paused, and on
+    # what — so a retirement loop never needs graph.compiled or
+    # snapshot.tasks[*].interrupts[*].value directly (#164).
+
+    def _tids(configs) -> list[str]:
+        return [c["configurable"]["thread_id"] for c in configs]
+
+    def when_threads_pause_on_different_classes():
+        def it_filters_to_the_given_class():
+            saver = MemorySaver()
+            graph = EventGraph([_wait_on_a, _wait_on_b], checkpointer=saver)
+            cfg_a = {"configurable": {"thread_id": "tpo-class-a"}}
+            cfg_b = {"configurable": {"thread_id": "tpo-class-b"}}
+            graph.invoke(_StartOnA(), config=cfg_a)
+            graph.invoke(_StartOnB(), config=cfg_b)
+
+            assert _tids(graph.threads_paused_on(_PauseOnA)) == ["tpo-class-a"]
+
+        def it_keeps_a_subclass_of_the_given_class():
+            saver = MemorySaver()
+            graph = EventGraph([_wait_narrow], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "tpo-subclass"}}
+            graph.invoke(_StartOnA(), config=cfg)
+
+            assert _tids(graph.threads_paused_on(_PauseOnA)) == ["tpo-subclass"]
+
+    def when_event_type_is_none():
+        def it_returns_every_paused_thread():
+            saver = MemorySaver()
+            graph = EventGraph([_waiter_a, _waiter_b], checkpointer=saver)
+            cfg_a = {"configurable": {"thread_id": "tpo-none-a"}}
+            cfg_b = {"configurable": {"thread_id": "tpo-none-b"}}
+            graph.invoke(Started(data="x"), config=cfg_a)
+            graph.invoke(Started(data="x"), config=cfg_b)
+
+            assert set(_tids(graph.threads_paused_on())) == {
+                "tpo-none-a",
+                "tpo-none-b",
+            }
+
+        def it_excludes_a_completed_thread():
+            saver = MemorySaver()
+            graph = EventGraph([_waiter, _completes], checkpointer=saver)
+            paused_cfg = {"configurable": {"thread_id": "tpo-completed-paused"}}
+            done_cfg = {"configurable": {"thread_id": "tpo-completed-done"}}
+            graph.invoke(Started(data="x"), config=paused_cfg)
+
+            other = EventGraph([_completes], checkpointer=saver)
+            other.invoke(Started(data="x"), config=done_cfg)
+
+            assert _tids(graph.threads_paused_on()) == ["tpo-completed-paused"]
+
+    def when_multiple_threads_are_paused():
+        def it_sorts_thread_ids_for_determinism():
+            saver = MemorySaver()
+            graph = EventGraph([_waiter], checkpointer=saver)
+            for tid in ("tpo-sort-c", "tpo-sort-a", "tpo-sort-b"):
+                graph.invoke(
+                    Started(data="x"), config={"configurable": {"thread_id": tid}}
+                )
+
+            assert _tids(graph.threads_paused_on()) == [
+                "tpo-sort-a",
+                "tpo-sort-b",
+                "tpo-sort-c",
+            ]
+
+    def when_there_is_no_checkpointer():
+        def it_raises():
+            graph = EventGraph([_waiter])
+            with pytest.raises(
+                ValueError, match=r"threads_paused_on.*requires a checkpointer"
+            ):
+                graph.threads_paused_on()
+
+    def when_the_checkpointer_does_not_implement_list():
+        def it_raises_a_value_error_naming_the_method():
+            saver = _NoListSaver()
+            graph = EventGraph([_waiter], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "tpo-no-list"}}
+            graph.invoke(Started(data="x"), config=cfg)
+
+            with pytest.raises(ValueError, match=r"threads_paused_on"):
+                graph.threads_paused_on()
+
+
+def describe_athreads_paused_on():
+    # Async mirror of describe_threads_paused_on().
+
+    def _tids(configs) -> list[str]:
+        return [c["configurable"]["thread_id"] for c in configs]
+
+    def when_threads_pause_on_different_classes():
+        @pytest.mark.asyncio
+        async def it_filters_to_the_given_class():
+            saver = MemorySaver()
+            graph = EventGraph([_wait_on_a, _wait_on_b], checkpointer=saver)
+            cfg_a = {"configurable": {"thread_id": "atpo-class-a"}}
+            cfg_b = {"configurable": {"thread_id": "atpo-class-b"}}
+            await graph.ainvoke(_StartOnA(), config=cfg_a)
+            await graph.ainvoke(_StartOnB(), config=cfg_b)
+
+            result = await graph.athreads_paused_on(_PauseOnA)
+            assert _tids(result) == ["atpo-class-a"]
+
+    def when_event_type_is_none():
+        @pytest.mark.asyncio
+        async def it_returns_every_paused_thread():
+            saver = MemorySaver()
+            graph = EventGraph([_waiter_a, _waiter_b], checkpointer=saver)
+            cfg_a = {"configurable": {"thread_id": "atpo-none-a"}}
+            cfg_b = {"configurable": {"thread_id": "atpo-none-b"}}
+            await graph.ainvoke(Started(data="x"), config=cfg_a)
+            await graph.ainvoke(Started(data="x"), config=cfg_b)
+
+            result = await graph.athreads_paused_on()
+            assert set(_tids(result)) == {"atpo-none-a", "atpo-none-b"}
+
+    def when_there_is_no_checkpointer():
+        @pytest.mark.asyncio
+        async def it_raises():
+            graph = EventGraph([_waiter])
+            with pytest.raises(
+                ValueError, match=r"athreads_paused_on.*requires a checkpointer"
+            ):
+                await graph.athreads_paused_on()
+
+    def when_the_checkpointer_does_not_implement_list():
+        @pytest.mark.asyncio
+        async def it_raises_a_value_error_naming_the_method():
+            saver = _NoListSaver()
+            graph = EventGraph([_waiter], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "atpo-no-list"}}
+            await graph.ainvoke(Started(data="x"), config=cfg)
+
+            with pytest.raises(ValueError, match=r"athreads_paused_on"):
+                await graph.athreads_paused_on()
 
 
 def describe_assert_resume_recovers():

@@ -1586,21 +1586,43 @@ class EventGraph:
         return await self._arun(LGCommand(resume=value), **kwargs)
 
     @staticmethod
-    def _discarded_interrupt_name(snapshot: StateSnapshot) -> str:
-        """Type name(s) of the interrupt(s) about to be discarded, joined
-        with ``", "`` and deduped, in discovery order. Empty if none.
+    def _is_interrupted(snapshot: StateSnapshot) -> bool:
+        """Whether *snapshot* is currently paused at a real interrupt.
+
+        ``snapshot.tasks[*].interrupts`` distinguishes a real interrupt
+        from a cancelled or crashed graph, which also leaves
+        ``snapshot.next`` set.
+        """
+        has_interrupt = any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
+        return bool(snapshot.next) and has_interrupt
+
+    @staticmethod
+    def _pending_interrupt_events(snapshot: StateSnapshot) -> list[Event]:
+        """Event instance(s) behind every pending interrupt, deduped by
+        type name, in discovery order. Empty if none.
 
         Scans every task, not just ``tasks[0]`` — a fanned-out dispatch
         can pause more than one. Skips a non-``Event`` payload, e.g. a
         raw ``langgraph.types.interrupt("...")`` call.
         """
-        names: list[str] = []
+        seen: set[str] = set()
+        values: list[Event] = []
         for task in snapshot.tasks:
             for i in getattr(task, "interrupts", ()):
                 value = i.value
-                if isinstance(value, Event) and type(value).__name__ not in names:
-                    names.append(type(value).__name__)
-        return ", ".join(names)
+                if isinstance(value, Event) and type(value).__name__ not in seen:
+                    seen.add(type(value).__name__)
+                    values.append(value)
+        return values
+
+    @staticmethod
+    def _discarded_interrupt_name(snapshot: StateSnapshot) -> str:
+        """Type name(s) of the interrupt(s) about to be discarded, joined
+        with ``", "`` and deduped, in discovery order. Empty if none.
+        """
+        return ", ".join(
+            type(v).__name__ for v in EventGraph._pending_interrupt_events(snapshot)
+        )
 
     @staticmethod
     def _require_settleable(
@@ -1620,14 +1642,40 @@ class EventGraph:
             "thread was never run (or only pre_seed()ed)."
         )
 
-    def abandon(self, config: RunnableConfig, *, reason: str = "") -> None:
+    @classmethod
+    def _require_pending_interrupt(
+        cls, method: str, snapshot: StateSnapshot, config: RunnableConfig
+    ) -> None:
+        """Raise ``ValueError`` if the thread has no pending interrupt.
+
+        Guards the default ``require_interrupt=True``: without it,
+        ``abandon()``/``aabandon()`` would silently settle an
+        already-completed thread onto a terminal ``Abandoned``.
+        """
+        if cls._is_interrupted(snapshot):
+            return
+        thread_id = config.get("configurable", {}).get("thread_id")
+        raise ValueError(
+            f"{method}() found no pending interrupt on thread {thread_id!r}. "
+            "Pass require_interrupt=False to settle it anyway."
+        )
+
+    def abandon(
+        self,
+        config: RunnableConfig,
+        *,
+        reason: str = "",
+        require_interrupt: bool = True,
+    ) -> None:
         """Settle a thread onto a terminal ``Abandoned`` without
         dispatching whatever ``Interrupted`` it was paused on. Use this
         to retire an ``Interrupted`` subclass — resuming every paused
         thread first would instead append that identity to the log.
 
-        Also settles a thread with no pending interrupt, recording
-        ``Abandoned(discarded="")`` rather than raising.
+        If ``require_interrupt`` is ``True`` (the default) and the thread
+        has no pending interrupt, raises ``ValueError`` naming the
+        thread. Pass ``require_interrupt=False`` to settle such a thread
+        anyway, recording ``Abandoned(discarded="")``.
 
         Requires a checkpointer. Raises ``ValueError`` if the thread has
         no events to settle (never run, or only ``pre_seed``ed). Ignores
@@ -1640,16 +1688,120 @@ class EventGraph:
         self._require_checkpointer("abandon")
         snapshot = self._compile().get_state(config)
         self._require_settleable("abandon", snapshot, config)
+        if require_interrupt:
+            self._require_pending_interrupt("abandon", snapshot, config)
         discarded = self._discarded_interrupt_name(snapshot)
         self._settle(config, Abandoned(reason=reason, discarded=discarded))
 
-    async def aabandon(self, config: RunnableConfig, *, reason: str = "") -> None:
+    async def aabandon(
+        self,
+        config: RunnableConfig,
+        *,
+        reason: str = "",
+        require_interrupt: bool = True,
+    ) -> None:
         """Async version of :meth:`abandon`."""
         self._require_checkpointer("aabandon")
         snapshot = await self._compile().aget_state(config)
         self._require_settleable("aabandon", snapshot, config)
+        if require_interrupt:
+            self._require_pending_interrupt("aabandon", snapshot, config)
         discarded = self._discarded_interrupt_name(snapshot)
         await self._asettle(config, Abandoned(reason=reason, discarded=discarded))
+
+    def _list_thread_ids(self, method: str) -> list[str]:
+        """Every distinct thread id the checkpointer holds, sorted.
+
+        Raises ``ValueError`` naming *method* if the checkpointer's
+        ``list()`` is unimplemented, instead of letting a bare
+        ``NotImplementedError`` reach the caller.
+        """
+        ids: set[str] = set()
+        try:
+            for tup in self._checkpointer.list(None):
+                tid = tup.config.get("configurable", {}).get("thread_id")
+                if tid is not None:
+                    ids.add(tid)
+        except NotImplementedError as exc:
+            raise ValueError(
+                f"{method}() needs checkpointer.list() support, which this "
+                f"checkpointer does not implement. Enumerate thread ids "
+                f"yourself and call get_state() on each."
+            ) from exc
+        return sorted(ids)
+
+    async def _alist_thread_ids(self, method: str) -> list[str]:
+        """Async sibling of :meth:`_list_thread_ids`, via ``alist()``."""
+        ids: set[str] = set()
+        try:
+            async for tup in self._checkpointer.alist(None):
+                tid = tup.config.get("configurable", {}).get("thread_id")
+                if tid is not None:
+                    ids.add(tid)
+        except NotImplementedError as exc:
+            raise ValueError(
+                f"{method}() needs checkpointer.alist() support, which this "
+                f"checkpointer does not implement. Enumerate thread ids "
+                f"yourself and call aget_state() on each."
+            ) from exc
+        return sorted(ids)
+
+    @classmethod
+    def _is_paused_on(
+        cls, snapshot: StateSnapshot, event_type: type[Interrupted] | None
+    ) -> bool:
+        """Whether *snapshot* is paused on *event_type* (or ``None`` for any
+        pending interrupt), matching a subclass of *event_type* too."""
+        if not cls._is_interrupted(snapshot):
+            return False
+        if event_type is None:
+            return True
+        return any(
+            isinstance(v, event_type) for v in cls._pending_interrupt_events(snapshot)
+        )
+
+    def threads_paused_on(
+        self, event_type: type[Interrupted] | None = None
+    ) -> list[RunnableConfig]:
+        """Configs for every thread whose latest checkpoint has a pending
+        interrupt.
+
+        With *event_type*, keeps only threads paused on that class or a
+        subclass. With ``None``, returns every paused thread.
+
+        WARNING: this reads every checkpoint the checkpointer holds and
+        deserializes every row — cost is O(all checkpoints), not O(paused
+        threads). A large deployment should filter thread ids server-side
+        instead of calling this directly.
+
+        Requires a checkpointer. Raises ``ValueError`` if the
+        checkpointer's ``list()`` is unimplemented, or if a custom saver
+        requires a ``thread_id`` filter — enumerate thread ids yourself
+        and call :meth:`get_state` on each in that case.
+        """
+        self._require_checkpointer("threads_paused_on")
+        compiled = self._compile()
+        configs: list[RunnableConfig] = []
+        for tid in self._list_thread_ids("threads_paused_on"):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            snapshot = compiled.get_state(cfg)
+            if self._is_paused_on(snapshot, event_type):
+                configs.append(cfg)
+        return configs
+
+    async def athreads_paused_on(
+        self, event_type: type[Interrupted] | None = None
+    ) -> list[RunnableConfig]:
+        """Async version of :meth:`threads_paused_on`."""
+        self._require_checkpointer("athreads_paused_on")
+        compiled = self._compile()
+        configs: list[RunnableConfig] = []
+        for tid in await self._alist_thread_ids("athreads_paused_on"):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            snapshot = await compiled.aget_state(cfg)
+            if self._is_paused_on(snapshot, event_type):
+                configs.append(cfg)
+        return configs
 
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
@@ -1659,15 +1811,20 @@ class EventGraph:
         """
         all_events = snapshot.values.get("events", [])
         log = EventLog(all_events)
-        # Determine interrupt status from the snapshot.
-        # snapshot.tasks[*].interrupts distinguishes real interrupts from
-        # cancelled/crashed graphs (which also have snapshot.next set).
-        has_interrupt = any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
-        is_interrupted = bool(snapshot.next) and has_interrupt
+        is_interrupted = self._is_interrupted(snapshot)
+        interrupted = log.latest(Interrupted) if is_interrupted else None
+        if is_interrupted and interrupted is None:
+            # An Interrupted joins the log only on resume, so a first pause
+            # has none there yet — fall back to the snapshot's pending
+            # interrupt payload.
+            for value in self._pending_interrupt_events(snapshot):
+                if isinstance(value, Interrupted):
+                    interrupted = value
+                    break
         return GraphState(
             events=log,
             is_interrupted=is_interrupted,
-            interrupted=log.latest(Interrupted) if is_interrupted else None,
+            interrupted=interrupted,
         )
 
     def get_state(self, config: Any) -> GraphState:
