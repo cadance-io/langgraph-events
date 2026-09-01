@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from langgraph_events import EventGraph
 
+from langgraph_events._warn import warn_user
 from langgraph_events.serde.migrations._core import RenameEvent
 
 BASELINE_VERSION = 3
@@ -93,19 +94,35 @@ def write_baseline(
     point this commit was authored?" — committed alongside migrations so
     diffs against future commits classify changes deterministically.
 
-    Refuses to silently regress: if *path* already exists and the new
-    snapshot would drop identities the old one recorded, raise
-    :class:`BaselineRegressionError` — overwriting them away would make
-    :func:`detect_changes` / ``assert_all_baselined_cover`` permanently blind
-    to a forgotten migration for those identities. Pass ``allow_removed=True``
-    to overwrite anyway (intentional deletes). This compares baseline ↔
-    topology only; it never inspects the serde or migration table — coverage
-    stays with ``assert_all_baselined_cover`` / ``assert_all_baselined_revive``.
+    Each ``events`` entry records the ``fields`` of its class. The record
+    is cumulative: a field that an earlier baseline recorded stays in the
+    record after the live class drops it. A recorded field can sit in a
+    checkpoint, so the revive gate must keep exercising it. Removing a
+    field from the record is a hand edit.
+
+    A write never erases an identity. An identity the old baseline recorded
+    and the topology no longer reaches moves to ``retired``, with the
+    ``fields`` last recorded for it. A ``retired`` entry persists across
+    later writes until a hand edit removes it, or until the identity is
+    live again. The coverage gates walk ``retired`` too, so a forgotten
+    migration for a retired identity fails in CI. This compares baseline ↔
+    topology only; it never inspects the serde or migration table.
+
+    *allow_removed* is deprecated and does nothing. Passing ``True`` emits a
+    ``DeprecationWarning``. The flag will be removed in a later release.
 
     *path* takes a ``str`` too. It is coerced to ``Path`` immediately,
     matching every ``assert_all_baselined_*`` gate's
     ``baseline_path: Path | str``.
     """
+    if allow_removed:
+        warn_user(
+            "write_baseline(allow_removed=True) does nothing: a write now "
+            "moves a dropped identity to the baseline's `retired` list "
+            "instead of erasing it. The flag will be removed in a later "
+            "release. Remove it from the call.",
+            DeprecationWarning,
+        )
     path = Path(path)
     live = {
         (module, qualname): frozenset(f.name for f in dataclasses.fields(cls))
@@ -114,14 +131,15 @@ def write_baseline(
     current = set(live)
     recorded: dict[tuple[str, str], frozenset[str] | None] = {}
     if path.exists():
-        recorded = _load_baseline_fields(path)
-    if path.exists() and not allow_removed:
-        removed = tuple(sorted(set(recorded) - current))
-        if removed:
-            raise BaselineRegressionError(removed)
+        recorded = _load_baseline_retired(path) | _load_baseline_fields(path)
     events = {
         identity: fields | (recorded.get(identity) or frozenset())
         for identity, fields in live.items()
+    }
+    retired = {
+        identity: fields
+        for identity, fields in recorded.items()
+        if identity not in current
     }
     payload = {
         "version": BASELINE_VERSION,
@@ -129,11 +147,26 @@ def write_baseline(
             {"module": module, "qualname": qualname, "fields": sorted(fields)}
             for (module, qualname), fields in sorted(events.items())
         ],
+        "retired": [
+            _retired_entry(module, qualname, fields)
+            for (module, qualname), fields in sorted(retired.items())
+        ],
         "handlers": [
             {"name": name} for name in sorted(_enumerate_handler_names(graph))
         ],
     }
     path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _retired_entry(
+    module: str, qualname: str, fields: frozenset[str] | None
+) -> dict[str, Any]:
+    """One ``retired`` entry. The ``fields`` key is absent when the last
+    record of the identity predates v3."""
+    entry: dict[str, Any] = {"module": module, "qualname": qualname}
+    if fields is not None:
+        entry["fields"] = sorted(fields)
+    return entry
 
 
 def _enumerate_handler_names(graph: EventGraph) -> Iterable[str]:
@@ -174,6 +207,24 @@ def _load_baseline_fields(
     }
 
 
+def _load_baseline_retired(
+    baseline_path: Path,
+) -> dict[tuple[str, str], frozenset[str] | None]:
+    """Parse a baseline file and map each ``retired`` identity to its
+    recorded field names.
+
+    A retired identity is one the topology no longer reaches. The value is
+    ``None`` when its last record predates v3. Empty for a v1 or v2 file.
+    """
+    raw = _read_baseline(baseline_path)
+    return {
+        (entry["module"], entry["qualname"]): (
+            frozenset(entry["fields"]) if "fields" in entry else None
+        )
+        for entry in raw.get("retired", [])
+    }
+
+
 def _load_baseline_handlers(baseline_path: Path) -> set[str]:
     """Parse a baseline file and return its handler node-name set.
 
@@ -199,7 +250,38 @@ def _read_baseline(baseline_path: Path) -> dict[str, Any]:
             f"{_SUPPORTED_BASELINE_VERSIONS}. Regenerate the baseline with the "
             f"current version of langgraph-events."
         )
+    if file_version >= 3:
+        _check_v3_shape(raw, baseline_path)
     return raw
+
+
+def _check_v3_shape(raw: dict[str, Any], baseline_path: Path) -> None:
+    """Reject a v3 file whose ``events`` entry lacks ``fields``, or whose
+    ``events`` and ``retired`` lists share an identity.
+
+    ``fields`` is mandatory from v3. A file that omits it would silently
+    degrade the revive gate. The writer never produces an overlap, so one
+    means a hand edit went wrong.
+    """
+    events = raw["events"]
+    incomplete = [e["qualname"] for e in events if "fields" not in e]
+    if incomplete:
+        raise ValueError(
+            f"Baseline at {baseline_path} is version {raw['version']} but "
+            f"these events entries have no `fields`: {', '.join(incomplete)}. "
+            f"Regenerate the baseline with write_baseline()."
+        )
+    live = {(e["module"], e["qualname"]) for e in events}
+    retired = {(e["module"], e["qualname"]) for e in raw.get("retired", [])}
+    overlap = sorted(live & retired)
+    if overlap:
+        joined = ", ".join(f"{m}:{q}" for m, q in overlap)
+        raise ValueError(
+            f"Baseline at {baseline_path} lists these identities under both "
+            f"`events` and `retired`: {joined}. Remove each one from one of "
+            f"the two lists by hand, or regenerate the baseline with "
+            f"write_baseline()."
+        )
 
 
 class CoverageError(AssertionError):
@@ -267,14 +349,14 @@ class HandlerCoverageError(CoverageError):
 
 
 class BaselineRegressionError(ValueError):
-    """Raised when :func:`write_baseline` would erase identities the
-    existing baseline recorded.
+    """Retained for one release so an existing ``except`` clause still
+    imports. :func:`write_baseline` no longer raises it.
 
-    Overwriting them away makes :func:`detect_changes` /
-    ``assert_all_baselined_cover`` blind to a forgotten migration for those
-    identities. Attribute
-    ``removed`` is the tuple of dropped ``(module, qualname)`` identities
-    so a custom CI reporter can format them however it wants.
+    Earlier releases raised it when a write would erase an identity the
+    existing baseline recorded. A write now moves such an identity to the
+    ``retired`` list, and the coverage gates catch a forgotten migration
+    for it. Attribute ``removed`` is the tuple of ``(module, qualname)``
+    identities the write would have erased.
     """
 
     def __init__(self, removed: tuple[tuple[str, str], ...]) -> None:
@@ -284,8 +366,7 @@ class BaselineRegressionError(ValueError):
         super().__init__(
             f"{len(removed)} identit{plural} in the existing baseline would "
             f"be erased by this write: {joined}. Add @migrate_from / "
-            f"@backfill (or a Migration) covering them and regenerate, or "
-            f"pass allow_removed=True if they are intentional deletes."
+            f"@backfill (or a Migration) covering them and regenerate."
         )
 
 
