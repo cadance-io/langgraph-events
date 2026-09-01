@@ -476,7 +476,7 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
 3. Verify: `graph.threads_paused_on(EventClass) == []`.
 4. Delete the class from the codebase.
-5. Verify no *answered* thread's history still references the class: `graph.unrevivable_threads() == {}`, against the real store. `threads_paused_on()` and `abandon()` never reach such a thread. A non-empty result maps each thread id to the qualnames it can no longer revive. Recover each one with a [tombstone](#recovering-a-delete-first-deployment) before you go on.
+5. Verify no *answered* thread's history still references the class: `graph.unrevivable_threads() == {}`, against the real store. `threads_paused_on()` and `abandon()` never reach such a thread. A non-empty result maps each thread id to the qualnames it can no longer revive. Recover each one with a [tombstone](#recovering-a-delete-first-deployment) before step 6.
 6. Re-baseline: `write_baseline(graph, BASELINE, allow_removed=True)`.
 
 ```python
@@ -489,10 +489,13 @@ assert graph.threads_paused_on(EventClass) == []
 assert graph.unrevivable_threads() == {}
 ```
 
-`unrevivable_threads()` reports nothing until the class is gone: while the class still imports, every thread revives. Run it after step 4, not before. It reads every checkpoint the checkpointer holds, like `threads_paused_on()`, so run it against a copy of the store, or off the hot path, on a large deployment.
+`unrevivable_threads()` reports nothing until the class is gone: while the class still imports, every thread revives. Run it once, after step 4 and before step 6. It reads every checkpoint the checkpointer holds, like `threads_paused_on()`. On a large deployment, run it against a copy of the store, or outside peak load. It reports an identity wherever the serde met it: in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise.
+
+!!! warning "Do not `abandon()` a thread that `unrevivable_threads()` reports"
+    `abandon(config, require_interrupt=False)` re-serializes that thread's settled history with the placeholder in it. After that, a strict read returns the placeholder in the log with no error. The recovery for a settled thread is the [tombstone](#recovering-a-delete-first-deployment) below, not `abandon()`.
 
 !!! warning "Step 3 is not `assert not graph.get_state(config).is_interrupted`"
-    Once the handler is deleted (step 5, or already done, which is the common order), `get_state()`'s `is_interrupted` reads the graph's compiled topology and is `False` on a thread that is *still paused*: the check would pass without proving anything. `threads_paused_on()` reads the checkpoint directly and stays accurate regardless of which handlers this graph still registers.
+    Once the handler is deleted (step 4, or already done, which is the common order), `get_state()`'s `is_interrupted` reads the graph's compiled topology and is `False` on a thread that is *still paused*: the check would pass without proving anything. `threads_paused_on()` reads the checkpoint directly and stays accurate regardless of which handlers this graph still registers.
 
 ### Why the baseline write needs `allow_removed=True`
 
@@ -503,7 +506,7 @@ Skip this step and the *next* baseline write for an unrelated change fails with 
 Once the re-baseline lands, `assert_all_baselined_cover` and the other [coverage gates](#coverage-gates) stop checking the retired identity — it is no longer in the baseline they read.
 
 !!! warning "After re-baselining, no coverage gate can see a remaining breakage"
-    The coverage gates read the baseline, and the retired identity is gone from it. `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. Re-baselining does not clear that risk: it means the baseline gates stop being able to tell you either way. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, and run it against the real store, before and after the re-baseline.
+    The coverage gates read the baseline, and the retired identity is gone from it. `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. Re-baselining does not clear that risk: it means the baseline gates stop being able to tell you either way. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 5 above, and run it against the real store.
 
 !!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
     Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips: this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE, allow_removed=True)` re-baselines both the event identity and the handler node in one write, so no separate step is needed.
