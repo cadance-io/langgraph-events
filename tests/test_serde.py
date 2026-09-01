@@ -13,6 +13,7 @@ from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Interrupt
 from pydantic import BaseModel
+from pydantic.v1 import BaseModel as BaseModelV1
 
 from langgraph_events import (
     Command,
@@ -633,6 +634,63 @@ class PydanticPayload(BaseModel):
     count: int
 
 
+class _ModelHolder:
+    """Nests a pydantic model inside a plain class (#167). Upstream stores
+    a pydantic payload by ``__name__`` and revives it with ``getattr`` on
+    the module, so ``Cfg`` never resolves and revives as a raw dict."""
+
+    class Cfg(BaseModel):
+        tag: str = "x"
+
+
+class _NestedPayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: _ModelHolder.Cfg
+
+
+class _NestedPayloadInGenericNs(Namespace):
+    class Placed(DomainEvent):
+        cfgs: list[_ModelHolder.Cfg] | None = None
+
+
+class _ModulePayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: PydanticPayload
+
+
+class _ClassVarPayloadNs(Namespace):
+    class Placed(DomainEvent):
+        """A ClassVar is not a dataclass field and is never checkpointed."""
+
+        default_cfg: ClassVar[_ModelHolder.Cfg] = _ModelHolder.Cfg()
+
+
+class _ModelHolderV1:
+    class Cfg(BaseModelV1):
+        """pydantic v1 takes the EXT_PYDANTIC_V1 branch upstream, with the
+        same getattr-by-__name__ miss."""
+
+        tag: str = "x"
+
+
+class _NestedV1PayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: _ModelHolderV1.Cfg
+
+
+class _SiblingRefPayloadNs(Namespace):
+    """A field typed as a sibling by forward reference. get_type_hints
+    without the enclosing class's names raises NameError on it, and an
+    all-or-nothing fallback would then skip the nested model beside it."""
+
+    class Sibling(DomainEvent):
+        pass
+
+    class Placed(DomainEvent):
+        other: Sibling | None = None  # noqa: F821 - resolved by the check's localns
+        cfg: _ModelHolder.Cfg | None = None
+
+
 def describe_NamespaceAwareSerde():
     def describe_dumps_typed_loads_typed_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -1002,6 +1060,40 @@ def describe_NamespaceAwareSerde():
                 )
                 assert back.name == "x"
                 assert back.count == 42
+
+        def when_an_event_field_is_a_pydantic_model_nested_in_a_class():
+            # #167: the model class is live and unmodified, yet its
+            # checkpoint identity (module, __name__) does not import.
+            # Every upstream failure path returns the raw dump dict, so
+            # the miss is silent at read time. Fail at build instead.
+            def it_raises_at_construction_naming_the_model():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg") as exc:
+                    NamespaceAwareSerde(namespaces=(_NestedPayloadNs,))
+                msg = str(exc.value)
+                assert "_NestedPayloadNs.Placed.cfg" in msg
+                assert "module scope" in msg
+
+            def it_finds_the_model_inside_a_generic_annotation():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_NestedPayloadInGenericNs,))
+
+        def when_an_event_field_is_a_module_level_pydantic_model():
+            def it_constructs():
+                NamespaceAwareSerde(namespaces=(_ModulePayloadNs,))
+
+        def when_a_nested_model_is_only_a_class_var():
+            def it_constructs():
+                NamespaceAwareSerde(namespaces=(_ClassVarPayloadNs,))
+
+        def when_an_event_field_is_a_pydantic_v1_model_nested_in_a_class():
+            def it_raises_at_construction():
+                with pytest.raises(ValueError, match=r"_ModelHolderV1\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_NestedV1PayloadNs,))
+
+        def when_a_sibling_forward_reference_sits_beside_a_nested_model():
+            def it_still_finds_the_nested_model():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_SiblingRefPayloadNs,))
 
         def when_constructor_allowlist_explicitly_admits_a_type():
             # Asymmetric guard that actually proves delegation: with strict

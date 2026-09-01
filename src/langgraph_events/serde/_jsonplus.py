@@ -73,6 +73,7 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
     _collect_decorated_migrations,
     _flatten_and_validate,
     _resolve_identity,
+    _unimportable_payload_models,
     _unreachable_migrate_from_siblings,
 )
 
@@ -353,6 +354,29 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         decorated, oldest_historic, scope = _collect_decorated_migrations(
             namespaces, events
         )
+        for event_cls, field, model in _unimportable_payload_models(scope.values()):
+            # The LangGraph serializer, which owns the pydantic ext code,
+            # stores a payload by ``__name__`` and revives it with one
+            # ``getattr`` on the module. Every failure path there returns
+            # the raw dump dict with no error. The event itself still
+            # constructs around that dict, so nothing downstream notices.
+            # Fail here, where the author can act (#167).
+            nested = "." in model.__qualname__
+            remedy = (
+                f"Move {model.__qualname__} to module scope in {model.__module__}."
+                if nested
+                else f"Bind it on module {model.__module__} under the name "
+                f"{model.__name__!r}. Alias a parametrized generic at module "
+                f"level, for example IntBox = Box[int]."
+            )
+            raise ValueError(
+                f"{event_cls.__qualname__}.{field} is annotated with pydantic "
+                f"model {model.__qualname__}. Its checkpoint identity "
+                f"{model.__module__}.{model.__name__} does not import. The "
+                f"LangGraph serializer stores a pydantic payload by __name__ "
+                f"and revives it with getattr on the module. On a miss it "
+                f"returns a raw dict with no error. {remedy}"
+            )
         all_migrations = (*decorated, *migrations)
         (
             self._rename_table,
