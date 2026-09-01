@@ -4247,9 +4247,8 @@ class _PauseB(Interrupted):
 
 @on(Started)
 def _waiter_a(event: Started) -> _PauseA:
-    """Fans out alongside _waiter_b so two tasks pause in the same
-    superstep — pins abandon()'s discarded-name computation against
-    `tasks[0]`."""
+    """Fans out with _waiter_b so two tasks pause together (pins
+    abandon()'s discarded-name scan against `tasks[0]` only)."""
     return _PauseA()
 
 
@@ -4260,16 +4259,14 @@ def _waiter_b(event: Started) -> _PauseB:
 
 @on(Started)
 def _completes(event: Started) -> None:
-    """Handler that ends the run with no interrupt at all."""
+    """Handler that ends the run without interrupting."""
     return None
 
 
 @on(Started)
 def _raw_pause(event: Started) -> None:
-    """Pauses via a bare `langgraph.types.interrupt(...)` rather than an
-    `Interrupted` subclass, leaving a non-Event payload on the task —
-    pins the `isinstance(value, Event)` filter in
-    `_discarded_interrupt_name`."""
+    """Pauses via a bare `langgraph.types.interrupt(...)`, not
+    `Interrupted` — leaves a non-Event payload on the task."""
     lg_interrupt("raw payload")
 
 
@@ -4283,10 +4280,8 @@ def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
 
 
 def _paused_pair(saver, tid: str, **kwargs: typing.Any):
-    """A genuinely-interrupted thread, ``_waiter`` still registered — the
-    "live" state ``abandon()`` itself is meant to settle, before anything
-    has cleared its pending task.
-    """
+    """A genuinely-interrupted thread with ``_waiter`` still registered —
+    the "live" state ``abandon()`` itself is meant to settle."""
     cfg = {"configurable": {"thread_id": tid}}
     graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
     graph.invoke(Started(data="x"), config=cfg)
@@ -4443,11 +4438,10 @@ def describe_on_unresumable():
 
 
 def describe_abandon():
-    # abandon() settles a genuinely-paused thread without ever answering
-    # its Interrupted — the tool for retiring an Interrupted subclass
-    # (#162). Contrast with on_unresumable="halt", which settles a thread
-    # that *shouldn't* still be paused (removed/renamed handler); abandon()
-    # acts deliberately on a thread that legitimately still is.
+    # abandon() settles a genuinely-paused thread without answering its
+    # Interrupted — the tool for retiring an Interrupted subclass (#162).
+    # Contrast on_unresumable="halt", which settles a thread that should
+    # not still be paused (handler removed/renamed).
 
     def when_a_thread_is_genuinely_paused():
         def it_leaves_nothing_scheduled():
@@ -4483,9 +4477,8 @@ def describe_abandon():
             assert log.latest(Abandoned).discarded == "_Pause"
 
         def it_joins_discarded_names_across_every_paused_task():
-            # Reverting `_discarded_interrupt_name` to `snapshot.tasks[0]`
-            # would silently drop `_PauseB` and leave this green with only
-            # `_PauseA` — asserting both names catches that regression.
+            # Reverting to `snapshot.tasks[0]` would silently drop
+            # `_PauseB` — asserting both names catches that regression.
             saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "abandon-multi-interrupt"}}
             graph = EventGraph([_waiter_a, _waiter_b], checkpointer=saver)
@@ -4498,8 +4491,6 @@ def describe_abandon():
             assert names == {"_PauseA", "_PauseB"}
 
         def it_leaves_discarded_empty_absent_a_pending_interrupt():
-            # abandon() on a thread that ran to completion without ever
-            # interrupting — `discarded` has nothing to name.
             saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "abandon-no-interrupt-at-all"}}
             graph = EventGraph([_completes], checkpointer=saver)
@@ -4511,11 +4502,9 @@ def describe_abandon():
             assert log.latest(Abandoned).discarded == ""
 
         def it_ignores_a_non_event_interrupt_payload():
-            # A bare `langgraph.types.interrupt(...)` (not an `Interrupted`
-            # subclass) leaves a plain string on the task, not an Event.
-            # Dropping the `isinstance(value, Event)` filter would record
-            # "str" here instead of "" — the exact defect the brief's
-            # docstring paragraph on `Abandoned` exists to prevent.
+            # A bare `interrupt(...)` leaves a plain string, not an Event
+            # — dropping the `isinstance` filter would record "str" here
+            # instead of "".
             saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "abandon-raw-interrupt"}}
             graph = EventGraph([_raw_pause], checkpointer=saver)
@@ -4536,11 +4525,9 @@ def describe_abandon():
             assert log.latest(Abandoned).reason == "retiring _Pause"
 
         def it_preserves_completed_sibling_writes():
-            # A fan-out where one handler (_waiter) interrupts and a
-            # sibling (_side_effect) completes in the same superstep.
-            # `_settle`'s leading clear must commit the sibling's already-
-            # written event rather than discard it along with the stale
-            # pending task.
+            # `_waiter` interrupts while sibling `_side_effect` completes
+            # in the same superstep — `_settle`'s leading clear must not
+            # discard the sibling's already-written event.
             saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "abandon-sibling"}}
             graph = EventGraph([_waiter, _side_effect, _go_noop], checkpointer=saver)
@@ -4574,11 +4561,10 @@ def describe_abandon():
 
         def with_the_thread_later_reused():
             def it_raises_the_generic_message():
-                # it_leaves_the_thread_usable proves a thread can be
-                # legitimately reused after abandon(). Once it is, the
-                # Abandoned that triggered the earlier message is no
-                # longer the *latest* Halted — resume() must fall back to
-                # the generic diagnostic, not keep claiming abandonment.
+                # it_leaves_the_thread_usable proves reuse after
+                # abandon() is legal — once reused, resume() must fall
+                # back to the generic message, not keep naming the
+                # earlier Abandoned.
                 saver = MemorySaver()
                 cfg = {"configurable": {"thread_id": "abandon-resume-reused"}}
                 EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
@@ -4770,15 +4756,12 @@ def describe_async_only_checkpointer():
             assert any(isinstance(e, Unresumable) for e in events)
 
     def describe_aabandon():
-        # Async mirror of describe_abandon() (module scope), driven through
-        # _AsyncOnlySaver — the #95 contract: aabandon() must read/write
-        # exclusively via aget_state/_asettle, never falling back to a sync
-        # checkpoint read from the running event loop.
+        # Async mirror of describe_abandon(), through _AsyncOnlySaver —
+        # the #95 contract: aabandon() must read/write only via
+        # `aget_state`/`_asettle`, never a sync read from the running loop.
 
         async def _apaused_live_pair(tid: str, **kwargs: typing.Any):
-            """Genuinely-interrupted async mirror of the module-level
-            `_paused_pair`, still registering `_waiter`, driven through
-            `_AsyncOnlySaver`."""
+            """Async mirror of `_paused_pair`, via `_AsyncOnlySaver`."""
             saver = _AsyncOnlySaver()
             cfg = {"configurable": {"thread_id": tid}}
             graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
@@ -4798,10 +4781,8 @@ def describe_async_only_checkpointer():
 
             @pytest.mark.asyncio
             async def it_leaves_no_pending_interrupt_write():
-                # The assertion that actually proves the class is
-                # retirable — mirrors the sync
-                # it_leaves_no_pending_interrupt_write, driven through
-                # _AsyncOnlySaver's async-only read path.
+                # Mirrors the sync it_leaves_no_pending_interrupt_write,
+                # via _AsyncOnlySaver's async-only read path.
                 saver = _AsyncOnlySaver()
                 cfg = {"configurable": {"thread_id": "aabandon-pending-write"}}
                 graph = EventGraph([_waiter, _go_noop], checkpointer=saver)

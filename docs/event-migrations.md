@@ -421,7 +421,9 @@ class Persist(Command):
 
     The CI handler gate catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
 
-    To *retire* an `Interrupted` subclass — delete it from the codebase entirely — every thread still paused on it must first stop referencing it. `graph.abandon(config)` / `.aabandon()` ([Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon)) settles one paused thread without answering it, so the retired class ends up named by no live checkpoint. It's per-thread, with no bulk/enumeration helper — find the paused thread IDs yourself (e.g. from your own operational records) and call `abandon()` on each.
+    To *retire* an `Interrupted` subclass means to delete it from the codebase entirely, after every thread still paused on it stops referencing it. `graph.abandon(config)` or `.aabandon()` (see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon)) settles one paused thread without answering it, so calling it on every affected thread leaves the retired class named by no live checkpoint.
+
+    `abandon()` works on one thread at a time — the library has no helper to list or bulk-settle threads. Find the paused thread IDs yourself (e.g. from your own operational records) and call `abandon()` on each one.
 
 ### Inline command handlers are keyed by the command qualname
 

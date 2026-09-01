@@ -708,45 +708,23 @@ class Cancelled(Halted):
 
 
 class Abandoned(Halted):
-    """A thread was deliberately settled by ``abandon()``/``aabandon()``.
+    """A thread that ``abandon()``/``aabandon()`` settled without
+    dispatching the ``Interrupted`` it was paused on. Recorded, not
+    dispatched: ``@on(Abandoned)`` never fires. The ``Halted`` gate
+    routes straight to ``END`` before any handler match. See
+    :meth:`EventGraph.abandon`.
 
-    Emitted by ``EventGraph.abandon()`` / ``aabandon()`` to end a thread
-    without ever dispatching whatever ``Interrupted`` it was paused on —
-    the opposite of ``resume()``, which answers it. Use this to retire an
-    ``Interrupted`` subclass: answering a paused thread to drain it before
-    deleting the class only makes things worse, since ``Interrupted``
-    joins the event log on resume, appending the very identity being
-    retired. ``abandon()`` never does that. (``abandon()`` also accepts a
-    thread with no pending interrupt at all — an already-completed
-    thread, say — as a plain "settle this thread now" call; see
-    :meth:`EventGraph.abandon`.)
+    ``discarded`` is the discarded interrupt's type name, never the
+    instance — a revived instance would leave a non-event in the log
+    once the class is deleted, and ``.trail()`` would raise
+    ``AttributeError``. ``""`` when there was no pending interrupt,
+    including a raw ``langgraph.types.interrupt(...)`` call, which has
+    no type name to record.
 
-    ``discarded`` is the **type name** of the ``Interrupted`` subclass
-    that was thrown away (a string, for diagnostics — mirroring how
-    ``Unresumable.resume_value`` stores a type name rather than an
-    instance). It is *not* the interrupt instance itself: once the class
-    is retired, an instance field would revive as ``None`` on replay,
-    leaving a non-event in the log where ``.trail()`` raises
-    ``AttributeError``. A raw ``langgraph.types.interrupt("...")`` thrown
-    from a handler (rather than an ``Interrupted`` subclass) leaves a bare
-    string in its place instead, which carries no useful type name — the
-    type-name string is the whole point of this field. When a fanned-out
-    dispatch left more than one task paused, the discarded type names are
-    joined with ``", "`` (so a single-value equality check like
-    ``e.discarded == "OrderApprovalRequested"`` silently stops matching
-    once a second task is also pending — check ``in`` or split on ``", "``
-    if that is reachable in your graph). ``discarded`` is ``""`` when
-    there was no pending interrupt to discard.
-
-    Like every terminal event produced by the settle paths (this one and
-    ``Unresumable``), ``Abandoned`` is **recorded, not dispatched**:
-    ``@on(Abandoned)`` never fires. Dispatch reads the ``_pending``
-    channel, and the ``Halted`` gate (``src/langgraph_events/_internal.py``,
-    the ``dispatch()`` conditional edge) routes straight to ``END`` before
-    any handler match is attempted. This is pre-existing behaviour shared
-    with ``Unresumable``, but a new public class invites the subscription
-    attempt more than a private one would — so it's worth stating plainly
-    here: don't write a handler expecting to react to an abandonment.
+    Joined with ``", "`` and deduped across a fanned-out dispatch — two
+    tasks paused on the same type add one name, not two. A single-value
+    equality check stops matching once a second task is pending. Use
+    ``in`` or split on ``", "`` instead.
     """
 
     reason: str = ""

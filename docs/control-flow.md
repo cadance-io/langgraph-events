@@ -182,21 +182,23 @@ See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkp
 
 ### Ending a pause without answering it — `abandon()`
 
-`graph.resume(event)` answers a pending `Interrupted`; `graph.abandon(config, reason=...)` / `aabandon()` ends the pause without ever answering it. Requires a checkpointer.
+`graph.resume(event)` answers a pending `Interrupted`. `graph.abandon(config, reason=...)` or `aabandon()` ends the pause without ever answering it. Both require a checkpointer.
 
 ```python
 graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-The interrupt is **discarded, not answered** — `abandon()` never dispatches it, and it never joins the event log. That distinction is the reason `abandon()` exists: to retire an `Interrupted` subclass, you cannot resume every thread paused on it first, because resuming appends the interrupt to the log — the very identity you're trying to delete.
+`abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass — resuming every paused thread first would append the very identity you are deleting.
 
-The thread is **terminal afterwards**: a terminal `Abandoned(Halted)` is appended, nothing is left scheduled, and any completed sibling handler's writes from the same fanned-out superstep survive. Like every event on this settle path, `Abandoned` is *recorded, not dispatched* — `@on(Abandoned)` never fires, because the terminal-event write bypasses routing. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` (the caller-supplied string, `""` if none) and `.discarded` (the type name of the interrupt that was thrown away, `""` if there was none).
+The thread is terminal afterwards. `abandon()` appends a terminal `Abandoned(Halted)` event, leaves nothing scheduled, and preserves any completed sibling handler's writes from the same fanned-out superstep.
 
-Only the **live checkpoint** is cleaned. Historic checkpoints for the same thread keep their own `__interrupt__` write untouched, so time-travel/replay against an older checkpoint still sees the original pause — retirement is safe only for the identity a *current* thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#coverage-gates) (issue [#160](https://github.com/cadance-io/langgraph-events/issues/160)).
+Like every event on this settle path, `Abandoned` is recorded, not dispatched — `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` (the caller-supplied string, `""` if none) and `.discarded` (the type name of the interrupt thrown away, `""` if none).
 
-Precondition: don't call `abandon()` on a thread with a run currently in flight — the run's own writes silently overwrite whatever `abandon()` did (or vice versa, depending on ordering). `abandon()` is for a thread that is genuinely at rest.
+`abandon()` cleans only the live checkpoint — a historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#coverage-gates) (issue [#160](https://github.com/cadance-io/langgraph-events/issues/160)).
 
-`abandon()` does **not** consult `on_unresumable` — that policy governs an accidental no-op `resume()` (a renamed/removed handler, a double resume); abandoning is always deliberate. A later `resume()` on an abandoned thread still raises `UnresumableError` under the default policy, with a message that names the abandonment rather than pointing you at a handler rename.
+WARNING: A run in flight on the thread will silently overwrite whatever `abandon()` did, or vice versa, depending on ordering. Call `abandon()` only on a thread that is genuinely at rest.
+
+`abandon()` does not consult `on_unresumable` — that policy governs an accidental no-op `resume()` (a renamed/removed handler, a double resume), not a deliberate abandonment. A later `resume()` on an abandoned thread still raises `UnresumableError` under the default policy, naming the abandonment instead of pointing at a handler rename.
 
 ### Typed payloads — `InterruptedWithPayload`
 

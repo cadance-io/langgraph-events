@@ -1432,22 +1432,12 @@ class EventGraph:
     def _unresumable_message(
         self, log: EventLog | None = None, config: Any = None
     ) -> str:
-        """Build the diagnostic for a ``resume()`` that would be a no-op.
+        """Diagnostic for a ``resume()`` that would be a no-op.
 
-        *log* is the thread's event log, when the caller already has it (both
-        call sites do — see :meth:`_unresumable_short_circuits`). The
-        abandoned diagnosis is keyed on the *last* event being an
-        ``Abandoned``, not merely present anywhere in the log
-        (``log.latest(Halted)`` searches the whole log): a thread can be
-        legitimately reused after ``abandon()`` (see :meth:`abandon`), and
-        once it is, the earlier ``Abandoned`` is no longer the reason a
-        later ``resume()`` is a no-op — that reason is whatever actually
-        halted it since. When the thread *was* left abandoned, the message
-        says so — the likely real sequence is an operator abandoning
-        threads while a stale approval card elsewhere still posts its
-        answer — and surfaces the two facts the reader needs to act:
-        the thread id and, if one is recorded, the discarded interrupt's
-        type name(s).
+        Keys the abandoned diagnosis on the *last* event, not
+        ``log.latest(Halted)`` (a whole-log search) — a thread reused
+        after :meth:`abandon` must fall back to the generic message once
+        ``Abandoned`` is no longer latest.
         """
         if log and isinstance(log[-1], Abandoned):
             abandoned = log[-1]
@@ -1473,14 +1463,13 @@ class EventGraph:
     def _unresumable_short_circuits(
         self, log: EventLog | None = None, config: Any = None
     ) -> bool:
-        """Apply the ``raise``/``warn`` arm of ``on_unresumable``; return whether
-        the caller should short-circuit (``True`` for ``warn`` — return the log
-        unchanged) rather than append a terminal event (``False`` for ``halt``).
-        ``raise`` raises. *log*/*config* are passed through to
-        :meth:`_unresumable_message` so the diagnostic can distinguish an
-        abandoned thread; the state read itself is left to the caller so each
-        path uses the matching reader (the async path must ``await aget_state``
-        — an async-only checkpointer rejects sync reads from the running loop).
+        """Apply ``on_unresumable``'s ``raise``/``warn`` arm — ``False``
+        means append a terminal event (``halt``), ``True`` means return
+        the log unchanged (``warn``). ``raise`` raises.
+
+        Caller supplies the state read — async path must ``await
+        aget_state`` (an async-only checkpointer rejects a sync read
+        from the running loop).
         """
         if self._on_unresumable == "raise":
             raise UnresumableError(self._unresumable_message(log, config))
@@ -1598,17 +1587,12 @@ class EventGraph:
 
     @staticmethod
     def _discarded_interrupt_name(snapshot: StateSnapshot) -> str:
-        """Type name(s) of the interrupt(s) ``abandon()``/``aabandon()`` is
-        about to throw away.
+        """Type name(s) of the interrupt(s) about to be discarded, joined
+        with ``", "`` and deduped, in discovery order. Empty if none.
 
-        Flattens ``interrupts`` across every task on the snapshot — a
-        fanned-out dispatch can leave more than one task paused, so taking
-        only ``tasks[0]`` would silently miss the others. Keeps only
-        payloads that are ``Event`` instances (a raw
-        ``langgraph.types.interrupt("...")`` thrown from a handler, rather
-        than an ``Interrupted`` subclass, leaves a bare string with no
-        useful type name) and joins their type names, deduped and in
-        discovery order. Empty when there is no pending interrupt at all.
+        Scans every task, not just ``tasks[0]`` — a fanned-out dispatch
+        can pause more than one. Skips a non-``Event`` payload, e.g. a
+        raw ``langgraph.types.interrupt("...")`` call.
         """
         names: list[str] = []
         for task in snapshot.tasks:
@@ -1622,14 +1606,11 @@ class EventGraph:
     def _require_settleable(
         method: str, snapshot: StateSnapshot, config: RunnableConfig
     ) -> None:
-        """Guard ``abandon()``/``aabandon()`` against a thread with nothing
-        to settle.
+        """Raise ``ValueError`` if the thread has no events to settle.
 
-        Guards on an empty event log, not on ``snapshot.created_at is
-        None``: the latter reliably flags "no checkpoint at all", but a
-        thread that was only ever ``pre_seed``ed (never run) *has* a
-        checkpoint and would sail past that check, leaving a thread whose
-        entire log is ``[Abandoned()]``.
+        Checks the event log, not ``snapshot.created_at is None`` — a
+        ``pre_seed``ed-only thread has a checkpoint and would pass that
+        check.
         """
         if snapshot.values.get("events"):
             return
@@ -1640,31 +1621,21 @@ class EventGraph:
         )
 
     def abandon(self, config: RunnableConfig, *, reason: str = "") -> None:
-        """Settle a thread without dispatching whatever it was paused on.
+        """Settle a thread onto a terminal ``Abandoned`` without
+        dispatching whatever ``Interrupted`` it was paused on. Use this
+        to retire an ``Interrupted`` subclass — resuming every paused
+        thread first would instead append that identity to the log.
 
-        Where :meth:`resume` answers a pending ``Interrupted`` and dispatches
-        the answer, ``abandon()`` discards it: the thread ends on a terminal
-        ``Abandoned`` (see :class:`~langgraph_events.Abandoned`) with nothing
-        left scheduled, via the same settle primitive :meth:`resume` uses for
-        ``on_unresumable="halt"``. Use this to retire an ``Interrupted``
-        subclass — answering a paused thread to drain it first only makes
-        things worse, since the answer causes ``Interrupted`` to join the
-        event log, appending the very identity being retired.
+        Also settles a thread with no pending interrupt, recording
+        ``Abandoned(discarded="")`` rather than raising.
 
-        A thread with no pending interrupt at all — one that already ran
-        to completion, for instance — settles too: it is a quieter no-op,
-        recording an ``Abandoned`` with ``discarded=""`` rather than
-        raising, since there is nothing wrong with calling ``abandon()``
-        on a thread that turns out not to have needed it.
+        Requires a checkpointer. Raises ``ValueError`` if the thread has
+        no events to settle (never run, or only ``pre_seed``ed). Ignores
+        ``on_unresumable`` — that policy governs an accidental no-op
+        ``resume()``, not a deliberate abandonment.
 
-        Does **not** consult ``on_unresumable`` — that policy governs an
-        accidental no-op ``resume()``; abandoning is deliberate. Requires a
-        checkpointer. Raises ``ValueError`` if the thread has no events to
-        settle at all (never run, or only ``pre_seed``ed).
-
-        Returns ``None`` — ``abandon()`` runs no graph, so there is no run
-        log to hand back. Callers who want the log call
-        ``graph.get_state(config).events``.
+        Runs no graph, so returns no log — call
+        ``graph.get_state(config).events`` for it.
         """
         self._require_checkpointer("abandon")
         snapshot = self._compile().get_state(config)
@@ -1673,12 +1644,7 @@ class EventGraph:
         self._settle(config, Abandoned(reason=reason, discarded=discarded))
 
     async def aabandon(self, config: RunnableConfig, *, reason: str = "") -> None:
-        """Async version of :meth:`abandon`.
-
-        Every checkpoint read/write uses the async API (``aget_state``/
-        ``_asettle``) so async-only checkpointers aren't driven
-        synchronously from the running event loop.
-        """
+        """Async version of :meth:`abandon`."""
         self._require_checkpointer("aabandon")
         snapshot = await self._compile().aget_state(config)
         self._require_settleable("aabandon", snapshot, config)

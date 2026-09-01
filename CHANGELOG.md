@@ -11,18 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`EventGraph.abandon()` / `.aabandon()`** — settle a paused thread without answering its
   pending `Interrupted`, closing [#162](https://github.com/cadance-io/langgraph-events/issues/162).
-  Where `resume()` answers the interrupt and dispatches it, `abandon()` discards it: the thread
-  ends on a terminal `Abandoned(Halted)` with nothing scheduled, via the same three-superstep
-  settle primitive `on_unresumable="halt"` uses. This is the tool for retiring an `Interrupted`
-  subclass — resuming every thread paused on it first only makes retirement worse, since
-  `Interrupted` joins the event log on resume, appending the very identity being deleted. Requires
-  a checkpointer; raises `ValueError` on a thread with no events to settle; does not consult
-  `on_unresumable` (that policy governs an *accidental* no-op resume, not a deliberate abandonment).
-  Returns `None` — callers who want the log call `graph.get_state(config).events`.
+  Ends the thread on a terminal `Abandoned(Halted)`, via the same three-superstep settle
+  primitive `on_unresumable="halt"` uses. The tool for retiring an `Interrupted` subclass —
+  resuming every paused thread first would instead append the retired identity back into the log.
+  Requires a checkpointer. Raises `ValueError` on a thread with no events to settle. Ignores
+  `on_unresumable` (that policy governs an *accidental* no-op resume, not a deliberate
+  abandonment). Returns `None` — callers who want the log call `graph.get_state(config).events`.
 
-- **`Abandoned`** — new `Halted` subtype recorded by `abandon()`/`aabandon()`. `.reason` carries
-  the caller-supplied reason; `.discarded` carries the type name(s) of the interrupt(s) thrown
-  away, for diagnostics (mirroring `Unresumable.resume_value`).
+- **`Abandoned`** — new `Halted` subtype recorded by `abandon()`/`aabandon()`. `.reason` is the
+  caller-supplied reason. `.discarded` is the type name(s) of the interrupt(s) thrown away.
 
 - A `resume()` on an already-abandoned thread now names the abandonment in its
   `UnresumableError` message instead of pointing at a handler rename/removal.
