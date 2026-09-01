@@ -305,24 +305,46 @@ gates in ``testing.py``). One wording, so a fix that works for one
 gate's failure reads the same for the others."""
 
 
+RETIRED_REMEDY = (
+    "A retired identity has no live class and must revive through a "
+    "migration: add @migrate_from to a surviving class or a tombstone, or "
+    "delete its `retired` entry from the baseline by hand once every thread "
+    "that names it is settled."
+)
+"""Remedy line for a gate failure on an identity the baseline lists under
+``retired``. Regenerating the baseline does not help there: a write keeps
+the entry."""
+
+
 class MigrationCoverageError(CoverageError):
     """Raised when a baselined event identity has no migration and no live class.
 
     ``uncovered`` is the tuple of offending ``(module, qualname)`` identities
-    for custom CI reporters. Raised by ``assert_all_baselined_cover`` /
+    for custom CI reporters. ``retired`` is the subset the baseline lists
+    under ``retired``. Raised by ``assert_all_baselined_cover`` /
     ``_resolve`` / ``_revive``.
     """
 
-    def __init__(self, uncovered: tuple[tuple[str, str], ...]) -> None:
+    def __init__(
+        self,
+        uncovered: tuple[tuple[str, str], ...],
+        retired: tuple[tuple[str, str], ...] = (),
+    ) -> None:
         self.uncovered = uncovered
+        self.retired = retired
         joined = ", ".join(f"{m}:{q}" for m, q in uncovered)
         plural = "y" if len(uncovered) == 1 else "ies"
         verb = "is" if len(uncovered) == 1 else "are"
-        super().__init__(
+        message = (
             f"{len(uncovered)} identit{plural} in the baseline {verb} neither "
             f"currently live nor covered by a migration: {joined}. "
             f"{MIGRATION_REMEDY}"
         )
+        if retired:
+            joined = ", ".join(f"{m}:{q}" for m, q in retired)
+            message += f" Of these, the baseline lists as retired: {joined}. "
+            message += RETIRED_REMEDY
+        super().__init__(message)
 
 
 class HandlerCoverageError(CoverageError):
