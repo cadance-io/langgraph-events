@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-09-01
+
 ### Added
 
 - **`SplitEvent`, `@split_event` and `Migration.split_event(...)`.** Closes
@@ -1040,7 +1042,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/cadance-io/langgraph-events/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/cadance-io/langgraph-events/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/cadance-io/langgraph-events/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/cadance-io/langgraph-events/compare/v0.25.1...v0.26.0
