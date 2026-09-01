@@ -126,7 +126,8 @@ class SplitEvent:
     new_kwargs)`` to build ``target_class`` from ``new_kwargs`` instead.
     The class object is the return value, not a string, so an IDE rename
     follows it. ``targets`` lists every class ``select`` can return, for
-    validation at serde construction.
+    validation at serde construction. Any iterable is accepted and
+    normalised to a tuple. An empty one is refused here.
 
     A split runs in the class stage only, keyed on the live identity:
     after the rename and the class-stage :class:`TransformFields`,
@@ -138,7 +139,19 @@ class SplitEvent:
     module: str
     qualname: str
     select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None]
-    targets: tuple[type, ...]
+    targets: Iterable[type]
+
+    def __post_init__(self) -> None:
+        # One normalisation point for the decorator, the sugar and the raw
+        # op: a list author gets the same op as a tuple author, and the
+        # frozen op stays hashable. ``object.__setattr__`` because frozen.
+        targets = tuple(self.targets)
+        if not targets:
+            raise ValueError(
+                f"SplitEvent({self.module}:{self.qualname!r}): `targets` must "
+                f"list at least one class `select` can return."
+            )
+        object.__setattr__(self, "targets", targets)
 
 
 Operation = RenameEvent | AddField | TransformFields | SplitEvent
@@ -290,7 +303,7 @@ class Migration:
         module: str | None = None,
         qualname: str | None = None,
         select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None],
-        targets: tuple[type, ...],
+        targets: Iterable[type],
     ) -> Migration:
         """Single-op split sugar.
 
@@ -494,10 +507,6 @@ def _bucket_splits(
                 f"or by import. A split keys on the live identity that stays "
                 f"stored. Either the module/qualname has a typo, or the class "
                 f"was deleted after the migration was authored."
-            )
-        if not op.targets:
-            raise ValueError(
-                f"{label}: `targets` must list at least one class `select` can return."
             )
         for target in op.targets:
             _validate_split_target(label, target, scope)
@@ -1211,7 +1220,7 @@ _SPLIT_ATTR = "__lge_split__"
 def split_event(
     select: Callable[[dict[str, Any]], tuple[type, dict[str, Any]] | None],
     *,
-    targets: tuple[type, ...],
+    targets: Iterable[type],
 ) -> Callable[[type], type]:
     """Split payloads stored under this class onto ``targets`` by a
     payload value.
@@ -1227,7 +1236,8 @@ def split_event(
 
     Metadata is stashed as ``__lge_split__``. One split per class: a
     second decorator is rejected at decoration. Compose the cases in one
-    ``select``.
+    ``select``. ``targets`` is normalised to a tuple, and refused when
+    empty, where the :class:`SplitEvent` is built at serde construction.
     """
 
     def _wrap(cls: type) -> type:
@@ -1239,7 +1249,7 @@ def split_event(
                 f"@split_event: {cls.__qualname__} already carries a split: "
                 f"one split per class; compose the cases in one select."
             )
-        setattr(cls, _SPLIT_ATTR, (select, tuple(targets)))
+        setattr(cls, _SPLIT_ATTR, (select, targets))
         return cls
 
     return _wrap

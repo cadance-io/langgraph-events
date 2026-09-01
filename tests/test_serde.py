@@ -4722,10 +4722,9 @@ def describe_SplitEvent():
                 NamespaceAwareSerde(namespaces=[Work], migrations=[unreachable])
 
         def it_refuses_empty_targets():
-            empty = _split(targets=())
-
+            # Refused where the op is built, before any serde sees it.
             with pytest.raises(ValueError, match=r"targets.*at least one"):
-                NamespaceAwareSerde(namespaces=[Work], migrations=[empty])
+                _split(targets=())
 
         def it_refuses_a_select_that_is_not_callable():
             not_callable = _split(select="select_failed")
@@ -4747,6 +4746,27 @@ def describe_SplitEvent():
                 NamespaceAwareSerde(
                     namespaces=[Work], migrations=[_split()], legacy_write=True
                 )
+
+    def when_targets_is_a_list():
+        def it_normalises_to_a_tuple_and_stays_hashable():
+            # The decorator, the sugar and the raw op all pass through one
+            # normalisation, so a list author gets the same op as a tuple
+            # author, and the frozen op stays usable as a dict key.
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            raw = SplitEvent(
+                module=Work.__module__,
+                qualname="Work.Completed",
+                select=_select_failed,
+                targets=[Work.Failed],
+            )
+            sugared = Migration.split_event(
+                source=Work.Completed, select=_select_failed, targets=[Work.Failed]
+            ).operations[0]
+
+            assert raw.targets == (Work.Failed,)
+            assert sugared == raw
+            assert hash(raw) == hash(sugared)
 
     def when_the_source_carries_the_decorator():
         def it_is_collected_from_namespaces():
