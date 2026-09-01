@@ -25,6 +25,7 @@ from langgraph_events.serde.migrations._core import (
     backfill,
     migrate_from,
     replay_reducer,
+    transform_fields,
 )
 from langgraph_events.serde.migrations.detect import (
     CoverageError,
@@ -57,4 +58,5 @@ __all__ = [
     "migrate_from",
     "replay_reducer",
     "synthesize_legacy_payload",
+    "transform_fields",
 ]

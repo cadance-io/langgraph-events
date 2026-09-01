@@ -37,7 +37,7 @@ from langgraph_events.serde._jsonplus import (
     EXT_NAMESPACE_AWARE_EVENT,
     _option,
 )
-from langgraph_events.serde.migrations import backfill, migrate_from
+from langgraph_events.serde.migrations import backfill, migrate_from, transform_fields
 
 
 def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
@@ -3751,6 +3751,12 @@ def _merge_name(kw: dict[str, Any]) -> dict[str, Any]:
     return kw
 
 
+def _int_count(kw: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(kw.get("count"), str):
+        kw["count"] = int(kw["count"])
+    return kw
+
+
 class Reshaped(Namespace):
     class Trimmed(DomainEvent):
         """Dropped ``legacy_flag``."""
@@ -3761,6 +3767,12 @@ class Reshaped(Namespace):
         """Merged ``first`` and ``last`` into ``name``."""
 
         name: str = ""
+
+    @transform_fields(_int_count)
+    class Counted(DomainEvent):
+        """``count`` was a ``str``, now an ``int``."""
+
+        count: int = 0
 
 
 def describe_TransformFields():
@@ -3826,3 +3838,17 @@ def describe_TransformFields():
             )
 
             assert revived == Reshaped.Named(name="Ada Lovelace")
+
+    def when_a_stored_field_changed_type():
+        def it_revives_holding_the_retyped_value():
+            # ``@transform_fields`` is the class-global decorator form,
+            # collected from ``namespaces=`` like ``@backfill``.
+            serde = NamespaceAwareSerde(namespaces=[Reshaped])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Reshaped.__module__, "Reshaped.Counted", {"count": "3"}
+                )
+            )
+
+            assert revived == Reshaped.Counted(count=3)
