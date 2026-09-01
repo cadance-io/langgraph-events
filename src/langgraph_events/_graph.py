@@ -1836,6 +1836,42 @@ class EventGraph:
             "Pass require_interrupt=False to settle it anyway."
         )
 
+    @classmethod
+    def _require_revivable_history(
+        cls,
+        method: str,
+        unresolved: Iterable[UnrevivedIdentity],
+        pending: _PendingInterrupts,
+        config: RunnableConfig,
+    ) -> None:
+        """Raise ``ValueError`` if the tolerant read degraded an identity
+        other than the thread's pending interrupt (#170).
+
+        *unresolved* is the collector :meth:`_tolerant_read` yields. A
+        degraded pending interrupt is the documented delete-first
+        recovery: ``abandon()`` records its qualname in ``discarded``
+        and never writes it back. Any other degraded identity sits in
+        the settled ``events`` history, or nested in a live event there.
+        Settling re-serializes that history, so the placeholder would
+        become a stored value. A strict read then returns it with no
+        error and ``unrevivable_threads()`` stops reporting the thread.
+        """
+        names = [
+            name
+            for name in cls._unrevived_qualnames(unresolved)
+            if name not in pending.unresolved_names
+        ]
+        if not names:
+            return
+        thread_id = config.get("configurable", {}).get("thread_id")
+        raise ValueError(
+            f"{method}() refuses to settle thread {thread_id!r}: its settled "
+            f"history names {', '.join(names)}, which the checkpointer's serde "
+            f"cannot revive. Settling would write a placeholder into the log. "
+            f"Map each identity onto a tombstone with @migrate_from instead. "
+            f"See 'Recovering a delete-first deployment' in docs/event-migrations.md."
+        )
+
     def abandon(
         self,
         config: RunnableConfig,
@@ -1856,7 +1892,11 @@ class EventGraph:
         Settles a thread even when the pending interrupt names an
         ``Interrupted`` subclass already deleted from the codebase,
         recording the class's last-known qualname in ``discarded``
-        instead of a live instance.
+        instead of a live instance. Raises ``ValueError`` instead when
+        the settled history names a deleted class: settling would write
+        a placeholder into the log, so recover that thread with a
+        tombstone (see "Recovering a delete-first deployment" in
+        ``docs/event-migrations.md``).
 
         Requires a checkpointer. Raises ``ValueError`` if the thread has
         no events to settle (never run, or only ``pre_seed``ed). Ignores
@@ -1867,12 +1907,13 @@ class EventGraph:
         ``graph.get_state(config).events`` for it.
         """
         self._require_checkpointer("abandon")
-        with self._tolerant_read():
+        with self._tolerant_read() as unresolved:
             snapshot = self._compile().get_state(config)
             self._require_settleable("abandon", snapshot, config)
             pending = self._read_pending_interrupts(config, "abandon")
             if require_interrupt:
                 self._require_pending_interrupt("abandon", pending, config)
+            self._require_revivable_history("abandon", unresolved, pending, config)
             discarded = ", ".join(
                 (
                     *(type(v).__qualname__ for v in pending.events),
@@ -1890,12 +1931,13 @@ class EventGraph:
     ) -> None:
         """Async version of :meth:`abandon`."""
         self._require_checkpointer("aabandon")
-        with self._tolerant_read():
+        with self._tolerant_read() as unresolved:
             snapshot = await self._compile().aget_state(config)
             self._require_settleable("aabandon", snapshot, config)
             pending = await self._aread_pending_interrupts(config, "aabandon")
             if require_interrupt:
                 self._require_pending_interrupt("aabandon", pending, config)
+            self._require_revivable_history("aabandon", unresolved, pending, config)
             discarded = ", ".join(
                 (
                     *(type(v).__qualname__ for v in pending.events),

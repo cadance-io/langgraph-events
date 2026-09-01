@@ -137,6 +137,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an `init=False` field no placeholder. A `@backfill` on an `init=False` field is refused at
   serde construction with the existing "has no field" message.
 
+- **`abandon()` / `aabandon()` refuse a thread whose settled history cannot revive.**
+  Closes [#170](https://github.com/cadance-io/langgraph-events/issues/170).
+  `abandon(config, require_interrupt=False)` on a thread whose settled history named a deleted
+  class re-serialized the `events` channel with a literal `UnrevivedIdentity` in it. After that a
+  strict `get_state()` returned the placeholder in the log with no error, and
+  `unrevivable_threads()` stopped reporting the thread. Both methods now read the collector the
+  tolerant read yields. When it holds an identity other than the pending interrupt, they raise
+  `ValueError` naming the thread and the qualnames, and point at the tombstone recovery in
+  `docs/event-migrations.md`. A thread whose only unrevivable identity is its pending interrupt
+  still settles as before. That is the documented delete-first recovery.
 - **A pydantic payload nested inside a class no longer revives silently as a raw `dict`.**
   Closes [#167](https://github.com/cadance-io/langgraph-events/issues/167). The LangGraph
   serializer stores a pydantic payload by `__name__` and revives it with one `getattr` on the
