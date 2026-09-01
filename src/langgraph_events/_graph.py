@@ -262,6 +262,23 @@ class GraphState(NamedTuple):
     interrupted: Interrupted | None
 
 
+class _PendingInterrupts(NamedTuple):
+    """Topology-independent read of a checkpoint's pending interrupt(s) —
+    see ``EventGraph._read_pending_interrupts``.
+
+    ``has_interrupt`` is ``True`` for *any* pending ``__interrupt__``
+    write, including a non-``Event`` payload (e.g. a raw
+    ``langgraph.types.interrupt("...")`` call) — this is what
+    ``require_interrupt`` and ``event_type=None`` discovery gate on.
+    ``events`` is the same set narrowed to ``Event`` payloads, deduped by
+    type name — this is what a class filter matches against, and what
+    ``abandon()`` records as ``discarded``.
+    """
+
+    has_interrupt: bool
+    events: list[Event]
+
+
 class StreamFrame(NamedTuple):
     """A yielded frame from ``stream_events()`` when ``include_reducers`` is enabled.
 
@@ -1592,6 +1609,14 @@ class EventGraph:
         ``snapshot.tasks[*].interrupts`` distinguishes a real interrupt
         from a cancelled or crashed graph, which also leaves
         ``snapshot.next`` set.
+
+        Topology-dependent: ``snapshot.tasks`` only reports a task the
+        graph that produced *snapshot* can still schedule — a thread
+        paused on a handler this graph no longer registers looks
+        uninterrupted here. Used only by :meth:`_graph_state`, reached
+        through a caller's own working graph. Everywhere else
+        (discovery, ``abandon()``) reads the checkpoint's raw pending
+        writes instead — see :meth:`_pending_interrupt_writes`.
         """
         has_interrupt = any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
         return bool(snapshot.next) and has_interrupt
@@ -1604,6 +1629,9 @@ class EventGraph:
         Scans every task, not just ``tasks[0]`` — a fanned-out dispatch
         can pause more than one. Skips a non-``Event`` payload, e.g. a
         raw ``langgraph.types.interrupt("...")`` call.
+
+        Topology-dependent, same caveat as :meth:`_is_interrupted` — used
+        only by :meth:`_graph_state`'s first-pause fallback.
         """
         seen: set[str] = set()
         values: list[Event] = []
@@ -1616,13 +1644,73 @@ class EventGraph:
         return values
 
     @staticmethod
-    def _discarded_interrupt_name(snapshot: StateSnapshot) -> str:
-        """Type name(s) of the interrupt(s) about to be discarded, joined
-        with ``", "`` and deduped, in discovery order. Empty if none.
+    def _pending_interrupt_writes(pending_writes: Iterable[Any]) -> _PendingInterrupts:
+        """Read every pending ``__interrupt__`` checkpoint write into a
+        :class:`_PendingInterrupts`.
+
+        Reads a checkpoint's raw ``pending_writes`` — topology-
+        independent, unlike :meth:`_pending_interrupt_events`. A thread
+        paused on a handler the current graph no longer registers still
+        carries this write; ``StateSnapshot.tasks`` would not show it.
+        This is the mechanism behind discovery and ``abandon()``.
+
+        A write's value is one interrupt or a sequence of them
+        (framework detail; handled either way).
         """
-        return ", ".join(
-            type(v).__name__ for v in EventGraph._pending_interrupt_events(snapshot)
-        )
+        has_interrupt = False
+        seen: set[str] = set()
+        events: list[Event] = []
+        for _task_id, channel, value in pending_writes:
+            if channel != "__interrupt__":
+                continue
+            entries = value if isinstance(value, (list, tuple)) else [value]
+            for entry in entries:
+                has_interrupt = True
+                payload = getattr(entry, "value", entry)
+                if isinstance(payload, Event) and type(payload).__name__ not in seen:
+                    seen.add(type(payload).__name__)
+                    events.append(payload)
+        return _PendingInterrupts(has_interrupt=has_interrupt, events=events)
+
+    def _read_pending_interrupts(
+        self, config: RunnableConfig, method: str
+    ) -> _PendingInterrupts:
+        """*config*'s latest checkpoint's pending interrupt(s), read
+        straight from the checkpointer — see :meth:`_pending_interrupt_writes`.
+
+        A stored write can name a class the current codebase no longer
+        imports; the checkpointer's own deserialization error then
+        propagates, re-raised naming *method* and the thread so the
+        caller knows which thread is unreadable. Never swallowed —
+        skipping it here would make that thread silently invisible to
+        every caller of this method (discovery included).
+        """
+        thread_id = config.get("configurable", {}).get("thread_id")
+        try:
+            tup = self._checkpointer.get_tuple(config)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
+            ) from exc
+        if tup is None:
+            return _PendingInterrupts(has_interrupt=False, events=[])
+        return self._pending_interrupt_writes(tup.pending_writes)
+
+    async def _aread_pending_interrupts(
+        self, config: RunnableConfig, method: str
+    ) -> _PendingInterrupts:
+        """Async sibling of :meth:`_read_pending_interrupts`, via
+        ``aget_tuple``."""
+        thread_id = config.get("configurable", {}).get("thread_id")
+        try:
+            tup = await self._checkpointer.aget_tuple(config)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
+            ) from exc
+        if tup is None:
+            return _PendingInterrupts(has_interrupt=False, events=[])
+        return self._pending_interrupt_writes(tup.pending_writes)
 
     @staticmethod
     def _require_settleable(
@@ -1642,17 +1730,20 @@ class EventGraph:
             "thread was never run (or only pre_seed()ed)."
         )
 
-    @classmethod
+    @staticmethod
     def _require_pending_interrupt(
-        cls, method: str, snapshot: StateSnapshot, config: RunnableConfig
+        method: str, pending: _PendingInterrupts, config: RunnableConfig
     ) -> None:
-        """Raise ``ValueError`` if the thread has no pending interrupt.
+        """Raise ``ValueError`` if *pending* (from
+        :meth:`_read_pending_interrupts`) has no interrupt at all —
+        including a non-``Event`` payload, which still genuinely pauses
+        the thread even though it can't be named in ``discarded``.
 
         Guards the default ``require_interrupt=True``: without it,
         ``abandon()``/``aabandon()`` would silently settle an
         already-completed thread onto a terminal ``Abandoned``.
         """
-        if cls._is_interrupted(snapshot):
+        if pending.has_interrupt:
             return
         thread_id = config.get("configurable", {}).get("thread_id")
         raise ValueError(
@@ -1688,9 +1779,10 @@ class EventGraph:
         self._require_checkpointer("abandon")
         snapshot = self._compile().get_state(config)
         self._require_settleable("abandon", snapshot, config)
+        pending = self._read_pending_interrupts(config, "abandon")
         if require_interrupt:
-            self._require_pending_interrupt("abandon", snapshot, config)
-        discarded = self._discarded_interrupt_name(snapshot)
+            self._require_pending_interrupt("abandon", pending, config)
+        discarded = ", ".join(type(v).__name__ for v in pending.events)
         self._settle(config, Abandoned(reason=reason, discarded=discarded))
 
     async def aabandon(
@@ -1704,9 +1796,10 @@ class EventGraph:
         self._require_checkpointer("aabandon")
         snapshot = await self._compile().aget_state(config)
         self._require_settleable("aabandon", snapshot, config)
+        pending = await self._aread_pending_interrupts(config, "aabandon")
         if require_interrupt:
-            self._require_pending_interrupt("aabandon", snapshot, config)
-        discarded = self._discarded_interrupt_name(snapshot)
+            self._require_pending_interrupt("aabandon", pending, config)
+        discarded = ", ".join(type(v).__name__ for v in pending.events)
         await self._asettle(config, Abandoned(reason=reason, discarded=discarded))
 
     def _list_thread_ids(self, method: str) -> list[str]:
@@ -1746,19 +1839,19 @@ class EventGraph:
             ) from exc
         return sorted(ids)
 
-    @classmethod
-    def _is_paused_on(
-        cls, snapshot: StateSnapshot, event_type: type[Interrupted] | None
+    @staticmethod
+    def _matches_event_type(
+        pending: _PendingInterrupts, event_type: type[Interrupted] | None
     ) -> bool:
-        """Whether *snapshot* is paused on *event_type* (or ``None`` for any
-        pending interrupt), matching a subclass of *event_type* too."""
-        if not cls._is_interrupted(snapshot):
+        """Whether *pending* (from :meth:`_read_pending_interrupts`) has
+        an interrupt matching *event_type* — any pending interrupt at
+        all, including a non-``Event`` payload, if *event_type* is
+        ``None``."""
+        if not pending.has_interrupt:
             return False
         if event_type is None:
             return True
-        return any(
-            isinstance(v, event_type) for v in cls._pending_interrupt_events(snapshot)
-        )
+        return any(isinstance(v, event_type) for v in pending.events)
 
     def threads_paused_on(
         self, event_type: type[Interrupted] | None = None
@@ -1768,6 +1861,12 @@ class EventGraph:
 
         With *event_type*, keeps only threads paused on that class or a
         subclass. With ``None``, returns every paused thread.
+
+        Reads each thread's raw checkpoint directly (see
+        :meth:`_read_pending_interrupts`), not this graph's compiled
+        topology — so a thread paused on a handler already removed from
+        this graph is still found. That is the common case: retiring an
+        ``Interrupted`` usually retires the handler that produced it too.
 
         WARNING: this reads every checkpoint the checkpointer holds and
         deserializes every row — cost is O(all checkpoints), not O(paused
@@ -1780,12 +1879,11 @@ class EventGraph:
         and call :meth:`get_state` on each in that case.
         """
         self._require_checkpointer("threads_paused_on")
-        compiled = self._compile()
         configs: list[RunnableConfig] = []
         for tid in self._list_thread_ids("threads_paused_on"):
             cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
-            snapshot = compiled.get_state(cfg)
-            if self._is_paused_on(snapshot, event_type):
+            pending = self._read_pending_interrupts(cfg, "threads_paused_on")
+            if self._matches_event_type(pending, event_type):
                 configs.append(cfg)
         return configs
 
@@ -1794,12 +1892,11 @@ class EventGraph:
     ) -> list[RunnableConfig]:
         """Async version of :meth:`threads_paused_on`."""
         self._require_checkpointer("athreads_paused_on")
-        compiled = self._compile()
         configs: list[RunnableConfig] = []
         for tid in await self._alist_thread_ids("athreads_paused_on"):
             cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
-            snapshot = await compiled.aget_state(cfg)
-            if self._is_paused_on(snapshot, event_type):
+            pending = await self._aread_pending_interrupts(cfg, "athreads_paused_on")
+            if self._matches_event_type(pending, event_type):
                 configs.append(cfg)
         return configs
 
@@ -1808,6 +1905,13 @@ class EventGraph:
 
         Shared by the sync :meth:`get_state` and async :meth:`aget_state` so
         the snapshot-to-state logic stays in one place across both paths.
+
+        Deliberately a pure function of *snapshot* — no checkpointer read
+        here. That keeps ``is_interrupted``/``interrupted`` topology-
+        dependent (see :meth:`_is_interrupted`): a caller holding a
+        ``GraphState`` reached it through its own working graph, unlike
+        discovery (:meth:`threads_paused_on`) or ``abandon()``, which
+        read the checkpoint directly for exactly this reason.
         """
         all_events = snapshot.values.get("events", [])
         log = EventLog(all_events)

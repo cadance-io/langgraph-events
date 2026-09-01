@@ -28,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose latest checkpoint has a pending interrupt, optionally filtered to an `Interrupted`
   class or subclass. Closes the discovery gap in the `abandon()` retirement workflow: a client
   no longer needs `graph.compiled` or `snapshot.tasks[*].interrupts[*].value` to find the
-  threads to abandon. Requires a checkpointer. Reads every checkpoint the checkpointer holds —
+  threads to abandon. Reads the checkpoint's raw pending writes directly, not the graph's
+  compiled topology — so it still finds a thread paused on a handler already removed from the
+  graph, the common retirement shape (an `Interrupted` usually retires the handler that
+  produced it too). Requires a checkpointer. Reads every checkpoint the checkpointer holds —
   O(all checkpoints), not O(paused threads); a large deployment should filter thread ids
   server-side instead. Raises `ValueError` if the checkpointer's `list()`/`alist()` is
   unimplemented, naming the method (closes part of [#164]).
@@ -37,7 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raise `ValueError` on a thread with no pending interrupt, naming the thread and pointing at
   `require_interrupt=False`. Previously they settled such a thread silently, recording
   `Abandoned(discarded="")` — appending a terminal event onto settled business history with no
-  warning. Pass `require_interrupt=False` to keep the old behaviour (closes part of [#164]).
+  warning. The pending-interrupt check reads the checkpoint directly, same as
+  `threads_paused_on()`, so it does not raise on a genuinely paused thread whose handler is
+  already gone from the graph. Pass `require_interrupt=False` to keep the old behaviour
+  (closes part of [#164]).
 
 [#164]: https://github.com/cadance-io/langgraph-events/issues/164
 

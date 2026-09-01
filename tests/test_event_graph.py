@@ -4622,20 +4622,44 @@ def describe_abandon():
             assert graph.get_state(cfg).events.has(_SideDone)
 
         def it_leaves_the_thread_usable():
-            # v2 drops `_waiter`, so its own get_state() can no longer
-            # schedule that node — require_interrupt would see no pending
-            # interrupt here even though the thread is genuinely paused.
             saver = MemorySaver()
             cfg = {"configurable": {"thread_id": "abandon-usable"}}
             EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
                 Started(data="x"), config=cfg
             )
             v2 = EventGraph([_go_ends], checkpointer=saver)
-            v2.abandon(cfg, require_interrupt=False)
+            v2.abandon(cfg)
 
             log = v2.invoke(_Go(), config=cfg)
 
             assert log.latest(Ended) == Ended(result="went")
+
+    def when_the_paused_handler_has_been_removed_from_the_graph():
+        # The primary retirement shape: retiring an Interrupted usually
+        # retires the handler that produced it too, so abandon() runs
+        # against a graph that no longer registers the paused node.
+        # StateSnapshot.tasks can't see this thread's pause once the
+        # node is gone — discovery and the require_interrupt guard must
+        # not depend on it (#164).
+
+        def it_is_still_discovered_and_settled_by_default():
+            saver = MemorySaver()
+            cfg = {"configurable": {"thread_id": "abandon-handler-gone"}}
+            EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+                Started(data="x"), config=cfg
+            )
+
+            v2 = EventGraph([_go_ends], checkpointer=saver)
+
+            found = v2.threads_paused_on(_Pause)
+            assert [c["configurable"]["thread_id"] for c in found] == [
+                "abandon-handler-gone"
+            ]
+
+            v2.abandon(cfg)  # default require_interrupt=True must not raise
+
+            log = v2.get_state(cfg).events
+            assert log.latest(Abandoned).discarded == "_Pause"
 
     def when_the_thread_has_no_pending_interrupt():
         # require_interrupt defaults to True: a completed thread has no
@@ -4700,7 +4724,7 @@ def describe_abandon():
                     Started(data="x"), config=cfg
                 )
                 v2 = EventGraph([_go_ends], checkpointer=saver)
-                v2.abandon(cfg, require_interrupt=False)
+                v2.abandon(cfg)
                 v2.invoke(_Go(), config=cfg)
 
                 with pytest.raises(UnresumableError) as excinfo:
@@ -4935,21 +4959,38 @@ def describe_async_only_checkpointer():
 
             @pytest.mark.asyncio
             async def it_leaves_the_thread_usable():
-                # v2 drops `_waiter`, so its own aget_state() can no longer
-                # schedule that node — require_interrupt would see no
-                # pending interrupt here even though the thread is
-                # genuinely paused.
                 saver = _AsyncOnlySaver()
                 cfg = {"configurable": {"thread_id": "aabandon-usable"}}
                 await EventGraph([_waiter, _go_noop], checkpointer=saver).ainvoke(
                     Started(data="x"), config=cfg
                 )
                 v2 = EventGraph([_go_ends], checkpointer=saver)
-                await v2.aabandon(cfg, require_interrupt=False)
+                await v2.aabandon(cfg)
 
                 log = await v2.ainvoke(_Go(), config=cfg)
 
                 assert log.latest(Ended) == Ended(result="went")
+
+        def when_the_paused_handler_has_been_removed_from_the_graph():
+            @pytest.mark.asyncio
+            async def it_is_still_discovered_and_settled_by_default():
+                saver = _AsyncOnlySaver()
+                cfg = {"configurable": {"thread_id": "aabandon-handler-gone"}}
+                await EventGraph([_waiter, _go_noop], checkpointer=saver).ainvoke(
+                    Started(data="x"), config=cfg
+                )
+
+                v2 = EventGraph([_go_ends], checkpointer=saver)
+
+                found = await v2.athreads_paused_on(_Pause)
+                assert [c["configurable"]["thread_id"] for c in found] == [
+                    "aabandon-handler-gone"
+                ]
+
+                await v2.aabandon(cfg)  # default require_interrupt=True must not raise
+
+                log = (await v2.aget_state(cfg)).events
+                assert log.latest(Abandoned).discarded == "_Pause"
 
         def when_the_thread_has_no_pending_interrupt():
             def with_default_policy():
