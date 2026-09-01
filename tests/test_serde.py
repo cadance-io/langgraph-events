@@ -4441,21 +4441,56 @@ class WorkStaged(Namespace):
         result: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
-def _select_deco_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+# The decorator form, collected from ``namespaces=`` like ``@transform_fields``.
+# ``select_failed`` and ``Job`` are the example in docs/event-migrations.md,
+# "Splitting one stored event into two on a payload value". Keep them in
+# step: ``describe_SplitEvent_docs_example`` runs the docs snippet verbatim.
+def select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
     result = kw.get("result")
     if result is None or result.get("status") != "error":
-        return None
-    return WorkDeco.Failed, {"reason": result["message"]}
+        return None  # keep Job.Completed
+    return Job.Failed, {"reason": result["message"]}
 
 
-# The decorator form, collected from ``namespaces=`` like ``@transform_fields``.
-class WorkDeco(Namespace):
+class Job(Namespace):
     class Failed(DomainEvent):
         reason: str = ""
 
-    @split_event(_select_deco_failed, targets=(Failed,))
+    @split_event(select_failed, targets=(Failed,))
     class Completed(DomainEvent):
         result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def _select_gate_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return GateSplit.Failed, {"reason": result["message"]}
+
+
+def _select_reading_placeholder(kw: dict[str, Any]) -> tuple[type, dict[str, Any]]:
+    """Raises ``TypeError`` on the gate's ``None`` placeholder."""
+    return GateSplitStrict.Failed, {"reason": kw["result"]["message"]}
+
+
+# ``result`` is required, so the revive gate sends a ``None`` placeholder
+# for it and the select sees it.
+class GateSplit(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_gate_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any]
+
+
+class GateSplitStrict(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_reading_placeholder, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any]
 
 
 def describe_SplitEvent():
@@ -4715,15 +4750,15 @@ def describe_SplitEvent():
 
     def when_the_source_carries_the_decorator():
         def it_is_collected_from_namespaces():
-            serde = NamespaceAwareSerde(namespaces=[WorkDeco])
+            serde = NamespaceAwareSerde(namespaces=[Job])
 
             revived = serde.loads_typed(
                 synthesize_legacy_payload(
-                    WorkDeco.__module__, "WorkDeco.Completed", {"result": _ERROR}
+                    Job.__module__, "Job.Completed", {"result": _ERROR}
                 )
             )
 
-            assert revived == WorkDeco.Failed(reason="boom")
+            assert revived == Job.Failed(reason="boom")
 
         def with_two_stacked_decorators():
             def it_is_rejected_at_decoration_time():
@@ -4760,3 +4795,72 @@ def describe_SplitEvent():
             assert _revive(serde, "Work.Completed", result=_ERROR) == Work.Failed(
                 reason="boom"
             )
+
+
+def describe_SplitEvent_revive_gate():
+    # The gate sends a ``None`` placeholder for a required field. A select
+    # must return None on it, so the gate proves the source still
+    # constructs. Each branch is pinned with real values through
+    # ``synthesize_legacy_payload`` instead.
+
+    def when_select_returns_None_on_the_placeholder():
+        def it_passes(tmp_path: Any):
+            from langgraph_events.serde.migrations import assert_all_baselined_revive
+
+            baseline = _baseline_v3_file(
+                tmp_path,
+                events=((GateSplit.__module__, "GateSplit.Completed", ["result"]),),
+            )
+
+            assert_all_baselined_revive(
+                NamespaceAwareSerde(namespaces=[GateSplit]), baseline
+            )
+
+    def when_select_reads_the_placeholder():
+        def it_fails_naming_the_placeholder_contract(tmp_path: Any):
+            from langgraph_events.serde.migrations import assert_all_baselined_revive
+
+            baseline = _baseline_v3_file(
+                tmp_path,
+                events=(
+                    (
+                        GateSplitStrict.__module__,
+                        "GateSplitStrict.Completed",
+                        ["result"],
+                    ),
+                ),
+            )
+
+            with pytest.raises(AssertionError) as excinfo:
+                assert_all_baselined_revive(
+                    NamespaceAwareSerde(namespaces=[GateSplitStrict]), baseline
+                )
+
+            message = str(excinfo.value)
+            assert "SplitEvent raised TypeError" in message
+            assert "None placeholder" in message
+            assert "synthesize_legacy_payload" in message
+
+
+def describe_SplitEvent_docs_example():
+    # The snippet under "Splitting one stored event into two on a payload
+    # value" in docs/event-migrations.md, verbatim.
+
+    def it_pins_both_branches():
+        serde = NamespaceAwareSerde(namespaces=[Job])
+
+        failed = serde.loads_typed(
+            synthesize_legacy_payload(
+                Job.__module__,
+                "Job.Completed",
+                {"result": {"status": "error", "message": "disk full"}},
+            )
+        )
+        assert failed == Job.Failed(reason="disk full")
+
+        completed = serde.loads_typed(
+            synthesize_legacy_payload(
+                Job.__module__, "Job.Completed", {"result": {"status": "ok"}}
+            )
+        )
+        assert completed == Job.Completed(result={"status": "ok"})

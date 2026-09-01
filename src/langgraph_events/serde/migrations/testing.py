@@ -330,16 +330,17 @@ def _failure_hint(exc: Exception) -> str:
     A kwarg the live class rejected: the baseline recorded it, the class
     dropped it, and a stored payload still carries it. The remedy is
     already in *exc*, so the sentence states the cause only. A transform
-    that raised: the gate sent a ``None`` placeholder for each dropped
-    field, and the transform may need a real value. Empty for every other
-    failure.
+    or a select that raised: the gate sent a ``None`` placeholder for
+    each required or dropped field, and the callable may need a real
+    value. Empty for every other failure.
     """
     text = str(exc)
-    if "TransformFields raised" in text:
+    if "TransformFields raised" in text or "SplitEvent raised" in text:
         return (
-            " The gate sent a None placeholder for every recorded field the "
-            "live class no longer accepts. Pin real values with "
-            "synthesize_legacy_payload if the transform reads them."
+            " The gate sent a None placeholder for every required field and "
+            "every recorded field the live class no longer accepts. Pin real "
+            "values with synthesize_legacy_payload if the transform or the "
+            "select reads them."
         )
     match = _UNEXPECTED_KWARG_RE.search(text)
     if match is None:
