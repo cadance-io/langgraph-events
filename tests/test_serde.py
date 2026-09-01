@@ -186,6 +186,41 @@ class ValidatedReorg(Namespace):
             return ValidatedReorg.Persist.Persisted(name=self.name)
 
 
+# Fixture for the v3 revive gate. ``name`` has a default and
+# ``__post_init__`` rejects an empty/None value. The baseline records
+# ``name``, the live class still accepts it, so the gate must send no
+# placeholder for it: a ``None`` there trips the validator that a real
+# payload never trips.
+class ValidatedDefault(Namespace):
+    class Persist(Command):
+        name: str = "x"
+
+        class Persisted(DomainEvent):
+            name: str = "x"
+
+            def __post_init__(self) -> None:
+                if not self.name:
+                    raise ValueError("name must be non-empty")
+
+        def handle(self) -> ValidatedDefault.Persist.Persisted:
+            return ValidatedDefault.Persist.Persisted(name=self.name)
+
+
+# Tombstones for identities a baseline lists under ``retired``. The
+# retired ``Retiring.ApprovalRequired`` recorded ``order_id``, so its
+# tombstone declares the same field. ``Retiring.ReviewRequired`` predates
+# v3 (no field record), and its tombstone has a required field the gate
+# must placeholder.
+class Retiring(Namespace):
+    @migrate_from("Retiring.ApprovalRequired")
+    class RetiredApprovalGate(Interrupted):
+        order_id: str = ""
+
+    @migrate_from("Retiring.ReviewRequired")
+    class RetiredReviewGate(Interrupted):
+        order_id: str
+
+
 class DecoMulti(Namespace):
     class Persist(Command):
         note: str = ""
@@ -2341,6 +2376,25 @@ def describe_NamespaceAwareSerde():
                 assert "1 identity in the baseline is neither" in str(excinfo.value)
                 assert "add @migrate_from" in str(excinfo.value)
 
+        def when_the_baseline_lists_an_unmigrated_retired_identity():
+            def it_raises_naming_the_retired_remedy(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    MigrationCoverageError,
+                    assert_all_baselined_cover,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[Retiring])
+                baseline = _baseline_v3_file(
+                    tmp_path, retired=(("ghost.mod", "Ghost.Gone", ["x"]),)
+                )
+
+                with pytest.raises(MigrationCoverageError) as excinfo:
+                    assert_all_baselined_cover(serde, baseline)
+
+                assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
+                assert "retired" in str(excinfo.value)
+                assert "delete its `retired` entry" in str(excinfo.value)
+
         def when_unifying_the_gate_error_base():
             def it_is_an_assertion_error_subclass():
                 # Unified error base: every gate raises AssertionError so
@@ -2502,6 +2556,128 @@ def describe_NamespaceAwareSerde():
                     baseline = _baseline_file(
                         tmp_path,
                         (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                    )
+
+                    assert_all_baselined_revive(serde, baseline)
+
+        def when_a_field_is_dropped_and_the_baseline_rewritten():
+            def it_still_fails(tmp_path: Any):
+                # The write keeps every field ever recorded, so a plain
+                # re-baseline after the drop cannot blind the gate.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                baseline = _baseline_v3_file(
+                    tmp_path,
+                    events=(
+                        (
+                            DecoReorg.__module__,
+                            "DecoReorg.Persist.Persisted",
+                            ["legacy_flag", "note"],
+                        ),
+                    ),
+                )
+                write_baseline(EventGraph.from_namespaces(DecoReorg), baseline)
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+
+                with pytest.raises(AssertionError, match="legacy_flag"):
+                    assert_all_baselined_revive(serde, baseline)
+
+        def when_a_defaulted_field_is_validated_in_post_init():
+            def it_passes_after_a_v3_write(tmp_path: Any):
+                # The record names ``name``. The live class still accepts
+                # it, so no ``None`` placeholder reaches the validator.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                baseline = tmp_path / "baseline.json"
+                write_baseline(EventGraph.from_namespaces(ValidatedDefault), baseline)
+                serde = NamespaceAwareSerde(namespaces=[ValidatedDefault])
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_the_live_class_gained_a_backfilled_required_field():
+            def it_passes_against_the_v3_record_of_the_old_shape(tmp_path: Any):
+                # The record predates ``command_id``. The back-fill injects
+                # it, so the gate sends no placeholder and still revives.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoBackfill])
+                baseline = _baseline_v3_file(
+                    tmp_path,
+                    events=(
+                        (
+                            DecoBackfill.__module__,
+                            "DecoBackfill.Persist.Persisted",
+                            ["note"],
+                        ),
+                    ),
+                )
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_the_baseline_lists_a_retired_identity():
+            def without_a_migration():
+                def it_fails_naming_the_retired_remedy(tmp_path: Any):
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[Retiring])
+                    baseline = _baseline_v3_file(
+                        tmp_path,
+                        retired=(("ghost.mod", "Ghost.Gone", ["x"]),),
+                    )
+
+                    with pytest.raises(AssertionError) as excinfo:
+                        assert_all_baselined_revive(serde, baseline)
+
+                    message = str(excinfo.value)
+                    assert "Ghost.Gone" in message
+                    assert "retired" in message
+                    assert "delete its `retired` entry" in message
+
+            def with_a_tombstone_declaring_the_recorded_fields():
+                def it_passes(tmp_path: Any):
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[Retiring])
+                    baseline = _baseline_v3_file(
+                        tmp_path,
+                        retired=(
+                            (
+                                Retiring.__module__,
+                                "Retiring.ApprovalRequired",
+                                ["order_id"],
+                            ),
+                        ),
+                    )
+
+                    assert_all_baselined_revive(serde, baseline)
+
+            def without_a_field_record():
+                def it_sends_required_placeholders_only(tmp_path: Any):
+                    # A retired entry hand-added for an identity erased
+                    # before v3 has no ``fields``. The tombstone's required
+                    # ``order_id`` still gets its placeholder.
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[Retiring])
+                    baseline = _baseline_v3_file(
+                        tmp_path,
+                        retired=(
+                            (Retiring.__module__, "Retiring.ReviewRequired", None),
+                        ),
                     )
 
                     assert_all_baselined_revive(serde, baseline)

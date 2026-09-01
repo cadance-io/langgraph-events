@@ -40,11 +40,13 @@ from langgraph_events.serde.migrations._core import (
 )
 from langgraph_events.serde.migrations.detect import (
     MIGRATION_REMEDY,
+    RETIRED_REMEDY,
     HandlerCoverageError,
     MigrationCoverageError,
     _load_baseline,
     _load_baseline_fields,
     _load_baseline_handlers,
+    _load_baseline_retired,
 )
 
 
@@ -126,13 +128,18 @@ def assert_all_baselined_cover(
     :meth:`NamespaceAwareSerde.revivable_identities` — every baselined
     identity must be either still live in this serde's ``namespaces=`` or
     covered by a rename migration. Neither resolves nor constructs the class.
-    Raises :class:`MigrationCoverageError` (an ``AssertionError``) whose
-    ``uncovered`` attribute lists the offending identities.
+    Walks the baseline's ``retired`` list too: a retired identity must be
+    covered by a migration. Raises :class:`MigrationCoverageError` (an
+    ``AssertionError``) whose ``uncovered`` attribute lists the offending
+    identities and whose ``retired`` attribute lists the retired subset.
     """
     baseline = _load_baseline(Path(baseline_path))
-    missing = tuple(sorted(baseline - serde.revivable_identities()))
+    retired = set(_load_baseline_retired(Path(baseline_path)))
+    missing = tuple(sorted((baseline | retired) - serde.revivable_identities()))
     if missing:
-        raise MigrationCoverageError(missing)
+        raise MigrationCoverageError(
+            missing, tuple(identity for identity in missing if identity in retired)
+        )
 
 
 def assert_all_baselined_handlers_cover(
@@ -218,19 +225,24 @@ def _assert_baselined(
     :func:`assert_all_baselined_revive`: load → sweep (collecting *every*
     failure, never aborting early) → raise *header* plus one indented line
     per failure. *check* receives the fields the baseline recorded for the
-    identity, or ``None`` for a pre-v3 record. ``cover`` is a set-diff
-    rather than a per-identity sweep, so it stays separate.
+    identity, or ``None`` for a pre-v3 record. The sweep covers ``events``
+    and ``retired`` both. A failure line for a retired identity says so
+    and carries :data:`RETIRED_REMEDY`, because regenerating the baseline
+    cannot clear it. ``cover`` is a set-diff rather than a per-identity
+    sweep, so it stays separate.
     """
     recorded = _load_baseline_fields(Path(baseline_path))
+    retired = _load_baseline_retired(Path(baseline_path))
     failures = [
-        failure
-        for (module, qualname), fields in sorted(recorded.items())
-        if (failure := check(serde, module, qualname, fields)) is not None
+        failure if identity not in retired else f"{failure} (retired)"
+        for identity, fields in sorted((recorded | retired).items())
+        if (failure := check(serde, *identity, fields)) is not None
     ]
     if failures:
-        raise AssertionError(
-            header + "\n  " + "\n  ".join(failures) + "\n" + MIGRATION_REMEDY
-        )
+        remedy = MIGRATION_REMEDY
+        if any(line.endswith("(retired)") for line in failures):
+            remedy += " " + RETIRED_REMEDY
+        raise AssertionError(header + "\n  " + "\n  ".join(failures) + "\n" + remedy)
 
 
 def _resolve_check(
@@ -338,6 +350,14 @@ def assert_all_baselined_revive(
     :func:`assert_all_baselined_resolve` instead; validation on a
     back-filled field sees the real injected value and passes here.
 
+    A v3 baseline records the fields of each identity. A recorded field
+    the live class no longer accepts gets a placeholder too, so a dropped
+    field fails here the way a stored payload fails at read. A pre-v3
+    baseline records no fields, and the gate sends required placeholders
+    only. The sweep covers the baseline's ``retired`` list as well: a
+    retired identity must revive through a migration, and its failure line
+    says so.
+
     Blind spot: an origin-scoped fill keyed mid-chain leaves EARLIER eras
     placeholder-masked — their baselined identities have no applicable
     fill, so the field falls back to a ``None`` placeholder and the gate
@@ -368,8 +388,9 @@ def assert_all_baselined_resolve(
     no ``__init__``/``__post_init__``. Use when the baseline includes events
     with construction-time validation, framework ``SystemEvents``, or
     module-level ``IntegrationEvents`` that ``revive`` would trip or ``cover``
-    would miss. Raises ``AssertionError`` naming every identity that no longer
-    resolves to an ``Event`` subclass.
+    would miss. The sweep covers the baseline's ``retired`` list as well.
+    Raises ``AssertionError`` naming every identity that no longer resolves
+    to an ``Event`` subclass.
     """
     _assert_baselined(
         serde,
