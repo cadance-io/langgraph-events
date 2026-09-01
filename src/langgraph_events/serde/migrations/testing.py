@@ -30,7 +30,10 @@ if TYPE_CHECKING:
 from langgraph.checkpoint.serde.jsonplus import _option
 
 from langgraph_events._event import Event, Resumed
-from langgraph_events.serde._jsonplus import EXT_NAMESPACE_AWARE_EVENT
+from langgraph_events.serde._jsonplus import (
+    _UNEXPECTED_KWARG_RE,
+    EXT_NAMESPACE_AWARE_EVENT,
+)
 from langgraph_events.serde.migrations._core import (
     _resolve_identity,
     _resolve_rename,
@@ -40,6 +43,7 @@ from langgraph_events.serde.migrations.detect import (
     HandlerCoverageError,
     MigrationCoverageError,
     _load_baseline,
+    _load_baseline_fields,
     _load_baseline_handlers,
 )
 
@@ -64,17 +68,24 @@ def synthesize_legacy_payload(
     return ("msgpack", outer)
 
 
-def _required_field_placeholders(
+def _placeholder_kwargs(
     module: str,
     qualname: str,
+    recorded: frozenset[str] | None,
     *,
     skip: frozenset[str] = frozenset(),
     scope: Mapping[tuple[str, str], type] | None = None,
 ) -> dict[str, Any]:
-    """``{name: None}`` for every required (no-default) field of the live
-    class at ``(module, qualname)``, except those in *skip*. An
-    ``init=False`` field gets no placeholder: the encoder does not write it
-    and the constructor rejects it as a kwarg (#172).
+    """``{name: None}`` for every field the gate must send to the live class
+    at ``(module, qualname)``, except those in *skip*.
+
+    Two kinds of field get a placeholder. A required (no-default) field of
+    the live class, so a healthy class constructs. A field in *recorded*,
+    the baseline's record, that the live class no longer accepts as an init
+    kwarg: a stored payload still carries it, so the gate must send it too.
+    A recorded field the live class still accepts gets no placeholder. A
+    ``None`` there would reach a defaulted field and trip a
+    ``__post_init__`` validator that a real payload never trips.
 
     Reads the fields off whichever class the read path would build — hence
     *scope*, the serde's ``namespaces=`` map, ahead of the import walk.
@@ -95,14 +106,15 @@ def _required_field_placeholders(
         return {}
     if not dataclasses.is_dataclass(obj):
         return {}
-    return {
-        f.name: None
-        for f in dataclasses.fields(obj)
-        if f.init
-        and f.name not in skip
-        and f.default is dataclasses.MISSING
-        and f.default_factory is dataclasses.MISSING
+    fields = dataclasses.fields(obj)
+    accepted = {f.name for f in fields if f.init}
+    required = {
+        f.name
+        for f in fields
+        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
     }
+    dropped = (recorded or frozenset()) - accepted
+    return dict.fromkeys(sorted((required | dropped) - skip))
 
 
 def assert_all_baselined_cover(
@@ -198,21 +210,22 @@ def _assert_baselined(
     serde: NamespaceAwareSerde,
     baseline_path: Path | str,
     header: str,
-    check: Callable[[NamespaceAwareSerde, str, str], str | None],
+    check: Callable[[NamespaceAwareSerde, str, str, frozenset[str] | None], str | None],
 ) -> None:
     """Sweep *check* over every baselined identity; raise ``AssertionError``.
 
     Shared spine of :func:`assert_all_baselined_resolve` and
     :func:`assert_all_baselined_revive`: load → sweep (collecting *every*
     failure, never aborting early) → raise *header* plus one indented line
-    per failure. ``cover`` is a set-diff rather than a per-identity sweep, so
-    it stays separate.
+    per failure. *check* receives the fields the baseline recorded for the
+    identity, or ``None`` for a pre-v3 record. ``cover`` is a set-diff
+    rather than a per-identity sweep, so it stays separate.
     """
-    baseline = _load_baseline(Path(baseline_path))
+    recorded = _load_baseline_fields(Path(baseline_path))
     failures = [
         failure
-        for module, qualname in sorted(baseline)
-        if (failure := check(serde, module, qualname)) is not None
+        for (module, qualname), fields in sorted(recorded.items())
+        if (failure := check(serde, module, qualname, fields)) is not None
     ]
     if failures:
         raise AssertionError(
@@ -221,7 +234,10 @@ def _assert_baselined(
 
 
 def _resolve_check(
-    serde: NamespaceAwareSerde, module: str, qualname: str
+    serde: NamespaceAwareSerde,
+    module: str,
+    qualname: str,
+    recorded_fields: frozenset[str] | None,
 ) -> str | None:
     """Failure string if ``(module, qualname)`` no longer resolves (rename-
     aware) to a live ``Event`` subclass, else ``None``. Never constructs.
@@ -229,7 +245,8 @@ def _resolve_check(
     Resolves through *serde*'s own scope first, exactly as its read path
     does — the gate asks "would a checkpoint revive", and answering it with
     a different resolution rule than the reader uses makes it wrong in both
-    directions."""
+    directions. *recorded_fields* is unused: resolution never looks at a
+    field."""
     target_module, target_qualname = _resolve_rename(
         module, qualname, serde._rename_table
     )
@@ -242,13 +259,20 @@ def _resolve_check(
     return None
 
 
-def _revive_check(serde: NamespaceAwareSerde, module: str, qualname: str) -> str | None:
+def _revive_check(
+    serde: NamespaceAwareSerde,
+    module: str,
+    qualname: str,
+    recorded_fields: frozenset[str] | None,
+) -> str | None:
     """Failure string if a synthesized legacy payload for ``(module,
     qualname)`` does not revive to an ``Event`` through *serde*, else ``None``.
 
     Resolve the historic identity to its live target via the same rule the
-    read path uses, so required-field placeholder kwargs match the class
-    actually built. Fields the migration table back-fills — origin-scoped
+    read path uses, so placeholder kwargs match the class actually built.
+    The payload carries a placeholder for every required field of the live
+    class, plus one for every field in *recorded_fields* the live class no
+    longer accepts. Fields the migration table back-fills — origin-scoped
     (keyed on the baselined identity) or class-global (keyed on the
     resolved target) — get no placeholder, so the gate proves the fills
     actually inject.
@@ -263,16 +287,37 @@ def _revive_check(serde: NamespaceAwareSerde, module: str, qualname: str) -> str
             *serde._addfield_table.get((target_module, target_qualname), ()),
         )
     )
-    kwargs = _required_field_placeholders(
-        target_module, target_qualname, skip=backfilled, scope=serde._scope
+    kwargs = _placeholder_kwargs(
+        target_module,
+        target_qualname,
+        recorded_fields,
+        skip=backfilled,
+        scope=serde._scope,
     )
     try:
         revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))
     except Exception as exc:  # report every failure, don't abort the sweep
-        return f"{module}:{qualname} -> {type(exc).__name__}: {exc}"
+        return f"{module}:{qualname} -> {type(exc).__name__}: {exc}" + _dropped_hint(
+            exc
+        )
     if not isinstance(revived, Event):
         return f"{module}:{qualname} revived as non-Event {revived!r}"
     return None
+
+
+def _dropped_hint(exc: Exception) -> str:
+    """One sentence when *exc* names a kwarg the live class rejected: the
+    baseline recorded it, the class dropped it, and a stored payload
+    still carries it. Empty for every other failure."""
+    match = _UNEXPECTED_KWARG_RE.search(str(exc))
+    if match is None:
+        return ""
+    field = match.group(1)
+    return (
+        f" The baseline recorded field {field!r}, which the live class no "
+        f"longer accepts. Add a TransformFields migration that drops it, or "
+        f"restore the field on the class."
+    )
 
 
 def assert_all_baselined_revive(
