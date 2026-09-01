@@ -17,6 +17,26 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+def _ghost_entry(fields: list[str] | None = None) -> dict[str, object]:
+    """A baseline entry for an identity no graph reaches."""
+    entry: dict[str, object] = {"module": "ghost.mod", "qualname": "Ghost.Gone"}
+    if fields is not None:
+        entry["fields"] = fields
+    return entry
+
+
+def _write_v3(
+    target: Path,
+    *,
+    events: list[dict[str, object]] | None = None,
+    retired: list[dict[str, object]] | None = None,
+) -> None:
+    """Write a v3 baseline file with the given ``events`` and ``retired``."""
+    target.write_text(
+        json.dumps({"version": 3, "events": events or [], "retired": retired or []})
+    )
+
+
 def describe_detect_changes():
     def when_baseline_matches_current():
         def it_reports_no_diff():
@@ -227,39 +247,82 @@ def describe_write_baseline_cumulative_fields():
             assert fields["Order.Place.Placed"] == ["legacy_flag", "order_id"]
 
 
-def describe_write_baseline_regression_guard():
-    # The prose rule "commit the baseline alongside the migration, never
-    # after" is now enforced: silently overwriting away an identity the
-    # old baseline recorded would make assert_all_baselined_cover/
-    # detect_changes blind to a forgotten migration forever.
+def describe_write_baseline_retirement():
+    # A write never erases an identity the old baseline recorded. The
+    # identity moves to ``retired``, so the coverage gates keep walking it
+    # until a hand edit removes the entry.
 
     def when_an_existing_identity_is_gone_from_the_graph():
-        def it_raises_naming_the_dropped_identity(tmp_path: Path):
-            import pytest
+        def with_a_pre_v3_record():
+            def it_omits_fields_from_the_retired_entry(tmp_path: Path):
+                # A v1 record predates field tracking, so the retired entry
+                # carries no ``fields`` key: the one permitted degrade.
+                from conftest import Order
+
+                from langgraph_events import EventGraph
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                target = tmp_path / "baseline.json"
+                target.write_text(
+                    json.dumps({"version": 1, "events": [_ghost_entry()]})
+                )
+
+                write_baseline(EventGraph([Order.Place]), target)
+
+                loaded = json.loads(target.read_text())
+                assert loaded["retired"] == [_ghost_entry()]
+                identities = {(e["module"], e["qualname"]) for e in loaded["events"]}
+                assert ("ghost.mod", "Ghost.Gone") not in identities
+
+        def with_a_v3_record():
+            def it_keeps_the_recorded_fields_on_the_retired_entry(tmp_path: Path):
+                from conftest import Order
+
+                from langgraph_events import EventGraph
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                target = tmp_path / "baseline.json"
+                _write_v3(target, events=[_ghost_entry(["x"])])
+
+                write_baseline(EventGraph([Order.Place]), target)
+
+                loaded = json.loads(target.read_text())
+                assert loaded["retired"] == [_ghost_entry(["x"])]
+
+    def when_a_later_write_finds_a_retired_entry():
+        def it_keeps_the_entry(tmp_path: Path):
             from conftest import Order
 
             from langgraph_events import EventGraph
-            from langgraph_events.serde.migrations.detect import (
-                BaselineRegressionError,
-                write_baseline,
-            )
+            from langgraph_events.serde.migrations.detect import write_baseline
 
             target = tmp_path / "baseline.json"
-            target.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "events": [{"module": "ghost.mod", "qualname": "Ghost.Gone"}],
-                    }
-                )
-            )
-            graph = EventGraph([Order.Place])
+            _write_v3(target, retired=[_ghost_entry(["x"])])
 
-            with pytest.raises(BaselineRegressionError) as exc:
-                write_baseline(graph, target)
+            write_baseline(EventGraph([Order.Place]), target)
 
-            assert ("ghost.mod", "Ghost.Gone") in exc.value.removed
-            assert "Ghost.Gone" in str(exc.value)
+            assert json.loads(target.read_text())["retired"] == [_ghost_entry(["x"])]
+
+    def when_a_retired_identity_is_live_again():
+        def it_moves_the_identity_back_to_events(tmp_path: Path):
+            from conftest import Order
+
+            from langgraph_events import EventGraph
+            from langgraph_events.serde.migrations.detect import write_baseline
+
+            target = tmp_path / "baseline.json"
+            placed = {
+                "module": Order.__module__,
+                "qualname": "Order.Place.Placed",
+                "fields": ["order_id"],
+            }
+            _write_v3(target, retired=[placed])
+
+            write_baseline(EventGraph([Order.Place]), target)
+
+            loaded = json.loads(target.read_text())
+            assert loaded["retired"] == []
+            assert placed in loaded["events"]
 
     def when_no_baseline_exists_yet():
         def it_writes_the_first_baseline(tmp_path: Path):
@@ -276,17 +339,20 @@ def describe_write_baseline_regression_guard():
 
     def when_the_topology_is_unchanged():
         def it_rewrites_idempotently(tmp_path: Path):
+            # The seed file carries a retired identity, so the second write
+            # must reproduce ``events`` and ``retired`` both.
             from conftest import Order
 
             from langgraph_events import EventGraph
             from langgraph_events.serde.migrations.detect import write_baseline
 
             target = tmp_path / "baseline.json"
+            _write_v3(target, events=[_ghost_entry(["x"])])
             graph = EventGraph([Order.Place])
             write_baseline(graph, target)
             first = target.read_text()
 
-            write_baseline(graph, target)  # must not raise
+            write_baseline(graph, target)
 
             assert target.read_text() == first
 
@@ -319,29 +385,26 @@ def describe_write_baseline_regression_guard():
             assert (Order.__module__, "Order.Place.Placed") in identities
 
     def when_allow_removed_is_set():
-        def it_overwrites_the_intentional_delete(tmp_path: Path):
+        def it_warns_that_the_flag_does_nothing(tmp_path: Path):
+            # The flag once erased the dropped identity. A write now retires
+            # it whatever the flag says, and the flag is on its way out.
+            import pytest
             from conftest import Order
 
             from langgraph_events import EventGraph
             from langgraph_events.serde.migrations.detect import write_baseline
 
             target = tmp_path / "baseline.json"
-            target.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "events": [{"module": "ghost.mod", "qualname": "Ghost.Gone"}],
-                    }
-                )
-            )
+            _write_v3(target, events=[_ghost_entry(["x"])])
+            graph = EventGraph([Order.Place])
+            write_baseline(graph, target)
+            plain = target.read_text()
+            _write_v3(target, events=[_ghost_entry(["x"])])
 
-            write_baseline(EventGraph([Order.Place]), target, allow_removed=True)
+            with pytest.warns(DeprecationWarning, match="allow_removed"):
+                write_baseline(graph, target, allow_removed=True)
 
-            identities = {
-                (e["module"], e["qualname"])
-                for e in json.loads(target.read_text())["events"]
-            }
-            assert ("ghost.mod", "Ghost.Gone") not in identities
+            assert target.read_text() == plain
 
     def when_the_existing_baseline_has_an_unsupported_version():
         def it_still_raises_the_version_error(tmp_path: Path):
@@ -386,6 +449,49 @@ def describe_load_baseline():
                 ("cadance.persona", "P.Old"),
                 ("cadance.story", "S.Old"),
             }
+
+    def when_the_file_predates_v3():
+        def it_loads_no_fields_and_no_retired_identities(tmp_path: Path):
+            # v1 and v2 recorded neither. The revive gate then synthesizes
+            # required placeholders only: the documented degrade.
+            from langgraph_events.serde.migrations.detect import (
+                _load_baseline_fields,
+                _load_baseline_retired,
+            )
+
+            target = tmp_path / "baseline.json"
+            target.write_text(json.dumps({"version": 2, "events": [_ghost_entry()]}))
+
+            assert _load_baseline_fields(target) == {("ghost.mod", "Ghost.Gone"): None}
+            assert _load_baseline_retired(target) == {}
+
+    def when_a_v3_events_entry_lacks_fields():
+        def it_rejects_the_file(tmp_path: Path):
+            # ``fields`` is mandatory on v3. A hand-built file that omits it
+            # would silently degrade the revive gate.
+            import pytest
+
+            from langgraph_events.serde.migrations.detect import _load_baseline
+
+            target = tmp_path / "baseline.json"
+            _write_v3(target, events=[_ghost_entry()])
+
+            with pytest.raises(ValueError, match=r"fields.*Regenerate"):
+                _load_baseline(target)
+
+    def when_an_identity_is_in_events_and_retired():
+        def it_rejects_the_file(tmp_path: Path):
+            # The writer never produces an overlap. One means a hand edit
+            # went wrong, and the gates must not guess which list wins.
+            import pytest
+
+            from langgraph_events.serde.migrations.detect import _load_baseline
+
+            target = tmp_path / "baseline.json"
+            _write_v3(target, events=[_ghost_entry([])], retired=[_ghost_entry([])])
+
+            with pytest.raises(ValueError, match=r"retired.*Ghost\.Gone"):
+                _load_baseline(target)
 
     def when_version_mismatches():
         def it_raises_naming_the_version(tmp_path: Path):
