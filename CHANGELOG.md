@@ -10,20 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **`on_unresumable="halt"` re-armed the thread it was supposed to retire.** The policy appended
-  its terminal `Unresumable(Halted)` with a single `update_state`, which re-ran routing against the
-  checkpoint's stale `_pending` and rescheduled the already-paused node. A later `resume()` then
-  passed the pending check and ran for real, writing the retired `Interrupted` identity back into
-  the event log.
+  its terminal `Unresumable(Halted)` event with a single `update_state` call. That call re-ran
+  routing against the checkpoint's stale `_pending` state. Routing then rescheduled the
+  already-paused node. A later `resume()` call then passed the pending check. It ran for real
+  and wrote the retired `Interrupted` identity back into the event log.
 
-- **A halted thread came back dead.** The same `update_state` call left `_cursor` behind the
-  appended terminal event, so it re-entered the *next* run's pending window and tripped the
-  `Halted` dispatch gate silently — a later `invoke()` on the same thread appended its event but
-  never dispatched it, with no handler firing and no error raised.
+- **A halted thread stopped dispatching events.** The same `update_state` call left `_cursor`
+  behind the appended terminal event. The event then re-entered the *next* run's pending window.
+  This tripped the `Halted` dispatch gate without an error. A later `invoke()` on the same
+  thread appended its event but did not dispatch it. No handler fired, and no error was raised.
 
-Both are fixed by settling the thread through a three-superstep clear/append/clear write
-(`clear` → append the terminal event with `_cursor`/`_pending` reset → `clear`) instead of a
-single `update_state`, so a halted thread ends with nothing scheduled, no stale pending state,
-and any completed sibling writes from a fanned-out superstep intact.
+Both defects are fixed by a three-superstep clear/append/clear write. The write clears pending
+tasks, appends the terminal event with `_cursor` and `_pending` reset, then clears again. This
+replaces the single `update_state` call. A halted thread now ends with nothing scheduled and no
+stale pending state. Any completed sibling write from a fanned-out superstep survives.
 
 ## [0.28.0] - 2026-08-28
 

@@ -4218,7 +4218,8 @@ def _waiter(event: Started) -> _Pause:
 
 @on(Started)
 def _side_effect(event: Started) -> _SideDone:
-    """Fan-out sibling of _waiter: completes normally in the same superstep."""
+    """Fan-out sibling of ``_waiter``. Completes normally in the same
+    superstep."""
     return _SideDone()
 
 
@@ -4245,13 +4246,16 @@ def _resumable_pair(saver, tid: str, **kwargs: typing.Any):
 
 def _abandoned_pair(saver, tid: str, **kwargs: typing.Any):
     """A genuinely-interrupted thread whose pending task was cleared out
-    from under it — the shape a future ``abandon()`` will leave behind.
+    from under it.
 
-    ``_pending`` still stale-references the still-registered paused node
-    (``_waiter``), while the checkpoint's own ``next`` reports empty, via a
-    bare "clear all tasks" ``bulk_update_state`` through LangGraph's public
-    ``compiled`` property. Returns the graph (still with ``_waiter``
-    registered) and the paused thread config.
+    This is the shape a future ``abandon()`` will leave behind.
+    ``_pending`` still stale-references the still-registered paused node,
+    ``_waiter``. The checkpoint's own ``next`` reports empty. A bare
+    "clear all tasks" ``bulk_update_state`` call produces this state. The
+    call runs through LangGraph's public ``compiled`` property.
+
+    Returns the graph, still with ``_waiter`` registered, and the paused
+    thread config.
     """
     cfg = {"configurable": {"thread_id": tid}}
     graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
@@ -4310,9 +4314,9 @@ def describe_on_unresumable():
             assert not v2.get_state(cfg).is_interrupted
 
         def it_leaves_nothing_scheduled():
-            # `_abandoned_pair`: `_pending` still stales-references the
-            # still-registered paused node, which the buggy single-
-            # superstep write re-schedules.
+            # `_abandoned_pair` sets up a thread where `_pending` still
+            # stale-references the still-registered paused node. A
+            # single-superstep write reschedules that node.
             graph, cfg = _abandoned_pair(
                 MemorySaver(), "unres-halt-next", on_unresumable="halt"
             )
@@ -4336,10 +4340,10 @@ def describe_on_unresumable():
 
         def it_does_not_resurrect_the_retired_identity():
             # Same `_abandoned_pair` stale-scheduling setup as
-            # `it_leaves_nothing_scheduled`. If the halt policy re-arms the
-            # paused node, a second resume() then passes
-            # `_resume_is_pending` and runs `_waiter` for real, writing the
-            # retired `_Pause` identity back into the log.
+            # `it_leaves_nothing_scheduled`. If the halt policy re-arms
+            # the paused node, a second `resume()` call passes
+            # `_resume_is_pending`. It then runs `_waiter` for real,
+            # writing the retired `_Pause` identity back into the log.
             graph, cfg = _abandoned_pair(
                 MemorySaver(), "unres-halt-resurrect", on_unresumable="halt"
             )
@@ -4443,9 +4447,12 @@ def describe_async_only_checkpointer():
         return EventGraph([_go_noop], checkpointer=saver, **kwargs), cfg
 
     async def _aabandoned_pair(tid: str, **kwargs: typing.Any):
-        """Async mirror of ``_abandoned_pair`` — a genuinely-interrupted
-        thread whose pending task was cleared out from under it, still
-        registering ``_waiter``, driven through ``_AsyncOnlySaver``."""
+        """Async mirror of ``_abandoned_pair``.
+
+        Builds a genuinely-interrupted thread whose pending task was
+        cleared out from under it. ``_waiter`` is still registered. The
+        setup runs through ``_AsyncOnlySaver``.
+        """
         saver = _AsyncOnlySaver()
         cfg = {"configurable": {"thread_id": tid}}
         graph = EventGraph([_waiter, _go_noop], checkpointer=saver, **kwargs)
@@ -4501,9 +4508,10 @@ def describe_async_only_checkpointer():
 
         @pytest.mark.asyncio
         async def it_aresume_halt_leaves_nothing_scheduled():
-            # Async mirror of the sync `it_leaves_nothing_scheduled` — same
-            # `_aabandoned_pair` stale-scheduling setup, driven through the
-            # async-only checkpointer to exercise `_asettle`.
+            # Async mirror of the sync `it_leaves_nothing_scheduled`. It
+            # uses the same `_aabandoned_pair` stale-scheduling setup.
+            # The test runs through the async-only checkpointer to
+            # exercise `_asettle`.
             graph, cfg = await _aabandoned_pair(
                 "async-only-halt-next", on_unresumable="halt"
             )

@@ -1458,36 +1458,14 @@ class EventGraph:
         """Build the clear/append/clear supersteps that settle a thread onto
         *terminal* at rest.
 
-        A plain single-superstep ``update_state`` re-runs routing against
-        whatever the checkpoint's ``_pending`` state key still holds — stale
-        once a node genuinely interrupted without ever writing its own
-        state update — re-scheduling that node for a later resume. It also
-        leaves ``_cursor`` behind the newly appended event, so the very next
-        dispatch treats *terminal* as freshly pending and, if it is a
-        ``Halted``, trips the halt gate silently.
+        The leading clear (``values=None, as_node=END``, LangGraph's
+        clear-all-tasks branch) skips ``ERROR``/``INTERRUPT`` pending
+        writes, preserving an already-completed write from a fanned-out
+        sibling.
 
-        The leading ``clear`` (``values=None, as_node=END`` — LangGraph's
-        documented "clear all tasks" branch, which skips ``ERROR``/
-        ``INTERRUPT`` pending writes) discharges any stale pending task
-        *before* anything is appended, so a fanned-out sibling's
-        already-completed write is preserved rather than superseded by a
-        checkpoint that carries none of it. The middle superstep appends
-        *terminal* while resetting ``_cursor`` to the post-append event
-        count, so the next run's cursor starts past *terminal* instead of
-        re-entering its pending window. These two are pinned by the test
-        suite: dropping either fails
-        ``it_preserves_completed_sibling_writes`` or
-        ``it_leaves_the_thread_usable`` respectively.
-
-        The trailing ``clear`` and clearing ``_pending`` alongside the
-        append are deliberate belt-and-braces against the stale-``_pending``
-        re-arming this primitive exists to fix, but neither is independently
-        pinned by the suite as it stands: ablating either one alone still
-        leaves every current test green (only dropping both fails). Kept
-        anyway — they're cheap, and the mechanism they guard against
-        (routing re-run against a stale ``_pending`` on some future
-        checkpointer/LangGraph combination this suite doesn't exercise) is
-        exactly what defect 1 was.
+        The suite pins the leading clear and the ``_cursor`` reset, each
+        with its own failing test. The trailing clear and
+        ``_pending: []`` are a second guard. Neither is pinned alone.
         """
         appended = [terminal]
         return [
@@ -1506,22 +1484,11 @@ class EventGraph:
         ]
 
     def _settle(self, config: Any, terminal: Event) -> EventLog:
-        """Append *terminal* and settle the thread to a clean rest state.
-
-        Runs the three-superstep clear/append/clear recipe (see
-        :meth:`_settle_supersteps`) through the sync checkpoint API, so the
-        thread ends with nothing scheduled and no stale ``_pending`` to
-        re-arm routing on a later resume, while preserving any sibling
-        writes from a fanned-out superstep.
-        """
-        # Must read through `get_state`, not the checkpoint directly: its
-        # snapshot applies pending writes the same way the leading clear in
-        # `_settle_supersteps` will commit them, so `len(events)` here
-        # matches what the leading clear actually lands. A direct
-        # checkpoint read (e.g. `checkpointer.get_tuple` or a `get_state`
-        # pinned to a `checkpoint_id`, either of which skips pending-write
-        # application) would undercount, leaving `_cursor` short and
-        # putting the terminal event back in the next run's pending window.
+        """Append *terminal* and settle the thread via :meth:`_settle_supersteps`."""
+        # `_cursor` is correct only because this reads via `get_state`,
+        # whose snapshot applies the same pending writes the leading
+        # clear commits. A direct checkpoint read undercounts `_cursor`
+        # without raising an error, and no test in this suite catches it.
         events = self.get_state(config).events
         self._compile().bulk_update_state(
             cast("RunnableConfig", config),
@@ -1530,11 +1497,8 @@ class EventGraph:
         return self.get_state(config).events
 
     async def _asettle(self, config: Any, terminal: Event) -> EventLog:
-        """Async sibling of :meth:`_settle` — every checkpoint read/write
-        uses the async API (``aget_state``/``abulk_update_state``) so
-        async-only checkpointers aren't driven synchronously."""
-        # See `_settle` — must read through `aget_state`, not the
-        # checkpoint directly, for the same pending-writes-applied reason.
+        """Async sibling of :meth:`_settle`."""
+        # Same `_cursor` reasoning as `_settle`, via `aget_state`.
         events = (await self.aget_state(config)).events
         await self._compile().abulk_update_state(
             cast("RunnableConfig", config),
@@ -1547,11 +1511,8 @@ class EventGraph:
     ) -> EventLog:
         """Sync ``on_unresumable`` for a resume that would be a no-op.
 
-        Called only when :meth:`_resume_is_pending` is ``False``. The ``halt``
-        arm settles the thread onto a terminal ``Unresumable(Halted)`` (see
-        :meth:`_settle`) so the abandoned thread ends observably, with
-        nothing left scheduled and no stale pending state to trip on a
-        later resume or dispatch.
+        Runs only when :meth:`_resume_is_pending` is ``False``, so no
+        completed sibling write can be lost on this path.
         """
         config = kwargs.get("config")
         if self._unresumable_short_circuits():
@@ -1561,9 +1522,7 @@ class EventGraph:
     async def _aapply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
-        """Async sibling of :meth:`_apply_unresumable_policy` — every checkpoint
-        read/write uses the async API (``aget_state``/``_asettle``) so
-        async-only checkpointers aren't driven synchronously."""
+        """Async sibling of :meth:`_apply_unresumable_policy`."""
         config = kwargs.get("config")
         if self._unresumable_short_circuits():
             return (await self.aget_state(config)).events
