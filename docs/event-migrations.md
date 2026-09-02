@@ -307,7 +307,7 @@ Pass the live class for refactor safety; strings only for cross-module cases whe
     New pods encode events under the oldest historic qualname (recorded by `@migrate_from`). Old pods (release N) read those via existing class defs. Both pod versions can resume each other's threads.
 
     **Release N+2: `legacy_write=False` (default)**
-    Once release N is fully drained, flip writes to current qualname. Keep `@migrate_from` — it covers remaining old-format payloads in storage. Drop the decorator only after every old payload has been touched by new code.
+    Once release N is fully drained, flip writes to current qualname. Keep `@migrate_from` — it covers remaining old-format payloads in storage. Drop the decorator after `graph.rewrite_store()` has rewritten every live checkpoint under the new qualname. See [Rewriting the live set](#rewriting-the-live-set).
 
     `legacy_write` is scope-symmetric: decorated classes outside `namespaces=` are encoded under their current qualname (otherwise the read path of the same serde could not migrate them). Keep `namespaces=` consistent between encode and decode pods.
 
@@ -626,6 +626,49 @@ The two tracks are independent — do both, in one PR:
 !!! warning "Renaming an inline Command is always both renames at once"
     The command class is simultaneously the node identity *and* the event class of the payload sitting in the paused checkpoint. The alias node dispatches by `isinstance` against the **new** class, so `previously` alone is not enough: the checkpointed command payload must also revive *as* the new class — `@migrate_from` on the command plus a namespace-aware serde on the checkpointer (`from_namespaces(..., checkpointer=...)` wires it automatically). With the default LangGraph serializer the alias node re-enters but sees no matching event and the resume silently no-ops — and this bypasses `on_unresumable`: the thread *is* still awaiting input, so the safety net never fires.
 
+## Rewriting the live set
+
+Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.plan_rewrite()` and `graph.rewrite_store()` rewrite the stored bytes. Closes [#179](https://github.com/cadance-io/langgraph-events/issues/179).
+
+The live set is the latest checkpoint of each thread in the root namespace, plus its pending writes. `rewrite_store()` reads each one through the checkpointer's serde, so every rename, transform, split and fill applies. It writes the result back through the checkpointer's `put()`, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same walk and the same verification, and writes nothing.
+
+```python
+report = graph.plan_rewrite(drop=(Order.ApprovalRequired,))
+print(report)
+assert not report.refused
+
+report = graph.rewrite_store(drop=(Order.ApprovalRequired,))
+assert not report.refused
+```
+
+Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran: `"rewrite"` in a plan means the thread needs a write, in an applied report it means the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the log entries `drop=` removed, per identity. `reason` says what to do with a refused thread. `str(report)` prints one summary line, then one line per refused thread. The async twins are `aplan_rewrite()` and `arewrite_store()`.
+
+Before the write, each rewritten value is encoded the way `put()` encodes it, scanned for a dropped or historic identity, and revived under the strict serde. One failure refuses the thread, and nothing is written for it. A thread is also refused when:
+
+- Its history names an identity the serde cannot revive. Add a [tombstone](#recovering-a-delete-first-deployment) first.
+- It is paused on a dropped class. `abandon()` it first.
+- A dropped event is pending dispatch on a paused thread. After the drop, the resumed task finds no event to handle and ends the thread with the answer lost. Resume or abandon the thread first.
+- It holds a completed task write from a fanned-out sibling. The checkpointer API cannot rewrite that write. Resume or abandon the thread first.
+- It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
+- A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
+- A run advanced the thread between the read and the write. Rerun.
+
+An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is dropped, the rewrite sets the field to `None`. The `Resumed` event stays, and `dropped` does not count the cleared field. `drop=` matches the stored identity exactly. A subclass instance stays in place.
+
+!!! warning "Run it while the graph is idle, never inside a rolling deploy window"
+    An old pod cannot read the new bytes. The walk also toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Take a store-level backup first. The previous blob versions stay in the store, but the checkpoint row is overwritten in place.
+
+!!! warning "On Postgres, pass `thread_ids=`"
+    `thread_ids=None` walks `checkpointer.list(None)`, which deserializes every checkpoint the store holds. Pass the ids from one `SELECT DISTINCT thread_id FROM checkpoints` query instead.
+
+What the rewrite does not do:
+
+- A historic checkpoint keeps the old bytes. After the class is deleted, `get_state_history()` cannot read it.
+- `drop=` removes the stored event only. Reducer state is not recomputed. Use [`replay_reducer`](#recovering-with-replay_reducer).
+- An event inside a non-Event container field, a dataclass or a pydantic model, has no migratable identity ([#160](https://github.com/cadance-io/langgraph-events/issues/160)). The rewrite does not reach it.
+- A checkpoint under a subgraph namespace is not read, the same as `unrevivable_threads()`.
+- `legacy_write=True` is refused with `ValueError`. Under `legacy_write` the rewrite stores the historic identity again.
+
 ## Retiring an Interrupted subclass
 
 !!! warning "`threads_paused_on()` and `abandon()` cover paused threads only"
@@ -647,21 +690,28 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 1. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass)`.
 2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
 3. Verify: `graph.threads_paused_on(EventClass) == []`.
-4. Delete the class from the codebase.
-5. Verify no *answered* thread's history still references the class: `graph.unrevivable_threads() == {}`, against the real store. `threads_paused_on()` and `abandon()` never reach such a thread. A non-empty result maps each thread id to the qualnames it can no longer revive. Recover each one with a [tombstone](#recovering-a-delete-first-deployment) before step 6.
-6. Re-baseline: `write_baseline(graph, BASELINE)`. The retired identity moves to the baseline's `retired` list.
+4. Plan the rewrite: `report = graph.plan_rewrite(drop=(EventClass,))`. Review it. Verify: `not report.refused`. An *answered* thread holds the class in its settled history. `threads_paused_on()` and `abandon()` never reach such a thread. The plan does.
+5. Take a store backup. Outside a rolling deploy window, while the graph is idle: `report = graph.rewrite_store(drop=(EventClass,))`. Verify: `not report.refused`. See [Rewriting the live set](#rewriting-the-live-set).
+6. Delete the class from the codebase. Re-baseline: `write_baseline(graph, BASELINE)`. The retired identity moves to the baseline's `retired` list. Deploy.
+7. After the deploy, verify against the real store: `graph.unrevivable_threads() == {}`. Then delete the `retired` entry from the baseline file.
 
 ```python
 for config in graph.threads_paused_on(EventClass):
     graph.abandon(config, reason="retiring EventClass")
 assert graph.threads_paused_on(EventClass) == []
 
+report = graph.plan_rewrite(drop=(EventClass,))
+print(report)
+assert not report.refused
+report = graph.rewrite_store(drop=(EventClass,))
+assert not report.refused
+
 # After the class is deleted. Reads the store, not the baseline, so a
 # stale name in your own code cannot make it report "safe".
 assert graph.unrevivable_threads() == {}
 ```
 
-`unrevivable_threads()` reports nothing until the class is gone: while the class still imports, every thread revives. Run it once, after step 4 and before step 6. It reads every checkpoint the checkpointer holds, like `threads_paused_on()`. On a large deployment, run it against a copy of the store, or outside peak load. It reports an identity wherever the serde met it: in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise.
+`unrevivable_threads()` reports nothing until the class is gone: while the class still imports, every thread revives. Run it once, after step 6. A non-empty result maps each thread id to the qualnames it can no longer revive: a thread the rewrite refused, or one that was written after it. Recover each one with a [tombstone](#recovering-a-delete-first-deployment). It reads every checkpoint the checkpointer holds, like `threads_paused_on()`. On a large deployment, run it against a copy of the store, or outside peak load. It reports an identity wherever the serde met it: in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise.
 
 !!! warning "Do not `abandon()` a thread that `unrevivable_threads()` reports"
     `abandon(config, require_interrupt=False)` would re-serialize that thread's settled history with the placeholder in it. After that, a strict read would return the placeholder in the log with no error. The code refuses. `NamespaceAwareSerde` never stores a placeholder: a write that holds one raises `ValueError` naming the identity. `abandon()`/`aabandon()` refuse first, with a clearer message. They raise `ValueError` naming the thread and the qualnames when the settled history holds a deleted class. They settle only a thread whose sole unrevivable identity is its pending interrupt. The recovery for a settled thread is the [tombstone](#recovering-a-delete-first-deployment) below, not `abandon()`.
@@ -674,7 +724,7 @@ assert graph.unrevivable_threads() == {}
 Deleting the class drops an identity from the graph's topology. `write_baseline` moves it to the baseline's `retired` list, with the fields last recorded for it. The [coverage gates](#coverage-gates) keep walking a retired identity. `assert_all_baselined_cover` and `assert_all_baselined_revive` fail on it until a migration covers it. That is the gate doing its job. Once `unrevivable_threads()` reports nothing and every paused thread is settled, delete the `retired` entry by hand. From then on, no coverage gate checks the retired identity.
 
 !!! warning "After the hand edit, no coverage gate can see a remaining breakage"
-    The coverage gates read the baseline. Once the `retired` entry is gone, `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 5 above, and run it against the real store before the hand edit.
+    The coverage gates read the baseline. Once the `retired` entry is gone, `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 7 above, and run it against the real store before the hand edit.
 
 !!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
     Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips: this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE)` re-baselines both the event identity and the handler node in one write, so no separate step is needed. A handler name is not retired. The write drops it from `handlers` at once.
@@ -716,6 +766,8 @@ graph = EventGraph.from_namespaces(
 Run this against a store that still holds a thread paused on `Order.ApprovalRequired` and an already-answered one. `graph.threads_paused_on()` lists the paused thread again, matched against the live `RetiredApprovalGate`, not a degraded identity. `graph.abandon(config)` settles it, recording `discarded="Order.RetiredApprovalGate"`. The already-answered thread's history revives too, closing the #159 gap for this one identity without waiting on the library-level fix. Verified end to end, across a real process restart against persisted checkpoint bytes (not just an in-process object), before this recipe was published.
 
 `in_module=` defaults to the decorated class's `__module__`. Pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does.
+
+**Deleting the tombstone.** The tombstone is a live class, so `drop=` reaches it. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify `graph.unrevivable_threads() == {}`. Then delete the tombstone, its `@migrate_from` and the baseline's `retired` entry in the next release.
 
 **Onto a sibling instead of a tombstone.** When a live class already stands for the retired one, and every one of its fields has a default, put the same decorator on the sibling. The stored fields are discarded, and the sibling constructs from its defaults. Do not map a stored field onto a sibling field that means something else, for example a message id onto an order id:
 

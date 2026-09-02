@@ -37,6 +37,7 @@ from langgraph_events.serde._jsonplus import (
     EXT_NAMESPACE_AWARE_EVENT,
     UnrevivedIdentity,
     _option,
+    _scan_identities,
 )
 from langgraph_events.serde.migrations import (
     backfill,
@@ -4884,3 +4885,147 @@ def describe_SplitEvent_docs_example():
             )
         )
         assert completed == Job.Completed(result={"status": "ok"})
+
+
+# --- Apply-side rewrite helpers (#179) ------------------------------------
+# Module level: an event used as a field annotation must resolve at runtime.
+
+
+class _ScanInner(IntegrationEvent):
+    pass
+
+
+class _ScanOuter(IntegrationEvent):
+    inner: _ScanInner | None = None
+
+
+class _Rec(Namespace):
+    @migrate_from("_Rec.Old")
+    class New(DomainEvent):
+        pass
+
+
+@transform_fields(lambda kw: {**kw, "note": "transformed"})
+class _RecSameIdentity(IntegrationEvent):
+    note: str = ""
+
+
+@transform_fields(lambda kw: kw)
+class _RecIdentityTransform(IntegrationEvent):
+    pass
+
+
+@backfill("flag", default=True)
+class _RecFilled(IntegrationEvent):
+    flag: bool
+
+
+class _RecUntouched(IntegrationEvent):
+    pass
+
+
+def describe_scan_identities():
+    # Class-blind: every stored event identity in a blob, without an import.
+    # The rewrite tool uses it to prove a dropped or historic identity is
+    # gone from the bytes it is about to store.
+
+    def it_lists_every_event_identity_nested_or_interrupt_wrapped():
+        serde = NamespaceAwareSerde(events=(_ScanInner, _ScanOuter))
+        _, data = serde.dumps_typed(
+            [_ScanOuter(inner=_ScanInner()), Interrupt(value=_ScanInner(), id="i1")]
+        )
+
+        assert _scan_identities(data) == [
+            (_ScanOuter.__module__, "_ScanOuter"),
+            (_ScanInner.__module__, "_ScanInner"),
+            (_ScanInner.__module__, "_ScanInner"),
+        ]
+
+    def it_returns_nothing_for_a_plain_blob():
+        serde = NamespaceAwareSerde(events=())
+        _, data = serde.dumps_typed({"_cursor": 3, "items": [1, "a"]})
+
+        assert _scan_identities(data) == []
+
+
+def describe_record_reads():
+    # A collector, shaped like ``tolerate_unresolved()``: every stored
+    # record this read met, as (stored, resolved, touched) entries.
+
+    def it_records_a_renamed_identity_as_touched_per_stored_record():
+        serde = NamespaceAwareSerde(namespaces=[_Rec])
+        mod = _Rec.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
+            serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
+
+        assert reads == [
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
+        ]
+
+    def it_records_a_same_identity_transform_as_touched():
+        serde = NamespaceAwareSerde(events=(_RecSameIdentity,))
+        mod = _RecSameIdentity.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(serde.dumps_typed(_RecSameIdentity()))
+
+        assert reads == [((mod, "_RecSameIdentity"), (mod, "_RecSameIdentity"), True)]
+
+    def it_records_an_identity_transform_as_untouched():
+        # The table ran, the kwargs did not change: a rewrite would store
+        # the same bytes. Recording it as touched would make every later
+        # rewrite_store() run rewrite the thread again.
+        serde = NamespaceAwareSerde(events=(_RecIdentityTransform,))
+        mod = _RecIdentityTransform.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(serde.dumps_typed(_RecIdentityTransform()))
+
+        assert reads == [
+            ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False)
+        ]
+
+    def it_records_a_fill_as_touched_only_for_a_payload_that_lacked_the_field():
+        serde = NamespaceAwareSerde(events=(_RecFilled,))
+        mod = _RecFilled.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(synthesize_legacy_payload(mod, "_RecFilled", {}))
+            serde.loads_typed(serde.dumps_typed(_RecFilled(flag=False)))
+
+        assert reads == [
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), True),
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), False),
+        ]
+
+    def it_records_nothing_for_a_record_that_does_not_revive():
+        serde = NamespaceAwareSerde(events=(_RecUntouched,))
+        mod = _RecUntouched.__module__
+
+        with serde.tolerate_unresolved() as unresolved, serde._record_reads() as reads:
+            serde.loads_typed(synthesize_legacy_payload(mod, "_RecGone", {}))
+
+        assert [u.qualname for u in unresolved] == ["_RecGone"]
+        assert reads == []
+
+    def it_records_an_untouched_class_as_untouched():
+        serde = NamespaceAwareSerde(events=(_RecUntouched,))
+        mod = _RecUntouched.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(serde.dumps_typed([_RecUntouched()]))
+
+        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False)]
+
+    def it_stays_off_outside_the_block():
+        serde = NamespaceAwareSerde(namespaces=[_Rec])
+        mod = _Rec.__module__
+
+        with serde._record_reads() as reads:
+            pass
+        serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
+
+        assert reads == []

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventGraph.plan_rewrite()` / `rewrite_store()` and their async twins
+  `aplan_rewrite()` / `arewrite_store()`.** Closes
+  [#179](https://github.com/cadance-io/langgraph-events/issues/179). The apply-side
+  migration. `rewrite_store()` reads each thread's latest checkpoint through the
+  checkpointer's serde, so every rename, transform, split and fill applies, and writes it
+  back through the checkpointer's `put()` under the same checkpoint id, with a new version
+  for each channel the rewrite touched. `drop=` names event classes whose stored instances
+  leave the `events` and `_pending` channels, so a retired `Interrupted` subclass, or its
+  tombstone, can be deleted. `plan_rewrite()` does the same walk and the same verification
+  and writes nothing. Both return a `RewriteReport` of `ThreadRewrite` entries, exported
+  at the top level. A thread is refused, with a reason that says what to do, when its
+  history cannot revive, when it is paused on a dropped class, when a dropped event is
+  pending dispatch, when it holds a completed sibling write, when a dropped instance sits
+  in a field or a reducer value, or when a run advanced it during the write. See
+  *Rewriting the live set* in `docs/event-migrations.md`.
+- **`NamespaceAwareSerde._record_reads()` and `_scan_identities()`.** Private. The read
+  collector and the class-blind identity scan the rewrite uses.
+
+### Changed
+
+- **The retirement sequence gains a rewrite step.** `plan_rewrite(drop=(EventClass,))`
+  and `rewrite_store(drop=(EventClass,))` run after the `abandon()` sweep and before the
+  class is deleted. `unrevivable_threads()` is the proof after the deploy, not a
+  pre-deletion step. The tombstone recipe ends with the same two calls, so the tombstone
+  can be deleted in the next release.
+
+
 ## [0.29.0] - 2026-09-01
 
 ### Added
