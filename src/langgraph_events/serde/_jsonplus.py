@@ -111,6 +111,49 @@ class UnrevivedIdentity(NamedTuple):
     qualname: str
 
 
+ReadRecord = tuple[tuple[str, str], tuple[str, str], bool]
+"""One stored event record: ``(stored, resolved, touched)``. *stored* and
+*resolved* are ``(module, qualname)`` identities. *touched* is ``True``
+when the migration table rewrote the record."""
+
+
+def _scan_identities(data: bytes) -> list[tuple[str, str]]:
+    """Every ``(module, qualname)`` event identity stored in *data*, in
+    read order, outer record before the records nested inside it.
+
+    Class-blind: imports nothing and constructs nothing, so it cannot go
+    stale when a class moves. Recurses into every ext payload, ours and
+    upstream's, and ignores a payload that is not itself msgpack. An
+    event inside a pydantic field is upstream ext 5 under ``__name__``
+    only, so it is not seen here, as it is not seen by the migration
+    tables on read.
+    """
+    found: list[tuple[str, str]] = []
+
+    def hook(code: int, payload: bytes) -> None:
+        # Remember the slot before recursing, so the outer record lands
+        # ahead of the records nested inside its kwargs.
+        slot = len(found)
+        try:
+            inner = ormsgpack.unpackb(
+                payload, ext_hook=hook, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+        except ormsgpack.MsgpackDecodeError:
+            return None
+        if (
+            code == EXT_NAMESPACE_AWARE_EVENT
+            and isinstance(inner, (list, tuple))
+            and len(inner) == 3
+            and isinstance(inner[0], str)
+            and isinstance(inner[1], str)
+        ):
+            found.insert(slot, (inner[0], inner[1]))
+        return None
+
+    ormsgpack.unpackb(data, ext_hook=hook, option=ormsgpack.OPT_NON_STR_KEYS)
+    return found
+
+
 def _revival_remedy(qualname: str, exc: Exception) -> str:
     """The actionable second sentence of a ``Cannot revive`` message.
 
@@ -273,6 +316,7 @@ def _make_ext_hook(
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
+    reads: list[ReadRecord] | None = None,
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
 
@@ -299,6 +343,11 @@ def _make_ext_hook(
     returned as an :class:`UnrevivedIdentity` instead of raising. Only
     ``NamespaceAwareSerde.tolerate_unresolved`` passes one. Every other
     caller keeps the strict default.
+
+    *reads*, when not ``None``, is a second collector. Every stored
+    ``EXT_NAMESPACE_AWARE_EVENT`` record is appended to it as a
+    :data:`ReadRecord`, touched or not. Only
+    ``NamespaceAwareSerde._record_reads`` passes one.
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
@@ -338,6 +387,9 @@ def _make_ext_hook(
             # reach the ``errors`` channel like every other failure, or
             # ormsgpack reports a bare ``ext_hook failed``. The identity
             # stays the STORED one when the migration itself fails.
+            stored = (module_name, qualname)
+            # A fill mutates ``kwargs`` in place: snapshot it first.
+            before = dict(kwargs) if reads is not None else None
             module_name, qualname, kwargs = _apply_identity_migrations(
                 module_name,
                 qualname,
@@ -349,7 +401,17 @@ def _make_ext_hook(
                 origin_transform_table,
                 split_table,
             )
-            return _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
+            instance = _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
+            if reads is not None:
+                # Recorded after the record revived, so a degraded record
+                # lands in *unresolved* only. Touched means the table
+                # changed the identity or the kwargs: a rewrite would
+                # store different bytes. A table entry that changed
+                # nothing (a fill whose field the payload already held)
+                # is untouched, so a second rewrite converges.
+                touched = stored != (module_name, qualname) or kwargs != before
+                reads.append((stored, (module_name, qualname), touched))
+            return instance
         except (ImportError, AttributeError, TypeError, _CallableError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
             # resolves, but the stored kwargs carry a key the live class
@@ -512,6 +574,8 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         self._oldest_historic = oldest_historic
         self._tolerant_depth = 0
         self._unresolved: list[UnrevivedIdentity] | None = None
+        self._record_depth = 0
+        self._reads: list[ReadRecord] | None = None
         for cls in _unreachable_migrate_from_siblings(scope):
             warn_user(
                 f"{cls.__qualname__} is decorated with @migrate_from, but "
@@ -563,6 +627,36 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._tolerant_depth -= 1
             if self._tolerant_depth == 0:
                 self._unresolved = None
+
+    @contextlib.contextmanager
+    def _record_reads(self) -> Iterator[list[ReadRecord]]:
+        """Collect every stored event record this serde reads, for the
+        duration of the ``with`` block.
+
+        Yields a collector of :data:`ReadRecord` entries, one per stored
+        ``EXT_NAMESPACE_AWARE_EVENT`` record that revived, in read order,
+        wherever the record sat in the blob. A record that degraded to an
+        :class:`UnrevivedIdentity` is not collected. The ``touched`` flag
+        is ``True`` when the migration table changed the identity or the
+        kwargs, so a re-encode would store different bytes. A class that
+        gained a dataclass default with no ``AddField`` is untouched: the
+        table never saw the missing field.
+
+        For ``EventGraph.plan_rewrite()`` and ``rewrite_store()`` only.
+        Reentrant like :meth:`tolerate_unresolved`, and with the same
+        per-instance-state caveat: do not read through this serde from
+        another thread or task while the block is open.
+        """
+        collector = self._reads
+        if collector is None:
+            collector = self._reads = []
+        self._record_depth += 1
+        try:
+            yield collector
+        finally:
+            self._record_depth -= 1
+            if self._record_depth == 0:
+                self._reads = None
 
     def revivable_identities(self) -> frozenset[tuple[str, str]]:
         """Every ``(module, qualname)`` this serde can revive — either still
@@ -624,6 +718,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                     self._split_table,
                     self._scope,
                     unresolved=self._unresolved,
+                    reads=self._reads,
                 ),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )

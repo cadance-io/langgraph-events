@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import inspect
 import types
 import typing
 from collections.abc import Mapping as _Mapping
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -57,6 +59,13 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._rewrite import (
+    RewriteReport,
+    ThreadPlan,
+    ThreadRewrite,
+    plan_thread,
+    validate_drop,
+)
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -78,7 +87,18 @@ if TYPE_CHECKING:
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
     from langgraph_events._types import StateDict
-    from langgraph_events.serde._jsonplus import UnrevivedIdentity
+    from langgraph_events.serde._jsonplus import NamespaceAwareSerde, UnrevivedIdentity
+
+    _PlanThread = Callable[..., ThreadPlan]
+    """``plan_thread`` with the serde, drop classes and version function bound."""
+
+
+def _no_checkpoint(thread_id: str) -> ThreadRewrite:
+    """A ``thread_ids`` entry the store does not hold. Reported, so a typo
+    in an exported id list cannot vanish from the report."""
+    return ThreadRewrite(
+        thread_id, "refused", reason="no checkpoint for this thread id"
+    )
 
 
 class OrphanedEventWarning(UserWarning):
@@ -2168,6 +2188,234 @@ class EventGraph:
             if unresolved:
                 found[tid] = self._unrevived_qualnames(unresolved)
         return found
+
+    def plan_rewrite(
+        self,
+        *,
+        drop: Iterable[type[Event]] = (),
+        thread_ids: Iterable[str] | None = None,
+    ) -> RewriteReport:
+        """Report what :meth:`rewrite_store` would do. Writes nothing.
+
+        Walks each thread's latest checkpoint through the checkpointer's
+        serde. The read path applies every rename, transform, split and
+        fill, so the plan lists the stored identities the migration
+        table rewrote. ``drop`` names event classes whose stored
+        instances leave the ``events`` and ``_pending`` channels. Each
+        thread that needs a write is verified end to end before it is
+        reported as a rewrite.
+
+        ``thread_ids`` limits the walk. ``None`` walks
+        ``checkpointer.list(None)``, which deserializes every checkpoint
+        the store holds. On a large store, pass the ids from one
+        ``SELECT DISTINCT thread_id`` query instead.
+
+        Raises ``ValueError`` without a checkpointer, without a
+        :class:`~langgraph_events.serde.NamespaceAwareSerde`, under
+        ``legacy_write=True``, or for a ``drop`` class the serde cannot
+        revive. See *Retiring an Interrupted subclass* in
+        ``docs/event-migrations.md``.
+        """
+        return self._rewrite_walk(
+            "plan_rewrite", apply=False, drop=drop, thread_ids=thread_ids
+        )
+
+    def rewrite_store(
+        self,
+        *,
+        drop: Iterable[type[Event]] = (),
+        thread_ids: Iterable[str] | None = None,
+    ) -> RewriteReport:
+        """Rewrite each thread's latest checkpoint under the live
+        migration table, and drop the stored events ``drop`` names.
+
+        Same walk and same report as :meth:`plan_rewrite`. Each thread
+        the plan marks as a rewrite is written back through the
+        checkpointer's ``put()`` under its existing checkpoint id, with a
+        new version for each channel the rewrite touched, and its
+        ``__interrupt__`` pending write is rewritten in place. A thread
+        that advanced between the read and the write is reported as
+        refused and is not rewritten.
+
+        WARNING: run it while the graph is idle, never inside a rolling
+        deploy window. An old pod cannot read the new bytes. Take a
+        store-level backup first: the previous blob versions stay in the
+        store, but the checkpoint row is overwritten in place. Review
+        ``plan_rewrite()`` before this call.
+
+        Historic checkpoints keep the old bytes. A ``drop`` removes the
+        stored event only. Reducer state is not recomputed. Each
+        rewritten thread is read twice: once to plan, once after the
+        write to prove the thread did not move.
+        """
+        return self._rewrite_walk(
+            "rewrite_store", apply=True, drop=drop, thread_ids=thread_ids
+        )
+
+    def _apply_thread_plan(
+        self, cfg: RunnableConfig, tup: CheckpointTuple, plan: ThreadPlan, method: str
+    ) -> ThreadRewrite:
+        """Write one planned rewrite, then prove the thread did not move."""
+        base = self._rewrite_base_config(cfg, tup)
+        self._checkpointer.put(base, plan.checkpoint, tup.metadata, plan.new_versions)
+        for task_id, channel, value in plan.interrupt_writes:
+            self._checkpointer.put_writes(tup.config, [(channel, value)], task_id)
+        after, _unresolved = self._read_checkpoint_tuple(cfg, method)
+        return self._rewrite_outcome(tup, after, plan)
+
+    @staticmethod
+    def _rewrite_base_config(cfg: RunnableConfig, tup: CheckpointTuple) -> Any:
+        """The config ``put`` takes: the parent, so the parent link stays,
+        or a bare thread config on a thread with one checkpoint.
+        ``MemorySaver.put`` reads ``checkpoint_ns`` with no default."""
+        return tup.parent_config or {
+            "configurable": {
+                "thread_id": cfg["configurable"]["thread_id"],
+                "checkpoint_ns": "",
+            }
+        }
+
+    @staticmethod
+    def _rewrite_outcome(
+        tup: CheckpointTuple, after: CheckpointTuple | None, plan: ThreadPlan
+    ) -> ThreadRewrite:
+        """A run between the read and the write lands a newer checkpoint.
+        The store's latest id says so; the rewritten row still exists
+        but is no longer the live one."""
+        written = tup.config["configurable"].get("checkpoint_id")
+        latest = after.config["configurable"].get("checkpoint_id") if after else None
+        if latest != written:
+            return replace(
+                plan.result,
+                status="refused",
+                reason="thread advanced during the rewrite; rerun",
+            )
+        return plan.result
+
+    def _rewrite_walk(
+        self,
+        method: str,
+        *,
+        apply: bool,
+        drop: Iterable[type[Event]],
+        thread_ids: Iterable[str] | None,
+    ) -> RewriteReport:
+        serde, plan, ids = self._prepare_rewrite(method, drop, thread_ids)
+        explicit = ids is not None
+        results: list[ThreadRewrite] = []
+        for tid in ids if ids is not None else self._list_thread_ids(method):
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            with serde._record_reads() as reads:
+                tup, unresolved = self._read_checkpoint_tuple(cfg, method)
+            if tup is None:
+                if explicit:
+                    results.append(_no_checkpoint(tid))
+                continue
+            planned = plan(
+                thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
+            )
+            result = planned.result
+            if apply and result.status == "rewrite":
+                result = self._apply_thread_plan(cfg, tup, planned, method)
+            results.append(result)
+        return RewriteReport(applied=apply, threads=tuple(results))
+
+    def _prepare_rewrite(
+        self,
+        method: str,
+        drop: Iterable[type[Event]],
+        thread_ids: Iterable[str] | None,
+    ) -> tuple[NamespaceAwareSerde, _PlanThread, list[str] | None]:
+        """Shared preconditions of the rewrite walk. Returns the serde,
+        the planner bound to this graph's serde, drop classes and version
+        function, and the explicit thread ids, or ``None`` when the walk
+        must enumerate the store."""
+        self._require_checkpointer(method)
+        self._require_namespace_aware_serde(method)
+        serde: NamespaceAwareSerde = self._checkpointer.serde
+        if serde._legacy_write:
+            raise ValueError(
+                f"{method}() cannot run under legacy_write=True: the rewrite "
+                f"would store every event under its historic identity again. "
+                f"Drop legacy_write first, after the rolling deploy drained."
+            )
+        plan = functools.partial(
+            plan_thread,
+            serde=serde,
+            drop=validate_drop(serde, drop, method),
+            next_version=self._checkpointer.get_next_version,
+        )
+        ids = None if thread_ids is None else list(dict.fromkeys(thread_ids))
+        return serde, plan, ids
+
+    async def aplan_rewrite(
+        self,
+        *,
+        drop: Iterable[type[Event]] = (),
+        thread_ids: Iterable[str] | None = None,
+    ) -> RewriteReport:
+        """Async version of :meth:`plan_rewrite`."""
+        return await self._arewrite_walk(
+            "aplan_rewrite", apply=False, drop=drop, thread_ids=thread_ids
+        )
+
+    async def arewrite_store(
+        self,
+        *,
+        drop: Iterable[type[Event]] = (),
+        thread_ids: Iterable[str] | None = None,
+    ) -> RewriteReport:
+        """Async version of :meth:`rewrite_store`."""
+        return await self._arewrite_walk(
+            "arewrite_store", apply=True, drop=drop, thread_ids=thread_ids
+        )
+
+    async def _arewrite_walk(
+        self,
+        method: str,
+        *,
+        apply: bool,
+        drop: Iterable[type[Event]],
+        thread_ids: Iterable[str] | None,
+    ) -> RewriteReport:
+        """Async sibling of :meth:`_rewrite_walk`, via ``aget_tuple``,
+        ``aput`` and ``aput_writes``."""
+        serde, plan, ids = self._prepare_rewrite(method, drop, thread_ids)
+        explicit = ids is not None
+        if ids is None:
+            ids = await self._alist_thread_ids(method)
+        results: list[ThreadRewrite] = []
+        for tid in ids:
+            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+            with serde._record_reads() as reads:
+                tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
+            if tup is None:
+                if explicit:
+                    results.append(_no_checkpoint(tid))
+                continue
+            planned = plan(
+                thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
+            )
+            result = planned.result
+            if apply and result.status == "rewrite":
+                result = await self._aapply_thread_plan(cfg, tup, planned, method)
+            results.append(result)
+        return RewriteReport(applied=apply, threads=tuple(results))
+
+    async def _aapply_thread_plan(
+        self, cfg: RunnableConfig, tup: CheckpointTuple, plan: ThreadPlan, method: str
+    ) -> ThreadRewrite:
+        """Async sibling of :meth:`_apply_thread_plan`."""
+        base = self._rewrite_base_config(cfg, tup)
+        await self._checkpointer.aput(
+            base, plan.checkpoint, tup.metadata, plan.new_versions
+        )
+        for task_id, channel, value in plan.interrupt_writes:
+            await self._checkpointer.aput_writes(
+                tup.config, [(channel, value)], task_id
+            )
+        after, _unresolved = await self._aread_checkpoint_tuple(cfg, method)
+        return self._rewrite_outcome(tup, after, plan)
 
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
