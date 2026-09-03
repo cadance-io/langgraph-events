@@ -13,9 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Closes [#180](https://github.com/cadance-io/langgraph-events/issues/180). With ids, the
   method reads those threads only and never calls `checkpointer.list()`. Ids are deduped in
   caller order. A listed thread with no checkpoint, or with no match, stays out of the
-  result. Without ids, the walk is unchanged. The new *Finding candidates on Postgres*
-  section of `docs/event-migrations.md` gives the server-side query for a pending
-  interrupt, names `thread_ids=[tid]` as the per-thread check, and explains why
+  result. A bare `str` raises `TypeError` instead of iterating its characters. Without
+  ids, the walk is unchanged. The new *Finding candidates server-side* section of
+  `docs/event-migrations.md` explains why the library cannot filter the walk itself,
+  gives the Postgres and SQLite candidate queries for a pending interrupt, names
+  `thread_ids=[tid]` as the per-thread check, and explains why
   `GraphState.is_interrupted` is not that check.
 
 ### Changed

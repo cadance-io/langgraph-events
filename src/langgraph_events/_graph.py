@@ -277,6 +277,16 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     return ReturnInfo(event_types, scatter_types, has_interrupted, True)
 
 
+def _explicit_thread_ids(method: str, thread_ids: Iterable[str]) -> list[str]:
+    """*thread_ids* deduped in caller order. Rejects a bare ``str``."""
+    if isinstance(thread_ids, str):
+        raise TypeError(
+            f"{method}() thread_ids must be an iterable of thread ids, "
+            f"not one str: pass [{thread_ids!r}] for a single thread."
+        )
+    return list(dict.fromkeys(thread_ids))
+
+
 class GraphState(NamedTuple):
     """Event-focused snapshot of a checkpointed thread."""
 
@@ -2034,9 +2044,12 @@ class EventGraph:
 
         The explicit path never touches ``checkpointer.list()``, so a
         saver without it works when the caller supplies the ids.
+
+        Raises ``TypeError`` for a bare ``str``: iterating its characters
+        would silently find nothing.
         """
         if thread_ids is not None:
-            return list(dict.fromkeys(thread_ids))
+            return _explicit_thread_ids(method, thread_ids)
         return self._list_thread_ids(method)
 
     async def _acandidate_thread_ids(
@@ -2044,7 +2057,7 @@ class EventGraph:
     ) -> list[str]:
         """Async sibling of :meth:`_candidate_thread_ids`."""
         if thread_ids is not None:
-            return list(dict.fromkeys(thread_ids))
+            return _explicit_thread_ids(method, thread_ids)
         return await self._alist_thread_ids(method)
 
     @staticmethod
@@ -2098,7 +2111,8 @@ class EventGraph:
         ``checkpointer.list(None)``, which deserializes every checkpoint
         the store holds, historic versions included. On a large store,
         pass the ids from a server-side candidate query instead. See
-        *Finding candidates on Postgres* in ``docs/event-migrations.md``.
+        *Finding candidates server-side* in ``docs/event-migrations.md``.
+        A bare ``str`` raises ``TypeError``.
 
         Requires a checkpointer. With ``thread_ids=None``, raises
         ``ValueError`` if the checkpointer's ``list()`` is unimplemented.

@@ -5221,7 +5221,7 @@ def describe_threads_paused_on():
 
         def with_a_listed_id_that_has_no_checkpoint():
             def it_skips_that_id():
-                saver = MemorySaver()
+                saver = _NoListSaver()
                 graph = EventGraph([_waiter], checkpointer=saver)
                 cfg = {"configurable": {"thread_id": "tpo-ids-present"}}
                 graph.invoke(Started(data="x"), config=cfg)
@@ -5252,6 +5252,22 @@ def describe_threads_paused_on():
 
             found = graph.threads_paused_on(thread_ids=["tpo-ids-no-list"])
             assert _tids(found) == ["tpo-ids-no-list"]
+
+        def with_an_empty_list():
+            def it_returns_nothing_and_never_calls_list():
+                saver = _NoListSaver()
+                graph = EventGraph([_waiter], checkpointer=saver)
+                cfg = {"configurable": {"thread_id": "tpo-ids-empty"}}
+                graph.invoke(Started(data="x"), config=cfg)
+
+                assert graph.threads_paused_on(thread_ids=[]) == []
+
+        def with_a_bare_string():
+            def it_raises_type_error_instead_of_iterating_characters():
+                graph = EventGraph([_waiter], checkpointer=MemorySaver())
+
+                with pytest.raises(TypeError, match=r"threads_paused_on.*str"):
+                    graph.threads_paused_on(thread_ids="tpo-ids-str")
 
 
 def describe_athreads_paused_on():
@@ -5332,6 +5348,59 @@ def describe_athreads_paused_on():
 
             found = await graph.athreads_paused_on(thread_ids=["atpo-ids-no-list"])
             assert _tids(found) == ["atpo-ids-no-list"]
+
+        def with_a_bare_string():
+            @pytest.mark.asyncio
+            async def it_raises_type_error_instead_of_iterating_characters():
+                graph = EventGraph([_waiter], checkpointer=MemorySaver())
+
+                with pytest.raises(TypeError, match=r"athreads_paused_on.*str"):
+                    await graph.athreads_paused_on(thread_ids="atpo-ids-str")
+
+
+def describe_documented_candidate_confirmation():
+    # The snippet under "Finding candidates server-side" in
+    # docs/event-migrations.md, run verbatim: candidates from a
+    # server-side query, confirmed through the serde, then abandoned.
+
+    @pytest.mark.asyncio
+    async def it_confirms_then_abandons_each_candidate():
+        from langgraph_events.serde import NamespaceAwareSerde
+
+        class Order(Namespace):
+            class ApprovalRequired(Interrupted):
+                pass
+
+        @on(Started)
+        def wait(event: Started) -> Order.ApprovalRequired:
+            return Order.ApprovalRequired()
+
+        saver = MemorySaver()
+        saver.serde = NamespaceAwareSerde(events=(Started, Order.ApprovalRequired))
+        graph = EventGraph([wait], checkpointer=saver)
+        for tid in ("dcc-listed", "dcc-unlisted", "dcc-other"):
+            await graph.ainvoke(
+                Started(data="x"), config={"configurable": {"thread_id": tid}}
+            )
+        candidates = ["dcc-other", "dcc-listed", "dcc-typo"]
+
+        paused = await graph.athreads_paused_on(
+            Order.ApprovalRequired, thread_ids=candidates
+        )
+        for config in paused:
+            await graph.aabandon(config, reason="retiring Order.ApprovalRequired")
+
+        assert [c["configurable"]["thread_id"] for c in paused] == [
+            "dcc-other",
+            "dcc-listed",
+        ]
+        for tid in ("dcc-other", "dcc-listed"):
+            state = await graph.aget_state({"configurable": {"thread_id": tid}})
+            assert state.events.latest(Abandoned).discarded.endswith(
+                "Order.ApprovalRequired"
+            )
+        still = await graph.athreads_paused_on(Order.ApprovalRequired)
+        assert [c["configurable"]["thread_id"] for c in still] == ["dcc-unlisted"]
 
 
 class _Holder(IntegrationEvent):
@@ -5813,6 +5882,15 @@ def describe_aunrevivable_threads():
 
             found = await graph.aunrevivable_threads(thread_ids=["aunrev-ids-listed"])
             assert list(found) == ["aunrev-ids-listed"]
+
+        @pytest.mark.asyncio
+        async def it_never_calls_alist_on_the_checkpointer():
+            graph, _cfg = await _asettled_unrevivable_pair(
+                _NoListSaver(), "aunrev-ids-nl"
+            )
+
+            found = await graph.aunrevivable_threads(thread_ids=["aunrev-ids-nl"])
+            assert list(found) == ["aunrev-ids-nl"]
 
 
 def describe_assert_resume_recovers():

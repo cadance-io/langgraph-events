@@ -195,7 +195,7 @@ for config in graph.threads_paused_on(OrderConfirmationRequested):
     graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-Omit the class to get every paused thread. With no `thread_ids=`, `threads_paused_on()` reads every checkpoint the checkpointer holds. On a large store, pass candidate ids. See [Finding candidates on Postgres](event-migrations.md#finding-candidates-on-postgres). To check one thread, pass `thread_ids=[tid]`.
+Omit the class to get every paused thread. With no `thread_ids=`, `threads_paused_on()` reads every checkpoint the checkpointer holds. On a large store, pass candidate ids. See [Finding candidates server-side](event-migrations.md#finding-candidates-server-side). To check one thread, pass `thread_ids=[tid]`.
 
 `abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass. Resuming every paused thread first would append the very identity you are deleting.
 
