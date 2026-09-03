@@ -195,11 +195,14 @@ for config in graph.threads_paused_on(OrderConfirmationRequested):
     graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-Omit the class to get every paused thread. `threads_paused_on()` reads every checkpoint the checkpointer holds. Cost is O(all checkpoints), not O(paused threads). A large deployment should filter thread IDs server-side instead of calling it directly.
+Omit the class to get every paused thread. With no `thread_ids=`, `threads_paused_on()` reads every checkpoint the checkpointer holds. On a large store, pass candidate ids. See [Finding candidates on Postgres](event-migrations.md#finding-candidates-on-postgres). To check one thread, pass `thread_ids=[tid]`.
 
 `abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass. Resuming every paused thread first would append the very identity you are deleting.
 
 The thread is terminal afterwards. `abandon()` appends a terminal [`Abandoned`](api.md#system-events) event (a [`Halted`](concepts.md#system-events) subtype). It leaves nothing scheduled. It preserves any completed sibling handler's writes from the same fanned-out superstep.
+
+!!! warning "`Abandoned` sets a rollback floor of 0.29.0"
+    `abandon()` writes an `Abandoned` event into the thread. That class exists from langgraph-events 0.29.0. A deployment rolled back below 0.29.0 cannot revive it. Every read of an abandoned thread then raises `Cannot revive`. Before you call `abandon()` in production, confirm that the previous production image also runs 0.29.0 or later.
 
 `abandon()` raises `ValueError` if the thread has no events to settle (never run, or only `pre_seed()`ed). `abandon()` also raises `ValueError` if the thread has no pending interrupt, naming the thread. This catches a stray ID in a candidate list before it silently closes out settled business history. Pass `require_interrupt=False` to settle such a thread anyway. It records `Abandoned(discarded="")`.
 

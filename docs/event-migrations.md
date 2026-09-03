@@ -672,11 +672,11 @@ What the rewrite does not do:
 ## Retiring an Interrupted subclass
 
 !!! warning "`threads_paused_on()` and `abandon()` cover paused threads only"
-    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads()` is the sweep that finds it: it reads every thread's latest checkpoint from the store and reports each identity that no longer revives, settled or pending. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
+    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads()` is the sweep that finds it: it reads every thread's latest checkpoint from the store and reports each identity that no longer revives, settled or pending. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. On a large store, pass `thread_ids=`. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
 
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
-`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you. No need for your own operational records or a direct checkpointer query.
+`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you. With no `thread_ids=`, it walks every checkpoint the store holds. On a large store, pass candidate ids from a server-side query. See [Finding candidates on Postgres](#finding-candidates-on-postgres) below.
 
 `threads_paused_on()` and `abandon()` read each thread's checkpoint directly, not the graph's compiled topology. Two deletions this survives, with different outcomes:
 
@@ -684,6 +684,45 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 - The **class** itself is already deleted and no longer imports. The normal habit is to ship the class deletion in the same release as the handler's, and this section used to train that habit. The interrupt cannot revive. With no filter, `threads_paused_on()` still returns the thread. With a class filter, it matches nothing: a class filter can never match an identity with no class. `abandon()` still settles the thread, recording the interrupt's last-known qualname in `discarded` instead of a live instance.
 
 `Cannot revive` states the fix directly: settle the thread with `abandon()`/`aabandon()` before deleting the class, or map the dead identity onto a tombstone with `@migrate_from` — see [Recovering a delete-first deployment](#recovering-a-delete-first-deployment) below.
+
+### Finding candidates on Postgres
+
+`threads_paused_on()` and `unrevivable_threads()` walk `checkpointer.list(None)` when `thread_ids=` is not given. That walk deserializes every checkpoint of every thread, historic versions included. On one store with 60 threads and 15,000 historic checkpoints, the walk did not complete. Closes [#180](https://github.com/cadance-io/langgraph-events/issues/180).
+
+Filter the candidates server-side, then pass the ids. This query reads the `__interrupt__` writes of each thread's latest root checkpoint. It matches the retired qualname as bytes inside the msgpack blob:
+
+```sql
+WITH latest AS (
+  SELECT DISTINCT ON (thread_id) thread_id, checkpoint_id
+  FROM checkpoints
+  WHERE checkpoint_ns = ''
+  ORDER BY thread_id, checkpoint_id DESC
+)
+SELECT DISTINCT w.thread_id
+FROM checkpoint_writes w
+JOIN latest l
+  ON w.thread_id = l.thread_id AND w.checkpoint_id = l.checkpoint_id
+WHERE w.checkpoint_ns = ''
+  AND w.channel = '__interrupt__'
+  AND w.type = 'msgpack'
+  AND position(convert_to('Order.ApprovalRequired', 'UTF8') in w.blob) > 0
+```
+
+The byte match is a candidate filter only. It also matches a longer qualname, for example `Order.ApprovalRequiredV2`. The library then confirms each candidate through the serde:
+
+```python
+paused = await graph.athreads_paused_on(
+    Order.ApprovalRequired, thread_ids=candidates
+)
+for config in paused:
+    await graph.aabandon(config, reason="retiring Order.ApprovalRequired")
+```
+
+`abandon()` settles one thread per call. Loop over the confirmed configs, as above.
+
+For `unrevivable_threads()`, one `SELECT DISTINCT thread_id FROM checkpoints` query gives the candidate ids.
+
+To check one thread, pass its id alone: `graph.threads_paused_on(Order.ApprovalRequired, thread_ids=[tid])`. Do not use `graph.get_state(config)` for this check. `GraphState.is_interrupted` and `GraphState.interrupted` read the compiled topology, so both are empty once the handler is deleted.
 
 ### Sequence
 

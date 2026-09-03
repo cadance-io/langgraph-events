@@ -2026,6 +2026,32 @@ class EventGraph:
             ) from exc
         return sorted(ids)
 
+    def _candidate_thread_ids(
+        self, method: str, thread_ids: Iterable[str] | None
+    ) -> list[str]:
+        """*thread_ids* deduped in caller order, or, with ``None``, every
+        thread id the store holds via :meth:`_list_thread_ids`.
+
+        The explicit path never touches ``checkpointer.list()``, so a
+        saver without it works when the caller supplies the ids.
+        """
+        if thread_ids is not None:
+            return list(dict.fromkeys(thread_ids))
+        return self._list_thread_ids(method)
+
+    async def _acandidate_thread_ids(
+        self, method: str, thread_ids: Iterable[str] | None
+    ) -> list[str]:
+        """Async sibling of :meth:`_candidate_thread_ids`."""
+        if thread_ids is not None:
+            return list(dict.fromkeys(thread_ids))
+        return await self._alist_thread_ids(method)
+
+    @staticmethod
+    def _thread_config(thread_id: str) -> RunnableConfig:
+        """The config that addresses *thread_id*'s latest root checkpoint."""
+        return cast("RunnableConfig", {"configurable": {"thread_id": thread_id}})
+
     @staticmethod
     def _matches_event_type(
         pending: _PendingInterrupts, event_type: type[Interrupted] | None
@@ -2040,7 +2066,10 @@ class EventGraph:
         return any(isinstance(v, event_type) for v in pending.events)
 
     def threads_paused_on(
-        self, event_type: type[Interrupted] | None = None
+        self,
+        event_type: type[Interrupted] | None = None,
+        *,
+        thread_ids: Iterable[str] | None = None,
     ) -> list[RunnableConfig]:
         """Configs for every thread whose latest checkpoint has a pending
         interrupt. With *event_type*, keeps only threads paused on that
@@ -2063,33 +2092,38 @@ class EventGraph:
           last-known qualname in ``discarded`` instead of a live
           instance.
 
-        WARNING: this reads every checkpoint the checkpointer holds and
-        deserializes every row: cost is O(all checkpoints), not O(paused
-        threads). A large deployment should filter thread ids server-side
-        instead of calling this directly.
+        ``thread_ids`` limits the read to those threads, deduped in
+        caller order. A listed thread with no checkpoint, or with no
+        matching interrupt, stays out of the result. ``None`` walks
+        ``checkpointer.list(None)``, which deserializes every checkpoint
+        the store holds, historic versions included. On a large store,
+        pass the ids from a server-side candidate query instead. See
+        *Finding candidates on Postgres* in ``docs/event-migrations.md``.
 
-        Requires a checkpointer. Raises ``ValueError`` if the
-        checkpointer's ``list()`` is unimplemented, or if a custom saver
-        requires a ``thread_id`` filter: enumerate thread ids yourself
-        and call :meth:`get_state` on each in that case.
+        Requires a checkpointer. With ``thread_ids=None``, raises
+        ``ValueError`` if the checkpointer's ``list()`` is unimplemented.
         """
         self._require_checkpointer("threads_paused_on")
         configs: list[RunnableConfig] = []
-        for tid in self._list_thread_ids("threads_paused_on"):
-            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+        for tid in self._candidate_thread_ids("threads_paused_on", thread_ids):
+            cfg = self._thread_config(tid)
             pending = self._read_pending_interrupts(cfg, "threads_paused_on")
             if self._matches_event_type(pending, event_type):
                 configs.append(cfg)
         return configs
 
     async def athreads_paused_on(
-        self, event_type: type[Interrupted] | None = None
+        self,
+        event_type: type[Interrupted] | None = None,
+        *,
+        thread_ids: Iterable[str] | None = None,
     ) -> list[RunnableConfig]:
         """Async version of :meth:`threads_paused_on`."""
         self._require_checkpointer("athreads_paused_on")
         configs: list[RunnableConfig] = []
-        for tid in await self._alist_thread_ids("athreads_paused_on"):
-            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+        ids = await self._acandidate_thread_ids("athreads_paused_on", thread_ids)
+        for tid in ids:
+            cfg = self._thread_config(tid)
             pending = await self._aread_pending_interrupts(cfg, "athreads_paused_on")
             if self._matches_event_type(pending, event_type):
                 configs.append(cfg)
@@ -2127,7 +2161,9 @@ class EventGraph:
             f"checkpointer.serde = NamespaceAwareSerde(...)."
         )
 
-    def unrevivable_threads(self) -> dict[str, list[str]]:
+    def unrevivable_threads(
+        self, *, thread_ids: Iterable[str] | None = None
+    ) -> dict[str, list[str]]:
         """Every thread whose latest checkpoint holds an event identity
         the checkpointer's serde can no longer revive.
 
@@ -2156,32 +2192,40 @@ class EventGraph:
         written by this graph embedded as a subgraph lives under a child
         namespace and is not read, the same as :meth:`threads_paused_on`.
 
-        WARNING: cost is O(all checkpoints), like
-        :meth:`threads_paused_on`.
+        ``thread_ids`` limits the read to those threads, deduped in
+        caller order, the same as :meth:`threads_paused_on`. A listed
+        thread with no checkpoint, or one that revives, stays out of the
+        mapping. ``None`` walks ``checkpointer.list(None)``, which
+        deserializes every checkpoint the store holds. On a large store,
+        pass the ids from one ``SELECT DISTINCT thread_id`` query.
 
         Requires a checkpointer whose serde is a
         :class:`~langgraph_events.serde.NamespaceAwareSerde`. Raises
-        ``ValueError`` otherwise, or if the checkpointer's ``list()`` is
-        unimplemented. Raises ``RuntimeError`` naming the thread if one
-        checkpoint cannot be read.
+        ``ValueError`` otherwise, or, with ``thread_ids=None``, if the
+        checkpointer's ``list()`` is unimplemented. Raises
+        ``RuntimeError`` naming the thread if one checkpoint cannot be
+        read.
         """
         self._require_checkpointer("unrevivable_threads")
         self._require_namespace_aware_serde("unrevivable_threads")
         found: dict[str, list[str]] = {}
-        for tid in self._list_thread_ids("unrevivable_threads"):
-            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+        for tid in self._candidate_thread_ids("unrevivable_threads", thread_ids):
+            cfg = self._thread_config(tid)
             _tup, unresolved = self._read_checkpoint_tuple(cfg, "unrevivable_threads")
             if unresolved:
                 found[tid] = self._unrevived_qualnames(unresolved)
         return found
 
-    async def aunrevivable_threads(self) -> dict[str, list[str]]:
+    async def aunrevivable_threads(
+        self, *, thread_ids: Iterable[str] | None = None
+    ) -> dict[str, list[str]]:
         """Async version of :meth:`unrevivable_threads`."""
         self._require_checkpointer("aunrevivable_threads")
         self._require_namespace_aware_serde("aunrevivable_threads")
         found: dict[str, list[str]] = {}
-        for tid in await self._alist_thread_ids("aunrevivable_threads"):
-            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+        ids = await self._acandidate_thread_ids("aunrevivable_threads", thread_ids)
+        for tid in ids:
+            cfg = self._thread_config(tid)
             _tup, unresolved = await self._aread_checkpoint_tuple(
                 cfg, "aunrevivable_threads"
             )
@@ -2300,11 +2344,11 @@ class EventGraph:
         drop: Iterable[type[Event]],
         thread_ids: Iterable[str] | None,
     ) -> RewriteReport:
-        serde, plan, ids = self._prepare_rewrite(method, drop, thread_ids)
-        explicit = ids is not None
+        serde, plan = self._prepare_rewrite(method, drop)
+        explicit = thread_ids is not None
         results: list[ThreadRewrite] = []
-        for tid in ids if ids is not None else self._list_thread_ids(method):
-            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+        for tid in self._candidate_thread_ids(method, thread_ids):
+            cfg = self._thread_config(tid)
             with serde._record_reads() as reads:
                 tup, unresolved = self._read_checkpoint_tuple(cfg, method)
             if tup is None:
@@ -2321,15 +2365,11 @@ class EventGraph:
         return RewriteReport(applied=apply, threads=tuple(results))
 
     def _prepare_rewrite(
-        self,
-        method: str,
-        drop: Iterable[type[Event]],
-        thread_ids: Iterable[str] | None,
-    ) -> tuple[NamespaceAwareSerde, _PlanThread, list[str] | None]:
-        """Shared preconditions of the rewrite walk. Returns the serde,
-        the planner bound to this graph's serde, drop classes and version
-        function, and the explicit thread ids, or ``None`` when the walk
-        must enumerate the store."""
+        self, method: str, drop: Iterable[type[Event]]
+    ) -> tuple[NamespaceAwareSerde, _PlanThread]:
+        """Shared preconditions of the rewrite walk. Returns the serde
+        and the planner bound to this graph's serde, drop classes and
+        version function."""
         self._require_checkpointer(method)
         self._require_namespace_aware_serde(method)
         serde: NamespaceAwareSerde = self._checkpointer.serde
@@ -2345,8 +2385,7 @@ class EventGraph:
             drop=validate_drop(serde, drop, method),
             next_version=self._checkpointer.get_next_version,
         )
-        ids = None if thread_ids is None else list(dict.fromkeys(thread_ids))
-        return serde, plan, ids
+        return serde, plan
 
     async def aplan_rewrite(
         self,
@@ -2380,13 +2419,11 @@ class EventGraph:
     ) -> RewriteReport:
         """Async sibling of :meth:`_rewrite_walk`, via ``aget_tuple``,
         ``aput`` and ``aput_writes``."""
-        serde, plan, ids = self._prepare_rewrite(method, drop, thread_ids)
-        explicit = ids is not None
-        if ids is None:
-            ids = await self._alist_thread_ids(method)
+        serde, plan = self._prepare_rewrite(method, drop)
+        explicit = thread_ids is not None
         results: list[ThreadRewrite] = []
-        for tid in ids:
-            cfg = cast("RunnableConfig", {"configurable": {"thread_id": tid}})
+        for tid in await self._acandidate_thread_ids(method, thread_ids):
+            cfg = self._thread_config(tid)
             with serde._record_reads() as reads:
                 tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
             if tup is None:
