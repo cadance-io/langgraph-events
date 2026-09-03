@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-03
+
 ### Added
 
 - **`thread_ids=` on `threads_paused_on()`, `unrevivable_threads()` and their async twins.**
@@ -1092,7 +1094,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.30.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/cadance-io/langgraph-events/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/cadance-io/langgraph-events/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/cadance-io/langgraph-events/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/cadance-io/langgraph-events/compare/v0.27.0...v0.28.0
