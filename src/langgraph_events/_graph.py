@@ -1448,6 +1448,22 @@ class EventGraph:
                 destination="Outbox",
             )
 
+    def flush_persistence(self, config: Any) -> EventLog:
+        """Reconcile configured pyES destinations with checkpoint history.
+
+        Call after an uncertain or failed persistence append, including at
+        process startup after a crash. Prefix validation makes repeated calls
+        idempotent. A checkpointer is required because stateless runs leave no
+        durable graph history to recover.
+        """
+        self._require_checkpointer("flush_persistence")
+        if self._event_store is None and self._outbox is None:
+            raise ValueError("flush_persistence() requires event_store= or outbox=")
+        stream_id = self._persistence_stream_id(config)
+        state = self.get_state(config)
+        self._persist_to_event_store(state.events, stream_id)
+        return state.events
+
     @classmethod
     def from_namespaces(
         cls,

@@ -47,6 +47,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `EventGraph.invoke()` / `.ainvoke()` | Method | Run (sync/async); returns `EventLog`. When persistence is configured, `config["configurable"]["thread_id"]` is required |
 | `EventGraph.resume()` / `.aresume()` | Method | Resume an interrupted graph (requires checkpointer) |
 | `EventGraph.stream_events()` / `.astream_events()` | Method | Stream emitted events. Persistence commits only after the stream is fully consumed successfully; closing or cancelling it early does not persist a partial run |
+| `EventGraph.flush_persistence()` | Method | Reconcile `event_store=` / `outbox=` with the latest checkpoint after a failed append or process crash. Requires a checkpointer. Prefix validation makes repeated calls idempotent; call it during startup recovery before accepting work for a thread |
 | `EventGraph.abandon()` / `.aabandon()` | Method | Settles a paused thread without answering its interrupt. `require_interrupt=True` (default) raises `ValueError` if the thread has no pending interrupt. Pass `False` to settle it anyway, recording `discarded=""`. Requires a checkpointer. Raises `ValueError` if the thread has no events to settle (never run, or only `pre_seed()`ed). Returns `None`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) |
 | `EventGraph.threads_paused_on()` / `.athreads_paused_on()` | Method | Configs for every thread whose latest checkpoint has a pending interrupt, optionally filtered to an `Interrupted` class or subclass. `thread_ids=` limits the read to those threads and skips `checkpointer.list()`, and rejects a bare `str` with `TypeError`; `None` reads every checkpoint the checkpointer holds, so on a large store pass candidate ids from a server-side query. Requires a checkpointer. See [Finding candidates server-side](event-migrations.md#finding-candidates-server-side) and [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) |
 | `EventGraph.unrevivable_threads()` / `.aunrevivable_threads()` | Method | Mapping of thread id to the qualnames its latest checkpoint can no longer revive, wherever the serde met them: settled history, pending interrupt, completed sibling write, or a field nested in a live event. Empty when every thread revives. Reads the store, not the baseline, so it sees a settled thread the coverage gates cannot. `thread_ids=` limits the read to those threads, the same as `threads_paused_on()`. Requires a checkpointer with a `NamespaceAwareSerde`, raises `ValueError` otherwise. See [Retiring an Interrupted subclass](event-migrations.md#retiring-an-interrupted-subclass) |
@@ -83,9 +84,14 @@ repeated runs on one stream.
 
 `outbox=` filters the batch to `IntegrationEvent` instances before append. A
 python-event-sourcery backend configured with `with_outbox=True` then publishes those records via
-its outbox runner. If both `event_store=` and `outbox=` are supplied, their two appends are ordered
-but not atomic across separate backends: the full event store is written first, and a retry uses
-prefix validation to avoid duplicating it.
+its outbox runner. Checkpoint and pyES writes are not one transaction: if a process stops after the
+checkpoint commit, call `flush_persistence(config)` during recovery. It reloads the cumulative
+checkpoint history and appends only the missing suffix, so repeated recovery is idempotent. Without
+a checkpointer there is no durable graph history to recover.
+
+If both `event_store=` and `outbox=` are supplied, their two appends are ordered but not atomic
+across separate backends. The full event store is written first; `flush_persistence()` validates
+its prefix before repairing the outbox, so an already-written event-store suffix is not duplicated.
 
 ## System Events
 

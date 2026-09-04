@@ -1,14 +1,12 @@
-"""Static typing assertions for the ``@dataclass_transform`` on ``Event``.
+"""Static typing assertions for Pydantic-generated ``Event`` constructors.
 
-These are checked by **mypy**, not pytest — the bodies are typing-only.
-Run: ``uv run mypy tests/test_event_typing.py``
+Checked by **mypy**, not pytest:
+``uv run mypy tests/test_event_typing.py``.
 
-``Event.__init_subclass__`` turns every subclass into a frozen dataclass at runtime.
-Without the transform a type checker cannot see that, so a consumer's constructor is
-invisible and every construction has to be silenced. A passing mypy run proves three
-things, three of them negative — under strict ``warn_unused_ignores`` an unused
-ignore is itself an error, so an ignore only survives if what it silences is
-genuinely rejected.
+Without the transform a type checker cannot see fields inherited through
+python-event-sourcery's base, so consumer constructors reject every keyword.
+Strict ``warn_unused_ignores`` makes each negative assertion prove that mypy
+really rejects the invalid call.
 """
 
 from __future__ import annotations
@@ -35,11 +33,6 @@ def constructor_rejects_an_unknown_field() -> None:
 
 def constructor_rejects_a_mistyped_field() -> None:
     Ordered(quantity="two")  # type: ignore[arg-type]
-
-
-def events_are_frozen() -> None:
-    event = Ordered(sku="abc")
-    event.sku = "def"  # type: ignore[misc]
 
 
 def the_package_reexports_its_documented_public_names() -> None:

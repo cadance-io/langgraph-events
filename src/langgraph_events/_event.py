@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import inspect
 import operator
 import sys
 import types
 import typing
 import weakref
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from event_sourcery import Event as _ESBaseEvent
 from langchain_core.messages import BaseMessage, SystemMessage  # noqa: TC002
-from pydantic import BaseModel, ConfigDict
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    GetCoreSchemaHandler,
+    PlainSerializer,
+)
+from pydantic_core import CoreSchema, core_schema
 
 # ModelMetaclass is not public API. At runtime we derive it from BaseModel
 # to avoid depending on pydantic internals. For mypy we import the real class
@@ -36,6 +44,111 @@ during ``__dict__`` walks (it shares a class object with a directly-nested
 DomainEvent for single-outcome Commands) or look it up by attribute access."""
 
 
+_PERSISTED_TYPE = "__langgraph_events_type__"
+_PERSISTED_DATA = "data"
+_PERSISTED_ARGS = "args"
+_PERSISTED_ATTRIBUTES = "attributes"
+
+
+def _type_descendants(base: type[Any]) -> list[type[Any]]:
+    descendants: list[type[Any]] = []
+    pending = list(base.__subclasses__())
+    while pending:
+        cls = pending.pop()
+        descendants.append(cls)
+        pending.extend(cls.__subclasses__())
+    return descendants
+
+
+def _resolve_qualified_type(
+    module: str,
+    qualname: str,
+    *,
+    base: type[Any],
+) -> type[Any]:
+    if "<locals>" not in qualname:
+        try:
+            obj: Any = importlib.import_module(module)
+            for part in qualname.split("."):
+                obj = getattr(obj, part)
+            if isinstance(obj, type) and issubclass(obj, base):
+                return obj
+        except (ImportError, AttributeError):
+            pass
+    matches = [
+        cls
+        for cls in _type_descendants(base)
+        if cls.__module__ == module and cls.__qualname__ == qualname
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    raise ValueError(f"Cannot resolve {module}.{qualname} as {base.__name__}")
+
+
+def _validated_identity(value: dict[str, Any]) -> tuple[str, str]:
+    identity = value.get(_PERSISTED_TYPE)
+    if not (
+        isinstance(identity, list)
+        and len(identity) == 2
+        and all(isinstance(part, str) for part in identity)
+    ):
+        raise ValueError("Invalid persisted type identity")
+    return identity[0], identity[1]
+
+
+def _resolve_nested_event(module: str, qualname: str) -> type[Event]:
+    return typing.cast(
+        "type[Event]",
+        _resolve_qualified_type(module, qualname, base=Event),
+    )
+
+
+def _serialize_nested_event(value: Event) -> dict[str, Any]:
+    return {
+        _PERSISTED_TYPE: [type(value).__module__, type(value).__qualname__],
+        _PERSISTED_DATA: value.model_dump(mode="json", serialize_as_any=True),
+    }
+
+
+def _deserialize_nested_event(value: Any) -> Any:
+    if not isinstance(value, dict) or _PERSISTED_TYPE not in value:
+        return value
+    module, qualname = _validated_identity(value)
+    event_cls = _resolve_nested_event(module, qualname)
+    return event_cls.model_validate(value[_PERSISTED_DATA])
+
+
+def _serialize_exception(value: Exception | None) -> Any:
+    if value is None:
+        return None
+    return {
+        _PERSISTED_TYPE: [type(value).__module__, type(value).__qualname__],
+        _PERSISTED_ARGS: list(value.args),
+        _PERSISTED_ATTRIBUTES: vars(value),
+    }
+
+
+def _deserialize_exception(value: Any) -> Any:
+    if value is None or isinstance(value, Exception):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("Invalid persisted exception")
+    module, qualname = _validated_identity(value)
+    exc_cls = _resolve_qualified_type(module, qualname, base=Exception)
+    exception = exc_cls(*value.get(_PERSISTED_ARGS, ()))
+    for name, attribute in value.get(_PERSISTED_ATTRIBUTES, {}).items():
+        setattr(exception, name, attribute)
+    return exception
+
+
+_PersistedException = Annotated[
+    Exception | None,
+    BeforeValidator(_deserialize_exception),
+    PlainSerializer(_serialize_exception, return_type=Any),
+]
+
+
+@typing.dataclass_transform()
 class Event(_ESBaseEvent):
     """Internal base class for all events.
 
@@ -47,7 +160,31 @@ class Event(_ESBaseEvent):
     filter (``event_type=Event`` catches all events).
     """
 
-    model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
+    __nested_schema_base__: ClassVar[bool] = True
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls,
+        source_type: Any,
+        handler: GetCoreSchemaHandler,
+    ) -> CoreSchema:
+        schema = handler(source_type)
+        if "__nested_schema_base__" not in cls.__dict__:
+            return schema
+        return core_schema.no_info_before_validator_function(
+            _deserialize_nested_event,
+            schema,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                _serialize_nested_event,
+                return_schema=core_schema.any_schema(),
+            ),
+        )
+
+    model_config = ConfigDict(
+        frozen=True,
+        arbitrary_types_allowed=True,
+        validate_by_name=True,
+    )
 
     def __init_subclass__(cls, *, _event_base: bool = False, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -942,7 +1079,7 @@ class HandlerRaised(SystemEvent):
 
     handler: str = ""
     source_event: Event | None = None
-    exception: Exception | None = None
+    exception: _PersistedException = None
     abandoned_for_deadline: bool = False
 
 
@@ -976,7 +1113,7 @@ class HandlerRetried(SystemEvent):
 
     handler: str = ""
     source_event: Event | None = None
-    exception: Exception | None = None
+    exception: _PersistedException = None
     attempt: int = 0
     delay_seconds: float = 0.0
 
@@ -1007,6 +1144,31 @@ class Invariant:
     """
 
 
+def _serialize_invariant(value: Invariant | None) -> Any:
+    if value is None:
+        return None
+    return {
+        _PERSISTED_TYPE: [type(value).__module__, type(value).__qualname__],
+    }
+
+
+def _deserialize_invariant(value: Any) -> Any:
+    if value is None or isinstance(value, Invariant):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("Invalid persisted invariant")
+    module, qualname = _validated_identity(value)
+    invariant_cls = _resolve_qualified_type(module, qualname, base=Invariant)
+    return invariant_cls()
+
+
+_PersistedInvariant = Annotated[
+    Invariant | None,
+    BeforeValidator(_deserialize_invariant),
+    PlainSerializer(_serialize_invariant, return_type=Any),
+]
+
+
 class InvariantViolated(SystemEvent):
     """Emitted when an invariant predicate declared on a handler returns False.
 
@@ -1034,7 +1196,7 @@ class InvariantViolated(SystemEvent):
     See ``HandlerRaised`` for the ``source_event`` naming rationale.
     """
 
-    invariant: Invariant | None = None
+    invariant: _PersistedInvariant = None
     handler: str = ""
     source_event: Event | None = None
     would_emit: tuple[Event, ...] = ()
@@ -1096,7 +1258,7 @@ class SystemPromptSet(IntegrationEvent, MessageEvent):
         """Create from a plain string, wrapping it in a ``SystemMessage``."""
         from langchain_core.messages import SystemMessage as SysMsg  # noqa: PLC0415
 
-        return cls(message=SysMsg(content=content))  # type: ignore[call-arg]
+        return cls(message=SysMsg(content=content))
 
 
 class Scatter:

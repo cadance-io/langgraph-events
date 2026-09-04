@@ -13,7 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `invoke` / `ainvoke` runs to the stream named by
   `config["configurable"]["thread_id"]`; `outbox=...` appends only
   `IntegrationEvent`s for publication. Sync and async event streams persist after they are fully
-  consumed. `EventLog.from_store(...)` restores a stored stream.
+  consumed. `EventLog.from_store(...)` restores a stored stream, and
+  `EventGraph.flush_persistence(...)` repairs a missing store/outbox suffix from checkpoint history
+  after a failed append or process crash.
 
 ### Changed
 
@@ -33,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpointer append their events instead of treating a matching count as already persisted; and
   `EventGraph` replaces only LangGraph's untouched default serializer, never a caller-supplied
   serializer.
+- **Pydantic event payloads now round-trip through python-event-sourcery.** Nested fields retain
+  their concrete `Event` subclass, field aliases accept the field-name form written by both
+  persistence serializers, and `HandlerRaised` / `HandlerRetried` exceptions plus
+  `InvariantViolated` markers are persisted instead of failing JSON serialization.
 - **Serde and model guards fail explicitly.** A function-local event is bound to the serde that
   encodes it so the same graph can read its next checkpoint; a fresh serde with no matching scope
   raises a named revival error instead of decoding to `None`. Reserved `Command` modifiers are
