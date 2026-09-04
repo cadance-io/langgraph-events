@@ -38,6 +38,340 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises a named revival error instead of decoding to `None`. Reserved `Command` modifiers are
   rejected as payload fields before Pydantic model creation, including under Python 3.14's deferred
   annotation storage.
+## [0.31.0] - 2026-09-03
+
+### Added
+
+- **`thread_ids=` on `threads_paused_on()`, `unrevivable_threads()` and their async twins.**
+  Closes [#180](https://github.com/cadance-io/langgraph-events/issues/180). With ids, the
+  method reads those threads only and never calls `checkpointer.list()`. Ids are deduped in
+  caller order. A listed thread with no checkpoint, or with no match, stays out of the
+  result. A bare `str` raises `TypeError` instead of iterating its characters. Without
+  ids, the walk is unchanged. The new *Finding candidates server-side* section of
+  `docs/event-migrations.md` explains why the library cannot filter the walk itself,
+  gives the Postgres and SQLite candidate queries for a pending interrupt, names
+  `thread_ids=[tid]` as the per-thread check, and explains why
+  `GraphState.is_interrupted` is not that check.
+
+### Changed
+
+- **Docs: `abandon()` sets a rollback floor.** `Abandoned` exists from 0.29.0. A rollback
+  below it makes every read of an abandoned thread raise `Cannot revive`. Documented under
+  *Ending a pause without answering it* in `docs/control-flow.md`.
+
+## [0.30.0] - 2026-09-02
+
+### Added
+
+- **`EventGraph.plan_rewrite()` / `rewrite_store()` and their async twins
+  `aplan_rewrite()` / `arewrite_store()`.** Closes
+  [#179](https://github.com/cadance-io/langgraph-events/issues/179). The apply-side
+  migration. `rewrite_store()` reads each thread's latest checkpoint through the
+  checkpointer's serde, so every rename, transform, split and fill applies, and writes it
+  back through the checkpointer's `put()` under the same checkpoint id, with a new version
+  for each channel the rewrite touched. `drop=` names event classes whose stored instances
+  leave the `events` and `_pending` channels, so a retired `Interrupted` subclass, or its
+  tombstone, can be deleted. `plan_rewrite()` does the same walk and the same verification
+  and writes nothing. Both return a `RewriteReport` of `ThreadRewrite` entries, exported
+  at the top level. A thread is refused, with a reason that says what to do, when its
+  history cannot revive, when it is paused on a dropped class, when a dropped event is
+  pending dispatch, when it holds a completed sibling write, when a dropped instance sits
+  in a field or a reducer value, or when a run advanced it during the write. See
+  *Rewriting the live set* in `docs/event-migrations.md`.
+- **`NamespaceAwareSerde._record_reads()` and `_scan_identities()`.** Private. The read
+  collector and the class-blind identity scan the rewrite uses.
+
+### Changed
+
+- **The retirement sequence gains a rewrite step.** `plan_rewrite(drop=(EventClass,))`
+  and `rewrite_store(drop=(EventClass,))` run after the `abandon()` sweep and before the
+  class is deleted. `unrevivable_threads()` is the proof after the deploy, not a
+  pre-deletion step. The tombstone recipe ends with the same two calls, so the tombstone
+  can be deleted in the next release.
+
+
+## [0.29.0] - 2026-09-01
+
+### Added
+
+- **`SplitEvent`, `@split_event` and `Migration.split_event(...)`.** Closes
+  [#125](https://github.com/cadance-io/langgraph-events/issues/125). One stored identity
+  revives as one of several live classes, picked by a payload value. The source identity
+  stays live, so a rename cannot host the split. The split runs in the class stage, after
+  the class-stage transform and before the fills of the resulting identity. See *Splitting
+  one stored event into two on a payload value* in `docs/event-migrations.md`.
+
+- **How to declare a split.** Put `@split_event(select, targets=(...))` on the source class,
+  or pass `Migration.split_event(source=Class, select=fn, targets=(...))`. `select` receives
+  a copy of the stored kwargs. It returns `None` to keep the source, or `(target_class,
+  kwargs)` to build that class instead. `targets` lists every class `select` can return and
+  is validated at serde construction. A `select` that raises or returns the wrong shape
+  fails the read with `Cannot revive <stored identity>: SplitEvent raised ...`, and
+  degrades to `UnrevivedIdentity` under `serde.tolerate_unresolved()`.
+
+- **Limits of a split.** `legacy_write=True` with any split is refused at serde
+  construction, because a split has no inverse. The revive gate sends a `None`
+  placeholder, so `select` must return `None` when the discriminating value is absent or
+  `None`. Pin each branch with real values through `synthesize_legacy_payload`.
+
+- **`TransformFields`, `@transform_fields` and `migrate_from(transform=...)`.** Item 3 of
+  [#159](https://github.com/cadance-io/langgraph-events/issues/159). A kwargs-to-kwargs
+  operation, decode side only. A rename moves an identity and an `AddField` fills a gained
+  field. Neither can remove or reshape a stored value. `TransformFields(module, qualname,
+  transform)` runs `transform` on a copy of the stored kwargs, and the return value replaces
+  them. The identity picks the stage, the same rule as `AddField`. The origin stage is keyed
+  on a historic identity and runs before the rename, on that origin only. The class stage is
+  keyed on the live class and runs after the rename, on every era, including payloads the
+  current release writes. Read-path order: the origin stage (transform, then origin fills),
+  the rename, then the class stage (transform, then class fills).
+  `Migration.transform_fields(...)` is the single-op sugar. A transform in the class stage
+  must be idempotent. A retired identity with
+  no field-compatible survivor now maps onto an empty tombstone or a sibling with
+  `migrate_from("Old", transform=lambda kw: {})`. Validation at serde construction: the target
+  resolves live or is a rename source, one transform per identity, and `legacy_write=True`
+  with any transform is refused because a transform has no inverse. `migrate_from(transform=)`
+  takes exactly one historic qualname. See *Dropping, merging or retyping a field* in
+  `docs/event-migrations.md`.
+
+- **The revive gate exercises a transform.** `assert_all_baselined_revive` sends a `None`
+  placeholder for every recorded field the live class dropped, so the transform runs through
+  the real read path. A transform that raises on the placeholder fails the gate with one
+  sentence on the `None` placeholders and `synthesize_legacy_payload`. The dropped-field
+  failure line now names the `TransformFields` remedy.
+
+- **`EventGraph.unrevivable_threads()` / `.aunrevivable_threads()`.** The store-walking gate
+  from [#159](https://github.com/cadance-io/langgraph-events/issues/159). Reads every thread's
+  latest checkpoint through the serde's tolerant path and returns a mapping of thread id to the
+  qualnames it can no longer revive. It collects every identity the serde degraded, wherever it
+  sat: the settled `events` history, a pending interrupt, a completed sibling write, or a field
+  nested inside a live event. Empty when every thread revives. The baseline coverage gates
+  compare the topology to a committed snapshot and never read a checkpoint, so they cannot
+  tell whether a settled thread still raises `Cannot revive`. This method reads that thread. Replaces the hand-rolled step 4 recipe in
+  *Retiring an Interrupted subclass*, whose own warning admitted a stale string literal would
+  report "safe". Requires a checkpointer with a `NamespaceAwareSerde`, and raises `ValueError`
+  otherwise. Cost is O(all checkpoints), like `threads_paused_on()`.
+
+- **`NamespaceAwareSerde.tolerate_unresolved()` now yields a collector.** Every identity the
+  block degrades is appended to it. `unrevivable_threads()` reads the collector instead of
+  walking the checkpoint structure.
+
+- **`EventGraph.abandon()` / `.aabandon()`.** Settles a paused thread without answering its
+  pending `Interrupted`. Closes [#162](https://github.com/cadance-io/langgraph-events/issues/162).
+  Ends the thread on a terminal `Abandoned(Halted)`, via the same three-superstep settle
+  primitive `on_unresumable="halt"` uses. The tool for retiring an `Interrupted` subclass:
+  resuming every paused thread first would instead append the retired identity back into the log.
+  Requires a checkpointer. Raises `ValueError` on a thread with no events to settle. Ignores
+  `on_unresumable` (that policy governs an *accidental* no-op resume, not a deliberate
+  abandonment). Returns `None`. Callers who want the log call `graph.get_state(config).events`.
+
+- **`Abandoned`.** New `Halted` subtype recorded by `abandon()`/`aabandon()`. `.reason` is the
+  caller-supplied reason. `.discarded` is the qualname(s) of the interrupt(s) thrown away.
+
+- A `resume()` on an already-abandoned thread now names the abandonment in its
+  `UnresumableError` message instead of pointing at a handler rename/removal.
+
+- **`EventGraph.threads_paused_on()` / `.athreads_paused_on()`.** Configs for every thread
+  whose latest checkpoint has a pending interrupt, optionally filtered to an `Interrupted`
+  class or subclass. Closes the discovery gap in the `abandon()` retirement workflow: a client
+  no longer needs `graph.compiled` or `snapshot.tasks[*].interrupts[*].value` to find the
+  threads to abandon. Reads the checkpoint's raw pending writes directly, not the graph's
+  compiled topology, so it still finds a thread paused on a handler already removed from the
+  graph, the common retirement shape (an `Interrupted` usually retires the handler that
+  produced it too). Requires a checkpointer. Reads every checkpoint the checkpointer holds:
+  cost is O(all checkpoints), not O(paused threads), so a large deployment should filter
+  thread ids server-side instead. Raises `ValueError` if the checkpointer's `list()`/`alist()`
+  is unimplemented, naming the method (closes part of [#164]).
+
+- **`abandon()` / `aabandon()` gained `require_interrupt: bool = True`.** By default, both now
+  raise `ValueError` on a thread with no pending interrupt, naming the thread and pointing at
+  `require_interrupt=False`. Previously they settled such a thread silently, recording
+  `Abandoned(discarded="")`. This appended a terminal event onto settled business history with
+  no warning. The pending-interrupt check reads the checkpoint directly, same as
+  `threads_paused_on()`, so it does not raise on a genuinely paused thread whose handler is
+  already gone from the graph. Pass `require_interrupt=False` to keep the old behaviour
+  (closes part of [#164]).
+
+- **`threads_paused_on()`/`abandon()` now survive a deleted `Interrupted` class, not only a
+  removed handler.** A stored pending interrupt naming a class that no longer imports used to
+  raise `Cannot revive` from both, the exact tool meant to clean up that state. Both now
+  degrade: the thread stays in `threads_paused_on()`'s result, and `abandon()`/`aabandon()`
+  settle it under the default `require_interrupt=True`, recording the interrupt's last-known
+  qualname in `Abandoned.discarded` instead of a live instance. Scoped to these two operations
+  only: every other read (`get_state()`, `resume()`, `invoke()`, …) stays strict, so a genuine
+  revival bug still raises. The `Cannot revive` message now states the remedy: settle with
+  `abandon()`/`aabandon()` before deleting the class, or map the identity onto a tombstone with
+  `@migrate_from()` — see [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment)
+  (closes part of [#164]).
+
+- **`serde.UnreachableMigrationWarning`.** `NamespaceAwareSerde` now warns at construction when
+  a `@migrate_from`-decorated class lives in a module its `namespaces=`/`events=` already
+  reaches, but was never itself passed in. Its migration silently did nothing before this. The
+  warning names the class and says how to fix it (nest it in a passed `Namespace`, or add it to
+  `events=`). Scoped to modules already reachable through this construction, not a process-wide
+  scan, so an unrelated engine lifetime's decorated classes are never flagged.
+
+[#164]: https://github.com/cadance-io/langgraph-events/issues/164
+
+- **Baseline v3: recorded fields and a `retired` list.** Item 2 of
+  [#159](https://github.com/cadance-io/langgraph-events/issues/159). Each `events` entry now
+  records the `fields` of its class, the init fields only, the same set the serde writes. The
+  record is cumulative: a field an earlier baseline
+  recorded stays in the record after the live class drops it. A `retired` list holds every
+  identity a write dropped from `events`, with the fields last recorded for it. The reader
+  rejects a v3 entry without `fields`, and rejects an identity listed under both `events` and
+  `retired`. A v1 or v2 file still loads, with no recorded fields and an empty `retired` list.
+  Regenerate the baseline once to record the fields. A hand-added `events` entry needs `fields`
+  too: a test that appends `{"module", "qualname"}` to `events` and expects an `AssertionError`
+  from a gate gets a `ValueError` from the reader instead. See *When to commit the baseline* in
+  `docs/event-migrations.md` for the file shape and the hand-added `retired` entry for an
+  identity erased before v3.
+
+- **`MigrationCoverageError.retired`.** The subset of `.uncovered` the baseline lists as retired.
+
+### Changed
+
+- **`write_baseline` never erases an identity.** An identity the old baseline recorded and
+  the graph no longer reaches moves to `retired` instead. The entry persists across later
+  writes and leaves the list when the identity is live again. Removing it is a hand edit, done
+  once every thread that names it is settled. `BaselineRegressionError` is no longer raised.
+
+- **The three event gates walk `retired`.** `assert_all_baselined_cover`, `_resolve` and
+  `_revive` sweep the baseline's `events` and `retired` lists both. A retired identity must
+  revive through a migration onto a surviving class or a tombstone. A failure on one says it is
+  retired and names the remedy.
+
+- **`assert_all_baselined_revive` exercises a dropped field.** The gate sends a placeholder for
+  every recorded field the live class no longer accepts as an init kwarg, plus the required
+  placeholders it sent before. A recorded field the class still accepts gets none, so a
+  defaulted field with a `__post_init__` validator stays green. The failure line names the
+  dropped field. Before this, the gate stayed green while every stored payload for the class
+  raised `Cannot revive`.
+
+### Deprecated
+
+- **`write_baseline(allow_removed=...)`.** The flag does nothing. Passing `True` emits a
+  `DeprecationWarning`. It will be removed in a later release.
+
+- **`BaselineRegressionError`.** Retained for one release so an existing `except` clause still
+  imports. Nothing raises it.
+
+### Fixed
+
+- **A migration step that raised surfaced as a bare `ext_hook failed`.** The read path ran the
+  identity migration outside the ext-hook's `try`, so an exception there reached `ormsgpack`
+  with no identity and no cause, and `serde.tolerate_unresolved()` raised instead of
+  degrading. The migration step now runs inside the `try`. A transform that raises, or returns
+  a non-dict, raises `ValueError("Cannot revive <module>.<qualname>: TransformFields raised
+  <Type>: ...")` with a remedy, and degrades to `UnrevivedIdentity` under
+  `serde.tolerate_unresolved()`.
+
+- **An `init=False` dataclass field now round-trips through `NamespaceAwareSerde`.**
+  Closes [#172](https://github.com/cadance-io/langgraph-events/issues/172). The encoder wrote
+  every `dataclasses.fields()` name of an event. The constructor rejected an `init=False` field
+  on read with `Cannot revive ... unexpected keyword argument`. The encoder now writes only
+  fields with `init=True`. An `init=False` field is rebuilt by `__post_init__` on read. A
+  checkpoint written before this fix still carries the field and still fails to revive: settle
+  or abandon such a thread. `assert_all_baselined_revive` agrees: its placeholder helper gives
+  an `init=False` field no placeholder. A `@backfill` on an `init=False` field is refused at
+  serde construction with the existing "has no field" message.
+
+- **`abandon()` / `aabandon()` refuse a thread whose settled history cannot revive.**
+  Closes [#170](https://github.com/cadance-io/langgraph-events/issues/170).
+  `abandon(config, require_interrupt=False)` on a thread whose settled history named a deleted
+  class re-serialized the `events` channel with a literal `UnrevivedIdentity` in it. After that a
+  strict `get_state()` returned the placeholder in the log with no error, and
+  `unrevivable_threads()` stopped reporting the thread. `NamespaceAwareSerde` now never stores a
+  placeholder. A write that holds an `UnrevivedIdentity` raises `ValueError` naming the identity
+  and the tombstone remedy. `abandon()` and `aabandon()` refuse first, with a clearer message.
+  They walk the log the settle rewrites and raise `ValueError` naming the thread and the
+  qualnames. The message points at the tombstone recovery in `docs/event-migrations.md`. A
+  thread whose only unrevivable identity is its pending interrupt still settles as before. That
+  is the documented delete-first recovery.
+- **A pydantic payload nested inside a class no longer revives silently as a raw `dict`.**
+  Closes [#167](https://github.com/cadance-io/langgraph-events/issues/167). The LangGraph
+  serializer stores a pydantic payload by `__name__` and revives it with one `getattr` on the
+  module. A model nested inside a class, or defined inside a function, never resolves that way.
+  Every failure path there returns the dump dict with no error. `NamespaceAwareSerde` now walks
+  every event field annotation in its scope, generic arguments included. It raises `ValueError`
+  at construction on a model that does not resolve. The message names the event field and the
+  model and states the remedy. Pydantic v1 and v2 models are both covered. A model nested inside
+  another model is not affected: pydantic re-validates it from the dump itself. A model held
+  behind `Any` or an untyped container is not reachable from an annotation and is not checked.
+
+- **The retirement docs' step 4 sweep could never fail.** It compared
+  `type(e).__qualname__` against `"EventClass"` (a placeholder inside a string literal, which
+  never equals a real qualname). The snippet therefore always computed `unsafe == []`. It
+  green-lit the delete regardless of what the store held. Now binds `RETIRING = EventClass`
+  and compares `type(e).__qualname__ == RETIRING.__qualname__`. Verified against a store with
+  a genuinely unsafe answered thread, which the snippet now reports.
+
+- **`write_baseline` raised `AttributeError` on a `str` path.** Every sibling gate
+  (`assert_all_baselined_cover`/`_resolve`/`_revive`/`_handlers_cover`) already accepts
+  `Path | str`. `write_baseline` was the one outlier, and the retirement docs' own workflow
+  printed a bare string. Now accepts `Path | str` and coerces, matching its siblings.
+
+- **`Cannot revive`'s remedy misdirected on a field-shape `TypeError`.** When the identity
+  resolved to a live class (including a tombstone already carrying `@migrate_from`) but
+  construction failed on a field mismatch, the message still said to map the identity onto a
+  tombstone with `@migrate_from(...)`, naming the class that already **is** the tombstone. Now
+  says the target class does not declare the field the stored payload carries, naming the
+  field.
+
+- **The nested tombstone recipe silently no-oped when the checkpointer already carried a
+  `NamespaceAwareSerde`** (e.g. reused from an earlier graph in the same process).
+  `from_namespaces(...)`'s auto-wiring deliberately skips rebuilding one that is already there
+  (see `api.md`), so the tombstone never entered scope, with no error or warning. Documented
+  inline in the recipe, not only in a table three documents away.
+
+- **`Abandoned.discarded` recorded the leaf class name, not the qualname.** `"ApprovalRequested"`
+  when the class was still live, but `"Order.ApprovalRequested"` (the qualname) once it was
+  deleted. The same field changed shape under the exact axis a retirement changes. A check
+  written before the deletion (`match with in or .split(", ")`) could stop matching after it.
+  Always the qualname now, live class or not: unambiguous under nesting and stable across the
+  deletion (closes part of [#164]).
+
+- **The published `@migrate_from` retirement recipe did not work.** It printed a module-level
+  tombstone class and claimed `EventGraph.from_namespaces(...)` would collect it. That method
+  has no `events=` kwarg and never reaches a module-level class, so the recipe recovered
+  nothing, silently. Replaced with a nested-in-`Namespace` recipe (the one
+  `from_namespaces(...)` actually wires up) as the primary path, and the module-level form as a
+  separate, complete, hand-built-serde alternative. The tombstone in both was field-free,
+  correct only when the retired class also had no fields, and the alternative's
+  `EventGraph([...])` call dropped the inline `Order.Approve` command it needs, tripping
+  `OrphanedEventWarning`. Both snippets now carry the retired class's fields (with an inline
+  comment saying why) and register every handler they need. Both were verified end to end,
+  warning-free, across a real process restart against persisted checkpoint bytes (closes part
+  of [#164]).
+
+- **Two coverage-gate messages had no remedy line, and two had a grammar/count mismatch.**
+  `assert_all_baselined_resolve`/`assert_all_baselined_revive` named the broken identity but not
+  the fix. Both now end with the same remedy line `MigrationCoverageError` already had.
+  `MigrationCoverageError`/`HandlerCoverageError` said "1 identity ... are neither" and "1
+  ... handler no longer resolve" regardless of count. The verb now agrees ("is"/"resolves" for
+  one, "are"/"resolve" for more than one).
+
+- **`GraphState.interrupted` was `None` on a first pause.** `get_state().interrupted` read only
+  the event log, and an `Interrupted` joins the log only on resume. A thread paused for the
+  first time therefore reported `is_interrupted=True` with `interrupted=None`. The published
+  `docs/control-flow.md` example crashed on this (`AttributeError` reading `.order_id`). Now
+  falls back to the snapshot's pending interrupt payload when the log has none yet (closes part
+  of [#164]).
+
+- **`on_unresumable="halt"` re-armed the thread it was supposed to retire.** The policy appended
+  its terminal `Unresumable(Halted)` event with a single `update_state` call. That call re-ran
+  routing against the checkpoint's stale `_pending` state. Routing then rescheduled the
+  already-paused node. A later `resume()` call then passed the pending check. It ran for real
+  and wrote the retired `Interrupted` identity back into the event log.
+
+- **A halted thread stopped dispatching events.** The same `update_state` call left `_cursor`
+  behind the appended terminal event. The event then re-entered the *next* run's pending window.
+  This tripped the `Halted` dispatch gate without an error. A later `invoke()` on the same
+  thread appended its event but did not dispatch it. No handler fired, and no error was raised.
+
+Both defects are fixed by a three-superstep clear/append/clear write. The write clears pending
+tasks, appends the terminal event with `_cursor` and `_pending` reset, then clears again. This
+replaces the single `update_state` call. A halted thread now ends with nothing scheduled and no
+stale pending state. Any completed sibling write from a fanned-out superstep survives.
 
 ## [0.28.0] - 2026-08-28
 
@@ -791,7 +1125,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/cadance-io/langgraph-events/compare/v0.30.0...v0.31.0
+[0.30.0]: https://github.com/cadance-io/langgraph-events/compare/v0.29.0...v0.30.0
+[0.29.0]: https://github.com/cadance-io/langgraph-events/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/cadance-io/langgraph-events/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/cadance-io/langgraph-events/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/cadance-io/langgraph-events/compare/v0.25.1...v0.26.0

@@ -12,16 +12,17 @@ Existing threads survive graph modifications via graceful degradation — no cra
 |---|---|
 | **Add a handler** | `dispatch()` is rebuilt from current handlers; new handler participates immediately. |
 | **Add an event type** | New events can be emitted and matched normally. |
-| **Remove an event type** | Existing events stay in the log but no handler matches them — inert. |
+| **Remove an event type** | Existing events stay in the log but no handler matches them — inert. Not true for an `Interrupted` subclass a thread is still paused on — see the row below. |
 
 ## What to Watch Out For
 
 | Change | Risk |
 |---|---|
 | **Remove a handler** (normal checkpoint) | Events only the removed handler subscribed to become undeliverable. Graph halts early — no crash, incomplete execution. |
-| **Remove a handler** (interrupted checkpoint) | If the graph was paused inside the removed handler via `Interrupted`, `graph.resume(value)` raises `UnresumableError` by default (set `EventGraph(on_unresumable="halt"\|"warn")` to handle it non-fatally). Declare `@on(previously=...)` to keep it resumable. See [Handler renames](event-migrations.md#handler-renames). |
+| **Remove a handler** (interrupted checkpoint) | If the graph was paused inside the removed handler via `Interrupted`, `graph.resume(value)` raises `UnresumableError` by default (set `EventGraph(on_unresumable="halt"\|"warn")` to handle it non-fatally). Declare `@on(previously=...)` to keep it resumable. To retire the `Interrupted` subclass itself, call `graph.abandon(config)` or `.aabandon()`. It settles the paused thread without ever answering it. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon). See [Handler renames](event-migrations.md#handler-renames). |
+| **Remove an `Interrupted` subclass** | A thread paused on it still holds a pending `__interrupt__` write naming the class. Deleting the class without a migration breaks revival on that write, not just dispatch. Call `graph.abandon(config)` (or `.aabandon()`) on every thread paused on it first, then delete the class. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) and [Retiring an Interrupted subclass](event-migrations.md#retiring-an-interrupted-subclass). |
 | **Rename a handler** | An `Interrupted` checkpoint targeting the old node is lost — unless you declare `@on(previously="old_name")`, which keeps it resumable. See [Handler renames](event-migrations.md#handler-renames). |
-| **Rename / relocate an Event class** | Old checkpoints fail revival under the default serde — author a migration; the [coverage gates](event-migrations.md#coverage-gates) catch an uncovered rename in CI before deploy. |
+| **Rename / relocate an Event class** | Old checkpoints fail revival under the default serde — author a migration; the [coverage gates](event-migrations.md#coverage-gates) catch an uncovered rename in CI before deploy. A renamed `Interrupted` subclass stays resumable under `@migrate_from`. Removing it is different: it needs `abandon()` first (see above). |
 | **Add a reducer** | New reducer starts cold — misses default values and all historical projections. Only post-resume events contribute. |
 | **Remove a reducer** | Channel data is silently dropped from the checkpoint. |
 
@@ -29,5 +30,5 @@ Existing threads survive graph modifications via graceful degradation — no cra
 
 - Renaming a handler with active interrupted threads is safe **if** you declare `@on(previously=...)` — for an inline `Command`, the `previously: ClassVar = (...)` class attribute — (or pin `@on(node_name=...)` up front); the handler coverage gate flags an undeclared rename in CI.
 - Treat reducer addition as a fresh start; for full history, use a new thread.
-- Prefer additive changes (add handlers/events; removal is safe only with no in-flight threads).
+- Prefer additive changes (add handlers/events; removal is safe only with no in-flight threads). For an `Interrupted` subclass, `abandon(config)` on each paused thread produces exactly that state.
 - Use a new `thread_id` after structural changes to avoid all edge cases.

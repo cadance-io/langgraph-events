@@ -182,6 +182,34 @@ def _drain_namespace_finalize(container: type, namespace_cls: type) -> None:
                 cb(attr, namespace_cls)
 
 
+def _normalize_pyes_annotations(container: type) -> None:
+    """Expose resolved field types to python-event-sourcery's registry.
+
+    Its registry calls ``get_type_hints`` without the enclosing namespace.
+    Replacing only persisted field annotations keeps sibling references
+    resolvable without changing Pydantic's already-built model schema.
+    """
+    localns = dict(vars(container))
+    for event_cls in _iter_nested_events(container, recurse_commands=False):
+        if issubclass(event_cls, Command):
+            localns.update(vars(event_cls))
+    for event_cls in _iter_nested_events(container, recurse_commands=True):
+        annotations = dict(event_cls.__dict__.get("__annotations__", {}))
+        try:
+            resolved = typing.get_type_hints(event_cls, localns=localns)
+        except (NameError, TypeError):
+            resolved = {}
+        model_fields = getattr(event_cls, "model_fields", {})
+        changed = False
+        for name, field in model_fields.items():
+            annotation = resolved.get(name, field.annotation)
+            if annotation is not None and annotations.get(name) != annotation:
+                annotations[name] = annotation
+                changed = True
+        if changed:
+            event_cls.__annotations__ = annotations
+
+
 def _iter_nested_outcomes(cmd: type) -> list[type[DomainEvent]]:
     """``DomainEvent`` classes directly nested under *cmd*.
 
@@ -258,6 +286,7 @@ class Namespace:
         _stamp_nested_namespace(cls, cls)
         _attach_command_outcomes(cls)
         _drain_namespace_finalize(cls, cls)
+        _normalize_pyes_annotations(cls)
 
 
 def _collect_namespace_reducers(cls: type) -> tuple[Any, ...]:
@@ -765,6 +794,35 @@ class Cancelled(Halted):
     the cancelled handler's partial events — sibling handler results
     that already committed to state will persist.
     """
+
+
+class Abandoned(Halted):
+    """A thread that ``abandon()``/``aabandon()`` settled without
+    dispatching the ``Interrupted`` it was paused on. Recorded, not
+    dispatched: ``@on(Abandoned)`` never fires. The ``Halted`` gate
+    routes straight to ``END`` before any handler match. See
+    :meth:`EventGraph.abandon`.
+
+    ``discarded`` is the discarded interrupt's **qualname**, not the
+    instance. A revived instance would leave a non-event in the log once
+    the class is deleted, and ``.trail()`` would then raise
+    ``AttributeError``. Always the qualname, e.g. ``"Order.
+    ApprovalRequested"`` for a class nested in a ``Namespace``, never the
+    bare ``"ApprovalRequested"``. The qualname stays unambiguous under
+    nesting. It is what a checkpoint records, so it stays the same
+    whether the class still imports or was already deleted. ``""`` when
+    there was no pending interrupt, including a raw
+    ``langgraph.types.interrupt(...)`` call, which has no identity to
+    record.
+
+    Joined with ``", "`` and deduped across a fanned-out dispatch. Two
+    tasks paused on the same type add one name, not two. A single-value
+    equality check stops matching once a second task is pending. Use
+    ``in`` or split on ``", "`` instead.
+    """
+
+    reason: str = ""
+    discarded: str = ""
 
 
 class Unresumable(Halted):

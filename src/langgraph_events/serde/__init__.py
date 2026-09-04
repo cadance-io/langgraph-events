@@ -21,7 +21,10 @@ Pass ``migrations=`` to keep old checkpoints readable after a refactor —
 see :mod:`langgraph_events.serde.migrations` and ``docs/event-migrations.md``.
 """
 
-from langgraph_events.serde._jsonplus import NamespaceAwareSerde
+from langgraph_events.serde._jsonplus import (
+    NamespaceAwareSerde,
+    UnreachableMigrationWarning,
+)
 from langgraph_events.serde.migrations import (
     CoverageError,
     HandlerCoverageError,
@@ -35,20 +38,25 @@ from langgraph_events.serde.migrations import (
     backfill,
     migrate_from,
     replay_reducer,
+    split_event,
     synthesize_legacy_payload,
+    transform_fields,
 )
 
-# Raw RenameEvent / AddField are deliberately NOT re-exported here. The
-# common path is decorator-first (@migrate_from) plus Migration.rename /
-# Migration.add_field sugar. The raw operation constructors remain
-# importable from ``langgraph_events.serde.migrations`` for the rare
-# composite multi-op Migration — keeping the top-level surface small.
+# Raw RenameEvent / AddField / TransformFields / SplitEvent are deliberately
+# NOT re-exported here. The common path is decorator-first (@migrate_from,
+# @backfill, @transform_fields, @split_event) plus Migration.rename /
+# Migration.add_field / Migration.transform_fields / Migration.split_event
+# sugar. The raw operation constructors remain importable from
+# ``langgraph_events.serde.migrations`` for the rare composite multi-op
+# Migration — keeping the top-level surface small.
 __all__ = [
     "CoverageError",
     "HandlerCoverageError",
     "Migration",
     "MigrationCoverageError",
     "NamespaceAwareSerde",
+    "UnreachableMigrationWarning",
     "assert_all_baselined_cover",
     "assert_all_baselined_handlers_cover",
     "assert_all_baselined_resolve",
@@ -57,5 +65,7 @@ __all__ = [
     "backfill",
     "migrate_from",
     "replay_reducer",
+    "split_event",
     "synthesize_legacy_payload",
+    "transform_fields",
 ]

@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Interrupt
 from pydantic import BaseModel
+from pydantic.v1 import BaseModel as BaseModelV1
 
 from langgraph_events import (
     Command,
@@ -35,9 +36,16 @@ from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payloa
 from langgraph_events.serde._jsonplus import (
     EXT_INTERRUPT,
     EXT_NAMESPACE_AWARE_EVENT,
+    UnrevivedIdentity,
     _option,
+    _scan_identities,
 )
-from langgraph_events.serde.migrations import backfill, migrate_from
+from langgraph_events.serde.migrations import (
+    backfill,
+    migrate_from,
+    split_event,
+    transform_fields,
+)
 
 
 def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
@@ -53,6 +61,38 @@ def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
                     {"module": module, "qualname": qualname}
                     for module, qualname in identities
                 ],
+            }
+        )
+    )
+    return target
+
+
+def _baseline_v3_file(
+    tmp_path: Any,
+    *,
+    events: tuple[tuple[str, str, list[str] | None], ...] = (),
+    retired: tuple[tuple[str, str, list[str] | None], ...] = (),
+) -> Any:
+    """Write a v3 baseline JSON and return its path.
+
+    Each entry is ``(module, qualname, fields)``. ``fields`` is ``None`` for
+    a retired entry whose record predates v3.
+    """
+    import json
+
+    def entry(module: str, qualname: str, fields: list[str] | None) -> dict[str, Any]:
+        record: dict[str, Any] = {"module": module, "qualname": qualname}
+        if fields is not None:
+            record["fields"] = fields
+        return record
+
+    target = tmp_path / "baseline.json"
+    target.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "events": [entry(*e) for e in events],
+                "retired": [entry(*r) for r in retired],
             }
         )
     )
@@ -116,6 +156,17 @@ class FieldShape(Namespace):
         reason: str
 
 
+# Fixture for #172. ``derived`` is ``init=False`` and is rebuilt in
+# ``__post_init__``. The serde must not write it: the constructor rejects it.
+class DerivedField(Namespace):
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False, default=0)
+
+        def __post_init__(self) -> None:
+            object.__setattr__(self, "derived", self.total * 2)
+
+
 # Fixtures for the decorator-driven migration tests. Module-level so their
 # qualnames resolve through ``importlib.import_module`` + dotted ``getattr``
 # at serde-construction validation time. Function-local classes acquire
@@ -152,6 +203,59 @@ class ValidatedReorg(Namespace):
 
         def handle(self) -> ValidatedReorg.Persist.Persisted:
             return ValidatedReorg.Persist.Persisted(name=self.name)
+
+
+# Fixture for the v3 revive gate. ``name`` has a default and
+# ``__post_init__`` rejects an empty/None value. The baseline records
+# ``name``, the live class still accepts it, so the gate must send no
+# placeholder for it: a ``None`` there trips the validator that a real
+# payload never trips.
+class ValidatedDefault(Namespace):
+    class Persist(Command):
+        name: str = "x"
+
+        class Persisted(DomainEvent):
+            name: str = "x"
+
+            def __post_init__(self) -> None:
+                if not self.name:
+                    raise ValueError("name must be non-empty")
+
+        def handle(self) -> ValidatedDefault.Persist.Persisted:
+            return ValidatedDefault.Persist.Persisted(name=self.name)
+
+
+# Fixture for an ``init=False`` field. The serde writes init fields only,
+# so the baseline must record the same set. A recorded ``length`` would
+# reach the constructor as a placeholder, and the constructor rejects it.
+class Derived(Namespace):
+    class Persist(Command):
+        note: str = ""
+
+        class Persisted(DomainEvent):
+            note: str = ""
+            length: int = dataclasses.field(init=False, default=0)
+
+            def __post_init__(self) -> None:
+                object.__setattr__(self, "length", len(self.note))
+
+        def handle(self) -> Derived.Persist.Persisted:
+            return Derived.Persist.Persisted(note=self.note)
+
+
+# Tombstones for identities a baseline lists under ``retired``. The
+# retired ``Retiring.ApprovalRequired`` recorded ``order_id``, so its
+# tombstone declares the same field. ``Retiring.ReviewRequired`` predates
+# v3 (no field record), and its tombstone has a required field the gate
+# must placeholder.
+class Retiring(Namespace):
+    @migrate_from("Retiring.ApprovalRequired")
+    class RetiredApprovalGate(Interrupted):
+        order_id: str = ""
+
+    @migrate_from("Retiring.ReviewRequired")
+    class RetiredReviewGate(Interrupted):
+        order_id: str
 
 
 class DecoMulti(Namespace):
@@ -371,6 +475,15 @@ class DecoBackfillTypoField(Namespace):
     class Persisted(DomainEvent):
         command_id: str
         note: str = ""
+
+
+# Fixture for #172. A fill on an ``init=False`` field is not a kwarg the
+# constructor accepts, so the serde must refuse it at construction.
+class DecoBackfillInitFalse(Namespace):
+    @backfill("derived", default=0)
+    class Placed(DomainEvent):
+        total: int
+        derived: int = dataclasses.field(init=False, default=0)
 
 
 # Fixture proving the revive gate exercises origin fills instead of
@@ -634,6 +747,63 @@ class PydanticPayload(BaseModel):
     count: int
 
 
+class _ModelHolder:
+    """Nests a pydantic model inside a plain class (#167). Upstream stores
+    a pydantic payload by ``__name__`` and revives it with ``getattr`` on
+    the module, so ``Cfg`` never resolves and revives as a raw dict."""
+
+    class Cfg(BaseModel):
+        tag: str = "x"
+
+
+class _NestedPayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: _ModelHolder.Cfg
+
+
+class _NestedPayloadInGenericNs(Namespace):
+    class Placed(DomainEvent):
+        cfgs: list[_ModelHolder.Cfg] | None = None
+
+
+class _ModulePayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: PydanticPayload
+
+
+class _ClassVarPayloadNs(Namespace):
+    class Placed(DomainEvent):
+        """A ClassVar is not a dataclass field and is never checkpointed."""
+
+        default_cfg: ClassVar[_ModelHolder.Cfg] = _ModelHolder.Cfg()
+
+
+class _ModelHolderV1:
+    class Cfg(BaseModelV1):
+        """pydantic v1 takes the EXT_PYDANTIC_V1 branch upstream, with the
+        same getattr-by-__name__ miss."""
+
+        tag: str = "x"
+
+
+class _NestedV1PayloadNs(Namespace):
+    class Placed(DomainEvent):
+        cfg: _ModelHolderV1.Cfg
+
+
+class _SiblingRefPayloadNs(Namespace):
+    """A field typed as a sibling by forward reference. get_type_hints
+    without the enclosing class's names raises NameError on it, and an
+    all-or-nothing fallback would then skip the nested model beside it."""
+
+    class Sibling(DomainEvent):
+        pass
+
+    class Placed(DomainEvent):
+        other: Sibling | None = None  # noqa: F821 - resolved by the check's localns
+        cfg: _ModelHolder.Cfg | None = None
+
+
 def describe_NamespaceAwareSerde():
     def describe_dumps_typed_loads_typed_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -652,6 +822,18 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(s_back, Persona.Approve.Approved)
                 assert p_back.note == "persona"
                 assert s_back.note == "story"
+
+        def when_an_event_has_an_init_false_field():
+            def it_round_trips_and_recomputes_the_derived_value():
+                serde = NamespaceAwareSerde(namespaces=(DerivedField,))
+                ev = DerivedField.Placed(total=1)
+                assert ev.derived == 2
+
+                back = serde.loads_typed(serde.dumps_typed(ev))
+
+                assert isinstance(back, DerivedField.Placed)
+                assert back.total == 1
+                assert back.derived == 2
 
     def describe_checkpoint_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -748,7 +930,29 @@ def describe_NamespaceAwareSerde():
                 assert "FieldShape.Persisted" in message
                 assert any(t in message for t in ("TypeError", "ValidationError"))
                 assert "note" in message
-                assert "fields may have changed" in message
+
+            def it_says_the_class_is_missing_the_field_not_to_migrate_from_it():
+                # The identity resolved to a live class — possibly already
+                # a tombstone carrying @migrate_from — so "map onto a
+                # tombstone with @migrate_from" is nonsense advice here;
+                # that remedy belongs to the ImportError/AttributeError
+                # branch (identity doesn't resolve at all), not this one
+                # (identity resolves, __init__ rejects a stored field).
+                serde = NamespaceAwareSerde()
+
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept", "note": "dropped"},
+                )
+
+                with pytest.raises(ValueError) as excinfo:
+                    serde.loads_typed(payload)
+
+                message = str(excinfo.value)
+                assert "does not declare" in message
+                assert "'note'" in message
+                assert "@migrate_from" not in message
 
         def when_a_required_field_was_added_to_the_class():
             def without_a_migration():
@@ -769,7 +973,7 @@ def describe_NamespaceAwareSerde():
                     assert "FieldShape.Persisted" in message
                     assert any(t in message for t in ("TypeError", "ValidationError"))
                     assert "reason" in message
-                    assert "fields may have changed" in message
+                    assert "fields no longer match the stored payload" in message
 
         def when_the_stored_fields_still_match():
             def it_revives_the_event():
@@ -850,6 +1054,27 @@ def describe_NamespaceAwareSerde():
                     serde = NamespaceAwareSerde(**opt_in_unsafe_fallback)
                     with pytest.raises(ormsgpack.MsgpackEncodeError):
                         serde.dumps_typed(Unencodable())
+
+    def describe_unrevived_identity_on_write():
+        # #170: ``UnrevivedIdentity`` is a read-side placeholder for the
+        # retirement tools. Upstream's default hook would encode it as a
+        # named tuple by class name, so it would round-trip as a stored
+        # value a strict read cannot tell from a real event. The serde
+        # must refuse to write it, whatever caller passes it.
+
+        def when_a_placeholder_is_in_the_payload():
+            def it_raises_naming_the_identity_and_the_remedy():
+                serde = NamespaceAwareSerde()
+                placeholder = UnrevivedIdentity(module="app.events", qualname="Gone")
+
+                with pytest.raises(
+                    ValueError,
+                    match=(
+                        r"app\.events\.Gone.*placeholder.*never.*stored.*"
+                        r"tombstone.*Recovering a delete-first deployment"
+                    ),
+                ):
+                    serde.dumps_typed([placeholder])
 
     def describe_event_nested_in_langgraph_Interrupt():
         # Regression for #60: every namespaced ``Interrupted`` subclass that
@@ -1003,6 +1228,40 @@ def describe_NamespaceAwareSerde():
                 )
                 assert back.name == "x"
                 assert back.count == 42
+
+        def when_an_event_field_is_a_pydantic_model_nested_in_a_class():
+            # #167: the model class is live and unmodified, yet its
+            # checkpoint identity (module, __name__) does not import.
+            # Every upstream failure path returns the raw dump dict, so
+            # the miss is silent at read time. Fail at build instead.
+            def it_raises_at_construction_naming_the_model():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg") as exc:
+                    NamespaceAwareSerde(namespaces=(_NestedPayloadNs,))
+                msg = str(exc.value)
+                assert "_NestedPayloadNs.Placed.cfg" in msg
+                assert "module scope" in msg
+
+            def it_finds_the_model_inside_a_generic_annotation():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_NestedPayloadInGenericNs,))
+
+        def when_an_event_field_is_a_module_level_pydantic_model():
+            def it_constructs():
+                NamespaceAwareSerde(namespaces=(_ModulePayloadNs,))
+
+        def when_a_nested_model_is_only_a_class_var():
+            def it_constructs():
+                NamespaceAwareSerde(namespaces=(_ClassVarPayloadNs,))
+
+        def when_an_event_field_is_a_pydantic_v1_model_nested_in_a_class():
+            def it_raises_at_construction():
+                with pytest.raises(ValueError, match=r"_ModelHolderV1\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_NestedV1PayloadNs,))
+
+        def when_a_sibling_forward_reference_sits_beside_a_nested_model():
+            def it_still_finds_the_nested_model():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_SiblingRefPayloadNs,))
 
         def when_constructor_allowlist_explicitly_admits_a_type():
             # Asymmetric guard that actually proves delegation: with strict
@@ -2215,6 +2474,31 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
+                # Grammar must agree with the count: one identity, not "are".
+                assert "1 identity in the baseline is neither" in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
+
+        def when_the_baseline_lists_an_unmigrated_retired_identity():
+            def it_raises_naming_the_retired_remedy(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    MigrationCoverageError,
+                    assert_all_baselined_cover,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[Retiring])
+                baseline = _baseline_v3_file(
+                    tmp_path, retired=(("ghost.mod", "Ghost.Gone", ["x"]),)
+                )
+
+                with pytest.raises(MigrationCoverageError) as excinfo:
+                    assert_all_baselined_cover(serde, baseline)
+
+                message = str(excinfo.value)
+                assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
+                assert message.count("Ghost.Gone") == 1
+                assert "regenerate" not in message
+                assert "unrevivable_threads() == {}" in message
+                assert "delete its `retired` entry" in message
 
         def when_unifying_the_gate_error_base():
             def it_is_an_assertion_error_subclass():
@@ -2311,6 +2595,7 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persisted" not in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
 
         def when_a_baselined_identity_is_only_reachable_in_scope():
             def it_revives_through_the_scope(tmp_path: Any):
@@ -2334,6 +2619,188 @@ def describe_NamespaceAwareSerde():
                 )
 
                 assert_all_baselined_revive(serde, baseline)
+
+        def when_the_live_class_dropped_a_recorded_field():
+            # The stored blob still carries the field. A v3 baseline records
+            # it, so the gate sends it and the live class rejects it: the
+            # failure a real checkpoint would raise.
+            def it_fails_naming_the_recorded_field(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                baseline = _baseline_v3_file(
+                    tmp_path,
+                    events=(
+                        (
+                            DecoReorg.__module__,
+                            "DecoReorg.Persist.Persisted",
+                            ["legacy_flag", "note"],
+                        ),
+                    ),
+                )
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_revive(serde, baseline)
+
+                message = str(excinfo.value)
+                assert "DecoReorg.Persist.Persisted" in message
+                assert "recorded 'legacy_flag'" in message
+                # One remedy, from the read path: the gate adds the cause
+                # sentence and does not repeat it.
+                assert "drop it from the payload with @transform_fields" in message
+                assert message.count("from the payload") == 1
+
+            def with_a_baseline_that_predates_v3():
+                def it_passes(tmp_path: Any):
+                    # No field record, so nothing to send: the documented
+                    # degrade until the project re-baselines.
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+                    baseline = _baseline_file(
+                        tmp_path,
+                        (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
+                    )
+
+                    assert_all_baselined_revive(serde, baseline)
+
+        def when_a_field_is_dropped_and_the_baseline_rewritten():
+            def it_still_fails(tmp_path: Any):
+                # The write keeps every field ever recorded, so a plain
+                # re-baseline after the drop cannot blind the gate.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                baseline = _baseline_v3_file(
+                    tmp_path,
+                    events=(
+                        (
+                            DecoReorg.__module__,
+                            "DecoReorg.Persist.Persisted",
+                            ["legacy_flag", "note"],
+                        ),
+                    ),
+                )
+                write_baseline(EventGraph.from_namespaces(DecoReorg), baseline)
+                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
+
+                with pytest.raises(AssertionError, match="legacy_flag"):
+                    assert_all_baselined_revive(serde, baseline)
+
+        def when_a_defaulted_field_is_validated_in_post_init():
+            def it_passes_after_a_v3_write(tmp_path: Any):
+                # The record names ``name``. The live class still accepts
+                # it, so no ``None`` placeholder reaches the validator.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                baseline = tmp_path / "baseline.json"
+                write_baseline(EventGraph.from_namespaces(ValidatedDefault), baseline)
+                serde = NamespaceAwareSerde(namespaces=[ValidatedDefault])
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_the_live_class_has_an_init_false_field():
+            def it_stays_green_after_a_v3_write(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+                from langgraph_events.serde.migrations.detect import write_baseline
+
+                baseline = tmp_path / "baseline.json"
+                write_baseline(EventGraph.from_namespaces(Derived), baseline)
+                serde = NamespaceAwareSerde(namespaces=[Derived])
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_the_live_class_gained_a_backfilled_required_field():
+            def it_passes_against_the_v3_record_of_the_old_shape(tmp_path: Any):
+                # The record predates ``command_id``. The back-fill injects
+                # it, so the gate sends no placeholder and still revives.
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoBackfill])
+                baseline = _baseline_v3_file(
+                    tmp_path,
+                    events=(
+                        (
+                            DecoBackfill.__module__,
+                            "DecoBackfill.Persist.Persisted",
+                            ["note"],
+                        ),
+                    ),
+                )
+
+                assert_all_baselined_revive(serde, baseline)
+
+        def when_the_baseline_lists_a_retired_identity():
+            def without_a_migration():
+                def it_fails_naming_the_retired_remedy(tmp_path: Any):
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[Retiring])
+                    baseline = _baseline_v3_file(
+                        tmp_path,
+                        retired=(("ghost.mod", "Ghost.Gone", ["x"]),),
+                    )
+
+                    with pytest.raises(AssertionError) as excinfo:
+                        assert_all_baselined_revive(serde, baseline)
+
+                    message = str(excinfo.value)
+                    assert "ghost.mod:Ghost.Gone (retired) -> " in message
+                    assert "delete its `retired` entry" in message
+
+            def with_a_tombstone_declaring_the_recorded_fields():
+                def it_passes(tmp_path: Any):
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[Retiring])
+                    baseline = _baseline_v3_file(
+                        tmp_path,
+                        retired=(
+                            (
+                                Retiring.__module__,
+                                "Retiring.ApprovalRequired",
+                                ["order_id"],
+                            ),
+                        ),
+                    )
+
+                    assert_all_baselined_revive(serde, baseline)
+
+            def without_a_field_record():
+                def it_sends_required_placeholders_only(tmp_path: Any):
+                    # A retired entry hand-added for an identity erased
+                    # before v3 has no ``fields``. The tombstone's required
+                    # ``order_id`` still gets its placeholder.
+                    from langgraph_events.serde.migrations import (
+                        assert_all_baselined_revive,
+                    )
+
+                    serde = NamespaceAwareSerde(namespaces=[Retiring])
+                    baseline = _baseline_v3_file(
+                        tmp_path,
+                        retired=(
+                            (Retiring.__module__, "Retiring.ReviewRequired", None),
+                        ),
+                    )
+
+                    assert_all_baselined_revive(serde, baseline)
 
         def when_the_live_class_has_required_fields():
             def it_does_not_spuriously_fail(tmp_path: Any):
@@ -2432,6 +2899,24 @@ def describe_NamespaceAwareSerde():
 
                 assert_all_baselined_resolve(serde, baseline)
 
+        def when_the_baseline_lists_an_unmigrated_retired_identity():
+            def it_fails_naming_the_retired_remedy(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_resolve,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[Retiring])
+                baseline = _baseline_v3_file(
+                    tmp_path, retired=(("ghost.mod", "Ghost.Gone", ["x"]),)
+                )
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_resolve(serde, baseline)
+
+                message = str(excinfo.value)
+                assert "ghost.mod:Ghost.Gone (retired) -> " in message
+                assert "delete its `retired` entry" in message
+
         def when_a_baselined_identity_no_longer_resolves():
             def it_raises_naming_the_missing_identity(tmp_path: Any):
                 from langgraph_events.serde.migrations import (
@@ -2450,6 +2935,44 @@ def describe_NamespaceAwareSerde():
 
                 assert "Ghost.Gone" in str(excinfo.value)
                 assert "DecoReorg.Persist.Persisted" not in str(excinfo.value)
+                assert "add @migrate_from" in str(excinfo.value)
+
+
+def describe_UnreachableMigrationWarning():
+    # A @migrate_from-decorated class that namespaces=/events= never
+    # reaches contributes nothing — no error, no warning, before this
+    # (#164). The fixture lives in its own module
+    # (_migrate_from_warning_fixture.py) so its module-level orphan
+    # class is never scanned by an unrelated test's serde construction.
+
+    def when_a_decorated_class_is_not_passed_to_the_serde():
+        def it_warns_naming_the_class():
+            import _migrate_from_warning_fixture as fx
+
+            from langgraph_events.serde import UnreachableMigrationWarning
+
+            with pytest.warns(UnreachableMigrationWarning, match="OrphanTombstone"):
+                NamespaceAwareSerde(namespaces=(fx.Gate,))
+
+    def when_the_decorated_class_is_passed_via_events():
+        def it_does_not_warn():
+            import _migrate_from_warning_fixture as fx
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                NamespaceAwareSerde(namespaces=(fx.Gate,), events=(fx.OrphanTombstone,))
+
+    def when_no_namespace_reaches_the_decorated_classs_module():
+        def it_does_not_warn():
+            # The fixture module is never passed at all here — out of
+            # scope by design, not a bug; must not be flagged.
+            class _Unrelated(Namespace):
+                class Placeholder(Interrupted):
+                    pass
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", UserWarning)
+                NamespaceAwareSerde(namespaces=(_Unrelated,))
 
 
 def describe_public_serde_surface():
@@ -2465,6 +2988,8 @@ def describe_public_serde_surface():
 
             assert not hasattr(serde_pkg, "RenameEvent")
             assert not hasattr(serde_pkg, "AddField")
+            assert not hasattr(serde_pkg, "TransformFields")
+            assert not hasattr(serde_pkg, "SplitEvent")
 
         def it_still_exposes_the_decorator_and_sugar_tier():
             import langgraph_events.serde as serde_pkg
@@ -2473,6 +2998,8 @@ def describe_public_serde_surface():
                 "NamespaceAwareSerde",
                 "Migration",
                 "migrate_from",
+                "transform_fields",
+                "split_event",
                 "synthesize_legacy_payload",
                 "assert_all_baselined_revive",
             ):
@@ -2480,10 +3007,17 @@ def describe_public_serde_surface():
 
     def when_the_composite_escape_hatch_is_needed():
         def it_keeps_raw_ops_importable_from_serde_migrations():
-            from langgraph_events.serde.migrations import AddField, RenameEvent
+            from langgraph_events.serde.migrations import (
+                AddField,
+                RenameEvent,
+                SplitEvent,
+                TransformFields,
+            )
 
             assert RenameEvent is not None
             assert AddField is not None
+            assert TransformFields is not None
+            assert SplitEvent is not None
 
 
 def describe_detect_cli():
@@ -2834,6 +3368,13 @@ def describe_origin_scoped_backfill():
             with pytest.raises(ValueError, match="command_idd"):
                 NamespaceAwareSerde(namespaces=[DecoBackfillTypoField])
 
+    def when_a_fill_names_an_init_false_field():
+        def it_is_rejected_at_serde_construction():
+            # The encoder never writes the field and the constructor rejects
+            # it as a kwarg, so the fill can only break every read.
+            with pytest.raises(ValueError, match="has no field 'derived'"):
+                NamespaceAwareSerde(namespaces=[DecoBackfillInitFalse])
+
     def when_legacy_write_meets_origin_scoped_fills():
         def it_is_rejected_at_serde_construction():
             # legacy_write relabels EVERY instance under the oldest
@@ -3160,6 +3701,8 @@ def describe_assert_all_baselined_handlers_cover():
                 # sibling of MigrationCoverageError under the shared base
                 assert isinstance(excinfo.value, CoverageError)
                 assert excinfo.value.uncovered == ("place",)
+                # Grammar must agree with the count: one handler, not "resolve".
+                assert "1 baselined handler no longer resolves to" in str(excinfo.value)
 
     def when_a_reactor_is_replaced_by_an_inline_command():
         # The command's ``previously`` class attribute feeds the same
@@ -3238,3 +3781,1258 @@ def describe_assert_all_baselined_handlers_cover():
             baseline.write_text(json.dumps({"version": 1, "events": []}))
 
             _assert_handlers_cover(EventGraph([place]), baseline)
+
+
+# Fixtures for ``TransformFields``. Each class dropped, merged or retyped a
+# field after payloads were written, so a stored payload no longer matches
+# the live constructor. The transforms are module-level so a decorator
+# fixture below can reuse them.
+def _dropping(key: str) -> Any:
+    """A transform that removes *key* when present."""
+
+    def _transform(kw: dict[str, Any]) -> dict[str, Any]:
+        kw.pop(key, None)
+        return kw
+
+    return _transform
+
+
+_drop_legacy_flag = _dropping("legacy_flag")
+
+
+def _recording(calls: list[str], label: str) -> Any:
+    """A transform that appends *label* to *calls* and changes nothing."""
+
+    def _transform(kw: dict[str, Any]) -> dict[str, Any]:
+        calls.append(label)
+        return kw
+
+    return _transform
+
+
+def _merge_name(kw: dict[str, Any]) -> dict[str, Any]:
+    first = kw.pop("first", None)
+    last = kw.pop("last", None)
+    if first is not None or last is not None:
+        kw["name"] = f"{first or ''} {last or ''}".strip()
+    return kw
+
+
+def _int_count(kw: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(kw.get("count"), str):
+        kw["count"] = int(kw["count"])
+    return kw
+
+
+class Reshaped(Namespace):
+    class Trimmed(DomainEvent):
+        """Dropped ``legacy_flag``."""
+
+        note: str = ""
+
+    class Named(DomainEvent):
+        """Merged ``first`` and ``last`` into ``name``."""
+
+        name: str = ""
+
+    @transform_fields(_int_count)
+    class Counted(DomainEvent):
+        """``count`` was a ``str``, now an ``int``."""
+
+        count: int = 0
+
+
+def _upper_draft(kw: dict[str, Any]) -> dict[str, Any]:
+    """Idempotent, and visible on a payload the current release wrote."""
+    if "draft" in kw:
+        kw["draft"] = kw["draft"].upper()
+    return kw
+
+
+# A class-stage transform composed with a rename. The transform is keyed
+# on the live identity, so it runs on every era: the historic origin and
+# the payloads the current release writes.
+class Gate(Namespace):
+    @transform_fields(_upper_draft)
+    @migrate_from("Gate.OldReviewed")
+    class Reviewed(Interrupted):
+        draft: str = ""
+
+
+# An origin-scoped transform: it runs before the rename, on payloads
+# written under ``DecoOriginTransform.Old`` only.
+class DecoOriginTransform(Namespace):
+    @migrate_from("DecoOriginTransform.Old", transform=_drop_legacy_flag)
+    class Persisted(DomainEvent):
+        note: str = ""
+
+
+# ``transform=`` and ``backfill=`` on one decorator. The transform runs
+# first, then the origin fill supplies the required ``source``.
+class DecoOriginBoth(Namespace):
+    @migrate_from(
+        "DecoOriginBoth.Old", transform=_drop_legacy_flag, backfill={"source": "old"}
+    )
+    class Persisted(DomainEvent):
+        source: str
+
+
+# A chain A -> B -> Persisted for hand-authored transforms keyed on A (the
+# origin stage) and on Persisted (the class stage).
+class ChainTransform(Namespace):
+    @migrate_from("ChainTransform.A", "ChainTransform.B")
+    class Persisted(DomainEvent):
+        note: str = ""
+
+
+def describe_TransformFields():
+    # A kwargs-to-kwargs operation. A rename covers a moved class and an
+    # AddField covers a gained field. A dropped, merged or retyped field
+    # has no operation without this one (#159).
+
+    def when_a_stored_payload_carries_a_dropped_field():
+        def it_revives_after_the_transform_drops_it():
+            from langgraph_events.serde.migrations import (
+                Migration,
+                TransformFields,
+            )
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration(
+                        name="drop-legacy-flag",
+                        operations=(
+                            TransformFields(
+                                module=Reshaped.__module__,
+                                qualname="Reshaped.Trimmed",
+                                transform=_drop_legacy_flag,
+                            ),
+                        ),
+                    )
+                ],
+            )
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Reshaped.__module__,
+                    "Reshaped.Trimmed",
+                    {"note": "n", "legacy_flag": True},
+                )
+            )
+
+            assert isinstance(revived, Reshaped.Trimmed)
+            assert revived.note == "n"
+
+    def when_two_stored_fields_merge_into_one():
+        def it_revives_holding_the_merged_value():
+            # ``Migration.transform_fields`` is the single-op sugar, beside
+            # ``Migration.rename`` and ``Migration.add_field``.
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(
+                        target=Reshaped.Named, transform=_merge_name
+                    )
+                ],
+            )
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Reshaped.__module__,
+                    "Reshaped.Named",
+                    {"first": "Ada", "last": "Lovelace"},
+                )
+            )
+
+            assert revived == Reshaped.Named(name="Ada Lovelace")
+
+    def when_a_stored_field_changed_type():
+        def it_revives_holding_the_retyped_value():
+            # ``@transform_fields`` is the class-stage decorator form,
+            # collected from ``namespaces=`` like ``@backfill``.
+            serde = NamespaceAwareSerde(namespaces=[Reshaped])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Reshaped.__module__, "Reshaped.Counted", {"count": "3"}
+                )
+            )
+
+            assert revived == Reshaped.Counted(count=3)
+
+    def when_the_transform_is_keyed_on_the_live_identity():
+        # The class stage. It runs after the rename, on every era,
+        # so the transform must be idempotent.
+
+        def it_runs_on_a_payload_the_current_release_wrote():
+            serde = NamespaceAwareSerde(namespaces=[Gate])
+
+            revived = serde.loads_typed(serde.dumps_typed(Gate.Reviewed(draft="d")))
+
+            assert revived == Gate.Reviewed(draft="D")
+
+        def it_runs_on_a_payload_renamed_onto_the_class():
+            serde = NamespaceAwareSerde(namespaces=[Gate])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Gate.__module__, "Gate.OldReviewed", {"draft": "d"}
+                )
+            )
+
+            assert revived == Gate.Reviewed(draft="D")
+
+        def it_reaches_an_event_nested_inside_a_Resumed():
+            # ``Resumed.interrupted`` is one ext record inside another, so
+            # the transform runs through the hook's recursion.
+            serde = NamespaceAwareSerde(namespaces=[Gate])
+            stored = Resumed(interrupted=Gate.Reviewed(draft="d"))
+
+            revived = serde.loads_typed(serde.dumps_typed(stored))
+
+            assert revived.interrupted == Gate.Reviewed(draft="D")
+
+        def it_runs_once_per_read():
+            # A live identity with no rename has the same key before and
+            # after the rename step. The class stage must still run once.
+            from langgraph_events.serde.migrations import Migration
+
+            calls: list[str] = []
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(
+                        target=Reshaped.Trimmed, transform=_recording(calls, "T")
+                    )
+                ],
+            )
+
+            serde.loads_typed(serde.dumps_typed(Reshaped.Trimmed(note="n")))
+
+            assert calls == ["T"]
+
+    def when_the_transform_is_keyed_on_a_rename_source():
+        # The origin stage, declared with ``migrate_from(transform=...)``.
+
+        def it_runs_for_that_origin_only():
+            serde = NamespaceAwareSerde(namespaces=[DecoOriginTransform])
+            module = DecoOriginTransform.__module__
+
+            old_era = serde.loads_typed(
+                synthesize_legacy_payload(
+                    module, "DecoOriginTransform.Old", {"legacy_flag": True}
+                )
+            )
+
+            assert old_era == DecoOriginTransform.Persisted()
+            with pytest.raises(ValueError, match="legacy_flag"):
+                serde.loads_typed(
+                    synthesize_legacy_payload(
+                        module,
+                        "DecoOriginTransform.Persisted",
+                        {"legacy_flag": True},
+                    )
+                )
+
+        def with_two_historic_qualnames():
+            def it_is_rejected_at_decoration_time():
+                # Same rule as ``backfill=``: a chain is ambiguous about
+                # which origin the transform belongs to.
+                with pytest.raises(ValueError, match="exactly one historic"):
+
+                    @migrate_from("Chain.A", "Chain.B", transform=_drop_legacy_flag)
+                    class Ambiguous(DomainEvent):
+                        note: str = ""
+
+    def when_transforms_sit_on_every_step_of_a_chain():
+        # Chain A -> B -> Persisted, with a transform keyed on each step.
+        # A and B are origin stages, Persisted is the class stage. The run
+        # list per era pins which stages run, and in which order.
+
+        def _serde(calls: list[str]) -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import (
+                Migration,
+                TransformFields,
+            )
+
+            module = ChainTransform.__module__
+            return NamespaceAwareSerde(
+                namespaces=[ChainTransform],
+                migrations=[
+                    Migration(
+                        name="every-step",
+                        operations=tuple(
+                            TransformFields(module, qualname, _recording(calls, label))
+                            for qualname, label in (
+                                ("ChainTransform.A", "T(A)"),
+                                ("ChainTransform.B", "T(B)"),
+                                ("ChainTransform.Persisted", "T(C)"),
+                            )
+                        ),
+                    )
+                ],
+            )
+
+        def _runs_for(qualname: str) -> list[str]:
+            calls: list[str] = []
+            _serde(calls).loads_typed(
+                synthesize_legacy_payload(ChainTransform.__module__, qualname, {})
+            )
+            return calls
+
+        def it_runs_the_A_origin_then_the_class_stage_on_an_A_era_payload():
+            assert _runs_for("ChainTransform.A") == ["T(A)", "T(C)"]
+
+        def it_runs_the_B_origin_then_the_class_stage_on_a_B_era_payload():
+            assert _runs_for("ChainTransform.B") == ["T(B)", "T(C)"]
+
+        def it_runs_the_class_stage_once_on_a_live_payload():
+            calls: list[str] = []
+            serde = _serde(calls)
+
+            serde.loads_typed(serde.dumps_typed(ChainTransform.Persisted()))
+
+            assert calls == ["T(C)"]
+
+    def when_the_transform_raises():
+        # ormsgpack swallows an exception raised inside the ext-hook and
+        # re-raises a bare ``ext_hook failed``. The transform runs inside
+        # the hook, so its failure must reach the same ``errors`` channel
+        # the resolve failure uses.
+
+        def _serde() -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import Migration
+
+            def broken(kw: dict[str, Any]) -> dict[str, Any]:
+                return {"note": kw["legacy_flag"]}
+
+            return NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(
+                        target=Reshaped.Trimmed, transform=broken
+                    )
+                ],
+            )
+
+        _payload = synthesize_legacy_payload(
+            Reshaped.__module__, "Reshaped.Trimmed", {"note": "n"}
+        )
+
+        def it_raises_naming_the_stored_identity_and_the_cause():
+            with pytest.raises(ValueError) as excinfo:
+                _serde().loads_typed(_payload)
+
+            message = str(excinfo.value)
+            assert message.startswith(
+                f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
+                f"TransformFields raised KeyError: 'legacy_flag'."
+            )
+            # The gate sends None for a dropped field, so the remedy must
+            # cover a key that is present but None, not only an absent one.
+            assert "kw.pop('x', None) and a None check" in message
+
+        def with_tolerate_unresolved():
+            def it_degrades_and_collects_the_identity():
+                from langgraph_events.serde._jsonplus import UnrevivedIdentity
+
+                serde = _serde()
+                with serde.tolerate_unresolved() as unresolved:
+                    revived = serde.loads_typed(_payload)
+
+                placeholder = UnrevivedIdentity(Reshaped.__module__, "Reshaped.Trimmed")
+                assert revived == placeholder
+                assert unresolved == [placeholder]
+
+    def when_the_transform_returns_a_non_dict():
+        def it_raises_naming_the_stored_identity_and_the_type():
+            from langgraph_events.serde.migrations import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration.transform_fields(target=Reshaped.Trimmed, transform=list)
+                ],
+            )
+
+            with pytest.raises(ValueError) as excinfo:
+                serde.loads_typed(
+                    synthesize_legacy_payload(
+                        Reshaped.__module__, "Reshaped.Trimmed", {"note": "n"}
+                    )
+                )
+
+            assert str(excinfo.value).startswith(
+                f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
+                f"TransformFields raised TypeError: transform returned list"
+            )
+
+    def when_two_transforms_target_one_identity():
+        def it_is_rejected_at_serde_construction():
+            # The read path runs one transform per stage. A second one
+            # would be silently ignored. Compose the steps in one callable.
+            from langgraph_events.serde.migrations import Migration
+
+            conflicting = Migration.transform_fields(
+                name="second", target=Reshaped.Counted, transform=_drop_legacy_flag
+            )
+
+            with pytest.raises(ValueError, match="Duplicate TransformFields"):
+                NamespaceAwareSerde(namespaces=[Reshaped], migrations=[conflicting])
+
+        def with_two_unnamed_migrations():
+            def it_asks_for_names_instead_of_naming_nothing_twice():
+                from langgraph_events.serde.migrations import Migration
+
+                first = Migration.transform_fields(
+                    target=Reshaped.Trimmed, transform=_drop_legacy_flag
+                )
+                second = Migration.transform_fields(
+                    target=Reshaped.Trimmed, transform=_int_count
+                )
+
+                with pytest.raises(
+                    ValueError,
+                    match=r"by two unnamed migrations\. Pass name= to each",
+                ):
+                    NamespaceAwareSerde(
+                        namespaces=[Reshaped], migrations=[first, second]
+                    )
+
+        def with_two_stacked_decorators():
+            def it_is_rejected_at_decoration_time():
+                # Same treatment as a duplicate origin on ``@migrate_from``:
+                # refuse where the duplication happens, not at construction
+                # with a message naming one migration twice.
+                with pytest.raises(ValueError, match="one transform per class"):
+
+                    class Stacked(Namespace):
+                        @transform_fields(_int_count)
+                        @transform_fields(_drop_legacy_flag)
+                        class Persisted(DomainEvent):
+                            note: str = ""
+
+    def when_the_transform_is_not_callable():
+        def it_is_rejected_at_serde_construction():
+            from langgraph_events.serde.migrations import Migration
+
+            broken = Migration.transform_fields(
+                target=Reshaped.Trimmed, transform="drop_legacy_flag"
+            )
+
+            with pytest.raises(TypeError, match=r"Reshaped\.Trimmed.*callable"):
+                NamespaceAwareSerde(namespaces=[Reshaped], migrations=[broken])
+
+    def when_the_target_is_unresolvable():
+        def it_is_rejected_at_serde_construction():
+            # Same rule as AddField: the target resolves live, or it is a
+            # rename source.
+            from langgraph_events.serde.migrations import Migration
+
+            ghost = Migration.transform_fields(
+                module="ghost.mod", qualname="Ghost.Gone", transform=_drop_legacy_flag
+            )
+
+            with pytest.raises(ValueError, match="TransformFields target"):
+                NamespaceAwareSerde(migrations=[ghost])
+
+    def when_a_transform_and_a_fill_share_one_stage():
+        def it_runs_the_transform_first_and_the_fill_never_overwrites():
+            from langgraph_events.serde.migrations import (
+                AddField,
+                Migration,
+                TransformFields,
+            )
+
+            module = Reshaped.__module__
+
+            def note_from_flag(kw: dict[str, Any]) -> dict[str, Any]:
+                if kw.pop("legacy_flag", None):
+                    kw["note"] = "from-transform"
+                return kw
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Reshaped],
+                migrations=[
+                    Migration(
+                        name="transform-then-fill",
+                        operations=(
+                            TransformFields(module, "Reshaped.Trimmed", note_from_flag),
+                            AddField(module, "Reshaped.Trimmed", "note", "from-fill"),
+                        ),
+                    )
+                ],
+            )
+
+            def revive(**kwargs: Any) -> Any:
+                return serde.loads_typed(
+                    synthesize_legacy_payload(module, "Reshaped.Trimmed", kwargs)
+                )
+
+            assert revive(legacy_flag=True).note == "from-transform"
+            assert revive().note == "from-fill"
+
+    def when_one_decorator_carries_a_transform_and_a_backfill():
+        def it_runs_the_transform_then_the_origin_fill():
+            serde = NamespaceAwareSerde(namespaces=[DecoOriginBoth])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    DecoOriginBoth.__module__,
+                    "DecoOriginBoth.Old",
+                    {"legacy_flag": True},
+                )
+            )
+
+            assert revived == DecoOriginBoth.Persisted(source="old")
+
+    def when_legacy_write_meets_a_transform():
+        # A transform has no inverse, so a payload written under the
+        # historic identity would not carry the shape old pods expect.
+
+        def with_a_class_stage_transform():
+            def it_is_rejected_at_serde_construction():
+                with pytest.raises(ValueError, match="legacy_write"):
+                    NamespaceAwareSerde(namespaces=[Reshaped], legacy_write=True)
+
+        def with_an_origin_stage_transform():
+            def it_is_rejected_at_serde_construction():
+                with pytest.raises(ValueError, match="legacy_write"):
+                    NamespaceAwareSerde(
+                        namespaces=[DecoOriginTransform], legacy_write=True
+                    )
+
+
+def _upper_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
+    """Raises ``AttributeError`` on the gate's ``None`` placeholder."""
+    kw["note"] = kw.pop("legacy_flag").upper()
+    return kw
+
+
+class GateTrimmed(Namespace):
+    """Dropped ``legacy_flag``, with a transform that reads its value."""
+
+    @transform_fields(_upper_legacy_flag)
+    class Persisted(DomainEvent):
+        note: str = ""
+
+
+def describe_TransformFields_revive_gate():
+    # A v3 baseline records a field the live class dropped. The gate sends
+    # a ``None`` placeholder for it, so the transform is exercised through
+    # the real read path.
+
+    def _baseline(tmp_path: Any, namespace: type) -> Any:
+        return _baseline_v3_file(
+            tmp_path,
+            events=(
+                (
+                    namespace.__module__,
+                    f"{namespace.__name__}.Persisted",
+                    ["legacy_flag", "note"],
+                ),
+            ),
+        )
+
+    def when_the_baseline_records_a_dropped_field():
+        def without_a_transform():
+            def it_fails_pointing_at_TransformFields(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[DecoOriginTransform])
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_revive(
+                        serde, _baseline(tmp_path, DecoOriginTransform)
+                    )
+
+                message = str(excinfo.value)
+                assert "The baseline recorded 'legacy_flag'." in message
+                assert "@transform_fields" in message
+
+        def with_a_transform_that_drops_it():
+            def it_passes(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    Migration,
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(
+                    namespaces=[DecoOriginTransform],
+                    migrations=[
+                        Migration.transform_fields(
+                            target=DecoOriginTransform.Persisted,
+                            transform=_drop_legacy_flag,
+                        )
+                    ],
+                )
+
+                assert_all_baselined_revive(
+                    serde, _baseline(tmp_path, DecoOriginTransform)
+                )
+
+        def with_a_transform_that_rejects_the_placeholder():
+            def it_fails_naming_the_placeholder_contract(tmp_path: Any):
+                from langgraph_events.serde.migrations import (
+                    assert_all_baselined_revive,
+                )
+
+                serde = NamespaceAwareSerde(namespaces=[GateTrimmed])
+
+                with pytest.raises(AssertionError) as excinfo:
+                    assert_all_baselined_revive(serde, _baseline(tmp_path, GateTrimmed))
+
+                message = str(excinfo.value)
+                assert "TransformFields raised AttributeError" in message
+                assert "None placeholder" in message
+                assert "synthesize_legacy_payload" in message
+
+
+# Fixtures for ``SplitEvent``. ``Work.Completed`` stays live and keeps its
+# stored identity. A payload whose ``result`` says error builds
+# ``Work.Failed`` instead (#125). ``result`` is a plain dict, so the
+# payload needs no msgpack allowlist entry.
+def _select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return Work.Failed, {"reason": result["message"]}
+
+
+class Work(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    class Completed(DomainEvent):
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+_ERROR = {"status": "error", "message": "boom"}
+_OK = {"status": "ok", "message": ""}
+
+
+def _outcome_to_result(kw: dict[str, Any]) -> dict[str, Any]:
+    """Class-stage transform: ``outcome`` was renamed to ``result``."""
+    if "outcome" in kw:
+        kw["result"] = kw.pop("outcome")
+    return kw
+
+
+def _select_staged_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return WorkStaged.Failed, {"reason": result["message"]}
+
+
+# The source carries a rename, a class-stage transform and a class fill.
+# The target carries its own class fill. The read order is: rename,
+# transform, split, then the fills of the RESULTING identity only. A
+# source fill applied after a split would reach ``Failed``, which has no
+# ``attempt`` field, and fail the read.
+class WorkStaged(Namespace):
+    @backfill("severity", default="high")
+    class Failed(DomainEvent):
+        severity: str
+        reason: str = ""
+
+    @backfill("attempt", default=1)
+    @transform_fields(_outcome_to_result)
+    @migrate_from("WorkStaged.OldCompleted")
+    class Completed(DomainEvent):
+        attempt: int
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+# The decorator form, collected from ``namespaces=`` like ``@transform_fields``.
+# ``select_failed`` and ``Job`` are the example in docs/event-migrations.md,
+# "Splitting one stored event into two on a payload value". Keep them in
+# step: ``describe_SplitEvent_docs_example`` runs the docs snippet verbatim.
+def select_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None  # keep Job.Completed
+    return Job.Failed, {"reason": result["message"]}  # resolved at read time
+
+
+class Job(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(select_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+
+def _select_gate_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
+    result = kw.get("result")
+    if result is None or result.get("status") != "error":
+        return None
+    return GateSplit.Failed, {"reason": result["message"]}
+
+
+def _select_reading_placeholder(kw: dict[str, Any]) -> tuple[type, dict[str, Any]]:
+    """Raises ``KeyError`` when the gate's type-valid placeholder is empty."""
+    return GateSplitStrict.Failed, {"reason": kw["result"]["message"]}
+
+
+# ``result`` is required, so the revive gate sends an empty dict placeholder
+# and the select sees it.
+class GateSplit(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_gate_failed, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any]
+
+
+class GateSplitStrict(Namespace):
+    class Failed(DomainEvent):
+        reason: str = ""
+
+    @split_event(_select_reading_placeholder, targets=(Failed,))
+    class Completed(DomainEvent):
+        result: dict[str, Any]
+
+
+def describe_SplitEvent():
+    # One stored identity, two live classes. ``select`` owns the access
+    # to the discriminating value and picks the target (#125).
+
+    def _serde(**kwargs: Any) -> NamespaceAwareSerde:
+        from langgraph_events.serde.migrations import Migration, SplitEvent
+
+        return NamespaceAwareSerde(
+            namespaces=[Work],
+            migrations=[
+                Migration(
+                    name="split-failed",
+                    operations=(
+                        SplitEvent(
+                            module=Work.__module__,
+                            qualname="Work.Completed",
+                            select=_select_failed,
+                            targets=(Work.Failed,),
+                        ),
+                    ),
+                )
+            ],
+            **kwargs,
+        )
+
+    def _revive(serde: NamespaceAwareSerde, qualname: str, **kwargs: Any) -> Any:
+        return serde.loads_typed(
+            synthesize_legacy_payload(Work.__module__, qualname, kwargs)
+        )
+
+    def when_select_returns_a_target():
+        def it_builds_the_target_from_the_returned_kwargs():
+            revived = _revive(_serde(), "Work.Completed", result=_ERROR)
+
+            assert revived == Work.Failed(reason="boom")
+
+    def when_select_returns_None():
+        def it_keeps_the_stored_class_and_kwargs():
+            revived = _revive(_serde(), "Work.Completed", result=_OK)
+
+            assert revived == Work.Completed(result=_OK)
+
+    def when_the_current_release_wrote_the_source():
+        def it_round_trips_unchanged():
+            serde = _serde()
+            stored = Work.Completed(result=_OK)
+
+            assert serde.loads_typed(serde.dumps_typed(stored)) == stored
+
+    def when_the_source_carries_a_transform_and_both_classes_carry_a_fill():
+        def _staged_serde() -> NamespaceAwareSerde:
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            return NamespaceAwareSerde(
+                namespaces=[WorkStaged],
+                migrations=[
+                    Migration(
+                        operations=(
+                            SplitEvent(
+                                module=WorkStaged.__module__,
+                                qualname="WorkStaged.Completed",
+                                select=_select_staged_failed,
+                                targets=(WorkStaged.Failed,),
+                            ),
+                        )
+                    )
+                ],
+            )
+
+        def _revive_staged(qualname: str, **kwargs: Any) -> Any:
+            return _staged_serde().loads_typed(
+                synthesize_legacy_payload(WorkStaged.__module__, qualname, kwargs)
+            )
+
+        def it_runs_the_transform_then_the_split_then_the_target_fills():
+            revived = _revive_staged("WorkStaged.Completed", outcome=_ERROR)
+
+            assert revived == WorkStaged.Failed(severity="high", reason="boom")
+
+        def it_runs_the_source_fills_on_a_payload_select_keeps():
+            revived = _revive_staged("WorkStaged.Completed", outcome=_OK)
+
+            assert revived == WorkStaged.Completed(attempt=1, result=_OK)
+
+        def it_splits_a_payload_stored_under_a_historic_name():
+            revived = _revive_staged("WorkStaged.OldCompleted", outcome=_ERROR)
+
+            assert revived == WorkStaged.Failed(severity="high", reason="boom")
+
+    def _broken_serde(select: Any) -> NamespaceAwareSerde:
+        from langgraph_events.serde.migrations import Migration, SplitEvent
+
+        return NamespaceAwareSerde(
+            namespaces=[Work],
+            migrations=[
+                Migration(
+                    operations=(
+                        SplitEvent(
+                            module=Work.__module__,
+                            qualname="Work.Completed",
+                            select=select,
+                            targets=(Work.Failed,),
+                        ),
+                    )
+                )
+            ],
+        )
+
+    _stored = synthesize_legacy_payload(
+        Work.__module__, "Work.Completed", {"result": _ERROR}
+    )
+    _prefix = f"Cannot revive {Work.__module__}.Work.Completed: SplitEvent raised "
+
+    def when_select_raises():
+        # ormsgpack swallows an exception raised inside the ext-hook and
+        # re-raises a bare ``ext_hook failed``. The split runs inside the
+        # hook, so its failure must reach the ``errors`` channel, the
+        # same one a TransformFields failure uses.
+
+        def _raising(kw: dict[str, Any]) -> Any:
+            return Work.Failed, {"reason": kw["missing"]}
+
+        def it_raises_naming_the_stored_identity_and_the_cause():
+            with pytest.raises(ValueError) as excinfo:
+                _broken_serde(_raising).loads_typed(_stored)
+
+            message = str(excinfo.value)
+            assert message.startswith(_prefix + "KeyError: 'missing'.")
+            assert "return None" in message
+
+        def with_tolerate_unresolved():
+            def it_degrades_and_collects_the_stored_identity():
+                serde = _broken_serde(_raising)
+                with serde.tolerate_unresolved() as unresolved:
+                    revived = serde.loads_typed(_stored)
+
+                placeholder = UnrevivedIdentity(Work.__module__, "Work.Completed")
+                assert revived == placeholder
+                assert unresolved == [placeholder]
+
+    def when_select_returns_the_wrong_shape():
+        # ``targets`` was validated at construction. A target outside it
+        # would build a class the serde never validated, so the read
+        # refuses it like every other bad return value.
+
+        def _message(select: Any) -> str:
+            with pytest.raises(ValueError) as excinfo:
+                _broken_serde(select).loads_typed(_stored)
+            return str(excinfo.value)
+
+        def it_refuses_a_target_outside_targets():
+            message = _message(lambda kw: (Work.Completed, kw))
+
+            assert message.startswith(
+                _prefix + "ValueError: select returned Work.Completed, which is "
+                "not in targets="
+            )
+
+        def it_refuses_a_return_value_that_is_not_a_tuple():
+            message = _message(lambda kw: {"reason": "boom"})
+
+            assert message.startswith(
+                _prefix + "TypeError: select returned dict, expected None or a "
+                "(target, kwargs) tuple"
+            )
+
+        def it_refuses_kwargs_that_are_not_a_dict():
+            message = _message(lambda kw: (Work.Failed, ["boom"]))
+
+            assert message.startswith(
+                _prefix + "TypeError: select returned kwargs of type list, "
+                "expected dict"
+            )
+
+    def when_the_declaration_is_wrong():
+        # Every refusal here would otherwise surface on the first
+        # production read. Same strictness as TransformFields.
+
+        def _split(name: str = "bad-split", **overrides: Any) -> Any:
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            fields: dict[str, Any] = {
+                "module": Work.__module__,
+                "qualname": "Work.Completed",
+                "select": _select_failed,
+                "targets": (Work.Failed,),
+            }
+            fields.update(overrides)
+            return Migration(name=name, operations=(SplitEvent(**fields),))
+
+        def it_refuses_a_source_that_is_a_rename_source():
+            # The rename table cannot host a split: the source stays live,
+            # and a rename source never resolves live.
+            keyed_on_origin = _split(
+                module=WorkStaged.__module__,
+                qualname="WorkStaged.OldCompleted",
+                targets=(WorkStaged.Failed,),
+            )
+
+            with pytest.raises(ValueError, match="split on the live target"):
+                NamespaceAwareSerde(
+                    namespaces=[WorkStaged], migrations=[keyed_on_origin]
+                )
+
+        def it_refuses_a_source_that_does_not_resolve():
+            ghost = _split(module="ghost.mod", qualname="Ghost.Gone")
+
+            with pytest.raises(ValueError, match=r"SplitEvent source ghost\.mod"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[ghost])
+
+        def it_refuses_a_target_that_is_not_an_Event():
+            not_an_event = _split(targets=(dict,))
+
+            with pytest.raises(ValueError, match="SplitEvent target dict"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[not_an_event])
+
+        def it_refuses_a_target_that_does_not_resolve():
+            # A class nested in a function carries ``<locals>`` in its
+            # qualname. Outside ``namespaces=`` nothing reaches it.
+            class Local(Namespace):
+                class Unreachable(DomainEvent):
+                    reason: str = ""
+
+            unreachable = _split(targets=(Local.Unreachable,))
+
+            with pytest.raises(ValueError, match=r"SplitEvent target .*Unreachable"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[unreachable])
+
+        def it_refuses_empty_targets():
+            # Refused where the op is built, before any serde sees it.
+            with pytest.raises(ValueError, match=r"targets.*at least one"):
+                _split(targets=())
+
+        def it_refuses_a_select_that_is_not_callable():
+            not_callable = _split(select="select_failed")
+
+            with pytest.raises(TypeError, match=r"Work\.Completed.*callable"):
+                NamespaceAwareSerde(namespaces=[Work], migrations=[not_callable])
+
+        def it_refuses_two_splits_on_one_identity():
+            # The read path runs one split per identity. A second one
+            # would be silently ignored. Compose the cases in one select.
+            with pytest.raises(ValueError, match="Duplicate SplitEvent"):
+                NamespaceAwareSerde(
+                    namespaces=[Work], migrations=[_split(), _split(name="again")]
+                )
+
+        def it_refuses_legacy_write():
+            # A split has no inverse, the same rule as a transform.
+            with pytest.raises(ValueError, match=r"legacy_write.*SplitEvent"):
+                NamespaceAwareSerde(
+                    namespaces=[Work], migrations=[_split()], legacy_write=True
+                )
+
+    def when_targets_is_a_list():
+        def it_normalises_to_a_tuple_and_stays_hashable():
+            # The decorator, the sugar and the raw op all pass through one
+            # normalisation, so a list author gets the same op as a tuple
+            # author, and the frozen op stays usable as a dict key.
+            from langgraph_events.serde.migrations import Migration, SplitEvent
+
+            raw = SplitEvent(
+                module=Work.__module__,
+                qualname="Work.Completed",
+                select=_select_failed,
+                targets=[Work.Failed],
+            )
+            sugared = Migration.split_event(
+                source=Work.Completed, select=_select_failed, targets=[Work.Failed]
+            ).operations[0]
+
+            assert raw.targets == (Work.Failed,)
+            assert sugared == raw
+            assert hash(raw) == hash(sugared)
+
+    def when_the_source_carries_the_decorator():
+        def it_is_collected_from_namespaces():
+            serde = NamespaceAwareSerde(namespaces=[Job])
+
+            revived = serde.loads_typed(
+                synthesize_legacy_payload(
+                    Job.__module__, "Job.Completed", {"result": _ERROR}
+                )
+            )
+
+            assert revived == Job.Failed(reason="boom")
+
+        def with_two_stacked_decorators():
+            def it_is_rejected_at_decoration_time():
+                from langgraph_events.serde import split_event
+
+                with pytest.raises(ValueError, match="one split per class"):
+
+                    class Stacked(Namespace):
+                        class Failed(DomainEvent):
+                            reason: str = ""
+
+                        @split_event(_select_failed, targets=(Failed,))
+                        @split_event(_select_failed, targets=(Failed,))
+                        class Completed(DomainEvent):
+                            result: dict[str, Any] = dataclasses.field(
+                                default_factory=dict
+                            )
+
+    def when_authored_through_the_sugar():
+        def it_splits_like_the_raw_operation():
+            from langgraph_events.serde import Migration
+
+            serde = NamespaceAwareSerde(
+                namespaces=[Work],
+                migrations=[
+                    Migration.split_event(
+                        source=Work.Completed,
+                        select=_select_failed,
+                        targets=(Work.Failed,),
+                    )
+                ],
+            )
+
+            assert _revive(serde, "Work.Completed", result=_ERROR) == Work.Failed(
+                reason="boom"
+            )
+
+
+def describe_SplitEvent_revive_gate():
+    # The gate sends a ``None`` placeholder for a required field. A select
+    # must return None on it, so the gate proves the source still
+    # constructs. Each branch is pinned with real values through
+    # ``synthesize_legacy_payload`` instead.
+
+    def when_select_returns_None_on_the_placeholder():
+        def it_passes(tmp_path: Any):
+            from langgraph_events.serde.migrations import assert_all_baselined_revive
+
+            baseline = _baseline_v3_file(
+                tmp_path,
+                events=((GateSplit.__module__, "GateSplit.Completed", ["result"]),),
+            )
+
+            assert_all_baselined_revive(
+                NamespaceAwareSerde(namespaces=[GateSplit]), baseline
+            )
+
+    def when_select_reads_the_placeholder():
+        def it_fails_naming_the_placeholder_contract(tmp_path: Any):
+            from langgraph_events.serde.migrations import assert_all_baselined_revive
+
+            baseline = _baseline_v3_file(
+                tmp_path,
+                events=(
+                    (
+                        GateSplitStrict.__module__,
+                        "GateSplitStrict.Completed",
+                        ["result"],
+                    ),
+                ),
+            )
+
+            with pytest.raises(AssertionError) as excinfo:
+                assert_all_baselined_revive(
+                    NamespaceAwareSerde(namespaces=[GateSplitStrict]), baseline
+                )
+
+            message = str(excinfo.value)
+            assert "SplitEvent raised KeyError" in message
+            assert "type-valid placeholder" in message
+            assert "synthesize_legacy_payload" in message
+
+
+def describe_SplitEvent_docs_example():
+    # The snippet under "Splitting one stored event into two on a payload
+    # value" in docs/event-migrations.md, verbatim.
+
+    def it_pins_both_branches():
+        serde = NamespaceAwareSerde(namespaces=[Job])
+
+        failed = serde.loads_typed(
+            synthesize_legacy_payload(
+                Job.__module__,
+                "Job.Completed",
+                {"result": {"status": "error", "message": "disk full"}},
+            )
+        )
+        assert failed == Job.Failed(reason="disk full")
+
+        completed = serde.loads_typed(
+            synthesize_legacy_payload(
+                Job.__module__, "Job.Completed", {"result": {"status": "ok"}}
+            )
+        )
+        assert completed == Job.Completed(result={"status": "ok"})
+
+
+# --- Apply-side rewrite helpers (#179) ------------------------------------
+# Module level: an event used as a field annotation must resolve at runtime.
+
+
+class _ScanInner(IntegrationEvent):
+    pass
+
+
+class _ScanOuter(IntegrationEvent):
+    inner: _ScanInner | None = None
+
+
+class _Rec(Namespace):
+    @migrate_from("_Rec.Old")
+    class New(DomainEvent):
+        pass
+
+
+@transform_fields(lambda kw: {**kw, "note": "transformed"})
+class _RecSameIdentity(IntegrationEvent):
+    note: str = ""
+
+
+@transform_fields(lambda kw: kw)
+class _RecIdentityTransform(IntegrationEvent):
+    pass
+
+
+@backfill("flag", default=True)
+class _RecFilled(IntegrationEvent):
+    flag: bool
+
+
+class _RecUntouched(IntegrationEvent):
+    pass
+
+
+def describe_scan_identities():
+    # Class-blind: every stored event identity in a blob, without an import.
+    # The rewrite tool uses it to prove a dropped or historic identity is
+    # gone from the bytes it is about to store.
+
+    def it_lists_every_event_identity_nested_or_interrupt_wrapped():
+        serde = NamespaceAwareSerde(events=(_ScanInner, _ScanOuter))
+        _, data = serde.dumps_typed(
+            [_ScanOuter(inner=_ScanInner()), Interrupt(value=_ScanInner(), id="i1")]
+        )
+
+        assert _scan_identities(data) == [
+            (_ScanOuter.__module__, "_ScanOuter"),
+            (_ScanInner.__module__, "_ScanInner"),
+            (_ScanInner.__module__, "_ScanInner"),
+        ]
+
+    def it_returns_nothing_for_a_plain_blob():
+        serde = NamespaceAwareSerde(events=())
+        _, data = serde.dumps_typed({"_cursor": 3, "items": [1, "a"]})
+
+        assert _scan_identities(data) == []
+
+
+def describe_record_reads():
+    # A collector, shaped like ``tolerate_unresolved()``: every stored
+    # record this read met, as (stored, resolved, touched) entries.
+
+    def it_records_a_renamed_identity_as_touched_per_stored_record():
+        serde = NamespaceAwareSerde(namespaces=[_Rec])
+        mod = _Rec.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
+            serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
+
+        assert reads == [
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
+        ]
+
+    def it_records_a_same_identity_transform_as_touched():
+        serde = NamespaceAwareSerde(events=(_RecSameIdentity,))
+        mod = _RecSameIdentity.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(serde.dumps_typed(_RecSameIdentity()))
+
+        assert reads == [((mod, "_RecSameIdentity"), (mod, "_RecSameIdentity"), True)]
+
+    def it_records_an_identity_transform_as_untouched():
+        # The table ran, the kwargs did not change: a rewrite would store
+        # the same bytes. Recording it as touched would make every later
+        # rewrite_store() run rewrite the thread again.
+        serde = NamespaceAwareSerde(events=(_RecIdentityTransform,))
+        mod = _RecIdentityTransform.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(serde.dumps_typed(_RecIdentityTransform()))
+
+        assert reads == [
+            ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False)
+        ]
+
+    def it_records_a_fill_as_touched_only_for_a_payload_that_lacked_the_field():
+        serde = NamespaceAwareSerde(events=(_RecFilled,))
+        mod = _RecFilled.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(synthesize_legacy_payload(mod, "_RecFilled", {}))
+            serde.loads_typed(serde.dumps_typed(_RecFilled(flag=False)))
+
+        assert reads == [
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), True),
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), False),
+        ]
+
+    def it_records_nothing_for_a_record_that_does_not_revive():
+        serde = NamespaceAwareSerde(events=(_RecUntouched,))
+        mod = _RecUntouched.__module__
+
+        with serde.tolerate_unresolved() as unresolved, serde._record_reads() as reads:
+            serde.loads_typed(synthesize_legacy_payload(mod, "_RecGone", {}))
+
+        assert [u.qualname for u in unresolved] == ["_RecGone"]
+        assert reads == []
+
+    def it_records_an_untouched_class_as_untouched():
+        serde = NamespaceAwareSerde(events=(_RecUntouched,))
+        mod = _RecUntouched.__module__
+
+        with serde._record_reads() as reads:
+            serde.loads_typed(serde.dumps_typed([_RecUntouched()]))
+
+        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False)]
+
+    def it_stays_off_outside_the_block():
+        serde = NamespaceAwareSerde(namespaces=[_Rec])
+        mod = _Rec.__module__
+
+        with serde._record_reads() as reads:
+            pass
+        serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
+
+        assert reads == []
