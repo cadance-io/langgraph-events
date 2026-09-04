@@ -98,19 +98,64 @@ def _annotation_accepts_none(hint: Any) -> bool:
     return False
 
 
-def _resolve_type_hints(fn: Any) -> dict[str, Any]:
-    """Return ``fn``'s resolved type hints, cached on the function object.
+def _resolve_each_annotation(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """Resolve ``fn``'s annotations one at a time.
+
+    ``typing.get_type_hints`` is all-or-nothing. One unresolvable annotation
+    discards every hint on the handler, so a valid ``RunnableConfig`` param
+    stops being detected and the resulting error names the wrong parameter.
+    See issue #183.
+
+    Resolve each annotation on its own probe function instead. A resolvable
+    annotation lands in the hints. An unresolvable one lands in the errors,
+    keyed by parameter name.
+
+    Resolution uses ``fn.__globals__`` only, exactly like the whole-function
+    call, so the fallback never resolves a name the fast path would miss.
+    """
+    target = getattr(fn, "__func__", fn)
+    raw = getattr(target, "__annotations__", {})
+    globalns = getattr(target, "__globals__", {})
+    hints: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for name, annotation in raw.items():
+
+        def _probe() -> None: ...
+
+        _probe.__annotations__ = {name: annotation}
+        try:
+            hints[name] = typing.get_type_hints(_probe, globalns)[name]
+        except Exception as exc:
+            errors[name] = f"{type(exc).__name__}: {exc}"
+    return hints, errors
+
+
+def _resolve_hints_and_errors(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """Return ``fn``'s resolved hints and its per-annotation failures.
 
     Both ``_infer_event_type`` (at decoration) and ``extract_handler_meta``
     (at graph construction) need the same hints — resolving twice is wasteful
     and doubles the chance of forward-ref surprises. Cache on ``fn`` itself.
+
+    Never raises. A caller that needs an annotation reads ``errors`` to learn
+    why it is absent, and decides whether that absence is fatal.
     """
     cached = getattr(fn, "_resolved_hints", None)
     if cached is not None:
-        return cached
-    hints = typing.get_type_hints(fn)
+        return cached, getattr(fn, "_hint_errors", {})
+    try:
+        hints = typing.get_type_hints(fn)
+        errors: dict[str, str] = {}
+    except Exception:
+        hints, errors = _resolve_each_annotation(fn)
     fn._resolved_hints = hints
-    return hints
+    fn._hint_errors = errors
+    return hints, errors
+
+
+def _resolve_type_hints(fn: Any) -> dict[str, Any]:
+    """Return ``fn``'s resolvable type hints. Unresolvable ones are absent."""
+    return _resolve_hints_and_errors(fn)[0]
 
 
 def _infer_event_type(fn: Any) -> type[Event]:
@@ -120,15 +165,7 @@ def _infer_event_type(fn: Any) -> type[Event]:
     ``TypeError`` with an actionable message for the full range of failure
     modes (missing parameter, missing annotation, non-``Event`` type, Union).
     """
-    try:
-        hints = _resolve_type_hints(fn)
-    except Exception as exc:
-        raise TypeError(
-            f"@on could not resolve type hints for {fn.__qualname__!r}: "
-            f"{exc}. Annotate the first parameter with a resolvable Event "
-            f"subclass, or pass the event type explicitly: @on(EventType)."
-        ) from exc
-
+    hints, hint_errors = _resolve_hints_and_errors(fn)
     sig = inspect.signature(fn)
     params = [p for p in sig.parameters if p != "self"]
     if not params:
@@ -137,6 +174,13 @@ def _infer_event_type(fn: Any) -> type[Event]:
             f"parameter (the event), but it has none."
         )
     first = params[0]
+    if first in hint_errors:
+        raise TypeError(
+            f"@on could not resolve the annotation on {fn.__qualname__!r}'s "
+            f"first parameter {first!r} ({hint_errors[first]}). Make the "
+            f"annotation importable at run time, or pass the event type "
+            f"explicitly: @on(EventType)."
+        )
     event_type = hints.get(first)
     if event_type is None:
         raise TypeError(
@@ -448,6 +492,11 @@ class HandlerMeta:
     # key in EventGraph(services={...}). Used as the lookup key in the
     # name-keyed services map at dispatch time.
     service_name_params: tuple[tuple[str, str], ...] = ()
+    # Parameters whose annotation did not resolve, mapped to the reason. A
+    # parameter listed here carries no hint, so no type-matched injection can
+    # claim it. ``_verify_no_unclaimed_params`` reads this to name the real
+    # cause instead of blaming an unrelated parameter. See issue #183.
+    hint_errors: tuple[tuple[str, str], ...] = ()
 
     @property
     def claimant(self) -> str:
@@ -644,14 +693,15 @@ def extract_handler_meta(
             f"Function {fn.__qualname__!r} is not decorated with @on(EventType)"
         )
 
-    try:
-        hints = _resolve_type_hints(fn)
-    except Exception as exc:
+    hints, hint_errors = _resolve_hints_and_errors(fn)
+    param_errors = {n: e for n, e in hint_errors.items() if n != "return"}
+    if param_errors:
+        failed = ", ".join(f"{n!r} ({e})" for n, e in param_errors.items())
         warn_user(
-            f"Failed to resolve type hints for handler {fn.__qualname__!r}; "
-            f"falling back to signature-only detection. ({exc})",
+            f"Failed to resolve the annotation on parameter(s) {failed} of "
+            f"handler {fn.__qualname__!r}; the framework cannot match them by "
+            f"type. Make each annotation importable at run time.",
         )
-        hints = {}
 
     framework_params = _detect_framework_params(hints)
 
@@ -744,4 +794,5 @@ def extract_handler_meta(
         invariants=invariants,
         service_params=service_params,
         service_name_params=service_name_params,
+        hint_errors=tuple(param_errors.items()),
     )

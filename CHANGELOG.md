@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **One unresolvable annotation no longer discards every type hint on a handler.**
+  Closes [#183](https://github.com/cadance-io/langgraph-events/issues/183).
+  `typing.get_type_hints` is all-or-nothing. A single annotation that does not resolve at run
+  time — the usual cause is `from __future__ import annotations` plus a `TYPE_CHECKING`-only
+  import — discarded the hints for the whole signature. Framework injectables such as
+  `RunnableConfig` then went undetected, and the build failed naming *those* parameters. The
+  message told you to register a service or a reducer for a parameter that was already
+  correct. Resolution is now per annotation. A resolvable annotation is kept, and only the
+  failing one is lost.
+- **The unclaimed-parameter error names the annotation that did not resolve.** When an
+  unclaimed parameter has a failed annotation, the `TypeError` states that first, with the
+  parameter name and the underlying `NameError`, before the existing registration advice.
+- **`@on` infers the event type when a later annotation does not resolve.** Bare `@on` read
+  the whole signature, so one unresolvable annotation anywhere made it raise. It now reads the
+  first parameter only, and raises with a distinct message when *that* annotation is the one
+  that failed.
+- **The unresolvable-annotation warning names the parameter and the reason.** It replaces the
+  per-handler "falling back to signature-only detection" warning.
+
+### Changed
+
+- **BREAKING: an unresolvable return annotation now raises `TypeError` at `EventGraph`
+  construction.** It previously warned and treated the handler as unannotated. The topology
+  then drew the same `?` outcome edge as a genuinely unannotated handler, so a wrong diagram
+  was indistinguishable from a legitimate one and could sit in a committed mermaid baseline
+  unnoticed. A handler constructs the events it returns, so those classes are already
+  importable at run time. Make every name in the return annotation importable, then rebuild.
+  A class declared inside a function cannot be named from module globals — declare it at
+  module level.
+
 ## [0.31.0] - 2026-09-03
 
 ### Added
