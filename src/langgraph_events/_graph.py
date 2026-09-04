@@ -38,7 +38,7 @@ from langgraph_events._event import (
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import (
     HandlerMeta,
-    _resolve_type_hints,
+    _resolve_hints_and_errors,
     extract_handler_meta,
     normalize_previous_names,
     on,
@@ -234,14 +234,21 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     Raises ``TypeError`` for Scatter shapes that contribute no concrete event
     types — see :func:`_raise_empty_scatter`.
     """
-    try:
-        hints = _resolve_type_hints(fn)
-    except Exception as exc:
-        warn_user(
-            f"Failed to resolve return type hints for handler {fn.__qualname__!r}; "
-            f"treating as unannotated for topology parsing. ({exc})",
+    hints, hint_errors = _resolve_hints_and_errors(fn)
+    if "return" in hint_errors:
+        # A handler constructs the events it returns, so those classes are
+        # already importable at run time. An unresolvable return annotation is
+        # therefore always a defect, and always a one-line fix. Raise rather
+        # than fall back: the fallback drew the same "?" topology edge as a
+        # genuinely unannotated handler, so the defect stayed invisible in a
+        # committed mermaid baseline. See issue #183.
+        raise TypeError(
+            f"Handler {fn.__qualname__!r} has a return annotation that did "
+            f"not resolve ({hint_errors['return']}). The framework reads the "
+            f"return annotation to build the topology, so it cannot be left "
+            f"unresolvable. Make every name in the annotation importable at "
+            f"run time."
         )
-        hints = {}
 
     return_hint = hints.get("return")
     if return_hint is None:
@@ -810,11 +817,25 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
         if name not in claimed and p.kind not in variadic
     ]
     if unclaimed:
+        # An unclaimed param whose annotation failed to resolve has a cause
+        # the generic advice cannot express — the framework never saw a type
+        # to match, so "register a service" is the wrong instruction. State
+        # the resolution failure first. See issue #183.
+        errors = dict(meta.hint_errors)
+        blamed = [name for name in unclaimed if name in errors]
+        cause = ""
+        if blamed:
+            detail = ", ".join(f"{name!r} ({errors[name]})" for name in blamed)
+            cause = (
+                f" The annotation on {detail} did not resolve, so the "
+                f"framework could not match it by type. Make the annotation "
+                f"importable at run time."
+            )
         raise TypeError(
             f"Handler {meta.name!r} declares parameter(s) {unclaimed} that "
-            f"the framework cannot inject. For service injection, register "
-            f"a matching instance via EventGraph(services=[...]); for state, "
-            f"register a Reducer; otherwise remove the parameter."
+            f"the framework cannot inject.{cause} For service injection, "
+            f"register a matching instance via EventGraph(services=[...]); "
+            f"for state, register a Reducer; otherwise remove the parameter."
         )
 
 

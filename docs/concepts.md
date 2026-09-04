@@ -65,7 +65,7 @@ class Order(Namespace):
         class Shipped(DomainEvent):
             tracking: str
 
-        def ship(self) -> Shipped:
+        def ship(self) -> Order.Ship.Shipped:
             return Order.Ship.Shipped(tracking=f"track-{self.order_id}")
 
 
@@ -76,6 +76,7 @@ graph = EventGraph.from_namespaces(Order, handlers=[react])
 
 - Exactly one public method per `Command`; helpers must be underscore-prefixed (else `TypeError` at class creation).
 - Annotated return types must cover every nested `DomainEvent`.
+- Every name in the return annotation must resolve at run time from the handler module's globals. Write the qualified name (`Order.Ship.Shipped`), not the bare nested name (`Shipped`). A bare nested name works today but fails under `from __future__ import annotations`, because the annotation is then a string resolved against module globals only. An unresolvable return annotation raises `TypeError` at graph construction.
 - `DomainEvent`s nested inside a `Command` are **Command-private** — only that Command's handler may emit them. Recovery reactors emit namespace-level siblings (e.g. `Order.Rejected`). Violations raise `CommandPrivacyError` at graph construction.
 
 Declare `invariants` and `raises` as class-level attributes:
@@ -139,7 +140,7 @@ class Story(Namespace):
         class Refined(DomainEvent):
             text: str
 
-        async def handle(self, chat_model: BaseChatModel) -> Refined: ...
+        async def handle(self, chat_model: BaseChatModel) -> Story.Refine.Refined: ...
 
 # Name-keyed: handler params resolve by name. Multiple instances of same type allowed.
 EventGraph(
@@ -151,10 +152,17 @@ EventGraph(
 def react(event, primary_chat, backup_chat) -> ...: ...
 ```
 
+The two shapes differ in what they need from the annotation.
+
+Type-keyed injection matches on the resolved annotation. The annotation must be importable at run time. An annotation imported only under `TYPE_CHECKING` does not resolve, so the parameter stays unclaimed and raises `TypeError` at graph construction.
+
+Name-keyed injection matches on the parameter name. It needs no annotation. An unresolvable annotation still binds the parameter, but the framework emits a `UserWarning`, because the annotation does not describe what is injected.
+
 ### Return contract
 
 - Annotated handlers must return a type in the declared union (or `None`).
 - Unannotated `Command`-subscribing handlers must return one of `Command.Outcomes` (or `None`); other unannotated handlers keep a shape-only check.
+- An omitted annotation is not the same as an unresolvable one. Omitting the return annotation is legal. An annotation that fails to resolve raises `TypeError` at graph construction.
 - Violations raise `TypeError` at dispatch.
 
 ## `EventGraph`

@@ -50,6 +50,93 @@ class Shop2(Namespace):
             pass
 
 
+# Namespaces for the class-creation and class-level-modifier tests below.
+# A Namespace declared inside a test function cannot be named from module
+# globals, so its return annotation never resolves and the topology is
+# silently lost. See CLAUDE.md and issue #183.
+class Boutique(Namespace):
+    class Buy(Command):
+        item: str = ""
+
+        class Bought(DomainEvent):
+            item: str = ""
+
+        def buy(self) -> Boutique.Buy.Bought:
+            return Boutique.Buy.Bought(item=self.item)
+
+
+class _Helped(Namespace):
+    class Cmd(Command):
+        class Done(DomainEvent):
+            note: str = ""
+
+        def place(self) -> _Helped.Cmd.Done:
+            return _Helped.Cmd.Done(note=self._note())
+
+        def _note(self) -> str:
+            return "ok"
+
+
+class _BlockedInv(Invariant):
+    pass
+
+
+class _InlineInv(Namespace):
+    class Cmd(Command):
+        invariants: ClassVar = {_BlockedInv: lambda log: False}
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _InlineInv.Cmd.Done:
+            return _InlineInv.Cmd.Done()
+
+
+class _StaleInv(Invariant):
+    pass
+
+
+class _StaleInvariants(Namespace):
+    class Cmd(Command):
+        invariants: ClassVar = {_StaleInv: lambda log: False}
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _StaleInvariants.Cmd.Done:
+            return _StaleInvariants.Cmd.Done()
+
+
+class _BoomError(Exception):
+    pass
+
+
+class _InlineRaises(Namespace):
+    class Cmd(Command):
+        raises: ClassVar = (_BoomError,)
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _InlineRaises.Cmd.Done:
+            raise _BoomError("nope")
+
+
+class _StaleBoomError(Exception):
+    pass
+
+
+class _StaleRaises(Namespace):
+    class Cmd(Command):
+        raises: ClassVar = (_StaleBoomError,)
+
+        class Done(DomainEvent):
+            pass
+
+        def handle(self) -> _StaleRaises.Cmd.Done:
+            raise _StaleBoomError("nope")
+
+
 class Shop3(Namespace):
     class CmdA(Command):
         class DoneA(DomainEvent):
@@ -313,16 +400,6 @@ def describe_Command_handle():
             # ``handle``. The framework picks up the sole public method.
 
             def it_stamps___command_handler__():
-                class Boutique(Namespace):
-                    class Buy(Command):
-                        item: str = ""
-
-                        class Bought(DomainEvent):
-                            item: str = ""
-
-                        def buy(self) -> Boutique.Buy.Bought:
-                            return Boutique.Buy.Bought(item=self.item)
-
                 assert Boutique.Buy.__command_handler__ is Boutique.Buy.__dict__["buy"]
                 graph = EventGraph([Boutique.Buy])
                 log = graph.invoke(Boutique.Buy(item="apple"))
@@ -352,17 +429,6 @@ def describe_Command_handle():
             # the handler.
 
             def it_picks_up_only_the_public_method():
-                class _Helped(Namespace):
-                    class Cmd(Command):
-                        class Done(DomainEvent):
-                            note: str = ""
-
-                        def place(self) -> _Helped.Cmd.Done:
-                            return _Helped.Cmd.Done(note=self._note())
-
-                        def _note(self) -> str:
-                            return "ok"
-
                 graph = EventGraph([_Helped.Cmd])
                 log = graph.invoke(_Helped.Cmd())
                 assert log.latest(_Helped.Cmd.Done).note == "ok"
@@ -370,45 +436,19 @@ def describe_Command_handle():
     def describe_class_level_modifiers():
         def when_invariants_set_as_class_attribute():
             def it_evaluates_the_predicate_at_dispatch():
-                class _BlockedInv(Invariant):
-                    pass
-
-                class _InlineInv(Namespace):
-                    class Cmd(Command):
-                        invariants: ClassVar = {_BlockedInv: lambda log: False}
-
-                        class Done(DomainEvent):
-                            pass
-
-                        def handle(self) -> _InlineInv.Cmd.Done:
-                            return _InlineInv.Cmd.Done()
-
                 graph = EventGraph([_InlineInv.Cmd])
                 log = graph.invoke(_InlineInv.Cmd())
                 assert log.has(InvariantViolated)
                 assert not log.has(_InlineInv.Cmd.Done)
 
             def when_the_declaration_is_removed_between_builds():
-                def it_stops_evaluating_the_predicate():
+                def it_stops_evaluating_the_predicate(monkeypatch):
                     # Each build must reflect the class's current declaration
                     # — a stale ``_invariants`` stamp from an earlier build
                     # must not keep evaluating a removed predicate.
-                    class _StaleInv(Invariant):
-                        pass
-
-                    class _StaleInvariants(Namespace):
-                        class Cmd(Command):
-                            invariants: ClassVar = {_StaleInv: lambda log: False}
-
-                            class Done(DomainEvent):
-                                pass
-
-                            def handle(self) -> _StaleInvariants.Cmd.Done:
-                                return _StaleInvariants.Cmd.Done()
-
                     first = EventGraph([_StaleInvariants.Cmd])
                     assert first.invoke(_StaleInvariants.Cmd()).has(InvariantViolated)
-                    del _StaleInvariants.Cmd.invariants
+                    monkeypatch.delattr(_StaleInvariants.Cmd, "invariants")
                     log = EventGraph([_StaleInvariants.Cmd]).invoke(
                         _StaleInvariants.Cmd()
                     )
@@ -417,19 +457,6 @@ def describe_Command_handle():
 
         def when_raises_set_as_class_attribute():
             def it_routes_the_exception_to_HandlerRaised():
-                class _BoomError(Exception):
-                    pass
-
-                class _InlineRaises(Namespace):
-                    class Cmd(Command):
-                        raises: ClassVar = (_BoomError,)
-
-                        class Done(DomainEvent):
-                            pass
-
-                        def handle(self) -> _InlineRaises.Cmd.Done:
-                            raise _BoomError("nope")
-
                 @on(HandlerRaised, exception=_BoomError)
                 def catch(event: HandlerRaised) -> None:
                     return None
@@ -439,30 +466,17 @@ def describe_Command_handle():
                 assert log.has(HandlerRaised)
 
             def when_the_declaration_is_removed_between_builds():
-                def it_stops_routing_the_exception_to_HandlerRaised():
+                def it_stops_routing_the_exception_to_HandlerRaised(monkeypatch):
                     # Each build must reflect the class's current declaration
                     # — a stale ``_raises`` stamp from an earlier build must
                     # not keep catching an exception nobody declares.
-                    class _StaleBoomError(Exception):
-                        pass
-
-                    class _StaleRaises(Namespace):
-                        class Cmd(Command):
-                            raises: ClassVar = (_StaleBoomError,)
-
-                            class Done(DomainEvent):
-                                pass
-
-                            def handle(self) -> _StaleRaises.Cmd.Done:
-                                raise _StaleBoomError("nope")
-
                     @on(HandlerRaised, exception=_StaleBoomError)
                     def catch(event: HandlerRaised) -> None:
                         return None
 
                     first = EventGraph([_StaleRaises.Cmd, catch])
                     assert first.invoke(_StaleRaises.Cmd()).has(HandlerRaised)
-                    del _StaleRaises.Cmd.raises
+                    monkeypatch.delattr(_StaleRaises.Cmd, "raises")
                     second = EventGraph([_StaleRaises.Cmd, catch])
                     with pytest.raises(_StaleBoomError, match="nope"):
                         second.invoke(_StaleRaises.Cmd())

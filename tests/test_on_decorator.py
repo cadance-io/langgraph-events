@@ -1,6 +1,7 @@
 """Tests for the @on decorator and handler metadata extraction."""
 
 import asyncio
+import sys
 import warnings
 
 import pytest
@@ -15,7 +16,10 @@ from langgraph_events import (
     on,
 )
 from langgraph_events._event import Interrupted, Resumed
-from langgraph_events._handler import extract_handler_meta
+from langgraph_events._handler import (
+    _resolve_each_annotation,
+    extract_handler_meta,
+)
 
 
 class _DomainError(Exception):
@@ -32,6 +36,24 @@ class SampleEvent(IntegrationEvent):
 
 class MustBeTrue(Invariant):
     pass
+
+
+# Declared before ``LateService`` on purpose. Bare @on resolves hints at
+# decoration, when the name does not exist yet. Resolution must be retried at
+# graph build, when it does. See issue #183 review.
+@on
+def _forward_ref_handler(event: SampleEvent, dep: "LateService") -> None:
+    return None
+
+
+class LateService:
+    pass
+
+
+class _MethodHandlerHost:
+    @on(SampleEvent)
+    def react(self, event: SampleEvent) -> None:
+        return None
 
 
 class RuleOne(Invariant):
@@ -672,7 +694,7 @@ def describe_extract_handler_meta():
 
     def when_type_hints_cannot_be_resolved():
 
-        def it_warns_and_falls_back_to_signature_only_detection():
+        def it_warns_naming_each_unresolvable_parameter():
             @on(SampleEvent)
             def handler(event: SampleEvent, log: EventLog) -> None:
                 pass
@@ -685,33 +707,13 @@ def describe_extract_handler_meta():
                 meta = extract_handler_meta(handler)
 
             assert len(w) == 1
-            assert "Failed to resolve type hints" in str(w[0].message)
+            message = str(w[0].message)
+            assert "'event'" in message
+            assert "'log'" in message
+            assert "MissingLog" in message
+            assert all(item.filename == __file__ for item in w)
             assert meta.log_param is None
             assert meta.event_types == (SampleEvent,)
-
-
-def describe_return_hint_parsing():
-
-    def when_return_type_hints_cannot_be_resolved():
-
-        def it_warns_and_treats_handler_as_unannotated():
-            @on(SampleEvent)
-            def handler(event: SampleEvent) -> SampleEvent:
-                return SampleEvent()
-
-            handler.__annotations__["return"] = "MissingReturnEvent"
-
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                graph = EventGraph([handler])
-
-                messages = [str(item.message) for item in w]
-                assert any("Failed to resolve type hints" in msg for msg in messages)
-                assert any(
-                    "Failed to resolve return type hints" in msg for msg in messages
-                )
-                assert all(item.filename == __file__ for item in w)
-                assert "-->|handler| ?" in graph.namespaces().mermaid()
 
 
 def describe_handler_identity():
@@ -793,3 +795,140 @@ def describe_handler_identity():
         def it_raises_TypeError_at_decoration():
             with pytest.raises(TypeError, match="previously"):
                 on(SampleEvent, previously={"old": "oops"})
+
+
+def describe_partial_hint_resolution():
+    # One unresolvable annotation must not discard the resolvable ones.
+    # See issue #183: a TYPE_CHECKING-only import made every hint vanish, so
+    # a valid ``RunnableConfig`` param looked unclaimed and the error named it.
+
+    def when_one_parameter_annotation_does_not_resolve():
+
+        def it_still_detects_the_resolvable_injectables():
+            @on(SampleEvent)
+            def handler(event: SampleEvent, log: EventLog, dep: EventLog) -> None:
+                pass
+
+            handler.__annotations__["dep"] = "MissingDep"
+
+            with warnings.catch_warnings(record=True):
+                warnings.simplefilter("always")
+                meta = extract_handler_meta(handler)
+
+            assert meta.log_param == "log"
+
+        def it_names_the_failing_parameter_in_the_unclaimed_error():
+            @on(SampleEvent)
+            def handler(event: SampleEvent, log: EventLog, dep: EventLog) -> None:
+                pass
+
+            handler.__annotations__["dep"] = "MissingDep"
+
+            with warnings.catch_warnings(record=True):
+                warnings.simplefilter("always")
+                with pytest.raises(TypeError) as exc:
+                    EventGraph([handler])
+
+            message = str(exc.value)
+            assert "'dep'" in message
+            assert "MissingDep" in message
+            assert "'log'" not in message
+
+        def it_binds_a_name_keyed_service_despite_the_failed_annotation():
+            @on(SampleEvent)
+            def handler(event: SampleEvent, mailer: EventLog) -> None:
+                pass
+
+            handler.__annotations__["mailer"] = "MissingMailer"
+
+            with warnings.catch_warnings(record=True):
+                warnings.simplefilter("always")
+                graph = EventGraph([handler], services={"mailer": object()})
+
+            meta = graph._handler_metas[0]
+            assert meta.service_name_params == (("mailer", "mailer"),)
+
+    def when_a_name_is_declared_after_the_handler():
+        # A failed resolution must not be cached. The name exists by the time
+        # the graph is built, so the annotation resolves then.
+
+        def it_resolves_the_annotation_at_graph_build():
+            graph = EventGraph([_forward_ref_handler], services=[LateService()])
+
+            meta = graph._handler_metas[0]
+            assert meta.service_params == (("dep", LateService),)
+
+    def when_the_handler_declares_a_pep_695_type_parameter():
+        # ``get_type_hints`` puts ``fn.__type_params__`` in scope. The
+        # per-annotation fallback must do the same, or a valid generic
+        # annotation is recorded as a failure.
+
+        @pytest.mark.skipif(
+            sys.version_info < (3, 12), reason="PEP 695 syntax needs 3.12"
+        )
+        def it_resolves_the_type_parameter():
+            namespace: dict[str, object] = {"SampleEvent": SampleEvent}
+            exec(  # noqa: S102 — 3.12-only syntax cannot be parsed on 3.11
+                'def gen[T](event: "SampleEvent", item: "T",'
+                ' bad: "Missing") -> "T": ...',
+                namespace,
+            )
+            fn = namespace["gen"]
+
+            hints, errors = _resolve_each_annotation(fn)
+
+            assert hints["item"] is hints["return"]
+            assert set(errors) == {"bad"}
+
+    def when_the_handler_is_a_bound_method():
+
+        def it_builds_the_graph():
+            graph = EventGraph([_MethodHandlerHost().react])
+
+            assert graph._handler_metas[0].event_types == (SampleEvent,)
+
+    def when_the_event_annotation_resolves_but_another_does_not():
+
+        def without_an_explicit_event_type_argument():
+
+            def it_infers_the_event_type_from_the_first_parameter():
+                # The bad annotation must be present when @on runs. @on caches
+                # resolved hints on the function, so mutating them afterwards
+                # would never reach _infer_event_type.
+                def undecorated(event, dep):
+                    pass
+
+                undecorated.__annotations__ = {
+                    "event": SampleEvent,
+                    "dep": "MissingDep",
+                    "return": None,
+                }
+
+                with warnings.catch_warnings(record=True):
+                    warnings.simplefilter("always")
+                    handler = on(undecorated)
+                    meta = extract_handler_meta(handler)
+
+                assert meta.event_types == (SampleEvent,)
+
+
+def describe_unresolvable_return_annotation():
+    # A handler must construct the events it returns, so the classes are
+    # already importable at run time. An unresolvable return annotation is
+    # always a defect. Raise instead of drawing a silent "?" edge.
+
+    def when_the_return_annotation_does_not_resolve():
+
+        def it_raises_naming_the_annotation():
+            @on(SampleEvent)
+            def handler(event: SampleEvent) -> SampleEvent:
+                return SampleEvent()
+
+            handler.__annotations__["return"] = "MissingReturnEvent"
+
+            with pytest.raises(TypeError) as exc:
+                EventGraph([handler])
+
+            message = str(exc.value)
+            assert "handler" in message
+            assert "MissingReturnEvent" in message

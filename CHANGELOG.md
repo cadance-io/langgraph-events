@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **One unresolvable annotation no longer discards every type hint on a handler.**
+  Closes [#183](https://github.com/cadance-io/langgraph-events/issues/183).
+  `typing.get_type_hints` is all-or-nothing. A single annotation that does not resolve at run
+  time — the usual cause is `from __future__ import annotations` plus a `TYPE_CHECKING`-only
+  import — discarded the hints for the whole signature. Framework injectables such as
+  `RunnableConfig` then went undetected, and the build failed naming *those* parameters. The
+  message told you to register a service or a reducer for a parameter that was already
+  correct. Resolution is now per annotation. A resolvable annotation is kept, and only the
+  failing one is lost.
+- **The unclaimed-parameter error names the annotation that did not resolve.** When an
+  unclaimed parameter has a failed annotation, the `TypeError` states that first, with the
+  parameter name and the underlying `NameError`, before the existing registration advice.
+- **`@on` infers the event type when a later annotation does not resolve.** Bare `@on` required
+  the whole signature to resolve, so one unresolvable annotation anywhere made it raise. Only the
+  first parameter's annotation is required now. A failure on any later parameter no longer stops
+  inference, and a failure on the first parameter raises with its own message.
+- **A failed resolution is no longer cached.** A name can be absent when the decorator runs and
+  present when the graph is built. A service class declared below its handler is one example.
+  Only a complete resolution is cached, so resolution is retried at build.
+- **A bound method handler builds again.** The hint cache is written to the underlying function,
+  not to the `method` object, which rejects attributes.
+- **A PEP 695 type parameter resolves.** `typing.get_type_hints` puts `__type_params__` in scope.
+  The per-annotation path now does the same, so `def handle[T](...) -> T` is not reported as
+  unresolvable on Python 3.12 and later.
+- **The unresolvable-annotation warning names the parameter and the reason.** It replaces the
+  per-handler "falling back to signature-only detection" warning.
+
+### Changed
+
+- **BREAKING: an unresolvable return annotation now raises `TypeError` at `EventGraph`
+  construction.** It previously warned and treated the handler as unannotated. The topology
+  then drew the same `?` outcome edge as a genuinely unannotated handler, so a wrong diagram
+  was indistinguishable from a legitimate one and could sit in a committed mermaid baseline
+  unnoticed. Make every name in the return annotation importable at run time, then rebuild.
+
+  Two shapes break. Under `from __future__ import annotations`, a bare nested outcome name
+  (`-> Placed`) does not resolve from module globals. Write the qualified name
+  (`-> Order.Place.Placed`), as `examples/` and the docs now do. A class declared inside a
+  function cannot be named from module globals at all. Declare it at module level.
+
+  WARNING: the fix is not always one import. A handler can return an event that a service
+  constructs, and import that class only under `TYPE_CHECKING`. Such a handler must now make
+  the import real, which costs the import it avoided.
+
 ## [0.31.0] - 2026-09-03
 
 ### Added
