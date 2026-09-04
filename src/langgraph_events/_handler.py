@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import types
 import typing
@@ -116,15 +117,19 @@ def _resolve_each_annotation(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
     target = getattr(fn, "__func__", fn)
     raw = getattr(target, "__annotations__", {})
     globalns = getattr(target, "__globals__", {})
+    # ``get_type_hints`` puts a PEP 695 type parameter in scope for the
+    # function that declares it. The probe declares none, so pass them as
+    # locals or every annotation naming one is recorded as a failure.
+    localns = {p.__name__: p for p in getattr(target, "__type_params__", ())}
     hints: dict[str, Any] = {}
     errors: dict[str, str] = {}
+
+    def _probe() -> None: ...
+
     for name, annotation in raw.items():
-
-        def _probe() -> None: ...
-
         _probe.__annotations__ = {name: annotation}
         try:
-            hints[name] = typing.get_type_hints(_probe, globalns)[name]
+            hints[name] = typing.get_type_hints(_probe, globalns, localns)[name]
         except Exception as exc:
             errors[name] = f"{type(exc).__name__}: {exc}"
     return hints, errors
@@ -139,17 +144,27 @@ def _resolve_hints_and_errors(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
 
     Never raises. A caller that needs an annotation reads ``errors`` to learn
     why it is absent, and decides whether that absence is fatal.
+
+    Only a complete resolution is cached. A name can be absent at decoration
+    and present at graph build — a service class declared below its handler,
+    for instance — so a cached failure would report a resolvable annotation as
+    broken forever. Retry instead. The retry costs nothing on the happy path.
+
+    The cache lives on the underlying function, so a bound method caches once
+    for every instance. A callable that rejects attributes is not cached.
     """
-    cached = getattr(fn, "_resolved_hints", None)
+    target = getattr(fn, "__func__", fn)
+    cached = getattr(target, "_resolved_hints", None)
     if cached is not None:
-        return cached, getattr(fn, "_hint_errors", {})
+        return cached, {}
     try:
         hints = typing.get_type_hints(fn)
         errors: dict[str, str] = {}
     except Exception:
         hints, errors = _resolve_each_annotation(fn)
-    fn._resolved_hints = hints
-    fn._hint_errors = errors
+    if not errors:
+        with contextlib.suppress(AttributeError):
+            target._resolved_hints = hints
     return hints, errors
 
 

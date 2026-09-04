@@ -1,6 +1,7 @@
 """Tests for the @on decorator and handler metadata extraction."""
 
 import asyncio
+import sys
 import warnings
 
 import pytest
@@ -15,7 +16,10 @@ from langgraph_events import (
     on,
 )
 from langgraph_events._event import Interrupted, Resumed
-from langgraph_events._handler import extract_handler_meta
+from langgraph_events._handler import (
+    _resolve_each_annotation,
+    extract_handler_meta,
+)
 
 
 class _DomainError(Exception):
@@ -32,6 +36,24 @@ class SampleEvent(IntegrationEvent):
 
 class MustBeTrue(Invariant):
     pass
+
+
+# Declared before ``LateService`` on purpose. Bare @on resolves hints at
+# decoration, when the name does not exist yet. Resolution must be retried at
+# graph build, when it does. See issue #183 review.
+@on
+def _forward_ref_handler(event: SampleEvent, dep: "LateService") -> None:
+    return None
+
+
+class LateService:
+    pass
+
+
+class _MethodHandlerHost:
+    @on(SampleEvent)
+    def react(self, event: SampleEvent) -> None:
+        return None
 
 
 class RuleOne(Invariant):
@@ -825,6 +847,45 @@ def describe_partial_hint_resolution():
 
             meta = graph._handler_metas[0]
             assert meta.service_name_params == (("mailer", "mailer"),)
+
+    def when_a_name_is_declared_after_the_handler():
+        # A failed resolution must not be cached. The name exists by the time
+        # the graph is built, so the annotation resolves then.
+
+        def it_resolves_the_annotation_at_graph_build():
+            graph = EventGraph([_forward_ref_handler], services=[LateService()])
+
+            meta = graph._handler_metas[0]
+            assert meta.service_params == (("dep", LateService),)
+
+    def when_the_handler_declares_a_pep_695_type_parameter():
+        # ``get_type_hints`` puts ``fn.__type_params__`` in scope. The
+        # per-annotation fallback must do the same, or a valid generic
+        # annotation is recorded as a failure.
+
+        @pytest.mark.skipif(
+            sys.version_info < (3, 12), reason="PEP 695 syntax needs 3.12"
+        )
+        def it_resolves_the_type_parameter():
+            namespace: dict[str, object] = {"SampleEvent": SampleEvent}
+            exec(  # noqa: S102 — 3.12-only syntax cannot be parsed on 3.11
+                'def gen[T](event: "SampleEvent", item: "T",'
+                ' bad: "Missing") -> "T": ...',
+                namespace,
+            )
+            fn = namespace["gen"]
+
+            hints, errors = _resolve_each_annotation(fn)
+
+            assert hints["item"] is hints["return"]
+            assert set(errors) == {"bad"}
+
+    def when_the_handler_is_a_bound_method():
+
+        def it_builds_the_graph():
+            graph = EventGraph([_MethodHandlerHost().react])
+
+            assert graph._handler_metas[0].event_types == (SampleEvent,)
 
     def when_the_event_annotation_resolves_but_another_does_not():
 

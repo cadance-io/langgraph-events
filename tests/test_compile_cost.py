@@ -66,6 +66,7 @@ def describe_event_graph_compile():
             monkeypatch.setattr(inspect, "getsource", counting)
             _ = EventGraph(handlers).compiled
 
-            # Drop the leaf-node declaration and this list holds one entry per
-            # handler, which is the regression the test exists to catch.
+            # Drop the leaf-node declaration in _internal.py and this list
+            # fills with the node functions whose source was read, which is
+            # the regression the test exists to catch.
             assert read == []

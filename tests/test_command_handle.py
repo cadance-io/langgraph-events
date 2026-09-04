@@ -442,13 +442,13 @@ def describe_Command_handle():
                 assert not log.has(_InlineInv.Cmd.Done)
 
             def when_the_declaration_is_removed_between_builds():
-                def it_stops_evaluating_the_predicate():
+                def it_stops_evaluating_the_predicate(monkeypatch):
                     # Each build must reflect the class's current declaration
                     # — a stale ``_invariants`` stamp from an earlier build
                     # must not keep evaluating a removed predicate.
                     first = EventGraph([_StaleInvariants.Cmd])
                     assert first.invoke(_StaleInvariants.Cmd()).has(InvariantViolated)
-                    del _StaleInvariants.Cmd.invariants
+                    monkeypatch.delattr(_StaleInvariants.Cmd, "invariants")
                     log = EventGraph([_StaleInvariants.Cmd]).invoke(
                         _StaleInvariants.Cmd()
                     )
@@ -466,7 +466,7 @@ def describe_Command_handle():
                 assert log.has(HandlerRaised)
 
             def when_the_declaration_is_removed_between_builds():
-                def it_stops_routing_the_exception_to_HandlerRaised():
+                def it_stops_routing_the_exception_to_HandlerRaised(monkeypatch):
                     # Each build must reflect the class's current declaration
                     # — a stale ``_raises`` stamp from an earlier build must
                     # not keep catching an exception nobody declares.
@@ -476,7 +476,7 @@ def describe_Command_handle():
 
                     first = EventGraph([_StaleRaises.Cmd, catch])
                     assert first.invoke(_StaleRaises.Cmd()).has(HandlerRaised)
-                    del _StaleRaises.Cmd.raises
+                    monkeypatch.delattr(_StaleRaises.Cmd, "raises")
                     second = EventGraph([_StaleRaises.Cmd, catch])
                     with pytest.raises(_StaleBoomError, match="nope"):
                         second.invoke(_StaleRaises.Cmd())

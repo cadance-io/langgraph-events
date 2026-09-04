@@ -17,7 +17,7 @@ class Order(Namespace):
         class Placed(DomainEvent):
             order_id: str
 
-        def handle(self) -> Placed:
+        def handle(self) -> Order.Place.Placed:
             return Order.Place.Placed(order_id=f"o-{self.customer_id}")
 
 
