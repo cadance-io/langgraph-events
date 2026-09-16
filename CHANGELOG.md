@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-16
+
 ### Added
 
 - **`RunScoped`: a service derived per run from the `RunnableConfig`.**
@@ -1152,7 +1154,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/cadance-io/langgraph-events/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/cadance-io/langgraph-events/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/cadance-io/langgraph-events/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/cadance-io/langgraph-events/compare/v0.28.0...v0.29.0
