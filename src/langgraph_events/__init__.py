@@ -65,6 +65,7 @@ from langgraph_events._reducer import (
 from langgraph_events._reflection import QueryTool, Reflection
 from langgraph_events._retry import RetryPolicy
 from langgraph_events._rewrite import RewriteReport, ThreadRewrite
+from langgraph_events._services import RunScoped
 from langgraph_events._types import (
     HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
@@ -136,6 +137,7 @@ __all__ = [
     "RetryPolicy",
     "RewriteReport",
     "RunPaused",
+    "RunScoped",
     "ScalarReducer",
     "Scatter",
     "SystemEvent",

@@ -66,6 +66,7 @@ from langgraph_events._rewrite import (
     plan_thread,
     validate_drop,
 )
+from langgraph_events._services import RunScoped
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -672,6 +673,12 @@ def _build_service_registries(
     if services is None:
         return by_type, by_name
     for s in services:
+        if isinstance(s, RunScoped):
+            raise TypeError(
+                "RunScoped is only supported in the name-keyed mapping form: "
+                "services={'name': RunScoped(factory)}. The type-keyed sequence "
+                "form resolves by annotation, and no handler annotates RunScoped."
+            )
         t = type(s)
         if t in by_type:
             raise TypeError(

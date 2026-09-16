@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`RunScoped`: a service derived per run from the `RunnableConfig`.**
+  Closes [#186](https://github.com/cadance-io/langgraph-events/issues/186).
+  A service in `services=` is injected as the same object on every dispatch. A value derived
+  from the run config, such as a chat model bound to the run's language, had to be derived in
+  every handler body. Place `RunScoped(factory)` in the name-keyed mapping instead. The factory
+  is called with the node's `RunnableConfig` once per node call, and its result is injected
+  under the handler's parameter name. A factory that is not callable, or is a coroutine
+  function, raises `TypeError` at `RunScoped(...)`. A `RunScoped` value in the type-keyed
+  sequence form raises `TypeError` at graph construction.
+
 ### Fixed
 
 - **One unresolvable annotation no longer discards every type hint on a handler.**

@@ -158,6 +158,29 @@ Type-keyed injection matches on the resolved annotation. The annotation must be 
 
 Name-keyed injection matches on the parameter name. It needs no annotation. An unresolvable annotation still binds the parameter, but the framework emits a `UserWarning`, because the annotation does not describe what is injected.
 
+#### Run-scoped services
+
+A service in `services=` is injected as the same object on every dispatch. A value that must be derived from the run's `RunnableConfig` has no home there. `RunScoped` gives it one.
+
+Wrap a factory in `RunScoped` and place it in the name-keyed mapping. The framework calls the factory with the node's `RunnableConfig` once per node call. The result is injected under the handler's parameter name.
+
+```python
+from langgraph_events import RunScoped
+
+def model_for(config: RunnableConfig) -> ConversationModel:
+    return models.main(config)
+
+EventGraph(
+    handlers=[...],
+    services={"model": RunScoped(model_for), "session_factory": session_factory},
+)
+
+@on(SomeEvent)
+async def handle(event: SomeEvent, model: ConversationModel) -> ...: ...
+```
+
+The factory must be a plain function. A coroutine function raises `TypeError` at `RunScoped(...)`, because the result would be injected without an `await`. `RunScoped` is rejected in the type-keyed sequence form, because that form resolves by annotation. A resumed run receives a freshly built config, so the factory runs against the current config, not a checkpointed one. A factory that raises surfaces as an unhandled node error, scoped to the declaring handler.
+
 ### Return contract
 
 - Annotated handlers must return a type in the declared union (or `None`).
