@@ -160,7 +160,7 @@ Name-keyed injection matches on the parameter name. It needs no annotation. An u
 
 #### Run-scoped services
 
-A service in `services=` is injected as the same object on every dispatch. A value that must be derived from the run's `RunnableConfig` has no home there. `RunScoped` gives it one.
+A service in `services=` is injected as the same object on every dispatch. A value derived from the run's `RunnableConfig` cannot be registered as a plain service. `RunScoped` registers it.
 
 Wrap a factory in `RunScoped` and place it in the name-keyed mapping. The framework calls the factory with the node's `RunnableConfig` once per node call. The result is injected under the handler's parameter name.
 
@@ -179,7 +179,13 @@ EventGraph(
 async def handle(event: SomeEvent, model: ConversationModel) -> ...: ...
 ```
 
-The factory must be a plain function. A coroutine function raises `TypeError` at `RunScoped(...)`, because the result would be injected without an `await`. `RunScoped` is rejected in the type-keyed sequence form, because that form resolves by annotation. A resumed run receives a freshly built config, so the factory runs against the current config, not a checkpointed one. A factory that raises surfaces as an unhandled node error, scoped to the declaring handler.
+Rules:
+
+- The factory must be a plain function. A coroutine function raises `TypeError` at `RunScoped(...)`, because the result would be injected without an `await`.
+- The factory runs synchronously on both the `invoke` and the `ainvoke` path. Do not do I/O in it.
+- `RunScoped` is rejected in the type-keyed sequence form, because that form resolves by annotation.
+- A resumed run receives a freshly built config. The factory runs against the current config, not a checkpointed one.
+- The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error, scoped to the declaring handler.
 
 ### Return contract
 

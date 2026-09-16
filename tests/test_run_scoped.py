@@ -45,7 +45,7 @@ def describe_RunScoped():
                 assert model.language == "fr"
 
         def when_one_node_call_handles_several_events():
-            def it_calls_the_factory_once_per_node_call():
+            def it_calls_the_factory_once():
                 calls: list[RunnableConfig] = []
 
                 def counting(config: RunnableConfig) -> _Model:
@@ -63,6 +63,29 @@ def describe_RunScoped():
                 )
 
                 assert len(calls) == 1
+
+        def when_two_handlers_each_run_in_their_own_node_call():
+            def it_calls_the_factory_once_per_node_call():
+                calls: list[RunnableConfig] = []
+
+                def counting(config: RunnableConfig) -> _Model:
+                    calls.append(config)
+                    return _model_for(config)
+
+                @on(Started)
+                def first(event: Started, model: _Model) -> None:
+                    pass
+
+                @on(Started)
+                def second(event: Started, model: _Model) -> None:
+                    pass
+
+                graph = EventGraph(
+                    [first, second], services={"model": RunScoped(counting)}
+                )
+                graph.invoke(Started(), config={"configurable": {"language": "en"}})
+
+                assert len(calls) == 2
 
         def when_the_runtime_config_is_missing():
             def it_raises_a_value_error_naming_the_handler_and_parameter():
@@ -95,6 +118,15 @@ def describe_RunScoped():
 
                 with pytest.raises(TypeError, match=r"coroutine"):
                     RunScoped(afactory)
+
+        def when_the_factory_is_an_object_whose_call_method_is_async():
+            def it_raises_a_type_error():
+                class AsyncCallable:
+                    async def __call__(self, config: RunnableConfig) -> _Model:
+                        return _model_for(config)
+
+                with pytest.raises(TypeError, match=r"coroutine"):
+                    RunScoped(AsyncCallable())
 
         def when_placed_in_the_type_keyed_sequence_form():
             def it_raises_a_type_error_at_graph_construction():

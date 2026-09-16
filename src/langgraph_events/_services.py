@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable  # noqa: TC003
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from langchain_core.runnables import RunnableConfig
 
 T = TypeVar("T")
@@ -26,7 +27,7 @@ class RunScoped(Generic[T]):
 
     Example::
 
-        services = {"model": RunScoped(lambda config: model_for(config))}
+        services = {"model": RunScoped(model_for)}
 
         @on(SomeEvent)
         def handle(event: SomeEvent, model: ConversationModel) -> None: ...
@@ -40,7 +41,12 @@ class RunScoped(Generic[T]):
                 f"RunScoped(factory=...) must be callable, got "
                 f"{type(self.factory).__name__!r}."
             )
-        if inspect.iscoroutinefunction(self.factory):
+        # A callable object with ``async def __call__`` is not a coroutine
+        # function itself, so check its ``__call__`` as well.
+        call = getattr(self.factory, "__call__", None)  # noqa: B004
+        if inspect.iscoroutinefunction(self.factory) or inspect.iscoroutinefunction(
+            call
+        ):
             raise TypeError(
                 "RunScoped(factory=...) must not be a coroutine function. The "
                 "factory is called synchronously at injection, so its result "
