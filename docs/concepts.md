@@ -185,7 +185,7 @@ Rules:
 - The factory runs synchronously on both the `invoke` and the `ainvoke` path. Do not do I/O in it.
 - `RunScoped` is rejected in the type-keyed sequence form, because that form resolves by annotation.
 - A resumed run receives a freshly built config. The factory runs against the current config, not a checkpointed one.
-- The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error, scoped to the declaring handler.
+- The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error, with a note that names the handler and the parameter. Keep the factory to a lookup. It must not raise an error that the handler declares in `raises=`. Validate the config in the factory and raise a clear error.
 
 ### Return contract
 

@@ -324,7 +324,16 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                         f"Handler '{meta.name}' requested the run-scoped service "
                         f"'{param_name}', but runtime config is missing."
                     )
-                svc = svc.factory(config)
+                try:
+                    svc = svc.factory(config)
+                except Exception as exc:
+                    # Keep the type, so a caller that catches it still can.
+                    # The note names the seam, like the missing-config branch.
+                    exc.add_note(
+                        f"Handler '{meta.name}' requested the run-scoped service "
+                        f"'{param_name}', but its factory raised."
+                    )
+                    raise
             inject[param_name] = svc
     return inject
 

@@ -87,6 +87,23 @@ def describe_RunScoped():
 
                 assert len(calls) == 2
 
+        def when_the_factory_raises():
+            def it_reraises_the_same_error_noting_the_handler_and_parameter():
+                def broken(config: RunnableConfig) -> _Model:
+                    return _Model(config["configurable"]["missing"])
+
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    pass
+
+                graph = EventGraph([handle], services={"model": RunScoped(broken)})
+
+                with pytest.raises(KeyError) as info:
+                    graph.invoke(Started(), config={"configurable": {}})
+
+                notes = getattr(info.value, "__notes__", [])
+                assert any("handle" in n and "model" in n for n in notes), notes
+
         def when_the_runtime_config_is_missing():
             def it_raises_a_value_error_naming_the_handler_and_parameter():
                 @on(Started)
