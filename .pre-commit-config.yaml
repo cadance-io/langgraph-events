@@ -21,7 +21,7 @@ repos:
       - id: pip-audit
         name: pip-audit
         language: system
-        entry: bash -c 'uv export --no-hashes --no-dev --format requirements-txt | uv run --with pip-audit pip-audit -r /dev/stdin'
+        entry: bash -c 'uv export --no-hashes --no-dev --no-emit-project --format requirements-txt | uv run --with pip-audit pip-audit --no-deps --disable-pip -r /dev/stdin'
         pass_filenames: false
         files: ^(pyproject\.toml|uv\.lock)$
       - id: validate-tests
