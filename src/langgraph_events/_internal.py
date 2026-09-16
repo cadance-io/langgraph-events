@@ -46,6 +46,7 @@ from langgraph_events._event import (
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import ReducerNotSetError
+from langgraph_events._services import RunScoped
 from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
 
 _logger = logging.getLogger(__name__)
@@ -316,7 +317,24 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
             inject[param_name] = services_by_type[svc_type]
     if services_by_name and meta.service_name_params:
         for param_name, svc_name in meta.service_name_params:
-            inject[param_name] = services_by_name[svc_name]
+            svc = services_by_name[svc_name]
+            if isinstance(svc, RunScoped):
+                if config is None:
+                    raise ValueError(
+                        f"Handler '{meta.name}' requested the run-scoped service "
+                        f"'{param_name}', but runtime config is missing."
+                    )
+                try:
+                    svc = svc.factory(config)
+                except Exception as exc:
+                    # Keep the type, so a caller that catches it still can.
+                    # The note names the seam, like the missing-config branch.
+                    exc.add_note(
+                        f"Handler '{meta.name}' requested the run-scoped service "
+                        f"'{param_name}', but its factory raised."
+                    )
+                    raise
+            inject[param_name] = svc
     return inject
 
 

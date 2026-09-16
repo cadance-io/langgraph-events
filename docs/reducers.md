@@ -29,7 +29,7 @@ class Order(Namespace):
         class Placed(DomainEvent):
             order_id: str
 
-        def handle(self, current_status: str | None) -> Placed:
+        def handle(self, current_status: str | None) -> Order.Place.Placed:
             # `current_status` is injected by parameter name.
             return Order.Place.Placed(order_id=f"o-{self.customer_id}")
 
@@ -105,7 +105,7 @@ def permissive(event: TaskReceived, strategy: str | None) -> Completed:
     - `ValueError` subclass; exported from `langgraph_events`.
     - Raised at injection time, **outside** the `raises=` catch boundary — a broad `raises=ValueError` cannot silently swallow it.
     - Opt out by widening the annotation: `str | None`, `Optional[str]`, `Any`, `object`, or no annotation.
-    - Forward-ref failures: framework emits `UserWarning` and falls back to permissive mode. Annotate against importable types so the assertion sticks.
+    - Forward-ref failures: the framework emits a `UserWarning` for that parameter and treats it as permissive. Other parameters on the same handler keep their hints. Annotate against importable types so the assertion sticks.
 
 ## `FoldReducer`
 

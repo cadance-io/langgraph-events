@@ -3,9 +3,13 @@
 LangGraph inspects each node function's source to find nested graphs. An
 EventGraph handler is a leaf, so that inspection is pure cost, paid again on
 every new EventGraph over the same handlers.
+
+The assertion counts source reads, not elapsed time. A wall-clock threshold
+measured the same property, but coverage instrumentation roughly doubles the
+time, so the pre-commit hook failed on a correct tree.
 """
 
-import time
+import inspect
 
 from langgraph_events import Command, EventGraph, Namespace, on
 
@@ -44,16 +48,25 @@ def _handlers() -> list:
     return made
 
 
-def _compile_seconds(handlers: list) -> float:
-    started = time.perf_counter()
-    _ = EventGraph(handlers).compiled
-    return time.perf_counter() - started
-
-
 def describe_event_graph_compile():
     def when_the_same_handlers_are_compiled_repeatedly():
-        def it_does_not_pay_source_inspection_per_graph():
+        def it_does_not_read_handler_source(monkeypatch):
             handlers = _handlers()
+            # Warm up: the first compile of a process may read source for
+            # reasons unrelated to the handler nodes.
             _ = EventGraph(handlers).compiled
-            fastest = min(_compile_seconds(handlers) for _ in range(20))
-            assert fastest < 0.006
+
+            read: list[str] = []
+            real = inspect.getsource
+
+            def counting(obj):
+                read.append(getattr(obj, "__qualname__", repr(obj)))
+                return real(obj)
+
+            monkeypatch.setattr(inspect, "getsource", counting)
+            _ = EventGraph(handlers).compiled
+
+            # Drop the leaf-node declaration in _internal.py and this list
+            # fills with the node functions whose source was read, which is
+            # the regression the test exists to catch.
+            assert read == []

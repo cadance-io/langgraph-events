@@ -22,7 +22,7 @@ class Order(Namespace):
         class Rejected(DomainEvent):
             reason: str
 
-        def handle(self) -> Placed | Rejected:
+        def handle(self) -> Order.Place.Placed | Order.Place.Rejected:
             if not self.items:
                 return Order.Place.Rejected(reason="empty order")
             return Order.Place.Placed(order_id=f"o-{self.customer_id}")

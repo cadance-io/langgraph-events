@@ -1123,11 +1123,13 @@ def describe_NamespaceAwareSerde():
         def when_round_tripped_through_a_real_interrupt_flow():
             def with_MemorySaver_and_NamespaceAwareSerde():
                 # ``filterwarnings("error", ...)`` locks the warning fix in:
-                # if a future change demotes ``ReviewApproved`` back to a
+                # if a future change demotes a class used here back to a
                 # local class, this test fails instead of silently emitting
-                # the "Failed to resolve type hints" UserWarning.
+                # the unresolvable-annotation UserWarning. A demoted return
+                # annotation raises outright; a demoted parameter annotation
+                # only warns, so the filter still earns its place.
                 @pytest.mark.filterwarnings(
-                    r"error:Failed to resolve.*type hints.*:UserWarning"
+                    r"error:Failed to resolve.*annotation.*:UserWarning"
                 )
                 def it_round_trips_a_namespaced_Interrupted_subclass():
                     @on(Started)
