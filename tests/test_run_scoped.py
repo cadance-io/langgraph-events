@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import functools
+from typing import TYPE_CHECKING, Any, Protocol, Self, TypeVar, runtime_checkable
 
 import pytest
 from conftest import Started
@@ -25,6 +26,62 @@ class _Model:
 
 def _model_for(config: RunnableConfig) -> _Model:
     return _Model(config["configurable"]["language"])
+
+
+class _Other:
+    """A type unrelated to ``_Model``."""
+
+
+def _other_for(config: RunnableConfig) -> _Other:
+    return _Other()
+
+
+class _SubModel(_Model):
+    """A subtype of ``_Model``."""
+
+
+def _sub_model_for(config: RunnableConfig) -> _SubModel:
+    return _SubModel(config["configurable"]["language"])
+
+
+def _any_for(config: RunnableConfig) -> Any:
+    return _model_for(config)
+
+
+T = TypeVar("T")
+
+
+class _Speaks(Protocol):
+    """A static contract. Python cannot test it at run time."""
+
+    def speak(self) -> str: ...
+
+
+@runtime_checkable
+class _Listens(Protocol):
+    def listen(self) -> str: ...
+
+
+@runtime_checkable
+class _HasName(Protocol):
+    name: str
+
+
+class _Factory:
+    """A class whose alternate constructor serves as the factory."""
+
+    @classmethod
+    def for_run(cls, config: RunnableConfig) -> Self:
+        return cls()
+
+
+@functools.cache
+def _cached_for(config: RunnableConfig) -> _Model:
+    return _model_for(config)
+
+
+def _generic_for(config: RunnableConfig) -> T:  # type: ignore[type-var]
+    return _model_for(config)  # type: ignore[return-value]
 
 
 def describe_RunScoped():
@@ -145,6 +202,43 @@ def describe_RunScoped():
                 with pytest.raises(TypeError, match=r"coroutine"):
                     RunScoped(AsyncCallable())
 
+        def when_the_factory_has_no_return_annotation():
+            def it_raises_a_type_error_naming_the_factory():
+                def unannotated(config):  # type: ignore[no-untyped-def]
+                    return _model_for(config)
+
+                with pytest.raises(TypeError, match=r"return annotation.*unannotated"):
+                    RunScoped(unannotated)
+
+        def when_the_factory_is_a_partial():
+            def it_reads_the_wrapped_function():
+                RunScoped(functools.partial(_model_for))
+
+        def when_the_factory_is_a_callable_object():
+            def it_reads_the_return_annotation_of_call():
+                class Callable:
+                    def __call__(self, config: RunnableConfig) -> _Model:
+                        return _model_for(config)
+
+                RunScoped(Callable())
+
+        def when_the_factory_is_a_lambda():
+            def it_says_a_lambda_cannot_carry_a_return_annotation():
+                with pytest.raises(TypeError, match=r"lambda cannot"):
+                    RunScoped(lambda config: _Model("en"))
+
+        def when_the_factory_inherits_an_unannotated_call_method():
+            def it_names_the_object_class():
+                class Base:
+                    def __call__(self, config):  # type: ignore[no-untyped-def]
+                        return _model_for(config)
+
+                class Sub(Base):
+                    pass
+
+                with pytest.raises(TypeError, match=r"Sub"):
+                    RunScoped(Sub())
+
         def when_placed_in_the_type_keyed_sequence_form():
             def it_raises_a_type_error_at_graph_construction():
                 @on(Started)
@@ -153,3 +247,140 @@ def describe_RunScoped():
 
                 with pytest.raises(TypeError, match=r"RunScoped.*mapping"):
                     EventGraph([handle], services=[RunScoped(_model_for)])
+
+    def describe_annotation_check():
+        def when_the_factory_return_annotation_does_not_resolve():
+            def it_raises_a_type_error_naming_the_factory_and_the_cause():
+                def broken(config: RunnableConfig) -> _Model:
+                    return _model_for(config)
+
+                broken.__annotations__["return"] = "MissingModel"
+
+                @on(Started)
+                def handle(event: Started) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"broken.*MissingModel"):
+                    EventGraph([handle], services={"model": RunScoped(broken)})
+
+        def when_the_factory_returns_another_type():
+            def it_raises_a_type_error_naming_handler_parameter_and_both_types():
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    pass
+
+                with pytest.raises(TypeError) as info:
+                    EventGraph([handle], services={"model": RunScoped(_other_for)})
+
+                message = str(info.value)
+                assert "'handle'" in message
+                assert "'model'" in message
+                assert "_Model" in message
+                assert "_Other" in message
+                assert "RunScoped(_other_for)" in message
+
+        def when_the_factory_returns_a_subtype():
+            def it_builds_and_injects():
+                seen: list[_Model] = []
+
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    seen.append(model)
+
+                graph = EventGraph(
+                    [handle], services={"model": RunScoped(_sub_model_for)}
+                )
+                graph.invoke(Started(), config={"configurable": {"language": "fr"}})
+
+                assert isinstance(seen[0], _SubModel)
+
+        def when_the_factory_returns_any():
+            def it_skips_the_check():
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    pass
+
+                EventGraph([handle], services={"model": RunScoped(_any_for)})
+
+        def when_the_factory_returns_a_type_variable():
+            def it_skips_the_check():
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    pass
+
+                EventGraph([handle], services={"model": RunScoped(_generic_for)})
+
+        def when_the_parameter_annotation_is_a_protocol_that_is_not_runtime_checkable():
+            def it_warns_and_builds():
+                @on(Started)
+                def handle(event: Started, model: _Speaks) -> None:
+                    pass
+
+                with pytest.warns(UserWarning, match=r"'model'.*not checked"):
+                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+
+        def when_the_parameter_is_a_runtime_protocol_that_has_a_data_member():
+            def it_warns_and_builds_for_a_run_scoped_factory():
+                @on(Started)
+                def handle(event: Started, model: _HasName) -> None:
+                    pass
+
+                with pytest.warns(UserWarning, match=r"'model'.*not checked"):
+                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+
+        def when_the_parameter_annotation_is_a_runtime_checkable_protocol():
+            def it_checks_the_factory_return_type():
+                @on(Started)
+                def handle(event: Started, model: _Listens) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"'model'.*_Listens"):
+                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+
+        def when_the_same_handler_is_built_in_two_graphs():
+            def it_checks_each_graph_against_its_own_services():
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    pass
+
+                EventGraph([handle], services={"model": RunScoped(_model_for)})
+                with pytest.raises(TypeError, match=r"_Other"):
+                    EventGraph([handle], services={"model": RunScoped(_other_for)})
+                EventGraph([handle], services={"model": RunScoped(_model_for)})
+
+        def when_the_factory_is_a_class():
+            def it_uses_the_class_as_the_provided_type():
+                @on(Started)
+                def handle(event: Started, model: _Other) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"'model'.*_Model"):
+                    EventGraph([handle], services={"model": RunScoped(_Model)})
+
+        def when_the_annotation_nests_a_protocol_that_is_not_runtime_checkable():
+            def it_warns_and_builds():
+                @on(Started)
+                def handle(event: Started, model: _Speaks | None) -> None:
+                    pass
+
+                with pytest.warns(UserWarning, match=r"'model'.*not checked"):
+                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+
+        def when_the_factory_is_wrapped_by_a_decorator_from_another_module():
+            def it_resolves_the_return_annotation_against_the_factory_module():
+                @on(Started)
+                def handle(event: Started, model: _Model) -> None:
+                    pass
+
+                EventGraph([handle], services={"model": RunScoped(_cached_for)})
+
+        def when_the_factory_is_a_classmethod_returning_self():
+            def it_compares_the_owner_class():
+                @on(Started)
+                def handle(event: Started, model: _Other) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"returns _Factory\."):
+                    EventGraph(
+                        [handle], services={"model": RunScoped(_Factory.for_run)}
+                    )

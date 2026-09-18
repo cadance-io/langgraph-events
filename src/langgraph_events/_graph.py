@@ -10,7 +10,7 @@ import types
 import typing
 from collections.abc import Mapping as _Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, TypeVar, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
@@ -66,7 +66,7 @@ from langgraph_events._rewrite import (
     plan_thread,
     validate_drop,
 )
-from langgraph_events._services import RunScoped
+from langgraph_events._services import RunScoped, _annotation_source
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -846,6 +846,150 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
         )
 
 
+def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the return annotation of every ``RunScoped`` factory.
+
+    The result maps the service name to the type the factory provides. The
+    build compares it with the handler parameter's annotation. A return
+    annotation that does not resolve raises ``TypeError`` here, so the failure
+    does not wait for the first handler that names the service.
+    """
+    provided: dict[str, Any] = {}
+    for name, value in services_by_name.items():
+        if not isinstance(value, RunScoped):
+            continue
+        source = _annotation_source(value.factory)
+        if isinstance(source, type):
+            provided[name] = source
+            continue
+        hints, errors = _resolve_hints_and_errors(source)
+        if "return" in errors:
+            raise TypeError(
+                f"RunScoped factory {_factory_label(source)!r} for service "
+                f"{name!r} has a "
+                f"return annotation that did not resolve ({errors['return']}). "
+                f"The framework compares it with each handler's parameter "
+                f"annotation at graph build, so it cannot be left unresolvable. "
+                f"Make every name in the annotation importable at run time, or "
+                f"declare the class at module level."
+            )
+        provided[name] = _resolve_self(hints["return"], source)
+    return provided
+
+
+def _resolve_self(hint: Any, source: Any) -> Any:
+    """Replace ``typing.Self`` with the class the method is bound to.
+
+    ``get_type_hints`` leaves ``Self`` as is. A method bound to a class
+    provides that class. A method bound to an instance provides its type. An
+    unbound function has no owner, so the hint is treated as ``Any``.
+    """
+    if hint is not typing.Self:
+        return hint
+    owner = getattr(source, "__self__", None)
+    if owner is None:
+        return Any
+    return owner if isinstance(owner, type) else type(owner)
+
+
+def _hint_label(hint: Any) -> str:
+    """Render an annotation for an error message.
+
+    A generic alias such as ``list[str]`` forwards ``__qualname__`` to its
+    origin, so only a plain class uses it.
+    """
+    if isinstance(hint, type):
+        return hint.__qualname__
+    return repr(hint)
+
+
+def _factory_label(factory: Any) -> str:
+    """Render a ``RunScoped`` factory for an error message."""
+    if inspect.isroutine(factory):
+        return factory.__qualname__
+    return _hint_label(factory)
+
+
+def _satisfies(
+    check: Callable[[Any, Any], bool], subject: Any, declared: Any
+) -> bool | str:
+    """Apply a ``beartype.door`` check. A string is the reason it cannot run.
+
+    ``typing`` refuses a ``Protocol`` that is not ``runtime_checkable``, and
+    beartype refuses a hint it cannot test at run time, at any nesting depth.
+    Such an annotation stays a valid static contract, so the build must not
+    fail on it. The caller warns instead.
+    """
+    from beartype.roar import BeartypeException  # noqa: PLC0415
+
+    try:
+        return check(subject, declared)
+    except (TypeError, BeartypeException) as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _verify_service_name_types(
+    meta: HandlerMeta,
+    services_by_name: dict[str, Any],
+    run_scoped_types: dict[str, Any],
+) -> None:
+    """Raise if a name-keyed service does not satisfy the handler annotation.
+
+    Name-keyed binding matches on the parameter name and needs no annotation.
+    When the parameter has an annotation that resolved, the framework checks
+    the registered service against it. A plain value must be an instance of
+    the annotation. A ``RunScoped`` factory must return a subtype of the
+    annotation. The comparison uses ``beartype.door``. It handles ``Union``,
+    a runtime ``Protocol`` with methods only, and a generic alias. A
+    ``NewType`` is nominal for a factory and erased for a plain value.
+    """
+    if not meta.service_name_hints:
+        return
+    # A cold import costs about 200 ms. Only the first graph in the process
+    # with an annotated name-keyed parameter pays it.
+    from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
+
+    for param, declared in meta.service_name_hints:
+        value = services_by_name[param]
+        label = _hint_label(declared)
+        if isinstance(value, RunScoped):
+            provided = run_scoped_types[param]
+            # ``Any`` and a bare type variable say nothing about the result.
+            if provided is Any or isinstance(provided, TypeVar):
+                continue
+            verdict = _satisfies(is_subhint, provided, declared)
+            if verdict is False:
+                factory = _factory_label(_annotation_source(value.factory))
+                returns = _hint_label(provided)
+                raise TypeError(
+                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"{label}, but services[{param!r}] is RunScoped({factory}) "
+                    f"and that factory returns {returns}. Change the annotation "
+                    f"to {returns}, or register a factory that returns {label}."
+                )
+        else:
+            verdict = _satisfies(is_bearable, value, declared)
+            if verdict is False:
+                if value is None:
+                    what = "None"
+                    fix = f"Widen the annotation to {label} | None"
+                else:
+                    what = f"an instance of {type(value).__qualname__}"
+                    fix = "Widen the annotation"
+                raise TypeError(
+                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"{label}, but services[{param!r}] is {what}, not an "
+                    f"instance of {label}. {fix}, or register a value that "
+                    f"satisfies it."
+                )
+        if isinstance(verdict, str):
+            warn_user(
+                f"Handler {meta.name!r} declares parameter {param!r} as {label}, "
+                f"which Python cannot test at run time ({verdict}). The service "
+                f"under services[{param!r}] is not checked against it."
+            )
+
+
 def _dedup_handler_name(meta: HandlerMeta, count: int) -> HandlerMeta:
     """Suffix a colliding display name positionally (``handle`` → ``handle_2``).
 
@@ -984,6 +1128,7 @@ class EventGraph:
         self._services_by_type, self._services_by_name = _build_service_registries(
             services
         )
+        run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
 
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
@@ -1000,6 +1145,7 @@ class EventGraph:
                 service_names=service_names,
             )
             _verify_no_unclaimed_params(meta)
+            _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:

@@ -111,12 +111,14 @@ def _resolve_each_annotation(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
     annotation lands in the hints. An unresolvable one lands in the errors,
     keyed by parameter name.
 
-    Resolution uses ``fn.__globals__`` only, exactly like the whole-function
-    call, so the fallback never resolves a name the fast path would miss.
+    Resolution uses the globals of the innermost wrapped function, exactly
+    like the whole-function call, so the fallback never resolves a name the
+    fast path would miss. A ``functools.wraps`` decorator copies the
+    annotations but not the globals, so the wrapper's own module is wrong.
     """
     target = getattr(fn, "__func__", fn)
     raw = getattr(target, "__annotations__", {})
-    globalns = getattr(target, "__globals__", {})
+    globalns = getattr(inspect.unwrap(target), "__globals__", {})
     # ``get_type_hints`` puts a PEP 695 type parameter in scope for the
     # function that declares it. The probe declares none, so pass them as
     # locals or every annotation naming one is recorded as a failure.
@@ -507,6 +509,11 @@ class HandlerMeta:
     # key in EventGraph(services={...}). Used as the lookup key in the
     # name-keyed services map at dispatch time.
     service_name_params: tuple[tuple[str, str], ...] = ()
+    # (param_name, resolved_annotation) for the name-keyed service params
+    # that carry an annotation. A param with no annotation, or with one that
+    # did not resolve, is absent. The graph build compares each annotation
+    # with the registered service. Name-keyed binding itself needs none.
+    service_name_hints: tuple[tuple[str, Any], ...] = ()
     # Parameters whose annotation did not resolve, mapped to the reason. A
     # parameter listed here carries no hint, so no type-matched injection can
     # claim it. ``_verify_no_unclaimed_params`` reads this to name the real
@@ -766,6 +773,9 @@ def extract_handler_meta(
     service_name_params = _detect_service_name_params(
         sig, service_names, consumed_for_services
     )
+    service_name_hints = tuple(
+        (name, hints[name]) for name, _ in service_name_params if name in hints
+    )
 
     if reducer_names:
         _warn_on_unknown_reducer_params(
@@ -809,5 +819,6 @@ def extract_handler_meta(
         invariants=invariants,
         service_params=service_params,
         service_name_params=service_name_params,
+        service_name_hints=service_name_hints,
         hint_errors=tuple(param_errors.items()),
     )

@@ -1058,6 +1058,93 @@ def describe_Command_handle():
                         services={"primary_chat": _StubChatModel(value="x")},
                     )
 
+        def when_a_name_keyed_value_is_not_an_instance_of_the_annotation():
+
+            def it_raises_at_graph_construction():
+                # Name-keyed binding needs no annotation. An annotation that
+                # is present is a contract, and the value must satisfy it.
+                @on(Shop.Buy.Bought)
+                def picky(
+                    event: Shop.Buy.Bought,
+                    primary_chat: _StubChatModel,
+                ) -> None:
+                    pass
+
+                with pytest.raises(TypeError) as info:
+                    EventGraph([picky], services={"primary_chat": object()})
+
+                message = str(info.value)
+                assert "'picky'" in message
+                assert "'primary_chat'" in message
+                assert "_StubChatModel" in message
+                assert "object" in message
+
+        def when_a_name_keyed_annotation_permits_none():
+
+            def it_accepts_a_none_value():
+                @on(Shop.Buy.Bought)
+                def lenient(
+                    event: Shop.Buy.Bought,
+                    primary_chat: _StubChatModel | None,
+                ) -> None:
+                    pass
+
+                EventGraph([lenient], services={"primary_chat": None})
+
+        def when_a_name_keyed_param_has_no_annotation():
+
+            def it_binds_the_value():
+                observed: dict[str, object] = {}
+
+                @on(Shop.Buy.Bought)
+                def untyped(event: Shop.Buy.Bought, primary_chat) -> None:  # type: ignore[no-untyped-def]
+                    observed["primary_chat"] = primary_chat
+
+                value = object()
+                graph = EventGraph([untyped], services={"primary_chat": value})
+                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
+                assert observed["primary_chat"] is value
+
+        def when_a_handler_has_an_unclaimed_param_and_a_mismatch():
+
+            def it_reports_the_unclaimed_param_first():
+                @on(Shop.Buy.Bought)
+                def twice_wrong(
+                    event: Shop.Buy.Bought,
+                    primary_chat: _StubChatModel,
+                    missing: _StubSessionFactory,
+                ) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"cannot inject"):
+                    EventGraph([twice_wrong], services={"primary_chat": object()})
+
+        def when_a_name_keyed_annotation_is_a_generic_alias():
+
+            def it_names_the_full_annotation_in_the_error():
+                @on(Shop.Buy.Bought)
+                def listy(
+                    event: Shop.Buy.Bought,
+                    primary_chat: list[_StubChatModel],
+                ) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"list\["):
+                    EventGraph([listy], services={"primary_chat": "x"})
+
+        def when_a_name_keyed_value_is_none_under_a_required_annotation():
+
+            def it_says_the_value_is_none():
+                @on(Shop.Buy.Bought)
+                def strict(
+                    event: Shop.Buy.Bought,
+                    primary_chat: _StubChatModel,
+                ) -> None:
+                    pass
+
+                with pytest.raises(TypeError, match=r"is None"):
+                    EventGraph([strict], services={"primary_chat": None})
+
         def when_handler_uses_args_and_kwargs():
 
             def it_does_not_flag_them_as_unclaimed():
