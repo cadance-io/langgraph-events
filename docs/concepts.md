@@ -156,7 +156,9 @@ The two shapes differ in what they need from the annotation.
 
 Type-keyed injection matches on the resolved annotation. The annotation must be importable at run time. An annotation imported only under `TYPE_CHECKING` does not resolve, so the parameter stays unclaimed and raises `TypeError` at graph construction.
 
-Name-keyed injection matches on the parameter name. It needs no annotation. An unresolvable annotation still binds the parameter, but the framework emits a `UserWarning`, because the annotation does not describe what is injected.
+Name-keyed injection matches on the parameter name. It needs no annotation. When the parameter has an annotation that resolves, the framework checks the registered value against it at graph build. A plain value must be an instance of the annotation. A `RunScoped` factory must return a subtype of the annotation. A mismatch raises `TypeError`.
+
+Two cases are not checked. An unresolvable annotation still binds the parameter, but the framework emits a `UserWarning`, because the annotation does not describe what is injected. An annotation that Python cannot test at run time, such as a `Protocol` without `@runtime_checkable`, is not checked. The framework emits a `UserWarning` for it.
 
 #### Run-scoped services
 
@@ -182,6 +184,8 @@ async def handle(event: SomeEvent, model: ConversationModel) -> ...: ...
 Rules:
 
 - The factory must be a plain function. A coroutine function raises `TypeError` at `RunScoped(...)`, because the result would be injected without an `await`.
+- The factory must have a return annotation. A factory without one raises `TypeError` at `RunScoped(...)`. A `functools.partial` is read through to the wrapped function. A callable object is read through its `__call__`.
+- The return annotation must resolve at graph build. A class declared inside a function cannot be named from module globals. Declare it at module level. The framework compares the return annotation with the handler parameter's annotation. A return type that is not a subtype of the parameter annotation raises `TypeError`. A factory annotated `-> Any` or with a bare type variable is not checked. The comparison is nominal. `Any` nested in the return type, or an unparameterised generic, is not a subtype of a parameterised annotation. Align the two annotations.
 - The factory runs synchronously on both the `invoke` and the `ainvoke` path. Do not do I/O in it.
 - `RunScoped` is rejected in the type-keyed sequence form, because that form resolves by annotation.
 - A resumed run receives a freshly built config. The factory runs against the current config, not a checkpointed one.

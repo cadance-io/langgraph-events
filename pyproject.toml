@@ -21,6 +21,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    # Compares a name-keyed service with the handler annotation at graph
+    # build (``beartype.door``). Pure Python, no dependencies.
+    "beartype>=0.22.0",
     "langgraph>=0.2.0",
     # NamespaceAwareSerde extends JsonPlusSerializer and relies on its
     # per-instance ``_unpack_ext_hook`` attribute (and on ``_msgpack_default``

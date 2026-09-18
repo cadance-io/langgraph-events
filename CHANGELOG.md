@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A name-keyed service is checked against the handler's annotation at graph build.**
+  Closes [#189](https://github.com/cadance-io/langgraph-events/issues/189).
+  `EventGraph(services={"name": value})` binds a handler parameter by name. The annotation on
+  that parameter was ignored. The framework now compares it with the registered value at graph
+  build. A plain value must be an instance of the annotation. A `RunScoped` factory must return
+  a subtype of the annotation. A mismatch raises `TypeError` naming the handler, the parameter,
+  the declared annotation and the provided type.
+
+  The check is skipped in four cases: the parameter has no annotation, the annotation does not
+  resolve, the factory returns `Any` or a bare type variable, or Python cannot test the
+  annotation at run time, such as a `Protocol` without `@runtime_checkable`. The last case
+  emits a `UserWarning`. The comparison uses `beartype.door`. `beartype` is a new required
+  dependency, imported only when a graph has an annotated name-keyed parameter.
+
+### Fixed
+
+- **A decorated handler or factory resolves its annotations against its own module.** The
+  per-annotation fallback read the globals of the outermost wrapper. A `functools.wraps`
+  decorator defined in another module, or `functools.cache`, then failed to resolve a name
+  that the function's own module defines. Resolution now reads the innermost wrapped function.
+
+### Changed
+
+- **BREAKING: a `RunScoped` factory must have a return annotation.**
+  A factory without a return annotation raises `TypeError` at `RunScoped(...)`. A return
+  annotation that does not resolve at graph build raises `TypeError` naming the factory. The
+  framework reads the annotation to check the factory result against the handler parameter.
+  Annotate the factory: `def model_for(config: RunnableConfig) -> ConversationModel`. A lambda
+  cannot carry a return annotation. A `unittest.mock.Mock` has none. Use a `def` in both cases.
+  A class is accepted as a factory. Its instances are the provided type.
+- **BREAKING: a name-keyed plain value that does not satisfy the parameter annotation fails
+  the build.** A `None` registered under a parameter annotated without `| None`, or a test
+  double that is not an instance of the annotation, raised nothing before. Correct the
+  annotation, or register a value that satisfies it.
+
 ## [0.32.0] - 2026-09-16
 
 ### Added
