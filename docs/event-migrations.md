@@ -355,6 +355,7 @@ rebuilt = replay_reducer(my_reducer, event_log)
 - Thin wrapper around `BaseReducer.seed(events)` — reducer default, namespace filter, and `event_type` predicate all apply.
 - Composes with event-rename machinery (`event_log` was already migrated on read).
 - Library doesn't iterate the checkpointer for you — wire the read/write loop in your own startup script.
+- `replay_reducer(my_reducer, event_log, services={"name": value})` binds a reducer `fn` that declares a service parameter. Give plain values only. This function has no run config. A `RunScoped` value there raises `TypeError`. Resolve it yourself first. See [Reducers › Services in a reducer fn](reducers.md#services-in-a-reducer-fn).
 
 ### Catching silent revivals loudly
 

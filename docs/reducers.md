@@ -107,6 +107,64 @@ def permissive(event: TaskReceived, strategy: str | None) -> Completed:
     - Opt out by widening the annotation: `str | None`, `Optional[str]`, `Any`, `object`, or no annotation.
     - Forward-ref failures: the framework emits a `UserWarning` for that parameter and treats it as permissive. Other parameters on the same handler keep their hints. Annotate against importable types so the assertion sticks.
 
+## Services in a reducer fn { #services-in-a-reducer-fn }
+
+A `Reducer` or `ScalarReducer` `fn` can declare a service. The first parameter is the event. Each other required parameter resolves by name from the graph's name-keyed `services` mapping. A plain value and a `RunScoped` value are both legal.
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+from langgraph_events import EventGraph, IntegrationEvent, Reducer, RunScoped, on
+
+
+class NoticeRaised(IntegrationEvent):
+    text: str
+
+
+def language_for(config) -> str:
+    return config["configurable"]["language"]
+
+
+def project(event: NoticeRaised, language: str) -> list[str]:
+    return [f"{language}: {event.text}"]
+
+
+notices = Reducer(name="notices", event_type=NoticeRaised, fn=project)
+
+
+@on(NoticeRaised)
+def log_notice(event: NoticeRaised) -> None:
+    return None
+
+
+graph = EventGraph(
+    [log_notice],
+    reducers=[notices],
+    services={"language": RunScoped(language_for)},
+    checkpointer=MemorySaver(),
+)
+
+config = {"configurable": {"thread_id": "t1", "language": "fr"}}
+log = graph.invoke(NoticeRaised(text="stock low"), config=config)
+print(graph.reflect(log, config=config).state())
+```
+
+A `fn` with one parameter keeps its old behaviour. It receives the event only.
+
+A reducer `fn` receives no `config`, no `store` and no reducer value. A wrong declaration raises `TypeError` at graph build. The message names the reducer, the parameter and the known services.
+
+`FoldReducer` cannot receive a service. A `fold` callable with a third required parameter raises `TypeError` at graph build. Use a `Reducer` or a `ScalarReducer` instead.
+
+!!! warning "A reducer's `RunScoped` factory sees a smaller config"
+    A factory used by a reducer receives only the caller-supplied `configurable` keys. It receives no `metadata`, no `callbacks`, no `tags` and no store. A missing config becomes `{"configurable": {}}`.
+
+    Reason: the checkpoint value and the streamed value must be equal. A handler's factory still receives the full config.
+
+!!! warning "A reducer service must stay stable for the thread's life"
+    A `RunScoped` service used by a reducer must be stable for the life of the thread. If it changes, a from-scratch projection, such as `reflect` or `replay_reducer`, computes a value that differs from the checkpoint.
+
+A handler and a reducer that share one `RunScoped` service call the factory two times in one node call. This cost is accepted.
+
 ## `FoldReducer`
 
 Accumulator whose next value depends on the **prior** state — a left-fold, where `Reducer` appends and `ScalarReducer` takes the last write. Use it for counters, merging dicts, or re-derived cursors. Each event owns its transition via `fold(self, state)` (the same polymorphic style as `MessageEvent.as_messages()`); supply only `name`, `event_type`, and a `default_factory`.
@@ -189,6 +247,8 @@ event_log = checkpointer.get_tuple(config).checkpoint["channel_values"]["event_l
 rebuilt = replay_reducer(my_reducer, event_log)
 # Write `rebuilt` back through the checkpointer's put API.
 ```
+
+Pass `services={"name": value}` when the reducer `fn` declares a service parameter. Use plain values only. A `RunScoped` value there raises `TypeError`. This function has no run config. Resolve the value yourself, then pass the result.
 
 The library doesn't iterate the checkpointer for you — wire the loop in your own startup or migration script. See [Event migrations](event-migrations.md) for the reducer-state matrix.
 

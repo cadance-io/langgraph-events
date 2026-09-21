@@ -36,6 +36,11 @@ beyond the handler call. The same goes for `run.tool()`: the tool closes
 over that snapshot, so an agent framework that retains tool objects across
 turns silently pins stale data.
 
+Pass `config` to `graph.reflect(log, config=...)` when a reducer `fn`
+declares a service parameter. A `RunScoped` service in that config resolves
+through its factory. See [Reducers › Services in a reducer
+fn](reducers.md#services-in-a-reducer-fn).
+
 `run.log` exposes the raw `EventLog` with its full Python query surface
 (`filter`/`select`/`latest`/`after`/…). `Reflection` deliberately does not
 re-wrap those methods: every `#index` in every rendering refers to a
