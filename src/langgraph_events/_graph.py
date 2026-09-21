@@ -2797,11 +2797,18 @@ class EventGraph:
         state: dict[str, Any],
         event: Event,
         reducer_names: list[str],
+        reducers: dict[str, BaseReducer],
     ) -> frozenset[str]:
-        """Incrementally update reducer state with a single new event."""
+        """Incrementally update reducer state with a single new event.
+
+        The caller passes *reducers*. A reducer bound to the run config
+        holds its service values, so the shadow state matches the
+        checkpoint. Concurrent streams share ``self._reducers``, so this
+        method must not read the attribute.
+        """
         changed: set[str] = set()
         for name in reducer_names:
-            r = self._reducers[name]
+            r = reducers[name]
             contribution = r.collect([event])
             if r.has_contributions(contribution):
                 reducer_fn = getattr(r, "reducer", None)
@@ -2875,6 +2882,18 @@ class EventGraph:
         compiled = self._compile()
         is_resume = isinstance(inp, LGCommand)
 
+        # Bind the reducers one time per stream call, not one time per
+        # event.  A bound reducer holds its service values, so the shadow
+        # state below equals the value the node path writes to the
+        # checkpoint.  ``self._reducers`` stays unchanged, because
+        # concurrent streams share it.  Skip the binding when the caller
+        # asked for no reducer, so an unused run-scoped factory never runs.
+        reducers = (
+            self._reducers_for(kwargs.get("config"))
+            if reducer_names
+            else self._reducers
+        )
+
         # Initialize incremental reducer state.  When a checkpoint exists
         # (subsequent run / resume), start from the checkpointed values so
         # the shadow state matches what the compiled graph already restored.
@@ -2892,11 +2911,9 @@ class EventGraph:
 
         for name in reducer_names:
             if checkpoint_values is not None:
-                reducer_state[name] = checkpoint_values.get(
-                    name, self._reducers[name].empty
-                )
+                reducer_state[name] = checkpoint_values.get(name, reducers[name].empty)
             else:
-                reducer_state[name] = self._reducers[name].seed(seeds)
+                reducer_state[name] = reducers[name].seed(seeds)
 
         # Merge seed contributions on top of checkpointed state.
         # - On astream_events second-run: seeds carry new events whose
@@ -2914,7 +2931,7 @@ class EventGraph:
         #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
         if checkpoint_values is not None and not is_resume:
             for s in seeds:
-                self._update_reducer_state(reducer_state, s, reducer_names)
+                self._update_reducer_state(reducer_state, s, reducer_names, reducers)
 
         # Yield seed events
         for s in seeds:
@@ -2922,9 +2939,7 @@ class EventGraph:
                 changed = frozenset(
                     name
                     for name in reducer_names
-                    if self._reducers[name].has_contributions(
-                        self._reducers[name].collect([s])
-                    )
+                    if reducers[name].has_contributions(reducers[name].collect([s]))
                 )
                 yield StreamFrame(
                     event=s,
@@ -3007,6 +3022,7 @@ class EventGraph:
                         reducer_state,
                         event,
                         reducer_names,
+                        reducers,
                     )
                     yield StreamFrame(
                         event=event,

@@ -1,7 +1,8 @@
 """Tests for reducer ``fn`` service parameters: `_service_params`, `_bind`,
 `_BoundFn`, the unbound guard on `collect` / `seed`, binding a whole reducer
-dict to a run config via `bind_reducers`, the graph build check, and
-`EventGraph._reducers_for`.
+dict to a run config via `bind_reducers`, the graph build check,
+`EventGraph._reducers_for`, the node paths, the stream shadow and the AG-UI
+adapter.
 """
 
 from __future__ import annotations
@@ -26,10 +27,12 @@ from langgraph_events import (
     Reflection,
     RunScoped,
     ScalarReducer,
+    message_reducer,
     on,
 )
 from langgraph_events._internal import _caller_config, bind_reducers
 from langgraph_events._reducer import _BoundFn, _fold_service_params, _service_params
+from langgraph_events.agui import AGUIAdapter, FrontendStateMutated
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -65,6 +68,29 @@ def _collected_value(reducer_cls, result):
 
 def _language_for(config: RunnableConfig) -> str:
     return config["configurable"]["language"]
+
+
+def _project_focus(event, language):
+    return [f"{language}:{event.state['focus']}"]
+
+
+# Module-level, so each stream test can read what the factory received.
+_factory_configs: list[Any] = []
+
+
+def _recording_language_for(config: RunnableConfig) -> str:
+    """Record the config the framework passes, then return the language."""
+    _factory_configs.append(config)
+    return config["configurable"]["language"]
+
+
+_metadata_seen: list[Any] = []
+
+
+def _metadata_probe(config: RunnableConfig) -> str:
+    """Record the top-level ``metadata`` key, then return a fixed language."""
+    _metadata_seen.append(config.get("metadata"))
+    return "fr"
 
 
 @on(MessageReceived)
@@ -648,3 +674,110 @@ def describe_node_paths_use_bound_reducers():
 
             value = graph.compiled.get_state(config).values["notes"]
             assert value == ["fr:hi"]
+
+
+async def _stream_notes(factory: Any, config: dict[str, Any]) -> tuple[list, dict]:
+    """Stream ``Pinged`` through a graph whose reducer needs a ``language``.
+
+    ``include_llm_tokens=True`` selects the shadow stream path. That path
+    keeps its own reducer state and calls the reducer ``fn`` directly.
+    ``_relay`` turns the seed into a ``MessageReceived``, so the reducer
+    projects a handler-produced event.
+
+    Returns the stream frames and the checkpoint values.
+    """
+    graph = EventGraph(
+        [_relay],
+        reducers=[_make_reducer(Reducer)],
+        services={"language": RunScoped(factory)},
+        checkpointer=MemorySaver(),
+    )
+    frames = [
+        item
+        async for item in graph.astream_events(
+            Pinged(),
+            include_reducers=True,
+            include_llm_tokens=True,
+            config=config,
+        )
+    ]
+    snapshot = await graph.compiled.aget_state(config)
+    return frames, snapshot.values
+
+
+def describe_stream_path_uses_bound_reducers():
+    """``EventGraph.astream_events`` projects events through bound reducers."""
+
+    def when_a_handler_produced_event_matches_a_service_bound_reducer():
+        async def it_streams_the_checkpoint_value():
+            config = {"configurable": {"thread_id": "stream-equal", "language": "fr"}}
+
+            frames, values = await _stream_notes(_recording_language_for, config)
+
+            assert isinstance(frames[-1].event, MessageReceived)
+            assert frames[-1].reducers["notes"] == values["notes"]
+            assert values["notes"] == ["fr:hi"]
+
+        async def it_gives_the_factory_the_same_config_on_every_path():
+            _factory_configs.clear()
+            config = {"configurable": {"thread_id": "stream-config", "language": "fr"}}
+            expected = {
+                "configurable": {"thread_id": "stream-config", "language": "fr"}
+            }
+
+            await _stream_notes(_recording_language_for, config)
+
+            assert len(_factory_configs) > 1
+            assert all(seen == expected for seen in _factory_configs)
+
+    def when_the_factory_reads_top_level_metadata():
+        async def it_receives_none_on_every_path():
+            _metadata_seen.clear()
+            config = {
+                "configurable": {"thread_id": "stream-metadata"},
+                "metadata": {"a": 1},
+            }
+
+            await _stream_notes(_metadata_probe, config)
+
+            assert len(_metadata_seen) > 1
+            assert all(seen is None for seen in _metadata_seen)
+
+    def when_the_stream_call_has_no_config():
+        async def it_raises_the_key_error_of_the_factory():
+            graph = EventGraph(
+                [_noop],
+                reducers=[_make_reducer(Reducer)],
+                services={"language": RunScoped(_language_for)},
+            )
+
+            with pytest.raises(KeyError, match="language"):
+                async for _ in graph.astream_events(
+                    MessageReceived(text="hi"),
+                    include_reducers=True,
+                    include_llm_tokens=True,
+                ):
+                    pass
+
+
+def describe_agui_adapter_uses_bound_reducers():
+    """``AGUIAdapter`` computes resume channel updates with bound reducers."""
+
+    def when_a_frontend_state_event_matches_a_service_bound_reducer():
+        def it_returns_a_bound_contribution():
+            reducer = Reducer(
+                name="notes", event_type=FrontendStateMutated, fn=_project_focus
+            )
+            graph = EventGraph(
+                [_noop],
+                reducers=[message_reducer(), reducer],
+                services={"language": RunScoped(_language_for)},
+            )
+            adapter = AGUIAdapter(graph=graph, seed_factory=lambda inp: Pinged())
+            config = {"configurable": {"thread_id": "adapter", "language": "fr"}}
+
+            updates = adapter._reducer_updates_for(
+                [FrontendStateMutated(state={"focus": "scene"})], config
+            )
+
+            assert updates["notes"] == ["fr:scene"]
