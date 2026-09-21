@@ -112,6 +112,35 @@ class _BoundFn:
         return f"<bound {name} services={sorted(self._values)}>"
 
 
+def _signature_params_after(
+    fn: Callable[..., Any], skip: int
+) -> list[inspect.Parameter]:
+    """Return the required, bindable parameters of *fn* after the first *skip*.
+
+    A required, bindable parameter has no default value and is not
+    ``*args`` or ``**kwargs``. Neither of those can take a keyword
+    argument the framework supplies by name.
+
+    Return ``[]`` when ``inspect.signature(fn)`` cannot read *fn*, for
+    example the builtin ``str``.
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return []
+    result: list[inspect.Parameter] = []
+    for parameter in list(signature.parameters.values())[skip:]:
+        if parameter.default is not inspect.Parameter.empty:
+            continue
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        result.append(parameter)
+    return result
+
+
 def _service_params(fn: Callable[..., Any]) -> tuple[str, ...]:
     """Return the service parameter names *fn* declares, in order.
 
@@ -133,19 +162,8 @@ def _service_params(fn: Callable[..., Any]) -> tuple[str, ...]:
     """
     if isinstance(fn, _BoundFn):
         return ()
-    try:
-        signature = inspect.signature(fn)
-    except (ValueError, TypeError):
-        return ()
     names: list[str] = []
-    for parameter in list(signature.parameters.values())[1:]:
-        if parameter.default is not inspect.Parameter.empty:
-            continue
-        if parameter.kind in (
-            inspect.Parameter.VAR_POSITIONAL,
-            inspect.Parameter.VAR_KEYWORD,
-        ):
-            continue
+    for parameter in _signature_params_after(fn, 1):
         if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
             raise TypeError(
                 f"{fn!r} declares the required positional-only parameter "
@@ -156,6 +174,19 @@ def _service_params(fn: Callable[..., Any]) -> tuple[str, ...]:
             )
         names.append(parameter.name)
     return tuple(names)
+
+
+def _fold_service_params(fold: Callable[..., Any]) -> tuple[str, ...]:
+    """Return the name of every parameter *fold* declares after ``state, event``.
+
+    A :class:`FoldReducer`'s ``fold`` callable takes ``fold(state, event)``.
+    It has no ``services=`` binding path, so any further required
+    parameter cannot be satisfied. The graph build reads this list and
+    raises for the first name found.
+
+    Return ``()`` when ``inspect.signature(fold)`` cannot read *fold*.
+    """
+    return tuple(p.name for p in _signature_params_after(fold, 2))
 
 
 class BaseReducer(ABC):

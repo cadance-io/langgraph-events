@@ -50,6 +50,7 @@ from langgraph_events._internal import (
     _InputState,
     _leaf_node,
     _OutputState,
+    bind_reducers,
     build_state_schema,
     make_dispatch,
     make_handler_node,
@@ -59,6 +60,7 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._reducer import FoldReducer, _fold_service_params
 from langgraph_events._rewrite import (
     RewriteReport,
     ThreadPlan,
@@ -929,11 +931,16 @@ def _satisfies(
 
 
 def _verify_service_name_types(
-    meta: HandlerMeta,
+    owner: str,
+    hints: Sequence[tuple[str, Any]],
     services_by_name: dict[str, Any],
     run_scoped_types: dict[str, Any],
 ) -> None:
-    """Raise if a name-keyed service does not satisfy the handler annotation.
+    """Raise if a name-keyed service does not satisfy the declared annotation.
+
+    *owner* labels the raised message, e.g. ``"Handler 'classify'"`` or
+    ``"Reducer 'notes' fn"``. *hints* pairs each name-keyed parameter with
+    its resolved annotation.
 
     Name-keyed binding matches on the parameter name and needs no annotation.
     When the parameter has an annotation that resolved, the framework checks
@@ -943,13 +950,13 @@ def _verify_service_name_types(
     a runtime ``Protocol`` with methods only, and a generic alias. A
     ``NewType`` is nominal for a factory and erased for a plain value.
     """
-    if not meta.service_name_hints:
+    if not hints:
         return
     # A cold import costs about 200 ms. Only the first graph in the process
     # with an annotated name-keyed parameter pays it.
     from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
 
-    for param, declared in meta.service_name_hints:
+    for param, declared in hints:
         value = services_by_name[param]
         label = _hint_label(declared)
         if isinstance(value, RunScoped):
@@ -962,7 +969,7 @@ def _verify_service_name_types(
                 factory = _factory_label(_annotation_source(value.factory))
                 returns = _hint_label(provided)
                 raise TypeError(
-                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"{owner} declares parameter {param!r} as "
                     f"{label}, but services[{param!r}] is RunScoped({factory}) "
                     f"and that factory returns {returns}. Change the annotation "
                     f"to {returns}, or register a factory that returns {label}."
@@ -977,17 +984,71 @@ def _verify_service_name_types(
                     what = f"an instance of {type(value).__qualname__}"
                     fix = "Widen the annotation"
                 raise TypeError(
-                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"{owner} declares parameter {param!r} as "
                     f"{label}, but services[{param!r}] is {what}, not an "
                     f"instance of {label}. {fix}, or register a value that "
                     f"satisfies it."
                 )
         if isinstance(verdict, str):
             warn_user(
-                f"Handler {meta.name!r} declares parameter {param!r} as {label}, "
+                f"{owner} declares parameter {param!r} as {label}, "
                 f"which Python cannot test at run time ({verdict}). The service "
                 f"under services[{param!r}] is not checked against it."
             )
+
+
+def _verify_reducer_service_params(
+    reducers: dict[str, BaseReducer],
+    services_by_type: dict[type, Any],
+    services_by_name: dict[str, Any],
+    run_scoped_types: dict[str, Any],
+) -> None:
+    """Raise if a reducer declares a service parameter the build cannot bind.
+
+    A ``FoldReducer``'s ``fold`` callable takes only ``state`` and ``event``
+    — it has no ``services=`` binding path, so a further required parameter
+    raises. A ``Reducer`` or ``ScalarReducer`` service parameter must be a
+    key of *services_by_name*. Each service parameter that carries a
+    resolved annotation is also checked against the registered service,
+    with the same rule :func:`_verify_service_name_types` applies to a
+    handler parameter.
+    """
+    known = set(services_by_name)
+    for name, r in reducers.items():
+        if isinstance(r, FoldReducer):
+            fold_params = _fold_service_params(r.fold)
+            if fold_params:
+                raise TypeError(
+                    f"FoldReducer {name!r} fold declares the parameter "
+                    f"{fold_params[0]!r}. A FoldReducer cannot receive a "
+                    f"service. Use a Reducer or a ScalarReducer."
+                )
+            continue
+        params = r._service_params
+        if not params:
+            continue
+        for param in params:
+            if param not in known:
+                message = (
+                    f"Reducer {name!r} fn parameter {param!r} is not a key "
+                    f"of services. A reducer fn receives the event and "
+                    f"name-keyed services only. It receives no config, no "
+                    f"store and no reducer value. Known services: "
+                    f"{sorted(known)}."
+                )
+                if services_by_type:
+                    message += (
+                        " A reducer service needs the name-keyed mapping "
+                        "form: services={'name': value}."
+                    )
+                raise TypeError(message)
+        # A non-empty _service_params means r is a Reducer or ScalarReducer,
+        # both of which declare a ``fn`` field — the base type does not.
+        hints, _errors = _resolve_hints_and_errors(cast("Any", r).fn)
+        reducer_hints = tuple((p, hints[p]) for p in params if p in hints)
+        _verify_service_name_types(
+            f"Reducer {name!r} fn", reducer_hints, services_by_name, run_scoped_types
+        )
 
 
 def _dedup_handler_name(meta: HandlerMeta, count: int) -> HandlerMeta:
@@ -1129,6 +1190,12 @@ class EventGraph:
             services
         )
         run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
+        _verify_reducer_service_params(
+            self._reducers,
+            self._services_by_type,
+            self._services_by_name,
+            run_scoped_types,
+        )
 
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
@@ -1145,7 +1212,12 @@ class EventGraph:
                 service_names=service_names,
             )
             _verify_no_unclaimed_params(meta)
-            _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
+            _verify_service_name_types(
+                f"Handler {meta.name!r}",
+                meta.service_name_hints,
+                self._services_by_name,
+                run_scoped_types,
+            )
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:
@@ -1210,6 +1282,16 @@ class EventGraph:
     def reducer_names(self) -> frozenset[str]:
         """The names of all registered reducers."""
         return frozenset(self._reducers.keys())
+
+    def _reducers_for(self, config: RunnableConfig | None) -> dict[str, BaseReducer]:
+        """Return this graph's reducers, bound to *config*'s service values.
+
+        Returns ``self._reducers`` itself when no reducer declares a
+        service parameter — the common case pays no cost. Otherwise
+        returns a fresh dict of bound copies; ``self._reducers`` is left
+        unchanged.
+        """
+        return bind_reducers(self._reducers, self._services_by_name, config)
 
     @property
     def handler_names(self) -> frozenset[str]:

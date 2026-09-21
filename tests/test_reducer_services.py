@@ -1,6 +1,7 @@
 """Tests for reducer ``fn`` service parameters: `_service_params`, `_bind`,
-`_BoundFn`, the unbound guard on `collect` / `seed`, and binding a whole
-reducer dict to a run config via `bind_reducers`.
+`_BoundFn`, the unbound guard on `collect` / `seed`, binding a whole reducer
+dict to a run config via `bind_reducers`, the graph build check, and
+`EventGraph._reducers_for`.
 """
 
 from __future__ import annotations
@@ -11,9 +12,21 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from conftest import MessageReceived
 
-from langgraph_events import BaseReducer, Reducer, RunScoped, ScalarReducer
+from langgraph_events import (
+    BaseReducer,
+    Command,
+    DomainEvent,
+    Event,
+    EventGraph,
+    FoldReducer,
+    Namespace,
+    Reducer,
+    RunScoped,
+    ScalarReducer,
+    on,
+)
 from langgraph_events._internal import _caller_config, bind_reducers
-from langgraph_events._reducer import _BoundFn, _service_params
+from langgraph_events._reducer import _BoundFn, _fold_service_params, _service_params
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -49,6 +62,25 @@ def _collected_value(reducer_cls, result):
 
 def _language_for(config: RunnableConfig) -> str:
     return config["configurable"]["language"]
+
+
+@on(MessageReceived)
+def _noop(event: MessageReceived) -> None:
+    return None
+
+
+# Module-level so the return annotation below resolves at runtime — see the
+# same pattern in test_reducer_namespace.py. The inline handler lives on the
+# Command itself, since only a Command's own handler may emit its outcome.
+class _NamespaceWithService(Namespace):
+    notes = Reducer(event_type=Event, fn=_project_list)
+
+    class Act(Command):
+        class Acted(DomainEvent):
+            pass
+
+        def handle(self) -> _NamespaceWithService.Act.Acted:
+            return _NamespaceWithService.Act.Acted()
 
 
 def describe_service_params():
@@ -342,3 +374,145 @@ def describe_bind_reducers():
 
             notes = getattr(info.value, "__notes__", [])
             assert any("notes" in n and "language" in n for n in notes), notes
+
+
+def describe_fold_service_params():
+    def it_returns_empty_for_the_default_fold():
+        def fold(state, event):
+            return state
+
+        assert _fold_service_params(fold) == ()
+
+    def it_returns_the_name_of_a_required_third_parameter():
+        def fold(state, event, language):
+            return state
+
+        assert _fold_service_params(fold) == ("language",)
+
+    def it_skips_a_third_parameter_that_has_a_default():
+        def fold(state, event, language="en"):
+            return state
+
+        assert _fold_service_params(fold) == ()
+
+    def it_returns_empty_for_an_unreadable_signature():
+        assert _fold_service_params(str) == ()
+
+
+def describe_build_check():
+    def when_a_reducer_service_parameter_is_not_a_registered_service():
+        def it_raises_naming_the_reducer_the_parameter_and_known_services():
+            reducer = _make_reducer(Reducer)
+
+            with pytest.raises(TypeError) as info:
+                EventGraph([_noop], reducers=[reducer], services={"other": "x"})
+
+            message = str(info.value)
+            assert "Reducer 'notes' fn parameter 'language' is not a key of " in message
+            assert "Known services: ['other']." in message
+
+    def when_a_reducer_fn_declares_a_config_parameter():
+        def it_raises_the_same_unknown_service_error():
+            def fn(event, config):
+                return [config]
+
+            reducer = Reducer(name="notes", event_type=MessageReceived, fn=fn)
+
+            with pytest.raises(TypeError) as info:
+                EventGraph([_noop], reducers=[reducer], services={"other": "x"})
+
+            assert "Reducer 'notes' fn parameter 'config' is not a key of " in str(
+                info.value
+            )
+
+    def when_the_sequence_form_of_services_is_in_use():
+        def it_adds_the_mapping_form_sentence():
+            reducer = _make_reducer(Reducer)
+
+            with pytest.raises(TypeError) as info:
+                EventGraph([_noop], reducers=[reducer], services=["x"])
+
+            assert "services={'name': value}." in str(info.value)
+
+    def when_a_fold_reducer_fold_declares_a_third_required_parameter():
+        def it_raises():
+            def fold(state, event, language):
+                return state
+
+            reducer = FoldReducer(
+                name="count",
+                event_type=MessageReceived,
+                default_factory=dict,
+                fold=fold,
+            )
+
+            with pytest.raises(TypeError) as info:
+                EventGraph([_noop], reducers=[reducer])
+
+            message = str(info.value)
+            assert "FoldReducer 'count' fold declares the parameter 'language'." in (
+                message
+            )
+            assert "Use a Reducer or a ScalarReducer." in message
+
+    def when_a_reducer_fn_parameter_has_the_wrong_declared_type():
+        def it_raises_a_message_prefixed_by_the_reducer_fn_label():
+            def fn(event, language: int):
+                return [language]
+
+            reducer = Reducer(name="messages", event_type=MessageReceived, fn=fn)
+
+            with pytest.raises(TypeError) as info:
+                EventGraph([_noop], reducers=[reducer], services={"language": "fr"})
+
+            assert str(info.value).startswith("Reducer 'messages' fn")
+
+    def when_a_run_scoped_factory_returns_the_wrong_type():
+        def it_raises():
+            def factory(config: RunnableConfig) -> int:
+                return 1
+
+            def fn(event, language: str):
+                return [language]
+
+            reducer = Reducer(name="messages", event_type=MessageReceived, fn=fn)
+
+            with pytest.raises(TypeError) as info:
+                EventGraph(
+                    [_noop],
+                    reducers=[reducer],
+                    services={"language": RunScoped(factory)},
+                )
+
+            assert str(info.value).startswith("Reducer 'messages' fn")
+
+    def when_fn_has_an_unreadable_signature():
+        def it_builds():
+            reducer = ScalarReducer(name="text", event_type=MessageReceived, fn=str)
+
+            EventGraph([_noop], reducers=[reducer])
+
+    def when_a_namespace_class_attribute_reducer_has_a_service_parameter():
+        def it_builds():
+            EventGraph([_NamespaceWithService.Act], services={"language": "fr"})
+
+
+def describe_reducers_for():
+    def when_no_reducer_declares_a_service_parameter():
+        def it_returns_the_graphs_reducers_itself():
+            reducer = Reducer(name="notes", event_type=MessageReceived, fn=lambda e: [])
+            graph = EventGraph([_noop], reducers=[reducer])
+
+            result = graph._reducers_for(None)
+
+            assert result is graph._reducers
+
+    def when_a_reducer_declares_a_service_parameter():
+        def it_returns_bound_copies():
+            reducer = _make_reducer(Reducer)
+            graph = EventGraph([_noop], reducers=[reducer], services={"language": "fr"})
+
+            result = graph._reducers_for(None)
+
+            assert result is not graph._reducers
+            assert result["notes"].collect([MessageReceived(text="hi")]) == ["fr:hi"]
