@@ -1,16 +1,22 @@
 """Tests for reducer ``fn`` service parameters: `_service_params`, `_bind`,
-`_BoundFn`, and the unbound guard on `collect` / `seed`.
+`_BoundFn`, the unbound guard on `collect` / `seed`, and binding a whole
+reducer dict to a run config via `bind_reducers`.
 """
 
 from __future__ import annotations
 
 import operator
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from conftest import MessageReceived
 
-from langgraph_events import BaseReducer, Reducer, ScalarReducer
+from langgraph_events import BaseReducer, Reducer, RunScoped, ScalarReducer
+from langgraph_events._internal import _caller_config, bind_reducers
 from langgraph_events._reducer import _BoundFn, _service_params
+
+if TYPE_CHECKING:
+    from langchain_core.runnables import RunnableConfig
 
 
 def _project_list(event, language):
@@ -39,6 +45,10 @@ class _Marker:
 
 def _collected_value(reducer_cls, result):
     return result[0] if reducer_cls is Reducer else result
+
+
+def _language_for(config: RunnableConfig) -> str:
+    return config["configurable"]["language"]
 
 
 def describe_service_params():
@@ -201,3 +211,134 @@ def describe_base_reducer_defaults():
         reducer = _NotADataclass()
 
         assert reducer._bind({"language": "fr"}) is reducer
+
+
+def describe_caller_config():
+    def when_config_is_none():
+        def it_returns_an_empty_configurable():
+            assert _caller_config(None) == {"configurable": {}}
+
+    def when_config_holds_internal_and_checkpoint_keys():
+        def it_drops_them():
+            config: RunnableConfig = {
+                "configurable": {
+                    "__pregel_runtime": object(),
+                    "__lge_deadline": 1.0,
+                    "checkpoint_ns": "ns",
+                    "checkpoint_id": "id",
+                    "thread_id": "t1",
+                    "language": "fr",
+                }
+            }
+
+            result = _caller_config(config)
+
+            assert result == {"configurable": {"thread_id": "t1", "language": "fr"}}
+
+    def when_config_holds_top_level_metadata():
+        def it_omits_metadata_callbacks_and_tags():
+            config: RunnableConfig = {
+                "configurable": {"thread_id": "t1"},
+                "metadata": {"a": 1},
+                "callbacks": [object()],
+                "tags": ["x"],
+            }
+
+            result = _caller_config(config)
+
+            assert result == {"configurable": {"thread_id": "t1"}}
+            assert "metadata" not in result
+            assert "callbacks" not in result
+            assert "tags" not in result
+
+
+def describe_bind_reducers():
+    def when_no_reducer_declares_a_service_parameter():
+        def it_returns_the_same_dict_object():
+            reducer = Reducer(name="notes", event_type=MessageReceived, fn=lambda e: [])
+            reducers = {"notes": reducer}
+
+            result = bind_reducers(reducers, None, None)
+
+            assert result is reducers
+
+    def when_a_run_scoped_service_is_declared():
+        def it_resolves_the_service_from_configurable():
+            reducer = _make_reducer(Reducer)
+            config: RunnableConfig = {"configurable": {"language": "fr"}}
+
+            bound = bind_reducers(
+                {"notes": reducer},
+                {"language": RunScoped(_language_for)},
+                config,
+            )
+
+            result = bound["notes"].collect([MessageReceived(text="hi")])
+            assert result == ["fr:hi"]
+
+    def when_a_plain_service_is_declared():
+        def it_binds_the_plain_value():
+            reducer = _make_reducer(Reducer)
+
+            bound = bind_reducers({"notes": reducer}, {"language": "fr"}, None)
+
+            result = bound["notes"].collect([MessageReceived(text="hi")])
+            assert result == ["fr:hi"]
+
+    def when_two_reducers_share_one_run_scoped_service():
+        def it_calls_the_factory_one_time():
+            calls: list[Any] = []
+
+            def factory(config: RunnableConfig) -> str:
+                calls.append(config)
+                return "fr"
+
+            first = _make_reducer(Reducer)
+            second = _make_reducer(ScalarReducer)
+            config: RunnableConfig = {"configurable": {}}
+
+            bind_reducers(
+                {"first": first, "second": second},
+                {"language": RunScoped(factory)},
+                config,
+            )
+
+            assert len(calls) == 1
+
+        def it_gives_the_factory_exactly_the_normalised_config():
+            calls: list[Any] = []
+
+            def factory(config: RunnableConfig) -> str:
+                calls.append(config)
+                return "fr"
+
+            reducer = _make_reducer(Reducer)
+            config: RunnableConfig = {
+                "configurable": {
+                    "thread_id": "t1",
+                    "__pregel_runtime": object(),
+                    "checkpoint_ns": "ns",
+                },
+                "metadata": {"a": 1},
+            }
+
+            bind_reducers({"notes": reducer}, {"language": RunScoped(factory)}, config)
+
+            assert calls == [{"configurable": {"thread_id": "t1"}}]
+
+    def when_the_factory_raises():
+        def it_keeps_the_exception_type_and_carries_the_note():
+            def broken(config: RunnableConfig) -> str:
+                raise ValueError("boom")
+
+            reducer = _make_reducer(Reducer)
+
+            with pytest.raises(ValueError, match="boom") as info:
+                bind_reducers(
+                    {"notes": reducer},
+                    {"language": RunScoped(broken)},
+                    {"configurable": {}},
+                )
+
+            notes = getattr(info.value, "__notes__", [])
+            assert any("notes" in n and "language" in n for n in notes), notes

@@ -380,6 +380,64 @@ def _apply_reducers(
     return updates
 
 
+def _caller_config(config: RunnableConfig | None) -> RunnableConfig:
+    """Return the part of *config* that is equal on every reducer path.
+
+    A node receives a config that LangGraph enriched. The stream path
+    holds the raw caller config. A reducer service factory receives this
+    view, so both paths give it equal input.
+    """
+    configurable = (config or {}).get("configurable") or {}
+    return {
+        "configurable": {
+            k: v
+            for k, v in configurable.items()
+            if not k.startswith(("__", "checkpoint_"))
+        }
+    }
+
+
+def bind_reducers(
+    reducers: dict[str, BaseReducer],
+    services_by_name: dict[str, Any] | None,
+    config: RunnableConfig | None,
+) -> dict[str, BaseReducer]:
+    """Bind every reducer in *reducers* to its declared service values.
+
+    Return the same dict object when no reducer declares a service
+    parameter. This is the fast path.
+
+    Otherwise, build the normalised config one time. Resolve each needed
+    service name one time per call, even when two reducers share it. A
+    :class:`~langgraph_events._services.RunScoped` value resolves by
+    calling its factory with the normalised config. A plain value stays
+    as is.
+
+    The returned dict is new. It keeps the same key order as *reducers*.
+    """
+    if not any(r._service_params for r in reducers.values()):
+        return reducers
+    caller_config = _caller_config(config)
+    services = services_by_name or {}
+    resolved: dict[str, Any] = {}
+    for name, r in reducers.items():
+        for param in r._service_params:
+            if param in resolved:
+                continue
+            svc = services[param]
+            if isinstance(svc, RunScoped):
+                try:
+                    svc = svc.factory(caller_config)
+                except Exception as exc:
+                    exc.add_note(
+                        f"Reducer {name!r} requested the run-scoped service "
+                        f"{param!r}, but its factory raised."
+                    )
+                    raise
+            resolved[param] = svc
+    return {name: r._bind(resolved) for name, r in reducers.items()}
+
+
 def _inject_fields(
     meta: HandlerMeta,
     event: Event,
