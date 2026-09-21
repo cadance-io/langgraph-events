@@ -1044,6 +1044,10 @@ def _verify_reducer_service_params(
                 raise TypeError(message)
         # A non-empty _service_params means r is a Reducer or ScalarReducer,
         # both of which declare a ``fn`` field — the base type does not.
+        # ``_errors`` is dropped on purpose: a reducer service parameter
+        # whose annotation does not resolve gets no type check and no
+        # warning here. A handler parameter in the same situation raises
+        # (see _parse_return_types).
         hints, _errors = _resolve_hints_and_errors(cast("Any", r).fn)
         reducer_hints = tuple((p, hints[p]) for p in params if p in hints)
         _verify_service_name_types(
@@ -1280,6 +1284,11 @@ class EventGraph:
         A ``RunScoped`` service resolves its factory from *config*. The
         resolved value comes from the current service, not from the run
         that produced *log*. Omit *config* when no reducer needs one.
+
+        ``reflect`` resolves every reducer service one time, when it is
+        called. It does not wait for a query that needs the value. Pass
+        *config* even when the caller reads only :meth:`Reflection.overview`,
+        if the graph has a ``RunScoped`` reducer service.
         """
         from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
@@ -1296,9 +1305,10 @@ class EventGraph:
         """Return this graph's reducers, bound to *config*'s service values.
 
         Returns ``self._reducers`` itself when no reducer declares a
-        service parameter — the common case pays no cost. Otherwise
-        returns a fresh dict of bound copies; ``self._reducers`` is left
-        unchanged.
+        service parameter. That check reads each reducer's
+        ``_service_params``, a value cached on the instance after its
+        first read. Otherwise returns a fresh dict of bound copies;
+        ``self._reducers`` is left unchanged.
         """
         return bind_reducers(self._reducers, self._services_by_name, config)
 

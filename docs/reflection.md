@@ -41,6 +41,11 @@ declares a service parameter. A `RunScoped` service in that config resolves
 through its factory. See [Reducers › Services in a reducer
 fn](reducers.md#services-in-a-reducer-fn).
 
+`reflect` resolves every reducer service one time, when it is called. It
+does not wait for a query that needs the value. Pass `config` even when
+the caller reads only `run.overview()`, if the graph has a `RunScoped`
+reducer service.
+
 `run.log` exposes the raw `EventLog` with its full Python query surface
 (`filter`/`select`/`latest`/`after`/…). `Reflection` deliberately does not
 re-wrap those methods: every `#index` in every rendering refers to a

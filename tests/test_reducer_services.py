@@ -7,6 +7,7 @@ adapter.
 
 from __future__ import annotations
 
+import inspect
 import operator
 from typing import TYPE_CHECKING, Any
 
@@ -233,6 +234,45 @@ def describe_bind():
 
             bound = reducer._bind({"language": "fr", "unused": "x"})
 
+            result = bound.collect([MessageReceived(text="hi")])
+            assert _collected_value(reducer_cls, result) == "fr:hi"
+
+
+def describe_cached_service_params():
+    """`_service_params` reads the `fn` signature at most one time per
+    reducer instance. See issue #193 final fix wave, Fix 1."""
+
+    def when_collect_runs_more_than_once():
+        @pytest.mark.parametrize("reducer_cls", [Reducer, ScalarReducer])
+        def it_reads_the_fn_signature_at_most_one_time(reducer_cls, monkeypatch):
+            calls: list[Any] = []
+            real_signature = inspect.signature
+
+            def counting_wrapper(obj: Any, *args: Any, **kwargs: Any) -> Any:
+                calls.append(obj)
+                return real_signature(obj, *args, **kwargs)
+
+            monkeypatch.setattr(
+                "langgraph_events._reducer.inspect.signature", counting_wrapper
+            )
+            fn = (lambda event: []) if reducer_cls is Reducer else (lambda event: None)
+            reducer = reducer_cls(name="notes", event_type=MessageReceived, fn=fn)
+
+            reducer.collect([MessageReceived(text="hi")])
+            reducer.collect([MessageReceived(text="hi")])
+            reducer.collect([MessageReceived(text="hi")])
+
+            assert len(calls) <= 1
+
+    def when_the_original_service_params_was_already_read():
+        @pytest.mark.parametrize("reducer_cls", [Reducer, ScalarReducer])
+        def it_does_not_carry_the_cache_into_a_bound_copy(reducer_cls):
+            reducer = _make_reducer(reducer_cls)
+            assert reducer._service_params == ("language",)  # populates the cache
+
+            bound = reducer._bind({"language": "fr"})
+
+            assert bound._service_params == ()
             result = bound.collect([MessageReceived(text="hi")])
             assert _collected_value(reducer_cls, result) == "fr:hi"
 
@@ -715,8 +755,12 @@ async def _stream_notes(factory: Any, config: dict[str, Any]) -> tuple[list, dic
     ``_relay`` turns the seed into a ``MessageReceived``, so the reducer
     projects a handler-produced event.
 
+    Clears ``_factory_configs`` first. This keeps the count a caller reads
+    from it independent of any earlier test that also called this helper.
+
     Returns the stream frames and the checkpoint values.
     """
+    _factory_configs.clear()
     graph = EventGraph(
         [_relay],
         reducers=[_make_reducer(Reducer)],
@@ -750,7 +794,6 @@ def describe_stream_path_uses_bound_reducers():
             assert values["notes"] == ["fr:hi"]
 
         async def it_gives_the_factory_the_same_config_on_every_path():
-            _factory_configs.clear()
             config = {"configurable": {"thread_id": "stream-config", "language": "fr"}}
             expected = {
                 "configurable": {"thread_id": "stream-config", "language": "fr"}
@@ -758,7 +801,9 @@ def describe_stream_path_uses_bound_reducers():
 
             await _stream_notes(_recording_language_for, config)
 
-            assert len(_factory_configs) > 1
+            # One factory call per bind site: the seed node, the handler
+            # node, and the stream's own shadow-reducer bind.
+            assert len(_factory_configs) == 3
             assert all(seen == expected for seen in _factory_configs)
 
     def when_the_factory_reads_top_level_metadata():
@@ -771,7 +816,9 @@ def describe_stream_path_uses_bound_reducers():
 
             await _stream_notes(_metadata_probe, config)
 
-            assert len(_metadata_seen) > 1
+            # One factory call per bind site: the seed node, the handler
+            # node, and the stream's own shadow-reducer bind.
+            assert len(_metadata_seen) == 3
             assert all(seen is None for seen in _metadata_seen)
 
     def when_the_stream_call_has_no_config():

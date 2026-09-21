@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import inspect
 import operator
 from abc import ABC, abstractmethod
@@ -303,8 +304,16 @@ class Reducer(BaseReducer):
     def empty(self) -> Any:
         return list(self.default)
 
-    @property
+    @functools.cached_property
     def _service_params(self) -> tuple[str, ...]:
+        """Names of the service parameters this reducer's ``fn`` declares.
+
+        Cached on the instance. ``inspect.signature`` reads ``fn`` one time
+        per reducer instance, not one time per ``collect``/``seed`` call.
+        ``_bind`` returns a new instance through ``dataclasses.replace``,
+        so a bound copy starts with no cache and computes its own value
+        from its ``_BoundFn``.
+        """
         return _service_params(self.fn)
 
     def _bind(self, values: Mapping[str, Any]) -> BaseReducer:
@@ -398,8 +407,16 @@ class ScalarReducer(BaseReducer):
     def empty(self) -> Any:
         return self.default
 
-    @property
+    @functools.cached_property
     def _service_params(self) -> tuple[str, ...]:
+        """Names of the service parameters this reducer's ``fn`` declares.
+
+        Cached on the instance. ``inspect.signature`` reads ``fn`` one time
+        per reducer instance, not one time per ``collect``/``seed`` call.
+        ``_bind`` returns a new instance through ``dataclasses.replace``,
+        so a bound copy starts with no cache and computes its own value
+        from its ``_BoundFn``.
+        """
         return _service_params(self.fn)
 
     def _bind(self, values: Mapping[str, Any]) -> BaseReducer:
