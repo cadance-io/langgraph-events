@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from conftest import MessageReceived
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     BaseReducer,
@@ -19,8 +20,10 @@ from langgraph_events import (
     Event,
     EventGraph,
     FoldReducer,
+    IntegrationEvent,
     Namespace,
     Reducer,
+    Reflection,
     RunScoped,
     ScalarReducer,
     on,
@@ -67,6 +70,28 @@ def _language_for(config: RunnableConfig) -> str:
 @on(MessageReceived)
 def _noop(event: MessageReceived) -> None:
     return None
+
+
+class Pinged(IntegrationEvent):
+    """A seed event that never matches the ``notes`` reducer.
+
+    Triggers ``_relay`` below, so the reducer's only contribution comes
+    from the handler-produced ``MessageReceived``, not from seeding.
+    """
+
+
+@on(Pinged)
+def _relay(event: Pinged) -> MessageReceived:
+    return MessageReceived(text="hi")
+
+
+# Module-level so the Reflection annotation below resolves at runtime.
+_reflection_states: list[dict] = []
+
+
+@on(MessageReceived)
+def _capture_reflection_state(event: MessageReceived, run: Reflection) -> None:
+    _reflection_states.append(run.state())
 
 
 # Module-level so the return annotation below resolves at runtime — see the
@@ -516,3 +541,110 @@ def describe_reducers_for():
 
             assert result is not graph._reducers
             assert result["notes"].collect([MessageReceived(text="hi")]) == ["fr:hi"]
+
+
+def describe_node_paths_use_bound_reducers():
+    """``EventGraph.invoke`` / ``.ainvoke`` project events through bound reducers."""
+
+    def when_a_seed_event_matches_a_service_bound_reducer():
+        @pytest.mark.parametrize("reducer_cls", [Reducer, ScalarReducer])
+        def it_projects_the_bound_value_into_the_channel(reducer_cls):
+            reducer = _make_reducer(reducer_cls)
+            graph = EventGraph(
+                [_noop],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "seed-sync", "language": "fr"}}
+
+            graph.invoke(MessageReceived(text="hi"), config=config)
+
+            value = graph.compiled.get_state(config).values["notes"]
+            assert _collected_value(reducer_cls, value) == "fr:hi"
+
+        async def it_projects_the_bound_value_through_ainvoke():
+            reducer = _make_reducer(Reducer)
+            graph = EventGraph(
+                [_noop],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "seed-async", "language": "fr"}}
+
+            await graph.ainvoke(MessageReceived(text="hi"), config=config)
+
+            snapshot = await graph.compiled.aget_state(config)
+            assert snapshot.values["notes"] == ["fr:hi"]
+
+    def when_a_handler_produced_event_matches_a_service_bound_reducer():
+        @pytest.mark.parametrize("reducer_cls", [Reducer, ScalarReducer])
+        def it_projects_the_bound_value_into_the_channel(reducer_cls):
+            reducer = _make_reducer(reducer_cls)
+            graph = EventGraph(
+                [_relay],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "handler-sync", "language": "fr"}}
+
+            graph.invoke(Pinged(), config=config)
+
+            value = graph.compiled.get_state(config).values["notes"]
+            assert _collected_value(reducer_cls, value) == "fr:hi"
+
+    def when_a_second_run_on_one_thread_follows_a_first():
+        @pytest.mark.parametrize("reducer_cls", [Reducer, ScalarReducer])
+        def it_adds_a_bound_contribution(reducer_cls):
+            reducer = _make_reducer(reducer_cls)
+            graph = EventGraph(
+                [_noop],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "second-run", "language": "fr"}}
+
+            graph.invoke(MessageReceived(text="hi"), config=config)
+            graph.invoke(MessageReceived(text="there"), config=config)
+
+            value = graph.compiled.get_state(config).values["notes"]
+            if reducer_cls is Reducer:
+                assert value == ["fr:hi", "fr:there"]
+            else:
+                assert value == "fr:there"
+
+    def when_a_handler_declares_a_reflection_parameter():
+        def it_lets_state_reflect_the_bound_value():
+            _reflection_states.clear()
+            reducer = _make_reducer(Reducer)
+            graph = EventGraph(
+                [_capture_reflection_state],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+            )
+
+            graph.invoke(
+                MessageReceived(text="hi"),
+                config={"configurable": {"language": "fr"}},
+            )
+
+            assert _reflection_states == [{"notes": ["fr:hi"]}]
+
+    def when_a_plain_service_is_registered():
+        def it_binds_the_plain_value():
+            reducer = _make_reducer(Reducer)
+            graph = EventGraph(
+                [_noop],
+                reducers=[reducer],
+                services={"language": "fr"},
+                checkpointer=MemorySaver(),
+            )
+            config = {"configurable": {"thread_id": "plain-service"}}
+
+            graph.invoke(MessageReceived(text="hi"), config=config)
+
+            value = graph.compiled.get_state(config).values["notes"]
+            assert value == ["fr:hi"]

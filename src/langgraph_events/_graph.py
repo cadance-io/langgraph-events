@@ -1342,12 +1342,14 @@ class EventGraph:
         )
 
         # --- nodes ---
-        seed_node = make_seed_node(reducers=self._reducers)
+        seed_node = make_seed_node(
+            reducers=self._reducers, services_by_name=self._services_by_name or None
+        )
         router_node = make_router_node(self._max_rounds)
         dispatch_fn = make_dispatch(self._handler_metas)
 
-        async def aseed(state: StateDict) -> StateDict:
-            return seed_node(state)
+        async def aseed(state: StateDict, config: RunnableConfig) -> StateDict:
+            return seed_node(state, config)
 
         async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
             return router_node(state, config)

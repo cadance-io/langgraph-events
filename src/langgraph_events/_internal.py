@@ -133,11 +133,12 @@ def _leaf_node(func: Any, afunc: Any, name: str) -> RunnableLambda:
 
 def make_seed_node(
     reducers: dict[str, BaseReducer] | None = None,
-) -> Callable[[StateDict], StateDict]:
+    services_by_name: dict[str, Any] | None = None,
+) -> Callable[[StateDict, RunnableConfig], StateDict]:
     """Create the seed node that initialises cursor and pending from input."""
     reds = reducers or {}
 
-    def seed(state: StateDict) -> StateDict:
+    def seed(state: StateDict, config: RunnableConfig) -> StateDict:
         prev_cursor = state.get("_cursor", 0)
         all_events = state["events"]
         new_events = all_events[prev_cursor:]
@@ -148,9 +149,13 @@ def make_seed_node(
             "_round": 0,
             "_run_paused_emitted": False,
         }
-        if reds:
+        # Bind one time per call, and only when a reducer will actually run:
+        # a first run always projects (even with no seed events, to write
+        # each channel's default), a later run only when new events arrived.
+        if reds and (prev_cursor == 0 or new_events):
+            bound = bind_reducers(reds, services_by_name, config)
             if prev_cursor == 0:
-                for name, r in reds.items():
+                for name, r in bound.items():
                     existing = state.get(name)
                     # Channel defaults: [] for list channels, None for
                     # scalar channels.  Anything else means pre-seeded
@@ -168,7 +173,7 @@ def make_seed_node(
                         result[name] = r.seed(new_events)
             elif new_events:
                 # Subsequent run (checkpointer) — only process new events
-                for name, r in reds.items():
+                for name, r in bound.items():
                     collected = r.collect(new_events)
                     if r.has_contributions(collected):
                         result[name] = collected
@@ -287,8 +292,9 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
         if meta.reflection_param:
             from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
+            bound_reducers = bind_reducers(reducers, services_by_name, config)
             inject[meta.reflection_param] = Reflection(
-                log_view, model=model_provider(), reducers=reducers
+                log_view, model=model_provider(), reducers=bound_reducers
             )
     for param_name in meta.reducer_params:
         r = reducers.get(param_name)
@@ -839,10 +845,11 @@ def make_handler_node(
             ),
         )
 
-    def _finalize(new_events: list[Event]) -> StateDict:
+    def _finalize(new_events: list[Event], config: RunnableConfig) -> StateDict:
         output: StateDict = {"events": new_events}
-        if reds:
-            output.update(_apply_reducers(new_events, reds))
+        if reds and new_events:
+            bound = bind_reducers(reds, svcs_by_name, config)
+            output.update(_apply_reducers(new_events, bound))
         return output
 
     def _run_handler_sync(state: StateDict, config: RunnableConfig) -> StateDict:
@@ -865,7 +872,7 @@ def make_handler_node(
             )
         finally:
             _reset_custom_emitters(tokens)
-        return _finalize(new_events)
+        return _finalize(new_events, config)
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
         matching, inject, deadline = _prepare(state, config)
@@ -883,10 +890,10 @@ def make_handler_node(
                 deadline,
             )
         except asyncio.CancelledError:
-            return _finalize([Cancelled()])
+            return _finalize([Cancelled()], config)
         finally:
             _reset_custom_emitters(tokens)
-        return _finalize(new_events)
+        return _finalize(new_events, config)
 
     return _leaf_node(_run_handler_sync, _run_handler_async, meta.name)
 
