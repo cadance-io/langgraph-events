@@ -20,6 +20,7 @@ from langgraph_events import (
     DomainEvent,
     Event,
     EventGraph,
+    EventLog,
     FoldReducer,
     IntegrationEvent,
     Namespace,
@@ -569,6 +570,36 @@ def describe_reducers_for():
             assert result["notes"].collect([MessageReceived(text="hi")]) == ["fr:hi"]
 
 
+def describe_reflect():
+    def when_a_reducer_declares_a_service_parameter():
+        def it_uses_the_configs_bound_value():
+            reducer = _make_reducer(Reducer)
+            graph = EventGraph(
+                [_noop],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+            )
+            log = EventLog([MessageReceived(text="hi")])
+            config = {"configurable": {"language": "fr"}}
+
+            reflection = graph.reflect(log, config=config)
+
+            assert reflection.state() == {"notes": ["fr:hi"]}
+
+    def when_config_is_omitted_and_the_factory_reads_a_missing_key():
+        def it_raises_the_factorys_key_error():
+            reducer = _make_reducer(Reducer)
+            graph = EventGraph(
+                [_noop],
+                reducers=[reducer],
+                services={"language": RunScoped(_language_for)},
+            )
+            log = EventLog([MessageReceived(text="hi")])
+
+            with pytest.raises(KeyError, match="language"):
+                graph.reflect(log).state()
+
+
 def describe_node_paths_use_bound_reducers():
     """``EventGraph.invoke`` / ``.ainvoke`` project events through bound reducers."""
 
@@ -781,3 +812,81 @@ def describe_agui_adapter_uses_bound_reducers():
             )
 
             assert updates["notes"] == ["fr:scene"]
+
+
+def describe_replay_reducer():
+    def when_the_reducer_has_no_service_parameter():
+        def when_services_is_absent():
+            def it_folds_the_events():
+                from langgraph_events.serde import replay_reducer
+
+                reducer = Reducer(
+                    name="notes", event_type=MessageReceived, fn=lambda e: [e.text]
+                )
+                events = [MessageReceived(text="hi")]
+
+                assert replay_reducer(reducer, events) == ["hi"]
+
+        def when_services_is_present():
+            def it_folds_the_events_and_ignores_the_extra_key():
+                from langgraph_events.serde import replay_reducer
+
+                reducer = Reducer(
+                    name="notes", event_type=MessageReceived, fn=lambda e: [e.text]
+                )
+                events = [MessageReceived(text="hi")]
+
+                result = replay_reducer(reducer, events, services={"language": "fr"})
+
+                assert result == ["hi"]
+
+    def when_the_reducer_has_a_service_parameter():
+        def when_services_is_given():
+            @pytest.mark.parametrize("reducer_cls", [Reducer, ScalarReducer])
+            def it_binds_the_plain_service_value(reducer_cls):
+                from langgraph_events.serde import replay_reducer
+
+                reducer = _make_reducer(reducer_cls)
+                events = [MessageReceived(text="hi")]
+
+                result = replay_reducer(reducer, events, services={"language": "fr"})
+
+                assert _collected_value(reducer_cls, result) == "fr:hi"
+
+        def when_services_is_not_given():
+            def it_raises_the_unbound_guard_type_error():
+                from langgraph_events.serde import replay_reducer
+
+                reducer = _make_reducer(Reducer)
+                events = [MessageReceived(text="hi")]
+
+                with pytest.raises(TypeError, match="notes") as info:
+                    replay_reducer(reducer, events)
+
+                assert "language" in str(info.value)
+
+        def when_services_holds_a_run_scoped_value():
+            def it_raises_naming_run_scoped():
+                from langgraph_events.serde import replay_reducer
+
+                reducer = _make_reducer(Reducer)
+                events = [MessageReceived(text="hi")]
+
+                with pytest.raises(TypeError, match="RunScoped"):
+                    replay_reducer(
+                        reducer,
+                        events,
+                        services={"language": RunScoped(_language_for)},
+                    )
+
+        def when_services_is_missing_the_needed_key():
+            def it_raises_naming_the_reducer_and_the_service():
+                from langgraph_events.serde import replay_reducer
+
+                reducer = _make_reducer(Reducer)
+                events = [MessageReceived(text="hi")]
+
+                with pytest.raises(TypeError, match="notes") as info:
+                    replay_reducer(reducer, events, services={})
+
+                assert "language" in str(info.value)

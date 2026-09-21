@@ -1267,16 +1267,25 @@ class EventGraph:
             )
         return self._namespaces_cache
 
-    def reflect(self, log: EventLog) -> Reflection:
+    def reflect(
+        self, log: EventLog, config: RunnableConfig | None = None
+    ) -> Reflection:
         """Return a :class:`Reflection` — deterministic query surface over *log*.
 
         Bundles the log with this graph's namespace model and reducers so an
         agent (or code) can query facts about a run: listings, field dumps,
         static topology, reducer projections, and verdict-free evidence joins.
+
+        Pass *config* when a reducer ``fn`` declares a service parameter.
+        A ``RunScoped`` service resolves its factory from *config*. The
+        resolved value comes from the current service, not from the run
+        that produced *log*. Omit *config* when no reducer needs one.
         """
         from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
-        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
+        return Reflection(
+            log, model=self.namespaces(), reducers=self._reducers_for(config)
+        )
 
     @property
     def reducer_names(self) -> frozenset[str]:
