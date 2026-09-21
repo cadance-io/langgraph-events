@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import operator
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -17,7 +19,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from langchain_core.messages import BaseMessage
 
@@ -90,6 +92,72 @@ def _matches_namespace(event: Any, dom: type[Namespace] | None) -> bool:
     return getattr(type(event), "__namespace_cls__", None) is dom
 
 
+class _BoundFn:
+    """A reducer ``fn`` that already holds its service values.
+
+    The ``repr`` shows the service names only. A service value can be a secret.
+    """
+
+    __slots__ = ("_fn", "_values")
+
+    def __init__(self, fn: Callable[..., Any], values: Mapping[str, Any]) -> None:
+        self._fn = fn
+        self._values = dict(values)
+
+    def __call__(self, event: Any) -> Any:
+        return self._fn(event, **self._values)
+
+    def __repr__(self) -> str:
+        name = getattr(self._fn, "__qualname__", repr(self._fn))
+        return f"<bound {name} services={sorted(self._values)}>"
+
+
+def _service_params(fn: Callable[..., Any]) -> tuple[str, ...]:
+    """Return the service parameter names *fn* declares, in order.
+
+    A reducer ``fn`` takes the event as its first parameter. A service
+    parameter is any other parameter that has no default and is not
+    ``*args`` or ``**kwargs``. The framework binds each one by name from a
+    ``services=`` mapping.
+
+    Return ``()`` when *fn* is a :class:`_BoundFn`. A ``_BoundFn`` already
+    holds its service values, so it declares none.
+
+    Return ``()`` when ``inspect.signature(fn)`` cannot read *fn*, for
+    example the builtin ``str``.
+
+    Raise ``TypeError`` when a parameter after the first is
+    positional-only and has no default. A positional-only parameter
+    cannot take a keyword argument, so the framework cannot bind it by
+    name.
+    """
+    if isinstance(fn, _BoundFn):
+        return ()
+    try:
+        signature = inspect.signature(fn)
+    except (ValueError, TypeError):
+        return ()
+    names: list[str] = []
+    for parameter in list(signature.parameters.values())[1:]:
+        if parameter.default is not inspect.Parameter.empty:
+            continue
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            raise TypeError(
+                f"{fn!r} declares the required positional-only parameter "
+                f"{parameter.name!r}. A reducer fn cannot declare a "
+                f"required positional-only service parameter. Give the "
+                f"parameter a name that accepts a keyword argument, or "
+                f"give it a default value."
+            )
+        names.append(parameter.name)
+    return tuple(names)
+
+
 class BaseReducer(ABC):
     """Abstract base for all reducer types.
 
@@ -118,6 +186,22 @@ class BaseReducer(ABC):
                 self.name = name
             if self.namespace is None:
                 self.namespace = owner
+
+    @property
+    def _service_params(self) -> tuple[str, ...]:
+        """Names of the service parameters this reducer's ``fn`` declares.
+
+        The base reducer has no ``fn``, so this returns ``()``.
+        """
+        return ()
+
+    def _bind(self, values: Mapping[str, Any]) -> BaseReducer:
+        """Return a copy of this reducer bound to service *values*.
+
+        The base reducer declares no service parameters. It returns
+        itself unchanged.
+        """
+        return self
 
     @abstractmethod
     def state_annotation(self) -> Any:
@@ -188,7 +272,27 @@ class Reducer(BaseReducer):
     def empty(self) -> Any:
         return list(self.default)
 
+    @property
+    def _service_params(self) -> tuple[str, ...]:
+        return _service_params(self.fn)
+
+    def _bind(self, values: Mapping[str, Any]) -> BaseReducer:
+        names = self._service_params
+        if not names:
+            return self
+        return dataclasses.replace(
+            self, fn=_BoundFn(self.fn, {n: values[n] for n in names})
+        )
+
     def collect(self, events: list[Event]) -> Any:
+        names = self._service_params
+        if names:
+            raise TypeError(
+                f"Reducer {self.name!r} fn declares the service parameter(s) "
+                f"{list(names)}, but the reducer is not bound to a run. Register "
+                f"it on an EventGraph with a name-keyed services= mapping. For "
+                f"replay_reducer, pass services=..."
+            )
         contributions: list[Any] = []
         for event in events:
             if not isinstance(event, self.event_type):
@@ -263,7 +367,27 @@ class ScalarReducer(BaseReducer):
     def empty(self) -> Any:
         return self.default
 
+    @property
+    def _service_params(self) -> tuple[str, ...]:
+        return _service_params(self.fn)
+
+    def _bind(self, values: Mapping[str, Any]) -> BaseReducer:
+        names = self._service_params
+        if not names:
+            return self
+        return dataclasses.replace(
+            self, fn=_BoundFn(self.fn, {n: values[n] for n in names})
+        )
+
     def collect(self, events: list[Event]) -> Any:
+        names = self._service_params
+        if names:
+            raise TypeError(
+                f"Reducer {self.name!r} fn declares the service parameter(s) "
+                f"{list(names)}, but the reducer is not bound to a run. Register "
+                f"it on an EventGraph with a name-keyed services= mapping. For "
+                f"replay_reducer, pass services=..."
+            )
         last: Any = SKIP
         for event in events:
             if not isinstance(event, self.event_type):
