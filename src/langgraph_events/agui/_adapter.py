@@ -433,10 +433,10 @@ class AGUIAdapter:
         drop the ``{"events": [fsm]}`` entry to avoid duplication.
         """
         updates: dict[str, Any] = {"events": [fsm]}
-        updates.update(self._reducer_updates_for([fsm]))
+        updates.update(self._reducer_updates_for([fsm], config))
         await self._graph.apre_seed(config, updates)
 
-    def _reducer_updates_for(self, events: list[Event]) -> dict[str, Any]:
+    def _reducer_updates_for(self, events: list[Event], config: Any) -> dict[str, Any]:
         """Compute per-channel reducer contributions for *events*.
 
         Runs each registered reducer's ``collect`` against *events* and
@@ -444,9 +444,13 @@ class AGUIAdapter:
         actual contributions).  Used on the resume path to materialise FSM
         reducer effects into LangGraph channel state so subsequent handlers
         see them via parameter injection.
+
+        The reducers are bound to *config* first.  A reducer ``fn`` that
+        declares a service parameter needs its service value, and the
+        value must match the one the node path uses.
         """
         updates: dict[str, Any] = {}
-        for name, reducer in self._graph._reducers.items():
+        for name, reducer in self._graph._reducers_for(config).items():
             contribution = reducer.collect(events)
             if reducer.has_contributions(contribution):
                 updates[name] = contribution

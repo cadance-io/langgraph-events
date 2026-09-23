@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `Reducer` or `ScalarReducer` `fn` can declare a name-keyed service.**
+  Closes [#193](https://github.com/cadance-io/langgraph-events/issues/193).
+  The first parameter of `fn` is the event. Each other required parameter resolves by name
+  from the graph's name-keyed `services={...}` mapping. This mirrors handler-parameter
+  injection. A plain value and a `RunScoped` value are both legal. A reducer `fn` receives no
+  `config`, no `store` and no reducer value. A wrong declaration raises `TypeError` at graph
+  build. The error names the reducer, the parameter and the known services.
+
+  `FoldReducer` cannot receive a service. LangGraph captures its merge function at compile
+  time. A `fold` callable with a third required parameter raises `TypeError` at graph build.
+
+  A `RunScoped` factory used by a reducer receives a normalised config. It holds only the
+  caller-supplied `configurable` keys, with no `metadata`, no `callbacks`, no `tags` and no
+  store. This keeps the checkpoint value and the streamed value equal. A service used by a
+  reducer must be stable for the life of the thread. If it changes, a from-scratch projection
+  (`reflect`, `replay_reducer`) computes a value that differs from the checkpoint.
+
+  `EventGraph.reflect(log, config=None)` and `replay_reducer(reducer, events, *,
+  services=None)` each accept a new optional parameter. `replay_reducer` takes resolved plain
+  values only. A `RunScoped` value there raises `TypeError`.
+
+  See [Reducers › Services in a reducer fn](https://cadance-io.github.io/langgraph-events/reducers/#services-in-a-reducer-fn).
+
 ## [0.33.0] - 2026-09-18
 
 ### Added

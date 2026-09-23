@@ -50,6 +50,7 @@ from langgraph_events._internal import (
     _InputState,
     _leaf_node,
     _OutputState,
+    bind_reducers,
     build_state_schema,
     make_dispatch,
     make_handler_node,
@@ -59,6 +60,7 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._reducer import FoldReducer, _fold_service_params
 from langgraph_events._rewrite import (
     RewriteReport,
     ThreadPlan,
@@ -929,11 +931,16 @@ def _satisfies(
 
 
 def _verify_service_name_types(
-    meta: HandlerMeta,
+    owner: str,
+    hints: Sequence[tuple[str, Any]],
     services_by_name: dict[str, Any],
     run_scoped_types: dict[str, Any],
 ) -> None:
-    """Raise if a name-keyed service does not satisfy the handler annotation.
+    """Raise if a name-keyed service does not satisfy the declared annotation.
+
+    *owner* labels the raised message, e.g. ``"Handler 'classify'"`` or
+    ``"Reducer 'notes' fn"``. *hints* pairs each name-keyed parameter with
+    its resolved annotation.
 
     Name-keyed binding matches on the parameter name and needs no annotation.
     When the parameter has an annotation that resolved, the framework checks
@@ -943,13 +950,13 @@ def _verify_service_name_types(
     a runtime ``Protocol`` with methods only, and a generic alias. A
     ``NewType`` is nominal for a factory and erased for a plain value.
     """
-    if not meta.service_name_hints:
+    if not hints:
         return
     # A cold import costs about 200 ms. Only the first graph in the process
     # with an annotated name-keyed parameter pays it.
     from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
 
-    for param, declared in meta.service_name_hints:
+    for param, declared in hints:
         value = services_by_name[param]
         label = _hint_label(declared)
         if isinstance(value, RunScoped):
@@ -962,7 +969,7 @@ def _verify_service_name_types(
                 factory = _factory_label(_annotation_source(value.factory))
                 returns = _hint_label(provided)
                 raise TypeError(
-                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"{owner} declares parameter {param!r} as "
                     f"{label}, but services[{param!r}] is RunScoped({factory}) "
                     f"and that factory returns {returns}. Change the annotation "
                     f"to {returns}, or register a factory that returns {label}."
@@ -977,17 +984,75 @@ def _verify_service_name_types(
                     what = f"an instance of {type(value).__qualname__}"
                     fix = "Widen the annotation"
                 raise TypeError(
-                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"{owner} declares parameter {param!r} as "
                     f"{label}, but services[{param!r}] is {what}, not an "
                     f"instance of {label}. {fix}, or register a value that "
                     f"satisfies it."
                 )
         if isinstance(verdict, str):
             warn_user(
-                f"Handler {meta.name!r} declares parameter {param!r} as {label}, "
+                f"{owner} declares parameter {param!r} as {label}, "
                 f"which Python cannot test at run time ({verdict}). The service "
                 f"under services[{param!r}] is not checked against it."
             )
+
+
+def _verify_reducer_service_params(
+    reducers: dict[str, BaseReducer],
+    services_by_type: dict[type, Any],
+    services_by_name: dict[str, Any],
+    run_scoped_types: dict[str, Any],
+) -> None:
+    """Raise if a reducer declares a service parameter the build cannot bind.
+
+    A ``FoldReducer``'s ``fold`` callable takes only ``state`` and ``event``
+    — it has no ``services=`` binding path, so a further required parameter
+    raises. A ``Reducer`` or ``ScalarReducer`` service parameter must be a
+    key of *services_by_name*. Each service parameter that carries a
+    resolved annotation is also checked against the registered service,
+    with the same rule :func:`_verify_service_name_types` applies to a
+    handler parameter.
+    """
+    known = set(services_by_name)
+    for name, r in reducers.items():
+        if isinstance(r, FoldReducer):
+            fold_params = _fold_service_params(r.fold)
+            if fold_params:
+                raise TypeError(
+                    f"FoldReducer {name!r} fold declares the parameter "
+                    f"{fold_params[0]!r}. A FoldReducer cannot receive a "
+                    f"service. Use a Reducer or a ScalarReducer."
+                )
+            continue
+        params = r._service_params
+        if not params:
+            continue
+        for param in params:
+            if param not in known:
+                message = (
+                    f"Reducer {name!r} fn parameter {param!r} is not a key "
+                    f"of services. A reducer fn receives the event and "
+                    f"name-keyed services only. It receives no config, no "
+                    f"store and no reducer value. Known services: "
+                    f"{sorted(known)}."
+                )
+                if services_by_type:
+                    message += (
+                        " A reducer service needs the name-keyed mapping "
+                        "form: services={'name': value}."
+                    )
+                raise TypeError(message)
+        # A non-empty _service_params means r is a Reducer or ScalarReducer,
+        # both of which declare a ``fn`` field — the base type does not.
+        # ``_errors`` is dropped on purpose: a reducer service parameter
+        # whose annotation does not resolve gets no type check and no
+        # warning here. A handler parameter in the same situation raises
+        # (see _parse_return_types).
+        hints, _errors = _resolve_hints_and_errors(cast("Any", r).fn)
+        reducer_hints = tuple((p, hints[p]) for p in params if p in hints)
+        _verify_service_name_types(
+            f"Reducer {name!r} fn", reducer_hints, services_by_name, run_scoped_types
+        )
 
 
 def _dedup_handler_name(meta: HandlerMeta, count: int) -> HandlerMeta:
@@ -1129,6 +1194,12 @@ class EventGraph:
             services
         )
         run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
+        _verify_reducer_service_params(
+            self._reducers,
+            self._services_by_type,
+            self._services_by_name,
+            run_scoped_types,
+        )
 
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
@@ -1145,7 +1216,12 @@ class EventGraph:
                 service_names=service_names,
             )
             _verify_no_unclaimed_params(meta)
-            _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
+            _verify_service_name_types(
+                f"Handler {meta.name!r}",
+                meta.service_name_hints,
+                self._services_by_name,
+                run_scoped_types,
+            )
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:
@@ -1195,21 +1271,46 @@ class EventGraph:
             )
         return self._namespaces_cache
 
-    def reflect(self, log: EventLog) -> Reflection:
+    def reflect(
+        self, log: EventLog, config: RunnableConfig | None = None
+    ) -> Reflection:
         """Return a :class:`Reflection` — deterministic query surface over *log*.
 
         Bundles the log with this graph's namespace model and reducers so an
         agent (or code) can query facts about a run: listings, field dumps,
         static topology, reducer projections, and verdict-free evidence joins.
+
+        Pass *config* when a reducer ``fn`` declares a service parameter.
+        A ``RunScoped`` service resolves its factory from *config*. The
+        resolved value comes from the current service, not from the run
+        that produced *log*. Omit *config* when no reducer needs one.
+
+        ``reflect`` resolves every reducer service one time, when it is
+        called. It does not wait for a query that needs the value. Pass
+        *config* even when the caller reads only :meth:`Reflection.overview`,
+        if the graph has a ``RunScoped`` reducer service.
         """
         from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
-        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
+        return Reflection(
+            log, model=self.namespaces(), reducers=self._reducers_for(config)
+        )
 
     @property
     def reducer_names(self) -> frozenset[str]:
         """The names of all registered reducers."""
         return frozenset(self._reducers.keys())
+
+    def _reducers_for(self, config: RunnableConfig | None) -> dict[str, BaseReducer]:
+        """Return this graph's reducers, bound to *config*'s service values.
+
+        Returns ``self._reducers`` itself when no reducer declares a
+        service parameter. That check reads each reducer's
+        ``_service_params``, a value cached on the instance after its
+        first read. Otherwise returns a fresh dict of bound copies;
+        ``self._reducers`` is left unchanged.
+        """
+        return bind_reducers(self._reducers, self._services_by_name, config)
 
     @property
     def handler_names(self) -> frozenset[str]:
@@ -1260,12 +1361,14 @@ class EventGraph:
         )
 
         # --- nodes ---
-        seed_node = make_seed_node(reducers=self._reducers)
+        seed_node = make_seed_node(
+            reducers=self._reducers, services_by_name=self._services_by_name or None
+        )
         router_node = make_router_node(self._max_rounds)
         dispatch_fn = make_dispatch(self._handler_metas)
 
-        async def aseed(state: StateDict) -> StateDict:
-            return seed_node(state)
+        async def aseed(state: StateDict, config: RunnableConfig) -> StateDict:
+            return seed_node(state, config)
 
         async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
             return router_node(state, config)
@@ -2713,11 +2816,18 @@ class EventGraph:
         state: dict[str, Any],
         event: Event,
         reducer_names: list[str],
+        reducers: dict[str, BaseReducer],
     ) -> frozenset[str]:
-        """Incrementally update reducer state with a single new event."""
+        """Incrementally update reducer state with a single new event.
+
+        The caller passes *reducers*. A reducer bound to the run config
+        holds its service values, so the shadow state matches the
+        checkpoint. Concurrent streams share ``self._reducers``, so this
+        method must not read the attribute.
+        """
         changed: set[str] = set()
         for name in reducer_names:
-            r = self._reducers[name]
+            r = reducers[name]
             contribution = r.collect([event])
             if r.has_contributions(contribution):
                 reducer_fn = getattr(r, "reducer", None)
@@ -2791,6 +2901,18 @@ class EventGraph:
         compiled = self._compile()
         is_resume = isinstance(inp, LGCommand)
 
+        # Bind the reducers one time per stream call, not one time per
+        # event.  A bound reducer holds its service values, so the shadow
+        # state below equals the value the node path writes to the
+        # checkpoint.  ``self._reducers`` stays unchanged, because
+        # concurrent streams share it.  Skip the binding when the caller
+        # asked for no reducer, so an unused run-scoped factory never runs.
+        reducers = (
+            self._reducers_for(kwargs.get("config"))
+            if reducer_names
+            else self._reducers
+        )
+
         # Initialize incremental reducer state.  When a checkpoint exists
         # (subsequent run / resume), start from the checkpointed values so
         # the shadow state matches what the compiled graph already restored.
@@ -2808,11 +2930,9 @@ class EventGraph:
 
         for name in reducer_names:
             if checkpoint_values is not None:
-                reducer_state[name] = checkpoint_values.get(
-                    name, self._reducers[name].empty
-                )
+                reducer_state[name] = checkpoint_values.get(name, reducers[name].empty)
             else:
-                reducer_state[name] = self._reducers[name].seed(seeds)
+                reducer_state[name] = reducers[name].seed(seeds)
 
         # Merge seed contributions on top of checkpointed state.
         # - On astream_events second-run: seeds carry new events whose
@@ -2830,7 +2950,7 @@ class EventGraph:
         #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
         if checkpoint_values is not None and not is_resume:
             for s in seeds:
-                self._update_reducer_state(reducer_state, s, reducer_names)
+                self._update_reducer_state(reducer_state, s, reducer_names, reducers)
 
         # Yield seed events
         for s in seeds:
@@ -2838,9 +2958,7 @@ class EventGraph:
                 changed = frozenset(
                     name
                     for name in reducer_names
-                    if self._reducers[name].has_contributions(
-                        self._reducers[name].collect([s])
-                    )
+                    if reducers[name].has_contributions(reducers[name].collect([s]))
                 )
                 yield StreamFrame(
                     event=s,
@@ -2923,6 +3041,7 @@ class EventGraph:
                         reducer_state,
                         event,
                         reducer_names,
+                        reducers,
                     )
                     yield StreamFrame(
                         event=event,

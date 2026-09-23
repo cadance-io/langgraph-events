@@ -1583,7 +1583,12 @@ def _unreachable_migrate_from_siblings(
     return found
 
 
-def replay_reducer(reducer: BaseReducer, events: Iterable[Event]) -> Any:
+def replay_reducer(
+    reducer: BaseReducer,
+    events: Iterable[Event],
+    *,
+    services: Mapping[str, Any] | None = None,
+) -> Any:
     """Rebuild a reducer's channel value from *events*.
 
     Use after a reducer's projection function or output shape changed
@@ -1595,6 +1600,12 @@ def replay_reducer(reducer: BaseReducer, events: Iterable[Event]) -> Any:
     Events that don't match the reducer's filter are silently skipped,
     matching how the reducer would behave on a fresh run.
 
+    Pass *services* when the reducer ``fn`` declares a service parameter.
+    ``services`` is a name-keyed mapping of plain values. The value comes
+    from the current service, not from the run that produced *events*.
+    This function has no run config. Resolve a ``RunScoped`` value
+    yourself. Pass the resolved value, not the ``RunScoped`` object.
+
     The library does not iterate the checkpointer for you — saver
     semantics vary across MemorySaver / Sqlite / Postgres. Typical
     recipe::
@@ -1604,4 +1615,23 @@ def replay_reducer(reducer: BaseReducer, events: Iterable[Event]) -> Any:
         rebuilt = replay_reducer(my_reducer, events)
         # write `rebuilt` back through the checkpointer's put API
     """
-    return reducer.seed(list(events))
+    if services is None:
+        return reducer.seed(list(events))
+
+    from langgraph_events._services import RunScoped  # noqa: PLC0415
+
+    for name in reducer._service_params:
+        if isinstance(services.get(name), RunScoped):
+            raise TypeError(
+                "replay_reducer has no run config. Pass the resolved "
+                "service value, not a RunScoped."
+            )
+    try:
+        bound = reducer._bind(services)
+    except KeyError as exc:
+        missing = exc.args[0]
+        raise TypeError(
+            f"replay_reducer: reducer {reducer.name!r} needs the service "
+            f"{missing!r}, but services= does not contain it."
+        ) from exc
+    return bound.seed(list(events))
