@@ -385,6 +385,7 @@ class NamespaceModel:
         focus: NamespaceModel.Focus | None = None,
         show_raises: bool = True,
         notes: Mapping[str, str] | None = None,
+        muted: Iterable[str] = (),
     ) -> str:
         """Render the unified choreography mermaid diagram.
 
@@ -443,6 +444,9 @@ class NamespaceModel:
         A key is an event qualname, as in :meth:`json`, or a reducer name.
         The renderer writes each Mermaid-special character of a note as an
         entity code. A key that names no node raises ``ValueError``.
+
+        ``muted`` fades the nodes it names, with the same keys as ``notes``.
+        A client can mark a part of the graph that it does not use.
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
@@ -455,6 +459,7 @@ class NamespaceModel:
             focus=focus,
             show_raises=show_raises,
             notes=notes,
+            muted=muted,
         )
 
     def to_dict(self) -> dict[str, Any]:

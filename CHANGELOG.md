@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in `json()`, or a reducer name. A client can show facts that only it knows, such as a record
   count. Each Mermaid-special character of a note becomes an entity code. A key that names no
   node raises `ValueError` with the nearest valid key.
+- **`mermaid(muted=[...])` fades the nodes it names.** It takes the same keys as `notes`. A
+  client can mark a part of the graph that it does not use.
 - **`mermaid(show_raises=False)` hides the `(raises)` edges.** A node that only those edges
   reach is hidden too. The default is `True`.
 

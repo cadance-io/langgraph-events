@@ -130,6 +130,7 @@ class MermaidFlowchart:
         self._classdefs: list[_Classdef] = []
         self._statements: list[_Statement] = []
         self._linkstyles: list[_LinkStyle] = []
+        self._class_assigns: list[tuple[tuple[str, ...], str]] = []
         self._entry_count = 0
 
     # ---- declarations ------------------------------------------------------
@@ -200,6 +201,15 @@ class MermaidFlowchart:
         self._entry_count += 1
         return self.edge(src, target, arrow="==>")
 
+    def assign_class(self, node_ids: tuple[str, ...], cls: str) -> MermaidFlowchart:
+        """Add *cls* to declared nodes, on top of the class each one has.
+
+        Emits one ``class A,B cls`` line after every statement.
+        """
+        if node_ids:
+            self._class_assigns.append((node_ids, cls))
+        return self
+
     # ---- linkStyle registration -------------------------------------------
 
     def link_style(self, tag: str, style: str) -> MermaidFlowchart:
@@ -249,6 +259,8 @@ class MermaidFlowchart:
             if not ids:
                 continue
             lines.append(f"    linkStyle {','.join(str(i) for i in ids)} {ls.style}")
+        for node_ids, cls in self._class_assigns:
+            lines.append(f"    class {','.join(node_ids)} {cls}")
 
         return "\n".join(lines)
 

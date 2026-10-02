@@ -59,18 +59,23 @@ def _label(name: str, note: str | None) -> str:
     return f'"{name}<br>{"<br>".join(lines)}"'
 
 
-def _check_note_names(
-    d: NamespaceModel, notes: Mapping[str, str], node_id: dict[type, str]
+def _node_ids_by_key(d: NamespaceModel, node_id: dict[type, str]) -> dict[str, str]:
+    """The node ID of each key that ``notes`` and ``muted`` accept."""
+    by_key = {cls.__qualname__: nid for cls, nid in node_id.items()}
+    return by_key | {r.name: _reducer_node_id(r.name) for r in d.reducers}
+
+
+def _check_node_keys(
+    option: str, keys: Iterable[str], by_key: Mapping[str, str]
 ) -> None:
-    """Raise ``ValueError`` for a note key that names no node of the model."""
-    known = {cls.__qualname__ for cls in node_id} | {r.name for r in d.reducers}
-    for name in notes:
-        if name in known:
+    """Raise ``ValueError`` for a key of *option* that names no node."""
+    for name in keys:
+        if name in by_key:
             continue
-        near = difflib.get_close_matches(name, known, n=1)
+        near = difflib.get_close_matches(name, by_key, n=1)
         hint = f" Did you mean {near[0]!r}?" if near else ""
         raise ValueError(
-            f"A note names {name!r}, which is not a node of the model.{hint} "
+            f"{option} names {name!r}, which is not a node of the model.{hint} "
             f"A key is an event qualname or a reducer name."
         )
 
@@ -143,6 +148,7 @@ def _add_reducer_node(
 # No fill and a mid-grey outline and text: a context node then reads as
 # dimmed on a light page and on a dark one. A light fill reads as bright on a
 # dark page.
+_MUTED_CLASSDEF_STYLE = "opacity:0.45"
 _CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3"
 
 
@@ -337,6 +343,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     focus: NamespaceModel.Focus | None = None,
     show_raises: bool = True,
     notes: Mapping[str, str] | None = None,
+    muted: Iterable[str] = (),
 ) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
@@ -363,7 +370,10 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         _check_focus_names(d, focus)
     node_id = _build_node_id_map(d)
     notes = dict(notes or {})
-    _check_note_names(d, notes, node_id)
+    by_key = _node_ids_by_key(d, node_id)
+    _check_node_keys("A note", notes, by_key)
+    muted = tuple(muted)
+    _check_node_keys("muted", muted, by_key)
     edges: list[_FlowEdge] = []
     side_effect_entries: list[tuple[str, str, tuple[type[Event], ...]]] = []
     referenced: set[type[Event]] = set()
@@ -795,6 +805,11 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     flow.link_style("orchestrate", _LINKSTYLE_ORCHESTRATE)
     flow.link_style("chain", _LINKSTYLE_CHAIN)
     flow.link_style("folds", _LINKSTYLE_FOLDS)
+
+    faded = tuple(by_key[key] for key in muted if view.shows(by_key[key]))
+    if faded:
+        flow.classdef("muted", _MUTED_CLASSDEF_STYLE)
+        flow.assign_class(faded, "muted")
 
     listed = [
         entry for entry, name, subs in side_effect_entries if view.lists(name, subs)

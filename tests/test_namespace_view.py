@@ -247,3 +247,24 @@ def describe_notes():
         def it_names_the_nearest_valid_node_in_the_error():
             with pytest.raises(ValueError, match=r"_Ledger\.Commit"):
                 _noted(**{"_Ledger.Comit": "x"})
+
+
+def describe_muted():
+    def when_it_names_a_command():
+        def it_adds_the_muted_class_to_the_node():
+            output = _model().mermaid(muted=("_Ledger.Commit",))
+            assert "class Commit muted" in output
+
+    def when_it_names_a_reducer():
+        def it_adds_the_muted_class_to_the_reducer():
+            output = _model().mermaid(muted=("edge_total",))
+            assert "class _reducer_edge_total muted" in output
+
+    def when_it_names_an_unknown_node():
+        def it_names_the_nearest_valid_node_in_the_error():
+            with pytest.raises(ValueError, match="edge_total"):
+                _model().mermaid(muted=("edge_totl",))
+
+    def when_it_is_empty():
+        def it_declares_no_muted_class():
+            assert "muted" not in _model().mermaid()
