@@ -47,13 +47,14 @@ surface them automatically."
 @dataclass(frozen=True)
 class Cause:
     source: Event   # the event that the handler was called with ("causation ID")
-    via: str        # the handler node name, the same name as NamespaceModel.Edge.via
+    via: str        # the handler node name (HandlerMeta.node_name)
 
 
-log.cause(event)     # -> Cause | None. None for a seed, or when the log records no causes.
+log.cause(event)     # -> Cause | None. None for a seed, or for an unknown cause.
 log.effects(event)   # -> tuple[Event, ...]: the events that this event caused, in log order
 log.flow(event)      # -> tuple[Event, ...]: the cause chain, from the root seed to the event
-log.has_causes       # -> bool: whether this log records causes
+log.causes           # -> tuple[Cause | None, ...] | None: aligned with events.
+                     #    None when the log records no causes.
 
 EventLog(events, causes=None)   # causes: a sequence aligned with events, of Cause | None
 ```
@@ -65,15 +66,22 @@ EventLog(events, causes=None)   # causes: a sequence aligned with events, of Cau
   already means the causal *role*: intent, react, orchestrate or chain.
 - `via` is the stable graph node name (`HandlerMeta.node_name`). For an inline command
   handler, that is the command qualname, not a positional name such as `handle_2`.
+  `via` equals `Edge.via` unless the handler has a stable identity: an inline command
+  handler, or an `@on(node_name=...)` pin.
 - `cause(event)` finds the event by identity first, then by equality, the same way as
   `Reflection._resolve_index`. An event that is not in the root log raises `ValueError`.
 - A log that derives from a log shares the root's cause table. `log.after(X).cause(e)`
   gives the same answer as `log.cause(e)`.
-- A log without causes (`EventLog(events)` from a plain list) has `has_causes == False`.
-  On such a log, `cause()` raises `ValueError` ("this log records no causes"). It does not
-  return `None`, because `None` means "a seed".
+- A log without causes (`EventLog(events)` from a plain list) has `causes is None`.
+  On such a log, `cause()`, `effects()` and `flow()` raise `ValueError` ("this log records
+  no causes"). `cause()` does not return `None`, because `None` means "a seed".
 - The constructor checks each `Cause`: its `source` must be an event that appears earlier
-  in the same log, by identity. Otherwise the constructor raises `ValueError`.
+  in the same log, by identity. Otherwise the constructor raises `ValueError`. An entry
+  that is not a `Cause` or `None` raises `TypeError`.
+- `log.causes` is the inverse of the constructor: `EventLog(log.events, causes=log.causes)`
+  rebuilds a root log. In a log from `after`, `before` or `select`, a source can be an
+  event outside that log. Building a log from its `events` and `causes` then raises
+  `ValueError`.
 
 The count of firings is then a plain expression:
 
@@ -96,7 +104,8 @@ The graph state gets one channel next to `events`:
 
 ```python
 "events": Annotated[list[Event], operator.add],
-"causes": Annotated[list[tuple[int, str] | None], operator.add],   # (source index, via)
+"causes": Annotated[list[tuple[int, str] | None], operator.add],   # (source, via)
+# source >= 0: the log index of the source. source < 0: the source is -source positions back.
 ```
 
 - `causes[i]` describes `events[i]`. Every writer to `events` writes the same number of
@@ -111,34 +120,60 @@ The graph state gets one channel next to `events`:
   checkpoint reload. The seed node and the router therefore write `_pending_base`, the
   log index of the first pending event. The handler uses `_pending_base + k` for the
   k-th pending event.
+- One module, `_causes.py`, owns the storage format. It holds the entry alias
+  `CauseEntry` and one function, `resolve(events, causes) -> (absolute entries,
+  known_from)`. `resolve` applies the relative-source rule and the align-from-the-end
+  rule. `EventLog` (built from state) and `rewrite_store(drop=...)` both call it, so
+  neither sees a negative source.
+- One helper in `_internal.py`, `pad_causes(update)`, adds a `None` cause for each event
+  of a state update that writes `events` without causes. Every writer outside a handler
+  call uses it.
 
 ### Writers
 
 | Writer | Writes to `causes` |
 |---|---|
-| Handler (`_finalize`) | One `(trigger index, node name)` per event, padded after each trigger, so the invariant rollback stays aligned |
-| Seed node | `[None] * (len(events) - len(causes))`. The graph input writes only `events`, so the seed node pads for it. |
-| Router: `MaxRoundsExceeded`, `RunPaused` | `[None]` |
-| Async `Cancelled` path | `[None]` |
-| `_settle_supersteps` (abandon) | `[None]` |
-| `rewrite_store(drop=...)` (`_drop_from_log`) | Filters `causes` at the same positions and remaps each source index. A cause whose source was dropped becomes `None`. |
+| Handler (`_finalize`) | One `(trigger index, node name)` per event, recorded after each handler call, so the invariant rollback stays aligned. On a thread that paused before this feature (no `_pending_base`), `None` per event |
+| Seed node | `[None] * min(len(events) - len(causes), len(events) - cursor)`. The graph input writes only `events`, so the seed node pads for it. The second term keeps the older events of a checkpoint saved before this feature unknown. |
+| Router: `MaxRoundsExceeded`, `RunPaused` | `[None]`, through `pad_causes` |
+| Async `Cancelled` path | `[None]`, through `pad_causes` |
+| `_settle_supersteps` (abandon) | `[None]`, through `pad_causes` |
+| `pre_seed()` / `apre_seed()` | `[None]` per event in `values["events"]`, through `pad_causes`. The AG-UI resume path writes events this way. |
+| `rewrite_store(drop=...)` (`_drop_from_log`) | Filters `causes` at the same positions and remaps each source index, after `resolve`. Writes absolute entries back. A cause whose source was dropped becomes `None`. It also lowers `_pending_base` by the dropped events below it, the same as `_cursor`. |
 
-A length check in `_finalize` and in the `EventLog` construction from state fails fast
-when a writer drifts.
+A writer that drifts fails fast. `_finalize` raises `RuntimeError` when a handler call
+records a different number of causes than events. `resolve` raises `RuntimeError` when
+`len(causes) > len(events)`, with both lengths in the message, and when a stored source
+is not an earlier event.
 
 ### Interrupt and resume
 
 The value that a human supplies on resume gets the `Interrupted` event as its source,
 with the `via` of the handler that interrupted. The human answered that `Interrupted`
-event.
+event. `Resumed` also gets the `Interrupted` event as its source.
+
+The handler writes `[Interrupted, value, Resumed]` as one contiguous block, but it cannot
+know the absolute index of `Interrupted` when it writes, because parallel tasks decide the
+final order. The channel therefore allows a **relative source**: a negative number `-d`
+means "the event `d` positions before this one". The value stores `-1` and `Resumed`
+stores `-2`. A task's block is contiguous in the channel, so the distance stays true in
+every later checkpoint. `_causes.resolve` turns a relative source into an absolute one,
+for the `EventLog` built from state and for `rewrite_store(drop=...)` before it remaps.
 
 ### Checkpoints saved before this feature
 
 LangGraph starts a channel that an old checkpoint lacks at its default, `[]`. The reader
 aligns the channels from the end: `offset = len(events) - len(causes)`, and each event
 below `offset` has an unknown cause. `cause()` returns `None` for such an event, and
-`Reflection.get` shows `cause: unknown`. If `len(causes) > len(events)`, the log reports
-`has_causes == False`.
+`Reflection.get` shows `cause: unknown`. If `len(causes) > len(events)`, a writer drifted:
+`resolve` raises `RuntimeError` with both lengths.
+
+A thread that paused before this feature has no `_pending_base`. When it resumes, the
+handler records `None` for each event it returns, so the channels stay aligned.
+
+`Reflection` must tell `unknown` from `seed`, because `cause()` returns `None` for both.
+It reads that one fact through the private `EventLog._cause_is_known(event)`, its only
+private dependency on `EventLog`.
 
 ## Clients that persist their own log
 
@@ -161,11 +196,14 @@ the client does not shift any index when it joins the logs of several runs.
 ## TDD order
 
 1. `EventLog(events, causes=...)` construction: a valid cause, a `source` that is not an
-   earlier event (raises), `has_causes`.
+   earlier event (raises), the `causes` property, the round trip
+   `EventLog(log.events, causes=log.causes)`, and the error for a derived log.
 2. `cause`, `effects` and `flow` on a constructed log, including a derived log
    (`after`, `select`) and a log without causes (raises).
 3. A graph run: a policy's output has `Cause(source=<trigger>, via="<policy>")`. A seed
-   has `None`. An inline command handler's `via` is the command qualname.
+   has `None`. `via` equals `Edge.via` unless the handler has a stable identity: an
+   inline command handler (`via` is the command qualname), or an `@on(node_name=...)`
+   pin (`via` is the pinned name).
 4. Alignment cases, one test each: parallel handlers and `Scatter`, one node with several
    triggers, the invariant rollback, `HandlerRaised` and `HandlerRetried`, interrupt and
    resume, `ainvoke`, `MaxRoundsExceeded`, `RunPaused`.
