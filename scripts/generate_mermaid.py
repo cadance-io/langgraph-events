@@ -102,7 +102,7 @@ graph LR
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
     linkStyle 9 stroke:#0891b2,stroke-dasharray:2 4
-    linkStyle 10 stroke:#0369a1,stroke-dasharray:2 2
+    linkStyle 10 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
 </details>"""

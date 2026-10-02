@@ -17,7 +17,7 @@ from langgraph_events._namespace._model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from langgraph_events._event import Event
     from langgraph_events._event import (
@@ -36,12 +36,52 @@ _NODE_SHAPE_BY_CLASS: dict[str, Shape] = {
 }
 
 
+_ENTITIES = (
+    ("#", "#35;"),
+    ("&", "#amp;"),
+    ('"', "#quot;"),
+    ("<", "#lt;"),
+    (">", "#gt;"),
+)
+
+
+def _label(name: str, note: str | None) -> str:
+    """The node label: *name*, then *note* on a second line.
+
+    A note is caller text, so each Mermaid-special character becomes an
+    entity code. The note cannot close the label or inject markup.
+    """
+    if note is None:
+        return name
+    for char, entity in _ENTITIES:
+        note = note.replace(char, entity)
+    note = " ".join(note.split())
+    return f'"{name}<br>{note}"'
+
+
+def _check_note_names(
+    d: NamespaceModel, notes: Mapping[str, str], node_id: dict[type, str]
+) -> None:
+    """Raise ``ValueError`` for a note key that names no node of the model."""
+    known = {cls.__qualname__ for cls in node_id} | {r.name for r in d.reducers}
+    for name in notes:
+        if name in known:
+            continue
+        near = difflib.get_close_matches(name, known, n=1)
+        hint = f" Did you mean {near[0]!r}?" if near else ""
+        raise ValueError(
+            f"A note names {name!r}, which is not a node of the model.{hint} "
+            f"A key is an event qualname or a reducer name."
+        )
+
+
 def _add_node(
     flow: MermaidFlowchart,
     cls: type,
     node_id: dict[type, str],
     *,
     context: bool = False,
+    note: str | None = None,
 ) -> None:
     """Declare an event class on the flowchart with its shape + class.
 
@@ -55,7 +95,7 @@ def _add_node(
         node_id[cls],
         _NODE_SHAPE_BY_CLASS[cls_key],
         cls="ctx" if context else cls_key,
-        label=_event_label(cls),
+        label=_label(_event_label(cls), note),
     )
 
 
@@ -85,18 +125,26 @@ def _reducer_node_id(name: str) -> str:
 
 
 def _add_reducer_node(
-    flow: MermaidFlowchart, name: str, *, context: bool = False
+    flow: MermaidFlowchart,
+    name: str,
+    *,
+    context: bool = False,
+    note: str | None = None,
 ) -> None:
     """Declare a reducer: cylinder, ``:::reducer`` styling."""
     flow.node(
         _reducer_node_id(name),
         "cylinder",
         cls="ctx" if context else "reducer",
-        label=name,
+        label=_label(name, note),
     )
 
 
-_CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#6b7280,stroke-dasharray:3 3"
+# A light, dimmed fill like the other node classes, so a context node reads
+# on a light page and on a dark one.
+_CONTEXT_CLASSDEF_STYLE = (
+    "fill:#f3f4f6,stroke:#9ca3af,color:#4b5563,stroke-dasharray:3 3"
+)
 
 
 def _check_focus_names(d: NamespaceModel, focus: NamespaceModel.Focus) -> None:
@@ -208,7 +256,7 @@ _LINKSTYLE_INVARIANT = "stroke:#c2410c,stroke-dasharray:4 2"
 # (Command → Command) is deliberately awkward to discourage the pattern.
 _LINKSTYLE_ORCHESTRATE = "stroke:#0369a1,stroke-width:3px"
 _LINKSTYLE_CHAIN = "stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3"
-_LINKSTYLE_FOLDS = "stroke:#0369a1,stroke-dasharray:2 2"
+_LINKSTYLE_FOLDS = "stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2"
 
 
 def _causation_override(e: NamespaceModel.Edge) -> tuple[str | None, str]:
@@ -289,6 +337,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     reactor_hub_min: int | None = None,
     focus: NamespaceModel.Focus | None = None,
     show_raises: bool = True,
+    notes: Mapping[str, str] | None = None,
 ) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
@@ -314,6 +363,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     if focus is not None:
         _check_focus_names(d, focus)
     node_id = _build_node_id_map(d)
+    notes = dict(notes or {})
+    _check_note_names(d, notes, node_id)
     edges: list[_FlowEdge] = []
     side_effect_entries: list[tuple[str, str, tuple[type[Event], ...]]] = []
     referenced: set[type[Event]] = set()
@@ -703,27 +754,33 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         with flow.subgraph(namespace_name, title=title, direction="LR"):
             for member in domain_members.get(namespace_name, []):
                 context = view.is_context(node_id[member])
-                _add_node(flow, member, node_id, context=context)
+                note = notes.get(member.__qualname__)
+                _add_node(flow, member, node_id, context=context, note=note)
             for inv_cls in namespace_invariants.get(namespace_name, []):
                 _add_invariant_node(flow, inv_cls, node_id)
             for hub_id, handler_name in hub_in_namespace.get(namespace_name, []):
                 _add_hub_node(flow, hub_id, handler_name)
             for reducer_name in namespace_reducers.get(namespace_name, []):
                 context = view.is_context(_reducer_node_id(reducer_name))
-                _add_reducer_node(flow, reducer_name, context=context)
+                note = notes.get(reducer_name)
+                _add_reducer_node(flow, reducer_name, context=context, note=note)
 
     for node in loose_nodes:
-        _add_node(flow, node, node_id, context=view.is_context(node_id[node]))
+        context = view.is_context(node_id[node])
+        note = notes.get(node.__qualname__)
+        _add_node(flow, node, node_id, context=context, note=note)
     for inv_cls in loose_invariants:
         _add_invariant_node(flow, inv_cls, node_id)
     for reducer_name in loose_reducers:
         context = view.is_context(_reducer_node_id(reducer_name))
-        _add_reducer_node(flow, reducer_name, context=context)
+        note = notes.get(reducer_name)
+        _add_reducer_node(flow, reducer_name, context=context, note=note)
 
-    # Seeds come from every edge, drawn or hidden: an event that a hidden
-    # edge reaches is not an entry point of the system.
+    # An entry point is a fact about the whole graph, so a focused diagram
+    # draws none. Seeds come from every edge, drawn or hidden: an event that
+    # a hidden raises edge reaches is not an entry point.
     for seed in sorted(all_sources - all_targets):
-        if view.shows(seed):
+        if focus is None and view.shows(seed):
             flow.entry_seed(seed)
 
     for ed in edges:

@@ -18,7 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   namespaces, reactions and reducers in three separate fields. The diagram draws the selected
   items, every edge that touches one, and the nodes at both ends of those edges. Other drawn
   nodes are dimmed context, and their namespace box is titled "(context)". An unknown name
-  raises `ValueError` with the nearest valid name. An empty `Focus()` raises `ValueError`.
+  raises `ValueError` with the nearest valid name. An empty `Focus()` raises `ValueError`. A
+  focused diagram draws no entry arrows, because an entry point is a fact about the whole graph.
+- **`mermaid(notes={...})` adds a second line to a node label.** A key is an event qualname, as
+  in `json()`, or a reducer name. A client can show facts that only it knows, such as a record
+  count. Each Mermaid-special character of a note becomes an entity code. A key that names no
+  node raises `ValueError` with the nearest valid key.
 - **`mermaid(show_raises=False)` hides the `(raises)` edges.** A node that only those edges
   reach is hidden too. The default is `True`.
 

@@ -65,7 +65,7 @@ graph LR
     Place -.->|invariant| CustomerNotBanned
     Place -.->|invariant| OrderTotalWithinLimit
     linkStyle 9,10,11,12 stroke:#c2410c,stroke-dasharray:4 2
-    linkStyle 4,5,6,7,8 stroke:#0369a1,stroke-dasharray:2 2
+    linkStyle 4,5,6,7,8 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 <!-- autogen:end -->
 

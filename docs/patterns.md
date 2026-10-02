@@ -54,7 +54,7 @@ graph LR
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
     linkStyle 9 stroke:#0891b2,stroke-dasharray:2 4
-    linkStyle 10 stroke:#0369a1,stroke-dasharray:2 2
+    linkStyle 10 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
 </details>
@@ -104,7 +104,7 @@ graph LR
         Place -.->|invariant| CustomerNotBanned
         Place -.->|invariant| OrderTotalWithinLimit
         linkStyle 9,10,11,12 stroke:#c2410c,stroke-dasharray:4 2
-        linkStyle 4,5,6,7,8 stroke:#0369a1,stroke-dasharray:2 2
+        linkStyle 4,5,6,7,8 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
 
 === "Flow (text)"
@@ -181,7 +181,7 @@ graph LR
         Invalidated -.->|folds| _reducer_status
         Submitted -.->|folds| _reducer_status
         linkStyle 6 stroke:#0369a1,stroke-width:3px
-        linkStyle 8,9,10,11 stroke:#0369a1,stroke-dasharray:2 2
+        linkStyle 8,9,10,11 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
 
 === "Flow (text)"
@@ -256,7 +256,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         LLMResponded -.->|folds| _reducer_messages
         ToolsExecuted -.->|folds| _reducer_messages
     %% Side-effect handlers: audit_trail (Auditable)
-        linkStyle 7,8,9 stroke:#0369a1,stroke-dasharray:2 2
+        linkStyle 7,8,9 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
 
 === "Flow (text)"
@@ -330,7 +330,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Run -.->|folds| _reducer_context_parts
     %% Side-effect handlers: audit_trail (Auditable)
         linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
-        linkStyle 12,13,14 stroke:#0369a1,stroke-dasharray:2 2
+        linkStyle 12,13,14 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
 
 === "Flow (text)"
@@ -450,7 +450,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Analyzed -.->|folds| _reducer_stages
         Approved -.->|folds| _reducer_stages
         Classified -.->|folds| _reducer_stages
-        linkStyle 5,6,7 stroke:#0369a1,stroke-dasharray:2 2
+        linkStyle 5,6,7 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
 
 === "Flow (text)"

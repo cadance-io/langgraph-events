@@ -32,7 +32,7 @@ from langgraph_events._namespace._smells import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Mapping
 
     from langgraph_events._graph import ReturnInfo
     from langgraph_events._handler import HandlerMeta
@@ -384,6 +384,7 @@ class NamespaceModel:
         reactor_hub_min: int | None = None,
         focus: NamespaceModel.Focus | None = None,
         show_raises: bool = True,
+        notes: Mapping[str, str] | None = None,
     ) -> str:
         """Render the unified choreography mermaid diagram.
 
@@ -434,6 +435,14 @@ class NamespaceModel:
 
         ``show_raises=False`` hides the ``(raises)`` edges, and any node that
         only those edges reach.
+
+        A focused diagram draws no entry arrows. An entry point is a fact
+        about the whole graph, not about one part of it.
+
+        ``notes`` adds a second line to a node label. A key is an event
+        qualname, as in :meth:`json`, or a reducer name. The renderer writes
+        each Mermaid-special character of a note as an entity code. A key
+        that names no node raises ``ValueError``.
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
@@ -445,6 +454,7 @@ class NamespaceModel:
             reactor_hub_min=reactor_hub_min,
             focus=focus,
             show_raises=show_raises,
+            notes=notes,
         )
 
     def to_dict(self) -> dict[str, Any]:

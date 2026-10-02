@@ -176,6 +176,9 @@ def describe_focus():
                 _focused(reactions=("note_each_tik",))
 
     def when_it_selects_a_namespace():
+        def it_draws_no_entry_arrow():
+            assert "==>" not in _focused(namespaces=("_Ledger",))
+
         def it_draws_the_commands_and_outcomes_of_the_namespace():
             assert "Commit --> Committed" in _focused(namespaces=("_Ledger",))
 
@@ -204,9 +207,6 @@ def describe_focus():
             output = _focused(reactions=("note_each_tick",))
             assert '_Clock["_Clock namespace (context)"]' in output
 
-        def it_draws_no_entry_arrow_into_an_event_that_a_hidden_edge_reaches():
-            assert "==> Ticked" not in _focused(reactions=("note_each_tick",))
-
         def it_leaves_out_the_outcome_of_a_context_command():
             assert "Noted" not in _focused(reactions=("note_each_tick",))
 
@@ -214,3 +214,31 @@ def describe_focus():
         def it_draws_the_events_the_reducer_folds():
             output = _focused(reducers=("edge_total",))
             assert "Committed -.->|folds| _reducer_edge_total" in output
+
+
+def _noted(**notes: str) -> str:
+    return _model().mermaid(notes=notes)
+
+
+def describe_notes():
+    def when_a_note_names_a_command():
+        def it_adds_the_note_as_a_second_line():
+            assert 'Commit{{"Commit<br>7 records"}}' in _noted(
+                **{"_Ledger.Commit": "7 records"}
+            )
+
+    def when_a_note_names_a_reducer():
+        def it_adds_the_note_as_a_second_line():
+            output = _noted(edge_total="sum edge")
+            assert '_reducer_edge_total[("edge_total<br>sum edge")]' in output
+
+    def when_the_note_holds_markup():
+        def it_writes_each_special_character_as_an_entity():
+            output = _noted(**{"_Ledger.Commit": '<b>"x"</b> #1'})
+            assert "#lt;b#gt;#quot;x#quot;#lt;/b#gt; #35;1" in output
+            assert "<b>" not in output
+
+    def when_a_note_names_an_unknown_node():
+        def it_names_the_nearest_valid_node_in_the_error():
+            with pytest.raises(ValueError, match=r"_Ledger\.Commit"):
+                _noted(**{"_Ledger.Comit": "x"})
