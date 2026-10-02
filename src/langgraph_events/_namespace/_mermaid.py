@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from langgraph_events._namespace._model import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from langgraph_events._event import Event
     from langgraph_events._event import (
         Invariant as InvariantBase,
@@ -33,18 +36,25 @@ _NODE_SHAPE_BY_CLASS: dict[str, Shape] = {
 }
 
 
-def _add_node(flow: MermaidFlowchart, cls: type, node_id: dict[type, str]) -> None:
+def _add_node(
+    flow: MermaidFlowchart,
+    cls: type,
+    node_id: dict[type, str],
+    *,
+    context: bool = False,
+) -> None:
     """Declare an event class on the flowchart with its shape + class.
 
     ``node_id`` maps each class to its mermaid-safe ID; the rendered
     label stays as the short leaf name so the diagram stays readable
-    regardless of whether the ID escalated to qualname form.
+    regardless of whether the ID escalated to qualname form. A context
+    node keeps its shape and takes the dimmed ``:::ctx`` class.
     """
     cls_key = _node_class(cls)
     flow.node(
         node_id[cls],
         _NODE_SHAPE_BY_CLASS[cls_key],
-        cls=cls_key,
+        cls="ctx" if context else cls_key,
         label=_event_label(cls),
     )
 
@@ -74,9 +84,100 @@ def _reducer_node_id(name: str) -> str:
     return "_reducer_" + re.sub(r"\W", "_", name)
 
 
-def _add_reducer_node(flow: MermaidFlowchart, name: str) -> None:
+def _add_reducer_node(
+    flow: MermaidFlowchart, name: str, *, context: bool = False
+) -> None:
     """Declare a reducer: cylinder, ``:::reducer`` styling."""
-    flow.node(_reducer_node_id(name), "cylinder", cls="reducer", label=name)
+    flow.node(
+        _reducer_node_id(name),
+        "cylinder",
+        cls="ctx" if context else "reducer",
+        label=name,
+    )
+
+
+_CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#6b7280,stroke-dasharray:3 3"
+
+
+def _check_focus_names(d: NamespaceModel, focus: NamespaceModel.Focus) -> None:
+    """Raise ``ValueError`` for a focus name that the model does not hold."""
+    known_by_kind = {
+        "namespaces": set(d.namespaces),
+        "reactions": {r.name for r in d.reactions},
+        "reducers": {r.name for r in d.reducers},
+    }
+    for kind, known in known_by_kind.items():
+        for name in getattr(focus, kind):
+            if name in known:
+                continue
+            near = difflib.get_close_matches(name, known, n=1)
+            hint = f" Did you mean {near[0]!r}?" if near else ""
+            raise ValueError(
+                f"Focus names an unknown {kind[:-1]} {name!r}.{hint} "
+                f"Valid {kind}: {', '.join(sorted(known)) or 'none'}."
+            )
+
+
+@dataclass(frozen=True)
+class _View:
+    """The node IDs that one diagram draws. ``drawn=None`` draws every node.
+
+    Under a focus, ``selected`` holds the IDs the focus names, and every
+    other drawn node is context.
+    """
+
+    drawn: frozenset[str] | None
+    selected: frozenset[str]
+    focus: NamespaceModel.Focus | None
+
+    def shows(self, node: str) -> bool:
+        return self.drawn is None or node == "?" or node in self.drawn
+
+    def is_context(self, node: str) -> bool:
+        return self.focus is not None and node not in self.selected
+
+    def title(self, namespace: str) -> str:
+        if self.focus is None or namespace in self.focus.namespaces:
+            return f"{namespace} namespace"
+        return f"{namespace} namespace (context)"
+
+    def lists(self, reaction: str, subscribes: Iterable[type]) -> bool:
+        """Whether the side-effect footer lists *reaction*."""
+        if self.focus is None or reaction in self.focus.reactions:
+            return True
+        return any(
+            getattr(t, "__namespace__", None) in self.focus.namespaces
+            for t in subscribes
+        )
+
+
+def _make_view(
+    focus: NamespaceModel.Focus | None,
+    show_raises: bool,
+    edges: list[_FlowEdge],
+    namespace_of: dict[str, str],
+    standalone: set[str],
+) -> _View:
+    """Choose the drawn nodes: the ends of the kept edges, plus selected nodes.
+
+    Under a focus, an edge is kept when one end is selected or when the
+    focus names its reaction. Without a focus, only hidden ``raises``
+    edges remove nodes, and ``standalone`` nodes stay drawn.
+    """
+    if focus is None:
+        if show_raises:
+            return _View(None, frozenset(), None)
+        ends = {n for e in edges for n in (e.src, e.tgt)}
+        return _View(frozenset(ends | standalone), frozenset(), None)
+    selected = {n for n, ns in namespace_of.items() if ns in focus.namespaces}
+    selected |= {_reducer_node_id(name) for name in focus.reducers}
+    kept = [
+        e
+        for e in edges
+        if e.src in selected or e.tgt in selected or e.via in focus.reactions
+    ]
+    ends = {n for e in kept for n in (e.src, e.tgt)}
+    return _View(frozenset(ends | selected), frozenset(selected), focus)
 
 
 # Classdef palette used by both choreography and structure renderers.
@@ -136,6 +237,7 @@ class _FlowEdge:
     arrow: str
     label: str | None
     tag: str | None
+    via: str | None = None
 
 
 def _reaction_subscribes(r: Any) -> tuple[type[Event], ...]:
@@ -185,6 +287,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     *,
     namespace_order: Literal["affinity", "alphabetical"] = "affinity",
     reactor_hub_min: int | None = None,
+    focus: NamespaceModel.Focus | None = None,
+    show_raises: bool = True,
 ) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
@@ -207,9 +311,11 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
       reactor is pinned (no catch-all ``@on(InvariantViolated)``).
     - Seed events (no incoming edges) keep the thick ``==>`` entry arrow
     """
+    if focus is not None:
+        _check_focus_names(d, focus)
     node_id = _build_node_id_map(d)
     edges: list[_FlowEdge] = []
-    side_effect_entries: list[str] = []
+    side_effect_entries: list[tuple[str, str, tuple[type[Event], ...]]] = []
     referenced: set[type[Event]] = set()
     all_sources: set[str] = set()
     all_targets: set[str] = set()
@@ -325,11 +431,11 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             tag = f"({kind})"
             for e in (x for x in re_edges if x.kind == kind):
                 src, tgt = _record(e.source, e.target)
-                if (src, tgt) in seen:
+                if (src, tgt) in seen or (kind == "raises" and not show_raises):
                     continue
                 seen.add((src, tgt))
                 label: str | None = tag if inline else f"{name} {tag}"
-                edges.append(_FlowEdge(src, tgt, "-.->", label, kind))
+                edges.append(_FlowEdge(src, tgt, "-.->", label, kind, name))
 
         solid_edges = [e for e in re_edges if e.kind == "solid"]
         scatter_edges = [e for e in re_edges if e.kind == "scatter"]
@@ -344,14 +450,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 # command (which is exactly its ``subs``) — list the command
                 # alone; external reactors keep ``name (subscribed events)``.
                 entry = subs_label if inline else f"{name} ({subs_label})"
-                side_effect_entries.append(entry)
+                side_effect_entries.append((entry, name, subs))
                 continue
             if not has_annotation:
                 # Unannotated handler with no known target → show "?" target.
                 for src_type in subs:
                     src, _tgt = _record(src_type, None)
                     label = None if inline else name
-                    edges.append(_FlowEdge(src, "?", "-->", label, "solid"))
+                    edges.append(_FlowEdge(src, "?", "-->", label, "solid", name))
                 continue
 
         inv_cls = pinned_reactor_invariant.get(name)
@@ -365,7 +471,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 tgt_id = node_id[e.target]
                 all_targets.add(tgt_id)
                 rerouted_pinned_edges.append(
-                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant")
+                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant", name)
                 )
                 for inv in d.invariants:
                     if inv.cls is inv_cls:
@@ -381,21 +487,21 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 all_sources.add(src_id)
                 all_targets.add(tgt_id)
                 if hub_id not in emitted_hub_inbound:
-                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None))
+                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None, name))
                     emitted_hub_inbound.add(hub_id)
-                edges.append(_FlowEdge(hub_id, tgt_id, "-->", None, "solid"))
+                edges.append(_FlowEdge(hub_id, tgt_id, "-->", None, "solid", name))
                 continue
             src, tgt = _record(e.source, e.target)
             ctag, csuf = _causation_override(e)
             label = (csuf.lstrip() or None) if inline else f"{name}{csuf}"
-            edges.append(_FlowEdge(src, tgt, "-->", label, ctag or "solid"))
+            edges.append(_FlowEdge(src, tgt, "-->", label, ctag or "solid", name))
         for e in scatter_edges:
             if inv_cls is not None:
                 referenced.add(e.target)
                 tgt_id = node_id[e.target]
                 all_targets.add(tgt_id)
                 rerouted_pinned_edges.append(
-                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant")
+                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant", name)
                 )
                 for inv in d.invariants:
                     if inv.cls is inv_cls:
@@ -411,14 +517,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 all_sources.add(src_id)
                 all_targets.add(tgt_id)
                 if hub_id not in emitted_hub_inbound:
-                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None))
+                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None, name))
                     emitted_hub_inbound.add(hub_id)
-                edges.append(_FlowEdge(hub_id, tgt_id, "-.->", None, "scatter"))
+                edges.append(_FlowEdge(hub_id, tgt_id, "-.->", None, "scatter", name))
                 continue
             src, tgt = _record(e.source, e.target)
             ctag, csuf = _causation_override(e)
             label = (csuf.lstrip() or None) if inline else f"{name}{csuf}"
-            edges.append(_FlowEdge(src, tgt, "-.->", label, ctag or "scatter"))
+            edges.append(_FlowEdge(src, tgt, "-.->", label, ctag or "scatter", name))
 
     # Framework Interrupted → Resumed edge.
     for e in (x for x in d.edges if x.kind == "framework"):
@@ -506,15 +612,61 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         else:
             namespace_reducers[red.namespace].append(red.name)
 
+    namespace_of: dict[str, str] = {
+        node_id[cls]: ns for ns, members in domain_members.items() for cls in members
+    }
+    namespace_of |= {
+        node_id[inv]: ns for ns, invs in namespace_invariants.items() for inv in invs
+    }
+    namespace_of |= {
+        hub: ns for ns, hubs_here in hub_in_namespace.items() for hub, _ in hubs_here
+    }
+    namespace_of |= {
+        _reducer_node_id(name): ns
+        for ns, names in namespace_reducers.items()
+        for name in names
+    }
+    view = _make_view(
+        focus,
+        show_raises,
+        [*edges, *invariant_edges],
+        namespace_of,
+        {node_id[inv.cls] for inv in d.invariants}
+        | {_reducer_node_id(r.name) for r in d.reducers},
+    )
+    edges = [e for e in edges if view.shows(e.src) and view.shows(e.tgt)]
+    invariant_edges = [
+        e for e in invariant_edges if view.shows(e.src) and view.shows(e.tgt)
+    ]
+    for members in domain_members.values():
+        members[:] = [m for m in members if view.shows(node_id[m])]
+    loose_nodes = [n for n in loose_nodes if view.shows(node_id[n])]
+    for invs in namespace_invariants.values():
+        invs[:] = [i for i in invs if view.shows(node_id[i])]
+    loose_invariants = [i for i in loose_invariants if view.shows(node_id[i])]
+    for hubs_here in hub_in_namespace.values():
+        hubs_here[:] = [h for h in hubs_here if view.shows(h[0])]
+    for names in namespace_reducers.values():
+        names[:] = [n for n in names if view.shows(_reducer_node_id(n))]
+    loose_reducers = [n for n in loose_reducers if view.shows(_reducer_node_id(n))]
+
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
     if hubs:
         flow.classdef("hub", _HUB_CLASSDEF_STYLE)
     if d.reducers:
         flow.classdef("reducer", _REDUCER_CLASSDEF_STYLE)
+    if focus is not None:
+        flow.classdef("ctx", _CONTEXT_CLASSDEF_STYLE)
 
     all_domain_names = sorted(
-        set(domain_members) | set(namespace_invariants) | set(namespace_reducers)
+        ns
+        for ns in set(domain_members)
+        | set(namespace_invariants)
+        | set(namespace_reducers)
+        if domain_members.get(ns)
+        or namespace_invariants.get(ns)
+        or namespace_reducers.get(ns)
     )
     if namespace_order == "affinity":
         # Affinity counts: solid + scatter reaction edges plus invariant
@@ -532,6 +684,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             ns_b = getattr(b, "__namespace__", None)
             if ns_a is None or ns_b is None or ns_a == ns_b:
                 return
+            if not (view.shows(node_id[a]) and view.shows(node_id[b])):
+                return
             affinity[frozenset([ns_a, ns_b])] += 1
 
         for e in d.edges:
@@ -545,26 +699,32 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         all_domain_names = _order_namespaces_by_affinity(all_domain_names, affinity)
 
     for namespace_name in all_domain_names:
-        title = f"{namespace_name} namespace"
+        title = view.title(namespace_name)
         with flow.subgraph(namespace_name, title=title, direction="LR"):
             for member in domain_members.get(namespace_name, []):
-                _add_node(flow, member, node_id)
+                context = view.is_context(node_id[member])
+                _add_node(flow, member, node_id, context=context)
             for inv_cls in namespace_invariants.get(namespace_name, []):
                 _add_invariant_node(flow, inv_cls, node_id)
             for hub_id, handler_name in hub_in_namespace.get(namespace_name, []):
                 _add_hub_node(flow, hub_id, handler_name)
             for reducer_name in namespace_reducers.get(namespace_name, []):
-                _add_reducer_node(flow, reducer_name)
+                context = view.is_context(_reducer_node_id(reducer_name))
+                _add_reducer_node(flow, reducer_name, context=context)
 
     for node in loose_nodes:
-        _add_node(flow, node, node_id)
+        _add_node(flow, node, node_id, context=view.is_context(node_id[node]))
     for inv_cls in loose_invariants:
         _add_invariant_node(flow, inv_cls, node_id)
     for reducer_name in loose_reducers:
-        _add_reducer_node(flow, reducer_name)
+        context = view.is_context(_reducer_node_id(reducer_name))
+        _add_reducer_node(flow, reducer_name, context=context)
 
+    # Seeds come from every edge, drawn or hidden: an event that a hidden
+    # edge reaches is not an entry point of the system.
     for seed in sorted(all_sources - all_targets):
-        flow.entry_seed(seed)
+        if view.shows(seed):
+            flow.entry_seed(seed)
 
     for ed in edges:
         flow.edge(ed.src, ed.tgt, arrow=ed.arrow, label=ed.label, tag=ed.tag)  # type: ignore[arg-type]
@@ -580,7 +740,10 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     flow.link_style("chain", _LINKSTYLE_CHAIN)
     flow.link_style("folds", _LINKSTYLE_FOLDS)
 
-    if side_effect_entries:
-        flow.comment(f"Side-effect handlers: {', '.join(side_effect_entries)}")
+    listed = [
+        entry for entry, name, subs in side_effect_entries if view.lists(name, subs)
+    ]
+    if listed:
+        flow.comment(f"Side-effect handlers: {', '.join(listed)}")
 
     return flow.render()

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import ClassVar
 
+import pytest
+
 from langgraph_events import (
     Command,
     DomainEvent,
@@ -135,3 +137,80 @@ def describe_reducers():
             output = _model().mermaid()
             start = output.index('subgraph _Ledger["_Ledger namespace"]')
             assert "_reducer_commits" in output[start : output.index("end", start)]
+
+
+Focus = NamespaceModel.Focus
+
+
+def _focused(**selected: tuple[str, ...]) -> str:
+    return _model().mermaid(focus=Focus(**selected))
+
+
+def describe_show_raises():
+    def when_it_is_true():
+        def it_draws_the_raises_edges():
+            assert "(raises)" in _model().mermaid()
+
+    def when_it_is_false():
+        def it_draws_no_raises_edge():
+            assert "(raises)" not in _model().mermaid(show_raises=False)
+
+        def it_draws_no_node_that_only_a_raises_edge_reaches():
+            output = _model().mermaid(show_raises=False)
+            assert "HandlerRaised([HandlerRaised])" not in output
+
+
+def describe_focus():
+    def when_it_selects_nothing():
+        def it_raises():
+            with pytest.raises(ValueError, match="selects nothing"):
+                Focus()
+
+    def when_a_field_is_one_string():
+        def it_reads_the_string_as_one_name():
+            assert Focus(namespaces="_Ledger") == Focus(namespaces=("_Ledger",))
+
+    def when_it_names_an_unknown_reaction():
+        def it_names_the_nearest_valid_reaction_in_the_error():
+            with pytest.raises(ValueError, match="note_each_tick"):
+                _focused(reactions=("note_each_tik",))
+
+    def when_it_selects_a_namespace():
+        def it_draws_the_commands_and_outcomes_of_the_namespace():
+            assert "Commit --> Committed" in _focused(namespaces=("_Ledger",))
+
+        def it_leaves_out_an_unrelated_namespace():
+            assert "_Ops" not in _focused(namespaces=("_Ledger",))
+
+        def it_draws_a_reducer_of_the_namespace_as_selected():
+            output = _focused(namespaces=("_Ledger",))
+            assert "_reducer_commits[(commits)]:::reducer" in output
+
+        def it_draws_a_reducer_outside_the_namespace_as_context():
+            output = _focused(namespaces=("_Ledger",))
+            assert "_reducer_edge_total[(edge_total)]:::ctx" in output
+
+    def when_it_selects_a_reaction():
+        def it_draws_the_edges_of_the_reaction():
+            output = _focused(reactions=("note_each_tick",))
+            assert 'Ticked -->|"note_each_tick [orchestrate]"| Note' in output
+
+        def it_draws_the_endpoints_as_context():
+            output = _focused(reactions=("note_each_tick",))
+            assert "Ticked(Ticked):::ctx" in output
+            assert "Note{{Note}}:::ctx" in output
+
+        def it_titles_the_namespace_of_a_context_node_as_context():
+            output = _focused(reactions=("note_each_tick",))
+            assert '_Clock["_Clock namespace (context)"]' in output
+
+        def it_draws_no_entry_arrow_into_an_event_that_a_hidden_edge_reaches():
+            assert "==> Ticked" not in _focused(reactions=("note_each_tick",))
+
+        def it_leaves_out_the_outcome_of_a_context_command():
+            assert "Noted" not in _focused(reactions=("note_each_tick",))
+
+    def when_it_selects_a_reducer():
+        def it_draws_the_events_the_reducer_folds():
+            output = _focused(reducers=("edge_total",))
+            assert "Committed -.->|folds| _reducer_edge_total" in output

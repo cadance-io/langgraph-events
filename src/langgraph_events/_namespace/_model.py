@@ -303,6 +303,32 @@ class NamespaceModel:
         subscribes: tuple[type[Event], ...]
         namespace: str | None
 
+    @dataclass(frozen=True)
+    class Focus:
+        """The part of the model that ``mermaid(focus=...)`` draws.
+
+        Each field names items of one kind: namespaces, reactions (handler
+        names) or reducers. A field can take one string or any iterable of
+        strings. The diagram draws the selected items, every edge that
+        touches one, and the nodes at both ends of those edges. A node that
+        is not selected is drawn as context.
+        """
+
+        namespaces: tuple[str, ...] = ()
+        reactions: tuple[str, ...] = ()
+        reducers: tuple[str, ...] = ()
+
+        def __post_init__(self) -> None:
+            for kind in ("namespaces", "reactions", "reducers"):
+                names = getattr(self, kind)
+                as_tuple = (names,) if isinstance(names, str) else tuple(names)
+                object.__setattr__(self, kind, as_tuple)
+            if not (self.namespaces or self.reactions or self.reducers):
+                raise ValueError(
+                    "Focus selects nothing. Name at least one namespace, "
+                    "reaction or reducer."
+                )
+
     # ---- fields ----
 
     namespaces: dict[str, NamespaceModel.Namespace]
@@ -356,6 +382,8 @@ class NamespaceModel:
         *,
         namespace_order: Literal["affinity", "alphabetical"] = "affinity",
         reactor_hub_min: int | None = None,
+        focus: NamespaceModel.Focus | None = None,
+        show_raises: bool = True,
     ) -> str:
         """Render the unified choreography mermaid diagram.
 
@@ -390,6 +418,22 @@ class NamespaceModel:
           reactors and ``raises`` edges are not hubbed (the invariant
           chain already concentrates dispatch and ``raises`` is a single
           error path).
+
+        ``focus`` opts in to a **partial diagram**. Pass a
+        :class:`NamespaceModel.Focus` that names namespaces, reactions or
+        reducers. The diagram draws:
+
+        - every node of a selected namespace, and each selected reducer
+        - every edge that has one end selected, or that a selected
+          reaction draws
+        - the nodes at both ends of those edges, dimmed as context
+
+        An edge is drawn only when both of its ends are drawn. An entry
+        arrow is drawn only into a real seed of the whole graph. An unknown
+        name raises ``ValueError`` that gives the nearest valid name.
+
+        ``show_raises=False`` hides the ``(raises)`` edges, and any node that
+        only those edges reach.
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
@@ -399,6 +443,8 @@ class NamespaceModel:
             self,
             namespace_order=namespace_order,
             reactor_hub_min=reactor_hub_min,
+            focus=focus,
+            show_raises=show_raises,
         )
 
     def to_dict(self) -> dict[str, Any]:

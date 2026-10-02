@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The namespace model shows reducers.** `NamespaceModel.reducers` lists each reducer of the
+  graph as `NamespaceModel.Reducer(name, subscribes, namespace)`. `subscribes` holds the
+  concrete events of the model that the reducer folds. `json()` and `text()` list the reducers.
+  `mermaid()` draws each reducer as a cylinder, with a dotted `folds` arrow from each event it
+  reads.
+- **`mermaid(focus=...)` draws one part of the graph.** `NamespaceModel.Focus` names
+  namespaces, reactions and reducers in three separate fields. The diagram draws the selected
+  items, every edge that touches one, and the nodes at both ends of those edges. Other drawn
+  nodes are dimmed context, and their namespace box is titled "(context)". An unknown name
+  raises `ValueError` with the nearest valid name. An empty `Focus()` raises `ValueError`.
+- **`mermaid(show_raises=False)` hides the `(raises)` edges.** A node that only those edges
+  reach is hidden too. The default is `True`.
+
+### Changed
+
+- **The diagram of a graph with a reducer changes.** It now draws the reducer and its `folds`
+  arrows. A snapshot test of such a diagram must be regenerated. A diagram of a graph without
+  a reducer does not change.
+
 ## [0.33.0] - 2026-09-18
 
 ### Added
