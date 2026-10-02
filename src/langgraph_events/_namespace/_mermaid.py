@@ -46,7 +46,7 @@ _ENTITIES = (
 
 
 def _label(name: str, note: str | None) -> str:
-    """The node label: *name*, then *note* on a second line.
+    """The node label: *name*, then each line of *note* under it.
 
     A note is caller text, so each Mermaid-special character becomes an
     entity code. The note cannot close the label or inject markup.
@@ -55,8 +55,8 @@ def _label(name: str, note: str | None) -> str:
         return name
     for char, entity in _ENTITIES:
         note = note.replace(char, entity)
-    note = " ".join(note.split())
-    return f'"{name}<br>{note}"'
+    lines = (" ".join(line.split()) for line in note.splitlines())
+    return f'"{name}<br>{"<br>".join(lines)}"'
 
 
 def _check_note_names(

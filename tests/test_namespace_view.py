@@ -232,6 +232,11 @@ def describe_notes():
             output = _noted(edge_total="sum edge")
             assert '_reducer_edge_total[("edge_total<br>sum edge")]' in output
 
+    def when_the_note_has_two_lines():
+        def it_draws_each_line_under_the_name():
+            output = _noted(edge_total="sum edge\n= 0.4")
+            assert '_reducer_edge_total[("edge_total<br>sum edge<br>= 0.4")]' in output
+
     def when_the_note_holds_markup():
         def it_writes_each_special_character_as_an_entity():
             output = _noted(**{"_Ledger.Commit": '<b>"x"</b> #1'})

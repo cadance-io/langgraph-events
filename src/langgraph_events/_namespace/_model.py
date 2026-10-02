@@ -439,10 +439,10 @@ class NamespaceModel:
         A focused diagram draws no entry arrows. An entry point is a fact
         about the whole graph, not about one part of it.
 
-        ``notes`` adds a second line to a node label. A key is an event
-        qualname, as in :meth:`json`, or a reducer name. The renderer writes
-        each Mermaid-special character of a note as an entity code. A key
-        that names no node raises ``ValueError``.
+        ``notes`` adds lines under a node label, one per line of the note.
+        A key is an event qualname, as in :meth:`json`, or a reducer name.
+        The renderer writes each Mermaid-special character of a note as an
+        entity code. A key that names no node raises ``ValueError``.
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
