@@ -140,11 +140,10 @@ def _add_reducer_node(
     )
 
 
-# A light, dimmed fill like the other node classes, so a context node reads
-# on a light page and on a dark one.
-_CONTEXT_CLASSDEF_STYLE = (
-    "fill:#f3f4f6,stroke:#9ca3af,color:#4b5563,stroke-dasharray:3 3"
-)
+# No fill and a mid-grey outline and text: a context node then reads as
+# dimmed on a light page and on a dark one. A light fill reads as bright on a
+# dark page.
+_CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3"
 
 
 def _check_focus_names(d: NamespaceModel, focus: NamespaceModel.Focus) -> None:
