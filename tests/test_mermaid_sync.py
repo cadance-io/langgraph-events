@@ -16,6 +16,7 @@ from pathlib import Path
 
 from langgraph_events._namespace._mermaid import (
     _LINKSTYLE_CHAIN,
+    _LINKSTYLE_FOLDS,
     _LINKSTYLE_INVARIANT,
     _LINKSTYLE_ORCHESTRATE,
     _LINKSTYLE_OWNS,
@@ -45,6 +46,7 @@ _EXPECTED_BY_LABEL: dict[str, str] = {
     "reactor": _LINKSTYLE_INVARIANT,
     "reactor [orchestrate]": _LINKSTYLE_ORCHESTRATE,
     "[chain]": _LINKSTYLE_CHAIN,
+    "folds": _LINKSTYLE_FOLDS,
 }
 _EXPECTED_BY_ARROW: dict[str, str | None] = {"-.-": _LINKSTYLE_OWNS}
 
@@ -130,3 +132,8 @@ def describe_legend_diagram():
                 f"legend edge {index} ({arrow} {label!r}) should be styled "
                 f"{expected!r} but carries {applied.get(index)!r}"
             )
+
+    def it_shows_every_edge_colour_the_renderer_uses():
+        applied = set(_applied_styles(_legend_mermaid_body()).values())
+        missing = set(_EXPECTED_BY_LABEL.values()) - applied
+        assert not missing, f"the legend shows no edge styled {sorted(missing)}"

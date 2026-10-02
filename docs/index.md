@@ -39,6 +39,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     subgraph Order["Order namespace"]
         direction LR
         Place{{Place}}:::cmd
@@ -48,16 +49,23 @@ graph LR
         Shipped(Shipped):::devt
         CustomerNotBanned{CustomerNotBanned}:::inv
         OrderTotalWithinLimit{OrderTotalWithinLimit}:::inv
+        _reducer_current_status[(current_status)]:::reducer
     end
     _e0_[ ]:::entry ==> Place
     _e1_[ ]:::entry ==> Ship
     Place --> Placed
     Ship --> Shipped
+    Place -.->|folds| _reducer_current_status
+    Placed -.->|folds| _reducer_current_status
+    Rejected -.->|folds| _reducer_current_status
+    Ship -.->|folds| _reducer_current_status
+    Shipped -.->|folds| _reducer_current_status
     CustomerNotBanned -.->|explain_banned| Rejected
     OrderTotalWithinLimit -.->|explain_over_limit| Rejected
     Place -.->|invariant| CustomerNotBanned
     Place -.->|invariant| OrderTotalWithinLimit
-    linkStyle 4,5,6,7 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 9,10,11,12 stroke:#c2410c,stroke-dasharray:4 2
+    linkStyle 4,5,6,7,8 stroke:#0369a1,stroke-dasharray:2 2
 ```
 <!-- autogen:end -->
 

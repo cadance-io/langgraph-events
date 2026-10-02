@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from langgraph_events._event import (
@@ -32,8 +32,11 @@ from langgraph_events._namespace._smells import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from langgraph_events._graph import ReturnInfo
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._reducer import BaseReducer
     from langgraph_events._retry import RetryPolicy
 
 
@@ -192,6 +195,7 @@ class NamespaceModel:
         d.seeds                # tuple[type[Event], ...]
         d.integration_events   # tuple[type[IntegrationEvent], ...]
         d.system_events        # tuple[type[SystemEvent], ...]
+        d.reducers             # tuple[NamespaceModel.Reducer, ...]
     """
 
     # ---- nested types (class-level, not fields) ----
@@ -285,6 +289,20 @@ class NamespaceModel:
         declared_by: tuple[str, ...]
         reactors: tuple[str, ...]
 
+    @dataclass(frozen=True)
+    class Reducer:
+        """A reducer registered on the graph, and the events it folds.
+
+        ``subscribes`` holds the concrete event classes of this model that the
+        reducer folds. A base class or a tuple in ``event_type`` resolves to
+        those classes. ``namespace`` is the name of the declaring namespace,
+        or ``None`` for a reducer passed to ``EventGraph(reducers=...)``.
+        """
+
+        name: str
+        subscribes: tuple[type[Event], ...]
+        namespace: str | None
+
     # ---- fields ----
 
     namespaces: dict[str, NamespaceModel.Namespace]
@@ -295,6 +313,7 @@ class NamespaceModel:
     edges: tuple[NamespaceModel.Edge, ...]
     seeds: tuple[type[Event], ...]
     invariants: tuple[NamespaceModel.Invariant, ...]
+    reducers: tuple[NamespaceModel.Reducer, ...] = ()
 
     # ---- derived accessors ----
 
@@ -310,8 +329,10 @@ class NamespaceModel:
         cls,
         handler_metas: list[HandlerMeta],
         return_info: dict[str, ReturnInfo],
+        reducers: Iterable[BaseReducer] = (),
     ) -> NamespaceModel:
-        return _build_domain_model(handler_metas, return_info)
+        model = _build_domain_model(handler_metas, return_info)
+        return replace(model, reducers=_model_reducers(model, reducers))
 
     # ---- renderers ----
 
@@ -773,4 +794,34 @@ def _rollup_invariants(
             reactors=tuple(reactors_by_name.get(inv_cls.__name__, ())),
         )
         for inv_cls in order
+    )
+
+
+def _folds(reducer: BaseReducer, cls: type) -> bool:
+    """Whether *reducer* folds events of class *cls*.
+
+    A ``runtime_checkable`` Protocol with data members cannot be checked
+    with ``issubclass``. Such a reducer folds no class of the static model.
+    """
+    try:
+        matches = issubclass(cls, reducer.event_type)
+    except TypeError:
+        return False
+    owner = reducer.namespace
+    return matches and (
+        owner is None or getattr(cls, "__namespace_cls__", None) is owner
+    )
+
+
+def _model_reducers(
+    model: NamespaceModel, reducers: Iterable[BaseReducer]
+) -> tuple[NamespaceModel.Reducer, ...]:
+    classes = sorted(_build_node_id_map(model), key=lambda c: c.__qualname__)
+    return tuple(
+        NamespaceModel.Reducer(
+            name=r.name,
+            subscribes=tuple(c for c in classes if _folds(r, c)),
+            namespace=getattr(r.namespace, "__namespace_name__", None),
+        )
+        for r in reducers
     )

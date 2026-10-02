@@ -1191,7 +1191,7 @@ class EventGraph:
         """
         if self._namespaces_cache is None:  # class-level default; set per instance
             self._namespaces_cache = NamespaceModel._build(
-                self._handler_metas, self._return_info
+                self._handler_metas, self._return_info, self._reducers.values()
             )
         return self._namespaces_cache
 

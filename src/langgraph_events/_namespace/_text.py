@@ -109,6 +109,11 @@ def _render_taxonomy_lines(  # noqa: PLR0912
                 annotations.append(f"reacted by: {', '.join(inv.reactors)}")
             suffix = f"  ({'; '.join(annotations)})" if annotations else ""
             lines.append(f"  {inv.cls.__name__}{suffix}")
+    if d.reducers:
+        lines.append("Reducers:")
+        for r in d.reducers:
+            folds = ", ".join(_event_label(t) for t in r.subscribes)
+            lines.append(f"  {r.name}  (folds {folds})")
     return lines
 
 

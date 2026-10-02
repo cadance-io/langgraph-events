@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -65,6 +66,17 @@ def _add_hub_node(flow: MermaidFlowchart, hub_id: str, handler_name: str) -> Non
 
 
 _HUB_CLASSDEF_STYLE = "fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-dasharray:3 2"
+_REDUCER_CLASSDEF_STYLE = "fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e"
+
+
+def _reducer_node_id(name: str) -> str:
+    """Mermaid-safe node ID of a reducer, apart from every event node ID."""
+    return "_reducer_" + re.sub(r"\W", "_", name)
+
+
+def _add_reducer_node(flow: MermaidFlowchart, name: str) -> None:
+    """Declare a reducer: cylinder, ``:::reducer`` styling."""
+    flow.node(_reducer_node_id(name), "cylinder", cls="reducer", label=name)
 
 
 # Classdef palette used by both choreography and structure renderers.
@@ -95,6 +107,7 @@ _LINKSTYLE_INVARIANT = "stroke:#c2410c,stroke-dasharray:4 2"
 # (Command → Command) is deliberately awkward to discourage the pattern.
 _LINKSTYLE_ORCHESTRATE = "stroke:#0369a1,stroke-width:3px"
 _LINKSTYLE_CHAIN = "stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3"
+_LINKSTYLE_FOLDS = "stroke:#0369a1,stroke-dasharray:2 2"
 
 
 def _causation_override(e: NamespaceModel.Edge) -> tuple[str | None, str]:
@@ -430,6 +443,16 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 src, tgt = _record(cmd.cls, outcome)
                 edges.append(_FlowEdge(src, tgt, "-.-", None, "ownership"))
 
+    # A reducer reads events and emits none, so each subscribed event gets a
+    # dotted ``folds`` arrow into the reducer node.
+    for red in d.reducers:
+        red_id = _reducer_node_id(red.name)
+        all_targets.add(red_id)
+        for cls in red.subscribes:
+            referenced.add(cls)
+            all_sources.add(node_id[cls])
+            edges.append(_FlowEdge(node_id[cls], red_id, "-.->", "folds", "folds"))
+
     # Append rerouted pinned-reactor edges to the flow edge list.  These
     # use the "invariant" tag so they get the same dashed-orange style as
     # the Command -> Invariant gate edges.
@@ -475,12 +498,24 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         group.sort(key=lambda c: c.__name__)
     loose_invariants.sort(key=lambda c: c.__name__)
 
+    namespace_reducers: dict[str, list[str]] = defaultdict(list)
+    loose_reducers: list[str] = []
+    for red in d.reducers:
+        if red.namespace is None:
+            loose_reducers.append(red.name)
+        else:
+            namespace_reducers[red.namespace].append(red.name)
+
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
     if hubs:
         flow.classdef("hub", _HUB_CLASSDEF_STYLE)
+    if d.reducers:
+        flow.classdef("reducer", _REDUCER_CLASSDEF_STYLE)
 
-    all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
+    all_domain_names = sorted(
+        set(domain_members) | set(namespace_invariants) | set(namespace_reducers)
+    )
     if namespace_order == "affinity":
         # Affinity counts: solid + scatter reaction edges plus invariant
         # chain edges (Command → Invariant), and nothing else. Ownership-fill
@@ -518,11 +553,15 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 _add_invariant_node(flow, inv_cls, node_id)
             for hub_id, handler_name in hub_in_namespace.get(namespace_name, []):
                 _add_hub_node(flow, hub_id, handler_name)
+            for reducer_name in namespace_reducers.get(namespace_name, []):
+                _add_reducer_node(flow, reducer_name)
 
     for node in loose_nodes:
         _add_node(flow, node, node_id)
     for inv_cls in loose_invariants:
         _add_invariant_node(flow, inv_cls, node_id)
+    for reducer_name in loose_reducers:
+        _add_reducer_node(flow, reducer_name)
 
     for seed in sorted(all_sources - all_targets):
         flow.entry_seed(seed)
@@ -539,6 +578,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     flow.link_style("invariant", _LINKSTYLE_INVARIANT)
     flow.link_style("orchestrate", _LINKSTYLE_ORCHESTRATE)
     flow.link_style("chain", _LINKSTYLE_CHAIN)
+    flow.link_style("folds", _LINKSTYLE_FOLDS)
 
     if side_effect_entries:
         flow.comment(f"Side-effect handlers: {', '.join(side_effect_entries)}")

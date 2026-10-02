@@ -13,6 +13,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     subgraph Example["Namespace"]
       direction LR
       Command{{Command}}:::cmd
@@ -20,6 +21,7 @@ graph LR
       Halted([Halted]):::halt
       Invariant{Invariant}:::inv
       Rejected(Rejected):::devt
+      Reducer[(Reducer)]:::reducer
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
@@ -32,6 +34,7 @@ graph LR
     DomainEvent -->|"reactor [orchestrate]"| Command
     Command -->|"[chain]"| Command
     Command -.->|"(retry)"| SystemEvent
+    DomainEvent -.->|folds| Reducer
     linkStyle 2 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 3 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
@@ -39,6 +42,7 @@ graph LR
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
     linkStyle 9 stroke:#0891b2,stroke-dasharray:2 4
+    linkStyle 10 stroke:#0369a1,stroke-dasharray:2 2
 ```
 
 </details>
@@ -56,6 +60,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     subgraph Expense["Expense namespace"]
         direction LR
         Approve{{Approve}}:::cmd
@@ -65,6 +70,7 @@ graph LR
         Rejected(Rejected):::devt
         Submit{{Submit}}:::cmd
         Submitted(Submitted):::devt
+        _reducer_status[(status)]:::reducer
     end
     ApprovalRequired([ApprovalRequired]):::syst
     _e0_[ ]:::entry ==> Reject
@@ -75,7 +81,12 @@ graph LR
     Reject --> Rejected
     Submitted -->|"check_policy [orchestrate]"| Approve
     Submitted -->|check_policy| ApprovalRequired
+    Approved -.->|folds| _reducer_status
+    Rejected -.->|folds| _reducer_status
+    Invalidated -.->|folds| _reducer_status
+    Submitted -.->|folds| _reducer_status
     linkStyle 6 stroke:#0369a1,stroke-width:3px
+    linkStyle 8,9,10,11 stroke:#0369a1,stroke-dasharray:2 2
 ```
 
 ## Choreography (text)
@@ -92,6 +103,8 @@ Namespaces:
       → Rejected
 System events:
   ApprovalRequired
+Reducers:
+  status  (folds Approved, Rejected, Invalidated, Submitted)
 Policies:
   check_policy  (Submitted → Approve, ApprovalRequired)
 Causal notes:
