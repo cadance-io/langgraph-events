@@ -148,7 +148,7 @@ def _add_reducer_node(
 # No fill and a mid-grey outline and text: a context node then reads as
 # dimmed on a light page and on a dark one. A light fill reads as bright on a
 # dark page.
-_MUTED_CLASSDEF_STYLE = "opacity:0.45"
+_MUTED_CLASSDEF_STYLE = "opacity:0.6"
 _CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3"
 
 
