@@ -38,6 +38,21 @@ class _CauseTable:
     entries: tuple[tuple[int, str] | None, ...]
     positions: dict[int, int]
 
+    def locate(self, event: Event) -> int:
+        """The root index of *event*: identity first, then the latest equal event.
+
+        The same lookup as ``Reflection``. Raises ``ValueError`` when *event*
+        is not in the root log.
+        """
+        position = self.positions.get(id(event))
+        if position is not None:
+            return position
+        for i in range(len(self.events) - 1, -1, -1):
+            candidate = self.events[i]
+            if type(candidate) is type(event) and candidate == event:
+                return i
+        raise ValueError(f"event {type(event).__name__} is not in this log")
+
 
 def _cause_at(table: _CauseTable, position: int) -> Cause | None:
     """The :class:`Cause` of the root event at *position*, or ``None``."""
@@ -131,6 +146,51 @@ class EventLog:
         return tuple(
             _cause_at(table, table.positions[id(event)]) for event in self._events
         )
+
+    def cause(self, event: Event) -> Cause | None:
+        """The handler that produced *event*, and the event it received.
+
+        Returns ``None`` for a seed, and for an event whose cause was not
+        recorded. Finds *event* by identity first, then as the latest equal
+        event. A log from ``after``, ``before`` or ``select`` answers like
+        its root log. Raises ``ValueError`` if the log records no causes, or
+        if *event* is not in the root log.
+        """
+        table = self._require_table()
+        return _cause_at(table, table.locate(event))
+
+    def effects(self, event: Event) -> tuple[Event, ...]:
+        """The events that *event* caused, in log order.
+
+        Finds *event* and raises like :meth:`cause`.
+        """
+        table = self._require_table()
+        position = table.locate(event)
+        return tuple(
+            table.events[i]
+            for i, entry in enumerate(table.entries)
+            if entry is not None and entry[0] == position
+        )
+
+    def flow(self, event: Event) -> tuple[Event, ...]:
+        """The cause chain of *event*, from the root seed to *event*.
+
+        The chain starts at the first event that has no recorded cause.
+        Finds *event* and raises like :meth:`cause`.
+        """
+        table = self._require_table()
+        chain = [table.locate(event)]
+        while (entry := table.entries[chain[-1]]) is not None:
+            chain.append(entry[0])
+        return tuple(table.events[i] for i in reversed(chain))
+
+    def _require_table(self) -> _CauseTable:
+        if self._table is None:
+            raise ValueError(
+                "this log records no causes. A graph run records them. Rebuild "
+                "a saved log with EventLog(events, causes=...)."
+            )
+        return self._table
 
     def filter(self, event_type: type[T]) -> list[T]:
         """Return all events matching *event_type* (including subclasses)."""

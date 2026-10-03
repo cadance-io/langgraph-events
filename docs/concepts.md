@@ -241,7 +241,31 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 | `log.has(T)` | `bool` |
 | `log.count(T)` | `int` |
 | `log.select(T)` / `log.after(T)` / `log.before(T)` | chainable `EventLog` |
+| `log.cause(e)` | `Cause \| None`: the handler that produced `e`, and the event it received |
+| `log.effects(e)` | `tuple[Event, ...]`: the events that `e` caused, in log order |
+| `log.flow(e)` | `tuple[Event, ...]`: the cause chain, from the root seed to `e` |
+| `log.causes` | `tuple[Cause \| None, ...] \| None`: one cause per event, or `None` when the log records no causes |
 | `len(log)`, `log[i]` | container protocol |
+
+### Causes
+
+A `Cause(source, via)` names the event that a handler received and the handler's graph node
+name. `via` equals `Edge.via` unless the handler has a stable identity: an inline command
+handler, or an `@on(node_name=...)` pin. `log.cause(e)` returns `None` for a seed. It raises
+`ValueError` when the log records no causes, or when `e` is not in the log. The lookup uses
+identity first, then the latest equal event. A log from `after()`, `before()` or `select()`
+answers like the log it came from.
+
+```python
+fired = sum(1 for e in log if (c := log.cause(e)) and c.via == "hourly_wake_brief")
+```
+
+A client that saves events in its own format saves each cause with them. It rebuilds the log
+with `EventLog(events, causes=...)`, one entry per event: a `Cause`, or `None` for a seed. Each
+`source` must be the same object as an earlier event in `events`. `log.causes` gives the
+entries back, so `EventLog(log.events, causes=log.causes)` rebuilds a root log. In a derived
+log, a source can be outside that log, and the rebuild raises `ValueError`.
+
 
 ## `Namespace` as a feature hub
 

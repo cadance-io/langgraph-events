@@ -343,3 +343,125 @@ def describe_causes():
 
             with pytest.raises(ValueError, match="not an earlier event"):
                 EventLog(derived.events, causes=derived.causes)
+
+
+def _caused_log():
+    """seed causes reply and other. reply causes echo."""
+    seed = Alpha(v=1)
+    reply = Beta(v=2)
+    echo = Alpha(v=3)
+    other = Beta(v=4)
+    log = EventLog(
+        [seed, reply, echo, other],
+        causes=[
+            None,
+            Cause(seed, "reply_h"),
+            Cause(reply, "echo_h"),
+            Cause(seed, "other_h"),
+        ],
+    )
+    return log, seed, reply, echo, other
+
+
+def _repeated_log():
+    """Two equal Alpha(v=1) objects. The second one has a cause."""
+    first = Alpha(v=1)
+    reply = Beta(v=2)
+    again = Alpha(v=1)
+    log = EventLog(
+        [first, reply, again],
+        causes=[None, Cause(first, "h"), Cause(reply, "g")],
+    )
+    return log, first, reply, again
+
+
+def describe_cause():
+    def when_the_event_has_a_cause():
+        def it_returns_the_source_event_and_the_handler():
+            log, seed, reply, _echo, _other = _caused_log()
+
+            cause = log.cause(reply)
+
+            assert cause == Cause(source=Alpha(v=1), via="reply_h")
+            assert cause.source is seed
+
+    def when_the_event_is_a_seed():
+        def it_returns_none():
+            log, seed, _reply, _echo, _other = _caused_log()
+
+            assert log.cause(seed) is None
+
+    def when_equal_events_repeat():
+        def it_finds_each_instance_by_identity():
+            log, first, reply, again = _repeated_log()
+
+            assert log.cause(first) is None
+            assert log.cause(again) == Cause(source=reply, via="g")
+
+        def it_falls_back_to_the_latest_equal_event():
+            log, _first, reply, _again = _repeated_log()
+
+            assert log.cause(Alpha(v=1)) == Cause(source=reply, via="g")
+
+    def when_the_event_is_not_in_the_log():
+        def it_raises_value_error():
+            log, _seed, _reply, _echo, _other = _caused_log()
+
+            with pytest.raises(ValueError, match="not in this log"):
+                log.cause(Beta(v=99))
+
+    def when_the_log_records_no_causes():
+        def it_raises_value_error():
+            seed = Alpha(v=1)
+
+            with pytest.raises(ValueError, match="records no causes"):
+                EventLog([seed]).cause(seed)
+
+    def when_the_log_derives_from_a_log():
+        def it_answers_like_the_root():
+            log, seed, reply, echo, other = _caused_log()
+
+            assert log.after(Beta).cause(echo).source is reply
+            assert log.select(Beta).cause(other).source is seed
+
+
+def describe_effects():
+    def when_the_event_caused_events():
+        def it_returns_them_in_log_order():
+            log, seed, reply, _echo, other = _caused_log()
+
+            assert log.effects(seed) == (reply, other)
+
+    def when_the_event_caused_nothing():
+        def it_returns_an_empty_tuple():
+            log, _seed, _reply, _echo, other = _caused_log()
+
+            assert log.effects(other) == ()
+
+    def when_the_log_records_no_causes():
+        def it_raises_value_error():
+            seed = Alpha(v=1)
+
+            with pytest.raises(ValueError, match="records no causes"):
+                EventLog([seed]).effects(seed)
+
+
+def describe_flow():
+    def when_the_event_has_a_cause_chain():
+        def it_returns_the_chain_from_the_root_seed():
+            log, seed, reply, echo, _other = _caused_log()
+
+            assert log.flow(echo) == (seed, reply, echo)
+
+    def when_the_event_is_a_seed():
+        def it_returns_the_seed_alone():
+            log, seed, _reply, _echo, _other = _caused_log()
+
+            assert log.flow(seed) == (seed,)
+
+    def when_the_log_records_no_causes():
+        def it_raises_value_error():
+            seed = Alpha(v=1)
+
+            with pytest.raises(ValueError, match="records no causes"):
+                EventLog([seed]).flow(seed)
