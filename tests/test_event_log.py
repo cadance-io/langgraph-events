@@ -2,7 +2,7 @@
 
 import pytest
 
-from langgraph_events import Event, EventLog, IntegrationEvent
+from langgraph_events import Cause, Event, EventLog, IntegrationEvent
 
 
 class Alpha(IntegrationEvent):
@@ -270,3 +270,76 @@ def describe_EventLog():
             sub = log.select(Alpha)
             assert list(sub) == [Alpha(v=1), Alpha(v=3)]
             assert len(log) == 3
+
+
+def describe_EventLog_causes_argument():
+    def when_a_source_comes_later():
+        def it_raises_value_error():
+            first = Alpha(v=1)
+            later = Beta(v=2)
+
+            with pytest.raises(ValueError, match="not an earlier event"):
+                EventLog([first, later], causes=[Cause(later, "h"), None])
+
+    def when_a_source_is_the_event_itself():
+        def it_raises_value_error():
+            seed = Alpha(v=1)
+
+            with pytest.raises(ValueError, match="not an earlier event"):
+                EventLog([seed], causes=[Cause(seed, "h")])
+
+    def when_a_source_is_only_equal_to_an_earlier_event():
+        def it_raises_value_error():
+            seed = Alpha(v=1)
+
+            with pytest.raises(ValueError, match="same object"):
+                EventLog([seed, Beta(v=2)], causes=[None, Cause(Alpha(v=1), "h")])
+
+    def when_an_entry_is_not_a_cause():
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match="must be a Cause or None"):
+                EventLog([Alpha(v=1), Beta(v=2)], causes=[None, (0, "h")])
+
+    def when_the_lengths_differ():
+        def it_raises_value_error():
+            with pytest.raises(ValueError, match="one entry per event"):
+                EventLog([Alpha(v=1), Beta(v=2)], causes=[None])
+
+
+def describe_causes():
+    def when_causes_are_given():
+        def it_returns_one_entry_per_event():
+            seed = Alpha(v=1)
+
+            log = EventLog([seed, Beta(v=2)], causes=[None, Cause(seed, "h")])
+
+            assert log.causes == (None, Cause(source=seed, via="h"))
+
+        def it_rebuilds_the_same_log():
+            seed = Alpha(v=1)
+            log = EventLog([seed, Beta(v=2)], causes=[None, Cause(seed, "h")])
+
+            rebuilt = EventLog(log.events, causes=log.causes)
+
+            assert rebuilt.causes == log.causes
+            assert rebuilt.causes[1].source is seed
+
+    def when_causes_are_omitted():
+        def it_is_none():
+            assert EventLog([Alpha(v=1)]).causes is None
+
+    def when_the_log_derives_from_a_log_that_has_causes():
+        def it_keeps_the_causes_of_its_events():
+            seed = Alpha(v=1)
+            log = EventLog([seed, Beta(v=2)], causes=[None, Cause(seed, "h")])
+
+            assert log.select(Beta).causes == (Cause(source=seed, via="h"),)
+            assert log.before(Beta).causes == (None,)
+
+        def it_cannot_rebuild_a_log_whose_source_is_outside_it():
+            seed = Alpha(v=1)
+            log = EventLog([seed, Beta(v=2)], causes=[None, Cause(seed, "h")])
+            derived = log.select(Beta)
+
+            with pytest.raises(ValueError, match="not an earlier event"):
+                EventLog(derived.events, causes=derived.causes)

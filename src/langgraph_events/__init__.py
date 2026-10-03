@@ -34,7 +34,7 @@ from langgraph_events._event import (
     Unresumable,
     on_namespace_finalize,
 )
-from langgraph_events._event_log import EventLog
+from langgraph_events._event_log import Cause, EventLog
 from langgraph_events._graph import (
     EventGraph,
     GraphState,
@@ -103,6 +103,7 @@ __all__ = [
     "Auditable",
     "BaseReducer",
     "Cancelled",
+    "Cause",
     "Command",
     "CommandChainWarning",
     "CommandPrivacyError",
