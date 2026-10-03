@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-10-03
+
 ### Fixed
 
 - **A `%` in a mermaid note is text.** Mermaid reads `%%{...}%%` anywhere in a diagram as a
@@ -1326,7 +1328,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.35.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.35.1...HEAD
+[0.35.1]: https://github.com/cadance-io/langgraph-events/compare/v0.35.0...v0.35.1
 [0.35.0]: https://github.com/cadance-io/langgraph-events/compare/v0.34.0...v0.35.0
 [0.34.0]: https://github.com/cadance-io/langgraph-events/compare/v0.33.0...v0.34.0
 [0.33.0]: https://github.com/cadance-io/langgraph-events/compare/v0.32.0...v0.33.0
