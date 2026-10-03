@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 import pytest
-from conftest import Ended, Order, Processed, Started
+from conftest import Ended, Order, Processed, Started, strip_channels
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -353,6 +353,20 @@ def describe_invoke():
             with pytest.raises(RuntimeError, match="not an earlier event"):
                 graph.invoke(Started(data="b"), config=config)
 
+    def when_the_thread_was_saved_before_causes_existed():
+        def it_records_causes_for_the_new_run_only():
+            graph, config, saver = _checkpointed([step, finish], "legacy")
+            graph.invoke(Started(data="old"), config=config)
+            strip_channels(saver, config, "causes", "_pending_base")
+
+            log = graph.invoke(Started(data="new"), config=config)
+            stored = graph.get_state(config).events
+
+            assert log.cause(log.first(Processed)) is None
+            assert log.cause(log.latest(Processed)).source is log.latest(Started)
+            assert stored.causes[4] == Cause(source=Started(data="new"), via="step")
+            assert "cause: unknown" in graph.reflect(log).event(1)
+
 
 def describe_ainvoke():
     def when_no_handler_reacts():
@@ -404,6 +418,18 @@ def describe_resume():
             assert log.cause(log.first(Approved)) == Cause(source=asked, via="ask")
             assert log.cause(log.first(Approved)).source is asked
             assert log.cause(log.first(Resumed)) == Cause(source=asked, via="ask")
+            assert log.cause(log.first(Ended)) == Cause(
+                source=log.first(Resumed), via="acknowledge"
+            )
+
+    def when_the_thread_paused_before_causes_existed():
+        def it_resumes_and_records_no_cause_for_the_answer():
+            graph, config, saver = _paused("legacy-pause")
+            strip_channels(saver, config, "causes", "_pending_base")
+
+            log = graph.resume(Approved(), config=config)
+
+            assert log.cause(log.first(Approved)) is None
             assert log.cause(log.first(Ended)) == Cause(
                 source=log.first(Resumed), via="acknowledge"
             )

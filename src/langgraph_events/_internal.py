@@ -152,6 +152,21 @@ def pad_causes(update: StateDict) -> StateDict:
     return {**update, "causes": [None] * len(events)}
 
 
+def _seed_causes(
+    all_events: list[Event], recorded: int, prev_cursor: int
+) -> list[CauseEntry]:
+    """The ``None`` causes that the seed writes for the input events.
+
+    The input writes only ``events``. On a thread that records causes, the
+    input is the gap between ``events`` and ``causes``. A checkpoint saved
+    before causes existed has no ``causes`` channel, so the gap covers the
+    whole history. The seed then pads only the events after the cursor, and
+    the older events keep an unknown cause.
+    """
+    total = len(all_events)
+    return [None] * min(total - recorded, total - prev_cursor)
+
+
 def make_seed_node(
     reducers: dict[str, BaseReducer] | None = None,
 ) -> Callable[[StateDict], StateDict]:
@@ -163,8 +178,7 @@ def make_seed_node(
         all_events = state["events"]
         new_events = all_events[prev_cursor:]
         recorded = len(state.get("causes") or [])
-        # The input writes only events, so the seed fills the gap for it.
-        gap: list[CauseEntry] = [None] * (len(all_events) - recorded)
+        gap = _seed_causes(all_events, recorded, prev_cursor)
 
         result: dict[str, Any] = {
             "causes": gap,
@@ -676,7 +690,7 @@ async def _invoke_async_path(
 def _record_causes(
     new_causes: list[CauseEntry],
     new_events: list[Event],
-    trigger: int,
+    trigger: int | None,
     via: str,
 ) -> None:
     """Record a cause for each event appended since the last call.
@@ -687,9 +701,13 @@ def _record_causes(
     The handler cannot know the absolute index of ``Interrupted``, because
     parallel tasks decide the final order. The value and the ``Resumed``
     therefore point back at it by a relative source: ``-1`` and ``-2``.
+    *trigger* is ``None`` on a thread that paused before causes existed.
+    The cause is then unknown, and ``None`` keeps the channels aligned.
     """
     for j in range(len(new_causes), len(new_events)):
-        if _closes_interrupt_block(new_events, j):
+        if trigger is None:
+            new_causes.append(None)
+        elif _closes_interrupt_block(new_events, j):
             new_causes[j - 1] = (-1, via)
             new_causes.append((-2, via))
         else:
@@ -709,7 +727,7 @@ def _closes_interrupt_block(new_events: list[Event], j: int) -> bool:
 
 def _process_events_sync(
     meta: HandlerMeta,
-    matching: list[tuple[int, Event]],
+    matching: list[tuple[int | None, Event]],
     state: StateDict,
     inject: dict[str, Any],
     new_events: list[Event],
@@ -720,7 +738,8 @@ def _process_events_sync(
 ) -> None:
     """Per-event invocation loop for the sync dispatch path.
 
-    Each *matching* entry pairs a pending event with its log index.
+    Each *matching* entry pairs a pending event with its log index, or with
+    ``None`` on a thread that paused before causes existed.
     """
     for trigger, event in matching:
         violation = _check_invariants(meta, event, state)
@@ -751,7 +770,7 @@ def _process_events_sync(
 
 async def _process_events_async(
     meta: HandlerMeta,
-    matching: list[tuple[int, Event]],
+    matching: list[tuple[int | None, Event]],
     state: StateDict,
     inject: dict[str, Any],
     new_events: list[Event],
@@ -762,7 +781,8 @@ async def _process_events_async(
 ) -> None:
     """Per-event invocation loop for the async dispatch path.
 
-    Each *matching* entry pairs a pending event with its log index.
+    Each *matching* entry pairs a pending event with its log index, or with
+    ``None`` on a thread that paused before causes existed.
     """
     for trigger, event in matching:
         violation = _check_invariants(meta, event, state)
@@ -823,10 +843,12 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[tuple[int, Event]], dict[str, Any], float | None]:
-        base = state["_pending_base"]
+    ) -> tuple[list[tuple[int | None, Event]], dict[str, Any], float | None]:
+        base = state.get("_pending_base")
         matching = [
-            (base + k, e) for k, e in enumerate(state["_pending"]) if meta.matches(e)
+            (None if base is None else base + k, e)
+            for k, e in enumerate(state["_pending"])
+            if meta.matches(e)
         ]
         inject = _build_inject(
             meta,

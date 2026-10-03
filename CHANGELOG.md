@@ -33,6 +33,11 @@ ection` shows the recorded cause.** `event(i)` and the `get` op show
   `cause: #N via <handler>`, or `cause: unknown`. `evidence(i)` lists the recorded cause first.
   The `query_log` tool gets a `cause` op that answers `#N via <handler>`, `seed` or `unknown`.
 
+ckpoint saved before causes existed still loads.** Its older events have an unknown
+  cause, and `EventLog.cause()` returns `None` for them. `Reflection` shows `cause: unknown`.
+  A thread that paused before the upgrade resumes. The events that the resumed handler
+  returns have no recorded cause.
+
 ## [0.34.0] - 2026-10-03
 
 ### Changed

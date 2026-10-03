@@ -271,6 +271,10 @@ The value that answers an `Interrupted`, and the `Resumed` that the framework cr
 that `Interrupted` as their source. `abandon()` and `pre_seed()` record no cause for the events
 that they write.
 
+A checkpoint saved before causes existed still loads. Its older events have an unknown cause,
+and `log.cause(e)` returns `None` for them. A thread that paused before the upgrade resumes.
+The events that the resumed handler returns have no recorded cause.
+
 ## `Namespace` as a feature hub
 
 A `Namespace` is where related features attach:
