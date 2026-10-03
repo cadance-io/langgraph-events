@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: every store sweep requires `thread_ids`.** The caller names the threads. The
+  library does not walk the store. This applies to eight `EventGraph` methods:
+  `threads_paused_on()`, `athreads_paused_on()`, `unrevivable_threads()`,
+  `aunrevivable_threads()`, `plan_rewrite()`, `aplan_rewrite()`, `rewrite_store()` and
+  `arewrite_store()`. `thread_ids` is a required keyword-only argument. A call without it
+  raises `TypeError`. `thread_ids=None` raises `TypeError` naming the method. A bare `str`
+  still raises `TypeError`.
+
+  Reason: without `thread_ids`, each method called `checkpointer.list(None)`. That call
+  deserializes every checkpoint in the store, historic versions included. The Postgres saver
+  also fetches the whole result into memory. On a store with 149,336 checkpoints in 4,938
+  threads, the query returned 3.7 GB. Memory grew by about 58 MB per 1,000 checkpoints. One
+  process reached 9 GB and made a 16 GB machine unresponsive. The checkpointer API has no cheap
+  read for the thread ids in a store, so the library cannot do this walk efficiently.
+
+  Migration: get the thread ids from one server-side query, then pass them as `thread_ids=`.
+  The library reads the root checkpoint namespace only, so the query filters on
+  `checkpoint_ns = ''`. If one checkpointer stores more than one graph, keep only the thread ids of this graph. To find the threads paused on one class, use the candidate
+  query in *Finding candidates server-side* in `docs/event-migrations.md`.
+
+  ```python
+  # 0.33
+  report = graph.plan_rewrite(drop=(Order.ApprovalRequired,))
+
+  # 0.34, Postgres (PostgresSaver) or SQLite (SqliteSaver): the same SQL works on both.
+  ids = [row[0] for row in conn.execute(
+      "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+  )]
+  report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=ids)
+
+  # 0.34, InMemorySaver
+  ids = [tid for tid, ns in saver.storage.items() if ns.get("")]
+  report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=ids)
+  ```
+
+  For `InMemorySaver`, the `if ns.get("")` filter is necessary. `InMemorySaver.get_tuple()` on
+  an unknown thread id leaves an empty `storage[thread_id][""]` entry. Without the filter, such
+  an id joins the list, although it has no checkpoint.
+
+  As in 0.33, `plan_rewrite()` and `rewrite_store()` report a listed id with no checkpoint as
+  refused, so a typo stays visible. `threads_paused_on()` and `unrevivable_threads()` skip such
+  an id silently.
+
 ## [0.33.0] - 2026-09-18
 
 ### Added

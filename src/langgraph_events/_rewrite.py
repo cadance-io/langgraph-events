@@ -1,12 +1,13 @@
 """Apply-side migration: plan the rewrite of one thread's live checkpoint.
 
-``EventGraph.plan_rewrite()`` and ``rewrite_store()`` walk each thread's
-latest checkpoint. The serde's read path already applies every rename,
-transform, split and fill, so a checkpoint read through ``get_tuple()``
-and written back through ``put()`` lands under live identities and live
-field shapes. This module owns the pure step in between: decide whether
-the thread needs a write, drop the stored events the caller named, and
-build the checkpoint the graph will store. It never touches a store.
+``EventGraph.plan_rewrite()`` and ``rewrite_store()`` read the latest
+checkpoint of each thread the caller names. The serde's read path
+already applies every rename, transform, split and fill, so a
+checkpoint read through ``get_tuple()`` and written back through
+``put()`` lands under live identities and live field shapes. This
+module owns the pure step in between: decide whether the thread needs a
+write, drop the stored events the caller named, and build the
+checkpoint the graph will store. It never touches a store.
 """
 
 from __future__ import annotations
