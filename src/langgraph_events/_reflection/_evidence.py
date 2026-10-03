@@ -11,7 +11,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import Event
-from langgraph_events._reflection._text import event_line
+from langgraph_events._reflection._text import event_line, recorded_cause
 
 if TYPE_CHECKING:
     from langgraph_events._event_log import EventLog
@@ -101,6 +101,9 @@ def render_evidence(index: int, log: EventLog, model: NamespaceModel) -> str:
     """
     event = log[index]
     lines = [f"evidence for {event_line(index, event)}"]
+    recorded = recorded_cause(index, log)
+    if recorded is not None:
+        lines.append(f"recorded cause: {recorded}")
 
     explicit = _explicit_link_lines(index, event, log)
     if explicit:

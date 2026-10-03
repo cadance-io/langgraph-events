@@ -217,6 +217,18 @@ class EventLog:
             )
         return self._table
 
+    def _cause_is_known(self, event: Event) -> bool:
+        """Whether the cause of *event* was recorded.
+
+        This is the only private member of ``EventLog`` that ``Reflection``
+        uses. ``cause()`` returns ``None`` both for a seed and for an older
+        event of a checkpoint saved before causes existed. Reflection must
+        show ``unknown`` for the second, and never a guessed ``seed``.
+        Finds *event* and raises like :meth:`cause`.
+        """
+        table = self._require_table()
+        return table.locate(event) >= table.known_from
+
     def filter(self, event_type: type[T]) -> list[T]:
         """Return all events matching *event_type* (including subclasses)."""
         return [e for e in self._events if isinstance(e, event_type)]

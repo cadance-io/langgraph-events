@@ -29,6 +29,10 @@ umed interrupt records its causes, and `get_state()` returns them.** The value t
   `Interrupted` as their source. `abandon()` and `pre_seed()` record no cause for the events
   that they write. `GraphState.events` carries the causes of the checkpointed thread.
 
+ection` shows the recorded cause.** `event(i)` and the `get` op show
+  `cause: #N via <handler>`, or `cause: unknown`. `evidence(i)` lists the recorded cause first.
+  The `query_log` tool gets a `cause` op that answers `#N via <handler>`, `seed` or `unknown`.
+
 ## [0.34.0] - 2026-10-03
 
 ### Changed

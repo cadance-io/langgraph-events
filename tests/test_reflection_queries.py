@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from conftest import Order, Started
+from conftest import Order, Started, strip_channels
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     EventGraph,
@@ -15,6 +16,7 @@ from langgraph_events import (
     RunPaused,
     on,
 )
+from langgraph_events.serde import NamespaceAwareSerde
 
 
 class Stopped(Halted):
@@ -237,3 +239,40 @@ def describe_event():
 
             assert "..." in detail
             assert len(detail) < 3000
+
+    def when_the_event_has_a_recorded_cause():
+        def it_shows_the_source_index_and_the_handler():
+            graph = EventGraph([Order.Place])
+            reflection = graph.reflect(graph.invoke(Order.Place(customer_id="c1")))
+
+            assert "cause: #0 via Order.Place" in reflection.event(1)
+
+    def when_the_event_is_a_seed():
+        def it_shows_no_cause_line():
+            graph = EventGraph([Order.Place])
+            reflection = graph.reflect(graph.invoke(Order.Place(customer_id="c1")))
+
+            assert "cause:" not in reflection.event(0)
+
+    def when_the_cause_was_not_recorded():
+        def it_shows_an_unknown_cause():
+            saver = MemorySaver(serde=NamespaceAwareSerde())
+            graph = EventGraph([Order.Place], checkpointer=saver)
+            config = {"configurable": {"thread_id": "legacy"}}
+            graph.invoke(Order.Place(customer_id="c1"), config=config)
+            strip_channels(saver, config, "causes", "_pending_base")
+
+            reflection = graph.reflect(graph.get_state(config).events)
+
+            assert "cause: unknown" in reflection.event(1)
+
+    def when_the_source_is_outside_a_derived_log():
+        def it_names_the_source_type():
+            graph = EventGraph([Order.Place])
+            log = graph.invoke(Order.Place(customer_id="c1"))
+
+            reflection = graph.reflect(log.select(Order.Place.Placed))
+
+            assert "cause: Place (outside this log) via Order.Place" in (
+                reflection.event(0)
+            )

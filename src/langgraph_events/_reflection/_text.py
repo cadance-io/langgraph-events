@@ -149,6 +149,30 @@ def render_overview(log: EventLog, model: NamespaceModel) -> str:
     return "\n".join(lines)
 
 
+def recorded_cause(index: int, log: EventLog) -> str | None:
+    """The recorded cause of ``log[index]``: ``#N via <handler>``, ``seed``
+    or ``unknown``. ``None`` when the log records no causes.
+
+    *index* must be canonical. ``#N`` is a position in *log*. A source
+    outside *log*, in a derived log, shows its type name instead.
+    """
+    if log.causes is None:
+        return None
+    event = log[index]
+    if not log._cause_is_known(event):
+        return "unknown"
+    cause = log.cause(event)
+    if cause is None:
+        return "seed"
+    position = next(
+        (j for j, candidate in enumerate(log.events) if candidate is cause.source),
+        None,
+    )
+    if position is None:
+        return f"{type(cause.source).__name__} (outside this log) via {cause.via}"
+    return f"#{position} via {cause.via}"
+
+
 def render_event_detail(index: int, log: EventLog) -> str:
     """The get op: one event, every field on its own line, plus taxonomy facts.
 
@@ -166,6 +190,9 @@ def render_event_detail(index: int, log: EventLog) -> str:
     command = getattr(type(event), "__command__", None)
     if command is not None:
         lines.append(f"  command: {command.__name__}")
+    cause = recorded_cause(index, log)
+    if cause is not None and cause != "seed":
+        lines.append(f"  cause: {cause}")
     return "\n".join(lines)
 
 
