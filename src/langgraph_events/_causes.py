@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 CauseEntry: TypeAlias = tuple[int, str] | None
 """One entry of the ``causes`` channel: ``(source, via)``, or ``None``.
 
-A source is the log index of the event that the handler received.
+A source ``>= 0`` is a log index. A source ``< 0`` counts back from its own
+event: ``-1`` is the event just before it. An ``Interrupted`` block uses it,
+because its handler cannot know the absolute index of ``Interrupted``.
 """
 
 
@@ -47,10 +49,11 @@ def resolve(
 
 def _absolute(position: int, entry: Sequence[Any]) -> tuple[int, str]:
     source, via = entry
-    if not 0 <= source < position:
+    absolute = position + source if source < 0 else source
+    if not 0 <= absolute < position:
         raise RuntimeError(
-            f"the stored cause of event #{position} points to #{source}, which "
+            f"the stored cause of event #{position} points to #{absolute}, which "
             f"is not an earlier event. A writer to events left causes out of "
             f"step. This is a framework bug."
         )
-    return (source, via)
+    return (absolute, via)

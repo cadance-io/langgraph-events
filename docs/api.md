@@ -67,7 +67,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `QueryTool` | Frozen dataclass | The `query_log` LLM tool: `name` / `description` / `parameters` (JSON Schema) / `run(...) -> str`. Maps 1:1 to Anthropic / LangChain tool shapes |
 | `EventLog` | Class | Immutable query container (see [Concepts](concepts.md#eventlog)). `cause(e)`, `effects(e)` and `flow(e)` read the causes that the log records. `causes` is the tuple of causes aligned with `events`, or `None` when the log records no causes. `EventLog(events, causes=...)` builds a log with causes, and `EventLog(log.events, causes=log.causes)` rebuilds a root log. A log from `after()`, `before()` or `select()` answers like its root |
 | `Cause` | Frozen dataclass | `(source, via)`: the event that a handler received, and the handler's graph node name. Event stores call `source` the causation ID. `via` equals `Edge.via` unless the handler has a stable identity: an inline command handler, or an `@on(node_name=...)` pin. Returned by `EventLog.cause()` |
-| `GraphState` | NamedTuple | `(events, is_interrupted, interrupted)` |
+| `GraphState` | NamedTuple | `(events, is_interrupted, interrupted)`. `events` carries the recorded causes of the thread |
 | `RewriteReport` | Dataclass | `(applied, threads)` from `plan_rewrite()` / `rewrite_store()`. `applied` is `False` from the plan. `.refused` is the tuple of refused threads. `str(report)` prints one summary line, then one line per refused thread |
 | `ThreadRewrite` | Dataclass | One thread's line in a `RewriteReport`: `thread_id`, `status` (`"rewrite"`, `"unchanged"` or `"refused"`), `migrated` as `(stored, live)` identity pairs, `dropped` counts per identity, and `reason` on a refusal |
 

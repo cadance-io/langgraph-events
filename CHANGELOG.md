@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_pending_base` are now reserved state fields: a reducer with one of these names raises
   `ValueError` at graph build.
 
+umed interrupt records its causes, and `get_state()` returns them.** The value that
+  answers an `Interrupted`, and the `Resumed` that the framework creates, have that
+  `Interrupted` as their source. `abandon()` and `pre_seed()` record no cause for the events
+  that they write. `GraphState.events` carries the causes of the checkpointed thread.
+
 ## [0.34.0] - 2026-10-03
 
 ### Changed

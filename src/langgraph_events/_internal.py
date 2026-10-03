@@ -679,12 +679,32 @@ def _record_causes(
     trigger: int,
     via: str,
 ) -> None:
-    """Record ``(trigger, via)`` for each event appended since the last call.
+    """Record a cause for each event appended since the last call.
 
     Called after each handler call. An invariant rollback replaces the
-    events of its call before this runs, so it leaves no cause behind.
+    events of its call before this runs, so it leaves no cause behind. An
+    ``Interrupted`` appends ``[Interrupted, value, Resumed]`` as one block.
+    The handler cannot know the absolute index of ``Interrupted``, because
+    parallel tasks decide the final order. The value and the ``Resumed``
+    therefore point back at it by a relative source: ``-1`` and ``-2``.
     """
-    new_causes.extend([(trigger, via)] * (len(new_events) - len(new_causes)))
+    for j in range(len(new_causes), len(new_events)):
+        if _closes_interrupt_block(new_events, j):
+            new_causes[j - 1] = (-1, via)
+            new_causes.append((-2, via))
+        else:
+            new_causes.append((trigger, via))
+
+
+def _closes_interrupt_block(new_events: list[Event], j: int) -> bool:
+    """Whether ``new_events[j]`` is the ``Resumed`` that ends an interrupt block."""
+    event = new_events[j]
+    return (
+        isinstance(event, Resumed)
+        and j >= 2
+        and new_events[j - 2] is event.interrupted
+        and new_events[j - 1] is event.value
+    )
 
 
 def _process_events_sync(

@@ -267,6 +267,9 @@ with `EventLog(events, causes=...)`, one entry per event: a `Cause`, or `None` f
 entries back, so `EventLog(log.events, causes=log.causes)` rebuilds a root log. In a derived
 log, a source can be outside that log, and the rebuild raises `ValueError`.
 
+The value that answers an `Interrupted`, and the `Resumed` that the framework creates, have
+that `Interrupted` as their source. `abandon()` and `pre_seed()` record no cause for the events
+that they write.
 
 ## `Namespace` as a feature hub
 

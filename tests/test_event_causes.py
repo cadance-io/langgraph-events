@@ -13,6 +13,7 @@ from conftest import Ended, Order, Processed, Started
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
+    Abandoned,
     Cancelled,
     Cause,
     EventGraph,
@@ -20,10 +21,12 @@ from langgraph_events import (
     HandlerRaised,
     HandlerRetried,
     IntegrationEvent,
+    Interrupted,
     Invariant,
     InvariantViolated,
     MaxRoundsExceeded,
     Reducer,
+    Resumed,
     RetryPolicy,
     RunPaused,
     Scatter,
@@ -139,6 +142,31 @@ def again(event: Tick) -> Tick:
 @on(RunPaused)
 def note_pause(event: RunPaused) -> Noted:
     return Noted()
+
+
+class Ask(Interrupted):
+    pass
+
+
+class Approved(IntegrationEvent):
+    pass
+
+
+@on(Processed)
+def ask(event: Processed) -> Ask:
+    return Ask()
+
+
+@on(Resumed)
+def acknowledge(event: Resumed) -> Ended:
+    return Ended(result="resumed")
+
+
+def _paused(thread_id: str) -> tuple[EventGraph, dict[str, Any], MemorySaver]:
+    """A checkpointed thread paused on ``Ask``: Started -> Processed -> Ask."""
+    graph, config, saver = _checkpointed([step, ask, acknowledge], thread_id)
+    graph.invoke(Started(data="x"), config=config)
+    return graph, config, saver
 
 
 def _config(thread_id: str) -> dict[str, Any]:
@@ -362,3 +390,60 @@ def describe_ainvoke():
                 source=log.first(Started), via="step"
             )
             assert log.cause(log.latest(Cancelled)) is None
+
+
+def describe_resume():
+    def when_a_human_answers_an_interrupt():
+        def it_points_the_answer_and_the_resume_at_the_interrupt():
+            graph, config, _saver = _paused("resume")
+
+            log = graph.resume(Approved(), config=config)
+            asked = log.first(Ask)
+
+            assert log.cause(asked) == Cause(source=log.first(Processed), via="ask")
+            assert log.cause(log.first(Approved)) == Cause(source=asked, via="ask")
+            assert log.cause(log.first(Approved)).source is asked
+            assert log.cause(log.first(Resumed)) == Cause(source=asked, via="ask")
+            assert log.cause(log.first(Ended)) == Cause(
+                source=log.first(Resumed), via="acknowledge"
+            )
+
+
+def describe_get_state():
+    def when_the_thread_reloads_from_the_checkpoint():
+        def it_answers_causes_by_identity_in_the_reloaded_log():
+            graph, config, _saver = _paused("reload")
+            graph.resume(Approved(), config=config)
+
+            log = graph.get_state(config).events
+
+            assert log.causes is not None
+            assert log.cause(log.first(Approved)).source is log.first(Ask)
+            assert log.cause(log.first(Processed)).source is log.first(Started)
+
+
+def describe_abandon():
+    def it_records_no_cause_for_the_abandoned_marker():
+        graph, config, _saver = _paused("abandon")
+
+        graph.abandon(config)
+        log = graph.get_state(config).events
+
+        assert log.cause(log.first(Processed)) == Cause(
+            source=log.first(Started), via="step"
+        )
+        assert log.cause(log.latest(Abandoned)) is None
+
+
+def describe_pre_seed():
+    def when_events_are_written_to_a_paused_thread():
+        def it_keeps_the_older_causes_aligned():
+            graph, config, _saver = _paused("pre-seed")
+
+            graph.pre_seed(config, {"events": [Noted()]})
+            log = graph.resume(Approved(), config=config)
+
+            assert log.cause(log.first(Noted)) is None
+            assert log.cause(log.first(Processed)) == Cause(
+                source=log.first(Started), via="step"
+            )

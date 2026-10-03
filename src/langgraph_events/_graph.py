@@ -56,6 +56,7 @@ from langgraph_events._internal import (
     make_handler_node,
     make_router_node,
     make_seed_node,
+    pad_causes,
 )
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
@@ -1639,17 +1640,19 @@ class EventGraph:
             graph.pre_seed(config, {"my_reducer": existing_value})
             graph.invoke(StartEvent(), config=config)
 
+        Each event in ``values["events"]`` gets a ``None`` cause.
+
         Requires a checkpointer.
         """
         self._require_checkpointer("pre_seed")
         compiled = self._compile()
-        compiled.update_state(config, values, as_node="__seed__")
+        compiled.update_state(config, pad_causes(values), as_node="__seed__")
 
     async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
         """Async version of :meth:`pre_seed`."""
         self._require_checkpointer("apre_seed")
         compiled = self._compile()
-        await compiled.aupdate_state(config, values, as_node="__seed__")
+        await compiled.aupdate_state(config, pad_causes(values), as_node="__seed__")
 
     def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
         """Whether the thread has work to resume into.
@@ -1752,11 +1755,13 @@ class EventGraph:
             [StateUpdate(None, END)],
             [
                 StateUpdate(
-                    {
-                        "events": appended,
-                        "_cursor": len(events) + len(appended),
-                        "_pending": [],
-                    },
+                    pad_causes(
+                        {
+                            "events": appended,
+                            "_cursor": len(events) + len(appended),
+                            "_pending": [],
+                        }
+                    ),
                     "__seed__",
                 )
             ],
@@ -2614,7 +2619,7 @@ class EventGraph:
         ``abandon()``, which read the checkpoint directly.
         """
         all_events = snapshot.values.get("events", [])
-        log = EventLog(all_events)
+        log = EventLog._from_state(all_events, snapshot.values.get("causes"))
         is_interrupted = self._is_interrupted(snapshot)
         interrupted = log.latest(Interrupted) if is_interrupted else None
         if is_interrupted and interrupted is None:
