@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import ClassVar
+from typing import ClassVar, Protocol, runtime_checkable
 
 import pytest
 
@@ -13,6 +13,8 @@ from langgraph_events import (
     DomainEvent,
     EventGraph,
     HandlerRaised,
+    Invariant,
+    InvariantViolated,
     Namespace,
     NamespaceModel,
     ScalarReducer,
@@ -73,6 +75,46 @@ def note_each_tick(event: _Clock.Tick.Ticked) -> _Clock.Note:
 @on(HandlerRaised)
 def recover_ledger(event: HandlerRaised) -> None:
     return None
+
+
+class _Unlocked(Invariant):
+    pass
+
+
+class _Gate(Namespace):
+    class Open(Command):
+        invariants: ClassVar = {_Unlocked: lambda log: False}
+
+        class Opened(DomainEvent):
+            pass
+
+        def handle(self) -> _Gate.Open.Opened:
+            return _Gate.Open.Opened()
+
+
+@on(_Clock.Tick.Ticked)
+def request_open(event: _Clock.Tick.Ticked) -> _Gate.Open:
+    return _Gate.Open()
+
+
+@on(InvariantViolated, invariant=_Unlocked)
+def explain_locked(event: InvariantViolated) -> _Ops.Ping:
+    return _Ops.Ping()
+
+
+@on(HandlerRaised)
+def report_failure(event: HandlerRaised) -> _Ops.Ping:
+    return _Ops.Ping()
+
+
+@runtime_checkable
+class _HasEdge(Protocol):
+    edge: float
+
+
+proto_total = ScalarReducer(
+    name="proto_total", event_type=_HasEdge, fn=lambda e: e.edge
+)
 
 
 @on(_Ops.Ping.Pinged)
@@ -358,3 +400,48 @@ def describe_reaction_keys():
             output = _focused(reactions=("note_each_tick",))
 
             assert 'Ticked ==>|"note_each_tick [orchestrate]"| Note' in output
+
+
+def _gate_model() -> NamespaceModel:
+    return EventGraph(
+        [_Clock.Tick, request_open, _Gate.Open, explain_locked, _Ops.Ping]
+    ).namespaces()
+
+
+def describe_truth_of_the_drawing():
+    def when_a_reducer_type_is_a_data_protocol():
+        def it_states_that_its_folds_are_unknown():
+            model = EventGraph(
+                [_Ledger.Commit, recover_ledger], reducers=[proto_total]
+            ).namespaces()
+            reducer = next(r for r in model.reducers if r.name == "proto_total")
+
+            assert reducer.subscribes is None
+            assert "  proto_total  (folds unknown" in model.text()
+            assert "proto_total<br>folds: unknown" in model.mermaid()
+
+    def when_a_focus_reaches_an_invariant():
+        def it_draws_the_invariant_as_context():
+            output = _gate_model().mermaid(focus=Focus(reactions="explain_locked"))
+
+            assert "_Unlocked{_Unlocked}:::ctx" in output
+
+        def it_writes_a_note_on_the_invariant():
+            qualname = _Unlocked.__qualname__
+            output = _gate_model().mermaid(notes={qualname: "violated 2x"})
+
+            assert '_Unlocked{"_Unlocked<br>violated 2x"}:::inv' in output
+
+    def when_a_focus_selects_a_reducer_only():
+        def it_does_not_title_its_box_as_context():
+            output = _focused(reducers=("commits",))
+
+            assert '_Ledger["_Ledger namespace"]' in output
+
+    def when_raises_edges_are_hidden_but_the_event_stays():
+        def it_says_that_its_producers_are_hidden():
+            model = EventGraph([_Ledger.Commit, report_failure, _Ops.Ping]).namespaces()
+
+            output = model.mermaid(show_raises=False)
+
+            assert "HandlerRaised<br>raises edges hidden" in output

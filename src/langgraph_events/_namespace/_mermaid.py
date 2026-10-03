@@ -171,10 +171,29 @@ def _add_node(
 
 
 def _add_invariant_node(
-    flow: MermaidFlowchart, inv_cls: type, node_id: dict[type, str]
+    flow: MermaidFlowchart,
+    inv_cls: type,
+    node_id: dict[type, str],
+    *,
+    context: bool = False,
+    note: object | None = None,
 ) -> None:
     """Declare an Invariant class as a diamond gate node styled ``:::inv``."""
-    flow.node(node_id[inv_cls], "diamond", cls="inv", label=inv_cls.__name__)
+    flow.node(
+        node_id[inv_cls],
+        "diamond",
+        cls="ctx" if context else "inv",
+        label=_label(inv_cls.__name__, note),
+    )
+
+
+def _with_fact(fact: str | None, note: object | None) -> object | None:
+    """A fact that the drawing must state, then the caller's note."""
+    if fact is None:
+        return note
+    if note is None or not str(note).strip():
+        return fact
+    return f"{fact}\n{note}"
 
 
 def _add_hub_node(
@@ -182,6 +201,7 @@ def _add_hub_node(
     hub_id: str,
     handler_name: str,
     *,
+    context: bool = False,
     note: object | None = None,
 ) -> None:
     """Declare a reactor hub: small circle, ``:::hub`` styling.
@@ -189,7 +209,12 @@ def _add_hub_node(
     The handler name lives on the hub label rather than repeated on every
     fanout edge — see ``reactor_hub_min`` on ``NamespaceModel.mermaid``.
     """
-    flow.node(hub_id, "circle", cls="hub", label=_label(handler_name, note))
+    flow.node(
+        hub_id,
+        "circle",
+        cls="ctx" if context else "hub",
+        label=_label(handler_name, note),
+    )
 
 
 _HUB_CLASSDEF_STYLE = "fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-dasharray:3 2"
@@ -254,6 +279,7 @@ class _View:
     drawn: frozenset[str] | None
     selected: frozenset[str]
     focus: NamespaceModel.Focus | None
+    selected_namespaces: frozenset[str] = frozenset()
 
     def shows(self, node: str) -> bool:
         return self.drawn is None or node == "?" or node in self.drawn
@@ -262,7 +288,11 @@ class _View:
         return self.focus is not None and node not in self.selected
 
     def title(self, namespace: str) -> str:
-        if self.focus is None or namespace in self.focus.namespaces:
+        if (
+            self.focus is None
+            or namespace in self.focus.namespaces
+            or namespace in self.selected_namespaces
+        ):
             return f"{namespace} namespace"
         return f"{namespace} namespace (context)"
 
@@ -302,7 +332,8 @@ def _make_view(
         if e.src in selected or e.tgt in selected or e.via in focus.reactions
     ]
     ends = {n for e in kept for n in (e.src, e.tgt)}
-    return _View(frozenset(ends | selected), frozenset(selected), focus)
+    holding = frozenset(namespace_of[n] for n in selected if n in namespace_of)
+    return _View(frozenset(ends | selected), frozenset(selected), focus, holding)
 
 
 # Classdef palette used by both choreography and structure renderers.
@@ -449,6 +480,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     keys.check("muted", muted)
     by_key = keys.nodes
     edges: list[_FlowEdge] = []
+    hidden_raises: set[str] = set()
     side_effect_entries: list[tuple[str, str, tuple[type[Event], ...]]] = []
     referenced: set[type[Event]] = set()
     all_sources: set[str] = set()
@@ -565,7 +597,10 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             tag = f"({kind})"
             for e in (x for x in re_edges if x.kind == kind):
                 src, tgt = _record(e.source, e.target)
-                if (src, tgt) in seen or (kind == "raises" and not show_raises):
+                if kind == "raises" and not show_raises:
+                    hidden_raises.add(tgt)
+                    continue
+                if (src, tgt) in seen:
                     continue
                 seen.add((src, tgt))
                 label: str | None = tag if inline else f"{name} {tag}"
@@ -688,7 +723,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     for red in d.reducers:
         red_id = _reducer_node_id(red.name)
         all_targets.add(red_id)
-        for cls in red.subscribes:
+        for cls in red.subscribes or ():
             referenced.add(cls)
             all_sources.add(node_id[cls])
             edges.append(_FlowEdge(node_id[cls], red_id, "-.->", "folds", "folds"))
@@ -793,6 +828,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         names[:] = [n for n in names if view.shows(_reducer_node_id(n))]
     loose_reducers = [n for n in loose_reducers if view.shows(_reducer_node_id(n))]
 
+    unknown_folds = {r.name for r in d.reducers if r.subscribes is None}
+
+    def folds_fact(reducer_name: str) -> str | None:
+        return "folds: unknown" if reducer_name in unknown_folds else None
+
+    def hidden_fact(cls: type) -> str | None:
+        return "raises edges hidden" if node_id[cls] in hidden_raises else None
+
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
     if hubs:
@@ -846,27 +889,32 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         with flow.subgraph(namespace_name, title=title, direction="LR"):
             for member in domain_members.get(namespace_name, []):
                 context = view.is_context(node_id[member])
-                note = notes.get(member.__qualname__)
+                note = _with_fact(hidden_fact(member), notes.get(member.__qualname__))
                 _add_node(flow, member, node_id, context=context, note=note)
             for inv_cls in namespace_invariants.get(namespace_name, []):
-                _add_invariant_node(flow, inv_cls, node_id)
+                context = view.is_context(node_id[inv_cls])
+                note = notes.get(inv_cls.__qualname__)
+                _add_invariant_node(flow, inv_cls, node_id, context=context, note=note)
             for hub_id, handler_name in hub_in_namespace.get(namespace_name, []):
                 note = notes.get(handler_name) if handler_name.strip() else None
-                _add_hub_node(flow, hub_id, handler_name, note=note)
+                context = view.is_context(hub_id)
+                _add_hub_node(flow, hub_id, handler_name, context=context, note=note)
             for reducer_name in namespace_reducers.get(namespace_name, []):
                 context = view.is_context(_reducer_node_id(reducer_name))
-                note = notes.get(reducer_name)
+                note = _with_fact(folds_fact(reducer_name), notes.get(reducer_name))
                 _add_reducer_node(flow, reducer_name, context=context, note=note)
 
     for node in loose_nodes:
         context = view.is_context(node_id[node])
-        note = notes.get(node.__qualname__)
+        note = _with_fact(hidden_fact(node), notes.get(node.__qualname__))
         _add_node(flow, node, node_id, context=context, note=note)
     for inv_cls in loose_invariants:
-        _add_invariant_node(flow, inv_cls, node_id)
+        context = view.is_context(node_id[inv_cls])
+        note = notes.get(inv_cls.__qualname__)
+        _add_invariant_node(flow, inv_cls, node_id, context=context, note=note)
     for reducer_name in loose_reducers:
         context = view.is_context(_reducer_node_id(reducer_name))
-        note = notes.get(reducer_name)
+        note = _with_fact(folds_fact(reducer_name), notes.get(reducer_name))
         _add_reducer_node(flow, reducer_name, context=context, note=note)
 
     # An entry point is a fact about the whole graph, so a focused diagram

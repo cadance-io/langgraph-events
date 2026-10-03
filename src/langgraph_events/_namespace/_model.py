@@ -294,13 +294,17 @@ class NamespaceModel:
         """A reducer registered on the graph, and the events it folds.
 
         ``subscribes`` holds the concrete event classes of this model that the
-        reducer folds. A base class or a tuple in ``event_type`` resolves to
-        those classes. ``namespace`` is the name of the declaring namespace,
-        or ``None`` for a reducer passed to ``EventGraph(reducers=...)``.
+        reducer folds, resolved from ``event_type``: a base class or a tuple
+        resolves to those classes. ``Policy.subscribes`` holds the declared
+        types instead. ``subscribes`` is ``None`` when the folds are unknown:
+        a ``runtime_checkable`` Protocol with data members can only be matched
+        against an event, not a class. ``namespace`` is the name of the
+        declaring namespace, or ``None`` for a reducer passed to
+        ``EventGraph(reducers=...)``.
         """
 
         name: str
-        subscribes: tuple[type[Event], ...]
+        subscribes: tuple[type[Event], ...] | None
         namespace: str | None
 
     @dataclass(frozen=True)
@@ -866,20 +870,26 @@ def _rollup_invariants(
     )
 
 
-def _folds(reducer: BaseReducer, cls: type) -> bool:
-    """Whether *reducer* folds events of class *cls*.
+def _folded(
+    reducer: BaseReducer, classes: Iterable[type]
+) -> tuple[type[Event], ...] | None:
+    """The classes of *classes* that *reducer* folds, or ``None`` if unknown.
 
     A ``runtime_checkable`` Protocol with data members cannot be checked
-    with ``issubclass``. Such a reducer folds no class of the static model.
+    with ``issubclass``, only with an event. Its folds are then unknown.
     """
-    try:
-        matches = issubclass(cls, reducer.event_type)
-    except TypeError:
-        return False
     owner = reducer.namespace
-    return matches and (
-        owner is None or getattr(cls, "__namespace_cls__", None) is owner
-    )
+    folded = []
+    for cls in classes:
+        try:
+            matches = issubclass(cls, reducer.event_type)
+        except TypeError:
+            return None
+        if matches and (
+            owner is None or getattr(cls, "__namespace_cls__", None) is owner
+        ):
+            folded.append(cls)
+    return tuple(folded)
 
 
 def _model_reducers(
@@ -889,7 +899,7 @@ def _model_reducers(
     return tuple(
         NamespaceModel.Reducer(
             name=r.name,
-            subscribes=tuple(c for c in classes if _folds(r, c)),
+            subscribes=_folded(r, classes),
             namespace=getattr(r.namespace, "__namespace_name__", None),
         )
         for r in reducers

@@ -112,6 +112,12 @@ def _render_taxonomy_lines(  # noqa: PLR0912
     if d.reducers:
         lines.append("Reducers:")
         for r in d.reducers:
+            if r.subscribes is None:
+                lines.append(
+                    f"  {r.name}  (folds unknown: its event type can only be "
+                    f"matched against an event)"
+                )
+                continue
             folds = ", ".join(_event_label(t) for t in r.subscribes)
             lines.append(f"  {r.name}  (folds {folds})")
     return lines

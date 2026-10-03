@@ -105,7 +105,9 @@ def encode_model(d: NamespaceModel) -> dict[str, Any]:
         "reducers": [
             {
                 "name": r.name,
-                "subscribes": [_qn(t) for t in r.subscribes],
+                "subscribes": (
+                    None if r.subscribes is None else [_qn(t) for t in r.subscribes]
+                ),
                 "namespace": r.namespace,
             }
             for r in d.reducers
