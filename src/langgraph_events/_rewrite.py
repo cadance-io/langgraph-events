@@ -398,7 +398,7 @@ def _remap_causes(
     each source absolute first, so this remaps absolute indices only and
     writes absolute entries back. An event below ``known_from`` keeps no
     entry, so the channels still align from the end. A cause whose source
-    was dropped becomes ``None``.
+    was dropped keeps its handler with an unknown source: ``(None, via)``.
     """
     entries, known_from = resolve(events, causes)
     new_position: dict[int, int] = {}
@@ -414,8 +414,8 @@ def _remap_causes(
             remapped.append(None)
             continue
         source, via = entry
-        target = new_position.get(source)
-        remapped.append(None if target is None else (target, via))
+        target = None if source is None else new_position.get(source)
+        remapped.append((target, via))
     return remapped
 
 

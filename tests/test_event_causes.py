@@ -5,6 +5,7 @@ Spec: docs/superpowers/specs/2026-10-02-event-causes-design.md
 
 import asyncio
 import itertools
+import pickle
 import time
 from typing import Any
 
@@ -142,6 +143,21 @@ def again(event: Tick) -> Tick:
 @on(RunPaused)
 def note_pause(event: RunPaused) -> Noted:
     return Noted()
+
+
+class Traced(Invariant):
+    pass
+
+
+def _every_cause_names_checked(log: EventLog) -> bool:
+    causes = log.causes
+    assert causes is not None, "the invariant log records no causes"
+    return all(c is None or c.via == "checked" for c in causes)
+
+
+@on(Tick, invariants={Traced: _every_cause_names_checked})
+def checked(event: Tick) -> Tock:
+    return Tock(n=event.n)
 
 
 class Ask(Interrupted):
@@ -292,6 +308,21 @@ def describe_invoke():
             assert log.cause(paused) is None
             assert log.cause(log.first(Noted)) == Cause(source=paused, via="note_pause")
 
+    def when_the_run_log_is_pickled():
+        def it_keeps_its_causes():
+            log = EventGraph([step, finish]).invoke(Started(data="x"))
+
+            restored = pickle.loads(pickle.dumps(log))  # noqa: S301 - own data
+
+            assert restored.causes == log.causes
+
+    def when_an_invariant_reads_the_causes():
+        def it_sees_the_causes_before_and_after_the_call():
+            log = EventGraph([checked]).invoke(Tick(n=1))
+
+            assert log.first(InvariantViolated) is None
+            assert log.cause(log.first(Tock)).via == "checked"
+
     def when_no_handler_reacts():
         def it_records_no_cause_for_the_seed():
             log = EventGraph([finish]).invoke(Started(data="x"))
@@ -423,16 +454,28 @@ def describe_resume():
             )
 
     def when_the_thread_paused_before_causes_existed():
-        def it_resumes_and_records_no_cause_for_the_answer():
+        def it_resumes_and_points_the_answer_at_the_interrupt():
             graph, config, saver = _paused("legacy-pause")
             strip_channels(saver, config, "causes", "_pending_base")
 
             log = graph.resume(Approved(), config=config)
 
-            assert log.cause(log.first(Approved)) is None
+            assert log.cause(log.first(Approved)) == Cause(
+                source=log.first(Ask), via="ask"
+            )
             assert log.cause(log.first(Ended)) == Cause(
                 source=log.first(Resumed), via="acknowledge"
             )
+
+        def it_shows_the_interrupt_cause_as_unknown_in_reflection():
+            graph, config, saver = _paused("legacy-unknown")
+            strip_channels(saver, config, "causes", "_pending_base")
+
+            log = graph.resume(Approved(), config=config)
+            asked = next(i for i, e in enumerate(log) if e is log.first(Ask))
+
+            assert log.cause(log.first(Ask)) is None
+            assert graph.reflect(log).tool().run(op="cause", index=asked) == "unknown"
 
 
 def describe_get_state():

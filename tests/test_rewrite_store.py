@@ -411,7 +411,7 @@ def describe_rewrite_store():
             assert thread.status == "unchanged"
 
     def when_a_dropped_event_sits_below_a_paused_handler():
-        def it_keeps_the_trigger_of_the_resumed_handler():
+        def _resumed():
             saver = MemorySaver()
 
             class _Noise(IntegrationEvent):
@@ -433,13 +433,21 @@ def describe_rewrite_store():
             graph = EventGraph([promote, wait], checkpointer=saver)
             graph.invoke(_Noise(), config=cfg)
             graph.rewrite_store(drop=(_Noise,))
+            return graph, graph.resume(_Go(), config=cfg), _Gate
 
-            log = graph.resume(_Go(), config=cfg)
+        def it_keeps_the_trigger_of_the_resumed_handler():
+            _graph, log, gate = _resumed()
 
-            assert log.cause(log.first(_Gate)) == Cause(
+            assert log.cause(log.first(gate)) == Cause(
                 source=Started(data="promoted"), via="wait"
             )
-            assert log.cause(log.first(_Gate)).source is log.first(Started)
+            assert log.cause(log.first(gate)).source is log.first(Started)
+
+        def it_shows_the_cause_of_a_dropped_source_as_unknown():
+            graph, log, _gate = _resumed()
+            started = next(i for i, e in enumerate(log) if e is log.first(Started))
+
+            assert graph.reflect(log).tool().run(op="cause", index=started) == "unknown"
 
     def when_a_live_class_carries_a_fill():
         def it_converges_on_the_second_run():

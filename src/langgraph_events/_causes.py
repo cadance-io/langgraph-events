@@ -13,12 +13,16 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-CauseEntry: TypeAlias = tuple[int, str] | None
+CauseEntry: TypeAlias = tuple[int | None, str] | None
 """One entry of the ``causes`` channel: ``(source, via)``, or ``None``.
 
 A source ``>= 0`` is a log index. A source ``< 0`` counts back from its own
 event: ``-1`` is the event just before it. An ``Interrupted`` block uses it,
 because its handler cannot know the absolute index of ``Interrupted``.
+A source ``None`` means the handler is known but its source is not: a
+handler that resumed on a thread saved before causes existed, or a source
+that ``rewrite_store(drop=...)`` removed. ``None`` as the whole entry means
+no handler produced the event: a seed.
 """
 
 
@@ -47,8 +51,10 @@ def resolve(
     return entries, known_from
 
 
-def _absolute(position: int, entry: Sequence[Any]) -> tuple[int, str]:
+def _absolute(position: int, entry: Sequence[Any]) -> tuple[int | None, str]:
     source, via = entry
+    if source is None:
+        return (None, via)
     absolute = position + source if source < 0 else source
     if not 0 <= absolute < position:
         raise RuntimeError(

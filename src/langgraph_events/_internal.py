@@ -328,7 +328,9 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
     if meta.log_param or meta.reflection_param:
-        log_view = EventLog._from_state(state["events"], state.get("causes"))
+        log_view = EventLog._from_state(
+            state["events"], state.get("causes"), check=False
+        )
         if meta.log_param:
             inject[meta.log_param] = log_view
         if meta.reflection_param:
@@ -592,7 +594,9 @@ def _check_invariants(
     """
     if not meta.invariants:
         return None
-    inv_cls = _find_failing_invariant(meta, EventLog(state["events"]))
+    inv_cls = _find_failing_invariant(
+        meta, EventLog._from_state(state["events"], state.get("causes"), check=False)
+    )
     if inv_cls is None:
         return None
     return InvariantViolated(
@@ -608,6 +612,7 @@ def _check_invariants_post(
     state: StateDict,
     new_events: list[Event],
     emitted: list[Event],
+    pending_causes: list[CauseEntry],
 ) -> InvariantViolated | None:
     """Post-check — evaluate invariants against the simulated log.
 
@@ -625,7 +630,11 @@ def _check_invariants_post(
     """
     if not meta.invariants or not emitted:
         return None
-    simulated = EventLog([*state["events"], *new_events])
+    simulated = EventLog._from_state(
+        [*state["events"], *new_events],
+        [*(state.get("causes") or []), *pending_causes],
+        check=False,
+    )
     inv_cls = _find_failing_invariant(meta, simulated)
     if inv_cls is None:
         return None
@@ -702,12 +711,11 @@ def _record_causes(
     parallel tasks decide the final order. The value and the ``Resumed``
     therefore point back at it by a relative source: ``-1`` and ``-2``.
     *trigger* is ``None`` on a thread that paused before causes existed.
-    The cause is then unknown, and ``None`` keeps the channels aligned.
+    The entry ``(None, via)`` then records the handler with an unknown
+    source. The interrupt block still points back exactly.
     """
     for j in range(len(new_causes), len(new_events)):
-        if trigger is None:
-            new_causes.append(None)
-        elif _closes_interrupt_block(new_events, j):
+        if _closes_interrupt_block(new_events, j):
             new_causes[j - 1] = (-1, via)
             new_causes.append((-2, via))
         else:
@@ -762,7 +770,15 @@ def _process_events_sync(
                 attempt += 1
                 continue
             _collect_and_check(
-                result, new_events, lg_interrupt, meta, state, event, return_contract
+                result,
+                new_events,
+                lg_interrupt,
+                meta,
+                state,
+                event,
+                return_contract,
+                new_causes=new_causes,
+                trigger=trigger,
             )
             break
         _record_causes(new_causes, new_events, trigger, meta.node_name)
@@ -805,7 +821,15 @@ async def _process_events_async(
                 attempt += 1
                 continue
             _collect_and_check(
-                result, new_events, lg_interrupt, meta, state, event, return_contract
+                result,
+                new_events,
+                lg_interrupt,
+                meta,
+                state,
+                event,
+                return_contract,
+                new_causes=new_causes,
+                trigger=trigger,
             )
             break
         _record_causes(new_causes, new_events, trigger, meta.node_name)
@@ -981,6 +1005,9 @@ def _collect_and_check(
     state: StateDict,
     event: Event,
     return_contract: Any = None,
+    *,
+    new_causes: list[CauseEntry],
+    trigger: int | None,
 ) -> None:
     """Collect handler result then run the post-command invariant check.
 
@@ -992,7 +1019,11 @@ def _collect_and_check(
     pre_len = len(new_events)
     _collect_result(result, new_events, lg_interrupt, meta, return_contract)
     emitted = new_events[pre_len:]
-    violation = _check_invariants_post(meta, event, state, new_events, emitted)
+    pending_causes = list(new_causes)
+    _record_causes(pending_causes, new_events, trigger, meta.node_name)
+    violation = _check_invariants_post(
+        meta, event, state, new_events, emitted, pending_causes
+    )
     if violation is not None:
         del new_events[pre_len:]
         new_events.append(violation)

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
 from langgraph_events._causes import resolve
 from langgraph_events._event import Event
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Iterable, Iterator, Sequence
 
     from langgraph_events._causes import CauseEntry
 
@@ -29,20 +30,53 @@ class Cause:
     via: str
 
 
-@dataclass(frozen=True, eq=False)
 class _CauseTable:
     """The causes of one root log. Every log derived from it shares the table.
 
-    ``entries[i]`` is ``(source index, via)`` for ``events[i]``, or ``None``
-    for a seed. ``positions`` maps ``id(event)`` to its latest index. An
-    event below ``known_from`` has an unknown cause: a checkpoint saved
-    before causes existed did not record it.
+    The table reads the ``causes`` channel lazily: :func:`resolve` runs on the
+    first query, not each time a handler receives the log. ``entries[i]`` is
+    ``(source index, via)`` for ``events[i]``, ``(None, via)`` when the source
+    is unknown, or ``None`` for a seed. An event below ``known_from`` has an
+    unknown cause: a checkpoint saved before causes existed did not record it.
     """
 
-    events: tuple[Event, ...]
-    entries: tuple[CauseEntry, ...]
-    positions: dict[int, int]
-    known_from: int = 0
+    def __init__(
+        self,
+        events: tuple[Event, ...],
+        stored: list[Any] | None,
+        resolved: tuple[tuple[CauseEntry, ...], int] | None = None,
+    ) -> None:
+        self.events = events
+        self._stored = stored
+        if resolved is not None:
+            self.__dict__["_resolved"] = resolved
+
+    @cached_property
+    def _resolved(self) -> tuple[tuple[CauseEntry, ...], int]:
+        entries, known_from = resolve(self.events, self._stored)
+        return tuple(entries), known_from
+
+    @property
+    def entries(self) -> tuple[CauseEntry, ...]:
+        return self._resolved[0]
+
+    @property
+    def known_from(self) -> int:
+        return self._resolved[1]
+
+    @cached_property
+    def positions(self) -> dict[int, int]:
+        """``id(event)`` to its latest root index, for identity lookups only.
+
+        Built on the first lookup, and left out of a pickle: an id is valid
+        only for the objects of one process.
+        """
+        return {id(event): i for i, event in enumerate(self.events)}
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        state.pop("positions", None)
+        return state
 
     def locate(self, event: Event) -> int:
         """The root index of *event*: identity first, then the latest equal event.
@@ -59,13 +93,25 @@ class _CauseTable:
                 return i
         raise ValueError(f"event {type(event).__name__} is not in this log")
 
+    def is_known(self, position: int) -> bool:
+        """Whether the cause of the root event at *position* was recorded."""
+        entry = self.entries[position]
+        if position < self.known_from:
+            return False
+        return entry is None or entry[0] is not None
+
 
 def _cause_at(table: _CauseTable, position: int) -> Cause | None:
-    """The :class:`Cause` of the root event at *position*, or ``None``."""
+    """The :class:`Cause` of the root event at *position*, or ``None``.
+
+    ``None`` for a seed, and for a cause whose source is unknown.
+    """
     entry = table.entries[position]
     if entry is None:
         return None
     source, via = entry
+    if source is None:
+        return None
     return Cause(source=table.events[source], via=via)
 
 
@@ -99,7 +145,7 @@ def _table_from_causes(
                 )
             entries.append((source, cause.via))
         positions[id(event)] = i
-    return _CauseTable(events, tuple(entries), positions)
+    return _CauseTable(events, None, resolved=(tuple(entries), 0))
 
 
 class EventLog:
@@ -111,7 +157,7 @@ class EventLog:
     :class:`Cause`.
     """
 
-    __slots__ = ("_events", "_table")
+    __slots__ = ("_events", "_roots", "_table")
 
     def __init__(
         self,
@@ -122,37 +168,50 @@ class EventLog:
         self._table = (
             None if causes is None else _table_from_causes(self._events, tuple(causes))
         )
+        self._roots: Sequence[int] | None = (
+            None if causes is None else range(len(self._events))
+        )
 
     @classmethod
     def _from_owned(
         cls,
         events: list[Any] | tuple[Any, ...],
         table: _CauseTable | None = None,
+        roots: Sequence[int] | None = None,
     ) -> EventLog:
-        """Create an EventLog from an already-built events sequence."""
+        """Create an EventLog from an already-built events sequence.
+
+        *roots* holds the root index of each event, when *table* is given.
+        """
         obj = object.__new__(cls)
         obj._events = events if isinstance(events, tuple) else tuple(events)
         obj._table = table
+        obj._roots = roots
         return obj
 
     @classmethod
     def _from_state(
-        cls, events: list[Any] | tuple[Any, ...], causes: list[Any] | None
+        cls,
+        events: list[Any] | tuple[Any, ...],
+        causes: list[Any] | None,
+        *,
+        check: bool = True,
     ) -> EventLog:
         """Build the log of a run from its ``events`` and ``causes`` channels.
 
         :func:`~langgraph_events._causes.resolve` aligns the channels and
-        raises ``RuntimeError`` when a writer drifted.
+        raises ``RuntimeError`` when a writer drifted. With ``check=False``
+        it runs on the first query instead, so a handler that receives the
+        log does not pay for it.
         """
         owned = tuple(events)
-        entries, known_from = resolve(owned, causes)
-        table = _CauseTable(
-            owned,
-            tuple(entries),
-            {id(event): i for i, event in enumerate(owned)},
-            known_from,
-        )
-        return cls._from_owned(owned, table)
+        table = _CauseTable(owned, causes)
+        if check:
+            table.entries  # noqa: B018
+        return cls._from_owned(owned, table, range(len(owned)))
+
+    def _derive(self, events: Sequence[Event], roots: Sequence[int] | None) -> EventLog:
+        return EventLog._from_owned(tuple(events), self._table, roots)
 
     @property
     def causes(self) -> tuple[Cause | None, ...] | None:
@@ -165,12 +224,10 @@ class EventLog:
         outside that log. Building a log from its ``events`` and ``causes``
         then raises ``ValueError``.
         """
-        table = self._table
-        if table is None:
+        table, roots = self._table, self._roots
+        if table is None or roots is None:
             return None
-        return tuple(
-            _cause_at(table, table.positions[id(event)]) for event in self._events
-        )
+        return tuple(_cause_at(table, root) for root in roots)
 
     def cause(self, event: Event) -> Cause | None:
         """The handler that produced *event*, and the event it received.
@@ -205,8 +262,10 @@ class EventLog:
         """
         table = self._require_table()
         chain = [table.locate(event)]
-        while (entry := table.entries[chain[-1]]) is not None:
-            chain.append(entry[0])
+        while (entry := table.entries[chain[-1]]) is not None and (
+            source := entry[0]
+        ) is not None:
+            chain.append(source)
         return tuple(table.events[i] for i in reversed(chain))
 
     def _require_table(self) -> _CauseTable:
@@ -227,7 +286,7 @@ class EventLog:
         Finds *event* and raises like :meth:`cause`.
         """
         table = self._require_table()
-        return table.locate(event) >= table.known_from
+        return table.is_known(table.locate(event))
 
     def filter(self, event_type: type[T]) -> list[T]:
         """Return all events matching *event_type* (including subclasses)."""
@@ -257,22 +316,31 @@ class EventLog:
 
     def after(self, event_type: type[Event]) -> EventLog:
         """Return an ``EventLog`` of events after the first *event_type*."""
+        roots = self._roots
         for i, e in enumerate(self._events):
             if isinstance(e, event_type):
-                return EventLog._from_owned(self._events[i + 1 :], self._table)
-        return EventLog._from_owned((), self._table)
+                after = None if roots is None else roots[i + 1 :]
+                return self._derive(self._events[i + 1 :], after)
+        return self._derive((), None if roots is None else ())
 
     def before(self, event_type: type[Event]) -> EventLog:
         """Return an ``EventLog`` of events before the first *event_type*."""
+        roots = self._roots
         for i, e in enumerate(self._events):
             if isinstance(e, event_type):
-                return EventLog._from_owned(self._events[:i], self._table)
-        return EventLog._from_owned((), self._table)
+                return self._derive(
+                    self._events[:i], None if roots is None else roots[:i]
+                )
+        return self._derive((), None if roots is None else ())
 
     def select(self, event_type: type[T]) -> EventLog:
         """Like ``filter()`` but returns an ``EventLog`` for chaining."""
-        filtered = [e for e in self._events if isinstance(e, event_type)]
-        return EventLog._from_owned(filtered, self._table)
+        keep = [i for i, e in enumerate(self._events) if isinstance(e, event_type)]
+        roots = self._roots
+        return self._derive(
+            [self._events[i] for i in keep],
+            None if roots is None else [roots[i] for i in keep],
+        )
 
     @property
     def events(self) -> tuple[Event, ...]:

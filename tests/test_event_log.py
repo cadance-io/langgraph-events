@@ -1,5 +1,7 @@
 """Tests for EventLog query container."""
 
+import pickle
+
 import pytest
 
 from langgraph_events import Cause, Event, EventLog, IntegrationEvent
@@ -323,6 +325,26 @@ def describe_causes():
 
             assert rebuilt.causes == log.causes
             assert rebuilt.causes[1].source is seed
+
+    def when_the_log_is_pickled():
+        def it_keeps_its_causes():
+            seed = Alpha(v=1)
+            log = EventLog([seed, Beta(v=2)], causes=[None, Cause(seed, "h")])
+
+            restored = pickle.loads(pickle.dumps(log))  # noqa: S301 - own data
+
+            assert restored.causes == (None, Cause(source=Alpha(v=1), via="h"))
+            assert restored.cause(restored[1]).source is restored[0]
+
+    def when_one_event_object_sits_at_two_positions():
+        def it_gives_each_position_its_own_cause():
+            first, second, shared = Alpha(v=1), Alpha(v=2), Beta(v=9)
+            log = EventLog(
+                [first, second, shared, shared],
+                causes=[None, None, Cause(first, "h"), Cause(second, "h")],
+            )
+
+            assert [c.source for c in log.causes[2:]] == [first, second]
 
     def when_causes_are_omitted():
         def it_is_none():

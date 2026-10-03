@@ -1256,6 +1256,12 @@ class EventGraph:
         workflows.
 
         The instance is compiled lazily on first access and cached.
+
+        Warning: the ``causes`` channel must stay aligned with ``events``. A
+        direct ``update_state`` that writes ``events`` without one ``causes``
+        entry per event shifts every older cause, and no check can detect it.
+        Write events through :meth:`pre_seed`, or write a ``None`` cause for
+        each event in the same update.
         """
         return self._compile()
 
