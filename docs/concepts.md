@@ -217,6 +217,39 @@ Topology derived from handler subscriptions — no manual node/edge wiring. `max
 
 Rendered diagrams live on the [Patterns](patterns.md) page — the collapsible legend shows the shape/edge vocabulary.
 
+#### Focused diagrams
+
+A graph with a large fixed part and a small part that a client adds on top draws a tall diagram.
+`mermaid(focus=...)` draws one part: the selected items, the edges that touch them, and the
+nodes at both ends, dimmed as context. `notes` writes runtime facts on nodes and on a
+reaction's edges, and `muted` fades what the client does not use. A count of how often a
+handler wrote events comes from the recorded causes:
+
+```python
+from collections import Counter
+
+from langgraph_events import Cause, NamespaceModel
+
+model = graph.namespaces()
+print(list(model.namespaces), [r.name for r in model.reactions])  # valid names
+
+log = graph.invoke(Order.Place(customer_id="c1"))
+emitted = Counter(c.via for e in log if isinstance(c := log.cause(e), Cause))
+
+print(
+    model.mermaid(
+        focus=NamespaceModel.Focus(namespaces="Order", reactions="notify_customer"),
+        notes={via: f"emitted {n}x" for via, n in emitted.items()},
+        show_raises=False,
+    )
+)
+```
+
+Every `Cause.via` is a valid note key: a policy by its reaction name, an inline command
+handler by its command qualname. A note on a reaction goes under the label of each of its
+edges. A handler that returns `None` writes no event, so the count means "emitted", not
+"dispatched".
+
 ### Escape hatch
 
 `graph.compiled` exposes the underlying `CompiledStateGraph` for subgraph composition or direct state access.

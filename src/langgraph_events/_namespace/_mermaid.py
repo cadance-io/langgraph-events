@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import difflib
+import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._mermaid import MermaidFlowchart, Shape
@@ -15,6 +17,8 @@ from langgraph_events._namespace._model import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from langgraph_events._event import Event
     from langgraph_events._event import (
         Invariant as InvariantBase,
@@ -32,39 +36,307 @@ _NODE_SHAPE_BY_CLASS: dict[str, Shape] = {
 }
 
 
-def _add_node(flow: MermaidFlowchart, cls: type, node_id: dict[type, str]) -> None:
+_ENTITIES = (
+    ("#", "#35;"),
+    ("&", "#amp;"),
+    ('"', "#quot;"),
+    ("<", "#lt;"),
+    (">", "#gt;"),
+)
+
+
+def _note_text(note: object | None) -> str | None:
+    """*note* as escaped label text, one ``<br>`` per line. ``None`` if empty.
+
+    A note is caller text, so each Mermaid-special character becomes an
+    entity code. The note cannot close the label or inject markup.
+    """
+    if note is None:
+        return None
+    text = str(note)
+    if not text.strip():
+        return None
+    for char, entity in _ENTITIES:
+        text = text.replace(char, entity)
+    return "<br>".join(" ".join(line.split()) for line in text.splitlines())
+
+
+def _label(name: str, note: object | None) -> str:
+    """The node label: *name*, then each line of *note* under it."""
+    text = _note_text(note)
+    return name if text is None else f'"{name}<br>{text}"'
+
+
+def _node_ids_by_key(d: NamespaceModel, node_id: dict[type, str]) -> dict[str, str]:
+    """The node ID of each key that ``notes`` and ``muted`` accept."""
+    by_key = {cls.__qualname__: nid for cls, nid in node_id.items()}
+    return by_key | {r.name: _reducer_node_id(r.name) for r in d.reducers}
+
+
+@dataclass(frozen=True)
+class _Keys:
+    """The keys that ``notes`` and ``muted`` accept.
+
+    ``nodes`` maps an event qualname or a reducer name to its node ID.
+    ``reactions`` holds the names of the reactions whose edges carry a label.
+    ``inline`` maps the name of an inline command handler to its command
+    qualname: its edge has no label, so its command node is the key.
+    """
+
+    nodes: Mapping[str, str]
+    reactions: frozenset[str]
+    inline: Mapping[str, str]
+
+    def check(self, option: str, keys: Iterable[str]) -> None:
+        """Raise ``ValueError`` for a key of *option* that names nothing."""
+        for name in keys:
+            if name in self.nodes and name in self.reactions:
+                raise ValueError(
+                    f"{option} names {name!r}, which is both a reaction and a node "
+                    f"of the model. Rename the reaction or the node."
+                )
+            if name in self.nodes or name in self.reactions:
+                continue
+            if name in self.inline:
+                command = self.inline[name]
+                raise ValueError(
+                    f"{option} names {name!r}, the inline handler of {command}. "
+                    f"Its edge has no label of its own: use the key {command!r}."
+                )
+            valid = sorted({*self.nodes, *self.reactions})
+            near = difflib.get_close_matches(name, valid, n=1)
+            hint = f" Did you mean {near[0]!r}?" if near else ""
+            raise ValueError(
+                f"{option} names {name!r}, which is not a node or a reaction of the "
+                f"model.{hint} A key is an event qualname, a reducer name or a "
+                f"reaction name. Valid keys: {', '.join(valid)}."
+            )
+
+
+def _keys(d: NamespaceModel, node_id: dict[type, str]) -> _Keys:
+    return _Keys(
+        nodes=_node_ids_by_key(d, node_id),
+        reactions=frozenset(
+            r.name for r in d.reactions if not getattr(r, "inline", False)
+        ),
+        inline={
+            r.name: r.commands[0].__qualname__
+            for r in d.command_handlers
+            if r.inline and r.commands
+        },
+    )
+
+
+def _styled_edge(
+    edge: _FlowEdge,
+    notes: Mapping[str, object],
+    muted: frozenset[str],
+    selected: frozenset[str],
+) -> _FlowEdge:
+    """*edge* with the note, the fade and the emphasis of its reaction."""
+    via = edge.via
+    if via is None or edge.tag in ("raises", "retry"):
+        return edge
+    label = edge.label
+    text = _note_text(notes.get(via))
+    if text is not None and label is not None:
+        label = f"{label}<br>{text}"
+    tag = "muted" if via in muted else edge.tag
+    arrow = "==>" if via in selected and edge.arrow == "-->" else edge.arrow
+    return replace(edge, label=label, tag=tag, arrow=arrow)
+
+
+def _add_node(
+    flow: MermaidFlowchart,
+    cls: type,
+    node_id: dict[type, str],
+    *,
+    context: bool = False,
+    note: object | None = None,
+) -> None:
     """Declare an event class on the flowchart with its shape + class.
 
     ``node_id`` maps each class to its mermaid-safe ID; the rendered
     label stays as the short leaf name so the diagram stays readable
-    regardless of whether the ID escalated to qualname form.
+    regardless of whether the ID escalated to qualname form. A context
+    node keeps its shape and takes the dimmed ``:::ctx`` class.
     """
     cls_key = _node_class(cls)
     flow.node(
         node_id[cls],
         _NODE_SHAPE_BY_CLASS[cls_key],
-        cls=cls_key,
-        label=_event_label(cls),
+        cls="ctx" if context else cls_key,
+        label=_label(_event_label(cls), note),
     )
 
 
 def _add_invariant_node(
-    flow: MermaidFlowchart, inv_cls: type, node_id: dict[type, str]
+    flow: MermaidFlowchart,
+    inv_cls: type,
+    node_id: dict[type, str],
+    *,
+    context: bool = False,
+    note: object | None = None,
 ) -> None:
     """Declare an Invariant class as a diamond gate node styled ``:::inv``."""
-    flow.node(node_id[inv_cls], "diamond", cls="inv", label=inv_cls.__name__)
+    flow.node(
+        node_id[inv_cls],
+        "diamond",
+        cls="ctx" if context else "inv",
+        label=_label(inv_cls.__name__, note),
+    )
 
 
-def _add_hub_node(flow: MermaidFlowchart, hub_id: str, handler_name: str) -> None:
+def _with_fact(fact: str | None, note: object | None) -> object | None:
+    """A fact that the drawing must state, then the caller's note."""
+    if fact is None:
+        return note
+    if note is None or not str(note).strip():
+        return fact
+    return f"{fact}\n{note}"
+
+
+def _add_hub_node(
+    flow: MermaidFlowchart,
+    hub_id: str,
+    handler_name: str,
+    *,
+    context: bool = False,
+    note: object | None = None,
+) -> None:
     """Declare a reactor hub: small circle, ``:::hub`` styling.
 
     The handler name lives on the hub label rather than repeated on every
     fanout edge — see ``reactor_hub_min`` on ``NamespaceModel.mermaid``.
     """
-    flow.node(hub_id, "circle", cls="hub", label=handler_name)
+    flow.node(
+        hub_id,
+        "circle",
+        cls="ctx" if context else "hub",
+        label=_label(handler_name, note),
+    )
 
 
 _HUB_CLASSDEF_STYLE = "fill:#f1f5f9,stroke:#64748b,color:#334155,stroke-dasharray:3 2"
+_REDUCER_CLASSDEF_STYLE = "fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e"
+
+
+def _reducer_node_id(name: str) -> str:
+    """Mermaid-safe node ID of a reducer, apart from every event node ID."""
+    return "_reducer_" + re.sub(r"\W", "_", name)
+
+
+def _add_reducer_node(
+    flow: MermaidFlowchart,
+    name: str,
+    *,
+    context: bool = False,
+    note: object | None = None,
+) -> None:
+    """Declare a reducer: cylinder, ``:::reducer`` styling."""
+    flow.node(
+        _reducer_node_id(name),
+        "cylinder",
+        cls="ctx" if context else "reducer",
+        label=_label(name, note),
+    )
+
+
+# Context and faded nodes have no fill, and a mid-grey outline and text: they
+# read as dimmed on a light page and on a dark one, where a light fill would
+# read as bright. A context node has a dashed outline. A faded node has a
+# dotted outline and italic text, so the two stay apart.
+_MUTED_CLASSDEF_STYLE = (
+    "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:1 3,font-style:italic"
+)
+_CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3"
+
+
+def _check_focus_names(d: NamespaceModel, focus: NamespaceModel.Focus) -> None:
+    """Raise ``ValueError`` for a focus name that the model does not hold."""
+    known_by_kind = {
+        "namespaces": set(d.namespaces),
+        "reactions": {r.name for r in d.reactions},
+        "reducers": {r.name for r in d.reducers},
+    }
+    for kind, known in known_by_kind.items():
+        for name in getattr(focus, kind):
+            if name in known:
+                continue
+            near = difflib.get_close_matches(name, known, n=1)
+            hint = f" Did you mean {near[0]!r}?" if near else ""
+            raise ValueError(
+                f"Focus names an unknown {kind[:-1]} {name!r}.{hint} "
+                f"Valid {kind}: {', '.join(sorted(known)) or 'none'}."
+            )
+
+
+@dataclass(frozen=True)
+class _View:
+    """The node IDs that one diagram draws. ``drawn=None`` draws every node.
+
+    Under a focus, ``selected`` holds the IDs the focus names, and every
+    other drawn node is context.
+    """
+
+    drawn: frozenset[str] | None
+    selected: frozenset[str]
+    focus: NamespaceModel.Focus | None
+    selected_namespaces: frozenset[str] = frozenset()
+
+    def shows(self, node: str) -> bool:
+        return self.drawn is None or node == "?" or node in self.drawn
+
+    def is_context(self, node: str) -> bool:
+        return self.focus is not None and node not in self.selected
+
+    def title(self, namespace: str) -> str:
+        if (
+            self.focus is None
+            or namespace in self.focus.namespaces
+            or namespace in self.selected_namespaces
+        ):
+            return f"{namespace} namespace"
+        return f"{namespace} namespace (context)"
+
+    def lists(self, reaction: str, subscribes: Iterable[type]) -> bool:
+        """Whether the side-effect footer lists *reaction*."""
+        if self.focus is None or reaction in self.focus.reactions:
+            return True
+        return any(
+            getattr(t, "__namespace__", None) in self.focus.namespaces
+            for t in subscribes
+        )
+
+
+def _make_view(
+    focus: NamespaceModel.Focus | None,
+    show_raises: bool,
+    edges: list[_FlowEdge],
+    namespace_of: dict[str, str],
+    standalone: set[str],
+) -> _View:
+    """Choose the drawn nodes: the ends of the kept edges, plus selected nodes.
+
+    Under a focus, an edge is kept when one end is selected or when the
+    focus names its reaction. Without a focus, only hidden ``raises``
+    edges remove nodes, and ``standalone`` nodes stay drawn.
+    """
+    if focus is None:
+        if show_raises:
+            return _View(None, frozenset(), None)
+        ends = {n for e in edges for n in (e.src, e.tgt)}
+        return _View(frozenset(ends | standalone), frozenset(), None)
+    selected = {n for n, ns in namespace_of.items() if ns in focus.namespaces}
+    selected |= {_reducer_node_id(name) for name in focus.reducers}
+    kept = [
+        e
+        for e in edges
+        if e.src in selected or e.tgt in selected or e.via in focus.reactions
+    ]
+    ends = {n for e in kept for n in (e.src, e.tgt)}
+    holding = frozenset(namespace_of[n] for n in selected if n in namespace_of)
+    return _View(frozenset(ends | selected), frozenset(selected), focus, holding)
 
 
 # Classdef palette used by both choreography and structure renderers.
@@ -95,6 +367,8 @@ _LINKSTYLE_INVARIANT = "stroke:#c2410c,stroke-dasharray:4 2"
 # (Command → Command) is deliberately awkward to discourage the pattern.
 _LINKSTYLE_ORCHESTRATE = "stroke:#0369a1,stroke-width:3px"
 _LINKSTYLE_CHAIN = "stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3"
+_LINKSTYLE_FOLDS = "stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2"
+_LINKSTYLE_MUTED = "stroke:#9ca3af,stroke-width:1px,stroke-dasharray:1 3"
 
 
 def _causation_override(e: NamespaceModel.Edge) -> tuple[str | None, str]:
@@ -123,6 +397,7 @@ class _FlowEdge:
     arrow: str
     label: str | None
     tag: str | None
+    via: str | None = None
 
 
 def _reaction_subscribes(r: Any) -> tuple[type[Event], ...]:
@@ -172,6 +447,10 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     *,
     namespace_order: Literal["affinity", "alphabetical"] = "affinity",
     reactor_hub_min: int | None = None,
+    focus: NamespaceModel.Focus | None = None,
+    show_raises: bool = True,
+    notes: Mapping[str, object] | None = None,
+    muted: Iterable[str] = (),
 ) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
 
@@ -194,9 +473,18 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
       reactor is pinned (no catch-all ``@on(InvariantViolated)``).
     - Seed events (no incoming edges) keep the thick ``==>`` entry arrow
     """
+    if focus is not None:
+        _check_focus_names(d, focus)
     node_id = _build_node_id_map(d)
+    notes = dict(notes or {})
+    keys = _keys(d, node_id)
+    keys.check("A note", notes)
+    muted = (muted,) if isinstance(muted, str) else tuple(muted)
+    keys.check("muted", muted)
+    by_key = keys.nodes
     edges: list[_FlowEdge] = []
-    side_effect_entries: list[str] = []
+    hidden_raises: set[str] = set()
+    side_effect_entries: list[tuple[str, str, tuple[type[Event], ...]]] = []
     referenced: set[type[Event]] = set()
     all_sources: set[str] = set()
     all_targets: set[str] = set()
@@ -312,11 +600,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             tag = f"({kind})"
             for e in (x for x in re_edges if x.kind == kind):
                 src, tgt = _record(e.source, e.target)
+                if kind == "raises" and not show_raises:
+                    hidden_raises.add(tgt)
+                    continue
                 if (src, tgt) in seen:
                     continue
                 seen.add((src, tgt))
                 label: str | None = tag if inline else f"{name} {tag}"
-                edges.append(_FlowEdge(src, tgt, "-.->", label, kind))
+                edges.append(_FlowEdge(src, tgt, "-.->", label, kind, name))
 
         solid_edges = [e for e in re_edges if e.kind == "solid"]
         scatter_edges = [e for e in re_edges if e.kind == "scatter"]
@@ -331,14 +622,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 # command (which is exactly its ``subs``) — list the command
                 # alone; external reactors keep ``name (subscribed events)``.
                 entry = subs_label if inline else f"{name} ({subs_label})"
-                side_effect_entries.append(entry)
+                side_effect_entries.append((entry, name, subs))
                 continue
             if not has_annotation:
                 # Unannotated handler with no known target → show "?" target.
                 for src_type in subs:
                     src, _tgt = _record(src_type, None)
                     label = None if inline else name
-                    edges.append(_FlowEdge(src, "?", "-->", label, "solid"))
+                    edges.append(_FlowEdge(src, "?", "-->", label, "solid", name))
                 continue
 
         inv_cls = pinned_reactor_invariant.get(name)
@@ -352,7 +643,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 tgt_id = node_id[e.target]
                 all_targets.add(tgt_id)
                 rerouted_pinned_edges.append(
-                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant")
+                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant", name)
                 )
                 for inv in d.invariants:
                     if inv.cls is inv_cls:
@@ -368,21 +659,21 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 all_sources.add(src_id)
                 all_targets.add(tgt_id)
                 if hub_id not in emitted_hub_inbound:
-                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None))
+                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None, name))
                     emitted_hub_inbound.add(hub_id)
-                edges.append(_FlowEdge(hub_id, tgt_id, "-->", None, "solid"))
+                edges.append(_FlowEdge(hub_id, tgt_id, "-->", None, "solid", name))
                 continue
             src, tgt = _record(e.source, e.target)
             ctag, csuf = _causation_override(e)
             label = (csuf.lstrip() or None) if inline else f"{name}{csuf}"
-            edges.append(_FlowEdge(src, tgt, "-->", label, ctag or "solid"))
+            edges.append(_FlowEdge(src, tgt, "-->", label, ctag or "solid", name))
         for e in scatter_edges:
             if inv_cls is not None:
                 referenced.add(e.target)
                 tgt_id = node_id[e.target]
                 all_targets.add(tgt_id)
                 rerouted_pinned_edges.append(
-                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant")
+                    _FlowEdge(node_id[inv_cls], tgt_id, "-.->", name, "invariant", name)
                 )
                 for inv in d.invariants:
                     if inv.cls is inv_cls:
@@ -398,14 +689,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                 all_sources.add(src_id)
                 all_targets.add(tgt_id)
                 if hub_id not in emitted_hub_inbound:
-                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None))
+                    edges.append(_FlowEdge(src_id, hub_id, "-->", None, None, name))
                     emitted_hub_inbound.add(hub_id)
-                edges.append(_FlowEdge(hub_id, tgt_id, "-.->", None, "scatter"))
+                edges.append(_FlowEdge(hub_id, tgt_id, "-.->", None, "scatter", name))
                 continue
             src, tgt = _record(e.source, e.target)
             ctag, csuf = _causation_override(e)
             label = (csuf.lstrip() or None) if inline else f"{name}{csuf}"
-            edges.append(_FlowEdge(src, tgt, "-.->", label, ctag or "scatter"))
+            edges.append(_FlowEdge(src, tgt, "-.->", label, ctag or "scatter", name))
 
     # Framework Interrupted → Resumed edge.
     for e in (x for x in d.edges if x.kind == "framework"):
@@ -429,6 +720,16 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
                     continue
                 src, tgt = _record(cmd.cls, outcome)
                 edges.append(_FlowEdge(src, tgt, "-.-", None, "ownership"))
+
+    # A reducer reads events and emits none, so each subscribed event gets a
+    # dotted ``folds`` arrow into the reducer node.
+    for red in d.reducers:
+        red_id = _reducer_node_id(red.name)
+        all_targets.add(red_id)
+        for cls in red.subscribes or ():
+            referenced.add(cls)
+            all_sources.add(node_id[cls])
+            edges.append(_FlowEdge(node_id[cls], red_id, "-.->", "folds", "folds"))
 
     # Append rerouted pinned-reactor edges to the flow edge list.  These
     # use the "invariant" tag so they get the same dashed-orange style as
@@ -475,12 +776,87 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         group.sort(key=lambda c: c.__name__)
     loose_invariants.sort(key=lambda c: c.__name__)
 
+    namespace_reducers: dict[str, list[str]] = defaultdict(list)
+    loose_reducers: list[str] = []
+    for red in d.reducers:
+        if red.namespace is None:
+            loose_reducers.append(red.name)
+        else:
+            namespace_reducers[red.namespace].append(red.name)
+
+    namespace_of: dict[str, str] = {
+        node_id[cls]: ns for ns, members in domain_members.items() for cls in members
+    }
+    namespace_of |= {
+        node_id[inv]: ns for ns, invs in namespace_invariants.items() for inv in invs
+    }
+    namespace_of |= {
+        hub: ns for ns, hubs_here in hub_in_namespace.items() for hub, _ in hubs_here
+    }
+    namespace_of |= {
+        _reducer_node_id(name): ns
+        for ns, names in namespace_reducers.items()
+        for name in names
+    }
+    view = _make_view(
+        focus,
+        show_raises,
+        [*edges, *invariant_edges],
+        namespace_of,
+        {node_id[inv.cls] for inv in d.invariants}
+        | {_reducer_node_id(r.name) for r in d.reducers},
+    )
+    edges = [
+        _styled_edge(
+            e,
+            notes,
+            keys.reactions & frozenset(muted),
+            frozenset(focus.reactions) if focus is not None else frozenset(),
+        )
+        for e in edges
+        if view.shows(e.src) and view.shows(e.tgt)
+    ]
+    invariant_edges = [
+        e for e in invariant_edges if view.shows(e.src) and view.shows(e.tgt)
+    ]
+    for members in domain_members.values():
+        members[:] = [m for m in members if view.shows(node_id[m])]
+    loose_nodes = [n for n in loose_nodes if view.shows(node_id[n])]
+    for invs in namespace_invariants.values():
+        invs[:] = [i for i in invs if view.shows(node_id[i])]
+    loose_invariants = [i for i in loose_invariants if view.shows(node_id[i])]
+    for hubs_here in hub_in_namespace.values():
+        hubs_here[:] = [h for h in hubs_here if view.shows(h[0])]
+    for names in namespace_reducers.values():
+        names[:] = [n for n in names if view.shows(_reducer_node_id(n))]
+    loose_reducers = [n for n in loose_reducers if view.shows(_reducer_node_id(n))]
+
+    unknown_folds = {r.name for r in d.reducers if r.subscribes is None}
+
+    def folds_fact(reducer_name: str) -> str | None:
+        return "folds: unknown" if reducer_name in unknown_folds else None
+
+    def hidden_fact(cls: type) -> str | None:
+        return "raises edges hidden" if node_id[cls] in hidden_raises else None
+
     flow = MermaidFlowchart("LR")
     _apply_classdefs(flow)
     if hubs:
         flow.classdef("hub", _HUB_CLASSDEF_STYLE)
+    if d.reducers:
+        flow.classdef("reducer", _REDUCER_CLASSDEF_STYLE)
+    if focus is not None:
+        flow.classdef("ctx", _CONTEXT_CLASSDEF_STYLE)
 
-    all_domain_names = sorted(set(domain_members) | set(namespace_invariants))
+    all_domain_names = sorted(
+        ns
+        for ns in set(domain_members)
+        | set(namespace_invariants)
+        | set(namespace_reducers)
+        if domain_members.get(ns)
+        or namespace_invariants.get(ns)
+        or namespace_reducers.get(ns)
+    )
     if namespace_order == "affinity":
         # Affinity counts: solid + scatter reaction edges plus invariant
         # chain edges (Command → Invariant), and nothing else. Ownership-fill
@@ -497,6 +873,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             ns_b = getattr(b, "__namespace__", None)
             if ns_a is None or ns_b is None or ns_a == ns_b:
                 return
+            if not (view.shows(node_id[a]) and view.shows(node_id[b])):
+                return
             affinity[frozenset([ns_a, ns_b])] += 1
 
         for e in d.edges:
@@ -510,22 +888,44 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         all_domain_names = _order_namespaces_by_affinity(all_domain_names, affinity)
 
     for namespace_name in all_domain_names:
-        title = f"{namespace_name} namespace"
+        title = view.title(namespace_name)
         with flow.subgraph(namespace_name, title=title, direction="LR"):
             for member in domain_members.get(namespace_name, []):
-                _add_node(flow, member, node_id)
+                context = view.is_context(node_id[member])
+                note = _with_fact(hidden_fact(member), notes.get(member.__qualname__))
+                _add_node(flow, member, node_id, context=context, note=note)
             for inv_cls in namespace_invariants.get(namespace_name, []):
-                _add_invariant_node(flow, inv_cls, node_id)
+                context = view.is_context(node_id[inv_cls])
+                note = notes.get(inv_cls.__qualname__)
+                _add_invariant_node(flow, inv_cls, node_id, context=context, note=note)
             for hub_id, handler_name in hub_in_namespace.get(namespace_name, []):
-                _add_hub_node(flow, hub_id, handler_name)
+                note = notes.get(handler_name) if handler_name.strip() else None
+                context = view.is_context(hub_id)
+                _add_hub_node(flow, hub_id, handler_name, context=context, note=note)
+            for reducer_name in namespace_reducers.get(namespace_name, []):
+                context = view.is_context(_reducer_node_id(reducer_name))
+                note = _with_fact(folds_fact(reducer_name), notes.get(reducer_name))
+                _add_reducer_node(flow, reducer_name, context=context, note=note)
 
     for node in loose_nodes:
-        _add_node(flow, node, node_id)
+        context = view.is_context(node_id[node])
+        note = _with_fact(hidden_fact(node), notes.get(node.__qualname__))
+        _add_node(flow, node, node_id, context=context, note=note)
     for inv_cls in loose_invariants:
-        _add_invariant_node(flow, inv_cls, node_id)
+        context = view.is_context(node_id[inv_cls])
+        note = notes.get(inv_cls.__qualname__)
+        _add_invariant_node(flow, inv_cls, node_id, context=context, note=note)
+    for reducer_name in loose_reducers:
+        context = view.is_context(_reducer_node_id(reducer_name))
+        note = _with_fact(folds_fact(reducer_name), notes.get(reducer_name))
+        _add_reducer_node(flow, reducer_name, context=context, note=note)
 
+    # An entry point is a fact about the whole graph, so a focused diagram
+    # draws none. Seeds come from every edge, drawn or hidden: an event that
+    # a hidden raises edge reaches is not an entry point.
     for seed in sorted(all_sources - all_targets):
-        flow.entry_seed(seed)
+        if focus is None and view.shows(seed):
+            flow.entry_seed(seed)
 
     for ed in edges:
         flow.edge(ed.src, ed.tgt, arrow=ed.arrow, label=ed.label, tag=ed.tag)  # type: ignore[arg-type]
@@ -539,8 +939,20 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     flow.link_style("invariant", _LINKSTYLE_INVARIANT)
     flow.link_style("orchestrate", _LINKSTYLE_ORCHESTRATE)
     flow.link_style("chain", _LINKSTYLE_CHAIN)
+    flow.link_style("folds", _LINKSTYLE_FOLDS)
+    flow.link_style("muted", _LINKSTYLE_MUTED)
 
-    if side_effect_entries:
-        flow.comment(f"Side-effect handlers: {', '.join(side_effect_entries)}")
+    faded = tuple(
+        by_key[key] for key in muted if key in by_key and view.shows(by_key[key])
+    )
+    if faded:
+        flow.classdef("muted", _MUTED_CLASSDEF_STYLE)
+        flow.assign_class(faded, "muted")
+
+    listed = [
+        entry for entry, name, subs in side_effect_entries if view.lists(name, subs)
+    ]
+    if listed:
+        flow.comment(f"Side-effect handlers: {', '.join(listed)}")
 
     return flow.render()

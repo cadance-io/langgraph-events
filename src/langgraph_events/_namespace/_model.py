@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import typing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from langgraph_events._event import (
@@ -32,8 +32,11 @@ from langgraph_events._namespace._smells import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from langgraph_events._graph import ReturnInfo
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._reducer import BaseReducer
     from langgraph_events._retry import RetryPolicy
 
 
@@ -192,6 +195,7 @@ class NamespaceModel:
         d.seeds                # tuple[type[Event], ...]
         d.integration_events   # tuple[type[IntegrationEvent], ...]
         d.system_events        # tuple[type[SystemEvent], ...]
+        d.reducers             # tuple[NamespaceModel.Reducer, ...]
     """
 
     # ---- nested types (class-level, not fields) ----
@@ -285,6 +289,58 @@ class NamespaceModel:
         declared_by: tuple[str, ...]
         reactors: tuple[str, ...]
 
+    @dataclass(frozen=True)
+    class Reducer:
+        """A reducer registered on the graph, and the events it folds.
+
+        ``subscribes`` holds the concrete event classes of this model that the
+        reducer folds, resolved from ``event_type``: a base class or a tuple
+        resolves to those classes. ``Policy.subscribes`` holds the declared
+        types instead. ``subscribes`` is ``None`` when the folds are unknown:
+        a ``runtime_checkable`` Protocol with data members can only be matched
+        against an event, not a class. ``namespace`` is the name of the
+        declaring namespace, or ``None`` for a reducer passed to
+        ``EventGraph(reducers=...)``.
+        """
+
+        name: str
+        subscribes: tuple[type[Event], ...] | None
+        namespace: str | None
+
+    @dataclass(frozen=True)
+    class Focus:
+        """The part of the model that ``mermaid(focus=...)`` draws.
+
+        Each field names items of one kind: namespaces, reactions (handler
+        names) or reducers. A field can take one string or any iterable of
+        strings. The diagram draws the selected items, every edge that
+        touches one, and the nodes at both ends of those edges. A node that
+        is not selected is drawn as context.
+        """
+
+        namespaces: tuple[str, ...] = ()
+        reactions: tuple[str, ...] = ()
+        reducers: tuple[str, ...] = ()
+
+        def __post_init__(self) -> None:
+            for kind in ("namespaces", "reactions", "reducers"):
+                names = getattr(self, kind)
+                if isinstance(names, str):
+                    names = (names,)
+                if isinstance(names, (bytes, bytearray)) or not all(
+                    isinstance(name, str) for name in names
+                ):
+                    raise TypeError(
+                        f"Focus {kind} names must be str, got {names!r}. Pass one "
+                        f"name or an iterable of names."
+                    )
+                object.__setattr__(self, kind, tuple(sorted(set(names))))
+            if not (self.namespaces or self.reactions or self.reducers):
+                raise ValueError(
+                    "Focus selects nothing. Name at least one namespace, "
+                    "reaction or reducer."
+                )
+
     # ---- fields ----
 
     namespaces: dict[str, NamespaceModel.Namespace]
@@ -295,6 +351,7 @@ class NamespaceModel:
     edges: tuple[NamespaceModel.Edge, ...]
     seeds: tuple[type[Event], ...]
     invariants: tuple[NamespaceModel.Invariant, ...]
+    reducers: tuple[NamespaceModel.Reducer, ...] = ()
 
     # ---- derived accessors ----
 
@@ -310,8 +367,10 @@ class NamespaceModel:
         cls,
         handler_metas: list[HandlerMeta],
         return_info: dict[str, ReturnInfo],
+        reducers: Iterable[BaseReducer] = (),
     ) -> NamespaceModel:
-        return _build_domain_model(handler_metas, return_info)
+        model = _build_domain_model(handler_metas, return_info)
+        return replace(model, reducers=_model_reducers(model, reducers))
 
     # ---- renderers ----
 
@@ -335,6 +394,10 @@ class NamespaceModel:
         *,
         namespace_order: Literal["affinity", "alphabetical"] = "affinity",
         reactor_hub_min: int | None = None,
+        focus: NamespaceModel.Focus | None = None,
+        show_raises: bool = True,
+        notes: Mapping[str, object] | None = None,
+        muted: Iterable[str] = (),
     ) -> str:
         """Render the unified choreography mermaid diagram.
 
@@ -369,6 +432,45 @@ class NamespaceModel:
           reactors and ``raises`` edges are not hubbed (the invariant
           chain already concentrates dispatch and ``raises`` is a single
           error path).
+
+        ``focus`` opts in to a **partial diagram**. Pass a
+        :class:`NamespaceModel.Focus` that names namespaces, reactions or
+        reducers. Valid names are ``list(model.namespaces)``,
+        ``[r.name for r in model.reactions]`` and
+        ``[r.name for r in model.reducers]``. The diagram draws:
+
+        - every node of a selected namespace, and each selected reducer
+        - every edge that has one end selected, or that a selected
+          reaction draws, with a selected reaction's solid edges as thick
+          arrows
+        - the nodes at both ends of those edges, dimmed as context
+        - every other edge between two drawn nodes
+
+        A box is titled "(context)" when it holds no selected node. A focused
+        diagram draws no entry arrows: an entry point is a fact about the
+        whole graph, not about one part of it. An unknown name raises
+        ``ValueError`` that gives the nearest valid name. An empty
+        ``Focus()`` raises too: an empty drawing would state nothing.
+
+        ``show_raises=False`` hides the ``(raises)`` edges, and any node that
+        only those edges reach. A node that stays drawn says that its raises
+        edges are hidden.
+
+        ``notes`` adds lines under a label, one per line of the note. A key
+        is an event qualname, as in :meth:`json`, a reducer name, or a
+        reaction name: a reaction's note goes under the label of each of its
+        edges. Every ``Cause.via`` of an event log is a valid key: a policy
+        by its reaction name, an inline command handler by its command
+        qualname. A note can be any value, written as text. The renderer
+        writes each Mermaid-special character as an entity code. A key that
+        names nothing raises ``ValueError`` that lists the valid keys.
+
+        ``muted`` fades the nodes and the reaction edges it names, with the
+        same keys as ``notes``. A client can mark a part of the graph that it
+        does not use.
+
+        A reducer whose ``subscribes`` is ``None`` draws with the line
+        "folds: unknown" and no ``folds`` edge.
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,
@@ -378,6 +480,10 @@ class NamespaceModel:
             self,
             namespace_order=namespace_order,
             reactor_hub_min=reactor_hub_min,
+            focus=focus,
+            show_raises=show_raises,
+            notes=notes,
+            muted=muted,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -773,4 +879,40 @@ def _rollup_invariants(
             reactors=tuple(reactors_by_name.get(inv_cls.__name__, ())),
         )
         for inv_cls in order
+    )
+
+
+def _folded(
+    reducer: BaseReducer, classes: Iterable[type]
+) -> tuple[type[Event], ...] | None:
+    """The classes of *classes* that *reducer* folds, or ``None`` if unknown.
+
+    A ``runtime_checkable`` Protocol with data members cannot be checked
+    with ``issubclass``, only with an event. Its folds are then unknown.
+    """
+    owner = reducer.namespace
+    folded = []
+    for cls in classes:
+        try:
+            matches = issubclass(cls, reducer.event_type)
+        except TypeError:
+            return None
+        if matches and (
+            owner is None or getattr(cls, "__namespace_cls__", None) is owner
+        ):
+            folded.append(cls)
+    return tuple(folded)
+
+
+def _model_reducers(
+    model: NamespaceModel, reducers: Iterable[BaseReducer]
+) -> tuple[NamespaceModel.Reducer, ...]:
+    classes = sorted(_build_node_id_map(model), key=lambda c: c.__qualname__)
+    return tuple(
+        NamespaceModel.Reducer(
+            name=r.name,
+            subscribes=_folded(r, classes),
+            namespace=getattr(r.namespace, "__namespace_name__", None),
+        )
+        for r in reducers
     )

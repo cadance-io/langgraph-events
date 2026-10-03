@@ -44,6 +44,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tool gets a `cause` op that answers `#N via <handler>`, `seed`, `framework`, or
   `unknown, <reason>`.
 
+- **The namespace model shows reducers.** `NamespaceModel.reducers` lists each reducer of the
+  graph as `NamespaceModel.Reducer(name, subscribes, namespace)`. `subscribes` holds the
+  concrete events of the model that the reducer folds, or `None` when a `runtime_checkable`
+  Protocol with data members makes the folds unknown. `json()` and `text()` list the reducers.
+  `mermaid()` draws each reducer as a cylinder, with a dotted `folds` arrow from each event it
+  reads, or with the line "folds: unknown".
+- **`mermaid(focus=...)` draws one part of the graph.** `NamespaceModel.Focus` names
+  namespaces, reactions and reducers in three separate fields. The diagram draws the selected
+  items, every edge that touches one, the nodes at both ends dimmed as context, and every
+  other edge between two drawn nodes. A selected reaction's solid edges are thick arrows. A box
+  that holds no selected node is titled "(context)". An unknown name raises `ValueError` with
+  the nearest valid name. An empty `Focus()` raises `ValueError`. A focused diagram draws no
+  entry arrows, because an entry point is a fact about the whole graph. `docs/concepts.md` has
+  an example.
+- **`mermaid(notes={...})` adds lines under a label.** A key is an event qualname, a reducer
+  name, or a reaction name, whose note goes under the label of each of its edges. Every
+  `Cause.via` of an event log is a valid key, so a client can show how often a handler emitted.
+  A note can be any value. Each Mermaid-special character becomes an entity code. A wrong key
+  raises `ValueError` that lists the valid keys.
+- **`mermaid(muted=[...])` fades what it names.** It takes the same keys as `notes`, one key or
+  many. A faded node has a dotted outline and italic text, and a faded reaction draws its edges
+  as a faint dotted line.
+- **`mermaid(show_raises=False)` hides the `(raises)` edges.** A node that only those edges
+  reach is hidden too. A node that stays drawn says that its raises edges are hidden. The
+  default is `True`.
+
 ### Changed
 
 - **BREAKING: `causes` is a reserved state field.** The graph state gets a `causes` channel next
@@ -54,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one `causes` entry per event,
   for example `None`. Otherwise every older cause shifts by one position, and no check can
   detect it. `pre_seed()` writes the causes for you.
+
+- **The diagram of a graph with a reducer changes.** It now draws the reducer and its `folds`
+  arrows. A snapshot test of such a diagram must be regenerated. A diagram of a graph without
+  a reducer does not change.
 
 ## [0.34.0] - 2026-10-03
 

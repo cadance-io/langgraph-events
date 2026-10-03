@@ -13,6 +13,9 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef ctx fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3
+    classDef muted fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:1 3,font-style:italic
     subgraph Example["Namespace"]
       direction LR
       Command{{Command}}:::cmd
@@ -20,9 +23,12 @@ graph LR
       Halted([Halted]):::halt
       Invariant{Invariant}:::inv
       Rejected(Rejected):::devt
+      Reducer[(Reducer)]:::reducer
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
+    Context(Context: outside a focus):::ctx
+    Muted(Muted: faded by the caller):::muted
     _seed_[ ]:::entry ==> Command
     Command --> DomainEvent
     Command -.->|"(raises)"| SystemEvent
@@ -32,6 +38,7 @@ graph LR
     DomainEvent -->|"reactor [orchestrate]"| Command
     Command -->|"[chain]"| Command
     Command -.->|"(retry)"| SystemEvent
+    DomainEvent -.->|folds| Reducer
     linkStyle 2 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 3 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     linkStyle 4 stroke:#9ca3af,stroke-dasharray:3 3
@@ -39,6 +46,7 @@ graph LR
     linkStyle 7 stroke:#0369a1,stroke-width:3px
     linkStyle 8 stroke:#b91c1c,stroke-width:2px,stroke-dasharray:5 3
     linkStyle 9 stroke:#0891b2,stroke-dasharray:2 4
+    linkStyle 10 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
 </details>
@@ -56,6 +64,7 @@ graph LR
     classDef syst fill:#fef3c7,stroke:#b45309,color:#78350f
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
+    classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     subgraph Conversation["Conversation namespace"]
         direction LR
         Blocked(Blocked):::devt
@@ -65,6 +74,7 @@ graph LR
     AnswerProduced[/AnswerProduced/]:::intg
     LLMResponded[/LLMResponded/]:::intg
     ToolsExecuted[/ToolsExecuted/]:::intg
+    _reducer_messages[(messages)]:::reducer
     _e0_[ ]:::entry ==> Send
     _e1_[ ]:::entry ==> ToolsExecuted
     Send --> Sent
@@ -72,7 +82,11 @@ graph LR
     Sent -->|call_llm| LLMResponded
     ToolsExecuted -->|call_llm| LLMResponded
     LLMResponded -->|finalize_answer| AnswerProduced
+    Sent -.->|folds| _reducer_messages
+    LLMResponded -.->|folds| _reducer_messages
+    ToolsExecuted -.->|folds| _reducer_messages
 %% Side-effect handlers: audit_trail (Auditable)
+    linkStyle 7,8,9 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
 ## Choreography (text)
@@ -87,6 +101,8 @@ Integration events:
   ToolsExecuted
   LLMResponded
   AnswerProduced
+Reducers:
+  messages  (folds Sent, LLMResponded, ToolsExecuted)
 Policies:
   call_llm  (Sent, ToolsExecuted → LLMResponded)
   finalize_answer  (LLMResponded → AnswerProduced)
