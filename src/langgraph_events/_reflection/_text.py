@@ -17,6 +17,7 @@ from langgraph_events._event import (
     RunPaused,
     SystemEvent,
 )
+from langgraph_events._event_log import FrameworkEvent, UnknownCause
 
 if TYPE_CHECKING:
     from typing import Any
@@ -150,20 +151,22 @@ def render_overview(log: EventLog, model: NamespaceModel) -> str:
 
 
 def recorded_cause(index: int, log: EventLog) -> str | None:
-    """The recorded cause of ``log[index]``: ``#N via <handler>``, ``seed``
-    or ``unknown``. ``None`` when the log records no causes.
+    """The recorded cause of ``log[index]``, as one line of text.
 
-    *index* must be canonical. ``#N`` is a position in *log*. A source
-    outside *log*, in a derived log, shows its type name instead.
+    ``#N via <handler>`` for a :class:`Cause`, ``seed``, ``framework``, or
+    ``unknown, <reason>`` for an :class:`UnknownCause`. ``None`` when the log
+    records no causes. *index* must be canonical. ``#N`` is a position in
+    *log*. A source outside *log*, in a derived log, shows its type name.
     """
     if log.causes is None:
         return None
-    event = log[index]
-    if not log._cause_is_known(event):
-        return "unknown"
-    cause = log.cause(event)
+    cause = log.cause(log[index])
     if cause is None:
         return "seed"
+    if isinstance(cause, FrameworkEvent):
+        return "framework"
+    if isinstance(cause, UnknownCause):
+        return f"unknown, {cause.reason}"
     position = next(
         (j for j, candidate in enumerate(log.events) if candidate is cause.source),
         None,

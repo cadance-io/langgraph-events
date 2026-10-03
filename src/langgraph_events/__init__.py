@@ -34,7 +34,14 @@ from langgraph_events._event import (
     Unresumable,
     on_namespace_finalize,
 )
-from langgraph_events._event_log import Cause, EventLog
+from langgraph_events._event_log import (
+    Cause,
+    EventLog,
+    FrameworkEvent,
+    NotRecorded,
+    SourceDropped,
+    UnknownCause,
+)
 from langgraph_events._graph import (
     EventGraph,
     GraphState,
@@ -114,6 +121,7 @@ __all__ = [
     "EventLog",
     "FoldReducer",
     "Foldable",
+    "FrameworkEvent",
     "GraphState",
     "Halted",
     "HandlerRaised",
@@ -129,6 +137,7 @@ __all__ = [
     "MessageEvent",
     "Namespace",
     "NamespaceModel",
+    "NotRecorded",
     "OrphanedEventWarning",
     "QueryTool",
     "Reducer",
@@ -141,9 +150,11 @@ __all__ = [
     "RunScoped",
     "ScalarReducer",
     "Scatter",
+    "SourceDropped",
     "SystemEvent",
     "SystemPromptSet",
     "ThreadRewrite",
+    "UnknownCause",
     "Unresumable",
     "UnresumableError",
     "aemit_custom",

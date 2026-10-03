@@ -25,7 +25,7 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events import _retry
-from langgraph_events._causes import CauseEntry
+from langgraph_events._causes import FRAMEWORK, CauseEntry
 from langgraph_events._custom_event import (
     _AsyncEmitter,
     _reset_custom_emitters,
@@ -62,8 +62,6 @@ _BASE_FIELDS: dict[str, Any] = {
     # causes[i] describes events[i]. Every writer to events writes the same
     # number of entries to causes, in the same order. See _causes.py.
     "causes": Annotated[list[CauseEntry], operator.add],
-    # The log index of _pending[0]. A handler adds k for the k-th pending event.
-    "_pending_base": int,
     "_cursor": int,
     "_pending": list[Event],
     "_round": int,
@@ -138,18 +136,19 @@ def _leaf_node(func: Any, afunc: Any, name: str) -> RunnableLambda:
     return _LeafNode(func=func, afunc=afunc, name=name)
 
 
-def pad_causes(update: StateDict) -> StateDict:
-    """*update* plus one ``None`` cause for each event that it writes.
+def pad_causes(update: StateDict, entry: CauseEntry) -> StateDict:
+    """*update* plus one *entry* in ``causes`` for each event that it writes.
 
-    Every writer to ``events`` outside a handler call goes through here: the
-    router, the ``Cancelled`` path, ``abandon()`` and ``pre_seed()``. Without
-    the padding, ``causes`` falls behind ``events``, and each older cause
-    reads one position late.
+    Every writer to ``events`` outside a handler call goes through here. The
+    router, the ``Cancelled`` path and ``abandon()`` pass ``FRAMEWORK``.
+    ``pre_seed()`` passes ``None``, because its events come from outside.
+    Without the padding, ``causes`` falls behind ``events``, and each older
+    cause reads one position late.
     """
     events = update.get("events")
     if not events:
         return update
-    return {**update, "causes": [None] * len(events)}
+    return {**update, "causes": [entry] * len(events)}
 
 
 def _seed_causes(
@@ -182,7 +181,6 @@ def make_seed_node(
 
         result: dict[str, Any] = {
             "causes": gap,
-            "_pending_base": prev_cursor,
             "_cursor": len(all_events),
             "_pending": new_events,
             "_round": 0,
@@ -232,10 +230,10 @@ def make_router_node(
                 {
                     "_cursor": len(state["events"]),
                     "_pending": [halted],
-                    "_pending_base": len(state["events"]),
                     "_round": current_round,
                     "events": [halted],
-                }
+                },
+                FRAMEWORK,
             )
         configurable = (config or {}).get("configurable", {})
         deadline = configurable.get(_DEADLINE_KEY)
@@ -261,16 +259,15 @@ def make_router_node(
                     # halted (terminal across runs).
                     "_cursor": len(state["events"]) + 1,
                     "_pending": [paused],
-                    "_pending_base": len(state["events"]),
                     "_round": current_round,
                     "events": [paused],
                     "_run_paused_emitted": True,
-                }
+                },
+                FRAMEWORK,
             )
         return {
             "_cursor": len(state["events"]),
             "_pending": new_events,
-            "_pending_base": state["_cursor"],
             "_round": current_round,
         }
 
@@ -699,7 +696,7 @@ async def _invoke_async_path(
 def _record_causes(
     new_causes: list[CauseEntry],
     new_events: list[Event],
-    trigger: int | None,
+    trigger: int,
     via: str,
 ) -> None:
     """Record a cause for each event appended since the last call.
@@ -710,9 +707,6 @@ def _record_causes(
     The handler cannot know the absolute index of ``Interrupted``, because
     parallel tasks decide the final order. The value and the ``Resumed``
     therefore point back at it by a relative source: ``-1`` and ``-2``.
-    *trigger* is ``None`` on a thread that paused before causes existed.
-    The entry ``(None, via)`` then records the handler with an unknown
-    source. The interrupt block still points back exactly.
     """
     for j in range(len(new_causes), len(new_events)):
         if _closes_interrupt_block(new_events, j):
@@ -735,7 +729,7 @@ def _closes_interrupt_block(new_events: list[Event], j: int) -> bool:
 
 def _process_events_sync(
     meta: HandlerMeta,
-    matching: list[tuple[int | None, Event]],
+    matching: list[tuple[int, Event]],
     state: StateDict,
     inject: dict[str, Any],
     new_events: list[Event],
@@ -746,8 +740,7 @@ def _process_events_sync(
 ) -> None:
     """Per-event invocation loop for the sync dispatch path.
 
-    Each *matching* entry pairs a pending event with its log index, or with
-    ``None`` on a thread that paused before causes existed.
+    Each *matching* entry pairs a pending event with its log index.
     """
     for trigger, event in matching:
         violation = _check_invariants(meta, event, state)
@@ -786,7 +779,7 @@ def _process_events_sync(
 
 async def _process_events_async(
     meta: HandlerMeta,
-    matching: list[tuple[int | None, Event]],
+    matching: list[tuple[int, Event]],
     state: StateDict,
     inject: dict[str, Any],
     new_events: list[Event],
@@ -797,8 +790,7 @@ async def _process_events_async(
 ) -> None:
     """Per-event invocation loop for the async dispatch path.
 
-    Each *matching* entry pairs a pending event with its log index, or with
-    ``None`` on a thread that paused before causes existed.
+    Each *matching* entry pairs a pending event with its log index.
     """
     for trigger, event in matching:
         violation = _check_invariants(meta, event, state)
@@ -867,13 +859,12 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[tuple[int | None, Event]], dict[str, Any], float | None]:
-        base = state.get("_pending_base")
-        matching = [
-            (None if base is None else base + k, e)
-            for k, e in enumerate(state["_pending"])
-            if meta.matches(e)
-        ]
+    ) -> tuple[list[tuple[int, Event]], dict[str, Any], float | None]:
+        pending = state["_pending"]
+        # The pending events sit at [_cursor - len(_pending), _cursor) in
+        # events, on every path that dispatches a handler. See _causes.py.
+        base = state["_cursor"] - len(pending)
+        matching = [(base + k, e) for k, e in enumerate(pending) if meta.matches(e)]
         inject = _build_inject(
             meta,
             state,
@@ -964,7 +955,7 @@ def make_handler_node(
                 deadline,
             )
         except asyncio.CancelledError:
-            return _finalize(pad_causes({"events": [Cancelled()]}))
+            return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))
         finally:
             _reset_custom_emitters(tokens)
         return _finalize({"events": new_events, "causes": new_causes})
@@ -1007,7 +998,7 @@ def _collect_and_check(
     return_contract: Any = None,
     *,
     new_causes: list[CauseEntry],
-    trigger: int | None,
+    trigger: int,
 ) -> None:
     """Collect handler result then run the post-command invariant check.
 

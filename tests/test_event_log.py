@@ -3,8 +3,18 @@
 import pickle
 
 import pytest
+from conftest import Order
 
-from langgraph_events import Cause, Event, EventLog, IntegrationEvent
+from langgraph_events import (
+    Cause,
+    Event,
+    EventLog,
+    FrameworkEvent,
+    IntegrationEvent,
+    NotRecorded,
+    SourceDropped,
+    UnknownCause,
+)
 
 
 class Alpha(IntegrationEvent):
@@ -297,9 +307,24 @@ def describe_EventLog_causes_argument():
             with pytest.raises(ValueError, match="same object"):
                 EventLog([seed, Beta(v=2)], causes=[None, Cause(Alpha(v=1), "h")])
 
+    def when_via_is_not_a_string():
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match="via must be a str"):
+                Cause(Alpha(v=1), 3)  # type: ignore[arg-type]
+
+    def when_a_source_is_a_copy():
+        def it_says_to_pass_the_logged_event():
+            seed = Alpha(v=1)
+
+            with pytest.raises(ValueError, match=r"pass events\[j\]"):
+                EventLog([seed, Beta(v=2)], causes=[None, Cause(Alpha(v=1), "h")])
+
     def when_an_entry_is_not_a_cause():
         def it_raises_type_error():
-            with pytest.raises(TypeError, match="must be a Cause or None"):
+            with pytest.raises(
+                TypeError,
+                match="must be a Cause, an UnknownCause, a FrameworkEvent or None",
+            ):
                 EventLog([Alpha(v=1), Beta(v=2)], causes=[None, (0, "h")])
 
     def when_the_lengths_differ():
@@ -487,3 +512,64 @@ def describe_flow():
 
             with pytest.raises(ValueError, match="records no causes"):
                 EventLog([seed]).flow(seed)
+
+
+def _every_case_log():
+    seed = Alpha(v=1)
+    entries = [
+        None,
+        NotRecorded(),
+        SourceDropped(via="h", source_type="Gone"),
+        FrameworkEvent(),
+        Cause(seed, "h"),
+    ]
+    events = [seed, Beta(v=2), Beta(v=3), Beta(v=4), Beta(v=5)]
+    return EventLog(events, causes=entries), entries
+
+
+def describe_unknown_causes():
+    def when_a_log_holds_every_case():
+        def it_keeps_each_case_through_a_rebuild():
+            log, entries = _every_case_log()
+
+            rebuilt = EventLog(log.events, causes=log.causes)
+
+            assert rebuilt.causes == tuple(entries)
+
+        def it_answers_each_case_from_cause():
+            log, entries = _every_case_log()
+
+            assert [log.cause(e) for e in log] == entries
+
+    def when_an_unknown_case_is_shown():
+        def it_states_why_the_cause_is_unknown():
+            dropped = SourceDropped(via="h", source_type="Gone")
+
+            assert isinstance(NotRecorded(), UnknownCause)
+            assert "before" in NotRecorded().reason
+            assert isinstance(dropped, UnknownCause)
+            assert "Gone" in dropped.reason
+            assert "h" in dropped.reason
+
+    def when_a_chain_reaches_an_unknown_cause():
+        def it_stops_the_flow_there():
+            old = Alpha(v=1)
+            child = Beta(v=2)
+            log = EventLog([old, child], causes=[NotRecorded(), Cause(old, "h")])
+
+            assert log.flow(child) == (old, child)
+
+        def it_counts_only_handler_causes_as_effects():
+            log, _entries = _every_case_log()
+
+            assert log.effects(log[0]) == (log[4],)
+
+
+def describe_cause_lookup_errors():
+    def when_a_nested_event_is_missing():
+        def it_names_the_event_by_qualname():
+            seed = Alpha(v=1)
+            log = EventLog([seed], causes=[None])
+
+            with pytest.raises(ValueError, match=r"Order\.Place"):
+                log.cause(Order.Place(customer_id="c1"))

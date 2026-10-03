@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
 
-from langgraph_events._causes import resolve
+from langgraph_events._causes import FRAMEWORK, NOT_RECORDED, dropped, resolve
 from langgraph_events._event import Event
 
 if TYPE_CHECKING:
@@ -29,40 +29,91 @@ class Cause:
     source: Event
     via: str
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.via, str):
+            raise TypeError(
+                f"Cause.via must be a str, the handler's node name, got "
+                f"{type(self.via).__name__}."
+            )
+
+
+class UnknownCause:
+    """Base of every case where the cause of an event is not known.
+
+    Each subclass names one case and keeps only the facts that are still
+    true. ``reason`` states the case in one sentence. An unknown cause comes
+    only from history that the framework did not record: a checkpoint saved
+    before causes existed, or a source that ``rewrite_store(drop=...)``
+    deleted.
+    """
+
+    __slots__ = ()
+
+    @property
+    def reason(self) -> str:
+        raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class NotRecorded(UnknownCause):
+    """The event was written before this library recorded causes."""
+
+    @property
+    def reason(self) -> str:
+        return "not recorded: the event was written before causes existed"
+
+
+@dataclass(frozen=True)
+class SourceDropped(UnknownCause):
+    """A handler produced the event, but a store rewrite deleted its source.
+
+    ``via`` is the handler. ``source_type`` is the qualname of the deleted
+    event.
+    """
+
+    via: str
+    source_type: str
+
+    @property
+    def reason(self) -> str:
+        return f"source {self.source_type} dropped by rewrite_store, via {self.via}"
+
+
+@dataclass(frozen=True)
+class FrameworkEvent:
+    """The framework wrote the event: ``RunPaused``, ``MaxRoundsExceeded``,
+    ``Cancelled`` or ``Abandoned``. The event type names the mechanism."""
+
+
+CauseValue: TypeAlias = "Cause | UnknownCause | FrameworkEvent | None"
+"""What :meth:`EventLog.cause` returns. ``None`` is a seed."""
+
 
 class _CauseTable:
     """The causes of one root log. Every log derived from it shares the table.
 
     The table reads the ``causes`` channel lazily: :func:`resolve` runs on the
     first query, not each time a handler receives the log. ``entries[i]`` is
-    ``(source index, via)`` for ``events[i]``, ``(None, via)`` when the source
-    is unknown, or ``None`` for a seed. An event below ``known_from`` has an
-    unknown cause: a checkpoint saved before causes existed did not record it.
+    the absolute entry of ``events[i]`` in the format of
+    :mod:`~langgraph_events._causes`. :func:`_decode` turns it into the public
+    value.
     """
 
     def __init__(
         self,
         events: tuple[Event, ...],
         stored: list[Any] | None,
-        resolved: tuple[tuple[CauseEntry, ...], int] | None = None,
+        entries: tuple[CauseEntry, ...] | None = None,
     ) -> None:
         self.events = events
         self._stored = stored
-        if resolved is not None:
-            self.__dict__["_resolved"] = resolved
+        if entries is not None:
+            self.__dict__["entries"] = entries
 
     @cached_property
-    def _resolved(self) -> tuple[tuple[CauseEntry, ...], int]:
-        entries, known_from = resolve(self.events, self._stored)
-        return tuple(entries), known_from
-
-    @property
     def entries(self) -> tuple[CauseEntry, ...]:
-        return self._resolved[0]
-
-    @property
-    def known_from(self) -> int:
-        return self._resolved[1]
+        resolved, _known_from = resolve(self.events, self._stored)
+        return tuple(resolved)
 
     @cached_property
     def positions(self) -> dict[int, int]:
@@ -91,32 +142,58 @@ class _CauseTable:
             candidate = self.events[i]
             if type(candidate) is type(event) and candidate == event:
                 return i
-        raise ValueError(f"event {type(event).__name__} is not in this log")
-
-    def is_known(self, position: int) -> bool:
-        """Whether the cause of the root event at *position* was recorded."""
-        entry = self.entries[position]
-        if position < self.known_from:
-            return False
-        return entry is None or entry[0] is not None
+        raise ValueError(f"event {type(event).__qualname__} is not in this log")
 
 
-def _cause_at(table: _CauseTable, position: int) -> Cause | None:
-    """The :class:`Cause` of the root event at *position*, or ``None``.
+def _cause_at(table: _CauseTable, position: int) -> CauseValue:
+    """The cause of the root event at *position*, decoded from its entry."""
+    return _decode(table.events, table.entries[position])
 
-    ``None`` for a seed, and for a cause whose source is unknown.
-    """
-    entry = table.entries[position]
+
+def _decode(events: tuple[Event, ...], entry: Any) -> CauseValue:
     if entry is None:
         return None
-    source, via = entry
-    if source is None:
+    tag = entry[0]
+    if tag == "framework":
+        return FrameworkEvent()
+    if tag == "not_recorded":
+        return NotRecorded()
+    if tag == "dropped":
+        return SourceDropped(via=entry[1], source_type=entry[2])
+    return Cause(source=events[tag], via=entry[1])
+
+
+def _is_handler_entry(entry: Any) -> bool:
+    return entry is not None and isinstance(entry[0], int)
+
+
+def _encode(i: int, cause: Any, positions: dict[int, int]) -> CauseEntry:
+    if cause is None:
         return None
-    return Cause(source=table.events[source], via=via)
+    if isinstance(cause, Cause):
+        source = positions.get(id(cause.source))
+        if source is None:
+            raise ValueError(
+                f"causes[{i}] names a {type(cause.source).__qualname__} source "
+                f"that is not an earlier event in this log. The source must be "
+                f"the same object as an earlier event: pass events[j], not a copy."
+            )
+        return (source, cause.via)
+    if isinstance(cause, NotRecorded):
+        return NOT_RECORDED
+    if isinstance(cause, SourceDropped):
+        return dropped(cause.via, cause.source_type)
+    if isinstance(cause, FrameworkEvent):
+        return FRAMEWORK
+    raise TypeError(
+        f"causes[{i}] must be a Cause, an UnknownCause, a FrameworkEvent or None, "
+        f"got {type(cause).__name__}. Wrap a source event and a handler name: "
+        f"Cause(source, via)."
+    )
 
 
 def _table_from_causes(
-    events: tuple[Event, ...], causes: tuple[Cause | None, ...]
+    events: tuple[Event, ...], causes: tuple[CauseValue, ...]
 ) -> _CauseTable:
     """Check *causes* against *events*, and store each source as an index."""
     if len(causes) != len(events):
@@ -127,25 +204,9 @@ def _table_from_causes(
     positions: dict[int, int] = {}
     entries: list[CauseEntry] = []
     for i, (event, cause) in enumerate(zip(events, causes, strict=True)):
-        if cause is None:
-            entries.append(None)
-        elif not isinstance(cause, Cause):
-            raise TypeError(
-                f"causes[{i}] must be a Cause or None, got "
-                f"{type(cause).__name__}. Wrap the source event and the handler "
-                f"name: Cause(source, via)."
-            )
-        else:
-            source = positions.get(id(cause.source))
-            if source is None:
-                raise ValueError(
-                    f"causes[{i}] names a {type(cause.source).__name__} source "
-                    f"that is not an earlier event in this log. The source must "
-                    f"be the same object as an earlier event."
-                )
-            entries.append((source, cause.via))
+        entries.append(_encode(i, cause, positions))
         positions[id(event)] = i
-    return _CauseTable(events, None, resolved=(tuple(entries), 0))
+    return _CauseTable(events, None, entries=tuple(entries))
 
 
 class EventLog:
@@ -162,7 +223,7 @@ class EventLog:
     def __init__(
         self,
         events: Iterable[Event],
-        causes: Iterable[Cause | None] | None = None,
+        causes: Iterable[CauseValue] | None = None,
     ) -> None:
         self._events = tuple(events)
         self._table = (
@@ -214,7 +275,7 @@ class EventLog:
         return EventLog._from_owned(tuple(events), self._table, roots)
 
     @property
-    def causes(self) -> tuple[Cause | None, ...] | None:
+    def causes(self) -> tuple[CauseValue, ...] | None:
         """The cause of each event, aligned with :attr:`events`.
 
         ``None`` when the log records no causes. Each entry is a
@@ -229,20 +290,25 @@ class EventLog:
             return None
         return tuple(_cause_at(table, root) for root in roots)
 
-    def cause(self, event: Event) -> Cause | None:
-        """The handler that produced *event*, and the event it received.
+    def cause(self, event: Event) -> CauseValue:
+        """The origin of *event*, one case per type.
 
-        Returns ``None`` for a seed, and for an event whose cause was not
-        recorded. Finds *event* by identity first, then as the latest equal
-        event. A log from ``after``, ``before`` or ``select`` answers like
-        its root log. Raises ``ValueError`` if the log records no causes, or
-        if *event* is not in the root log.
+        - :class:`Cause`: a handler produced *event* from ``source``.
+        - :class:`NotRecorded` or :class:`SourceDropped`: the cause is
+          unknown, and the type says why. See :class:`UnknownCause`.
+        - :class:`FrameworkEvent`: the framework wrote *event*.
+        - ``None``: a seed. *event* came from outside.
+
+        Finds *event* by identity first, then as the latest equal event. A log
+        from ``after``, ``before`` or ``select`` answers like its root log.
+        Raises ``ValueError`` if the log records no causes, or if *event* is
+        not in the root log.
         """
         table = self._require_table()
         return _cause_at(table, table.locate(event))
 
     def effects(self, event: Event) -> tuple[Event, ...]:
-        """The events that *event* caused, in log order.
+        """The events that a handler produced from *event*, in log order.
 
         Finds *event* and raises like :meth:`cause`.
         """
@@ -251,21 +317,23 @@ class EventLog:
         return tuple(
             table.events[i]
             for i, entry in enumerate(table.entries)
-            if entry is not None and entry[0] == position
+            if _is_handler_entry(entry) and entry is not None and entry[0] == position
         )
 
     def flow(self, event: Event) -> tuple[Event, ...]:
-        """The cause chain of *event*, from the root seed to *event*.
+        """The chain of :class:`Cause` that ends at *event*, oldest first.
 
-        The chain starts at the first event that has no recorded cause.
+        The chain starts at the first event whose own cause is not a
+        :class:`Cause`: a seed, a framework event, or an unknown cause.
         Finds *event* and raises like :meth:`cause`.
         """
         table = self._require_table()
         chain = [table.locate(event)]
-        while (entry := table.entries[chain[-1]]) is not None and (
-            source := entry[0]
-        ) is not None:
-            chain.append(source)
+        while True:
+            entry = table.entries[chain[-1]]
+            if entry is None or not isinstance(entry[0], int):
+                break
+            chain.append(entry[0])
         return tuple(table.events[i] for i in reversed(chain))
 
     def _require_table(self) -> _CauseTable:
@@ -275,18 +343,6 @@ class EventLog:
                 "a saved log with EventLog(events, causes=...)."
             )
         return self._table
-
-    def _cause_is_known(self, event: Event) -> bool:
-        """Whether the cause of *event* was recorded.
-
-        This is the only private member of ``EventLog`` that ``Reflection``
-        uses. ``cause()`` returns ``None`` both for a seed and for an older
-        event of a checkpoint saved before causes existed. Reflection must
-        show ``unknown`` for the second, and never a guessed ``seed``.
-        Finds *event* and raises like :meth:`cause`.
-        """
-        table = self._require_table()
-        return table.is_known(table.locate(event))
 
     def filter(self, event_type: type[T]) -> list[T]:
         """Return all events matching *event_type* (including subclasses)."""

@@ -16,7 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
 
-from langgraph_events._causes import CauseEntry
+from langgraph_events._causes import FRAMEWORK, CauseEntry
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     OUTCOMES_ATTR,
@@ -1652,13 +1652,15 @@ class EventGraph:
         """
         self._require_checkpointer("pre_seed")
         compiled = self._compile()
-        compiled.update_state(config, pad_causes(values), as_node="__seed__")
+        compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
 
     async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
         """Async version of :meth:`pre_seed`."""
         self._require_checkpointer("apre_seed")
         compiled = self._compile()
-        await compiled.aupdate_state(config, pad_causes(values), as_node="__seed__")
+        await compiled.aupdate_state(
+            config, pad_causes(values, None), as_node="__seed__"
+        )
 
     def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
         """Whether the thread has work to resume into.
@@ -1766,7 +1768,8 @@ class EventGraph:
                             "events": appended,
                             "_cursor": len(events) + len(appended),
                             "_pending": [],
-                        }
+                        },
+                        FRAMEWORK,
                     ),
                     "__seed__",
                 )

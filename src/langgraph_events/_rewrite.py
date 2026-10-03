@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
-from langgraph_events._causes import resolve
+from langgraph_events._causes import dropped, resolve
 from langgraph_events._event import Event, Resumed
 
 if TYPE_CHECKING:
@@ -39,7 +39,7 @@ _ERROR_CHANNEL = "__error__"
 _LOG_CHANNELS = ("events", "_pending")
 """The two channels ``drop`` filters. ``_POSITION_CHANNELS`` index ``events``."""
 
-_POSITION_CHANNELS = ("_cursor", "_pending_base")
+_POSITION_CHANNELS = ("_cursor",)
 """The channels that hold a position in ``events``."""
 
 RewriteStatus = Literal["rewrite", "unchanged", "refused"]
@@ -398,7 +398,8 @@ def _remap_causes(
     each source absolute first, so this remaps absolute indices only and
     writes absolute entries back. An event below ``known_from`` keeps no
     entry, so the channels still align from the end. A cause whose source
-    was dropped keeps its handler with an unknown source: ``(None, via)``.
+    was dropped becomes :func:`~langgraph_events._causes.dropped`: the handler
+    and the type of the deleted event stay known.
     """
     entries, known_from = resolve(events, causes)
     new_position: dict[int, int] = {}
@@ -413,9 +414,17 @@ def _remap_causes(
         if entry is None:
             remapped.append(None)
             continue
-        source, via = entry
-        target = None if source is None else new_position.get(source)
-        remapped.append((target, via))
+        source = entry[0]
+        if not isinstance(source, int):
+            remapped.append(entry)
+            continue
+        via = entry[1]
+        target = new_position.get(source)
+        remapped.append(
+            dropped(via, type(events[source]).__qualname__)
+            if target is None
+            else (target, via)
+        )
     return remapped
 
 

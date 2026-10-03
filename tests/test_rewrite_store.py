@@ -26,6 +26,7 @@ from langgraph_events import (
     Reducer,
     Resumed,
     RewriteReport,
+    SourceDropped,
     ThreadRewrite,
     on,
 )
@@ -382,7 +383,9 @@ def describe_rewrite_store():
 
             assert log.cause(log.latest(Ended)) == Cause(source=_Go(), via="_go_ends")
             assert log.cause(log.latest(Ended)).source is log.first(_Go)
-            assert log.cause(log.first(_Go)) is None
+            assert log.cause(log.first(_Go)) == SourceDropped(
+                via="wait", source_type=retiring.__qualname__
+            )
 
     def when_drop_names_a_base_class():
         def it_leaves_a_subclass_instance_in_place():
@@ -447,7 +450,10 @@ def describe_rewrite_store():
             graph, log, _gate = _resumed()
             started = next(i for i, e in enumerate(log) if e is log.first(Started))
 
-            assert graph.reflect(log).tool().run(op="cause", index=started) == "unknown"
+            answer = graph.reflect(log).tool().run(op="cause", index=started)
+
+            assert answer.startswith("unknown, source ")
+            assert answer.endswith("_Noise dropped by rewrite_store, via promote")
 
     def when_a_live_class_carries_a_fill():
         def it_converges_on_the_second_run():

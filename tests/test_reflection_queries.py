@@ -260,7 +260,7 @@ def describe_event():
             graph = EventGraph([Order.Place], checkpointer=saver)
             config = {"configurable": {"thread_id": "legacy"}}
             graph.invoke(Order.Place(customer_id="c1"), config=config)
-            strip_channels(saver, config, "causes", "_pending_base")
+            strip_channels(saver, config, "causes")
 
             reflection = graph.reflect(graph.get_state(config).events)
 

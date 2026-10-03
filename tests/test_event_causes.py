@@ -19,6 +19,7 @@ from langgraph_events import (
     Cause,
     EventGraph,
     EventLog,
+    FrameworkEvent,
     HandlerRaised,
     HandlerRetried,
     IntegrationEvent,
@@ -26,6 +27,7 @@ from langgraph_events import (
     Invariant,
     InvariantViolated,
     MaxRoundsExceeded,
+    NotRecorded,
     Reducer,
     Resumed,
     RetryPolicy,
@@ -277,17 +279,17 @@ def describe_invoke():
             assert log.cause(log.first(HandlerRaised)) == expected
 
     def when_max_rounds_is_exceeded():
-        def it_records_no_cause_for_the_halt():
+        def it_records_the_halt_as_a_framework_event():
             log = EventGraph([again], max_rounds=2).invoke(Tick(n=0))
             ticks = log.filter(Tick)
 
             assert log.cause(ticks[0]) is None
             for earlier, later in itertools.pairwise(ticks):
                 assert log.cause(later) == Cause(source=earlier, via="again")
-            assert log.cause(log.latest(MaxRoundsExceeded)) is None
+            assert log.cause(log.latest(MaxRoundsExceeded)) == FrameworkEvent()
 
     def when_the_deadline_passes_after_a_round():
-        def it_records_no_cause_for_the_pause():
+        def it_records_the_pause_as_a_framework_event():
             deadline = 0.0
 
             @on(Started)
@@ -305,7 +307,7 @@ def describe_invoke():
             assert log.cause(log.first(Processed)) == Cause(
                 source=log.first(Started), via="slow"
             )
-            assert log.cause(paused) is None
+            assert log.cause(paused) == FrameworkEvent()
             assert log.cause(log.first(Noted)) == Cause(source=paused, via="note_pause")
 
     def when_the_run_log_is_pickled():
@@ -388,15 +390,15 @@ def describe_invoke():
         def it_records_causes_for_the_new_run_only():
             graph, config, saver = _checkpointed([step, finish], "legacy")
             graph.invoke(Started(data="old"), config=config)
-            strip_channels(saver, config, "causes", "_pending_base")
+            strip_channels(saver, config, "causes")
 
             log = graph.invoke(Started(data="new"), config=config)
             stored = graph.get_state(config).events
 
-            assert log.cause(log.first(Processed)) is None
+            assert log.cause(log.first(Processed)) == NotRecorded()
             assert log.cause(log.latest(Processed)).source is log.latest(Started)
             assert stored.causes[4] == Cause(source=Started(data="new"), via="step")
-            assert "cause: unknown" in graph.reflect(log).event(1)
+            assert "cause: unknown, not recorded" in graph.reflect(log).event(1)
 
 
 def describe_ainvoke():
@@ -415,7 +417,7 @@ def describe_ainvoke():
             )
 
     def when_a_handler_is_cancelled():
-        async def it_records_no_cause_for_the_cancellation():
+        async def it_records_the_cancellation_as_a_framework_event():
             ready = asyncio.Event()
 
             @on(Processed)
@@ -434,7 +436,7 @@ def describe_ainvoke():
             assert log.cause(log.first(Processed)) == Cause(
                 source=log.first(Started), via="step"
             )
-            assert log.cause(log.latest(Cancelled)) is None
+            assert log.cause(log.latest(Cancelled)) == FrameworkEvent()
 
 
 def describe_resume():
@@ -456,7 +458,7 @@ def describe_resume():
     def when_the_thread_paused_before_causes_existed():
         def it_resumes_and_points_the_answer_at_the_interrupt():
             graph, config, saver = _paused("legacy-pause")
-            strip_channels(saver, config, "causes", "_pending_base")
+            strip_channels(saver, config, "causes")
 
             log = graph.resume(Approved(), config=config)
 
@@ -467,15 +469,28 @@ def describe_resume():
                 source=log.first(Resumed), via="acknowledge"
             )
 
-        def it_shows_the_interrupt_cause_as_unknown_in_reflection():
-            graph, config, saver = _paused("legacy-unknown")
-            strip_channels(saver, config, "causes", "_pending_base")
+        def it_derives_the_real_trigger_of_the_resumed_handler():
+            graph, config, saver = _paused("legacy-trigger")
+            strip_channels(saver, config, "causes")
 
             log = graph.resume(Approved(), config=config)
-            asked = next(i for i, e in enumerate(log) if e is log.first(Ask))
 
-            assert log.cause(log.first(Ask)) is None
-            assert graph.reflect(log).tool().run(op="cause", index=asked) == "unknown"
+            assert log.cause(log.first(Ask)) == Cause(
+                source=log.first(Processed), via="ask"
+            )
+            assert log.cause(log.first(Ask)).source is log.first(Processed)
+
+        def it_shows_the_older_events_as_not_recorded_in_reflection():
+            graph, config, saver = _paused("legacy-unknown")
+            strip_channels(saver, config, "causes")
+
+            log = graph.resume(Approved(), config=config)
+            done = next(i for i, e in enumerate(log) if e is log.first(Processed))
+
+            assert log.cause(log.first(Processed)) == NotRecorded()
+            assert graph.reflect(log).tool().run(op="cause", index=done) == (
+                "unknown, not recorded: the event was written before causes existed"
+            )
 
 
 def describe_get_state():
@@ -492,7 +507,7 @@ def describe_get_state():
 
 
 def describe_abandon():
-    def it_records_no_cause_for_the_abandoned_marker():
+    def it_records_the_abandoned_marker_as_a_framework_event():
         graph, config, _saver = _paused("abandon")
 
         graph.abandon(config)
@@ -501,7 +516,7 @@ def describe_abandon():
         assert log.cause(log.first(Processed)) == Cause(
             source=log.first(Started), via="step"
         )
-        assert log.cause(log.latest(Abandoned)) is None
+        assert log.cause(log.latest(Abandoned)) == FrameworkEvent()
 
 
 def describe_pre_seed():
