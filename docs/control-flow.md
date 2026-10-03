@@ -188,14 +188,15 @@ See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkp
 graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-`abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`):
+`abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass, thread_ids=...)` (or `athreads_paused_on()`):
 
 ```python
-for config in graph.threads_paused_on(OrderConfirmationRequested):
+paused = graph.threads_paused_on(OrderConfirmationRequested, thread_ids=candidates)
+for config in paused:
     graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-Omit the class to get every paused thread. With no `thread_ids=`, `threads_paused_on()` reads every checkpoint the checkpointer holds. On a large store, pass candidate ids. See [Finding candidates server-side](event-migrations.md#finding-candidates-server-side). To check one thread, pass `thread_ids=[tid]`.
+`thread_ids=` is required. The caller names the threads, and the library does not walk the store. Get the candidate ids from a server-side query. See [Finding candidates server-side](event-migrations.md#finding-candidates-server-side). Omit the class to get every listed thread that is paused. To check one thread, pass `thread_ids=[tid]`.
 
 `abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass. Resuming every paused thread first would append the very identity you are deleting.
 
@@ -210,7 +211,7 @@ Like every event on this settle path, `Abandoned` is recorded, not dispatched. `
 
 Always the qualname, never the bare class name: it stays unambiguous under nesting. For a plain retirement (handler deleted, or handler and class deleted together with no recovery), it also stays the *same string*: a check written before that retirement keeps matching after it. It does **not** stay the same string once the [tombstone recovery](event-migrations.md#recovering-a-delete-first-deployment) runs. `discarded` then holds the *tombstone's* qualname (e.g. `Order.RetiredApprovalGate`), not the retired class's (`Order.ApprovalRequired`). A check pinned to the original name stops matching from that point on.
 
-`threads_paused_on()` and `abandon()` still work if the `Interrupted` class itself has already been deleted, not just its handler. This is the delete-first mistake this library's docs used to train. Neither can construct the class anymore, so `discarded` then carries the interrupt's last-known qualname instead of a live instance. See [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment) to map that identity back onto a tombstone class. The fix also revives any thread that had already answered the interrupt. `graph.unrevivable_threads()` finds those threads: it reports every thread whose latest checkpoint names an identity that no longer revives, in its settled history or its pending interrupt.
+`threads_paused_on()` and `abandon()` still work if the `Interrupted` class itself has already been deleted, not just its handler. This is the delete-first mistake this library's docs used to train. Neither can construct the class anymore, so `discarded` then carries the interrupt's last-known qualname instead of a live instance. See [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment) to map that identity back onto a tombstone class. The fix also revives any thread that had already answered the interrupt. `graph.unrevivable_threads(thread_ids=...)` finds those threads: it reports each listed thread whose latest checkpoint names an identity that no longer revives, in its settled history or its pending interrupt.
 
 `abandon()` cleans only the live checkpoint. A historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#the-minimum-case-rename-inside-a-namespace).
 

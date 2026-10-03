@@ -630,14 +630,16 @@ The two tracks are independent — do both, in one PR:
 
 Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.plan_rewrite()` and `graph.rewrite_store()` rewrite the stored bytes. Closes [#179](https://github.com/cadance-io/langgraph-events/issues/179).
 
-The live set is the latest checkpoint of each thread in the root namespace, plus its pending writes. `rewrite_store()` reads each one through the checkpointer's serde, so every rename, transform, split and fill applies. It writes the result back through the checkpointer's `put()`, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same walk and the same verification, and writes nothing.
+The live set is the latest checkpoint of each thread in the root namespace, plus its pending writes. `rewrite_store()` reads each one through the checkpointer's serde, so every rename, transform, split and fill applies. It writes the result back through the checkpointer's `put()`, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same reads and the same verification, and writes nothing.
+
+The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. Get the ids from one `SELECT DISTINCT thread_id FROM checkpoints` query. See [Finding candidates server-side](#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
 
 ```python
-report = graph.plan_rewrite(drop=(Order.ApprovalRequired,))
+report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
 print(report)
 assert not report.refused
 
-report = graph.rewrite_store(drop=(Order.ApprovalRequired,))
+report = graph.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
 assert not report.refused
 ```
 
@@ -656,10 +658,7 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is dropped, the rewrite sets the field to `None`. The `Resumed` event stays, and `dropped` does not count the cleared field. `drop=` matches the stored identity exactly. A subclass instance stays in place.
 
 !!! warning "Run it while the graph is idle, never inside a rolling deploy window"
-    An old pod cannot read the new bytes. The walk also toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Take a store-level backup first. The previous blob versions stay in the store, but the checkpoint row is overwritten in place.
-
-!!! warning "On Postgres, pass `thread_ids=`"
-    `thread_ids=None` walks `checkpointer.list(None)`, which deserializes every checkpoint the store holds. Pass the ids from one `SELECT DISTINCT thread_id FROM checkpoints` query instead.
+    An old pod cannot read the new bytes. The rewrite also toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Take a store-level backup first. The previous blob versions stay in the store, but the checkpoint row is overwritten in place.
 
 What the rewrite does not do:
 
@@ -672,11 +671,11 @@ What the rewrite does not do:
 ## Retiring an Interrupted subclass
 
 !!! warning "`threads_paused_on()` and `abandon()` cover paused threads only"
-    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads()` is the sweep that finds it: it reads every thread's latest checkpoint from the store and reports each identity that no longer revives, settled or pending. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. On a large store, pass `thread_ids=`. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
+    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads(thread_ids=...)` is the sweep that finds it: it reads the latest checkpoint of each listed thread from the store and reports each identity that no longer revives, settled or pending. Pass every thread id in the store, from one `SELECT DISTINCT thread_id FROM checkpoints` query. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
 
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
-`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass)` (or `athreads_paused_on()`) finds the paused threads for you. With no `thread_ids=`, it walks every checkpoint the store holds. On a large store, pass candidate ids from a server-side query. See [Finding candidates server-side](#finding-candidates-server-side) below.
+`abandon()` settles one thread per call. `graph.threads_paused_on(EventClass, thread_ids=...)` (or `athreads_paused_on()`) finds the paused threads among the ids you pass. Get the candidate ids from a server-side query. See [Finding candidates server-side](#finding-candidates-server-side) below.
 
 `threads_paused_on()` and `abandon()` read each thread's checkpoint directly, not the graph's compiled topology. Two deletions this survives, with different outcomes:
 
@@ -687,11 +686,21 @@ To retire an `Interrupted` subclass, delete it from the codebase once no live ch
 
 ### Finding candidates server-side
 
-`threads_paused_on()` and `unrevivable_threads()` walk `checkpointer.list(None)` when `thread_ids=` is not given. That walk reads every checkpoint of every thread, historic versions included. On one Postgres store with 60 threads and 15,000 historic checkpoints, the walk did not complete. See [#180](https://github.com/cadance-io/langgraph-events/issues/180).
+Every store sweep takes its thread ids from the caller. This applies to `threads_paused_on()`, `unrevivable_threads()`, `plan_rewrite()`, `rewrite_store()` and their async twins. `thread_ids=` is required. The library does not walk the store. A server-side query is the way to find the ids.
 
-The library cannot filter this walk itself. The checkpointer API has no read for "the latest checkpoint of each thread". `list()` returns every checkpoint, and the Postgres and SQLite savers load every blob before the serde runs. Only the store can filter by latest checkpoint and by the `__interrupt__` channel. `thread_ids=` is the seam: it accepts ids from any query, any driver, sync or async.
+The checkpointer API has no cheap read for the thread ids in a store. It also has no read for "the latest checkpoint of each thread". `list()` with no thread filter returns every checkpoint, historic versions included, and the serde deserializes each one. The Postgres saver also fetches the whole result before the serde runs. On one Postgres store with 60 threads and 15,000 historic checkpoints, that walk did not complete. See [#180](https://github.com/cadance-io/langgraph-events/issues/180). On a store with 149,336 checkpoints in 4,938 threads, the query returned 3.7 GB. One process grew to 9 GB and made a 16 GB machine unresponsive. Up to v0.33.0, the library did this walk when `thread_ids=` was not given. The walk is removed.
 
-Filter the candidates server-side, then pass the ids. The Postgres query below reads the `__interrupt__` writes of each thread's latest root checkpoint. It matches the retired qualname as bytes inside the msgpack blob:
+Only the store can filter by latest checkpoint and by the `__interrupt__` channel. `thread_ids=` accepts ids from any query, any driver, sync or async.
+
+To sweep every thread, get the ids from one query:
+
+```sql
+SELECT DISTINCT thread_id FROM checkpoints
+```
+
+To find the threads paused on one class, filter the candidates server-side, then pass the ids.
+
+The Postgres query below reads the `__interrupt__` writes of each thread's latest root checkpoint. It matches the retired qualname as bytes inside the msgpack blob:
 
 ```sql
 WITH latest AS (
@@ -734,37 +743,41 @@ for config in paused:
     await graph.aabandon(config, reason="retiring Order.ApprovalRequired")
 ```
 
-For `unrevivable_threads()`, one `SELECT DISTINCT thread_id FROM checkpoints` query gives the candidate ids.
+For `unrevivable_threads()`, `plan_rewrite()` and `rewrite_store()`, pass every thread id from the `SELECT DISTINCT thread_id FROM checkpoints` query.
 
 To check one thread, pass its id alone: `graph.threads_paused_on(Order.ApprovalRequired, thread_ids=[tid])`. Do not use `graph.get_state(config)` for this check. Once the handler is deleted, `GraphState.is_interrupted` is `False` and `GraphState.interrupted` is `None` on a thread that is still paused. See the warning under [Sequence](#sequence).
 
 ### Sequence
 
-1. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass)`. On a large store, pass `thread_ids=` from the [candidate query](#finding-candidates-server-side).
-2. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
-3. Verify: `graph.threads_paused_on(EventClass) == []`.
-4. Plan the rewrite: `report = graph.plan_rewrite(drop=(EventClass,))`. Review it. Verify: `not report.refused`. An *answered* thread holds the class in its settled history. `threads_paused_on()` and `abandon()` never reach such a thread. The plan does.
-5. Take a store backup. Outside a rolling deploy window, while the graph is idle: `report = graph.rewrite_store(drop=(EventClass,))`. Verify: `not report.refused`. See [Rewriting the live set](#rewriting-the-live-set).
+1. Get every thread id in the store from one `SELECT DISTINCT thread_id FROM checkpoints` query. See [Finding candidates server-side](#finding-candidates-server-side). The steps below call this list `thread_ids`.
+2. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass, thread_ids=thread_ids)`. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
+3. Verify: `graph.threads_paused_on(EventClass, thread_ids=thread_ids) == []`.
+4. Plan the rewrite: `report = graph.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)`. Review it. Verify: `not report.refused`. An *answered* thread holds the class in its settled history. `threads_paused_on()` and `abandon()` never reach such a thread. The plan does.
+5. Take a store backup. Outside a rolling deploy window, while the graph is idle: `report = graph.rewrite_store(drop=(EventClass,), thread_ids=thread_ids)`. Verify: `not report.refused`. See [Rewriting the live set](#rewriting-the-live-set).
 6. Delete the class from the codebase. Re-baseline: `write_baseline(graph, BASELINE)`. The retired identity moves to the baseline's `retired` list. Deploy.
-7. After the deploy, verify against the real store: `graph.unrevivable_threads() == {}`. On a large store, pass `thread_ids=` from one `SELECT DISTINCT thread_id FROM checkpoints` query. Then delete the `retired` entry from the baseline file.
+7. After the deploy, query the thread ids again, then verify against the real store: `graph.unrevivable_threads(thread_ids=thread_ids) == {}`. Then delete the `retired` entry from the baseline file.
 
 ```python
-for config in graph.threads_paused_on(EventClass):
-    graph.abandon(config, reason="retiring EventClass")
-assert graph.threads_paused_on(EventClass) == []
+# Every thread id in the store, from one server-side query.
+thread_ids = [row[0] for row in conn.execute(ALL_THREAD_IDS)]
 
-report = graph.plan_rewrite(drop=(EventClass,))
+for config in graph.threads_paused_on(EventClass, thread_ids=thread_ids):
+    graph.abandon(config, reason="retiring EventClass")
+assert graph.threads_paused_on(EventClass, thread_ids=thread_ids) == []
+
+report = graph.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)
 print(report)
 assert not report.refused
-report = graph.rewrite_store(drop=(EventClass,))
+report = graph.rewrite_store(drop=(EventClass,), thread_ids=thread_ids)
 assert not report.refused
 
 # After the class is deleted. Reads the store, not the baseline, so a
 # stale name in your own code cannot make it report "safe".
-assert graph.unrevivable_threads() == {}
+thread_ids = [row[0] for row in conn.execute(ALL_THREAD_IDS)]
+assert graph.unrevivable_threads(thread_ids=thread_ids) == {}
 ```
 
-`unrevivable_threads()` reports nothing until the class is gone: while the class still imports, every thread revives. Run it once, after step 6. A non-empty result maps each thread id to the qualnames it can no longer revive: a thread the rewrite refused, or one that was written after it. Recover each one with a [tombstone](#recovering-a-delete-first-deployment). Without `thread_ids=`, it reads every checkpoint the checkpointer holds, like `threads_paused_on()`. On a large store, pass `thread_ids=`. It reports an identity wherever the serde met it: in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise.
+`unrevivable_threads()` reports nothing until the class is gone: while the class still imports, every thread revives. Run it once, after step 6. A non-empty result maps each thread id to the qualnames it can no longer revive: a thread the rewrite refused, or one that was written after it. Recover each one with a [tombstone](#recovering-a-delete-first-deployment). It reports an identity wherever the serde met it: in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise.
 
 !!! warning "Do not `abandon()` a thread that `unrevivable_threads()` reports"
     `abandon(config, require_interrupt=False)` would re-serialize that thread's settled history with the placeholder in it. After that, a strict read would return the placeholder in the log with no error. The code refuses. `NamespaceAwareSerde` never stores a placeholder: a write that holds one raises `ValueError` naming the identity. `abandon()`/`aabandon()` refuse first, with a clearer message. They raise `ValueError` naming the thread and the qualnames when the settled history holds a deleted class. They settle only a thread whose sole unrevivable identity is its pending interrupt. The recovery for a settled thread is the [tombstone](#recovering-a-delete-first-deployment) below, not `abandon()`.
