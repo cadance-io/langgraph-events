@@ -445,10 +445,17 @@ def describe_cause():
             assert log.cause(first) is None
             assert log.cause(again) == Cause(source=reply, via="g")
 
-        def it_falls_back_to_the_latest_equal_event():
-            log, _first, reply, _again = _repeated_log()
+        def it_refuses_a_copy_that_matches_several_events():
+            log, _first, _reply, _again = _repeated_log()
 
-            assert log.cause(Alpha(v=1)) == Cause(source=reply, via="g")
+            with pytest.raises(ValueError, match="matches 2 equal events"):
+                log.cause(Alpha(v=1))
+
+    def when_a_copy_matches_one_event():
+        def it_finds_that_event():
+            log, seed, _reply, _echo, _other = _caused_log()
+
+            assert log.cause(Beta(v=2)) == Cause(source=seed, via="reply_h")
 
     def when_the_event_is_not_in_the_log():
         def it_raises_value_error():

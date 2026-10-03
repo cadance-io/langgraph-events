@@ -1514,10 +1514,14 @@ class EventGraph:
 
     @staticmethod
     def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
-        """Build the input dict from a seed event or list of events."""
-        if isinstance(seed, list):
-            return {"events": seed}
-        return {"events": [seed]}
+        """Build the input dict from a seed event or list of events.
+
+        The input writes a ``None`` cause for each seed, so ``causes`` stays
+        aligned with ``events`` with no guess, also on a checkpoint saved
+        before causes existed.
+        """
+        seeds = seed if isinstance(seed, list) else [seed]
+        return {"events": seeds, "causes": [None] * len(seeds)}
 
     @staticmethod
     def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:

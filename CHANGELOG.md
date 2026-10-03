@@ -11,8 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A graph run records the origin of each event.** `EventLog.cause(event)` states it, one case
   per type:
-  - `Cause(source, via)`: a handler produced the event. `source` is the event the handler
-    received, and `via` is the handler's graph node name.
+  - `Cause(source, via)`: the dispatch of `source` to the handler `via` wrote the event. Usually
+    the handler returned it. `InvariantViolated`, `HandlerRaised` and `HandlerRetried` carry the
+    `Cause` of the dispatch they report.
   - `NotRecorded()`: the event comes from history written before causes existed.
   - `SourceDropped(via, source_type)`: a handler produced the event, but
     `rewrite_store(drop=...)` deleted its source. The handler and the type of the deleted event
@@ -28,7 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the events that a handler produced from an event. `flow()` gives the chain of `Cause` that
   ends at an event. `causes` gives one origin per event, aligned with `events`.
   `EventLog(events, causes=...)` rebuilds a log that a client saved in its own format, every
-  case included. Each `Cause.source` must be the same object as an earlier event.
+  case included. Each `Cause.source` must be the same object as an earlier event. A copy that
+  matches several equal events raises `ValueError` instead of picking one. `CauseValue` names
+  the union that `cause()` returns.
   `docs/concepts.md` has a JSON recipe.
 - **The causes survive interrupts, checkpoints and store rewrites.** The value that answers an
   `Interrupted`, and the `Resumed` that the framework creates, have that `Interrupted` as their
@@ -47,7 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to `events`. A reducer named `causes` now raises `ValueError` at graph build. Event classes,
   constructors and equality do not change.
 - **A direct state write to `events` must also write `causes`.** A direct
-  `graph.compiled.update_state()` that writes `events` must write one `causes` entry per event,
+  `graph.compiled.update_state()` or `graph.compiled.invoke()` that writes `events` must write
+  one `causes` entry per event,
   for example `None`. Otherwise every older cause shifts by one position, and no check can
   detect it. `pre_seed()` writes the causes for you.
 

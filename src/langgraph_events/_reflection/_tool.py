@@ -137,7 +137,8 @@ ops:
   after(type) / before(type) — events after / before the first match
   evidence(index) — all facts on how that event came to be: recorded cause,
     explicit links, owning command, static-edge candidates, forward face
-  cause(index) — the recorded cause: #<index> via <handler>, seed, or unknown
+  cause(index) — the recorded cause: #<index> via <handler>, seed, framework,
+    or unknown with its reason
   state — reducer projections over the log
   schema — the static topology: what can cause what
 """

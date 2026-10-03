@@ -325,6 +325,34 @@ def describe_invoke():
             assert log.first(InvariantViolated) is None
             assert log.cause(log.first(Tock)).via == "checked"
 
+    def when_a_thread_saved_before_causes_existed_is_pre_seeded():
+        def it_keeps_the_old_events_not_recorded():
+            graph, config, saver = _checkpointed([step], "legacy-preseed")
+            graph.invoke(Started(data="old"), config=config)
+            strip_channels(saver, config, "causes")
+            graph.pre_seed(config, {"events": [Noted()]})
+
+            log = graph.invoke(Started(data="new"), config=config)
+
+            assert log.cause(log.first(Processed)) == NotRecorded()
+            assert log.cause(log.first(Noted)) is None
+            assert log.cause(log.latest(Processed)) == Cause(
+                source=log.latest(Started), via="step"
+            )
+
+    def when_a_thread_saved_before_causes_existed_ended_on_max_rounds():
+        def it_keeps_the_halt_not_recorded():
+            saver = MemorySaver(serde=NamespaceAwareSerde())
+            graph = EventGraph([again], checkpointer=saver, max_rounds=2)
+            config = _config("legacy-halt")
+            graph.invoke(Tick(n=0), config=config)
+            strip_channels(saver, config, "causes")
+
+            log = graph.invoke(Noted(), config=config)
+
+            assert log.cause(log.latest(MaxRoundsExceeded)) == NotRecorded()
+            assert log.cause(log.latest(Noted)) is None
+
     def when_no_handler_reacts():
         def it_records_no_cause_for_the_seed():
             log = EventGraph([finish]).invoke(Started(data="x"))
@@ -371,7 +399,7 @@ def describe_invoke():
                 as_node="__seed__",
             )
 
-            with pytest.raises(RuntimeError, match="3 entries for 2 events"):
+            with pytest.raises(RuntimeError, match="4 entries for 2 events"):
                 graph.invoke(Started(data="b"), config=config)
 
     def when_a_stored_source_is_not_an_earlier_event():

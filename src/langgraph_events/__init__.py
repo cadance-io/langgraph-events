@@ -36,6 +36,7 @@ from langgraph_events._event import (
 )
 from langgraph_events._event_log import (
     Cause,
+    CauseValue,
     EventLog,
     FrameworkEvent,
     NotRecorded,
@@ -111,6 +112,7 @@ __all__ = [
     "BaseReducer",
     "Cancelled",
     "Cause",
+    "CauseValue",
     "Command",
     "CommandChainWarning",
     "CommandPrivacyError",

@@ -103,8 +103,8 @@ EventLog(events, causes=None)   # causes: a sequence aligned with events, of the
   handler, that is the command qualname, not a positional name such as `handle_2`.
   `via` equals `Edge.via` unless the handler has a stable identity: an inline command
   handler, or an `@on(node_name=...)` pin.
-- `cause(event)` finds the event by identity first, then by equality, the same way as
-  `Reflection._resolve_index`. An event that is not in the root log raises `ValueError`.
+- `cause(event)` finds the event by identity first, then as its one equal event. A copy
+  that matches several equal events raises `ValueError`, because picking one would be a guess. An event that is not in the root log raises `ValueError`.
 - A log that derives from a log shares the root's cause table. `log.after(X).cause(e)`
   gives the same answer as `log.cause(e)`.
 - A log without causes (`EventLog(events)` from a plain list) has `causes is None`.
@@ -179,7 +179,7 @@ The graph state gets one channel next to `events`:
 | Writer | Writes to `causes` |
 |---|---|
 | Handler (`_finalize`) | One `(trigger index, node name)` per event, recorded after each handler call, so the invariant rollback stays aligned. |
-| Seed node | `[None] * min(len(events) - len(causes), len(events) - cursor)`. The graph input writes only `events`, so the seed node pads for it. The second term keeps the older events of a checkpoint saved before this feature unknown. |
+| Graph input (`_prepare_input`) | `[None]` per seed. The input writes its own causes, so the channels stay aligned with no guess, also on a checkpoint saved before this feature. The seed node writes no causes. |
 | Router: `MaxRoundsExceeded`, `RunPaused` | `[("framework",)]`, through `pad_causes` |
 | Async `Cancelled` path | `[("framework",)]`, through `pad_causes` |
 | `_settle_supersteps` (abandon) | `[("framework",)]`, through `pad_causes` |

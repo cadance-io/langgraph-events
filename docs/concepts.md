@@ -253,7 +253,7 @@ A graph run records the origin of each event. `log.cause(e)` states it, one case
 
 | `log.cause(e)` returns | Meaning |
 |---|---|
-| `Cause(source, via)` | A handler produced `e`. `source` is the event the handler received, and `via` is its graph node name. |
+| `Cause(source, via)` | The dispatch of `source` to the handler `via` wrote `e`. Usually the handler returned `e`. `InvariantViolated`, `HandlerRaised` and `HandlerRetried` carry the `Cause` of the dispatch they report. |
 | `NotRecorded()` | `e` comes from history written before causes existed. |
 | `SourceDropped(via, source_type)` | A handler produced `e`, but `rewrite_store(drop=...)` deleted its source. The handler and the type of the deleted event stay known. |
 | `FrameworkEvent()` | The framework wrote `e`: `RunPaused`, `MaxRoundsExceeded`, `Cancelled` or `Abandoned`. |
@@ -269,19 +269,27 @@ this release, and that `rewrite_store(drop=...)` never rewrites, has no unknown 
 the pinned name. `Cause.source` is an event, while `Edge.source` is a type. `HandlerRaised`
 states the same two facts as `handler` and `source_event`.
 
-The lookup finds `e` by identity first, then as the latest equal event. A log from `after()`,
-`before()` or `select()` answers like the log it came from. `cause()` raises `ValueError` when
-the log records no causes, or when `e` is not in the root log.
+The lookup finds `e` by identity first, then as its one equal event. A copy that matches several
+equal events raises `ValueError`, because picking one would be a guess: pass the logged object.
+A log from `after()`, `before()` or `select()` answers like the log it came from. `cause()`
+also raises `ValueError` when the log records no causes, or when `e` is not in the root log.
+
+To count how often a handler was dispatched, count the distinct sources of its causes. One
+dispatch can write several events, for example through `Scatter`:
 
 ```python
-from langgraph_events import Cause, SourceDropped
+from langgraph_events import Cause
 
-fired = sum(
-    1
-    for e in log
-    if isinstance(c := log.cause(e), (Cause, SourceDropped)) and c.via == "notify_customer"
+dispatched = len(
+    {
+        id(c.source)
+        for e in log
+        if isinstance(c := log.cause(e), Cause) and c.via == "notify_customer"
+    }
 )
 ```
+
+A `SourceDropped` keeps `via`, so a count can include those dispatches as a separate number.
 
 `log.effects(e)` lists the events that a handler produced from `e`. `log.flow(e)` gives the
 chain of `Cause` that ends at `e`. The chain starts at the first event whose own cause is not a
@@ -339,8 +347,11 @@ def load_log(events: list, saved: str) -> EventLog:
     return EventLog(events, causes=[cause(e) for e in json.loads(saved)])
 ```
 
-A direct `graph.compiled.update_state()` that writes `events` must write one `causes` entry per
-event too. Otherwise every older cause shifts by one position, and no check can detect it.
+A save written before causes existed has no entries. Load each of its events as `NotRecorded()`,
+never as `None`: `None` would claim that the event is a seed.
+
+A direct `graph.compiled.update_state()` or `graph.compiled.invoke()` that writes `events` must
+write one `causes` entry per event too. Otherwise every older cause shifts by one position, and no check can detect it.
 `pre_seed()` writes the causes for you.
 
 ## `Namespace` as a feature hub

@@ -19,11 +19,16 @@ T = TypeVar("T", bound=Event)
 
 @dataclass(frozen=True)
 class Cause:
-    """The handler that produced an event, and the event it received.
+    """The dispatch that wrote an event: the event a handler received, and
+    the handler.
 
-    ``source`` is the event that the handler was called with. Event stores
-    call it the causation ID. ``via`` is the handler's graph node name. For
-    an inline command handler, ``via`` is the command qualname.
+    Usually the handler returned the event. The framework also writes events
+    for a dispatch: ``InvariantViolated`` when an invariant blocked it, and
+    ``HandlerRaised`` or ``HandlerRetried`` when the handler raised. These
+    carry the same ``Cause``. ``source`` is the event that the handler was
+    called with. Event stores call it the causation ID. ``via`` is the
+    handler's graph node name. For an inline command handler, ``via`` is the
+    command qualname.
     """
 
     source: Event
@@ -130,19 +135,27 @@ class _CauseTable:
         return state
 
     def locate(self, event: Event) -> int:
-        """The root index of *event*: identity first, then the latest equal event.
+        """The root index of *event*: identity first, then the one equal event.
 
-        The same lookup as ``Reflection``. Raises ``ValueError`` when *event*
-        is not in the root log.
+        Raises ``ValueError`` when *event* is not in the root log, or when a
+        copy matches more than one equal event: picking one would be a guess.
         """
         position = self.positions.get(id(event))
         if position is not None:
             return position
-        for i in range(len(self.events) - 1, -1, -1):
-            candidate = self.events[i]
-            if type(candidate) is type(event) and candidate == event:
-                return i
-        raise ValueError(f"event {type(event).__qualname__} is not in this log")
+        equal = [
+            i
+            for i, candidate in enumerate(self.events)
+            if type(candidate) is type(event) and candidate == event
+        ]
+        if len(equal) > 1:
+            raise ValueError(
+                f"event {type(event).__qualname__} is a copy that matches "
+                f"{len(equal)} equal events in this log. Pass the logged object."
+            )
+        if not equal:
+            raise ValueError(f"event {type(event).__qualname__} is not in this log")
+        return equal[0]
 
 
 def _cause_at(table: _CauseTable, position: int) -> CauseValue:
@@ -276,11 +289,12 @@ class EventLog:
 
     @property
     def causes(self) -> tuple[CauseValue, ...] | None:
-        """The cause of each event, aligned with :attr:`events`.
+        """The origin of each event, aligned with :attr:`events`.
 
-        ``None`` when the log records no causes. Each entry is a
-        :class:`Cause`, or ``None`` for an event without a recorded cause.
-        ``EventLog(log.events, causes=log.causes)`` rebuilds a root log. In a
+        ``None`` when the log records no causes. Each entry is what
+        :meth:`cause` returns for that event: a :class:`Cause`, an
+        :class:`UnknownCause`, a :class:`FrameworkEvent`, or ``None`` for a
+        seed. ``EventLog(log.events, causes=log.causes)`` rebuilds a root log. In a
         log from ``after``, ``before`` or ``select``, a source can be an event
         outside that log. Building a log from its ``events`` and ``causes``
         then raises ``ValueError``.
@@ -299,7 +313,7 @@ class EventLog:
         - :class:`FrameworkEvent`: the framework wrote *event*.
         - ``None``: a seed. *event* came from outside.
 
-        Finds *event* by identity first, then as the latest equal event. A log
+        Finds *event* by identity first, then as its one equal event. A log
         from ``after``, ``before`` or ``select`` answers like its root log.
         Raises ``ValueError`` if the log records no causes, or if *event* is
         not in the root log.
@@ -317,7 +331,7 @@ class EventLog:
         return tuple(
             table.events[i]
             for i, entry in enumerate(table.entries)
-            if _is_handler_entry(entry) and entry is not None and entry[0] == position
+            if _is_handler_entry(entry) and entry[0] == position  # type: ignore[index]
         )
 
     def flow(self, event: Event) -> tuple[Event, ...]:

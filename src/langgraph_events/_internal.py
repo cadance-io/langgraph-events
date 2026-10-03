@@ -89,6 +89,7 @@ def _inject_deadline_keys(configurable: dict[str, Any], deadline: float) -> None
 
 class _InputState(TypedDict):
     events: list[Event]
+    causes: list[CauseEntry]
 
 
 class _OutputState(TypedDict):
@@ -151,21 +152,6 @@ def pad_causes(update: StateDict, entry: CauseEntry) -> StateDict:
     return {**update, "causes": [entry] * len(events)}
 
 
-def _seed_causes(
-    all_events: list[Event], recorded: int, prev_cursor: int
-) -> list[CauseEntry]:
-    """The ``None`` causes that the seed writes for the input events.
-
-    The input writes only ``events``. On a thread that records causes, the
-    input is the gap between ``events`` and ``causes``. A checkpoint saved
-    before causes existed has no ``causes`` channel, so the gap covers the
-    whole history. The seed then pads only the events after the cursor, and
-    the older events keep an unknown cause.
-    """
-    total = len(all_events)
-    return [None] * min(total - recorded, total - prev_cursor)
-
-
 def make_seed_node(
     reducers: dict[str, BaseReducer] | None = None,
 ) -> Callable[[StateDict], StateDict]:
@@ -176,11 +162,8 @@ def make_seed_node(
         prev_cursor = state.get("_cursor", 0)
         all_events = state["events"]
         new_events = all_events[prev_cursor:]
-        recorded = len(state.get("causes") or [])
-        gap = _seed_causes(all_events, recorded, prev_cursor)
 
         result: dict[str, Any] = {
-            "causes": gap,
             "_cursor": len(all_events),
             "_pending": new_events,
             "_round": 0,
@@ -862,7 +845,9 @@ def make_handler_node(
     ) -> tuple[list[tuple[int, Event]], dict[str, Any], float | None]:
         pending = state["_pending"]
         # The pending events sit at [_cursor - len(_pending), _cursor) in
-        # events, on every path that dispatches a handler. See _causes.py.
+        # events on every path that dispatches a handler: the seed, the router
+        # and RunPaused. MaxRoundsExceeded leaves _cursor at the halted event,
+        # but dispatch sends a Halted event to END, so no handler reads it.
         base = state["_cursor"] - len(pending)
         matching = [(base + k, e) for k, e in enumerate(pending) if meta.matches(e)]
         inject = _build_inject(
