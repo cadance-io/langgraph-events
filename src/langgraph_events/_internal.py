@@ -214,12 +214,15 @@ def make_router_node(
         current_round = 1 if has_resume else state.get("_round", 0) + 1
         if current_round > max_rounds:
             halted = MaxRoundsExceeded(rounds=max_rounds)
-            return {
-                "_cursor": len(state["events"]),
-                "_pending": [halted],
-                "_round": current_round,
-                "events": [halted],
-            }
+            return pad_causes(
+                {
+                    "_cursor": len(state["events"]),
+                    "_pending": [halted],
+                    "_pending_base": len(state["events"]),
+                    "_round": current_round,
+                    "events": [halted],
+                }
+            )
         configurable = (config or {}).get("configurable", {})
         deadline = configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
@@ -236,17 +239,20 @@ def make_router_node(
             paused = RunPaused(
                 elapsed_seconds=time.monotonic() - started_at,
             )
-            return {
-                # Advance cursor PAST the paused event so a fresh /run on
-                # the same thread excludes it from new_events. Distinct
-                # from MaxRoundsExceeded above which keeps cursor AT the
-                # halted (terminal across runs).
-                "_cursor": len(state["events"]) + 1,
-                "_pending": [paused],
-                "_round": current_round,
-                "events": [paused],
-                "_run_paused_emitted": True,
-            }
+            return pad_causes(
+                {
+                    # Advance cursor PAST the paused event so a fresh /run on
+                    # the same thread excludes it from new_events. Distinct
+                    # from MaxRoundsExceeded above which keeps cursor AT the
+                    # halted (terminal across runs).
+                    "_cursor": len(state["events"]) + 1,
+                    "_pending": [paused],
+                    "_pending_base": len(state["events"]),
+                    "_round": current_round,
+                    "events": [paused],
+                    "_run_paused_emitted": True,
+                }
+            )
         return {
             "_cursor": len(state["events"]),
             "_pending": new_events,
