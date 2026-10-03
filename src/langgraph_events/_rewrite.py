@@ -1,12 +1,13 @@
 """Apply-side migration: plan the rewrite of one thread's live checkpoint.
 
-``EventGraph.plan_rewrite()`` and ``rewrite_store()`` walk each thread's
-latest checkpoint. The serde's read path already applies every rename,
-transform, split and fill, so a checkpoint read through ``get_tuple()``
-and written back through ``put()`` lands under live identities and live
-field shapes. This module owns the pure step in between: decide whether
-the thread needs a write, drop the stored events the caller named, and
-build the checkpoint the graph will store. It never touches a store.
+``EventGraph.plan_rewrite()`` and ``rewrite_store()`` read the latest
+checkpoint of each thread the caller names. The serde's read path
+already applies every rename, transform, split and fill, so a
+checkpoint read through ``get_tuple()`` and written back through
+``put()`` lands under live identities and live field shapes. This
+module owns the pure step in between: decide whether the thread needs a
+write, drop the stored events the caller named, and build the
+checkpoint the graph will store. It never touches a store.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
+from langgraph_events._causes import dropped, resolve
 from langgraph_events._event import Event, Resumed
 
 if TYPE_CHECKING:
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import Checkpoint, CheckpointTuple
 
+    from langgraph_events._causes import CauseEntry
     from langgraph_events.serde._jsonplus import (
         NamespaceAwareSerde,
         ReadRecord,
@@ -34,7 +37,10 @@ _ERROR_CHANNEL = "__error__"
 """A failed task's write. The task runs again on the next invoke."""
 
 _LOG_CHANNELS = ("events", "_pending")
-"""The two channels ``drop`` filters. ``_cursor`` indexes ``events``."""
+"""The two channels ``drop`` filters. ``_POSITION_CHANNELS`` index ``events``."""
+
+_POSITION_CHANNELS = ("_cursor",)
+"""The channels that hold a position in ``events``."""
 
 RewriteStatus = Literal["rewrite", "unchanged", "refused"]
 
@@ -334,14 +340,13 @@ def _verify_and_bump(
 def _drop_from_log(
     values: dict[str, Any], drop: tuple[type[Event], ...]
 ) -> tuple[dict[str, Any], set[str]]:
-    """Filter ``events`` and ``_pending``. Lower ``_cursor`` by the number
-    of dropped ``events`` entries that sat below it, so the next run
-    still dispatches exactly the entries it would have dispatched."""
+    """Filter ``events`` and ``_pending``. Lower each position by the number
+    of dropped ``events`` entries below it, so the next run still dispatches
+    exactly the entries it would have dispatched. Remap ``causes``."""
     new_values = dict(values)
     changed: set[str] = set()
     if not drop:
         return new_values, changed
-    cursor = values.get("_cursor")
     for channel in _LOG_CHANNELS:
         entries = _log_entries(values, channel)
         if entries is None:
@@ -353,12 +358,74 @@ def _drop_from_log(
             continue
         new_values[channel] = kept
         changed.add(channel)
-        if channel == "events" and isinstance(cursor, int):
-            below = sum(1 for entry in entries[:cursor] if type(entry) in drop)
-            if below:
-                new_values["_cursor"] = cursor - below
-                changed.add("_cursor")
+    events = _log_entries(values, "events")
+    if events is not None and "events" in changed:
+        _shift_positions(values, events, drop, new_values, changed)
     return new_values, changed
+
+
+def _shift_positions(
+    values: dict[str, Any],
+    events: list[Any],
+    drop: tuple[type[Event], ...],
+    new_values: dict[str, Any],
+    changed: set[str],
+) -> None:
+    """Lower each position channel past the dropped events, and remap ``causes``."""
+    for channel in _POSITION_CHANNELS:
+        position = values.get(channel)
+        if not isinstance(position, int):
+            continue
+        below = sum(1 for entry in events[:position] if type(entry) in drop)
+        if below:
+            new_values[channel] = position - below
+            changed.add(channel)
+    causes = _log_entries(values, "causes")
+    if causes is None:
+        return
+    remapped = _remap_causes(causes, events, drop)
+    if remapped != causes:
+        new_values["causes"] = remapped
+        changed.add("causes")
+
+
+def _remap_causes(
+    causes: list[Any], events: list[Any], drop: tuple[type[Event], ...]
+) -> list[CauseEntry]:
+    """Filter ``causes`` at the dropped positions and remap each source.
+
+    :func:`~langgraph_events._causes.resolve` aligns the channels and makes
+    each source absolute first, so this remaps absolute indices only and
+    writes absolute entries back. An event below ``known_from`` keeps no
+    entry, so the channels still align from the end. A cause whose source
+    was dropped becomes :func:`~langgraph_events._causes.dropped`: the handler
+    and the type of the deleted event stay known.
+    """
+    entries, known_from = resolve(events, causes)
+    new_position: dict[int, int] = {}
+    for old, event in enumerate(events):
+        if type(event) not in drop:
+            new_position[old] = len(new_position)
+    remapped: list[CauseEntry] = []
+    for position in range(known_from, len(events)):
+        if position not in new_position:
+            continue
+        entry = entries[position]
+        if entry is None:
+            remapped.append(None)
+            continue
+        source = entry[0]
+        if not isinstance(source, int):
+            remapped.append(entry)
+            continue
+        via = entry[1]
+        target = new_position.get(source)
+        remapped.append(
+            dropped(via, type(events[source]).__qualname__)
+            if target is None
+            else (target, via)
+        )
+    return remapped
 
 
 def _copy_checkpoint(checkpoint: Checkpoint, values: dict[str, Any]) -> Checkpoint:

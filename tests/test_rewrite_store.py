@@ -19,12 +19,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from test_event_graph import _AsyncOnlySaver
 
 from langgraph_events import (
+    Cause,
     EventGraph,
     IntegrationEvent,
     Interrupted,
     Reducer,
     Resumed,
     RewriteReport,
+    SourceDropped,
     ThreadRewrite,
     on,
 )
@@ -242,13 +244,13 @@ def describe_plan_rewrite():
     def when_preconditions_fail():
         def it_requires_a_checkpointer():
             with pytest.raises(ValueError, match=r"plan_rewrite\(\) requires"):
-                EventGraph([_completes]).plan_rewrite()
+                EventGraph([_completes]).plan_rewrite(thread_ids=[])
 
         def it_requires_a_namespace_aware_serde():
             graph = EventGraph([_completes], checkpointer=MemorySaver())
 
             with pytest.raises(ValueError, match=r"plan_rewrite\(\) needs a Namespace"):
-                graph.plan_rewrite()
+                graph.plan_rewrite(thread_ids=[])
 
         def it_refuses_legacy_write():
             saver = MemorySaver()
@@ -256,7 +258,7 @@ def describe_plan_rewrite():
             graph = EventGraph([_completes], checkpointer=saver)
 
             with pytest.raises(ValueError, match=r"legacy_write"):
-                graph.plan_rewrite()
+                graph.plan_rewrite(thread_ids=[])
 
         def it_refuses_a_drop_class_the_serde_cannot_revive():
             class _Unknown(IntegrationEvent):
@@ -267,14 +269,14 @@ def describe_plan_rewrite():
             graph = EventGraph([_completes], checkpointer=saver)
 
             with pytest.raises(ValueError, match=r"_Unknown"):
-                graph.plan_rewrite(drop=(_Unknown,))
+                graph.plan_rewrite(drop=(_Unknown,), thread_ids=[])
 
     def when_a_thread_holds_a_renamed_identity():
         def it_reports_the_migrated_pair():
             saver = MemorySaver()
             graph, _config, old, new = _renamed_history_pair(saver, "t1")
 
-            report = graph.plan_rewrite()
+            report = graph.plan_rewrite(thread_ids=["t1"])
 
             assert report.applied is False
             [thread] = report.threads
@@ -289,7 +291,7 @@ def describe_plan_rewrite():
             blobs_before = set(saver.blobs)
             versions_before = saver.get_tuple(cfg).checkpoint["channel_versions"]
 
-            graph.plan_rewrite()
+            graph.plan_rewrite(thread_ids=["t1"])
 
             assert set(saver.blobs) == blobs_before
             after = saver.get_tuple(cfg).checkpoint["channel_versions"]
@@ -302,7 +304,7 @@ def describe_plan_rewrite():
             graph = EventGraph([_completes], checkpointer=saver)
             graph.invoke(Started(data="x"), config=_cfg("plain"))
 
-            [thread] = graph.plan_rewrite().threads
+            [thread] = graph.plan_rewrite(thread_ids=["plain"]).threads
 
             assert thread.status == "unchanged"
             assert thread.migrated == ()
@@ -316,7 +318,7 @@ def describe_rewrite_store():
             graph, _config, old, new = _renamed_history_pair(saver, "t1")
             assert (old.__module__, old.__qualname__) in _stored_identities(saver, "t1")
 
-            report = graph.rewrite_store()
+            report = graph.rewrite_store(thread_ids=["t1"])
 
             assert report.applied is True
             [thread] = report.threads
@@ -331,7 +333,7 @@ def describe_rewrite_store():
             saver = MemorySaver()
             graph, cfg, retiring = _settled_drop_pair(saver, "t1")
 
-            report = graph.rewrite_store(drop=(retiring,))
+            report = graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
 
             [thread] = report.threads
             assert thread.status == "rewrite"
@@ -349,17 +351,17 @@ def describe_rewrite_store():
         def it_leaves_nothing_for_unrevivable_threads_once_the_class_is_gone():
             saver = MemorySaver()
             graph, _config, retiring = _settled_drop_pair(saver, "t1")
-            graph.rewrite_store(drop=(retiring,))
+            graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
 
             saver.serde = NamespaceAwareSerde(events=(Started,))
             after = EventGraph([_completes], checkpointer=saver)
 
-            assert after.unrevivable_threads() == {}
+            assert after.unrevivable_threads(thread_ids=["t1"]) == {}
 
         def it_dispatches_the_next_input_on_the_thread():
             saver = MemorySaver()
             graph, cfg, retiring = _settled_drop_pair(saver, "t1")
-            graph.rewrite_store(drop=(retiring,))
+            graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
             fired: list[int] = []
 
             @on(_Again)
@@ -371,6 +373,19 @@ def describe_rewrite_store():
 
             assert fired == [1]
             assert log.latest(Ended) == Ended(result="again")
+
+        def it_remaps_each_cause_to_the_kept_events():
+            saver = MemorySaver()
+            graph, cfg, retiring = _settled_drop_pair(saver, "t1")
+
+            graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
+            log = graph.get_state(cfg).events
+
+            assert log.cause(log.latest(Ended)) == Cause(source=_Go(), via="_go_ends")
+            assert log.cause(log.latest(Ended)).source is log.first(_Go)
+            assert log.cause(log.first(_Go)) == SourceDropped(
+                via="wait", source_type=retiring.__qualname__
+            )
 
     def when_drop_names_a_base_class():
         def it_leaves_a_subclass_instance_in_place():
@@ -394,9 +409,51 @@ def describe_rewrite_store():
             graph.invoke(Started(data="x"), config=cfg)
             graph.resume(_Go(), config=cfg)
 
-            [thread] = graph.rewrite_store(drop=(_Base,)).threads
+            [thread] = graph.rewrite_store(drop=(_Base,), thread_ids=["t1"]).threads
 
             assert thread.status == "unchanged"
+
+    def when_a_dropped_event_sits_below_a_paused_handler():
+        def _resumed():
+            saver = MemorySaver()
+
+            class _Noise(IntegrationEvent):
+                pass
+
+            class _Gate(Interrupted):
+                pass
+
+            @on(_Noise)
+            def promote(event: _Noise) -> Started:
+                return Started(data="promoted")
+
+            @on(Started)
+            def wait(event: Started) -> _Gate:
+                return _Gate()
+
+            cfg = _cfg("t1")
+            saver.serde = NamespaceAwareSerde(events=(Started, _Noise, _Gate))
+            graph = EventGraph([promote, wait], checkpointer=saver)
+            graph.invoke(_Noise(), config=cfg)
+            graph.rewrite_store(drop=(_Noise,), thread_ids=["t1"])
+            return graph, graph.resume(_Go(), config=cfg), _Gate
+
+        def it_keeps_the_trigger_of_the_resumed_handler():
+            _graph, log, gate = _resumed()
+
+            assert log.cause(log.first(gate)) == Cause(
+                source=Started(data="promoted"), via="wait"
+            )
+            assert log.cause(log.first(gate)).source is log.first(Started)
+
+        def it_shows_the_cause_of_a_dropped_source_as_unknown():
+            graph, log, _gate = _resumed()
+            started = next(i for i, e in enumerate(log) if e is log.first(Started))
+
+            answer = graph.reflect(log).tool().run(op="cause", index=started)
+
+            assert answer.startswith("unknown, source ")
+            assert answer.endswith("_Noise dropped by rewrite_store, via promote")
 
     def when_a_live_class_carries_a_fill():
         def it_converges_on_the_second_run():
@@ -424,20 +481,22 @@ def describe_rewrite_store():
             graph = EventGraph([_completes], checkpointer=saver)
             blobs_before = len(saver.blobs)
 
-            [first] = graph.rewrite_store().threads
-            [second] = graph.rewrite_store().threads
+            [first] = graph.rewrite_store(thread_ids=["t1"]).threads
+            [second] = graph.rewrite_store(thread_ids=["t1"]).threads
 
             assert first.status == "rewrite"
             assert second.status == "unchanged"
             assert len(saver.blobs) > blobs_before
-            assert graph.plan_rewrite().threads[0].status == "unchanged"
+            assert (
+                graph.plan_rewrite(thread_ids=["t1"]).threads[0].status == "unchanged"
+            )
 
     def when_a_thread_is_paused_on_a_live_interrupt():
         def it_rewrites_the_history_and_the_thread_still_resumes():
             saver = MemorySaver()
             graph, cfg, fired = _paused_renamed_pair(saver, "t1")
 
-            [thread] = graph.rewrite_store().threads
+            [thread] = graph.rewrite_store(thread_ids=["t1"]).threads
             log = graph.resume(_Again(), config=cfg)
 
             assert thread.status == "rewrite"
@@ -466,7 +525,7 @@ def describe_rewrite_store():
             saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
             graph = EventGraph([_completes], checkpointer=saver)
 
-            [thread] = graph.rewrite_store().threads
+            [thread] = graph.rewrite_store(thread_ids=["seeded"]).threads
 
             assert thread.status == "rewrite"
             assert (_NewGate.__module__, _NewGate.__qualname__) in _stored_identities(
@@ -478,10 +537,10 @@ def describe_rewrite_store():
             graph, cfg, _old, _new = _renamed_history_pair(saver, "t1")
             checkpoint_id = saver.get_tuple(cfg).checkpoint["id"]
 
-            graph.rewrite_store()
+            graph.rewrite_store(thread_ids=["t1"])
 
             assert saver.get_tuple(cfg).checkpoint["id"] == checkpoint_id
-            [thread] = graph.plan_rewrite().threads
+            [thread] = graph.plan_rewrite(thread_ids=["t1"]).threads
             assert thread.status == "unchanged"
 
 
@@ -513,7 +572,11 @@ def describe_rewrite_store_refusals():
             with saver.serde.tolerate_unresolved():
                 before = saver.get_tuple(cfg).checkpoint["channel_versions"]
 
-            thread = _only(EventGraph([_completes], checkpointer=saver).rewrite_store())
+            thread = _only(
+                EventGraph([_completes], checkpointer=saver).rewrite_store(
+                    thread_ids=["t1"]
+                )
+            )
 
             assert "_Deleted" in thread.reason
             assert "tombstone" in thread.reason
@@ -546,7 +609,7 @@ def describe_rewrite_store_refusals():
             saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
             graph = EventGraph([wait, _side_effect], checkpointer=saver)
 
-            thread = _only(graph.rewrite_store())
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
 
             assert "completed task write" in thread.reason
             assert "resume or abandon" in thread.reason
@@ -567,7 +630,7 @@ def describe_rewrite_store_refusals():
             graph = EventGraph([wait], checkpointer=saver)
             graph.invoke(Started(data="x"), config=cfg)
 
-            thread = _only(graph.rewrite_store(drop=(_Retiring,)))
+            thread = _only(graph.rewrite_store(drop=(_Retiring,), thread_ids=["t1"]))
 
             assert "paused on" in thread.reason
             assert "abandon" in thread.reason
@@ -598,7 +661,7 @@ def describe_rewrite_store_refusals():
             pending = saver.get_tuple(cfg).checkpoint["channel_values"]["_pending"]
             assert any(isinstance(e, _Retiring) for e in pending)
 
-            thread = _only(graph.rewrite_store(drop=(_Retiring,)))
+            thread = _only(graph.rewrite_store(drop=(_Retiring,), thread_ids=["t1"]))
 
             assert "pending dispatch" in thread.reason
             assert "resume or abandon" in thread.reason
@@ -623,7 +686,7 @@ def describe_rewrite_store_refusals():
             values = saver.get_tuple(cfg).checkpoint["channel_values"]
             assert any(isinstance(e, _Retiring) for e in values["gates"])
 
-            thread = _only(graph.rewrite_store(drop=(_Retiring,)))
+            thread = _only(graph.rewrite_store(drop=(_Retiring,), thread_ids=["t1"]))
 
             assert " remains in channel 'gates' after the drop; " in thread.reason
             assert thread.reason.endswith("leave the class in place")
@@ -641,7 +704,7 @@ def describe_rewrite_store_refusals():
             graph = EventGraph([carry], checkpointer=saver)
             graph.invoke(Started(data="x"), config=cfg)
 
-            thread = _only(graph.rewrite_store(drop=(_Inner,)))
+            thread = _only(graph.rewrite_store(drop=(_Inner,), thread_ids=["t1"]))
 
             assert thread.reason.startswith(
                 "_Inner remains in channel 'events' after the drop; "
@@ -653,6 +716,18 @@ def describe_rewrite_store_refusals():
             graph, _config, _old, _new = _renamed_history_pair(saver, "t1")
 
             report = graph.plan_rewrite(thread_ids=["t1", "t-typo"])
+
+            assert [(t.thread_id, t.status) for t in report.threads] == [
+                ("t1", "rewrite"),
+                ("t-typo", "refused"),
+            ]
+            assert report.threads[1].reason == "no checkpoint for this thread id"
+
+        async def it_reports_the_id_through_the_async_saver():
+            saver = _AsyncOnlySaver()
+            graph, _config, _old, _new = await _arenamed_history_pair(saver, "t1")
+
+            report = await graph.aplan_rewrite(thread_ids=["t1", "t-typo"])
 
             assert [(t.thread_id, t.status) for t in report.threads] == [
                 ("t1", "rewrite"),
@@ -691,7 +766,7 @@ def describe_rewrite_store_refusals():
             saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
             graph = EventGraph([wait, explode], checkpointer=saver)
 
-            thread = _only(graph.rewrite_store())
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
 
             assert thread.reason == (
                 "thread has a pending __error__ write from a failed task; run "
@@ -716,7 +791,7 @@ def describe_rewrite_store_refusals():
             saver = _AdvancingSaver()
             graph, _config, _old, _new = _renamed_history_pair(saver, "t1")
 
-            thread = _only(graph.rewrite_store())
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
 
             assert thread.reason == "thread advanced during the rewrite; rerun"
 
@@ -726,12 +801,12 @@ def describe_rewrite_report():
         saver = MemorySaver()
         graph, _config, _old, _new = _renamed_history_pair(saver, "t1")
 
-        report = graph.plan_rewrite()
+        report = graph.plan_rewrite(thread_ids=["t1"])
 
         assert isinstance(report, RewriteReport)
         assert all(isinstance(t, ThreadRewrite) for t in report.threads)
 
-    def it_limits_the_walk_to_thread_ids():
+    def it_reads_only_the_listed_threads():
         saver = MemorySaver()
         _renamed_history_pair(saver, "t1")
         graph, _config, _old, _new = _renamed_history_pair(saver, "t2")
@@ -748,7 +823,7 @@ def describe_rewrite_report():
         graph = EventGraph([_completes], checkpointer=saver)
         graph.invoke(Started(data="x"), config=_cfg("plain"))
 
-        report = graph.plan_rewrite()
+        report = graph.plan_rewrite(thread_ids=["gone-a", "gone-b", "plain"])
 
         lines = str(report).splitlines()
         assert lines[0] == "plan: 3 threads, 0 rewrite, 1 unchanged, 2 refused"
@@ -760,7 +835,7 @@ def describe_rewrite_report():
         saver = MemorySaver()
         graph, _config, _old, _new = _renamed_history_pair(saver, "t1")
 
-        report = graph.rewrite_store()
+        report = graph.rewrite_store(thread_ids=["t1"])
 
         assert str(report) == "applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused"
 
@@ -774,7 +849,7 @@ def describe_async_twins():
         saver = _AsyncOnlySaver()
         graph, _config, old, new = await _arenamed_history_pair(saver, "t1")
 
-        report = await graph.aplan_rewrite()
+        report = await graph.aplan_rewrite(thread_ids=["t1"])
 
         assert report.applied is False
         [thread] = report.threads
@@ -784,7 +859,7 @@ def describe_async_twins():
         saver = _AsyncOnlySaver()
         graph, _config, old, new = await _arenamed_history_pair(saver, "t1")
 
-        report = await graph.arewrite_store()
+        report = await graph.arewrite_store(thread_ids=["t1"])
 
         assert report.applied is True
         [thread] = report.threads
@@ -792,7 +867,7 @@ def describe_async_twins():
         stored = await _astored_identities(saver, "t1")
         assert (old.__module__, old.__qualname__) not in stored
         assert (new.__module__, new.__qualname__) in stored
-        [again] = (await graph.aplan_rewrite()).threads
+        [again] = (await graph.aplan_rewrite(thread_ids=["t1"])).threads
         assert again.status == "unchanged"
 
 
@@ -817,19 +892,22 @@ def describe_documented_retirement_sequence():
         graph.invoke(Started(data="x"), config=_cfg("answered"))
         graph.resume(_Go(), config=_cfg("answered"))
 
-        # 1. and 2.
-        for config in graph.threads_paused_on(EventClass):
+        # 1. The server-side query returns every thread id in the store.
+        thread_ids = ["paused", "answered"]
+        assert thread_ids, "the query returned no thread ids"
+        # 2. and 3.
+        for config in graph.threads_paused_on(EventClass, thread_ids=thread_ids):
             graph.abandon(config, reason="retiring EventClass")
-        assert graph.threads_paused_on(EventClass) == []
-        # 3.
-        report = graph.plan_rewrite(drop=(EventClass,))
+        assert graph.threads_paused_on(EventClass, thread_ids=thread_ids) == []
+        # 4.
+        report = graph.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)
         assert not report.refused
         assert {t.thread_id for t in report.threads} == {"paused", "answered"}
-        # 4.
-        report = graph.rewrite_store(drop=(EventClass,))
+        # 5.
+        report = graph.rewrite_store(drop=(EventClass,), thread_ids=thread_ids)
         assert not report.refused
-        # 5. The class is deleted: a serde that no longer reaches it.
+        # 6. The class is deleted: a serde that no longer reaches it.
         saver.serde = NamespaceAwareSerde(events=(Started,))
         graph = EventGraph([_completes], checkpointer=saver)
-        # 6.
-        assert graph.unrevivable_threads() == {}
+        # 7.
+        assert graph.unrevivable_threads(thread_ids=thread_ids) == {}

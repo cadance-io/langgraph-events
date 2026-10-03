@@ -173,3 +173,25 @@ def describe_evidence():
             text = reflection.evidence(1)
 
             assert "source_event: #0 Started (equality match)" in text
+
+    def when_the_log_records_the_cause():
+        def it_lists_the_recorded_cause_first():
+            graph = EventGraph([Fulfillment.Ship, notify_customer])
+            reflection = _reflect(graph, Fulfillment.Ship(order_id="o1"))
+
+            lines = reflection.evidence(2).splitlines()
+
+            assert lines[1] == "recorded cause: #1 via notify_customer"
+
+        def it_lists_a_seed_as_a_seed():
+            graph = EventGraph([Fulfillment.Ship, notify_customer])
+            reflection = _reflect(graph, Fulfillment.Ship(order_id="o1"))
+
+            assert reflection.evidence(0).splitlines()[1] == "recorded cause: seed"
+
+    def when_the_log_records_no_causes():
+        def it_lists_no_recorded_cause():
+            graph = EventGraph([Fulfillment.Ship, notify_customer])
+            reflection = graph.reflect(EventLog([Started(data="x")]))
+
+            assert "recorded cause" not in reflection.evidence(0)

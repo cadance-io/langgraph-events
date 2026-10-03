@@ -312,8 +312,9 @@ gate's failure reads the same for the others."""
 
 RETIRED_REMEDY = (
     "A write keeps a retired identity in the baseline: delete its `retired` "
-    "entry by hand once every thread that names it is settled "
-    "(graph.unrevivable_threads() == {})."
+    "entry by hand once every thread that names it is settled. To check, pass "
+    "every thread id in the store: graph.unrevivable_threads(thread_ids=ids) "
+    "== {}."
 )
 """The hand-delete rule for an identity the baseline lists under
 ``retired``. Follows :data:`MIGRATION_REMEDY`, which names the migration

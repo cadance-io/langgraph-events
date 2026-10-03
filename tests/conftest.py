@@ -1,8 +1,10 @@
 """Shared fixtures and event classes for the test suite."""
 
 import sys
+from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     Command,
@@ -110,3 +112,32 @@ def linear_chain():
         return Ended(result=f"done:{event.data}")
 
     return EventGraph([step1, step2])
+
+
+def strip_channels(saver: MemorySaver, config: dict[str, Any], *channels: str) -> None:
+    """Rewrite the latest checkpoint of the thread without *channels*.
+
+    Simulates a checkpoint that a release saved before those channels
+    existed. The checkpoint id stays the same, so a pending interrupt write
+    still belongs to it.
+    """
+    tup = saver.get_tuple(config)
+    assert tup is not None
+    checkpoint = dict(tup.checkpoint)
+    checkpoint["channel_values"] = {
+        name: value
+        for name, value in tup.checkpoint["channel_values"].items()
+        if name not in channels
+    }
+    checkpoint["channel_versions"] = {
+        name: version
+        for name, version in tup.checkpoint["channel_versions"].items()
+        if name not in channels
+    }
+    base = tup.parent_config or {
+        "configurable": {
+            "thread_id": config["configurable"]["thread_id"],
+            "checkpoint_ns": "",
+        }
+    }
+    saver.put(base, checkpoint, tup.metadata, {})

@@ -20,7 +20,7 @@ from langgraph_events._event import (
     SystemEvent,
     _iter_nested_events,
 )
-from langgraph_events._reflection._text import event_line, safe_repr
+from langgraph_events._reflection._text import event_line, recorded_cause, safe_repr
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from langgraph_events._reflection._core import Reflection
 
 _TYPE_OPS = ("filter", "select", "latest", "first", "has", "count", "after", "before")
-_INDEX_OPS = ("get", "evidence")
+_INDEX_OPS = ("get", "evidence", "cause")
 _OPS = ("overview", "list", *_TYPE_OPS, *_INDEX_OPS, "state", "schema")
 
 _BASE_KINDS: tuple[type[Event], ...] = (
@@ -135,8 +135,10 @@ ops:
   latest(type) / first(type) — newest / oldest match
   has(type) / count(type) — existence / count
   after(type) / before(type) — events after / before the first match
-  evidence(index) — all facts on how that event came to be: explicit links,
-    owning command, static-edge candidates, forward face
+  evidence(index) — all facts on how that event came to be: recorded cause,
+    explicit links, owning command, static-edge candidates, forward face
+  cause(index) — the recorded cause: #<index> via <handler>, seed, framework,
+    or unknown with its reason
   state — reducer projections over the log
   schema — the static topology: what can cause what
 """
@@ -197,6 +199,12 @@ def _coerce_int(value: Any) -> int | None:
         return None
 
 
+def _cause_answer(reflection: Reflection, index: int) -> str:
+    """The cause op: an index-preserving mirror of ``EventLog.cause``."""
+    answer = recorded_cause(reflection._resolve_index(index), reflection.log)
+    return "this log records no causes" if answer is None else answer
+
+
 def build_tool(reflection: Reflection, *, model: NamespaceModel) -> QueryTool:
     """Build the query_log tool over *reflection*."""
     log = reflection.log
@@ -251,6 +259,8 @@ def build_tool(reflection: Reflection, *, model: NamespaceModel) -> QueryTool:
                 # for which the gate's ValueError branch is unreachable.
                 if op == "get":
                     return reflection.event(index)
+                if op == "cause":
+                    return _cause_answer(reflection, index)
                 return reflection.evidence(index)
             except IndexError as exc:
                 return f"error: {exc}"

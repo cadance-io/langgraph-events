@@ -216,6 +216,25 @@ def describe_tool():
 
             assert "current_status: 'placed'" in tool.run(op="state")
 
+    def when_asking_for_a_cause():
+        def it_answers_the_source_index_and_the_handler():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="cause", index=1) == "#0 via Order.Place"
+
+        def it_answers_seed_for_a_seed():
+            tool, _ = _tool_and_reflection()
+
+            assert tool.run(op="cause", index=0) == "seed"
+
+        def it_says_so_for_a_log_that_records_no_causes():
+            graph = EventGraph([Order.Place])
+            log = EventLog([Order.Place(customer_id="c1")])
+
+            tool = graph.reflect(log).tool()
+
+            assert tool.run(op="cause", index=0) == "this log records no causes"
+
     def when_driven_across_every_op():
         def it_returns_a_string_from_every_op():
             from langgraph_events._reflection._tool import _INDEX_OPS, _TYPE_OPS

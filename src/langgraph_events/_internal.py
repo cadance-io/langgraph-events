@@ -25,6 +25,7 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events import _retry
+from langgraph_events._causes import FRAMEWORK, CauseEntry
 from langgraph_events._custom_event import (
     _AsyncEmitter,
     _reset_custom_emitters,
@@ -58,6 +59,9 @@ _logger = logging.getLogger(__name__)
 # Base fields present on every graph (no reducers needed)
 _BASE_FIELDS: dict[str, Any] = {
     "events": Annotated[list[Event], operator.add],
+    # causes[i] describes events[i]. Every writer to events writes the same
+    # number of entries to causes, in the same order. See _causes.py.
+    "causes": Annotated[list[CauseEntry], operator.add],
     "_cursor": int,
     "_pending": list[Event],
     "_round": int,
@@ -85,10 +89,12 @@ def _inject_deadline_keys(configurable: dict[str, Any], deadline: float) -> None
 
 class _InputState(TypedDict):
     events: list[Event]
+    causes: list[CauseEntry]
 
 
 class _OutputState(TypedDict):
     events: list[Event]
+    causes: list[CauseEntry]
 
 
 def build_state_schema(reducers: dict[str, BaseReducer]) -> type:
@@ -129,6 +135,21 @@ def _leaf_node(func: Any, afunc: Any, name: str) -> RunnableLambda:
             return []
 
     return _LeafNode(func=func, afunc=afunc, name=name)
+
+
+def pad_causes(update: StateDict, entry: CauseEntry) -> StateDict:
+    """*update* plus one *entry* in ``causes`` for each event that it writes.
+
+    Every writer to ``events`` outside a handler call goes through here. The
+    router, the ``Cancelled`` path and ``abandon()`` pass ``FRAMEWORK``.
+    ``pre_seed()`` passes ``None``, because its events come from outside.
+    Without the padding, ``causes`` falls behind ``events``, and each older
+    cause reads one position late.
+    """
+    events = update.get("events")
+    if not events:
+        return update
+    return {**update, "causes": [entry] * len(events)}
 
 
 def make_seed_node(
@@ -188,12 +209,15 @@ def make_router_node(
         current_round = 1 if has_resume else state.get("_round", 0) + 1
         if current_round > max_rounds:
             halted = MaxRoundsExceeded(rounds=max_rounds)
-            return {
-                "_cursor": len(state["events"]),
-                "_pending": [halted],
-                "_round": current_round,
-                "events": [halted],
-            }
+            return pad_causes(
+                {
+                    "_cursor": len(state["events"]),
+                    "_pending": [halted],
+                    "_round": current_round,
+                    "events": [halted],
+                },
+                FRAMEWORK,
+            )
         configurable = (config or {}).get("configurable", {})
         deadline = configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
@@ -210,17 +234,20 @@ def make_router_node(
             paused = RunPaused(
                 elapsed_seconds=time.monotonic() - started_at,
             )
-            return {
-                # Advance cursor PAST the paused event so a fresh /run on
-                # the same thread excludes it from new_events. Distinct
-                # from MaxRoundsExceeded above which keeps cursor AT the
-                # halted (terminal across runs).
-                "_cursor": len(state["events"]) + 1,
-                "_pending": [paused],
-                "_round": current_round,
-                "events": [paused],
-                "_run_paused_emitted": True,
-            }
+            return pad_causes(
+                {
+                    # Advance cursor PAST the paused event so a fresh /run on
+                    # the same thread excludes it from new_events. Distinct
+                    # from MaxRoundsExceeded above which keeps cursor AT the
+                    # halted (terminal across runs).
+                    "_cursor": len(state["events"]) + 1,
+                    "_pending": [paused],
+                    "_round": current_round,
+                    "events": [paused],
+                    "_run_paused_emitted": True,
+                },
+                FRAMEWORK,
+            )
         return {
             "_cursor": len(state["events"]),
             "_pending": new_events,
@@ -281,7 +308,9 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
     if meta.log_param or meta.reflection_param:
-        log_view = EventLog(state["events"])
+        log_view = EventLog._from_state(
+            state["events"], state.get("causes"), check=False
+        )
         if meta.log_param:
             inject[meta.log_param] = log_view
         if meta.reflection_param:
@@ -545,7 +574,9 @@ def _check_invariants(
     """
     if not meta.invariants:
         return None
-    inv_cls = _find_failing_invariant(meta, EventLog(state["events"]))
+    inv_cls = _find_failing_invariant(
+        meta, EventLog._from_state(state["events"], state.get("causes"), check=False)
+    )
     if inv_cls is None:
         return None
     return InvariantViolated(
@@ -561,6 +592,7 @@ def _check_invariants_post(
     state: StateDict,
     new_events: list[Event],
     emitted: list[Event],
+    pending_causes: list[CauseEntry],
 ) -> InvariantViolated | None:
     """Post-check — evaluate invariants against the simulated log.
 
@@ -578,7 +610,11 @@ def _check_invariants_post(
     """
     if not meta.invariants or not emitted:
         return None
-    simulated = EventLog([*state["events"], *new_events])
+    simulated = EventLog._from_state(
+        [*state["events"], *new_events],
+        [*(state.get("causes") or []), *pending_causes],
+        check=False,
+    )
     inv_cls = _find_failing_invariant(meta, simulated)
     if inv_cls is None:
         return None
@@ -640,21 +676,60 @@ async def _invoke_async_path(
     return meta.fn(event, **call_inject)
 
 
+def _record_causes(
+    new_causes: list[CauseEntry],
+    new_events: list[Event],
+    trigger: int,
+    via: str,
+) -> None:
+    """Record a cause for each event appended since the last call.
+
+    Called after each handler call. An invariant rollback replaces the
+    events of its call before this runs, so it leaves no cause behind. An
+    ``Interrupted`` appends ``[Interrupted, value, Resumed]`` as one block.
+    The handler cannot know the absolute index of ``Interrupted``, because
+    parallel tasks decide the final order. The value and the ``Resumed``
+    therefore point back at it by a relative source: ``-1`` and ``-2``.
+    """
+    for j in range(len(new_causes), len(new_events)):
+        if _closes_interrupt_block(new_events, j):
+            new_causes[j - 1] = (-1, via)
+            new_causes.append((-2, via))
+        else:
+            new_causes.append((trigger, via))
+
+
+def _closes_interrupt_block(new_events: list[Event], j: int) -> bool:
+    """Whether ``new_events[j]`` is the ``Resumed`` that ends an interrupt block."""
+    event = new_events[j]
+    return (
+        isinstance(event, Resumed)
+        and j >= 2
+        and new_events[j - 2] is event.interrupted
+        and new_events[j - 1] is event.value
+    )
+
+
 def _process_events_sync(
     meta: HandlerMeta,
-    matching: list[Event],
+    matching: list[tuple[int, Event]],
     state: StateDict,
     inject: dict[str, Any],
     new_events: list[Event],
+    new_causes: list[CauseEntry],
     lg_interrupt: Any,
     return_contract: Any = None,
     deadline: float | None = None,
 ) -> None:
-    """Per-event invocation loop for the sync dispatch path."""
-    for event in matching:
+    """Per-event invocation loop for the sync dispatch path.
+
+    Each *matching* entry pairs a pending event with its log index.
+    """
+    for trigger, event in matching:
         violation = _check_invariants(meta, event, state)
         if violation is not None:
             new_events.append(violation)
+            _record_causes(new_causes, new_events, trigger, meta.node_name)
             continue
         call_inject = _inject_fields(meta, event, inject)
         attempt = 1
@@ -671,26 +746,40 @@ def _process_events_sync(
                 attempt += 1
                 continue
             _collect_and_check(
-                result, new_events, lg_interrupt, meta, state, event, return_contract
+                result,
+                new_events,
+                lg_interrupt,
+                meta,
+                state,
+                event,
+                return_contract,
+                new_causes=new_causes,
+                trigger=trigger,
             )
             break
+        _record_causes(new_causes, new_events, trigger, meta.node_name)
 
 
 async def _process_events_async(
     meta: HandlerMeta,
-    matching: list[Event],
+    matching: list[tuple[int, Event]],
     state: StateDict,
     inject: dict[str, Any],
     new_events: list[Event],
+    new_causes: list[CauseEntry],
     lg_interrupt: Any,
     return_contract: Any = None,
     deadline: float | None = None,
 ) -> None:
-    """Per-event invocation loop for the async dispatch path."""
-    for event in matching:
+    """Per-event invocation loop for the async dispatch path.
+
+    Each *matching* entry pairs a pending event with its log index.
+    """
+    for trigger, event in matching:
         violation = _check_invariants(meta, event, state)
         if violation is not None:
             new_events.append(violation)
+            _record_causes(new_causes, new_events, trigger, meta.node_name)
             continue
         call_inject = _inject_fields(meta, event, inject)
         attempt = 1
@@ -707,9 +796,18 @@ async def _process_events_async(
                 attempt += 1
                 continue
             _collect_and_check(
-                result, new_events, lg_interrupt, meta, state, event, return_contract
+                result,
+                new_events,
+                lg_interrupt,
+                meta,
+                state,
+                event,
+                return_contract,
+                new_causes=new_causes,
+                trigger=trigger,
             )
             break
+        _record_causes(new_causes, new_events, trigger, meta.node_name)
 
 
 def make_handler_node(
@@ -744,8 +842,14 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[Event], dict[str, Any], float | None]:
-        matching = [e for e in state["_pending"] if meta.matches(e)]
+    ) -> tuple[list[tuple[int, Event]], dict[str, Any], float | None]:
+        pending = state["_pending"]
+        # The pending events sit at [_cursor - len(_pending), _cursor) in
+        # events on every path that dispatches a handler: the seed, the router
+        # and RunPaused. MaxRoundsExceeded leaves _cursor at the halted event,
+        # but dispatch sends a Halted event to END, so no handler reads it.
+        base = state["_cursor"] - len(pending)
+        matching = [(base + k, e) for k, e in enumerate(pending) if meta.matches(e)]
         inject = _build_inject(
             meta,
             state,
@@ -781,8 +885,15 @@ def make_handler_node(
             ),
         )
 
-    def _finalize(new_events: list[Event]) -> StateDict:
-        output: StateDict = {"events": new_events}
+    def _finalize(update: StateDict) -> StateDict:
+        new_events = update["events"]
+        if len(update["causes"]) != len(new_events):
+            raise RuntimeError(
+                f"Handler {meta.name!r} recorded {len(update['causes'])} causes "
+                f"for {len(new_events)} events. The causes channel must stay "
+                f"aligned with events. This is a framework bug."
+            )
+        output: StateDict = dict(update)
         if reds:
             output.update(_apply_reducers(new_events, reds))
         return output
@@ -793,6 +904,7 @@ def make_handler_node(
         _check_sync_invocation_of_async(meta)
         matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
+        new_causes: list[CauseEntry] = []
         tokens = _bind_custom_emitters(config)
         try:
             _process_events_sync(
@@ -801,17 +913,19 @@ def make_handler_node(
                 state,
                 inject,
                 new_events,
+                new_causes,
                 lg_interrupt,
                 return_contract,
                 deadline,
             )
         finally:
             _reset_custom_emitters(tokens)
-        return _finalize(new_events)
+        return _finalize({"events": new_events, "causes": new_causes})
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
         matching, inject, deadline = _prepare(state, config)
         new_events: list[Event] = []
+        new_causes: list[CauseEntry] = []
         tokens = _bind_custom_emitters(config)
         try:
             await _process_events_async(
@@ -820,15 +934,16 @@ def make_handler_node(
                 state,
                 inject,
                 new_events,
+                new_causes,
                 lg_interrupt,
                 return_contract,
                 deadline,
             )
         except asyncio.CancelledError:
-            return _finalize([Cancelled()])
+            return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))
         finally:
             _reset_custom_emitters(tokens)
-        return _finalize(new_events)
+        return _finalize({"events": new_events, "causes": new_causes})
 
     return _leaf_node(_run_handler_sync, _run_handler_async, meta.name)
 
@@ -866,6 +981,9 @@ def _collect_and_check(
     state: StateDict,
     event: Event,
     return_contract: Any = None,
+    *,
+    new_causes: list[CauseEntry],
+    trigger: int,
 ) -> None:
     """Collect handler result then run the post-command invariant check.
 
@@ -877,7 +995,11 @@ def _collect_and_check(
     pre_len = len(new_events)
     _collect_result(result, new_events, lg_interrupt, meta, return_contract)
     emitted = new_events[pre_len:]
-    violation = _check_invariants_post(meta, event, state, new_events, emitted)
+    pending_causes = list(new_causes)
+    _record_causes(pending_causes, new_events, trigger, meta.node_name)
+    violation = _check_invariants_post(
+        meta, event, state, new_events, emitted, pending_causes
+    )
     if violation is not None:
         del new_events[pre_len:]
         new_events.append(violation)

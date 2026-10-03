@@ -1,6 +1,7 @@
 """Integration tests for EventGraph — the full event-driven graph engine."""
 
 import asyncio
+import inspect
 import time
 import typing
 import warnings
@@ -1478,7 +1479,7 @@ def describe_EventGraph():
 
             @pytest.mark.parametrize(
                 "reserved_name",
-                ["events", "_cursor", "_pending", "_round"],
+                ["events", "causes", "_cursor", "_pending", "_round"],
             )
             def it_rejects_collisions(reserved_name):
                 r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
@@ -4686,7 +4687,7 @@ def describe_abandon():
 
             v2 = EventGraph([_go_ends], checkpointer=saver)
 
-            found = v2.threads_paused_on(_Pause)
+            found = v2.threads_paused_on(_Pause, thread_ids=["abandon-handler-gone"])
             assert [c["configurable"]["thread_id"] for c in found] == [
                 "abandon-handler-gone"
             ]
@@ -5032,7 +5033,9 @@ def describe_async_only_checkpointer():
 
                 v2 = EventGraph([_go_ends], checkpointer=saver)
 
-                found = await v2.athreads_paused_on(_Pause)
+                found = await v2.athreads_paused_on(
+                    _Pause, thread_ids=["aabandon-handler-gone"]
+                )
                 assert [c["configurable"]["thread_id"] for c in found] == [
                     "aabandon-handler-gone"
                 ]
@@ -5104,7 +5107,8 @@ def describe_async_only_checkpointer():
 
 class _NoListSaver(MemorySaver):
     """Checkpointer whose ``list()``/``alist()`` raise ``NotImplementedError``,
-    like a custom saver that requires a ``thread_id`` filter (#164)."""
+    like a custom saver that requires a ``thread_id`` filter (#164). A store
+    sweep must work on it, because the sweep never calls ``list()``."""
 
     def list(self, config, **kwargs):  # type: ignore[override]
         raise NotImplementedError
@@ -5112,6 +5116,80 @@ class _NoListSaver(MemorySaver):
     async def alist(self, config, **kwargs):  # type: ignore[override]
         raise NotImplementedError
         yield  # pragma: no cover - keeps this an async generator function
+
+
+_STORE_SWEEPS = (
+    "threads_paused_on",
+    "athreads_paused_on",
+    "unrevivable_threads",
+    "aunrevivable_threads",
+    "plan_rewrite",
+    "aplan_rewrite",
+    "rewrite_store",
+    "arewrite_store",
+)
+
+
+def describe_store_sweep_thread_ids():
+    # The caller names the threads for every store sweep. The library
+    # does not walk the store: a walk deserializes every checkpoint the
+    # store holds, historic versions included.
+
+    def _graph(saver: MemorySaver | None = None) -> EventGraph:
+        from langgraph_events.serde import NamespaceAwareSerde
+
+        saver = saver if saver is not None else MemorySaver()
+        saver.serde = NamespaceAwareSerde(events=(Started,))
+        return EventGraph([_completes], checkpointer=saver)
+
+    async def _call(
+        method: str, graph: EventGraph | None = None, **kwargs: typing.Any
+    ) -> typing.Any:
+        result = getattr(graph or _graph(), method)(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    def when_thread_ids_is_omitted():
+        @pytest.mark.asyncio
+        @pytest.mark.parametrize("method", _STORE_SWEEPS)
+        async def it_raises_type_error_naming_the_argument(method: str):
+            with pytest.raises(TypeError, match=rf"{method}\(\).*'thread_ids'"):
+                await _call(method)
+
+    def when_thread_ids_is_none():
+        @pytest.mark.asyncio
+        @pytest.mark.parametrize("method", _STORE_SWEEPS)
+        async def it_raises_type_error_naming_the_method(method: str):
+            with pytest.raises(TypeError, match=rf"^{method}\(\) thread_ids.*None"):
+                await _call(method, thread_ids=None)
+
+        def with_a_serde_that_is_not_namespace_aware():
+            @pytest.mark.asyncio
+            @pytest.mark.parametrize("method", _STORE_SWEEPS)
+            async def it_raises_the_thread_ids_type_error_first(method: str):
+                graph = EventGraph([_completes], checkpointer=MemorySaver())
+
+                with pytest.raises(TypeError, match=rf"^{method}\(\) thread_ids"):
+                    await _call(method, graph, thread_ids=None)
+
+    def when_thread_ids_is_a_bare_string():
+        @pytest.mark.asyncio
+        @pytest.mark.parametrize("method", _STORE_SWEEPS)
+        async def it_raises_type_error_instead_of_iterating_characters(method: str):
+            with pytest.raises(TypeError, match=rf"^{method}\(\) thread_ids.*str"):
+                await _call(method, thread_ids="one-thread")
+
+    def when_the_checkpointer_does_not_implement_list():
+        @pytest.mark.asyncio
+        @pytest.mark.parametrize("method", _STORE_SWEEPS)
+        async def it_never_calls_list_on_the_checkpointer(method: str):
+            saver = _NoListSaver()
+            graph = _graph(saver)
+            cfg = {"configurable": {"thread_id": "sweep-no-list"}}
+            await graph.ainvoke(Started(data="x"), config=cfg)
+
+            await _call(method, graph, thread_ids=["sweep-no-list"])
 
 
 def describe_threads_paused_on():
@@ -5131,7 +5209,10 @@ def describe_threads_paused_on():
             graph.invoke(_StartOnA(), config=cfg_a)
             graph.invoke(_StartOnB(), config=cfg_b)
 
-            assert _tids(graph.threads_paused_on(_PauseOnA)) == ["tpo-class-a"]
+            found = graph.threads_paused_on(
+                _PauseOnA, thread_ids=["tpo-class-a", "tpo-class-b"]
+            )
+            assert _tids(found) == ["tpo-class-a"]
 
         def it_keeps_a_subclass_of_the_given_class():
             saver = MemorySaver()
@@ -5139,7 +5220,8 @@ def describe_threads_paused_on():
             cfg = {"configurable": {"thread_id": "tpo-subclass"}}
             graph.invoke(_StartOnA(), config=cfg)
 
-            assert _tids(graph.threads_paused_on(_PauseOnA)) == ["tpo-subclass"]
+            found = graph.threads_paused_on(_PauseOnA, thread_ids=["tpo-subclass"])
+            assert _tids(found) == ["tpo-subclass"]
 
     def when_event_type_is_none():
         def it_returns_every_paused_thread():
@@ -5150,10 +5232,8 @@ def describe_threads_paused_on():
             graph.invoke(Started(data="x"), config=cfg_a)
             graph.invoke(Started(data="x"), config=cfg_b)
 
-            assert set(_tids(graph.threads_paused_on())) == {
-                "tpo-none-a",
-                "tpo-none-b",
-            }
+            found = graph.threads_paused_on(thread_ids=["tpo-none-a", "tpo-none-b"])
+            assert _tids(found) == ["tpo-none-a", "tpo-none-b"]
 
         def it_excludes_a_completed_thread():
             saver = MemorySaver()
@@ -5165,22 +5245,10 @@ def describe_threads_paused_on():
             other = EventGraph([_completes], checkpointer=saver)
             other.invoke(Started(data="x"), config=done_cfg)
 
-            assert _tids(graph.threads_paused_on()) == ["tpo-completed-paused"]
-
-    def when_multiple_threads_are_paused():
-        def it_sorts_thread_ids_for_determinism():
-            saver = MemorySaver()
-            graph = EventGraph([_waiter], checkpointer=saver)
-            for tid in ("tpo-sort-c", "tpo-sort-a", "tpo-sort-b"):
-                graph.invoke(
-                    Started(data="x"), config={"configurable": {"thread_id": tid}}
-                )
-
-            assert _tids(graph.threads_paused_on()) == [
-                "tpo-sort-a",
-                "tpo-sort-b",
-                "tpo-sort-c",
-            ]
+            found = graph.threads_paused_on(
+                thread_ids=["tpo-completed-paused", "tpo-completed-done"]
+            )
+            assert _tids(found) == ["tpo-completed-paused"]
 
     def when_there_is_no_checkpointer():
         def it_raises():
@@ -5188,21 +5256,11 @@ def describe_threads_paused_on():
             with pytest.raises(
                 ValueError, match=r"threads_paused_on.*requires a checkpointer"
             ):
-                graph.threads_paused_on()
+                graph.threads_paused_on(thread_ids=[])
 
-    def when_the_checkpointer_does_not_implement_list():
-        def it_raises_a_value_error_naming_the_method():
-            saver = _NoListSaver()
-            graph = EventGraph([_waiter], checkpointer=saver)
-            cfg = {"configurable": {"thread_id": "tpo-no-list"}}
-            graph.invoke(Started(data="x"), config=cfg)
-
-            with pytest.raises(ValueError, match=r"threads_paused_on"):
-                graph.threads_paused_on()
-
-    def when_thread_ids_are_given():
+    def when_the_store_holds_unlisted_threads():
         # #180: a large store filters candidates server-side, then hands
-        # the ids here. The store enumeration is skipped entirely.
+        # the ids here.
 
         def it_keeps_only_a_listed_thread_that_matches():
             saver = MemorySaver()
@@ -5219,19 +5277,20 @@ def describe_threads_paused_on():
             )
             assert _tids(found) == ["tpo-ids-a-listed"]
 
-        def with_a_listed_id_that_has_no_checkpoint():
-            def it_skips_that_id():
-                saver = _NoListSaver()
-                graph = EventGraph([_waiter], checkpointer=saver)
-                cfg = {"configurable": {"thread_id": "tpo-ids-present"}}
-                graph.invoke(Started(data="x"), config=cfg)
+    def when_a_listed_id_has_no_checkpoint():
+        def it_skips_that_id():
+            saver = MemorySaver()
+            graph = EventGraph([_waiter], checkpointer=saver)
+            cfg = {"configurable": {"thread_id": "tpo-ids-present"}}
+            graph.invoke(Started(data="x"), config=cfg)
 
-                found = graph.threads_paused_on(
-                    thread_ids=["tpo-ids-missing", "tpo-ids-present"]
-                )
-                assert _tids(found) == ["tpo-ids-present"]
+            found = graph.threads_paused_on(
+                thread_ids=["tpo-ids-missing", "tpo-ids-present"]
+            )
+            assert _tids(found) == ["tpo-ids-present"]
 
-        def it_keeps_caller_order_and_drops_a_duplicate():
+    def when_a_listed_id_repeats():
+        def it_keeps_caller_order_and_drops_the_duplicate():
             saver = MemorySaver()
             graph = EventGraph([_waiter], checkpointer=saver)
             for tid in ("tpo-ids-c", "tpo-ids-a"):
@@ -5244,30 +5303,14 @@ def describe_threads_paused_on():
             )
             assert _tids(found) == ["tpo-ids-c", "tpo-ids-a"]
 
-        def it_never_calls_list_on_the_checkpointer():
-            saver = _NoListSaver()
+    def when_thread_ids_is_empty():
+        def it_returns_nothing():
+            saver = MemorySaver()
             graph = EventGraph([_waiter], checkpointer=saver)
-            cfg = {"configurable": {"thread_id": "tpo-ids-no-list"}}
+            cfg = {"configurable": {"thread_id": "tpo-ids-empty"}}
             graph.invoke(Started(data="x"), config=cfg)
 
-            found = graph.threads_paused_on(thread_ids=["tpo-ids-no-list"])
-            assert _tids(found) == ["tpo-ids-no-list"]
-
-        def with_an_empty_list():
-            def it_returns_nothing_and_never_calls_list():
-                saver = _NoListSaver()
-                graph = EventGraph([_waiter], checkpointer=saver)
-                cfg = {"configurable": {"thread_id": "tpo-ids-empty"}}
-                graph.invoke(Started(data="x"), config=cfg)
-
-                assert graph.threads_paused_on(thread_ids=[]) == []
-
-        def with_a_bare_string():
-            def it_raises_type_error_instead_of_iterating_characters():
-                graph = EventGraph([_waiter], checkpointer=MemorySaver())
-
-                with pytest.raises(TypeError, match=r"threads_paused_on.*str"):
-                    graph.threads_paused_on(thread_ids="tpo-ids-str")
+            assert graph.threads_paused_on(thread_ids=[]) == []
 
 
 def describe_athreads_paused_on():
@@ -5286,7 +5329,9 @@ def describe_athreads_paused_on():
             await graph.ainvoke(_StartOnA(), config=cfg_a)
             await graph.ainvoke(_StartOnB(), config=cfg_b)
 
-            result = await graph.athreads_paused_on(_PauseOnA)
+            result = await graph.athreads_paused_on(
+                _PauseOnA, thread_ids=["atpo-class-a", "atpo-class-b"]
+            )
             assert _tids(result) == ["atpo-class-a"]
 
     def when_event_type_is_none():
@@ -5299,8 +5344,10 @@ def describe_athreads_paused_on():
             await graph.ainvoke(Started(data="x"), config=cfg_a)
             await graph.ainvoke(Started(data="x"), config=cfg_b)
 
-            result = await graph.athreads_paused_on()
-            assert set(_tids(result)) == {"atpo-none-a", "atpo-none-b"}
+            result = await graph.athreads_paused_on(
+                thread_ids=["atpo-none-a", "atpo-none-b"]
+            )
+            assert _tids(result) == ["atpo-none-a", "atpo-none-b"]
 
     def when_there_is_no_checkpointer():
         @pytest.mark.asyncio
@@ -5309,20 +5356,9 @@ def describe_athreads_paused_on():
             with pytest.raises(
                 ValueError, match=r"athreads_paused_on.*requires a checkpointer"
             ):
-                await graph.athreads_paused_on()
+                await graph.athreads_paused_on(thread_ids=[])
 
-    def when_the_checkpointer_does_not_implement_list():
-        @pytest.mark.asyncio
-        async def it_raises_a_value_error_naming_the_method():
-            saver = _NoListSaver()
-            graph = EventGraph([_waiter], checkpointer=saver)
-            cfg = {"configurable": {"thread_id": "atpo-no-list"}}
-            await graph.ainvoke(Started(data="x"), config=cfg)
-
-            with pytest.raises(ValueError, match=r"athreads_paused_on"):
-                await graph.athreads_paused_on()
-
-    def when_thread_ids_are_given():
+    def when_the_store_holds_unlisted_threads():
         @pytest.mark.asyncio
         async def it_keeps_only_a_listed_thread_that_matches():
             saver = MemorySaver()
@@ -5338,24 +5374,6 @@ def describe_athreads_paused_on():
                 _PauseOnA, thread_ids=["atpo-ids-b-listed", "atpo-ids-a-listed"]
             )
             assert _tids(found) == ["atpo-ids-a-listed"]
-
-        @pytest.mark.asyncio
-        async def it_never_calls_alist_on_the_checkpointer():
-            saver = _NoListSaver()
-            graph = EventGraph([_waiter], checkpointer=saver)
-            cfg = {"configurable": {"thread_id": "atpo-ids-no-list"}}
-            await graph.ainvoke(Started(data="x"), config=cfg)
-
-            found = await graph.athreads_paused_on(thread_ids=["atpo-ids-no-list"])
-            assert _tids(found) == ["atpo-ids-no-list"]
-
-        def with_a_bare_string():
-            @pytest.mark.asyncio
-            async def it_raises_type_error_instead_of_iterating_characters():
-                graph = EventGraph([_waiter], checkpointer=MemorySaver())
-
-                with pytest.raises(TypeError, match=r"athreads_paused_on.*str"):
-                    await graph.athreads_paused_on(thread_ids="atpo-ids-str")
 
 
 def describe_documented_candidate_confirmation():
@@ -5399,7 +5417,9 @@ def describe_documented_candidate_confirmation():
             assert state.events.latest(Abandoned).discarded.endswith(
                 "Order.ApprovalRequired"
             )
-        still = await graph.athreads_paused_on(Order.ApprovalRequired)
+        still = await graph.athreads_paused_on(
+            Order.ApprovalRequired, thread_ids=["dcc-listed", "dcc-unlisted"]
+        )
         assert [c["configurable"]["thread_id"] for c in still] == ["dcc-unlisted"]
 
 
@@ -5543,7 +5563,7 @@ def describe_delete_first_retirement():
                 MemorySaver(), "delete-first-discover"
             )
 
-            found = graph.threads_paused_on()
+            found = graph.threads_paused_on(thread_ids=["delete-first-discover"])
 
             assert [c["configurable"]["thread_id"] for c in found] == [
                 "delete-first-discover"
@@ -5554,7 +5574,10 @@ def describe_delete_first_retirement():
             # — a filter must not claim a false match.
             graph, _cfg = _paused_unrevivable_pair(MemorySaver(), "delete-first-filter")
 
-            assert graph.threads_paused_on(_Pause) == []
+            assert (
+                graph.threads_paused_on(_Pause, thread_ids=["delete-first-filter"])
+                == []
+            )
 
     def when_using_abandon():
         def it_settles_the_thread_under_the_default():
@@ -5564,7 +5587,7 @@ def describe_delete_first_retirement():
 
             log = graph.get_state(cfg).events
             assert log.latest(Abandoned).discarded  # carries the recorded name
-            assert graph.threads_paused_on() == []
+            assert graph.threads_paused_on(thread_ids=["delete-first-abandon"]) == []
 
     def when_the_settled_history_names_a_deleted_class():
         # #170: the retired identity sits in the settled log, not in a
@@ -5593,7 +5616,8 @@ def describe_delete_first_retirement():
                 graph.abandon(cfg, require_interrupt=False)
 
             assert _tolerant_log_types(saver, graph, cfg) == before
-            assert list(graph.unrevivable_threads()) == ["delete-first-intact"]
+            found = graph.unrevivable_threads(thread_ids=["delete-first-intact"])
+            assert list(found) == ["delete-first-intact"]
 
     def when_the_pending_interrupt_and_the_settled_history_share_a_deleted_class():
         # #170 review: subtracting the pending interrupt's qualname from
@@ -5621,7 +5645,9 @@ def describe_delete_first_retirement():
                 graph.abandon(cfg)
 
             assert _tolerant_log_types(saver, graph, cfg) == before
-            assert list(graph.unrevivable_threads()) == ["twice-intact"]
+            assert list(graph.unrevivable_threads(thread_ids=["twice-intact"])) == [
+                "twice-intact"
+            ]
 
     async def _apaused_unrevivable_pair(saver, tid: str):
         from langgraph_events.serde import NamespaceAwareSerde
@@ -5649,7 +5675,9 @@ def describe_delete_first_retirement():
                 MemorySaver(), "delete-first-adiscover"
             )
 
-            found = await graph.athreads_paused_on()
+            found = await graph.athreads_paused_on(
+                thread_ids=["delete-first-adiscover"]
+            )
 
             assert [c["configurable"]["thread_id"] for c in found] == [
                 "delete-first-adiscover"
@@ -5696,7 +5724,7 @@ def describe_unrevivable_threads():
         def it_reports_the_thread_naming_the_qualname():
             graph, _cfg = _settled_unrevivable_pair(MemorySaver(), "unrev-settled")
 
-            assert graph.unrevivable_threads() == {
+            assert graph.unrevivable_threads(thread_ids=["unrev-settled"]) == {
                 "unrev-settled": ["_settled_unrevivable_pair.<locals>._Retired"]
             }
 
@@ -5711,7 +5739,7 @@ def describe_unrevivable_threads():
             graph.invoke(Started(data="x"), config=cfg)
             graph.resume(_Go(), config=cfg)
 
-            assert graph.unrevivable_threads() == {}
+            assert graph.unrevivable_threads(thread_ids=["unrev-clean"]) == {}
 
     def when_a_pending_interrupt_names_a_deleted_class():
         def it_reports_the_paused_thread_too():
@@ -5722,10 +5750,10 @@ def describe_unrevivable_threads():
             graph, _cfg = _settled_unrevivable_pair(saver, "unrev-both-settled")
             graph, _cfg = _paused_unrevivable_pair(saver, "unrev-both-paused")
 
-            assert set(graph.unrevivable_threads()) == {
-                "unrev-both-settled",
-                "unrev-both-paused",
-            }
+            found = graph.unrevivable_threads(
+                thread_ids=["unrev-both-settled", "unrev-both-paused"]
+            )
+            assert list(found) == ["unrev-both-settled", "unrev-both-paused"]
 
     def when_there_is_no_checkpointer():
         def it_raises():
@@ -5733,17 +5761,7 @@ def describe_unrevivable_threads():
             with pytest.raises(
                 ValueError, match=r"unrevivable_threads.*requires a checkpointer"
             ):
-                graph.unrevivable_threads()
-
-    def when_the_checkpointer_does_not_implement_list():
-        def it_raises_a_value_error_naming_the_method():
-            saver = _NoListSaver()
-            graph = EventGraph([_waiter], checkpointer=saver)
-            cfg = {"configurable": {"thread_id": "unrev-no-list"}}
-            graph.invoke(Started(data="x"), config=cfg)
-
-            with pytest.raises(ValueError, match=r"unrevivable_threads"):
-                graph.unrevivable_threads()
+                graph.unrevivable_threads(thread_ids=[])
 
     def when_a_completed_sibling_write_names_a_deleted_class():
         def it_reports_the_thread():
@@ -5778,8 +5796,8 @@ def describe_unrevivable_threads():
             saver.serde = NamespaceAwareSerde(events=(Started, _Pausing))
             graph = EventGraph([_completes], checkpointer=saver)
 
-            assert list(graph.unrevivable_threads()) == ["unrev-sibling"]
-            assert graph.unrevivable_threads()["unrev-sibling"] == [_Gone.__qualname__]
+            found = graph.unrevivable_threads(thread_ids=["unrev-sibling"])
+            assert found == {"unrev-sibling": [_Gone.__qualname__]}
 
     def when_a_nested_payload_names_a_deleted_class():
         def it_reports_the_thread():
@@ -5800,7 +5818,8 @@ def describe_unrevivable_threads():
             saver.serde = NamespaceAwareSerde(events=(Started, _Holder))
             graph = EventGraph([_completes], checkpointer=saver)
 
-            assert graph.unrevivable_threads() == {"unrev-nested": [_Gone.__qualname__]}
+            found = graph.unrevivable_threads(thread_ids=["unrev-nested"])
+            assert found == {"unrev-nested": [_Gone.__qualname__]}
 
     def when_the_serde_is_not_namespace_aware():
         def it_raises_naming_the_method():
@@ -5815,7 +5834,7 @@ def describe_unrevivable_threads():
             with pytest.raises(
                 ValueError, match=r"unrevivable_threads.*NamespaceAware"
             ):
-                graph.unrevivable_threads()
+                graph.unrevivable_threads(thread_ids=["unrev-js"])
 
     def when_a_thread_checkpoint_cannot_be_read():
         def it_names_the_thread():
@@ -5834,9 +5853,9 @@ def describe_unrevivable_threads():
                 RuntimeError,
                 match=r"unrevivable_threads\(\) could not read thread 'bad'",
             ):
-                graph.unrevivable_threads()
+                graph.unrevivable_threads(thread_ids=["bad"])
 
-    def when_thread_ids_are_given():
+    def when_the_store_holds_unlisted_threads():
         def it_reports_only_a_listed_thread():
             saver = MemorySaver()
             _settled_unrevivable_pair(saver, "unrev-ids-listed")
@@ -5844,12 +5863,6 @@ def describe_unrevivable_threads():
 
             found = graph.unrevivable_threads(thread_ids=["unrev-ids-listed"])
             assert list(found) == ["unrev-ids-listed"]
-
-        def it_never_calls_list_on_the_checkpointer():
-            graph, _cfg = _settled_unrevivable_pair(_NoListSaver(), "unrev-ids-nl")
-
-            found = graph.unrevivable_threads(thread_ids=["unrev-ids-nl"])
-            assert list(found) == ["unrev-ids-nl"]
 
 
 def describe_aunrevivable_threads():
@@ -5862,7 +5875,8 @@ def describe_aunrevivable_threads():
                 MemorySaver(), "aunrev-settled"
             )
 
-            assert list(await graph.aunrevivable_threads()) == ["aunrev-settled"]
+            found = await graph.aunrevivable_threads(thread_ids=["aunrev-settled"])
+            assert list(found) == ["aunrev-settled"]
 
     def when_there_is_no_checkpointer():
         @pytest.mark.asyncio
@@ -5871,9 +5885,9 @@ def describe_aunrevivable_threads():
             with pytest.raises(
                 ValueError, match=r"aunrevivable_threads.*requires a checkpointer"
             ):
-                await graph.aunrevivable_threads()
+                await graph.aunrevivable_threads(thread_ids=[])
 
-    def when_thread_ids_are_given():
+    def when_the_store_holds_unlisted_threads():
         @pytest.mark.asyncio
         async def it_reports_only_a_listed_thread():
             saver = MemorySaver()
@@ -5882,15 +5896,6 @@ def describe_aunrevivable_threads():
 
             found = await graph.aunrevivable_threads(thread_ids=["aunrev-ids-listed"])
             assert list(found) == ["aunrev-ids-listed"]
-
-        @pytest.mark.asyncio
-        async def it_never_calls_alist_on_the_checkpointer():
-            graph, _cfg = await _asettled_unrevivable_pair(
-                _NoListSaver(), "aunrev-ids-nl"
-            )
-
-            found = await graph.aunrevivable_threads(thread_ids=["aunrev-ids-nl"])
-            assert list(found) == ["aunrev-ids-nl"]
 
 
 def describe_assert_resume_recovers():
