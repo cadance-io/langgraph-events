@@ -2488,7 +2488,7 @@ def describe_NamespaceAwareSerde():
                 assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
                 assert message.count("Ghost.Gone") == 1
                 assert "regenerate" not in message
-                assert "unrevivable_threads() == {}" in message
+                assert "unrevivable_threads(thread_ids=...) == {}" in message
                 assert "delete its `retired` entry" in message
 
         def when_unifying_the_gate_error_base():
