@@ -242,10 +242,13 @@ def _add_reducer_node(
     )
 
 
-# No fill and a mid-grey outline and text: a context node then reads as
-# dimmed on a light page and on a dark one. A light fill reads as bright on a
-# dark page.
-_MUTED_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#9ca3af"
+# Context and faded nodes have no fill, and a mid-grey outline and text: they
+# read as dimmed on a light page and on a dark one, where a light fill would
+# read as bright. A context node has a dashed outline. A faded node has a
+# dotted outline and italic text, so the two stay apart.
+_MUTED_CLASSDEF_STYLE = (
+    "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:1 3,font-style:italic"
+)
 _CONTEXT_CLASSDEF_STYLE = "fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3"
 
 

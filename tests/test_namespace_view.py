@@ -445,3 +445,19 @@ def describe_truth_of_the_drawing():
             output = model.mermaid(show_raises=False)
 
             assert "HandlerRaised<br>raises edges hidden" in output
+
+
+def describe_node_styles():
+    def when_a_focus_mutes_a_context_node():
+        def it_draws_muted_apart_from_context():
+            output = _model().mermaid(
+                focus=Focus(reactions="note_each_tick"), muted="_Clock.Note"
+            )
+            styles = {
+                line.split()[1]: line.split(maxsplit=2)[2]
+                for line in output.splitlines()
+                if line.strip().startswith("classDef")
+            }
+
+            assert styles["muted"] != styles["ctx"]
+            assert "font-style:italic" in styles["muted"]

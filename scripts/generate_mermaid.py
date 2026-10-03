@@ -27,6 +27,10 @@ from pathlib import Path
 from types import ModuleType  # noqa: TC003
 
 from langgraph_events import EventGraph
+from langgraph_events._namespace._mermaid import (
+    _CONTEXT_CLASSDEF_STYLE,
+    _MUTED_CLASSDEF_STYLE,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 EXAMPLES_DIR = ROOT / "examples"
@@ -74,6 +78,8 @@ graph LR
 {_HALT_CLASSDEF}
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
     classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef ctx {_CONTEXT_CLASSDEF_STYLE}
+    classDef muted {_MUTED_CLASSDEF_STYLE}
     subgraph Example["Namespace"]
       direction LR
       Command{{{{Command}}}}:::cmd
@@ -85,6 +91,8 @@ graph LR
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
+    Context(Context: outside a focus):::ctx
+    Muted(Muted: faded by the caller):::muted
     _seed_[ ]:::entry ==> Command
     Command --> DomainEvent
     Command -.->|"(raises)"| SystemEvent

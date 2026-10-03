@@ -435,30 +435,42 @@ class NamespaceModel:
 
         ``focus`` opts in to a **partial diagram**. Pass a
         :class:`NamespaceModel.Focus` that names namespaces, reactions or
-        reducers. The diagram draws:
+        reducers. Valid names are ``list(model.namespaces)``,
+        ``[r.name for r in model.reactions]`` and
+        ``[r.name for r in model.reducers]``. The diagram draws:
 
         - every node of a selected namespace, and each selected reducer
         - every edge that has one end selected, or that a selected
-          reaction draws
+          reaction draws, with a selected reaction's solid edges as thick
+          arrows
         - the nodes at both ends of those edges, dimmed as context
+        - every other edge between two drawn nodes
 
-        An edge is drawn only when both of its ends are drawn. An entry
-        arrow is drawn only into a real seed of the whole graph. An unknown
-        name raises ``ValueError`` that gives the nearest valid name.
+        A box is titled "(context)" when it holds no selected node. A focused
+        diagram draws no entry arrows: an entry point is a fact about the
+        whole graph, not about one part of it. An unknown name raises
+        ``ValueError`` that gives the nearest valid name. An empty
+        ``Focus()`` raises too: an empty drawing would state nothing.
 
         ``show_raises=False`` hides the ``(raises)`` edges, and any node that
-        only those edges reach.
+        only those edges reach. A node that stays drawn says that its raises
+        edges are hidden.
 
-        A focused diagram draws no entry arrows. An entry point is a fact
-        about the whole graph, not about one part of it.
+        ``notes`` adds lines under a label, one per line of the note. A key
+        is an event qualname, as in :meth:`json`, a reducer name, or a
+        reaction name: a reaction's note goes under the label of each of its
+        edges. Every ``Cause.via`` of an event log is a valid key: a policy
+        by its reaction name, an inline command handler by its command
+        qualname. A note can be any value, written as text. The renderer
+        writes each Mermaid-special character as an entity code. A key that
+        names nothing raises ``ValueError`` that lists the valid keys.
 
-        ``notes`` adds lines under a node label, one per line of the note.
-        A key is an event qualname, as in :meth:`json`, or a reducer name.
-        The renderer writes each Mermaid-special character of a note as an
-        entity code. A key that names no node raises ``ValueError``.
+        ``muted`` fades the nodes and the reaction edges it names, with the
+        same keys as ``notes``. A client can mark a part of the graph that it
+        does not use.
 
-        ``muted`` fades the nodes it names, with the same keys as ``notes``.
-        A client can mark a part of the graph that it does not use.
+        A reducer whose ``subscribes`` is ``None`` draws with the line
+        "folds: unknown" and no ``folds`` edge.
         """
         from langgraph_events._namespace._mermaid import (  # noqa: PLC0415
             render_mermaid_choreography,

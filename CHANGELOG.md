@@ -46,23 +46,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The namespace model shows reducers.** `NamespaceModel.reducers` lists each reducer of the
   graph as `NamespaceModel.Reducer(name, subscribes, namespace)`. `subscribes` holds the
-  concrete events of the model that the reducer folds. `json()` and `text()` list the reducers.
+  concrete events of the model that the reducer folds, or `None` when a `runtime_checkable`
+  Protocol with data members makes the folds unknown. `json()` and `text()` list the reducers.
   `mermaid()` draws each reducer as a cylinder, with a dotted `folds` arrow from each event it
-  reads.
+  reads, or with the line "folds: unknown".
 - **`mermaid(focus=...)` draws one part of the graph.** `NamespaceModel.Focus` names
   namespaces, reactions and reducers in three separate fields. The diagram draws the selected
-  items, every edge that touches one, and the nodes at both ends of those edges. Other drawn
-  nodes are dimmed context, and their namespace box is titled "(context)". An unknown name
-  raises `ValueError` with the nearest valid name. An empty `Focus()` raises `ValueError`. A
-  focused diagram draws no entry arrows, because an entry point is a fact about the whole graph.
-- **`mermaid(notes={...})` adds a second line to a node label.** A key is an event qualname, as
-  in `json()`, or a reducer name. A client can show facts that only it knows, such as a record
-  count. Each Mermaid-special character of a note becomes an entity code. A key that names no
-  node raises `ValueError` with the nearest valid key.
-- **`mermaid(muted=[...])` fades the nodes it names.** It takes the same keys as `notes`. A
-  client can mark a part of the graph that it does not use.
+  items, every edge that touches one, the nodes at both ends dimmed as context, and every
+  other edge between two drawn nodes. A selected reaction's solid edges are thick arrows. A box
+  that holds no selected node is titled "(context)". An unknown name raises `ValueError` with
+  the nearest valid name. An empty `Focus()` raises `ValueError`. A focused diagram draws no
+  entry arrows, because an entry point is a fact about the whole graph. `docs/concepts.md` has
+  an example.
+- **`mermaid(notes={...})` adds lines under a label.** A key is an event qualname, a reducer
+  name, or a reaction name, whose note goes under the label of each of its edges. Every
+  `Cause.via` of an event log is a valid key, so a client can show how often a handler emitted.
+  A note can be any value. Each Mermaid-special character becomes an entity code. A wrong key
+  raises `ValueError` that lists the valid keys.
+- **`mermaid(muted=[...])` fades what it names.** It takes the same keys as `notes`, one key or
+  many. A faded node has a dotted outline and italic text, and a faded reaction draws its edges
+  as a faint dotted line.
 - **`mermaid(show_raises=False)` hides the `(raises)` edges.** A node that only those edges
-  reach is hidden too. The default is `True`.
+  reach is hidden too. A node that stays drawn says that its raises edges are hidden. The
+  default is `True`.
 
 ### Changed
 

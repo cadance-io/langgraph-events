@@ -26,6 +26,8 @@ graph LR
     classDef halt fill:#fef3c7,stroke:#b45309,color:#78350f,stroke-width:3px,stroke-dasharray:4 2
     classDef inv fill:#ffedd5,stroke:#c2410c,color:#7c2d12
     classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
+    classDef ctx fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:3 3
+    classDef muted fill:none,stroke:#9ca3af,color:#9ca3af,stroke-dasharray:1 3,font-style:italic
     subgraph Example["Namespace"]
       direction LR
       Command{{Command}}:::cmd
@@ -37,6 +39,8 @@ graph LR
     end
     IntegrationEvent[/IntegrationEvent/]:::intg
     SystemEvent([SystemEvent]):::syst
+    Context(Context: outside a focus):::ctx
+    Muted(Muted: faded by the caller):::muted
     _seed_[ ]:::entry ==> Command
     Command --> DomainEvent
     Command -.->|"(raises)"| SystemEvent
