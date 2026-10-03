@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `%` in a mermaid note is text.** Mermaid reads `%%{...}%%` anywhere in a diagram as a
+  directive, and it drops the directive from the label. A note now writes each `%` as an
+  entity code, so the label shows the caller's text in full.
+
 ## [0.35.0] - 2026-10-03
 
 ### Added

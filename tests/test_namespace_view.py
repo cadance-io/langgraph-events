@@ -301,6 +301,13 @@ def describe_notes():
             assert "#lt;b#gt;#quot;x#quot;#lt;/b#gt; #35;1" in output
             assert "<b>" not in output
 
+    def when_the_note_holds_a_directive():
+        def it_writes_each_percent_sign_as_an_entity():
+            output = _noted(**{"_Ledger.Commit": '%%{init: {"theme":"dark"}}%%'})
+            assert (
+                "#37;#37;{init: {#quot;theme#quot;:#quot;dark#quot;}}#37;#37;" in output
+            )
+
     def when_a_note_names_an_unknown_node():
         def it_names_the_nearest_valid_node_in_the_error():
             with pytest.raises(ValueError, match=r"_Ledger\.Commit"):
