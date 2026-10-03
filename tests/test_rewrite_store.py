@@ -377,7 +377,7 @@ def describe_rewrite_store():
             saver = MemorySaver()
             graph, cfg, retiring = _settled_drop_pair(saver, "t1")
 
-            graph.rewrite_store(drop=(retiring,))
+            graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
             log = graph.get_state(cfg).events
 
             assert log.cause(log.latest(Ended)) == Cause(source=_Go(), via="_go_ends")
@@ -432,7 +432,7 @@ def describe_rewrite_store():
             saver.serde = NamespaceAwareSerde(events=(Started, _Noise, _Gate))
             graph = EventGraph([promote, wait], checkpointer=saver)
             graph.invoke(_Noise(), config=cfg)
-            graph.rewrite_store(drop=(_Noise,))
+            graph.rewrite_store(drop=(_Noise,), thread_ids=["t1"])
             return graph, graph.resume(_Go(), config=cfg), _Gate
 
         def it_keeps_the_trigger_of_the_resumed_handler():

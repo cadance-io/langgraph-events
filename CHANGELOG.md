@@ -24,19 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_pending_base` are now reserved state fields: a reducer with one of these names raises
   `ValueError` at graph build.
 
-umed interrupt records its causes, and `get_state()` returns them.** The value that
+- **A resumed interrupt records its causes, and `get_state()` returns them.** The value that
   answers an `Interrupted`, and the `Resumed` that the framework creates, have that
   `Interrupted` as their source. `abandon()` and `pre_seed()` record no cause for the events
   that they write. `GraphState.events` carries the causes of the checkpointed thread.
 
-ection` shows the recorded cause.** `event(i)` and the `get` op show
+- **`Reflection` shows the recorded cause.** `event(i)` and the `get` op show
   `cause: #N via <handler>`, or `cause: unknown`. `evidence(i)` lists the recorded cause first.
   The `query_log` tool gets a `cause` op that answers `#N via <handler>`, `seed` or `unknown`.
 
-ckpoint saved before causes existed still loads.** Its older events have an unknown
+- **A checkpoint saved before causes existed still loads.** Its older events have an unknown
   cause, and `EventLog.cause()` returns `None` for them. `Reflection` shows `cause: unknown`.
   A thread that paused before the upgrade resumes. The events that the resumed handler
-  returns have no recorded cause.
+  returns have an unknown source. The answer to its `Interrupted` still points at it.
 
 - **`rewrite_store(drop=...)` keeps the causes aligned.** It filters `causes` at the same
   positions as `events` and remaps each source. A cause whose source was dropped keeps its
