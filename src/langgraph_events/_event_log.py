@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 
+from langgraph_events._causes import resolve
 from langgraph_events._event import Event
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
+
+    from langgraph_events._causes import CauseEntry
 
 T = TypeVar("T", bound=Event)
 
@@ -31,12 +34,15 @@ class _CauseTable:
     """The causes of one root log. Every log derived from it shares the table.
 
     ``entries[i]`` is ``(source index, via)`` for ``events[i]``, or ``None``
-    for a seed. ``positions`` maps ``id(event)`` to its latest index.
+    for a seed. ``positions`` maps ``id(event)`` to its latest index. An
+    event below ``known_from`` has an unknown cause: a checkpoint saved
+    before causes existed did not record it.
     """
 
     events: tuple[Event, ...]
-    entries: tuple[tuple[int, str] | None, ...]
+    entries: tuple[CauseEntry, ...]
     positions: dict[int, int]
+    known_from: int = 0
 
     def locate(self, event: Event) -> int:
         """The root index of *event*: identity first, then the latest equal event.
@@ -73,7 +79,7 @@ def _table_from_causes(
             f"events. Pass one entry per event: a Cause, or None for a seed."
         )
     positions: dict[int, int] = {}
-    entries: list[tuple[int, str] | None] = []
+    entries: list[CauseEntry] = []
     for i, (event, cause) in enumerate(zip(events, causes, strict=True)):
         if cause is None:
             entries.append(None)
@@ -128,6 +134,25 @@ class EventLog:
         obj._events = events if isinstance(events, tuple) else tuple(events)
         obj._table = table
         return obj
+
+    @classmethod
+    def _from_state(
+        cls, events: list[Any] | tuple[Any, ...], causes: list[Any] | None
+    ) -> EventLog:
+        """Build the log of a run from its ``events`` and ``causes`` channels.
+
+        :func:`~langgraph_events._causes.resolve` aligns the channels and
+        raises ``RuntimeError`` when a writer drifted.
+        """
+        owned = tuple(events)
+        entries, known_from = resolve(owned, causes)
+        table = _CauseTable(
+            owned,
+            tuple(entries),
+            {id(event): i for i, event in enumerate(owned)},
+            known_from,
+        )
+        return cls._from_owned(owned, table)
 
     @property
     def causes(self) -> tuple[Cause | None, ...] | None:

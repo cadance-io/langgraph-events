@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
 
+from langgraph_events._causes import CauseEntry
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     OUTCOMES_ATTR,
@@ -1268,7 +1269,10 @@ class EventGraph:
         # Always include reducer channels — filtering is an output concern
         out_schema: Any = _OutputState
         if self._reducers:
-            reducer_fields: dict[str, Any] = {"events": list[Event]}
+            reducer_fields: dict[str, Any] = {
+                "events": list[Event],
+                "causes": list[CauseEntry],
+            }
             for name, r in self._reducers.items():
                 reducer_fields[name] = r.output_type()
             _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
@@ -1532,13 +1536,13 @@ class EventGraph:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
-        return EventLog._from_owned(result["events"])
+        return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
-        return EventLog._from_owned(result["events"])
+        return EventLog._from_state(result["events"], result.get("causes"))
 
     @classmethod
     def from_namespaces(

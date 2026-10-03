@@ -25,6 +25,7 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events import _retry
+from langgraph_events._causes import CauseEntry
 from langgraph_events._custom_event import (
     _AsyncEmitter,
     _reset_custom_emitters,
@@ -58,6 +59,11 @@ _logger = logging.getLogger(__name__)
 # Base fields present on every graph (no reducers needed)
 _BASE_FIELDS: dict[str, Any] = {
     "events": Annotated[list[Event], operator.add],
+    # causes[i] describes events[i]. Every writer to events writes the same
+    # number of entries to causes, in the same order. See _causes.py.
+    "causes": Annotated[list[CauseEntry], operator.add],
+    # The log index of _pending[0]. A handler adds k for the k-th pending event.
+    "_pending_base": int,
     "_cursor": int,
     "_pending": list[Event],
     "_round": int,
@@ -89,6 +95,7 @@ class _InputState(TypedDict):
 
 class _OutputState(TypedDict):
     events: list[Event]
+    causes: list[CauseEntry]
 
 
 def build_state_schema(reducers: dict[str, BaseReducer]) -> type:
@@ -141,8 +148,12 @@ def make_seed_node(
         prev_cursor = state.get("_cursor", 0)
         all_events = state["events"]
         new_events = all_events[prev_cursor:]
+        recorded = len(state.get("causes") or [])
+        # The input writes only events, so the seed fills the gap for it.
+        gap: list[CauseEntry] = [None] * (len(all_events) - recorded)
 
         result: dict[str, Any] = {
+            "causes": gap,
             "_cursor": len(all_events),
             "_pending": new_events,
             "_round": 0,
@@ -281,7 +292,7 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     """Build keyword arguments to inject into a handler call."""
     inject: dict[str, Any] = {}
     if meta.log_param or meta.reflection_param:
-        log_view = EventLog(state["events"])
+        log_view = EventLog._from_state(state["events"], state.get("causes"))
         if meta.log_param:
             inject[meta.log_param] = log_view
         if meta.reflection_param:
