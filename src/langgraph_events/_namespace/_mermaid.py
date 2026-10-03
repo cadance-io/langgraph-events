@@ -45,13 +45,16 @@ _ENTITIES = (
 )
 
 
-def _label(name: str, note: str | None) -> str:
+def _label(name: str, note: object | None) -> str:
     """The node label: *name*, then each line of *note* under it.
 
     A note is caller text, so each Mermaid-special character becomes an
     entity code. The note cannot close the label or inject markup.
     """
     if note is None:
+        return name
+    note = str(note)
+    if not note.strip():
         return name
     for char, entity in _ENTITIES:
         note = note.replace(char, entity)
@@ -76,7 +79,8 @@ def _check_node_keys(
         hint = f" Did you mean {near[0]!r}?" if near else ""
         raise ValueError(
             f"{option} names {name!r}, which is not a node of the model.{hint} "
-            f"A key is an event qualname or a reducer name."
+            f"A key is an event qualname or a reducer name. Valid keys: "
+            f"{', '.join(sorted(by_key))}."
         )
 
 
@@ -86,7 +90,7 @@ def _add_node(
     node_id: dict[type, str],
     *,
     context: bool = False,
-    note: str | None = None,
+    note: object | None = None,
 ) -> None:
     """Declare an event class on the flowchart with its shape + class.
 
@@ -134,7 +138,7 @@ def _add_reducer_node(
     name: str,
     *,
     context: bool = False,
-    note: str | None = None,
+    note: object | None = None,
 ) -> None:
     """Declare a reducer: cylinder, ``:::reducer`` styling."""
     flow.node(
@@ -342,7 +346,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     reactor_hub_min: int | None = None,
     focus: NamespaceModel.Focus | None = None,
     show_raises: bool = True,
-    notes: Mapping[str, str] | None = None,
+    notes: Mapping[str, object] | None = None,
     muted: Iterable[str] = (),
 ) -> str:
     """Emit a semantic ``graph LR`` flowchart of the event choreography.
@@ -372,7 +376,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     notes = dict(notes or {})
     by_key = _node_ids_by_key(d, node_id)
     _check_node_keys("A note", notes, by_key)
-    muted = tuple(muted)
+    muted = (muted,) if isinstance(muted, str) else tuple(muted)
     _check_node_keys("muted", muted, by_key)
     edges: list[_FlowEdge] = []
     side_effect_entries: list[tuple[str, str, tuple[type[Event], ...]]] = []

@@ -170,6 +170,15 @@ def describe_focus():
         def it_reads_the_string_as_one_name():
             assert Focus(namespaces="_Ledger") == Focus(namespaces=("_Ledger",))
 
+    def when_a_field_is_a_set():
+        def it_compares_equal_whatever_the_order():
+            assert Focus(namespaces={"b", "a"}) == Focus(namespaces=("a", "b"))
+
+    def when_a_field_is_bytes():
+        def it_raises_type_error():
+            with pytest.raises(TypeError, match="names must be str"):
+                Focus(namespaces=b"_Ledger")
+
     def when_it_names_an_unknown_reaction():
         def it_names_the_nearest_valid_reaction_in_the_error():
             with pytest.raises(ValueError, match="note_each_tick"):
@@ -248,6 +257,22 @@ def describe_notes():
             with pytest.raises(ValueError, match=r"_Ledger\.Commit"):
                 _noted(**{"_Ledger.Comit": "x"})
 
+    def when_a_note_is_not_a_string():
+        def it_writes_its_text():
+            assert 'Commit{{"Commit<br>7"}}' in _noted(**{"_Ledger.Commit": 7})
+
+    def when_a_note_is_empty():
+        def it_draws_the_name_alone():
+            output = _noted(**{"_Ledger.Commit": ""})
+
+            assert "Commit{{Commit}}" in output
+            assert "Commit<br>" not in output
+
+    def when_a_note_key_is_wrong():
+        def it_lists_the_valid_keys():
+            with pytest.raises(ValueError, match=r"Valid keys: .*edge_total"):
+                _noted(Flag="x")
+
 
 def describe_muted():
     def when_it_names_a_command():
@@ -264,6 +289,12 @@ def describe_muted():
         def it_names_the_nearest_valid_node_in_the_error():
             with pytest.raises(ValueError, match="edge_total"):
                 _model().mermaid(muted=("edge_totl",))
+
+    def when_it_is_one_string():
+        def it_reads_the_string_as_one_name():
+            output = _model().mermaid(muted="_Ledger.Commit")
+
+            assert "class Commit muted" in output
 
     def when_it_is_empty():
         def it_declares_no_muted_class():

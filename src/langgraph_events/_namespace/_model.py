@@ -321,8 +321,16 @@ class NamespaceModel:
         def __post_init__(self) -> None:
             for kind in ("namespaces", "reactions", "reducers"):
                 names = getattr(self, kind)
-                as_tuple = (names,) if isinstance(names, str) else tuple(names)
-                object.__setattr__(self, kind, as_tuple)
+                if isinstance(names, str):
+                    names = (names,)
+                if isinstance(names, (bytes, bytearray)) or not all(
+                    isinstance(name, str) for name in names
+                ):
+                    raise TypeError(
+                        f"Focus {kind} names must be str, got {names!r}. Pass one "
+                        f"name or an iterable of names."
+                    )
+                object.__setattr__(self, kind, tuple(sorted(set(names))))
             if not (self.namespaces or self.reactions or self.reducers):
                 raise ValueError(
                     "Focus selects nothing. Name at least one namespace, "
@@ -384,7 +392,7 @@ class NamespaceModel:
         reactor_hub_min: int | None = None,
         focus: NamespaceModel.Focus | None = None,
         show_raises: bool = True,
-        notes: Mapping[str, str] | None = None,
+        notes: Mapping[str, object] | None = None,
         muted: Iterable[str] = (),
     ) -> str:
         """Render the unified choreography mermaid diagram.
