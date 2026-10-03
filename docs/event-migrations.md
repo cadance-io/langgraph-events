@@ -632,7 +632,7 @@ Every migration above is read-side. The stored bytes keep the historic identity 
 
 The live set is the latest checkpoint of each thread in the root namespace, plus its pending writes. `rewrite_store()` reads each one through the checkpointer's serde, so every rename, transform, split and fill applies. It writes the result back through the checkpointer's `put()`, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same reads and the same verification, and writes nothing.
 
-The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. Get the ids from one `SELECT DISTINCT thread_id FROM checkpoints` query. See [Finding candidates server-side](#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
+The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. To rewrite every thread, get the ids from one `SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''` query. If one checkpointer stores more than one graph, keep only the thread ids of this graph. See [Finding candidates server-side](#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
 
 ```python
 report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
@@ -671,7 +671,7 @@ What the rewrite does not do:
 ## Retiring an Interrupted subclass
 
 !!! warning "`threads_paused_on()` and `abandon()` cover paused threads only"
-    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads(thread_ids=...)` is the sweep that finds it: it reads the latest checkpoint of each listed thread from the store and reports each identity that no longer revives, settled or pending. Pass every thread id in the store, from one `SELECT DISTINCT thread_id FROM checkpoints` query. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
+    A thread that already *answered* the interrupt holds the retired class in its **settled** history, not in a pending write. `threads_paused_on()` does not find such a thread, and `abandon()` does not touch it. Reading its history after the class is deleted raises `Cannot revive`. `graph.unrevivable_threads(thread_ids=...)` is the sweep that finds it: it reads the latest checkpoint of each listed thread from the store and reports each identity that no longer revives, settled or pending. Pass every thread id in the store, from one `SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''` query. If one checkpointer stores more than one graph, keep only the thread ids of this graph. Run it after the class is deleted, against the real store, and treat a non-empty result as a thread that needs the [recovery path](#recovering-a-delete-first-deployment) below. The field-shape half of [#159](https://github.com/cadance-io/langgraph-events/issues/159) is covered by [Dropping, merging or retyping a field](#dropping-merging-or-retyping-a-field).
 
 To retire an `Interrupted` subclass, delete it from the codebase once no live checkpoint still references it. `graph.abandon(config)` / `.aabandon()` settles one paused thread without answering it — see [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
@@ -692,11 +692,19 @@ The checkpointer API has no cheap read for the thread ids in a store. It also ha
 
 Only the store can filter by latest checkpoint and by the `__interrupt__` channel. `thread_ids=` accepts ids from any query, any driver, sync or async.
 
-To sweep every thread, get the ids from one query:
+To sweep every thread, get the ids from one query. The library reads the root checkpoint namespace only, so the query filters on `checkpoint_ns = ''`. The same SQL works on `PostgresSaver` and `SqliteSaver`. If one checkpointer stores more than one graph, keep only the thread ids of this graph.
 
 ```sql
-SELECT DISTINCT thread_id FROM checkpoints
+SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''
 ```
+
+For `InMemorySaver`, read the ids from its storage:
+
+```python
+ids = [tid for tid, ns in saver.storage.items() if ns.get("")]
+```
+
+The `if ns.get("")` filter is necessary. `InMemorySaver.get_tuple()` on an unknown thread id leaves an empty `storage[thread_id][""]` entry. Without the filter, such an id joins the list, although it has no checkpoint.
 
 To find the threads paused on one class, filter the candidates server-side, then pass the ids.
 
@@ -743,13 +751,13 @@ for config in paused:
     await graph.aabandon(config, reason="retiring Order.ApprovalRequired")
 ```
 
-For `unrevivable_threads()`, `plan_rewrite()` and `rewrite_store()`, pass every thread id from the `SELECT DISTINCT thread_id FROM checkpoints` query.
+For `unrevivable_threads()`, `plan_rewrite()` and `rewrite_store()`, pass every thread id from the `SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''` query.
 
 To check one thread, pass its id alone: `graph.threads_paused_on(Order.ApprovalRequired, thread_ids=[tid])`. Do not use `graph.get_state(config)` for this check. Once the handler is deleted, `GraphState.is_interrupted` is `False` and `GraphState.interrupted` is `None` on a thread that is still paused. See the warning under [Sequence](#sequence).
 
 ### Sequence
 
-1. Get every thread id in the store from one `SELECT DISTINCT thread_id FROM checkpoints` query. See [Finding candidates server-side](#finding-candidates-server-side). The steps below call this list `thread_ids`.
+1. Get every thread id in the store from one `SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''` query. See [Finding candidates server-side](#finding-candidates-server-side). The steps below call this list `thread_ids`. An empty list proves nothing. Check that the query returned ids.
 2. Enumerate every thread paused on the class with `graph.threads_paused_on(EventClass, thread_ids=thread_ids)`. Call `graph.abandon(config)` (or `.aabandon()`) on each thread returned.
 3. Verify: `graph.threads_paused_on(EventClass, thread_ids=thread_ids) == []`.
 4. Plan the rewrite: `report = graph.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)`. Review it. Verify: `not report.refused`. An *answered* thread holds the class in its settled history. `threads_paused_on()` and `abandon()` never reach such a thread. The plan does.
@@ -758,8 +766,12 @@ To check one thread, pass its id alone: `graph.threads_paused_on(Order.ApprovalR
 7. After the deploy, query the thread ids again, then verify against the real store: `graph.unrevivable_threads(thread_ids=thread_ids) == {}`. Then delete the `retired` entry from the baseline file.
 
 ```python
+# conn: a psycopg or sqlite3 connection to the checkpointer database.
+ALL_THREAD_IDS = "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+
 # Every thread id in the store, from one server-side query.
 thread_ids = [row[0] for row in conn.execute(ALL_THREAD_IDS)]
+assert thread_ids, "the query returned no thread ids"
 
 for config in graph.threads_paused_on(EventClass, thread_ids=thread_ids):
     graph.abandon(config, reason="retiring EventClass")
@@ -774,6 +786,7 @@ assert not report.refused
 # After the class is deleted. Reads the store, not the baseline, so a
 # stale name in your own code cannot make it report "safe".
 thread_ids = [row[0] for row in conn.execute(ALL_THREAD_IDS)]
+assert thread_ids, "the query returned no thread ids"
 assert graph.unrevivable_threads(thread_ids=thread_ids) == {}
 ```
 

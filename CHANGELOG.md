@@ -24,11 +24,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   process reached 9 GB and made a 16 GB machine unresponsive. The checkpointer API has no cheap
   read for the thread ids in a store, so the library cannot do this walk efficiently.
 
-  Migration: get the thread ids from one server-side query, for example
-  `SELECT DISTINCT thread_id FROM checkpoints`. Pass them as `thread_ids=`. To find the threads
-  paused on one class, use the candidate query in *Finding candidates server-side* in
-  `docs/event-migrations.md`. `plan_rewrite()` and `rewrite_store()` now report every listed id
-  with no checkpoint as refused, so a typo stays visible.
+  Migration: get the thread ids from one server-side query, then pass them as `thread_ids=`.
+  The library reads the root checkpoint namespace only, so the query filters on
+  `checkpoint_ns = ''`. If one checkpointer stores more than one graph, keep only the thread ids of this graph. To find the threads paused on one class, use the candidate
+  query in *Finding candidates server-side* in `docs/event-migrations.md`.
+
+  ```python
+  # 0.33
+  report = graph.plan_rewrite(drop=(Order.ApprovalRequired,))
+
+  # 0.34, Postgres (PostgresSaver) or SQLite (SqliteSaver): the same SQL works on both.
+  ids = [row[0] for row in conn.execute(
+      "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+  )]
+  report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=ids)
+
+  # 0.34, InMemorySaver
+  ids = [tid for tid, ns in saver.storage.items() if ns.get("")]
+  report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=ids)
+  ```
+
+  For `InMemorySaver`, the `if ns.get("")` filter is necessary. `InMemorySaver.get_tuple()` on
+  an unknown thread id leaves an empty `storage[thread_id][""]` entry. Without the filter, such
+  an id joins the list, although it has no checkpoint.
+
+  As in 0.33, `plan_rewrite()` and `rewrite_store()` report a listed id with no checkpoint as
+  refused, so a typo stays visible. `threads_paused_on()` and `unrevivable_threads()` skip such
+  an id silently.
 
 ## [0.33.0] - 2026-09-18
 

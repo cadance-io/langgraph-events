@@ -191,6 +191,7 @@ graph.abandon(config, reason="retiring OrderConfirmationRequested")
 `abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass, thread_ids=...)` (or `athreads_paused_on()`):
 
 ```python
+# candidates: thread ids from a server-side query.
 paused = graph.threads_paused_on(OrderConfirmationRequested, thread_ids=candidates)
 for config in paused:
     graph.abandon(config, reason="retiring OrderConfirmationRequested")

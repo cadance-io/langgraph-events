@@ -837,6 +837,7 @@ def describe_documented_retirement_sequence():
 
         # 1. The server-side query returns every thread id in the store.
         thread_ids = ["paused", "answered"]
+        assert thread_ids, "the query returned no thread ids"
         # 2. and 3.
         for config in graph.threads_paused_on(EventClass, thread_ids=thread_ids):
             graph.abandon(config, reason="retiring EventClass")
