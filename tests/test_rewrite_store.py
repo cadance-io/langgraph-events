@@ -19,12 +19,14 @@ from langgraph.checkpoint.memory import MemorySaver
 from test_event_graph import _AsyncOnlySaver
 
 from langgraph_events import (
+    Cause,
     EventGraph,
     IntegrationEvent,
     Interrupted,
     Reducer,
     Resumed,
     RewriteReport,
+    SourceDropped,
     ThreadRewrite,
     on,
 )
@@ -372,6 +374,19 @@ def describe_rewrite_store():
             assert fired == [1]
             assert log.latest(Ended) == Ended(result="again")
 
+        def it_remaps_each_cause_to_the_kept_events():
+            saver = MemorySaver()
+            graph, cfg, retiring = _settled_drop_pair(saver, "t1")
+
+            graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
+            log = graph.get_state(cfg).events
+
+            assert log.cause(log.latest(Ended)) == Cause(source=_Go(), via="_go_ends")
+            assert log.cause(log.latest(Ended)).source is log.first(_Go)
+            assert log.cause(log.first(_Go)) == SourceDropped(
+                via="wait", source_type=retiring.__qualname__
+            )
+
     def when_drop_names_a_base_class():
         def it_leaves_a_subclass_instance_in_place():
             # drop= matches the stored identity, not the class hierarchy,
@@ -397,6 +412,48 @@ def describe_rewrite_store():
             [thread] = graph.rewrite_store(drop=(_Base,), thread_ids=["t1"]).threads
 
             assert thread.status == "unchanged"
+
+    def when_a_dropped_event_sits_below_a_paused_handler():
+        def _resumed():
+            saver = MemorySaver()
+
+            class _Noise(IntegrationEvent):
+                pass
+
+            class _Gate(Interrupted):
+                pass
+
+            @on(_Noise)
+            def promote(event: _Noise) -> Started:
+                return Started(data="promoted")
+
+            @on(Started)
+            def wait(event: Started) -> _Gate:
+                return _Gate()
+
+            cfg = _cfg("t1")
+            saver.serde = NamespaceAwareSerde(events=(Started, _Noise, _Gate))
+            graph = EventGraph([promote, wait], checkpointer=saver)
+            graph.invoke(_Noise(), config=cfg)
+            graph.rewrite_store(drop=(_Noise,), thread_ids=["t1"])
+            return graph, graph.resume(_Go(), config=cfg), _Gate
+
+        def it_keeps_the_trigger_of_the_resumed_handler():
+            _graph, log, gate = _resumed()
+
+            assert log.cause(log.first(gate)) == Cause(
+                source=Started(data="promoted"), via="wait"
+            )
+            assert log.cause(log.first(gate)).source is log.first(Started)
+
+        def it_shows_the_cause_of_a_dropped_source_as_unknown():
+            graph, log, _gate = _resumed()
+            started = next(i for i, e in enumerate(log) if e is log.first(Started))
+
+            answer = graph.reflect(log).tool().run(op="cause", index=started)
+
+            assert answer.startswith("unknown, source ")
+            assert answer.endswith("_Noise dropped by rewrite_store, via promote")
 
     def when_a_live_class_carries_a_fill():
         def it_converges_on_the_second_run():

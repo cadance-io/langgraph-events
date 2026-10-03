@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A graph run records the origin of each event.** `EventLog.cause(event)` states it, one case
+  per type:
+  - `Cause(source, via)`: the dispatch of `source` to the handler `via` wrote the event. Usually
+    the handler returned it. `InvariantViolated`, `HandlerRaised` and `HandlerRetried` carry the
+    `Cause` of the dispatch they report.
+  - `NotRecorded()`: the event comes from history written before causes existed.
+  - `SourceDropped(via, source_type)`: a handler produced the event, but
+    `rewrite_store(drop=...)` deleted its source. The handler and the type of the deleted event
+    stay known.
+  - `FrameworkEvent()`: the framework wrote the event: `RunPaused`, `MaxRoundsExceeded`,
+    `Cancelled` or `Abandoned`.
+  - `None`: a seed, from the `invoke()` input or `pre_seed()`.
+
+  `NotRecorded` and `SourceDropped` subclass `UnknownCause`, which gives a `reason`. A cause is
+  unknown only for history that the framework did not record. `via` equals `Edge.via` unless the
+  handler has a stable identity: an inline command handler, or an `@on(node_name=...)` pin.
+- **`EventLog.effects(event)`, `EventLog.flow(event)` and `EventLog.causes`.** `effects()` lists
+  the events that a handler produced from an event. `flow()` gives the chain of `Cause` that
+  ends at an event. `causes` gives one origin per event, aligned with `events`.
+  `EventLog(events, causes=...)` rebuilds a log that a client saved in its own format, every
+  case included. Each `Cause.source` must be the same object as an earlier event. A copy that
+  matches several equal events raises `ValueError` instead of picking one. `CauseValue` names
+  the union that `cause()` returns.
+  `docs/concepts.md` has a JSON recipe.
+- **The causes survive interrupts, checkpoints and store rewrites.** The value that answers an
+  `Interrupted`, and the `Resumed` that the framework creates, have that `Interrupted` as their
+  source. `get_state()` returns the causes of a checkpointed thread. A checkpoint saved before
+  this release still loads: its older events are `NotRecorded`, and a handler that resumes on it
+  records its real trigger. `rewrite_store(drop=...)` filters the causes at the same positions
+  as the events, and a cause whose source it deletes becomes `SourceDropped`.
+- **`Reflection` shows the recorded cause.** `event(i)` and the `get` op show a `cause:` line for
+  every event that is not a seed. `evidence(i)` lists the recorded cause first. The `query_log`
+  tool gets a `cause` op that answers `#N via <handler>`, `seed`, `framework`, or
+  `unknown, <reason>`.
+
+### Changed
+
+- **BREAKING: `causes` is a reserved state field.** The graph state gets a `causes` channel next
+  to `events`. A reducer named `causes` now raises `ValueError` at graph build. Event classes,
+  constructors and equality do not change.
+- **A direct state write to `events` must also write `causes`.** A direct
+  `graph.compiled.update_state()` or `graph.compiled.invoke()` that writes `events` must write
+  one `causes` entry per event,
+  for example `None`. Otherwise every older cause shifts by one position, and no check can
+  detect it. `pre_seed()` writes the causes for you.
+
 ## [0.34.0] - 2026-10-03
 
 ### Changed

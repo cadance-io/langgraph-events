@@ -100,12 +100,13 @@ event-type name (subclass-aware, like the Python API):
 |---|---|---|
 | `overview` | — | totals, counts by kind/namespace, seeds, anomalies, status |
 | `list` | `index` (offset), `limit` | all events in order, paged |
-| `get` | `index` | full field dump of one event + kind/namespace/command |
+| `get` | `index` | full field dump of one event + kind/namespace/command + recorded cause |
 | `filter` / `select` | `type`, `limit` | matching events as `#index` lines |
 | `latest` / `first` | `type` | newest / oldest match |
 | `has` / `count` | `type` | `true`/`false` / a number |
 | `after` / `before` | `type`, `limit` | events after / before the first match |
 | `evidence` | `index` | every fact on how that event came to be |
+| `cause` | `index` | the recorded cause: `#N via <handler>`, `seed`, `framework`, or `unknown, <reason>` |
 | `state` | — | reducer projections over the log |
 | `schema` | — | the static topology: what *can* cause what |
 
@@ -122,15 +123,20 @@ input errors are caught; genuine bugs propagate.
 
 `evidence(index)` lists, with **no verdicts and no selection**:
 
-1. **Explicit links** — event-valued fields resolved to log positions
+1. **Recorded cause** — the handler that produced the event, and the event it received, as
+   `#N via <handler>`. The framework records it at dispatch, so it is a fact, not a candidate.
+   A seed shows `seed`, and an event that the framework wrote shows `framework`. An unknown
+   cause shows `unknown` and its reason: `not recorded` for history written before causes
+   existed, or `source <Type> dropped by rewrite_store, via <handler>`.
+2. **Explicit links** — event-valued fields resolved to log positions
    (`HandlerRaised.source_event`, `Resumed.interrupted`), by identity with a
    labeled equality fallback.
-2. **Owning command** — the outcome's command class and every preceding
+3. **Owning command** — the outcome's command class and every preceding
    instance of it.
-3. **Static edge candidates** — every model edge targeting this event's
+4. **Static edge candidates** — every model edge targeting this event's
    type, with its causation kind (`intent`/`react`/`orchestrate`/`chain`),
    handler, and preceding source instances.
-4. **Forward face** — edges sourced at this type, with subsequent target
+5. **Forward face** — edges sourced at this type, with subsequent target
    instances.
 
 The agent correlates; the API only joins. A typical ReAct trace:
@@ -179,6 +185,8 @@ tool to an agent whose transcript you wouldn't show those values to.
   agent driving the tool.
 - **Root indices only.** `select`-style narrowing lives on `run.log` (plain
   `EventLog` results); the reflective surface never re-indexes a slice.
-- **Richer events, richer facts.** If events later carry actor or
-  provenance fields, `get` and `evidence` surface them automatically — no
-  API change needed.
+- **Recorded causes.** The framework records which handler produced each
+  event, and from which event. `get`, `evidence` and `cause` show it. It is
+  recorded at dispatch, not inferred, so the rule "deterministic only" holds.
+  The recorded handler equals `Edge.via` unless the handler has a stable
+  identity: an inline command handler, or an `@on(node_name=...)` pin.

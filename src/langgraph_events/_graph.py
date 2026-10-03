@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
 
+from langgraph_events._causes import FRAMEWORK, CauseEntry
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     OUTCOMES_ATTR,
@@ -55,6 +56,7 @@ from langgraph_events._internal import (
     make_handler_node,
     make_router_node,
     make_seed_node,
+    pad_causes,
 )
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
@@ -1254,6 +1256,12 @@ class EventGraph:
         workflows.
 
         The instance is compiled lazily on first access and cached.
+
+        Warning: the ``causes`` channel must stay aligned with ``events``. A
+        direct ``update_state`` that writes ``events`` without one ``causes``
+        entry per event shifts every older cause, and no check can detect it.
+        Write events through :meth:`pre_seed`, or write a ``None`` cause for
+        each event in the same update.
         """
         return self._compile()
 
@@ -1268,7 +1276,10 @@ class EventGraph:
         # Always include reducer channels — filtering is an output concern
         out_schema: Any = _OutputState
         if self._reducers:
-            reducer_fields: dict[str, Any] = {"events": list[Event]}
+            reducer_fields: dict[str, Any] = {
+                "events": list[Event],
+                "causes": list[CauseEntry],
+            }
             for name, r in self._reducers.items():
                 reducer_fields[name] = r.output_type()
             _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
@@ -1503,10 +1514,14 @@ class EventGraph:
 
     @staticmethod
     def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
-        """Build the input dict from a seed event or list of events."""
-        if isinstance(seed, list):
-            return {"events": seed}
-        return {"events": [seed]}
+        """Build the input dict from a seed event or list of events.
+
+        The input writes a ``None`` cause for each seed, so ``causes`` stays
+        aligned with ``events`` with no guess, also on a checkpoint saved
+        before causes existed.
+        """
+        seeds = seed if isinstance(seed, list) else [seed]
+        return {"events": seeds, "causes": [None] * len(seeds)}
 
     @staticmethod
     def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -1532,13 +1547,13 @@ class EventGraph:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
-        return EventLog._from_owned(result["events"])
+        return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
-        return EventLog._from_owned(result["events"])
+        return EventLog._from_state(result["events"], result.get("causes"))
 
     @classmethod
     def from_namespaces(
@@ -1635,17 +1650,21 @@ class EventGraph:
             graph.pre_seed(config, {"my_reducer": existing_value})
             graph.invoke(StartEvent(), config=config)
 
+        Each event in ``values["events"]`` gets a ``None`` cause.
+
         Requires a checkpointer.
         """
         self._require_checkpointer("pre_seed")
         compiled = self._compile()
-        compiled.update_state(config, values, as_node="__seed__")
+        compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
 
     async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
         """Async version of :meth:`pre_seed`."""
         self._require_checkpointer("apre_seed")
         compiled = self._compile()
-        await compiled.aupdate_state(config, values, as_node="__seed__")
+        await compiled.aupdate_state(
+            config, pad_causes(values, None), as_node="__seed__"
+        )
 
     def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
         """Whether the thread has work to resume into.
@@ -1748,11 +1767,14 @@ class EventGraph:
             [StateUpdate(None, END)],
             [
                 StateUpdate(
-                    {
-                        "events": appended,
-                        "_cursor": len(events) + len(appended),
-                        "_pending": [],
-                    },
+                    pad_causes(
+                        {
+                            "events": appended,
+                            "_cursor": len(events) + len(appended),
+                            "_pending": [],
+                        },
+                        FRAMEWORK,
+                    ),
                     "__seed__",
                 )
             ],
@@ -2610,7 +2632,7 @@ class EventGraph:
         ``abandon()``, which read the checkpoint directly.
         """
         all_events = snapshot.values.get("events", [])
-        log = EventLog(all_events)
+        log = EventLog._from_state(all_events, snapshot.values.get("causes"))
         is_interrupted = self._is_interrupted(snapshot)
         interrupted = log.latest(Interrupted) if is_interrupted else None
         if is_interrupted and interrupted is None:

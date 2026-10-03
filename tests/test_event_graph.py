@@ -1479,7 +1479,7 @@ def describe_EventGraph():
 
             @pytest.mark.parametrize(
                 "reserved_name",
-                ["events", "_cursor", "_pending", "_round"],
+                ["events", "causes", "_cursor", "_pending", "_round"],
             )
             def it_rejects_collisions(reserved_name):
                 r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
