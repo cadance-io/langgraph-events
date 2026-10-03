@@ -241,40 +241,107 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 | `log.has(T)` | `bool` |
 | `log.count(T)` | `int` |
 | `log.select(T)` / `log.after(T)` / `log.before(T)` | chainable `EventLog` |
-| `log.cause(e)` | `Cause \| None`: the handler that produced `e`, and the event it received |
-| `log.effects(e)` | `tuple[Event, ...]`: the events that `e` caused, in log order |
-| `log.flow(e)` | `tuple[Event, ...]`: the cause chain, from the root seed to `e` |
-| `log.causes` | `tuple[Cause \| None, ...] \| None`: one cause per event, or `None` when the log records no causes |
+| `log.cause(e)` | the origin of `e`: `Cause`, `NotRecorded`, `SourceDropped`, `FrameworkEvent`, or `None` for a seed. See [Causes](#causes) |
+| `log.effects(e)` | `tuple[Event, ...]`: the events that a handler produced from `e`, in log order |
+| `log.flow(e)` | `tuple[Event, ...]`: the chain of `Cause` that ends at `e` |
+| `log.causes` | one origin per event, aligned with `events`, or `None` when the log records no causes |
 | `len(log)`, `log[i]` | container protocol |
 
 ### Causes
 
-A graph run records the cause of each event that a handler returns. A `Cause(source, via)`
-names the event that the handler received and the handler's graph node name. `via` equals
-`Edge.via` unless the handler has a stable identity: an inline command handler, or an
-`@on(node_name=...)` pin. `log.cause(e)` returns `None` for a seed. It raises
-`ValueError` when the log records no causes, or when `e` is not in the log. The lookup uses
-identity first, then the latest equal event. A log from `after()`, `before()` or `select()`
-answers like the log it came from.
+A graph run records the origin of each event. `log.cause(e)` states it, one case per type:
+
+| `log.cause(e)` returns | Meaning |
+|---|---|
+| `Cause(source, via)` | A handler produced `e`. `source` is the event the handler received, and `via` is its graph node name. |
+| `NotRecorded()` | `e` comes from history written before causes existed. |
+| `SourceDropped(via, source_type)` | A handler produced `e`, but `rewrite_store(drop=...)` deleted its source. The handler and the type of the deleted event stay known. |
+| `FrameworkEvent()` | The framework wrote `e`: `RunPaused`, `MaxRoundsExceeded`, `Cancelled` or `Abandoned`. |
+| `None` | A seed: `e` came from outside, through the `invoke()` input or `pre_seed()`. |
+
+`NotRecorded` and `SourceDropped` are subclasses of `UnknownCause`, and each has a `reason`
+sentence. A cause is unknown only for history that the framework did not record: a checkpoint
+saved before causes existed, or a source that a store rewrite deleted. A thread that starts on
+this release, and that `rewrite_store(drop=...)` never rewrites, has no unknown cause.
+
+`via` equals `Edge.via` unless the handler has a stable identity. For an inline command handler,
+`via` is the command qualname, such as `"Order.Place"`. For an `@on(node_name=...)` pin, it is
+the pinned name. `Cause.source` is an event, while `Edge.source` is a type. `HandlerRaised`
+states the same two facts as `handler` and `source_event`.
+
+The lookup finds `e` by identity first, then as the latest equal event. A log from `after()`,
+`before()` or `select()` answers like the log it came from. `cause()` raises `ValueError` when
+the log records no causes, or when `e` is not in the root log.
 
 ```python
-fired = sum(1 for e in log if (c := log.cause(e)) and c.via == "hourly_wake_brief")
+from langgraph_events import Cause, SourceDropped
+
+fired = sum(
+    1
+    for e in log
+    if isinstance(c := log.cause(e), (Cause, SourceDropped)) and c.via == "notify_customer"
+)
 ```
 
-A client that saves events in its own format saves each cause with them. It rebuilds the log
-with `EventLog(events, causes=...)`, one entry per event: a `Cause`, or `None` for a seed. Each
-`source` must be the same object as an earlier event in `events`. `log.causes` gives the
-entries back, so `EventLog(log.events, causes=log.causes)` rebuilds a root log. In a derived
-log, a source can be outside that log, and the rebuild raises `ValueError`.
+`log.effects(e)` lists the events that a handler produced from `e`. `log.flow(e)` gives the
+chain of `Cause` that ends at `e`. The chain starts at the first event whose own cause is not a
+`Cause`. The value that answers an `Interrupted`, and the `Resumed` that the framework creates,
+have that `Interrupted` as their source.
 
-The value that answers an `Interrupted`, and the `Resumed` that the framework creates, have
-that `Interrupted` as their source. `abandon()` and `pre_seed()` record no cause for the events
-that they write.
+A client that saves events in its own format saves each cause with them, and rebuilds the log
+with `EventLog(events, causes=...)`. Each `Cause.source` must be the same object as an earlier
+event: pass `events[j]`, not a copy. `log.causes` gives the entries back, so
+`EventLog(log.events, causes=log.causes)` rebuilds a root log, unknown and framework cases
+included. A recipe for JSON, where the client keeps its own list of events:
 
-A checkpoint saved before causes existed still loads. Its older events have an unknown cause,
-and `log.cause(e)` returns `None` for them. A thread that paused before the upgrade resumes.
-The events that the resumed handler returns have an unknown source.
-The answer to its `Interrupted` still points at it.
+```python
+import json
+
+from langgraph_events import (
+    Cause,
+    EventLog,
+    FrameworkEvent,
+    NotRecorded,
+    SourceDropped,
+)
+
+
+def dump_causes(log: EventLog) -> str:
+    index = {id(e): i for i, e in enumerate(log.events)}
+
+    def entry(cause):
+        match cause:
+            case Cause(source=source, via=via):
+                return {"source": index[id(source)], "via": via}
+            case SourceDropped(via=via, source_type=source_type):
+                return {"dropped": source_type, "via": via}
+            case NotRecorded():
+                return {"not_recorded": True}
+            case FrameworkEvent():
+                return {"framework": True}
+        return None
+
+    return json.dumps([entry(c) for c in log.causes])
+
+
+def load_log(events: list, saved: str) -> EventLog:
+    def cause(entry):
+        if entry is None:
+            return None
+        if "source" in entry:
+            return Cause(events[entry["source"]], entry["via"])
+        if "dropped" in entry:
+            return SourceDropped(via=entry["via"], source_type=entry["dropped"])
+        if "not_recorded" in entry:
+            return NotRecorded()
+        return FrameworkEvent()
+
+    return EventLog(events, causes=[cause(e) for e in json.loads(saved)])
+```
+
+A direct `graph.compiled.update_state()` that writes `events` must write one `causes` entry per
+event too. Otherwise every older cause shifts by one position, and no check can detect it.
+`pre_seed()` writes the causes for you.
 
 ## `Namespace` as a feature hub
 

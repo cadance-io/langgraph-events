@@ -106,7 +106,7 @@ event-type name (subclass-aware, like the Python API):
 | `has` / `count` | `type` | `true`/`false` / a number |
 | `after` / `before` | `type`, `limit` | events after / before the first match |
 | `evidence` | `index` | every fact on how that event came to be |
-| `cause` | `index` | the recorded cause: `#N via <handler>`, `seed`, or `unknown` |
+| `cause` | `index` | the recorded cause: `#N via <handler>`, `seed`, `framework`, or `unknown, <reason>` |
 | `state` | — | reducer projections over the log |
 | `schema` | — | the static topology: what *can* cause what |
 
@@ -125,8 +125,9 @@ input errors are caught; genuine bugs propagate.
 
 1. **Recorded cause** — the handler that produced the event, and the event it received, as
    `#N via <handler>`. The framework records it at dispatch, so it is a fact, not a candidate.
-   A seed shows `seed`. An older event of a checkpoint saved before causes existed shows
-   `unknown`.
+   A seed shows `seed`, and an event that the framework wrote shows `framework`. An unknown
+   cause shows `unknown` and its reason: `not recorded` for history written before causes
+   existed, or `source <Type> dropped by rewrite_store, via <handler>`.
 2. **Explicit links** — event-valued fields resolved to log positions
    (`HandlerRaised.source_event`, `Resumed.interrupted`), by identity with a
    labeled equality fallback.

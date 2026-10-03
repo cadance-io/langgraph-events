@@ -1,7 +1,8 @@
 """The evidence op — a verdict-free join of log facts around one event.
 
-Lists explicit instance links, the owning command, matching static edges with
-their candidate instances, and the forward face. Never selects a cause: the
+Lists the recorded cause, explicit instance links, the owning command,
+matching static edges with their candidate instances, and the forward face.
+The recorded cause is a fact. Among the candidates, it never selects one: the
 querying agent correlates; this module only joins.
 """
 

@@ -62,15 +62,21 @@ class Reflection:
         return _text.render_overview(self._log, self._model)
 
     def event(self, event: Event | int) -> str:
-        """Full-field dump of one event, plus kind/namespace/owning command."""
+        """Full-field dump of one event, plus kind/namespace/owning command.
+
+        A ``cause:`` line states the recorded cause of every event that is not
+        a seed.
+        """
         return _text.render_event_detail(self._resolve_index(event), self._log)
 
     def evidence(self, event: Event | int) -> str:
         """Every deterministic fact bearing on how one event came to be.
 
-        A verdict-free join: explicit instance links, the owning command,
-        matching static edges with candidate instances, and the forward face.
-        No cause is chosen — correlation is the querying agent's job.
+        A verdict-free join: the recorded cause, explicit instance links, the
+        owning command, matching static edges with candidate instances, and
+        the forward face. The recorded cause is a fact recorded at dispatch.
+        Among the static candidates, nothing is chosen: correlation is the
+        querying agent's job.
         """
         return _evidence.render_evidence(
             self._resolve_index(event), self._log, self._model
