@@ -666,6 +666,18 @@ def describe_rewrite_store_refusals():
             ]
             assert report.threads[1].reason == "no checkpoint for this thread id"
 
+        async def it_reports_the_id_through_the_async_saver():
+            saver = _AsyncOnlySaver()
+            graph, _config, _old, _new = await _arenamed_history_pair(saver, "t1")
+
+            report = await graph.aplan_rewrite(thread_ids=["t1", "t-typo"])
+
+            assert [(t.thread_id, t.status) for t in report.threads] == [
+                ("t1", "rewrite"),
+                ("t-typo", "refused"),
+            ]
+            assert report.threads[1].reason == "no checkpoint for this thread id"
+
     def when_a_failed_task_left_an_error_write():
         def it_asks_to_run_or_abandon_the_thread():
             saver = MemorySaver()

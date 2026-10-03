@@ -285,6 +285,13 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
     return ReturnInfo(event_types, scatter_types, has_interrupted, True)
 
 
+_ALL_THREAD_IDS_QUERY = (
+    "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+)
+"""The server-side query that returns every root thread id in a
+Postgres or SQLite checkpointer store. Named in the ``None`` error."""
+
+
 def _explicit_thread_ids(method: str, thread_ids: Iterable[str] | None) -> list[str]:
     """*thread_ids* deduped in caller order. Rejects ``None`` and a bare
     ``str``.
@@ -296,9 +303,10 @@ def _explicit_thread_ids(method: str, thread_ids: Iterable[str] | None) -> list[
     if thread_ids is None:
         raise TypeError(
             f"{method}() thread_ids must be an iterable of thread ids, not "
-            f"None. The library does not walk the store. Pass the ids from "
-            f"one server-side query. See 'Finding candidates server-side' "
-            f"in docs/event-migrations.md."
+            f"None. Since 0.34.0 the library does not walk the store. To "
+            f"sweep every thread, pass the ids from {_ALL_THREAD_IDS_QUERY}. "
+            f"See 'Finding candidates server-side' in "
+            f"docs/event-migrations.md."
         )
     if isinstance(thread_ids, str):
         raise TypeError(
@@ -2205,8 +2213,8 @@ class EventGraph:
     ) -> list[RunnableConfig]:
         """Configs for each thread in *thread_ids* whose latest checkpoint
         has a pending interrupt. With *event_type*, keeps only threads
-        paused on that class or a subclass. With ``None``, returns every
-        listed thread that is paused.
+        paused on that class or a subclass. With ``event_type=None``,
+        returns every listed thread that is paused.
 
         Reads each thread's raw checkpoint directly, not this graph's
         compiled topology. Two deletions this unlocks, with different
@@ -2230,14 +2238,15 @@ class EventGraph:
         store. A listed thread with no checkpoint, or with no matching
         interrupt, stays out of the result. Get the ids from one
         server-side query. See *Finding candidates server-side* in
-        ``docs/event-migrations.md``. ``None`` or a bare ``str`` raises
-        ``TypeError``.
+        ``docs/event-migrations.md``. ``thread_ids=None`` or a bare
+        ``str`` raises ``TypeError``.
 
         Requires a checkpointer.
         """
+        ids = _explicit_thread_ids("threads_paused_on", thread_ids)
         self._require_checkpointer("threads_paused_on")
         configs: list[RunnableConfig] = []
-        for tid in _explicit_thread_ids("threads_paused_on", thread_ids):
+        for tid in ids:
             cfg = self._thread_config(tid)
             pending = self._read_pending_interrupts(cfg, "threads_paused_on")
             if self._matches_event_type(pending, event_type):
@@ -2251,9 +2260,9 @@ class EventGraph:
         thread_ids: Iterable[str],
     ) -> list[RunnableConfig]:
         """Async version of :meth:`threads_paused_on`."""
+        ids = _explicit_thread_ids("athreads_paused_on", thread_ids)
         self._require_checkpointer("athreads_paused_on")
         configs: list[RunnableConfig] = []
-        ids = _explicit_thread_ids("athreads_paused_on", thread_ids)
         for tid in ids:
             cfg = self._thread_config(tid)
             pending = await self._aread_pending_interrupts(cfg, "athreads_paused_on")
@@ -2298,8 +2307,9 @@ class EventGraph:
         event identity the checkpointer's serde can no longer revive.
 
         Returns a mapping of thread id to the qualnames that checkpoint
-        could not revive. Thread ids are sorted. Qualnames are deduped
-        in read order. The mapping is empty when every thread revives.
+        could not revive. Thread ids keep the caller's order, without
+        duplicates. Qualnames are deduped in read order. The mapping is
+        empty when every listed thread revives.
 
         Reads the real store, not the baseline. The coverage gates
         compare the topology to a committed baseline and never read a
@@ -2324,18 +2334,22 @@ class EventGraph:
 
         The caller names the threads in ``thread_ids``, the same as
         :meth:`threads_paused_on`. A listed thread with no checkpoint, or
-        one that revives, stays out of the mapping. Get the ids from one
-        ``SELECT DISTINCT thread_id FROM checkpoints`` query.
+        one that revives, stays out of the mapping. To sweep every
+        thread, get the ids from one query:
+        ``SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''``.
+        If one checkpointer stores more than one graph, keep only the
+        thread ids of this graph.
 
         Requires a checkpointer whose serde is a
         :class:`~langgraph_events.serde.NamespaceAwareSerde`. Raises
         ``ValueError`` otherwise. Raises ``RuntimeError`` naming the
         thread if one checkpoint cannot be read.
         """
+        ids = _explicit_thread_ids("unrevivable_threads", thread_ids)
         self._require_checkpointer("unrevivable_threads")
         self._require_namespace_aware_serde("unrevivable_threads")
         found: dict[str, list[str]] = {}
-        for tid in _explicit_thread_ids("unrevivable_threads", thread_ids):
+        for tid in ids:
             cfg = self._thread_config(tid)
             _tup, unresolved = self._read_checkpoint_tuple(cfg, "unrevivable_threads")
             if unresolved:
@@ -2346,10 +2360,10 @@ class EventGraph:
         self, *, thread_ids: Iterable[str]
     ) -> dict[str, list[str]]:
         """Async version of :meth:`unrevivable_threads`."""
+        ids = _explicit_thread_ids("aunrevivable_threads", thread_ids)
         self._require_checkpointer("aunrevivable_threads")
         self._require_namespace_aware_serde("aunrevivable_threads")
         found: dict[str, list[str]] = {}
-        ids = _explicit_thread_ids("aunrevivable_threads", thread_ids)
         for tid in ids:
             cfg = self._thread_config(tid)
             _tup, unresolved = await self._aread_checkpoint_tuple(
@@ -2376,10 +2390,12 @@ class EventGraph:
         end to end before it is reported as a rewrite.
 
         The caller names the threads in ``thread_ids``. The method does
-        not walk the store. Get the ids from one
-        ``SELECT DISTINCT thread_id FROM checkpoints`` query. A listed id
-        with no checkpoint is reported as refused, so a typo stays
-        visible.
+        not walk the store. To sweep every thread, get the ids from one
+        query:
+        ``SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''``.
+        If one checkpointer stores more than one graph, keep only the
+        thread ids of this graph. A listed id with no checkpoint is
+        reported as refused, so a typo stays visible.
 
         Raises ``ValueError`` without a checkpointer, without a
         :class:`~langgraph_events.serde.NamespaceAwareSerde`, under
@@ -2472,9 +2488,10 @@ class EventGraph:
         drop: Iterable[type[Event]],
         thread_ids: Iterable[str],
     ) -> RewriteReport:
+        ids = _explicit_thread_ids(method, thread_ids)
         serde, plan = self._prepare_rewrite(method, drop)
         results: list[ThreadRewrite] = []
-        for tid in _explicit_thread_ids(method, thread_ids):
+        for tid in ids:
             cfg = self._thread_config(tid)
             with serde._record_reads() as reads:
                 tup, unresolved = self._read_checkpoint_tuple(cfg, method)
@@ -2545,9 +2562,10 @@ class EventGraph:
     ) -> RewriteReport:
         """Async sibling of :meth:`_rewrite_walk`, via ``aget_tuple``,
         ``aput`` and ``aput_writes``."""
+        ids = _explicit_thread_ids(method, thread_ids)
         serde, plan = self._prepare_rewrite(method, drop)
         results: list[ThreadRewrite] = []
-        for tid in _explicit_thread_ids(method, thread_ids):
+        for tid in ids:
             cfg = self._thread_config(tid)
             with serde._record_reads() as reads:
                 tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
