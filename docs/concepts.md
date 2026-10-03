@@ -249,9 +249,10 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 
 ### Causes
 
-A `Cause(source, via)` names the event that a handler received and the handler's graph node
-name. `via` equals `Edge.via` unless the handler has a stable identity: an inline command
-handler, or an `@on(node_name=...)` pin. `log.cause(e)` returns `None` for a seed. It raises
+A graph run records the cause of each event that a handler returns. A `Cause(source, via)`
+names the event that the handler received and the handler's graph node name. `via` equals
+`Edge.via` unless the handler has a stable identity: an inline command handler, or an
+`@on(node_name=...)` pin. `log.cause(e)` returns `None` for a seed. It raises
 `ValueError` when the log records no causes, or when `e` is not in the log. The lookup uses
 identity first, then the latest equal event. A log from `after()`, `before()` or `select()`
 answers like the log it came from.

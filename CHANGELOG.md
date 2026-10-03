@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A graph run records the cause of each event.** When a handler returns an event, the
+  framework records the event that the handler received and the handler's graph node name.
+  `EventLog.cause(event)` returns them as a `Cause(source, via)`, or `None` for a seed.
+  `EventLog.effects(event)` lists the events that an event caused, in log order.
+  `EventLog.flow(event)` gives the cause chain from the root seed. `EventLog.causes` gives
+  one cause per event, or `None` when the log records no causes. `EventLog(events,
+  causes=...)` rebuilds a log that a client saved in its own format. Each `source` must be
+  the same object as an earlier event.
+
+  `via` equals `Edge.via` unless the handler has a stable identity: an inline command
+  handler, or an `@on(node_name=...)` pin. The graph state gets a `causes` channel next to
+  `events`. Event classes, constructors and equality do not change. The names `causes` and
+  `_pending_base` are now reserved state fields: a reducer with one of these names raises
+  `ValueError` at graph build.
+
 ## [0.34.0] - 2026-10-03
 
 ### Changed
