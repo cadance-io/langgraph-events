@@ -2,7 +2,7 @@
 
 > Design spec, 2026-10-02. Brainstormed with the user, then checked by parallel
 > subagents: a throwaway spike of the state channel, a review of logs that derive from a
-> log, a review of checkpoint evolution and naming, a client study (reflection-lab), and
+> log, a review of checkpoint evolution and naming, a study of a client that persists its own log, and
 > a survey of event-sourcing practice. Implementation follows TDD per project conventions.
 
 ## Context
@@ -13,8 +13,8 @@ when it appends the result to the log. After the run, no query can say which han
 produced an event. The log and the static graph cannot recover the fact either. Two
 policies that react to one event type and return one command type give the same log.
 
-A client needs the fact. Example: reflection-lab draws a diagram of the rules a persona
-defined, and it must show how often each rule fired.
+A client needs the fact, for example to show how often each handler fired, or what an
+event led to.
 
 The Reflection spec (`2026-07-27-reflection-design.md`) cut a *heuristic* causation
 engine, because the API must never guess. This design does not guess. It *records* the
@@ -178,7 +178,7 @@ private dependency on `EventLog`.
 ## Clients that persist their own log
 
 A client that saves events in its own format saves each cause with them, through its own
-event references. reflection-lab, for example, saves
+event references. For example, a client that stores a reference as `{"$ref": N}` saves
 `"cause": {"source": {"$ref": N}, "via": "..."}` on each event that has a cause. It
 rebuilds the log with `EventLog(events, causes=...)`. Because a `Cause` holds an event,
 the client does not shift any index when it joins the logs of several runs.
