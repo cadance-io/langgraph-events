@@ -43,6 +43,8 @@ surface them automatically."
 
 ## Public API
 
+`log.cause(event)` states the truth about an event's origin, one case per type:
+
 ```python
 @dataclass(frozen=True)
 class Cause:
@@ -50,20 +52,53 @@ class Cause:
     via: str        # the handler node name (HandlerMeta.node_name)
 
 
-log.cause(event)     # -> Cause | None. None for a seed, or for an unknown cause.
+class UnknownCause:                 # base of every unknown case
+    reason: str                     # one plain sentence
+
+
+@dataclass(frozen=True)
+class NotRecorded(UnknownCause):    # written before this library recorded causes
+    pass
+
+
+@dataclass(frozen=True)
+class SourceDropped(UnknownCause):  # rewrite_store(drop=...) deleted the source
+    via: str                        # the handler: still known
+    source_type: str                # the qualname of the deleted event
+
+
+@dataclass(frozen=True)
+class FrameworkEvent:               # the framework wrote it: RunPaused,
+    pass                            # MaxRoundsExceeded, Cancelled, Abandoned
+
+
+log.cause(event)     # -> Cause | UnknownCause | FrameworkEvent | None. None: a seed.
 log.effects(event)   # -> tuple[Event, ...]: the events that this event caused, in log order
-log.flow(event)      # -> tuple[Event, ...]: the cause chain, from the root seed to the event
-log.causes           # -> tuple[Cause | None, ...] | None: aligned with events.
+log.flow(event)      # -> tuple[Event, ...]: the chain of Causes that ends at the event
+log.causes           # -> tuple of the same values, aligned with events.
                      #    None when the log records no causes.
 
-EventLog(events, causes=None)   # causes: a sequence aligned with events, of Cause | None
+EventLog(events, causes=None)   # causes: a sequence aligned with events, of the same values
 ```
 
+| `cause()` returns | Meaning |
+|---|---|
+| `Cause(source, via)` | A handler produced the event from `source`. |
+| `NotRecorded()` | The event came from history written before causes existed. |
+| `SourceDropped(via, source_type)` | The handler is known. A store rewrite deleted its source. |
+| `FrameworkEvent()` | The framework wrote the event. The event type says which mechanism. |
+| `None` | A seed: the event came from outside, through `invoke()` input or `pre_seed()`. |
+
+- Each type holds only the facts that are true. `NotRecorded` has no handler, because
+  none was recorded. `SourceDropped` keeps the handler and the type of the deleted event.
+- "Unknown" happens only for history that this release did not write: a checkpoint saved
+  before this feature, or a source that `rewrite_store(drop=...)` deleted. A thread that
+  starts with this release and is never rewritten with `drop` has no unknown cause.
 - `source` and `via` mirror `NamespaceModel.Edge(source, via, target)`. A `Cause` is the
-  instance-level form of an `Edge`, and the target is the event itself. The name `source`
-  also matches `HandlerRaised.source_event`. The docs map `source` to the event-store
-  term "causation ID". The name `causation` is not used, because `Edge.causation`
-  already means the causal *role*: intent, react, orchestrate or chain.
+  instance-level form of an `Edge`: `Cause.source` is an event, `Edge.source` is a type.
+  The name `source` also matches `HandlerRaised.source_event`. The docs map `source` to
+  the event-store term "causation ID". The name `causation` is not used, because
+  `Edge.causation` already means the causal *role*: intent, react, orchestrate or chain.
 - `via` is the stable graph node name (`HandlerMeta.node_name`). For an inline command
   handler, that is the command qualname, not a positional name such as `handle_2`.
   `via` equals `Edge.via` unless the handler has a stable identity: an inline command
@@ -74,29 +109,34 @@ EventLog(events, causes=None)   # causes: a sequence aligned with events, of Cau
   gives the same answer as `log.cause(e)`.
 - A log without causes (`EventLog(events)` from a plain list) has `causes is None`.
   On such a log, `cause()`, `effects()` and `flow()` raise `ValueError` ("this log records
-  no causes"). `cause()` does not return `None`, because `None` means "a seed".
-- The constructor checks each `Cause`: its `source` must be an event that appears earlier
-  in the same log, by identity. Otherwise the constructor raises `ValueError`. An entry
-  that is not a `Cause` or `None` raises `TypeError`.
+  no causes").
+- The constructor checks each entry. A `Cause` source must be the same object as an
+  earlier event in the same log: otherwise `ValueError`, which says to pass `events[j]`,
+  not a copy. `via` must be a `str`. Any other entry type raises `TypeError`.
 - `log.causes` is the inverse of the constructor: `EventLog(log.events, causes=log.causes)`
-  rebuilds a root log. In a log from `after`, `before` or `select`, a source can be an
-  event outside that log. Building a log from its `events` and `causes` then raises
-  `ValueError`.
+  rebuilds a root log, unknown and framework cases included. In a log from `after`,
+  `before` or `select`, a source can be an event outside that log. Building a log from
+  its `events` and `causes` then raises `ValueError`.
 
-The count of firings is then a plain expression:
+The count of firings is then a plain expression, and it includes dropped sources:
 
 ```python
-fired = sum(1 for e in log if (c := log.cause(e)) and c.via == "hourly_wake_brief")
+fired = sum(
+    1 for e in log
+    if isinstance(c := log.cause(e), (Cause, SourceDropped)) and c.via == "notify_customer"
+)
 ```
 
 ## Reflection
 
-`Reflection` gets the same facts by root index:
+`Reflection` gets the same facts by root index, through the public `EventLog` API only:
 
-- `get(index)` shows `cause: #N via <handler>` when the event has a cause.
+- `get(index)` shows a `cause:` line for every event that is not a seed: `#N via <handler>`,
+  `unknown, not recorded`, `unknown, source <Type> dropped by rewrite_store, via
+  <handler>`, or `framework`.
 - `evidence(index)` lists the recorded cause first, as a fact.
-- The `query_log` tool gets one op, `cause`, with an `index` argument. It answers
-  `#N via <handler>`, or `seed`.
+- The `query_log` tool gets one op, `cause`, with an `index` argument. It answers with the
+  same text, or `seed`.
 
 ## Storage
 
@@ -117,29 +157,34 @@ The graph state gets one channel next to `events`:
   becomes a serde identity and triggers the "unregistered type" warning of the
   serializer.
 - A handler cannot find the index of its trigger by identity or equality after a
-  checkpoint reload. The seed node and the router therefore write `_pending_base`, the
-  log index of the first pending event. The handler uses `_pending_base + k` for the
-  k-th pending event.
+  checkpoint reload. It derives the index instead: the pending events sit at indices
+  `[_cursor - len(_pending), _cursor)`. This is exact on every path where a handler runs:
+  the seed, the router and `RunPaused`. After `MaxRoundsExceeded`, no handler runs. The
+  derivation also holds for a checkpoint saved before this feature, so no extra channel
+  is needed.
+- Besides `(source, via)` and `None`, the channel stores two tagged tuples:
+  `("framework",)` for an event the framework wrote, and
+  `("dropped", via, source_type)` for a source that a store rewrite deleted.
 - One module, `_causes.py`, owns the storage format. It holds the entry alias
-  `CauseEntry` and one function, `resolve(events, causes) -> (absolute entries,
-  known_from)`. `resolve` applies the relative-source rule and the align-from-the-end
+  `CauseEntry`, the constructors of the tagged entries, and one reader,
+  `resolve(events, causes) -> (absolute entries, known_from)`. `resolve` applies the relative-source rule and the align-from-the-end
   rule. `EventLog` (built from state) and `rewrite_store(drop=...)` both call it, so
   neither sees a negative source.
-- One helper in `_internal.py`, `pad_causes(update)`, adds a `None` cause for each event
-  of a state update that writes `events` without causes. Every writer outside a handler
-  call uses it.
+- One helper in `_internal.py`, `pad_causes(update, entry)`, adds one entry for each
+  event of a state update that writes `events` without causes: `None` for a seed, or the
+  framework entry. Every writer outside a handler call uses it.
 
 ### Writers
 
 | Writer | Writes to `causes` |
 |---|---|
-| Handler (`_finalize`) | One `(trigger index, node name)` per event, recorded after each handler call, so the invariant rollback stays aligned. On a thread that paused before this feature (no `_pending_base`), `None` per event |
+| Handler (`_finalize`) | One `(trigger index, node name)` per event, recorded after each handler call, so the invariant rollback stays aligned. |
 | Seed node | `[None] * min(len(events) - len(causes), len(events) - cursor)`. The graph input writes only `events`, so the seed node pads for it. The second term keeps the older events of a checkpoint saved before this feature unknown. |
-| Router: `MaxRoundsExceeded`, `RunPaused` | `[None]`, through `pad_causes` |
-| Async `Cancelled` path | `[None]`, through `pad_causes` |
-| `_settle_supersteps` (abandon) | `[None]`, through `pad_causes` |
-| `pre_seed()` / `apre_seed()` | `[None]` per event in `values["events"]`, through `pad_causes`. The AG-UI resume path writes events this way. |
-| `rewrite_store(drop=...)` (`_drop_from_log`) | Filters `causes` at the same positions and remaps each source index, after `resolve`. Writes absolute entries back. A cause whose source was dropped becomes `None`. It also lowers `_pending_base` by the dropped events below it, the same as `_cursor`. |
+| Router: `MaxRoundsExceeded`, `RunPaused` | `[("framework",)]`, through `pad_causes` |
+| Async `Cancelled` path | `[("framework",)]`, through `pad_causes` |
+| `_settle_supersteps` (abandon) | `[("framework",)]`, through `pad_causes` |
+| `pre_seed()` / `apre_seed()` | `[None]` per event in `values["events"]`, through `pad_causes`. These events come from outside, so they are seeds. The AG-UI resume path writes events this way. |
+| `rewrite_store(drop=...)` (`_drop_from_log`) | Filters `causes` at the same positions and remaps each source index, after `resolve`. Writes absolute entries back. A cause whose source was dropped becomes `("dropped", via, source_type)`. |
 
 A writer that drifts fails fast. `_finalize` raises `RuntimeError` when a handler call
 records a different number of causes than events. `resolve` raises `RuntimeError` when
@@ -164,16 +209,12 @@ for the `EventLog` built from state and for `rewrite_store(drop=...)` before it 
 
 LangGraph starts a channel that an old checkpoint lacks at its default, `[]`. The reader
 aligns the channels from the end: `offset = len(events) - len(causes)`, and each event
-below `offset` has an unknown cause. `cause()` returns `None` for such an event, and
-`Reflection.get` shows `cause: unknown`. If `len(causes) > len(events)`, a writer drifted:
-`resolve` raises `RuntimeError` with both lengths.
+below `offset` is `NotRecorded()`. `Reflection.get` shows `cause: unknown, not
+recorded`. If `len(causes) > len(events)`, a writer drifted: `resolve` raises
+`RuntimeError` with both lengths.
 
-A thread that paused before this feature has no `_pending_base`. When it resumes, the
-handler records `None` for each event it returns, so the channels stay aligned.
-
-`Reflection` must tell `unknown` from `seed`, because `cause()` returns `None` for both.
-It reads that one fact through the private `EventLog._cause_is_known(event)`, its only
-private dependency on `EventLog`.
+A thread that paused before this feature resumes normally. Its handler derives the
+trigger index from `_cursor` and `_pending`, so the events it returns get a real `Cause`.
 
 ## Clients that persist their own log
 
