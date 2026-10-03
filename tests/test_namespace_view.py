@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import ClassVar
 
 import pytest
@@ -17,6 +18,7 @@ from langgraph_events import (
     ScalarReducer,
     on,
 )
+from langgraph_events._namespace._mermaid import _LINKSTYLE_MUTED
 
 
 class _LedgerError(Exception):
@@ -70,6 +72,11 @@ def note_each_tick(event: _Clock.Tick.Ticked) -> _Clock.Note:
 
 @on(HandlerRaised)
 def recover_ledger(event: HandlerRaised) -> None:
+    return None
+
+
+@on(_Ops.Ping.Pinged)
+def commits(event: _Ops.Ping.Pinged) -> None:
     return None
 
 
@@ -205,7 +212,7 @@ def describe_focus():
     def when_it_selects_a_reaction():
         def it_draws_the_edges_of_the_reaction():
             output = _focused(reactions=("note_each_tick",))
-            assert 'Ticked -->|"note_each_tick [orchestrate]"| Note' in output
+            assert 'Ticked ==>|"note_each_tick [orchestrate]"| Note' in output
 
         def it_draws_the_endpoints_as_context():
             output = _focused(reactions=("note_each_tick",))
@@ -299,3 +306,55 @@ def describe_muted():
     def when_it_is_empty():
         def it_declares_no_muted_class():
             assert "muted" not in _model().mermaid()
+
+
+def _inline_name(command: type) -> str:
+    return next(
+        r.name
+        for r in _model().command_handlers
+        if r.inline and r.commands[0] is command
+    )
+
+
+def describe_reaction_keys():
+    def when_a_note_names_a_reaction():
+        def it_writes_the_note_under_its_edge_label():
+            output = _model().mermaid(notes={"note_each_tick": "fired 2x"})
+
+            assert (
+                'Ticked -->|"note_each_tick [orchestrate]<br>fired 2x"| Note' in output
+            )
+
+    def when_muted_names_a_reaction():
+        def it_fades_the_edges_of_the_reaction():
+            output = _model().mermaid(muted=["note_each_tick"])
+            edges = [
+                line
+                for line in output.splitlines()
+                if re.search(r" (==>|-\.->|-\.-|-->)", line)
+            ]
+            index = edges.index('    Ticked -->|"note_each_tick [orchestrate]"| Note')
+
+            assert f"linkStyle {index} {_LINKSTYLE_MUTED}" in output
+
+    def when_a_name_is_a_reaction_and_a_reducer():
+        def it_raises_value_error():
+            model = EventGraph(
+                [_Clock.Tick, _Ledger.Commit, note_each_tick, recover_ledger, commits]
+            ).namespaces()
+
+            with pytest.raises(ValueError, match="both a reaction and a node"):
+                model.mermaid(notes={"commits": "x"})
+
+    def when_a_key_is_an_inline_handler_name():
+        def it_names_the_command_to_use_instead():
+            name = _inline_name(_Ledger.Commit)
+
+            with pytest.raises(ValueError, match=r"_Ledger\.Commit"):
+                _model().mermaid(notes={name: "x"})
+
+    def when_a_focus_selects_the_reaction():
+        def it_draws_its_edges_as_thick_arrows():
+            output = _focused(reactions=("note_each_tick",))
+
+            assert 'Ticked ==>|"note_each_tick [orchestrate]"| Note' in output
