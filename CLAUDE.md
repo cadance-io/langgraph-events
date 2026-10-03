@@ -65,6 +65,9 @@ Run all tooling through `uv`. Do not call bare `python` or `pytest`.
 - Put a shared event class in `conftest.py`. Put a scenario-specific event inline.
 - WARNING: Python resolves a forward reference at runtime. An event class used as a handler type
   annotation must be defined at module level, not inside a `describe_` or `when_` block.
+- The library stays general. A PR description, spec, doc, docstring or commit message never
+  names a client application or its domain. State the need in general terms, for example "a
+  client that wants to count how often a handler fired".
 
 ## Release
 
