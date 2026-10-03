@@ -38,6 +38,10 @@ ckpoint saved before causes existed still loads.** Its older events have an unkn
   A thread that paused before the upgrade resumes. The events that the resumed handler
   returns have no recorded cause.
 
+ite_store(drop=...)` keeps the causes aligned.** It filters `causes` at the same
+  positions as `events` and remaps each source. A cause whose source was dropped becomes
+  `None`. It also lowers `_pending_base`, so a paused handler resumes with its real trigger.
+
 ## [0.34.0] - 2026-10-03
 
 ### Changed

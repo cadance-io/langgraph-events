@@ -19,6 +19,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from test_event_graph import _AsyncOnlySaver
 
 from langgraph_events import (
+    Cause,
     EventGraph,
     IntegrationEvent,
     Interrupted,
@@ -372,6 +373,17 @@ def describe_rewrite_store():
             assert fired == [1]
             assert log.latest(Ended) == Ended(result="again")
 
+        def it_remaps_each_cause_to_the_kept_events():
+            saver = MemorySaver()
+            graph, cfg, retiring = _settled_drop_pair(saver, "t1")
+
+            graph.rewrite_store(drop=(retiring,))
+            log = graph.get_state(cfg).events
+
+            assert log.cause(log.latest(Ended)) == Cause(source=_Go(), via="_go_ends")
+            assert log.cause(log.latest(Ended)).source is log.first(_Go)
+            assert log.cause(log.first(_Go)) is None
+
     def when_drop_names_a_base_class():
         def it_leaves_a_subclass_instance_in_place():
             # drop= matches the stored identity, not the class hierarchy,
@@ -397,6 +409,37 @@ def describe_rewrite_store():
             [thread] = graph.rewrite_store(drop=(_Base,), thread_ids=["t1"]).threads
 
             assert thread.status == "unchanged"
+
+    def when_a_dropped_event_sits_below_a_paused_handler():
+        def it_keeps_the_trigger_of_the_resumed_handler():
+            saver = MemorySaver()
+
+            class _Noise(IntegrationEvent):
+                pass
+
+            class _Gate(Interrupted):
+                pass
+
+            @on(_Noise)
+            def promote(event: _Noise) -> Started:
+                return Started(data="promoted")
+
+            @on(Started)
+            def wait(event: Started) -> _Gate:
+                return _Gate()
+
+            cfg = _cfg("t1")
+            saver.serde = NamespaceAwareSerde(events=(Started, _Noise, _Gate))
+            graph = EventGraph([promote, wait], checkpointer=saver)
+            graph.invoke(_Noise(), config=cfg)
+            graph.rewrite_store(drop=(_Noise,))
+
+            log = graph.resume(_Go(), config=cfg)
+
+            assert log.cause(log.first(_Gate)) == Cause(
+                source=Started(data="promoted"), via="wait"
+            )
+            assert log.cause(log.first(_Gate)).source is log.first(Started)
 
     def when_a_live_class_carries_a_fill():
         def it_converges_on_the_second_run():
