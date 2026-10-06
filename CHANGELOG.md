@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`NamespaceAwareSerde.revive_event()` revives one stored event.** A store that keeps each
+  event as its own record, not as a msgpack blob, can now apply the migration tables. The method
+  takes the stored identity and field values, and an optional `resolve` callback that is asked
+  for the class first. It raises `ValueError` with the remedy. Inside `tolerate_unresolved()`
+  it returns an `UnrevivedIdentity`. The checkpoint read path and this method share one rule.
+- **`UnrevivedIdentity` is exported from `langgraph_events.serde`.**
+
 ## [0.35.1] - 2026-10-03
 
 ### Fixed
