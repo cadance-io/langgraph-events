@@ -104,7 +104,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `ScalarReducer` | Class | Last-write-wins for a single value; `None` is valid |
 | `FoldReducer` | Class | Folds each event into accumulating state via `fold(self, state)`; next value depends on the prior. Generic over state type `S` |
 | `Foldable` | Protocol | `@runtime_checkable` structural type for events with a `fold` method; types `FoldReducer`'s event arg (don't inherit it) |
-| `BaseReducer` | Class | Abstract base for custom reducers — subclass for bespoke channels |
+| `BaseReducer` | Class | Abstract base for custom reducers — subclass for bespoke channels. `advance(state, events)` folds events onto a channel value through the channel merge (see [Rebuilding a channel from the log](reducers.md#rebuilding-a-channel-from-the-log)) |
 | `SKIP` | Sentinel | Return from `ScalarReducer.fn` (or a `FoldReducer.fold`) to leave the value unchanged |
 | `RESET` | Sentinel | Return from a `FoldReducer.fold` to clear the channel back to `default_factory()` |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |

@@ -57,6 +57,18 @@ class Completed(IntegrationEvent):
     result: str = ""
 
 
+class Noted(IntegrationEvent):
+    key: str = ""
+    text: str = ""
+
+
+def keyed_merge(left: list[list[str]], right: list[list[str]]) -> list[list[str]]:
+    """A ``Reducer`` merge that keeps the newest text per key."""
+    merged = dict(left)
+    merged.update(right)
+    return [[key, text] for key, text in merged.items()]
+
+
 # Canonical namespace used by test_invariant.py / test_namespace.py /
 # test_reducer_namespace.py. The ``current_status`` reducer demonstrates
 # the declarative namespace-reducer form — auto-named "current_status",

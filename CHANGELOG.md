@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`BaseReducer.advance(state, events)` folds events onto a channel value.** It uses the merge
+  from `state_annotation()`, the merge LangGraph applies in a live run, not `seed()`. A store
+  that keeps only the event log rebuilds a channel with it, then folds each new batch.
 - **`NamespaceAwareSerde.revive_event()` revives one stored event.** A store that keeps each
   event as its own record, not as a msgpack blob, can now apply the migration tables. The method
   takes the stored identity and field values, and an optional `resolve` callback that is asked

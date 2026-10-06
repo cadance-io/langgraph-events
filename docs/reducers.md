@@ -178,6 +178,21 @@ graph.invoke(SeedEvent(), config=config)
 
 Pre-seeded values bypass the event log — `log.filter()` won't reflect them.
 
+## Rebuilding a channel from the log { #rebuilding-a-channel-from-the-log }
+
+`reducer.advance(state, events)` folds *events* onto *state* through the channel merge, the
+merge LangGraph applies in a live run. Start from `reducer.empty`. Call it again for each new
+batch: two calls equal one call over both batches.
+
+```python
+value = my_reducer.advance(my_reducer.empty, list(log))
+value = my_reducer.advance(value, new_events)
+```
+
+`advance` differs from `seed()` for a `Reducer` with a custom merge, such as `message_reducer`:
+`seed()` concatenates, `advance` merges. A store with no checkpointer uses `advance`. See
+[Event store](event-store.md).
+
 ## Recovering from projection changes { #replay_reducer }
 
 When a reducer's `fn` or output shape changes, the cached channel value in existing checkpoints is stale. Replay the (already-migrated) event log to rebuild it:
