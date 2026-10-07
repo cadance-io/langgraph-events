@@ -110,6 +110,11 @@ def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def _seed_events(seed: Event | list[Event]) -> list[Event]:
+    """The seed of an ``invoke``: one event, or a list of events, as a list."""
+    return seed if isinstance(seed, list) else [seed]
+
+
 class _OutputState(TypedDict):
     events: list[Event]
     causes: list[CauseEntry]

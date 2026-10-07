@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
 
 from langgraph_events._event import Event
 from langgraph_events._event_log import EventLog
+from langgraph_events._internal import _seed_events
 from langgraph_events.serde import NamespaceAwareSerde
 
 if TYPE_CHECKING:
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from langgraph_events._event import Namespace
+    from langgraph_events._graph import EventGraph
     from langgraph_events.serde import Migration, UnrevivedIdentity
 
 
@@ -359,3 +361,71 @@ class EventCodec:
         if marker == "$repr" and isinstance(body, str):
             return body
         raise ValueError(f"{marker} holds {type(body).__name__}")
+
+
+class EventStream:
+    """A graph over a durable log: load once, then append per superstep.
+
+    Each :meth:`invoke` hands the graph the stored history, the cached
+    reducer values and the seed. A handler sees the whole log in an
+    injected ``EventLog``. The events of a superstep reach the store before
+    the next superstep runs, so a crash loses at most the superstep that
+    was running.
+    """
+
+    def __init__(self, graph: EventGraph, store: EventStore, codec: EventCodec):
+        if graph.checkpointer is not None:
+            raise ValueError(
+                "EventStream keeps the log in its EventStore. Build the "
+                "EventGraph without checkpointer=."
+            )
+        self._graph = graph
+        self._store = store
+        self._codec = codec
+        self._events: list[Event] = list(codec.decode(store.load()))
+        self._states: dict[str, object] = {
+            name: reducer.advance(reducer.empty, self._events)
+            for name, reducer in graph.reducers.items()
+        }
+
+    @property
+    def log(self) -> EventLog:
+        """Every stored event, in order."""
+        return EventLog._from_owned(tuple(self._events))
+
+    def state(self) -> Mapping[str, object]:
+        """The reducer values over the stored log. Folds nothing."""
+        return dict(self._states)
+
+    def invoke(self, seed: Event | list[Event]) -> EventLog:
+        """Run one turn from *seed*. Returns only the events this turn added.
+
+        *seed* is one event or a list, as for ``EventGraph.invoke``. A handler's
+        injected ``EventLog`` is the stored log, then this turn's events.
+        When a handler raises, the events stored before it stay stored, and
+        the cache folds them.
+        """
+        base = len(self._events)
+        seeds = _seed_events(seed)
+        state = {
+            "events": [*self._events, *seeds],
+            "causes": [None] * (len(self._events) + len(seeds)),
+            "_cursor": base,
+            **self._states,
+        }
+        try:
+            for values in self._graph.compiled.stream(state, stream_mode="values"):
+                self._commit(values["events"][len(self._events) :])
+        finally:
+            added = self._events[base:]
+            self._states = {
+                name: reducer.advance(self._states[name], added)
+                for name, reducer in self._graph.reducers.items()
+            }
+        return EventLog._from_owned(tuple(self._events[base:]))
+
+    def _commit(self, new: list[Event]) -> None:
+        """Persist *new* events, then include them in the local log."""
+        if new:
+            self._store.append(self._codec.encode(new))
+            self._events.extend(new)

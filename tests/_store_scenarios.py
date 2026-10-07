@@ -8,11 +8,12 @@ function.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
-from langgraph_events import Event, IntegrationEvent
-from langgraph_events.store import EventCodec, JsonlEventStore
+from langgraph_events import Event, EventGraph, FoldReducer, IntegrationEvent, on
+from langgraph_events.store import EventCodec, EventStream, JsonlEventStore
 
 
 class Define(IntegrationEvent):
@@ -70,6 +71,61 @@ def read_runtime_class(path: str) -> None:
             }
         )
     )
+
+
+class Start(IntegrationEvent):
+    marker: str
+
+
+class Approved(IntegrationEvent):
+    marker: str
+
+
+class Done(IntegrationEvent):
+    pass
+
+
+@on(Start)
+def approve(event: Start) -> Approved:
+    return Approved(marker=event.marker)
+
+
+@on(Approved)
+def act_then_die(event: Approved) -> Done:
+    Path(event.marker).write_text("side effect")
+    os._exit(1)
+
+
+def crash_after_side_effect(path: str, marker: str) -> None:
+    with JsonlEventStore(Path(path)) as store:
+        stream = EventStream(EventGraph([approve, act_then_die]), store, EventCodec())
+        stream.invoke(Start(marker=marker))
+
+
+class Tick(IntegrationEvent):
+    pass
+
+
+class Tock(IntegrationEvent):
+    seen: int
+
+
+FOLDS: list[int] = []
+"""One entry per call of the ``ticks`` fold, so a test can count folds."""
+
+
+def _count(state: int, event: Event) -> int:
+    FOLDS.append(1)
+    return state + 1
+
+
+def ticks() -> FoldReducer[int]:
+    return FoldReducer(name="ticks", event_type=Tick, default_factory=int, fold=_count)
+
+
+@on(Tick)
+def guard(event: Tick, ticks: int) -> Tock:
+    return Tock(seen=ticks)
 
 
 def main() -> None:

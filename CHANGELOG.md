@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EventStream` runs an `EventGraph` over an `EventStore`.** It loads the log once. `invoke`
+  takes the same seed as `EventGraph.invoke`: one event or a list. It gives the graph the whole
+  log, the cached reducer values and the seed, and stores the events of each superstep before
+  the next superstep runs. A crash loses at most the running superstep. A handler's injected
+  log is the stored log, then the turn's events. `invoke` returns only the turn's events.
+  `state()` reads the cached reducer values, folded with `BaseReducer.advance`, and folds
+  nothing. The graph must have no checkpointer.
 - **`EventCodec` turns events into store records and back.** A field that holds an earlier event
   of the log is stored as `{"$ref": index}` and revives as the same object. A tuple, a dict with
   a `$` key, and a value outside JSON use `$tuple`, `$dict` and `$repr`. Each record goes through

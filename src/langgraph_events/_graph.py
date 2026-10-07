@@ -51,6 +51,7 @@ from langgraph_events._internal import (
     _apply_reducers,
     _leaf_node,
     _OutputState,
+    _seed_events,
     build_state_schema,
     make_dispatch,
     make_handler_node,
@@ -1534,7 +1535,7 @@ class EventGraph:
         aligned with ``events`` with no guess, also on a checkpoint saved
         before causes existed.
         """
-        seeds = seed if isinstance(seed, list) else [seed]
+        seeds = _seed_events(seed)
         return {"events": seeds, "causes": [None] * len(seeds)}
 
     def _run(self, inp: Any, **kwargs: Any) -> EventLog:
