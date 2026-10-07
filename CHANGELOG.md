@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventMixin`: a public base for a mixin that `@on` subscribes to.** Subclass it, compose
+  the subclass with an Event branch or a `Command`, and `@on(MyMixin)` receives every event
+  that carries it. `MessageEvent` and `Auditable` subclass it.
+
 ### Fixed
 
 - **Every logged event folds into the reducer channels exactly once.** The router did not fold
@@ -16,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: `@on` no longer reads the private `_event_mixin` flag.** A mixin must subclass
+  `EventMixin`. A class that carries only `_event_mixin = True` now raises `TypeError` at
+  `@on`.
 - **BREAKING: an `Interrupted` event on a graph with no checkpointer raises
   `InterruptWithoutCheckpointerError`.** Before, LangGraph ended the run and the interrupt was lost
   with no error. Pass `checkpointer=` to `EventGraph`, or return an event that does not pause.

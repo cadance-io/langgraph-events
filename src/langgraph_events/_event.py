@@ -614,7 +614,24 @@ class SystemEvent(Event, _event_base=True):
     """
 
 
-class MessageEvent:
+class EventMixin:
+    """Base for a behavioural mixin that ``@on`` can subscribe to.
+
+    A mixin is not an ``Event``. Compose it with an Event branch, or with a
+    ``Command``. ``@on(MyMixin)`` then dispatches every event that carries
+    it. ``@on`` refuses any other class that is not an ``Event``.
+
+    Example::
+
+        class Minted(EventMixin):
+            pass
+
+        @on(Minted)
+        def record(event: Minted) -> None: ...
+    """
+
+
+class MessageEvent(EventMixin):
     """Mixin for events that wrap LangChain messages.
 
     Compose with an Event branch (``DomainEvent``, ``IntegrationEvent``,
@@ -631,8 +648,6 @@ class MessageEvent:
             message: HumanMessage
     """
 
-    _event_mixin: ClassVar[bool] = True
-
     def as_messages(self) -> list[BaseMessage]:
         msg = getattr(self, "message", None)
         if msg is not None:
@@ -646,7 +661,7 @@ class MessageEvent:
         )
 
 
-class Auditable:
+class Auditable(EventMixin):
     """Mixin for events that should be auto-logged.
 
     Compose with an Event branch — this class is a behavioural mixin,
@@ -658,8 +673,6 @@ class Auditable:
         class OrderPlaced(DomainEvent, Auditable):
             order_id: str = ""
     """
-
-    _event_mixin: ClassVar[bool] = True
 
     def trail(self) -> str:
         """Return a compact, human-readable summary of this event."""

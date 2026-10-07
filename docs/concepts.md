@@ -458,7 +458,7 @@ def guard(event: Content.Classified) -> Reply | Content.Blocked:
 
 ## Mixins
 
-`Auditable` and `MessageEvent` are plain mixins (not `Event` subclasses). Compose with any event branch.
+`Auditable` and `MessageEvent` are plain mixins (not `Event` subclasses). Compose with any event branch. Both subclass `EventMixin`. Subclass `EventMixin` for your own mixin: `@on(MyMixin)` then subscribes to every event that carries it.
 
 **`Auditable`** — auto-logging marker. `@on(Auditable)` subscribes to all marked events:
 

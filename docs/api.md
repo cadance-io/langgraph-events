@@ -15,6 +15,7 @@
 
 | Export | Type | Description |
 |---|---|---|
+| `EventMixin` | Base class | Base for a behavioural mixin that `@on` can subscribe to. Compose a subclass with an Event branch or a `Command`. `@on(MyMixin)` dispatches every event that carries it. `@on` refuses any other class that is not an `Event` |
 | `Auditable` | Mixin | Marker for auto-logged events; `trail()` returns a compact summary. Compose with any event branch |
 | `MessageEvent` | Mixin | Wraps LangChain `BaseMessage`; declares `message` or `messages` field. Compose with any event branch |
 | `SystemPromptSet` | Event | Built-in `IntegrationEvent` + `MessageEvent` for system prompts |

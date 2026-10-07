@@ -11,7 +11,7 @@ from collections import abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from langgraph_events._event import Event, Invariant
+from langgraph_events._event import Event, EventMixin, Invariant
 from langgraph_events._event_log import (
     EventLog,
 )
@@ -175,6 +175,11 @@ def _resolve_type_hints(fn: Any) -> dict[str, Any]:
     return _resolve_hints_and_errors(fn)[0]
 
 
+def _is_subscribable(cls: object) -> bool:
+    """``@on`` accepts an ``Event`` subclass or an :class:`EventMixin` subclass."""
+    return isinstance(cls, type) and issubclass(cls, (Event, EventMixin))
+
+
 def _infer_event_type(fn: Any) -> type[Event]:
     """Read an ``Event`` subclass off ``fn``'s first parameter annotation.
 
@@ -213,10 +218,7 @@ def _infer_event_type(fn: Any) -> type[Event]:
             f"{event_type!r}. For multi-event subscription pass the types "
             f"explicitly: @on(A, B, ...)."
         )
-    is_event_type = issubclass(event_type, Event) or getattr(
-        event_type, "_event_mixin", False
-    )
-    if not is_event_type:
+    if not _is_subscribable(event_type):
         raise TypeError(
             f"@on requires {fn.__qualname__!r}'s first parameter {first!r} "
             f"to be annotated with an Event subclass or mixin, got "
@@ -270,10 +272,7 @@ def _build_on_decorator(
     """
     field_matchers = field_matchers or {}
     for et in event_types:
-        if not (
-            isinstance(et, type)
-            and (issubclass(et, Event) or getattr(et, "_event_mixin", False))
-        ):
+        if not _is_subscribable(et):
             raise TypeError(f"@on() requires Event subclasses or mixins, got {et!r}")
 
     raises_tuple = normalize_exception_tuple(raises, owner="@on() raises=")
