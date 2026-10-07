@@ -149,6 +149,7 @@ from langgraph_events.stream import (
 | Export | Type | Description |
 |---|---|---|
 | `CommandPrivacyError` | TypeError subclass | Raised at `EventGraph` construction; also at runtime when a handler with a broad base-class annotation (e.g. `-> DomainEvent`) constructs a `Cmd.Private(...)` that bypasses the static contract check. Outcomes nested inside a `Command` are private to that Command's inline `handle()` — neither sibling Commands nor non-inline reactors may produce them |
+| `InterruptWithoutCheckpointerError` | RuntimeError subclass | Raised when a handler returns an `Interrupted` on an `EventGraph` built without `checkpointer=`. Before, the run ended and the interrupt was lost with no error. Raised outside the `raises=` catch boundary |
 | `ReducerNotSetError` | ValueError subclass | Raised at injection time (before the handler body runs) when a handler parameter rejects `None` (e.g. `strategy: str`) and the channel value is `None`. Sits outside the `raises=` catch boundary — a broad `raises=ValueError` cannot swallow it. Opt out by widening the annotation to `str | None`, `Any`, `object`, or omitting it |
 
 ## AG-UI Subpackage

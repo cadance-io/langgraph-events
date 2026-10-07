@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: an `Interrupted` event on a graph with no checkpointer raises
+  `InterruptWithoutCheckpointerError`.** Before, LangGraph ended the run and the interrupt was lost
+  with no error. Pass `checkpointer=` to `EventGraph`, or return an event that does not pause.
+  The check reads the `EventGraph`'s own checkpointer. A graph with no checkpointer that you
+  embed through `graph.compiled` under a checkpointed parent graph now raises too.
 - **A `ScalarReducer` keeps the newest value that `fn` does not skip, in a batch.** Before, it
   called `fn` on the last matching event only, and a `SKIP` there dropped the whole batch. A
   batch now gives the value its events give one at a time. `fn` can run on more than one event

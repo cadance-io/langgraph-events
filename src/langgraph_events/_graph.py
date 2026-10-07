@@ -1319,6 +1319,7 @@ class EventGraph:
                 services_by_type=self._services_by_type or None,
                 services_by_name=self._services_by_name or None,
                 model_provider=self.namespaces,
+                checkpointed=self._checkpointer is not None,
             )
             graph.add_node(meta.node_name, cast("Any", handler_node))
             handler_names.append(meta.node_name)

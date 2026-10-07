@@ -139,7 +139,7 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
 
 ## `Interrupted` / `Resumed`
 
-Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)` (requires a checkpointer); a `Resumed` event emits alongside the dispatched event.
+Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)`; a `Resumed` event emits alongside the dispatched event. An interrupt requires a checkpointer on the `EventGraph`. Without one, a handler that returns an `Interrupted` raises `InterruptWithoutCheckpointerError`, because LangGraph keeps a pause only in a checkpoint.
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver

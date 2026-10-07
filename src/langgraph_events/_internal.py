@@ -38,6 +38,8 @@ from langgraph_events._event import (
     Halted,
     HandlerRaised,
     HandlerRetried,
+    Interrupted,
+    InterruptWithoutCheckpointerError,
     InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
@@ -834,6 +836,7 @@ def make_handler_node(
     services_by_name: dict[str, Any] | None = None,
     *,
     model_provider: Callable[[], NamespaceModel],
+    checkpointed: bool,
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
 
@@ -843,15 +846,18 @@ def make_handler_node(
     - Filters pending events by isinstance(e, handler.event_types)
     - Loops: calls handler once per matching event (strict event→event)
     - Normalises return: Event → [event], None → [], Scatter → list of events
-    - Handles Interrupted: calls interrupt(), creates Resumed on resume
+    - Handles Interrupted: calls interrupt(), creates Resumed on resume.
+      Without a checkpointer (*checkpointed* is ``False``) it raises
+      ``InterruptWithoutCheckpointerError`` instead
     - Applies reducer projections to new events
     """
     from langchain_core.callbacks.manager import (  # noqa: PLC0415
         adispatch_custom_event,
         dispatch_custom_event,
     )
-    from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
+    from langgraph.types import interrupt  # noqa: PLC0415
 
+    lg_interrupt = interrupt if checkpointed else _refuse_interrupt
     reds = reducers or {}
     svcs_by_type = services_by_type
     svcs_by_name = services_by_name
@@ -962,6 +968,15 @@ def make_handler_node(
         return _finalize({"events": new_events, "causes": new_causes})
 
     return _leaf_node(_run_handler_sync, _run_handler_async, meta.name)
+
+
+def _refuse_interrupt(event: Interrupted) -> Event:
+    """Stand in for LangGraph's ``interrupt()`` on a graph with no checkpointer."""
+    raise InterruptWithoutCheckpointerError(
+        f"{type(event).__qualname__} is an Interrupted event, and this graph "
+        f"has no checkpointer to keep the pause. Pass checkpointer= to "
+        f"EventGraph, or return an event that does not pause."
+    )
 
 
 def _collect_result(

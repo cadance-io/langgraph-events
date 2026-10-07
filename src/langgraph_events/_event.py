@@ -791,6 +791,9 @@ class Interrupted(SystemEvent):
     calls LangGraph's ``interrupt()`` and the graph pauses.  Resume with
     ``graph.resume(event)`` to continue — the event is auto-dispatched
     and a ``Resumed`` event is created alongside it.
+
+    A graph without a checkpointer cannot keep the pause. There, a returned
+    ``Interrupted`` raises :class:`InterruptWithoutCheckpointerError`.
     """
 
     def _collect_into(
@@ -806,6 +809,14 @@ class Interrupted(SystemEvent):
             raise TypeError(f"resume() requires an Event instance, got {got}")
         new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))
+
+
+class InterruptWithoutCheckpointerError(RuntimeError):
+    """An ``Interrupted`` event reached a graph that has no checkpointer.
+
+    LangGraph keeps a pending interrupt only in a checkpoint. Without one,
+    the run would end and the interrupt would be lost with no error.
+    """
 
 
 class Resumed(SystemEvent):
