@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import _store_scenarios as sc
 import pytest
@@ -29,7 +30,24 @@ from langgraph_events.store import (
     Record,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 TESTS = Path(__file__).parent
+
+
+class FailsOnceMemoryEventStore(MemoryEventStore):
+    """A store whose first append fails before any record becomes durable."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._fails = True
+
+    def append(self, records: Sequence[Record]) -> None:
+        if self._fails:
+            self._fails = False
+            raise OSError("append failed")
+        super().append(records)
 
 
 class Request(IntegrationEvent):
@@ -109,6 +127,19 @@ def describe_EventStream():
                 EventStream(graph, MemoryEventStore(), EventCodec())
 
     def describe_invoke():
+        def when_an_append_fails_once():
+            def when_the_same_seed_retries():
+                def with_a_valid_link():
+                    def it_reopens():
+                        store = FailsOnceMemoryEventStore()
+                        stream = EventStream(EventGraph([grant]), store, EventCodec())
+                        request = Request(what="retry")
+                        with pytest.raises(OSError, match="append failed"):
+                            stream.invoke(request)
+                        stream.invoke(request)
+                        reopened = EventStream(EventGraph([grant]), store, EventCodec())
+                        assert reopened.log[1].request is reopened.log[0]
+
         def when_the_turn_completes():
             def it_returns_only_the_events_of_this_turn():
                 stream = EventStream(

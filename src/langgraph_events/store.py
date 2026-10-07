@@ -279,6 +279,18 @@ class EventCodec:
         self._index_of.update(fresh)
         return records
 
+    @contextlib.contextmanager
+    def _staged_encode(self, events: Sequence[Event]) -> Iterator[list[Record]]:
+        base = len(self._book)
+        indices = dict(self._index_of)
+        records = self.encode(events)
+        try:
+            yield records
+        except BaseException:
+            del self._book[base:]
+            self._index_of = indices
+            raise
+
     def decode(self, records: Sequence[Record]) -> EventLog:
         """Revive *records* as the next events of the log.
 
@@ -427,5 +439,6 @@ class EventStream:
     def _commit(self, new: list[Event]) -> None:
         """Persist *new* events, then include them in the local log."""
         if new:
-            self._store.append(self._codec.encode(new))
+            with self._codec._staged_encode(new) as records:
+                self._store.append(records)
             self._events.extend(new)
