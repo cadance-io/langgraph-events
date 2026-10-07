@@ -284,7 +284,7 @@ def _make_default(
             # inside ``obj.value`` reachable through this hook and revivable
             # under EXT_NAMESPACE_AWARE_EVENT.
             #
-            # Tracks (value, id) explicitly rather than walking
+            # Tracks Interrupt fields explicitly rather than walking
             # ``dataclasses.fields(obj)`` — Interrupt has a custom
             # ``__init__`` that doesn't accept arbitrary kwargs, so a
             # generic walk would not round-trip cleanly anyway.
@@ -292,7 +292,11 @@ def _make_default(
             # guards against silent field drift.
             return ormsgpack.Ext(
                 EXT_INTERRUPT,
-                ormsgpack.packb((obj.value, obj.id), default=_default, option=_option),
+                ormsgpack.packb(
+                    (obj.value, obj.id, obj.response_schema),
+                    default=_default,
+                    option=_option,
+                ),
             )
         return _msgpack_default(obj)
 
@@ -328,11 +332,17 @@ def _make_ext_hook(
         if code == EXT_INTERRUPT:
             # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
             # inside ``value`` resolves back to its namespaced class.
-            value, id_ = ormsgpack.unpackb(
+            fields = ormsgpack.unpackb(
                 data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
             )
+            value, id_, *remaining_fields = fields
+            response_schema = remaining_fields[0] if remaining_fields else None
             try:
-                return Interrupt(value=value, id=id_)
+                return Interrupt(
+                    value=value,
+                    id=id_,
+                    response_schema=response_schema,
+                )
             except TypeError as exc:
                 # Mirrors the EXT_NAMESPACE_AWARE_EVENT branch below: degrade
                 # gracefully through ``loads_typed``'s ``errors`` channel if

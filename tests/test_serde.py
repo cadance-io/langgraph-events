@@ -1092,6 +1092,21 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(back.value, Story.Approve.Approved)
                 assert back.value.note == "persona"
 
+        def when_interrupt_has_a_response_schema():
+            def it_preserves_the_schema():
+                serde = NamespaceAwareSerde()
+                schema = {"type": "string"}
+                interrupt = Interrupt(
+                    value=Persona.Approve.Approved(note="persona"),
+                    id="abc123",
+                    response_schema=schema,
+                )
+
+                back = serde.loads_typed(serde.dumps_typed(interrupt))
+
+                assert isinstance(back, Interrupt)
+                assert back.response_schema == schema
+
         def when_a_checkpoint_carries_multiple_interrupts():
             # LangGraph's runner emits a *tuple* of ``Interrupt``s on a
             # checkpoint write (one per parallel branch / interrupt site).
@@ -1171,10 +1186,11 @@ def describe_NamespaceAwareSerde():
             # serde gets updated alongside the LangGraph bump.
             def it_matches_the_schema_we_encode():
                 fields = {f.name for f in dataclasses.fields(Interrupt)}
-                assert fields == {"value", "id"}, (
+                assert fields == {"value", "id", "response_schema"}, (
                     f"langgraph.types.Interrupt fields drifted from "
-                    f"{{'value', 'id'}} to {fields}. NamespaceAwareSerde "
-                    f"hardcodes (value, id) in _jsonplus.py — extend "
+                    f"{{'value', 'id', 'response_schema'}} to {fields}. "
+                    "NamespaceAwareSerde hardcodes Interrupt fields in "
+                    "_jsonplus.py — extend "
                     f"_default and the EXT_INTERRUPT branch of _ext_hook "
                     f"to cover the new field(s)."
                 )
