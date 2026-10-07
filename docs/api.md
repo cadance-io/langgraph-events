@@ -177,6 +177,20 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `merge_frontend_messages` | Function | `resume_factory` helper: reads messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages`, merges via `add_messages` (id-based dedup). Returns a tuple |
 | `build_langchain_tools` / `detect_new_tool_results` | Function | Convert `RunAgentInput.tools` to OpenAI-format / extract new `ToolMessage`s from a resume request |
 
+## Store Subpackage
+
+A durable event log with no checkpointer. Exported from `langgraph_events.store`. See [Event store](event-store.md).
+
+| Export | Type | Description |
+|---|---|---|
+| `Record` | Frozen dataclass | `(module, type, fields)`. One stored event. `to_json()` gives one line. `Record.from_json(line)` raises `ValueError` on a line that is not a record |
+| `EventStore` | Protocol | `append(records)` makes records durable in order. `load()` returns every durable record |
+| `MemoryEventStore` | Class | In-memory `EventStore` that keeps JSON text |
+| `JsonlEventStore` | Class | `JsonlEventStore(path)`. One JSON record per line: `{"module", "type", "fields"}`. The constructor takes an exclusive `flock` on `<path>.lock` until `close()`. It creates `<path>` with the default mode on the first append, never before. Each `append` flushes and calls `fsync`, and an `OSError` propagates unwrapped. `load()` ignores a torn last line, and the next `append` truncates it. Context manager. POSIX only |
+| `StoreLockedError` | RuntimeError subclass | Raised by `JsonlEventStore(path)` when another store holds the lock |
+| `EventCodec` | Class | `EventCodec(migrations=(), *, namespaces=(), events=(), replay={})`. `encode(events)` and `decode(records)` for one log. `register(cls)`. `tolerate_unresolved()` |
+| `EventStream` | Class | `EventStream(graph, store, codec)`. `invoke(seed)` takes one event or a list, returns the turn's events and stores each superstep before the next. A handler's log is the stored log, then the turn's events. `log` is the whole log. `state()` reads cached reducer values. Refuses a graph with a checkpointer |
+
 ## Serde Subpackage
 
 Namespace-aware serialization, auto-wired by default. `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` builds a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` on those classes. Opt out by passing `MemorySaver(serde=<custom>)`. See [Event migrations](event-migrations.md).

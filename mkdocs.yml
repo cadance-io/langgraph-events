@@ -24,6 +24,7 @@ nav:
   - AG-UI Adapter: agui.md
   - Checkpointer & Graph Evolution: checkpointer-evolution.md
   - Event Migrations: event-migrations.md
+  - Event Store: event-store.md
 
 markdown_extensions:
   - md_in_html
