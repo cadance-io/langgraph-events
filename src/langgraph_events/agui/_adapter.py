@@ -86,11 +86,11 @@ class AGUIAdapter:
         error_message: str | None = None,
         on_unmapped: Literal["warn", "ignore", "raise"] = "warn",
     ) -> None:
-        if resume_factory is not None and graph._checkpointer is None:
+        if resume_factory is not None and graph.checkpointer is None:
             raise ValueError(
                 "AGUIAdapter resume_factory requires a checkpointer on the EventGraph"
             )
-        if "messages" not in graph._reducers:
+        if "messages" not in graph.reducers:
             raise ValueError(
                 "AGUIAdapter requires a message_reducer() on the EventGraph. "
                 "Add reducers=[message_reducer()] when constructing your "
@@ -187,7 +187,7 @@ class AGUIAdapter:
 
     async def _aget_checkpoint_snapshot(self, config: Any) -> Any | None:
         """Return async checkpoint snapshot, or None when unsupported."""
-        if self._graph._checkpointer is None:
+        if self._graph.checkpointer is None:
             return None
         return await self._graph.compiled.aget_state(config)
 
@@ -446,7 +446,7 @@ class AGUIAdapter:
         see them via parameter injection.
         """
         updates: dict[str, Any] = {}
-        for name, reducer in self._graph._reducers.items():
+        for name, reducer in self._graph.reducers.items():
             contribution = reducer.collect(events)
             if reducer.has_contributions(contribution):
                 updates[name] = contribution
@@ -610,7 +610,7 @@ class AGUIAdapter:
         needs_checkpoint = (
             self._seed_accepts_state
             or self._resume_accepts_state
-            or self._graph._checkpointer is not None
+            or self._graph.checkpointer is not None
         )
         checkpoint_snapshot = (
             await self._aget_checkpoint_snapshot(config) if needs_checkpoint else None

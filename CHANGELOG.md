@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EventGraph.reducers` and `EventGraph.checkpointer` are public.** `reducers` is a read-only
+  mapping that includes the reducers discovered on namespaces. The AG-UI adapter reads both.
 - **`EventMixin`: a public base for a mixin that `@on` subscribes to.** Subclass it, compose
   the subclass with an Event branch or a `Command`, and `@on(MyMixin)` receives every event
   that carries it. `MessageEvent` and `Auditable` subclass it.
@@ -29,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The compiled graph's input schema accepts every state channel.** `graph.compiled` took only
+  `events` as input. It now takes `_cursor`, `_pending`, `_round`, `_run_paused_emitted` and
+  each reducer channel too, so a caller with no checkpointer can resume from a stored history
+  and its cached reducer values. `get_input_jsonschema()` lists these fields. `invoke()` with a
+  seed event is unchanged.
 - **BREAKING: `@on` no longer reads the private `_event_mixin` flag.** A mixin must subclass
   `EventMixin`. A class that carries only `_event_mixin = True` now raises `TypeError` at
   `@on`.

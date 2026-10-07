@@ -47,9 +47,8 @@ from langgraph_events._handler import (
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _BASE_FIELDS,
+    _apply_deadline_kwarg,
     _apply_reducers,
-    _inject_deadline_keys,
-    _InputState,
     _leaf_node,
     _OutputState,
     build_state_schema,
@@ -1236,6 +1235,19 @@ class EventGraph:
         return frozenset(self._reducers.keys())
 
     @property
+    def reducers(self) -> Mapping[str, BaseReducer]:
+        """Every registered reducer by channel name, as a read-only view.
+
+        Includes the reducers discovered on the graph's namespaces.
+        """
+        return types.MappingProxyType(self._reducers)
+
+    @property
+    def checkpointer(self) -> Any:
+        """The checkpointer passed to the constructor, or ``None``."""
+        return self._checkpointer
+
+    @property
     def handler_names(self) -> frozenset[str]:
         """Canonical graph-node name of every registered handler.
 
@@ -1288,7 +1300,7 @@ class EventGraph:
 
         graph: StateGraph[Any] = StateGraph(
             state_schema,
-            input_schema=_InputState,  # type: ignore[arg-type]
+            input_schema=state_schema,
             output_schema=out_schema,
         )
 
@@ -1525,34 +1537,14 @@ class EventGraph:
         seeds = seed if isinstance(seed, list) else [seed]
         return {"events": seeds, "causes": [None] * len(seeds)}
 
-    @staticmethod
-    def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
-
-        Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
-        and threads it into a copied ``config`` dict, so callers can pass
-        ``deadline=...`` through any entry point
-        (invoke/ainvoke/resume/aresume/stream_events/...) and the router
-        sees it via parameter injection.
-        """
-        deadline = kwargs.pop("deadline", None)
-        if deadline is None:
-            return kwargs
-        config = dict(kwargs.get("config") or {})
-        configurable = dict(config.get("configurable", {}))
-        _inject_deadline_keys(configurable, deadline)
-        config["configurable"] = configurable
-        kwargs["config"] = config
-        return kwargs
-
     def _run(self, inp: Any, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
@@ -2918,7 +2910,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         if not reducer_names:
             yield from seeds
@@ -3042,7 +3034,7 @@ class EventGraph:
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags."""
         kwargs.pop("stream_mode", None)
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(

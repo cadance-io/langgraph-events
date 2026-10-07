@@ -64,8 +64,10 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `NamespaceModel.reducers` | Field | Tuple of `NamespaceModel.Reducer` — every reducer with `name`, `subscribes` and `namespace`. `subscribes` holds the concrete events of the model that the reducer folds, resolved from `event_type` (unlike `Policy.subscribes`, which holds the declared types), or `None` when a `runtime_checkable` Protocol with data members makes the folds unknown. `namespace` is a name, or `None` for a reducer passed to `EventGraph(reducers=...)` |
 | `NamespaceModel.Focus` | Nested dataclass | The part of the graph that `mermaid(focus=...)` draws. Fields `namespaces`, `reactions`, `reducers` each take one name or an iterable of names, stored sorted. At least one name is required: an empty `Focus()` raises `ValueError`. Valid names are `list(model.namespaces)`, `[r.name for r in model.reactions]` and `[r.name for r in model.reducers]` |
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |
-| `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch |
+| `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch. Its input schema accepts every state channel: events, the internal cursor fields and each reducer channel |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
+| `EventGraph.reducers` | Property | Read-only mapping of channel name to reducer, including reducers discovered on the graph's namespaces |
+| `EventGraph.checkpointer` | Property | The checkpointer passed to the constructor, or `None` |
 | `EventGraph.reflect(log)` | Method | Deterministic query surface over a run — returns a `Reflection` (see [Reflection](reflection.md)) |
 | `Reflection` | Class | Facts-only read-model: `context()`, `tool()`, `overview()`, `event(i)`, `evidence(i)`, `schema()`, `state()`, `.log`. Injectable into handlers by parameter annotation, like `EventLog` |
 | `QueryTool` | Frozen dataclass | The `query_log` LLM tool: `name` / `description` / `parameters` (JSON Schema) / `run(...) -> str`. Maps 1:1 to Anthropic / LangChain tool shapes |

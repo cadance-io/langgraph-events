@@ -90,9 +90,24 @@ def _inject_deadline_keys(configurable: dict[str, Any], deadline: float) -> None
     configurable[_DEADLINE_STARTED_AT_KEY] = time.monotonic()
 
 
-class _InputState(TypedDict):
-    events: list[Event]
-    causes: list[CauseEntry]
+def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
+
+    Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
+    and threads it into a copied ``config`` dict, so callers can pass
+    ``deadline=...`` through any entry point
+    (invoke/ainvoke/resume/aresume/stream_events) and
+    the router sees it via parameter injection.
+    """
+    deadline = kwargs.pop("deadline", None)
+    if deadline is None:
+        return kwargs
+    config = dict(kwargs.get("config") or {})
+    configurable = dict(config.get("configurable", {}))
+    _inject_deadline_keys(configurable, deadline)
+    config["configurable"] = configurable
+    kwargs["config"] = config
+    return kwargs
 
 
 class _OutputState(TypedDict):
