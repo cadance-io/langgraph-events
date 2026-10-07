@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`langgraph_events.store`: an event log with no checkpointer.** `Record` is one stored event:
+  `module`, `type` and JSON `fields`. `EventStore` is the port, with `append` and `load`.
+  `MemoryEventStore` keeps JSON text in memory. `JsonlEventStore(path)` writes one record per
+  line, flushes and calls `fsync` on each append, and holds an exclusive `flock` on
+  `<path>.lock` for its lifetime. A second store on the same path raises `StoreLockedError`. The
+  store creates `<path>` with the default mode on the first append, never before. An `OSError`
+  from an append propagates unwrapped. Load ignores a torn last line, and the next append
+  truncates it. POSIX only.
 - **`EventGraph.reducers` and `EventGraph.checkpointer` are public.** `reducers` is a read-only
   mapping that includes the reducers discovered on namespaces. The AG-UI adapter reads both.
 - **`EventMixin`: a public base for a mixin that `@on` subscribes to.** Subclass it, compose
