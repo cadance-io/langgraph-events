@@ -31,6 +31,18 @@ def describe_Record():
         with pytest.raises(ValueError, match="not an event record"):
             Record.from_json('{"module": "shop", "fields": {}}')
 
+    def it_rejects_non_finite_field_values():
+        record = Record("shop", "Order.Placed", {"amount": float("nan")})
+        with pytest.raises(ValueError):
+            record.to_json()
+
+    def it_rejects_a_nonstandard_json_constant():
+        with pytest.raises(ValueError):
+            Record.from_json(
+                '{"module": "shop", "type": "Order.Placed", '
+                '"fields": {"amount": Infinity}}'
+            )
+
 
 def describe_MemoryEventStore():
     def it_loads_what_it_appended_in_order():
@@ -131,6 +143,14 @@ def describe_JsonlEventStore():
             JsonlEventStore(path).close()
             with JsonlEventStore(path) as store:
                 assert store.load() == []
+
+        def it_closes_more_than_once(tmp_path):
+            path = tmp_path / "book.jsonl"
+            store = JsonlEventStore(path)
+            store.close()
+            store.close()
+            with JsonlEventStore(path) as replacement:
+                assert replacement.load() == []
 
         def it_raises_store_locked_in_a_second_process(tmp_path):
             path = tmp_path / "book.jsonl"

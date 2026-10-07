@@ -20,6 +20,10 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 
+def _reject_json_constant(constant: str) -> object:
+    raise ValueError(f"not valid JSON: {constant}")
+
+
 @dataclass(frozen=True)
 class Record:
     """One stored event: its class identity and its field values.
@@ -37,6 +41,7 @@ class Record:
         return json.dumps(
             {"module": self.module, "type": self.type, "fields": dict(self.fields)},
             ensure_ascii=False,
+            allow_nan=False,
         )
 
     @classmethod
@@ -45,7 +50,7 @@ class Record:
 
         Raises ``ValueError`` when the line is not a record object.
         """
-        row = json.loads(text)
+        row = json.loads(text, parse_constant=_reject_json_constant)
         if not (
             isinstance(row, dict)
             and isinstance(row.get("module"), str)
@@ -103,11 +108,12 @@ class JsonlEventStore:
         self._path = path
         self._file: BinaryIO | None = None
         lock_path = path.with_name(path.name + ".lock")
-        self._lock = lock_path.open("ab")
+        self._lock: BinaryIO | None = lock_path.open("ab")
         try:
             fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             self._lock.close()
+            self._lock = None
             raise StoreLockedError(
                 f"{path} has another writer: {lock_path} is locked. Close the "
                 f"other JsonlEventStore, or stop the process that holds it."
@@ -166,7 +172,9 @@ class JsonlEventStore:
         if self._file is not None:
             self._file.close()
             self._file = None
-        self._lock.close()
+        if self._lock is not None:
+            self._lock.close()
+            self._lock = None
 
     def __enter__(self) -> JsonlEventStore:
         return self
