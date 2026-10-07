@@ -154,14 +154,22 @@ def pad_causes(update: StateDict, entry: CauseEntry) -> StateDict:
 
 def make_seed_node(
     reducers: dict[str, BaseReducer] | None = None,
+    max_rounds: int | None = None,
 ) -> Callable[[StateDict], StateDict]:
-    """Create the seed node that initialises cursor and pending from input."""
+    """Create the seed node that initialises cursor and pending from input.
+
+    Every event folds into the reducer channels once. The router folds the
+    ``MaxRoundsExceeded`` it emits and leaves the cursor on it, so the run
+    after a halt must not fold that event again.
+    """
     reds = reducers or {}
 
     def seed(state: StateDict) -> StateDict:
         prev_cursor = state.get("_cursor", 0)
         all_events = state["events"]
         new_events = all_events[prev_cursor:]
+        halted = max_rounds is not None and state.get("_round", 0) > max_rounds
+        reduced = new_events[1:] if halted else new_events
 
         result: dict[str, Any] = {
             "_cursor": len(all_events),
@@ -187,10 +195,10 @@ def make_seed_node(
                         # True first run — initialize from default +
                         # seed events.
                         result[name] = r.seed(new_events)
-            elif new_events:
+            elif reduced:
                 # Subsequent run (checkpointer) — only process new events
                 for name, r in reds.items():
-                    collected = r.collect(new_events)
+                    collected = r.collect(reduced)
                     if r.has_contributions(collected):
                         result[name] = collected
         return result
@@ -200,8 +208,14 @@ def make_seed_node(
 
 def make_router_node(
     max_rounds: int,
+    reducers: dict[str, BaseReducer] | None = None,
 ) -> Callable[[StateDict, RunnableConfig], StateDict]:
-    """Create the router node that collects new events and advances the cursor."""
+    """Create the router node that collects new events and advances the cursor.
+
+    The router folds each event it emits into the reducer channels, as a
+    handler node does, so a channel sees every event in the log.
+    """
+    reds = reducers or {}
 
     def router(state: StateDict, config: RunnableConfig) -> StateDict:
         new_events = state["events"][state["_cursor"] :]
@@ -215,6 +229,7 @@ def make_router_node(
                     "_pending": [halted],
                     "_round": current_round,
                     "events": [halted],
+                    **_apply_reducers([halted], reds),
                 },
                 FRAMEWORK,
             )
@@ -245,6 +260,7 @@ def make_router_node(
                     "_round": current_round,
                     "events": [paused],
                     "_run_paused_emitted": True,
+                    **_apply_reducers([paused], reds),
                 },
                 FRAMEWORK,
             )

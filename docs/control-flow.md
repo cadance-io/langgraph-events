@@ -287,6 +287,8 @@ messages = Reducer(
 
 `RunPaused` is intentionally **not** surfaced on the AG-UI wire by default. There is no built-in mapping: `FallbackMapper` skips it (one-time warning) because the previous `CustomEvent(name="interrupted", value={"kind": "soft_timeout", …})` overload collided with HITL `Interrupted` events on the same wire name. Apps that want a pause signal on the wire register their own `EventMapper` — see [AG-UI → Custom Mappers](agui.md#custom-mappers).
 
+The router folds the `RunPaused` and `MaxRoundsExceeded` it emits into every reducer channel, as a handler node folds its events. `abandon()` and the `on_unresumable` settle path fold the `Abandoned` or `Unresumable` event they append. A reducer channel therefore equals `reducer.advance(reducer.empty, events)` over the logged events.
+
 ## Field Matchers
 
 `@on(Event, field=Type)` dispatches only when `event.field` is a `Type` instance; if the handler signature includes a parameter named `field`, the value is injected:

@@ -69,7 +69,7 @@ history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], def
 
 ## `ScalarReducer`
 
-Last-write-wins scalar. `None` is valid; return `SKIP` from `fn` to leave the current value unchanged (distinguishes "set to `None`" from "don't update").
+Last-write-wins scalar. `None` is valid; return `SKIP` from `fn` to leave the current value unchanged (distinguishes "set to `None`" from "don't update"). In a batch of events, the value is the newest result of `fn` that is not `SKIP`. A batch therefore gives the value that its events give one at a time.
 
 ```python
 temperature = ScalarReducer(name="temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7)

@@ -252,9 +252,10 @@ class ScalarReducer(BaseReducer):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
-    last matching event.  The return value — including ``None`` — is injected
-    directly into the handler.  Return ``SKIP`` from ``fn`` to signal no
-    contribution and keep the channel at its current value.
+    matching events from the newest back, and keeps the first result that is
+    not ``SKIP``. The return value — including ``None`` — is injected directly
+    into the handler. Return ``SKIP`` from ``fn`` to signal no contribution
+    and keep the channel at its current value.
 
     Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
     multiple event types structurally.
@@ -294,14 +295,15 @@ class ScalarReducer(BaseReducer):
         return self.default
 
     def collect(self, events: list[Event]) -> Any:
-        last: Any = SKIP
-        for event in events:
+        for event in reversed(events):
             if not isinstance(event, self.event_type):
                 continue
             if not _matches_namespace(event, self.namespace):
                 continue
-            last = event
-        return self.fn(last) if last is not SKIP else SKIP
+            result = self.fn(event)
+            if result is not SKIP:
+                return result
+        return SKIP
 
     def has_contributions(self, result: Any) -> bool:
         return result is not SKIP

@@ -47,6 +47,7 @@ from langgraph_events._handler import (
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _BASE_FIELDS,
+    _apply_reducers,
     _inject_deadline_keys,
     _InputState,
     _leaf_node,
@@ -1292,8 +1293,8 @@ class EventGraph:
         )
 
         # --- nodes ---
-        seed_node = make_seed_node(reducers=self._reducers)
-        router_node = make_router_node(self._max_rounds)
+        seed_node = make_seed_node(reducers=self._reducers, max_rounds=self._max_rounds)
+        router_node = make_router_node(self._max_rounds, reducers=self._reducers)
         dispatch_fn = make_dispatch(self._handler_metas)
 
         async def aseed(state: StateDict) -> StateDict:
@@ -1746,9 +1747,8 @@ class EventGraph:
             return True
         return False
 
-    @staticmethod
     def _settle_supersteps(
-        events: EventLog, terminal: Event
+        self, events: EventLog, terminal: Event
     ) -> list[list[StateUpdate]]:
         """Build the clear/append/clear supersteps that settle a thread onto
         *terminal* at rest.
@@ -1772,6 +1772,7 @@ class EventGraph:
                             "events": appended,
                             "_cursor": len(events) + len(appended),
                             "_pending": [],
+                            **_apply_reducers(appended, self._reducers),
                         },
                         FRAMEWORK,
                     ),

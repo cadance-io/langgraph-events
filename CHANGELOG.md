@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every logged event folds into the reducer channels exactly once.** The router did not fold
+  the `RunPaused` and `MaxRoundsExceeded` it emitted. The run after a halt folded that
+  `MaxRoundsExceeded` a second time. `abandon()` and the `on_unresumable` settle path did not
+  fold `Abandoned` or `Unresumable`. A channel now equals `BaseReducer.advance` over the log.
+
+### Changed
+
+- **A `ScalarReducer` keeps the newest value that `fn` does not skip, in a batch.** Before, it
+  called `fn` on the last matching event only, and a `SKIP` there dropped the whole batch. A
+  batch now gives the value its events give one at a time. `fn` can run on more than one event
+  of a batch.
+
 ### Added
 
 - **`BaseReducer.advance(state, events)` folds events onto a channel value.** It uses the merge
