@@ -36,8 +36,8 @@ if TYPE_CHECKING:
 TESTS = Path(__file__).parent
 
 
-class FailsOnceMemoryEventStore(MemoryEventStore):
-    """A store whose first append fails before any record becomes durable."""
+class WritesThenFailsMemoryEventStore(MemoryEventStore):
+    """A store whose first append writes records, then reports an error."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -46,6 +46,7 @@ class FailsOnceMemoryEventStore(MemoryEventStore):
     def append(self, records: Sequence[Record]) -> None:
         if self._fails:
             self._fails = False
+            super().append(records)
             raise OSError("append failed")
         super().append(records)
 
@@ -128,17 +129,19 @@ def describe_EventStream():
 
     def describe_invoke():
         def when_an_append_fails_once():
-            def when_the_same_seed_retries():
-                def with_a_valid_link():
-                    def it_reopens():
-                        store = FailsOnceMemoryEventStore()
-                        stream = EventStream(EventGraph([grant]), store, EventCodec())
-                        request = Request(what="retry")
-                        with pytest.raises(OSError, match="append failed"):
-                            stream.invoke(request)
-                        stream.invoke(request)
-                        reopened = EventStream(EventGraph([grant]), store, EventCodec())
-                        assert reopened.log[1].request is reopened.log[0]
+            def it_makes_the_stream_unusable_and_reloads_in_a_new_stream():
+                store = WritesThenFailsMemoryEventStore()
+                stream = EventStream(EventGraph([grant]), store, EventCodec())
+                with pytest.raises(OSError, match="append failed"):
+                    stream.invoke(Request(what="retry"))
+                with pytest.raises(
+                    RuntimeError, match="unusable after an append error"
+                ):
+                    stream.invoke(Request(what="again"))
+                reopened = EventStream(EventGraph([grant]), store, EventCodec())
+                assert list(reopened.log) == [Request(what="retry")]
+                reopened.invoke(Request(what="again"))
+                assert reopened.log[2].request is reopened.log[1]
 
         def when_the_turn_completes():
             def it_returns_only_the_events_of_this_turn():

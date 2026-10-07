@@ -279,18 +279,6 @@ class EventCodec:
         self._index_of.update(fresh)
         return records
 
-    @contextlib.contextmanager
-    def _staged_encode(self, events: Sequence[Event]) -> Iterator[list[Record]]:
-        base = len(self._book)
-        indices = dict(self._index_of)
-        records = self.encode(events)
-        try:
-            yield records
-        except BaseException:
-            del self._book[base:]
-            self._index_of = indices
-            raise
-
     def decode(self, records: Sequence[Record]) -> EventLog:
         """Revive *records* as the next events of the log.
 
@@ -300,11 +288,13 @@ class EventCodec:
         of this call.
         """
         base = len(self._book)
+        registry = dict(self._registry)
         try:
             for index, record in enumerate(records, start=base):
                 self._book.append(self._decode_one(index, record))
         except BaseException:
             del self._book[base:]
+            self._registry = registry
             raise
         decoded = self._book[base:]
         self._index_of.update(
@@ -378,6 +368,8 @@ class EventCodec:
 class EventStream:
     """A graph over a durable log: load once, then append per superstep.
 
+    This synchronous class has no async API.
+
     Each :meth:`invoke` hands the graph the stored history, the cached
     reducer values and the seed. A handler sees the whole log in an
     injected ``EventLog``. The events of a superstep reach the store before
@@ -394,6 +386,7 @@ class EventStream:
         self._graph = graph
         self._store = store
         self._codec = codec
+        self._append_failed = False
         self._events: list[Event] = list(codec.decode(store.load()))
         self._states: dict[str, object] = {
             name: reducer.advance(reducer.empty, self._events)
@@ -417,6 +410,11 @@ class EventStream:
         When a handler raises, the events stored before it stay stored, and
         the cache folds them.
         """
+        if self._append_failed:
+            raise RuntimeError(
+                "EventStream is unusable after an append error. Create a new "
+                "EventStream to reload the store."
+            )
         base = len(self._events)
         seeds = _seed_events(seed)
         state = {
@@ -439,6 +437,10 @@ class EventStream:
     def _commit(self, new: list[Event]) -> None:
         """Persist *new* events, then include them in the local log."""
         if new:
-            with self._codec._staged_encode(new) as records:
+            records = self._codec.encode(new)
+            try:
                 self._store.append(records)
+            except BaseException:
+                self._append_failed = True
+                raise
             self._events.extend(new)

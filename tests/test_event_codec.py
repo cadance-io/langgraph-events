@@ -183,6 +183,18 @@ def describe_EventCodec():
                 with pytest.raises(ValueError, match=r"record #0 .*factory failed"):
                     codec.decode(rows)
 
+        def when_a_decode_fails_after_replay_registers_a_class():
+            def it_restores_the_replay_registry():
+                codec = sc.runtime_codec()
+                rows = [
+                    _row(sc.Defined, name="Gadget", field="size"),
+                    Record("gone.module", "Gone", {}),
+                ]
+                with pytest.raises(ValueError, match=r"record #1 gone\.module\.Gone"):
+                    codec.decode(rows)
+                with pytest.raises(ValueError, match=r"record #0 .*Cannot revive"):
+                    codec.decode([Record(sc.__name__, "Runtime.Gadget", {"size": 2})])
+
         def when_a_replay_function_exits():
             def it_lets_system_exit_through():
                 def leave(event: Event) -> list[type[Event]]:

@@ -20,17 +20,41 @@ run, and when another program must read the log without this library.
 ```python
 from pathlib import Path
 
-from langgraph_events import EventGraph
+from langgraph_events import EventGraph, IntegrationEvent, on
 from langgraph_events.store import EventCodec, EventStream, JsonlEventStore
 
-graph = EventGraph([grant], reducers=[ticks])
-with JsonlEventStore(Path("books/alice.jsonl")) as store:
+class Request(IntegrationEvent):
+    text: str
+
+
+class Recorded(IntegrationEvent):
+    request: Request
+
+
+@on(Request)
+def record(event: Request) -> Recorded:
+    return Recorded(request=event)
+
+
+@on(Recorded)
+def observe(event: Recorded) -> None:
+    return None
+
+
+path = Path("books/getting-started.jsonl")
+path.parent.mkdir(parents=True, exist_ok=True)
+with JsonlEventStore(path) as store:
+    graph = EventGraph([record, observe])
     stream = EventStream(graph, store, EventCodec())
-    added = stream.invoke(Request(what="leave"))
-    stream.state()       # the cached reducer values, no fold
+    added = stream.invoke(Request(text="hello"))
+
+print([type(event).__name__ for event in added])
 ```
 
-`EventStream` loads the log once. `invoke` takes the same seed as
+The parent directory must exist before `JsonlEventStore(path)` runs.
+`JsonlEventStore` does not create parent directories.
+
+`EventStream` is synchronous only. It has no async API. It loads the log once. `invoke` takes the same seed as
 `EventGraph.invoke`: one event or a list. It gives the graph the whole log,
 the cached reducer values and the seed. A handler's injected `EventLog` is
 the stored log, then the events of this turn. The events of each superstep
@@ -45,6 +69,19 @@ pause as an event, and continue on a later `invoke`.
 
 When a handler raises, the events stored before it stay stored. The cached
 reducer values fold them.
+
+An append error makes an `EventStream` unusable. The store can write bytes
+before it reports an error. Do not retry with that stream. Create a new codec
+and stream, then reload the log from the store. `EventStore.append()` does not
+promise an atomic append.
+
+`EventCodec` records positions while `encode()` runs. A direct caller that
+gets an append error must discard that codec. Create a new codec and decode
+the store log before the next encode.
+
+The store persists events only. It does not persist causation metadata. A
+reloaded log has no causes. A live handler can inspect causes from its current
+turn, but a later `EventStream` cannot recover them.
 
 ## The file
 
@@ -121,7 +158,8 @@ the live handler calls. It runs no handler. `codec.register(cls)` registers
 one class directly.
 
 Use one codec per log. The codec remembers the position of each event, so
-`encode` can write a `$ref`.
+`encode` can write a `$ref`. A failed decode restores its event book and replay
+registry to the state before that decode.
 
 ## Reducer values
 
