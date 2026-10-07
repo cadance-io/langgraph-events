@@ -24,6 +24,7 @@ see :mod:`langgraph_events.serde.migrations` and ``docs/event-migrations.md``.
 from langgraph_events.serde._jsonplus import (
     NamespaceAwareSerde,
     UnreachableMigrationWarning,
+    UnrevivedIdentity,
 )
 from langgraph_events.serde.migrations import (
     CoverageError,
@@ -57,6 +58,7 @@ __all__ = [
     "MigrationCoverageError",
     "NamespaceAwareSerde",
     "UnreachableMigrationWarning",
+    "UnrevivedIdentity",
     "assert_all_baselined_cover",
     "assert_all_baselined_handlers_cover",
     "assert_all_baselined_resolve",

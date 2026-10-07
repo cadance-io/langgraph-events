@@ -13,11 +13,12 @@ from typing import (
     Protocol,
     TypeVar,
     cast,
+    get_args,
     runtime_checkable,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from langchain_core.messages import BaseMessage
 
@@ -73,9 +74,24 @@ Use this so a reset event need not know the empty state's shape — and so
 """
 
 
+T = TypeVar("T")
+"""A channel value type, for :meth:`BaseReducer.advance`."""
+
+
 def _last_write_wins(existing: Any, new: Any) -> Any:
     """Binary operator that always takes the newer value."""
     return new
+
+
+def _channel_merge(annotation: Any) -> Callable[[Any, Any], Any]:
+    """LangGraph's rule: the last ``Annotated`` metadata item is the merge.
+
+    A channel annotated with a plain type keeps the last write.
+    """
+    metadata = get_args(annotation)[1:]
+    if metadata and callable(metadata[-1]):
+        return cast("Callable[[Any, Any], Any]", metadata[-1])
+    return _last_write_wins
 
 
 def _matches_namespace(event: Any, dom: type[Namespace] | None) -> bool:
@@ -143,6 +159,20 @@ class BaseReducer(ABC):
     @abstractmethod
     def seed(self, events: list[Event]) -> Any:
         """Initialize with default + seed event contributions."""
+
+    def advance(self, state: T, events: Sequence[Event]) -> T:
+        """The channel value after *events* fold into *state*.
+
+        The fold uses the channel merge from :meth:`state_annotation`, the
+        merge LangGraph applies in a live run. It does not call
+        :meth:`seed`. Start from :attr:`empty`. A store that keeps only the
+        event log calls this to rebuild a channel, and calls it again for
+        each new batch of events.
+        """
+        contributions = self.collect(list(events))
+        if not self.has_contributions(contributions):
+            return state
+        return _channel_merge(self.state_annotation())(state, contributions)
 
 
 @dataclass
@@ -222,9 +252,10 @@ class ScalarReducer(BaseReducer):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
-    last matching event.  The return value — including ``None`` — is injected
-    directly into the handler.  Return ``SKIP`` from ``fn`` to signal no
-    contribution and keep the channel at its current value.
+    matching events from the newest back, and keeps the first result that is
+    not ``SKIP``. The return value — including ``None`` — is injected directly
+    into the handler. Return ``SKIP`` from ``fn`` to signal no contribution
+    and keep the channel at its current value.
 
     Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
     multiple event types structurally.
@@ -264,14 +295,15 @@ class ScalarReducer(BaseReducer):
         return self.default
 
     def collect(self, events: list[Event]) -> Any:
-        last: Any = SKIP
-        for event in events:
+        for event in reversed(events):
             if not isinstance(event, self.event_type):
                 continue
             if not _matches_namespace(event, self.namespace):
                 continue
-            last = event
-        return self.fn(last) if last is not SKIP else SKIP
+            result = self.fn(event)
+            if result is not SKIP:
+                return result
+        return SKIP
 
     def has_contributions(self, result: Any) -> bool:
         return result is not SKIP

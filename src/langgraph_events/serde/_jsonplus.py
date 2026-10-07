@@ -23,14 +23,9 @@ import ormsgpack
 from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
-    from langgraph_events.serde.migrations._core import (
-        AddField,
-        Migration,
-        SplitEvent,
-        TransformFields,
-    )
+    from langgraph_events.serde.migrations._core import Migration
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 try:
@@ -289,7 +284,7 @@ def _make_default(
             # inside ``obj.value`` reachable through this hook and revivable
             # under EXT_NAMESPACE_AWARE_EVENT.
             #
-            # Tracks (value, id) explicitly rather than walking
+            # Tracks Interrupt fields explicitly rather than walking
             # ``dataclasses.fields(obj)`` — Interrupt has a custom
             # ``__init__`` that doesn't accept arbitrary kwargs, so a
             # generic walk would not round-trip cleanly anyway.
@@ -297,7 +292,11 @@ def _make_default(
             # guards against silent field drift.
             return ormsgpack.Ext(
                 EXT_INTERRUPT,
-                ormsgpack.packb((obj.value, obj.id), default=_default, option=_option),
+                ormsgpack.packb(
+                    (obj.value, obj.id, obj.response_schema),
+                    default=_default,
+                    option=_option,
+                ),
             )
         return _msgpack_default(obj)
 
@@ -307,22 +306,9 @@ def _make_default(
 def _make_ext_hook(
     errors: list[str],
     fallback: Callable[[int, bytes], Any],
-    rename_table: dict[tuple[str, str], tuple[str, str]],
-    addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-    origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-    transform_table: dict[tuple[str, str], TransformFields],
-    origin_transform_table: dict[tuple[str, str], TransformFields],
-    split_table: dict[tuple[str, str], SplitEvent],
-    scope: dict[tuple[str, str], type],
-    *,
-    unresolved: list[UnrevivedIdentity] | None = None,
-    reads: list[ReadRecord] | None = None,
+    revive: Callable[[str, str, dict[str, Any], list[str]], Any],
 ) -> Callable[[int, bytes], Any]:
     """Build an ext-hook that records revival errors into *errors*.
-
-    *scope* is the serde's ``namespaces=`` map, consulted ahead of the
-    import walk so revival lands on the classes this serde was built with
-    — the read-side mirror of the encoder's ``oldest_historic`` map.
 
     ormsgpack swallows the original exception from an ext-hook and re-raises
     a generic ``ValueError("ext_hook failed")``. The error list lets
@@ -338,27 +324,25 @@ def _make_ext_hook(
     plain ``dict`` regardless of ``LANGGRAPH_STRICT_MSGPACK`` or the
     constructor's ``allowed_msgpack_modules`` argument (#68).
 
-    *unresolved*, when not ``None``, is a collector. An unrevivable
-    ``EXT_NAMESPACE_AWARE_EVENT`` identity is then appended to it and
-    returned as an :class:`UnrevivedIdentity` instead of raising. Only
-    ``NamespaceAwareSerde.tolerate_unresolved`` passes one. Every other
-    caller keeps the strict default.
-
-    *reads*, when not ``None``, is a second collector. Every stored
-    ``EXT_NAMESPACE_AWARE_EVENT`` record is appended to it as a
-    :data:`ReadRecord`, touched or not. Only
-    ``NamespaceAwareSerde._record_reads`` passes one.
+    *revive* turns one ``EXT_NAMESPACE_AWARE_EVENT`` record into an
+    instance. See :meth:`NamespaceAwareSerde.revive_event`.
     """
 
     def _ext_hook(code: int, data: bytes) -> Any:
         if code == EXT_INTERRUPT:
             # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
             # inside ``value`` resolves back to its namespaced class.
-            value, id_ = ormsgpack.unpackb(
+            fields = ormsgpack.unpackb(
                 data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
             )
+            value, id_, *remaining_fields = fields
+            response_schema = remaining_fields[0] if remaining_fields else None
             try:
-                return Interrupt(value=value, id=id_)
+                return Interrupt(
+                    value=value,
+                    id=id_,
+                    response_schema=response_schema,
+                )
             except TypeError as exc:
                 # Mirrors the EXT_NAMESPACE_AWARE_EVENT branch below: degrade
                 # gracefully through ``loads_typed``'s ``errors`` channel if
@@ -375,71 +359,16 @@ def _make_ext_hook(
                 raise
         if code != EXT_NAMESPACE_AWARE_EVENT:
             return fallback(code, data)
-        tup = ormsgpack.unpackb(
+        module_name, qualname, kwargs = ormsgpack.unpackb(
             data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
         )
-        module_name, qualname, kwargs = tup
-        try:
-            # Rewrite historic identity to current, run any TransformFields
-            # and inject any AddField defaults — shared with the baseline
-            # test helper so the read-side migration rule lives in exactly
-            # one place. Inside the ``try``: a transform that raises must
-            # reach the ``errors`` channel like every other failure, or
-            # ormsgpack reports a bare ``ext_hook failed``. The identity
-            # stays the STORED one when the migration itself fails.
-            stored = (module_name, qualname)
-            # A fill mutates ``kwargs`` in place: snapshot it first.
-            before = dict(kwargs) if reads is not None else None
-            module_name, qualname, kwargs = _apply_identity_migrations(
-                module_name,
-                qualname,
-                kwargs,
-                rename_table,
-                addfield_table,
-                origin_addfield_table,
-                transform_table,
-                origin_transform_table,
-                split_table,
-            )
-            instance = _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
-            if reads is not None:
-                # Recorded after the record revived, so a degraded record
-                # lands in *unresolved* only. Touched means the table
-                # changed the identity or the kwargs: a rewrite would
-                # store different bytes. A table entry that changed
-                # nothing (a fill whose field the payload already held)
-                # is untouched, so a second rewrite converges.
-                touched = stored != (module_name, qualname) or kwargs != before
-                reads.append((stored, (module_name, qualname), touched))
-            return instance
-        except (ImportError, AttributeError, TypeError, _CallableError) as exc:
-            # ``TypeError`` is the field-shape mismatch: the identity
-            # resolves, but the stored kwargs carry a key the live class
-            # has dropped, or omit a field it has gained with no AddField.
-            # ``_CallableError`` wraps whatever a transform or a select
-            # raised.
-            if unresolved is not None:
-                # Retirement cleanup only (see the *unresolved* parameter
-                # docstring above). The caller is a tool that exists to
-                # settle exactly this thread, not a normal read. Degrade
-                # instead of raising. Keep no partial kwargs: there is
-                # no live class to hold them. The collector sees every
-                # degrade, however deep the identity sat in the blob.
-                placeholder = UnrevivedIdentity(module=module_name, qualname=qualname)
-                unresolved.append(placeholder)
-                return placeholder
-            failure = (
-                str(exc)
-                if isinstance(exc, _CallableError)
-                else f"{type(exc).__name__}: {exc}"
-            )
-            errors.append(
-                f"Cannot revive {module_name}.{qualname}: {failure}. "
-                f"{_revival_remedy(qualname, exc)}"
-            )
-            raise
+        return revive(module_name, qualname, kwargs, errors)
 
     return _ext_hook
+
+
+_REVIVAL_ERRORS = (ImportError, AttributeError, TypeError, _CallableError)
+"""What a failed revival raises."""
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)
@@ -671,6 +600,77 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         """
         return self._live_identities | frozenset(self._rename_table.keys())
 
+    def revive_event(
+        self,
+        module: str,
+        qualname: str,
+        kwargs: Mapping[str, object],
+        *,
+        resolve: Callable[[str, str], type[Event] | None] | None = None,
+    ) -> Event | UnrevivedIdentity:
+        """Revive one stored event from its identity and its field values.
+
+        This is the read rule of :meth:`loads_typed`, for a store that keeps
+        each event as its own record instead of a msgpack blob. The record
+        passes the migration tables first. *resolve* is then asked for the
+        class. The serde scope and the import walk are the fallback.
+
+        Raises ``ValueError`` with the remedy when the record cannot revive.
+        Inside :meth:`tolerate_unresolved` it returns an
+        :class:`UnrevivedIdentity` instead and appends it to the collector.
+        """
+        errors: list[str] = []
+        try:
+            return self._revive(module, qualname, dict(kwargs), errors, resolve)
+        except _REVIVAL_ERRORS as exc:
+            raise ValueError(errors[-1]) from exc
+
+    def _revive(
+        self,
+        module: str,
+        qualname: str,
+        kwargs: dict[str, Any],
+        errors: list[str],
+        resolve: Callable[[str, str], type[Event] | None] | None = None,
+    ) -> Any:
+        stored = (module, qualname)
+        before = dict(kwargs) if self._reads is not None else None
+        try:
+            module, qualname, kwargs = _apply_identity_migrations(
+                module,
+                qualname,
+                kwargs,
+                self._rename_table,
+                self._addfield_table,
+                self._origin_addfield_table,
+                self._transform_table,
+                self._origin_transform_table,
+                self._split_table,
+            )
+            cls = resolve(module, qualname) if resolve is not None else None
+            if cls is None:
+                cls = _resolve_identity(module, qualname, scope=self._scope)
+            instance = cls(**kwargs)
+        except _REVIVAL_ERRORS as exc:
+            if self._unresolved is not None:
+                placeholder = UnrevivedIdentity(module=module, qualname=qualname)
+                self._unresolved.append(placeholder)
+                return placeholder
+            failure = (
+                str(exc)
+                if isinstance(exc, _CallableError)
+                else f"{type(exc).__name__}: {exc}"
+            )
+            errors.append(
+                f"Cannot revive {module}.{qualname}: {failure}. "
+                f"{_revival_remedy(qualname, exc)}"
+            )
+            raise
+        if self._reads is not None:
+            touched = stored != (module, qualname) or kwargs != before
+            self._reads.append((stored, (module, qualname), touched))
+        return instance
+
     def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):
             return super().dumps_typed(obj)
@@ -707,19 +707,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         try:
             return ormsgpack.unpackb(
                 data_,
-                ext_hook=_make_ext_hook(
-                    errors,
-                    self._unpack_ext_hook,
-                    self._rename_table,
-                    self._addfield_table,
-                    self._origin_addfield_table,
-                    self._transform_table,
-                    self._origin_transform_table,
-                    self._split_table,
-                    self._scope,
-                    unresolved=self._unresolved,
-                    reads=self._reads,
-                ),
+                ext_hook=_make_ext_hook(errors, self._unpack_ext_hook, self._revive),
                 option=ormsgpack.OPT_NON_STR_KEYS,
             )
         except ValueError as exc:

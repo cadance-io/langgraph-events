@@ -7,6 +7,84 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventStream` runs an `EventGraph` over an `EventStore`.** It loads the log once. `invoke`
+  takes the same seed as `EventGraph.invoke`: one event or a list. It gives the graph the whole
+  log, the cached reducer values and the seed, and stores the events of each superstep before
+  the next superstep runs. A crash loses at most the running superstep. A handler's injected
+  log is the stored log, then the turn's events. `invoke` returns only the turn's events.
+  `state()` reads the cached reducer values, folded with `BaseReducer.advance`, and folds
+  nothing. The graph must have no checkpointer.
+- **`EventCodec` turns events into store records and back.** A field that holds an earlier event
+  of the log is stored as `{"$ref": index}` and revives as the same object. A tuple, a dict with
+  a `$` key, and a value outside JSON use `$tuple`, `$dict` and `$repr`. Each record goes through
+  `NamespaceAwareSerde.revive_event`, so every migration decorator applies. `replay={EventType:
+  factory}` registers the classes an event defines at run time, before the next record decodes.
+  A failed record raises `ValueError` naming its position, its type and any bad `$ref` value,
+  and the codec keeps no event of that call. A `SystemExit` from a replay function passes
+  through. A system event stored under the module `"langgraph_events"` resolves through the
+  import walk. `tolerate_unresolved()` decodes an unknown class to `UnrevivedIdentity`.
+- **`langgraph_events.store`: an event log with no checkpointer.** `Record` is one stored event:
+  `module`, `type` and JSON `fields`. `EventStore` is the port, with `append` and `load`.
+  `MemoryEventStore` keeps JSON text in memory. `JsonlEventStore(path)` writes one record per
+  line, flushes and calls `fsync` on each append, and holds an exclusive `flock` on
+  `<path>.lock` for its lifetime. A second store on the same path raises `StoreLockedError`. The
+  store creates `<path>` with the default mode on the first append, never before. An `OSError`
+  from an append propagates unwrapped. Load ignores a torn last line, and the next append
+  truncates it. POSIX only.
+- **`EventGraph.reducers` and `EventGraph.checkpointer` are public.** `reducers` is a read-only
+  mapping that includes the reducers discovered on namespaces. The AG-UI adapter reads both.
+- **`EventMixin`: a public base for a mixin that `@on` subscribes to.** Subclass it, compose
+  the subclass with an Event branch or a `Command`, and `@on(MyMixin)` receives every event
+  that carries it. `MessageEvent` and `Auditable` subclass it.
+- **`@on(..., handles_command=True)` lets one handler record outcomes for a family of
+  commands.** The handler may emit the outcomes nested under the command instance it receives,
+  and no other's. A declared return type may name only outcomes of the commands it subscribes
+  to. Subscribe it to `Command` subclasses or to an `EventMixin`; any other type raises
+  `TypeError`. This replaces stamping the private `_inline_command` attribute.
+- **Invariant predicates can receive the triggering event.** Predicates that accept two
+  positional arguments receive `(log, source_event)`. One-argument predicates remain supported.
+
+### Fixed
+
+- **Every logged event folds into the reducer channels exactly once.** The router did not fold
+  the `RunPaused` and `MaxRoundsExceeded` it emitted. The run after a halt folded that
+  `MaxRoundsExceeded` a second time. `abandon()` and the `on_unresumable` settle path did not
+  fold `Abandoned` or `Unresumable`. A channel now equals `BaseReducer.advance` over the log.
+
+### Changed
+
+- **The compiled graph's input schema accepts every state channel.** `graph.compiled` took only
+  `events` as input. It now takes `_cursor`, `_pending`, `_round`, `_run_paused_emitted` and
+  each reducer channel too, so a caller with no checkpointer can resume from a stored history
+  and its cached reducer values. `get_input_jsonschema()` lists these fields. `invoke()` with a
+  seed event is unchanged.
+- **BREAKING: `@on` no longer reads the private `_event_mixin` flag.** A mixin must subclass
+  `EventMixin`. A class that carries only `_event_mixin = True` now raises `TypeError` at
+  `@on`.
+- **BREAKING: an `Interrupted` event on a graph with no checkpointer raises
+  `InterruptWithoutCheckpointerError`.** Before, LangGraph ended the run and the interrupt was lost
+  with no error. Pass `checkpointer=` to `EventGraph`, or return an event that does not pause.
+  The check reads the `EventGraph`'s own checkpointer. A graph with no checkpointer that you
+  embed through `graph.compiled` under a checkpointed parent graph now raises too.
+- **A `ScalarReducer` keeps the newest value that `fn` does not skip, in a batch.** Before, it
+  called `fn` on the last matching event only, and a `SKIP` there dropped the whole batch. A
+  batch now gives the value its events give one at a time. `fn` can run on more than one event
+  of a batch.
+
+### Added
+
+- **`BaseReducer.advance(state, events)` folds events onto a channel value.** It uses the merge
+  from `state_annotation()`, the merge LangGraph applies in a live run, not `seed()`. A store
+  that keeps only the event log rebuilds a channel with it, then folds each new batch.
+- **`NamespaceAwareSerde.revive_event()` revives one stored event.** A store that keeps each
+  event as its own record, not as a msgpack blob, can now apply the migration tables. The method
+  takes the stored identity and field values, and an optional `resolve` callback that is asked
+  for the class first. It raises `ValueError` with the remedy. Inside `tolerate_unresolved()`
+  it returns an `UnrevivedIdentity`. The checkpoint read path and this method share one rule.
+- **`UnrevivedIdentity` is exported from `langgraph_events.serde`.**
+
 ## [0.35.1] - 2026-10-03
 
 ### Fixed

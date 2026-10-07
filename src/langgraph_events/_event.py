@@ -614,7 +614,24 @@ class SystemEvent(Event, _event_base=True):
     """
 
 
-class MessageEvent:
+class EventMixin:
+    """Base for a behavioural mixin that ``@on`` can subscribe to.
+
+    A mixin is not an ``Event``. Compose it with an Event branch, or with a
+    ``Command``. ``@on(MyMixin)`` then dispatches every event that carries
+    it. ``@on`` refuses any other class that is not an ``Event``.
+
+    Example::
+
+        class Minted(EventMixin):
+            pass
+
+        @on(Minted)
+        def record(event: Minted) -> None: ...
+    """
+
+
+class MessageEvent(EventMixin):
     """Mixin for events that wrap LangChain messages.
 
     Compose with an Event branch (``DomainEvent``, ``IntegrationEvent``,
@@ -631,8 +648,6 @@ class MessageEvent:
             message: HumanMessage
     """
 
-    _event_mixin: ClassVar[bool] = True
-
     def as_messages(self) -> list[BaseMessage]:
         msg = getattr(self, "message", None)
         if msg is not None:
@@ -646,7 +661,7 @@ class MessageEvent:
         )
 
 
-class Auditable:
+class Auditable(EventMixin):
     """Mixin for events that should be auto-logged.
 
     Compose with an Event branch — this class is a behavioural mixin,
@@ -658,8 +673,6 @@ class Auditable:
         class OrderPlaced(DomainEvent, Auditable):
             order_id: str = ""
     """
-
-    _event_mixin: ClassVar[bool] = True
 
     def trail(self) -> str:
         """Return a compact, human-readable summary of this event."""
@@ -791,6 +804,9 @@ class Interrupted(SystemEvent):
     calls LangGraph's ``interrupt()`` and the graph pauses.  Resume with
     ``graph.resume(event)`` to continue — the event is auto-dispatched
     and a ``Resumed`` event is created alongside it.
+
+    A graph without a checkpointer cannot keep the pause. There, a returned
+    ``Interrupted`` raises :class:`InterruptWithoutCheckpointerError`.
     """
 
     def _collect_into(
@@ -806,6 +822,14 @@ class Interrupted(SystemEvent):
             raise TypeError(f"resume() requires an Event instance, got {got}")
         new_events.append(resume_value)
         new_events.append(Resumed(value=resume_value, interrupted=self))
+
+
+class InterruptWithoutCheckpointerError(RuntimeError):
+    """An ``Interrupted`` event reached a graph that has no checkpointer.
+
+    LangGraph keeps a pending interrupt only in a checkpoint. Without one,
+    the run would end and the interrupt would be lost with no error.
+    """
 
 
 class Resumed(SystemEvent):
@@ -933,8 +957,9 @@ class InvariantViolated(SystemEvent):
 
     Either phase short-circuits on the first failing invariant.  Predicate
     exceptions propagate — they are NOT turned into violations.  Predicates
-    should be pure functions of ``log`` since the same predicate runs in both
-    phases.
+    should be pure functions of ``log`` and the triggering event since the
+    same predicate runs in both phases. A predicate can accept either
+    ``(log)`` or ``(log, source_event)``.
 
     Subscribe via ``@on(InvariantViolated)`` for all violations, or pin to a
     specific invariant via the ``invariant=`` field matcher::

@@ -111,7 +111,7 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
     - Pinned reactors fire for both pre- and post-check failures without distinguishing them — inspect `event.would_emit` to tell them apart.
 
 !!! note "Semantics"
-    - Predicates receive `EventLog`; must be **sync** (async rejected at decoration) and **pure functions of `log`**.
+    - Predicates receive `EventLog` and can also accept the triggering event as a second positional parameter. One-argument predicates remain supported. Predicates must be **sync** (async rejected at decoration) and pure functions of their arguments.
     - Pre-check log = committed events. Post-check log = committed + everything the current node call has buffered.
     - Multiple invariants short-circuit; one `InvariantViolated` per phase.
     - Predicate exceptions propagate (not converted to violations).
@@ -139,7 +139,7 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
 
 ## `Interrupted` / `Resumed`
 
-Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)` (requires a checkpointer); a `Resumed` event emits alongside the dispatched event.
+Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)`; a `Resumed` event emits alongside the dispatched event. An interrupt requires a checkpointer on the `EventGraph`. Without one, a handler that returns an `Interrupted` raises `InterruptWithoutCheckpointerError`, because LangGraph keeps a pause only in a checkpoint.
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
@@ -286,6 +286,8 @@ messages = Reducer(
 ### AG-UI wire shape
 
 `RunPaused` is intentionally **not** surfaced on the AG-UI wire by default. There is no built-in mapping: `FallbackMapper` skips it (one-time warning) because the previous `CustomEvent(name="interrupted", value={"kind": "soft_timeout", …})` overload collided with HITL `Interrupted` events on the same wire name. Apps that want a pause signal on the wire register their own `EventMapper` — see [AG-UI → Custom Mappers](agui.md#custom-mappers).
+
+The router folds the `RunPaused` and `MaxRoundsExceeded` it emits into every reducer channel, as a handler node folds its events. `abandon()` and the `on_unresumable` settle path fold the `Abandoned` or `Unresumable` event they append. A reducer channel therefore equals `reducer.advance(reducer.empty, events)` over the logged events.
 
 ## Field Matchers
 

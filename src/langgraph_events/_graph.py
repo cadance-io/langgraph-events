@@ -47,10 +47,11 @@ from langgraph_events._handler import (
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _BASE_FIELDS,
-    _inject_deadline_keys,
-    _InputState,
+    _apply_deadline_kwarg,
+    _apply_reducers,
     _leaf_node,
     _OutputState,
+    _seed_events,
     build_state_schema,
     make_dispatch,
     make_handler_node,
@@ -1235,6 +1236,19 @@ class EventGraph:
         return frozenset(self._reducers.keys())
 
     @property
+    def reducers(self) -> Mapping[str, BaseReducer]:
+        """Every registered reducer by channel name, as a read-only view.
+
+        Includes the reducers discovered on the graph's namespaces.
+        """
+        return types.MappingProxyType(self._reducers)
+
+    @property
+    def checkpointer(self) -> Any:
+        """The checkpointer passed to the constructor, or ``None``."""
+        return self._checkpointer
+
+    @property
     def handler_names(self) -> frozenset[str]:
         """Canonical graph-node name of every registered handler.
 
@@ -1287,13 +1301,13 @@ class EventGraph:
 
         graph: StateGraph[Any] = StateGraph(
             state_schema,
-            input_schema=_InputState,  # type: ignore[arg-type]
+            input_schema=state_schema,
             output_schema=out_schema,
         )
 
         # --- nodes ---
-        seed_node = make_seed_node(reducers=self._reducers)
-        router_node = make_router_node(self._max_rounds)
+        seed_node = make_seed_node(reducers=self._reducers, max_rounds=self._max_rounds)
+        router_node = make_router_node(self._max_rounds, reducers=self._reducers)
         dispatch_fn = make_dispatch(self._handler_metas)
 
         async def aseed(state: StateDict) -> StateDict:
@@ -1318,6 +1332,7 @@ class EventGraph:
                 services_by_type=self._services_by_type or None,
                 services_by_name=self._services_by_name or None,
                 model_provider=self.namespaces,
+                checkpointed=self._checkpointer is not None,
             )
             graph.add_node(meta.node_name, cast("Any", handler_node))
             handler_names.append(meta.node_name)
@@ -1520,37 +1535,17 @@ class EventGraph:
         aligned with ``events`` with no guess, also on a checkpoint saved
         before causes existed.
         """
-        seeds = seed if isinstance(seed, list) else [seed]
+        seeds = _seed_events(seed)
         return {"events": seeds, "causes": [None] * len(seeds)}
 
-    @staticmethod
-    def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
-
-        Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
-        and threads it into a copied ``config`` dict, so callers can pass
-        ``deadline=...`` through any entry point
-        (invoke/ainvoke/resume/aresume/stream_events/...) and the router
-        sees it via parameter injection.
-        """
-        deadline = kwargs.pop("deadline", None)
-        if deadline is None:
-            return kwargs
-        config = dict(kwargs.get("config") or {})
-        configurable = dict(config.get("configurable", {}))
-        _inject_deadline_keys(configurable, deadline)
-        config["configurable"] = configurable
-        kwargs["config"] = config
-        return kwargs
-
     def _run(self, inp: Any, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
@@ -1746,9 +1741,8 @@ class EventGraph:
             return True
         return False
 
-    @staticmethod
     def _settle_supersteps(
-        events: EventLog, terminal: Event
+        self, events: EventLog, terminal: Event
     ) -> list[list[StateUpdate]]:
         """Build the clear/append/clear supersteps that settle a thread onto
         *terminal* at rest.
@@ -1772,6 +1766,7 @@ class EventGraph:
                             "events": appended,
                             "_cursor": len(events) + len(appended),
                             "_pending": [],
+                            **_apply_reducers(appended, self._reducers),
                         },
                         FRAMEWORK,
                     ),
@@ -2916,7 +2911,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         if not reducer_names:
             yield from seeds
@@ -3040,7 +3035,7 @@ class EventGraph:
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags."""
         kwargs.pop("stream_mode", None)
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = _apply_deadline_kwarg(kwargs)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(

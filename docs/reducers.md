@@ -69,7 +69,7 @@ history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], def
 
 ## `ScalarReducer`
 
-Last-write-wins scalar. `None` is valid; return `SKIP` from `fn` to leave the current value unchanged (distinguishes "set to `None`" from "don't update").
+Last-write-wins scalar. `None` is valid; return `SKIP` from `fn` to leave the current value unchanged (distinguishes "set to `None`" from "don't update"). In a batch of events, the value is the newest result of `fn` that is not `SKIP`. A batch therefore gives the value that its events give one at a time.
 
 ```python
 temperature = ScalarReducer(name="temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7)
@@ -177,6 +177,21 @@ graph.invoke(SeedEvent(), config=config)
 ```
 
 Pre-seeded values bypass the event log — `log.filter()` won't reflect them.
+
+## Rebuilding a channel from the log { #rebuilding-a-channel-from-the-log }
+
+`reducer.advance(state, events)` folds *events* onto *state* through the channel merge, the
+merge LangGraph applies in a live run. Start from `reducer.empty`. Call it again for each new
+batch: two calls equal one call over both batches.
+
+```python
+value = my_reducer.advance(my_reducer.empty, list(log))
+value = my_reducer.advance(value, new_events)
+```
+
+`advance` differs from `seed()` for a `Reducer` with a custom merge, such as `message_reducer`:
+`seed()` concatenates, `advance` merges. A store with no checkpointer uses `advance`. See
+[Event store](event-store.md).
 
 ## Recovering from projection changes { #replay_reducer }
 

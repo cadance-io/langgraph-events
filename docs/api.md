@@ -15,6 +15,7 @@
 
 | Export | Type | Description |
 |---|---|---|
+| `EventMixin` | Base class | Base for a behavioural mixin that `@on` can subscribe to. Compose a subclass with an Event branch or a `Command`. `@on(MyMixin)` dispatches every event that carries it. `@on` refuses any other class that is not an `Event` |
 | `Auditable` | Mixin | Marker for auto-logged events; `trail()` returns a compact summary. Compose with any event branch |
 | `MessageEvent` | Mixin | Wraps LangChain `BaseMessage`; declares `message` or `messages` field. Compose with any event branch |
 | `SystemPromptSet` | Event | Built-in `IntegrationEvent` + `MessageEvent` for system prompts |
@@ -33,8 +34,9 @@ Modifiers:
 - `*field_matchers` — [field dispatch](control-flow.md#field-matchers); `type` values do `isinstance`, `str` values do equality.
 - `raises=` — [declared exceptions](control-flow.md#handler-exceptions).
 - `retry=RetryPolicy(...)` — [declarative backoff](control-flow.md#retries) around the handler call. Spelled as a `retry` class attribute on a `Command`, alongside `raises`/`invariants`.
-- `invariants={InvariantClass: predicate}` — [preconditions](control-flow.md#invariants).
-- `node_name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. These, and `retry=`, are reserved (a field named `node_name`/`previously`/`retry` can't be matched via `**field_matchers`; a `Command` declaring an annotated `retry` field also fails at class creation — use `retry: ClassVar = ...` for the policy, or rename the field). Inline `Command.handle()` handlers default their node identity to the **command's `__qualname__`** (e.g. `Order.Place`), not the method name, so it is stable regardless of `handlers=[...]` order; a renamed command declares its historic node names as a class attribute, `previously: ClassVar = (...)`, mirroring `raises`/`invariants` in spelling. All four are read off the command class that declares them — a concrete `Command` may not be subclassed, so a historic node name still identifies exactly one class. See [Handler renames](event-migrations.md#handler-renames).
+- `handles_command=True` — the handler acts as the `handle()` of each command it receives: it may emit the outcomes nested under that command instance, and no other's. Subscribe it to `Command` subclasses or to an `EventMixin` the commands carry. Any other type raises `TypeError` at decoration. Reserved: a field named `handles_command` cannot be matched through `**field_matchers`.
+- `invariants={InvariantClass: predicate}` — [preconditions](control-flow.md#invariants). A predicate can accept `(log)` or `(log, source_event)`.
+- `node_name=` — pin a **stable node identity** (defaults to the function name) so renaming the function never breaks an interrupted checkpoint. `previously=` (str or tuple) — historic node names to keep resumable after a rename. These, and `retry=`/`handles_command=`, are reserved (a field named `node_name`/`previously`/`retry`/`handles_command` cannot be matched via `**field_matchers`; a `Command` declaring an annotated `retry` field also fails at class creation — use `retry: ClassVar = ...` for the policy, or rename the field). Inline `Command.handle()` handlers default their node identity to the **command's `__qualname__`** (e.g. `Order.Place`), not the method name, so it is stable regardless of `handlers=[...]` order; a renamed command declares its historic node names as a class attribute, `previously: ClassVar = (...)`, mirroring `raises`/`invariants` in spelling. All four are read off the command class that declares them — a concrete `Command` may not be subclassed, so a historic node name still identifies exactly one class. See [Handler renames](event-migrations.md#handler-renames).
 
 Returns enforced against the declared annotation, or the subscribed `Command.Outcomes` when unannotated. Omitting the return annotation is legal. An annotation that does not resolve at run time is not, and raises `TypeError` at graph construction — see [Concepts › Return contract](concepts.md#return-contract).
 
@@ -62,8 +64,10 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `NamespaceModel.reducers` | Field | Tuple of `NamespaceModel.Reducer` — every reducer with `name`, `subscribes` and `namespace`. `subscribes` holds the concrete events of the model that the reducer folds, resolved from `event_type` (unlike `Policy.subscribes`, which holds the declared types), or `None` when a `runtime_checkable` Protocol with data members makes the folds unknown. `namespace` is a name, or `None` for a reducer passed to `EventGraph(reducers=...)` |
 | `NamespaceModel.Focus` | Nested dataclass | The part of the graph that `mermaid(focus=...)` draws. Fields `namespaces`, `reactions`, `reducers` each take one name or an iterable of names, stored sorted. At least one name is required: an empty `Focus()` raises `ValueError`. Valid names are `list(model.namespaces)`, `[r.name for r in model.reactions]` and `[r.name for r in model.reducers]` |
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant` — every declared invariant with `cls`, `commands`, `declared_by`, `reactors` |
-| `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch |
+| `EventGraph.compiled` | Property | Underlying `CompiledStateGraph` escape hatch. Its input schema accepts every state channel: events, the internal cursor fields and each reducer channel |
 | `EventGraph.reducer_names` | Property | `frozenset` of registered reducer names |
+| `EventGraph.reducers` | Property | Read-only mapping of channel name to reducer, including reducers discovered on the graph's namespaces |
+| `EventGraph.checkpointer` | Property | The checkpointer passed to the constructor, or `None` |
 | `EventGraph.reflect(log)` | Method | Deterministic query surface over a run — returns a `Reflection` (see [Reflection](reflection.md)) |
 | `Reflection` | Class | Facts-only read-model: `context()`, `tool()`, `overview()`, `event(i)`, `evidence(i)`, `schema()`, `state()`, `.log`. Injectable into handlers by parameter annotation, like `EventLog` |
 | `QueryTool` | Frozen dataclass | The `query_log` LLM tool: `name` / `description` / `parameters` (JSON Schema) / `run(...) -> str`. Maps 1:1 to Anthropic / LangChain tool shapes |
@@ -104,7 +108,7 @@ Returns enforced against the declared annotation, or the subscribed `Command.Out
 | `ScalarReducer` | Class | Last-write-wins for a single value; `None` is valid |
 | `FoldReducer` | Class | Folds each event into accumulating state via `fold(self, state)`; next value depends on the prior. Generic over state type `S` |
 | `Foldable` | Protocol | `@runtime_checkable` structural type for events with a `fold` method; types `FoldReducer`'s event arg (don't inherit it) |
-| `BaseReducer` | Class | Abstract base for custom reducers — subclass for bespoke channels |
+| `BaseReducer` | Class | Abstract base for custom reducers — subclass for bespoke channels. `advance(state, events)` folds events onto a channel value through the channel merge (see [Rebuilding a channel from the log](reducers.md#rebuilding-a-channel-from-the-log)) |
 | `SKIP` | Sentinel | Return from `ScalarReducer.fn` (or a `FoldReducer.fold`) to leave the value unchanged |
 | `RESET` | Sentinel | Return from a `FoldReducer.fold` to clear the channel back to `default_factory()` |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |
@@ -149,6 +153,7 @@ from langgraph_events.stream import (
 | Export | Type | Description |
 |---|---|---|
 | `CommandPrivacyError` | TypeError subclass | Raised at `EventGraph` construction; also at runtime when a handler with a broad base-class annotation (e.g. `-> DomainEvent`) constructs a `Cmd.Private(...)` that bypasses the static contract check. Outcomes nested inside a `Command` are private to that Command's inline `handle()` — neither sibling Commands nor non-inline reactors may produce them |
+| `InterruptWithoutCheckpointerError` | RuntimeError subclass | Raised when a handler returns an `Interrupted` on an `EventGraph` built without `checkpointer=`. Before, the run ended and the interrupt was lost with no error. Raised outside the `raises=` catch boundary |
 | `ReducerNotSetError` | ValueError subclass | Raised at injection time (before the handler body runs) when a handler parameter rejects `None` (e.g. `strategy: str`) and the channel value is `None`. Sits outside the `raises=` catch boundary — a broad `raises=ValueError` cannot swallow it. Opt out by widening the annotation to `str | None`, `Any`, `object`, or omitting it |
 
 ## AG-UI Subpackage
@@ -172,6 +177,20 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `merge_frontend_messages` | Function | `resume_factory` helper: reads messages from `checkpoint_state["reducers"][reducer_name]`, converts `input_data.messages`, merges via `add_messages` (id-based dedup). Returns a tuple |
 | `build_langchain_tools` / `detect_new_tool_results` | Function | Convert `RunAgentInput.tools` to OpenAI-format / extract new `ToolMessage`s from a resume request |
 
+## Store Subpackage
+
+A durable event log with no checkpointer. Exported from `langgraph_events.store`. See [Event store](event-store.md).
+
+| Export | Type | Description |
+|---|---|---|
+| `Record` | Frozen dataclass | `(module, type, fields)`. One stored event. `to_json()` gives one line. `Record.from_json(line)` raises `ValueError` on a line that is not a record |
+| `EventStore` | Protocol | `append(records)` makes records durable in order. `load()` returns every durable record |
+| `MemoryEventStore` | Class | In-memory `EventStore` that keeps JSON text |
+| `JsonlEventStore` | Class | `JsonlEventStore(path)`. One JSON record per line: `{"module": "...", "type": "...", "fields": {...}}`. The parent directory must exist. The constructor takes an exclusive `flock` on `<path>.lock` until `close()`. It creates `<path>` with the default mode on the first append, never before. Each `append` flushes and calls `fsync`, and an `OSError` propagates unwrapped. `load()` ignores a torn last line, and the next `append` truncates it. Context manager. POSIX only |
+| `StoreLockedError` | RuntimeError subclass | Raised by `JsonlEventStore(path)` when another store holds the lock |
+| `EventCodec` | Class | `EventCodec(migrations=(), *, namespaces=(), events=(), replay={})`. `encode(events)` and `decode(records)` serve one log. `register(cls)`. `tolerate_unresolved()`. Discard the codec after an append error. Reload the store into a new codec |
+| `EventStream` | Class | `EventStream(graph, store, codec)`. Synchronous only. `invoke(seed)` takes one event or a list, returns turn events and stores each superstep before the next. A handler log has stored events, then turn events. `log` has every event. `state()` reads cached reducer values. An append error makes the stream unusable. Create a new codec and stream, then reload. Store records omit causation metadata. Refuses a graph with a checkpointer |
+
 ## Serde Subpackage
 
 Namespace-aware serialization, auto-wired by default. `EventGraph.from_namespaces(..., checkpointer=MemorySaver())` builds a `NamespaceAwareSerde` scoped to the passed namespaces and auto-collects every `@migrate_from` / `@backfill` on those classes. Opt out by passing `MemorySaver(serde=<custom>)`. See [Event migrations](event-migrations.md).
@@ -192,6 +211,8 @@ Exported from `langgraph_events.serde` unless a different module is noted.
 | `synthesize_legacy_payload` | Function | `synthesize_legacy_payload(module, qualname, kwargs)` — builds the `(format, bytes)` a prior release would have written. For pinning a specific drifted field shape; the loop gate above covers identity reachability |
 | `replay_reducer` | Function | `replay_reducer(reducer, events)` — rebuild a reducer's channel value from its (already-migrated) event log when the projection/output shape changed. Thin wrapper over `BaseReducer.seed` |
 | `NamespaceAwareSerde.revivable_identities` | Method | Read-only `frozenset` of every revivable `(module, qualname)`. For custom coverage rules; `assert_all_baselined_cover` is the gate |
+| `NamespaceAwareSerde.revive_event` | Method | `revive_event(module, qualname, kwargs, *, resolve=None)` — revives one stored event through the same migration tables as a checkpoint read: rename, fills, transforms, split, then the class. `resolve(module, qualname)` is asked for the class first. The serde scope and the import walk are the fallback. Raises `ValueError` with the remedy. Inside `tolerate_unresolved()` it returns an `UnrevivedIdentity` instead. See [Event store](event-store.md) |
+| `UnrevivedIdentity` | NamedTuple | `(module, qualname)` placeholder for an identity that did not revive, produced only inside `tolerate_unresolved()`. Not an `Event` |
 | `assert_all_baselined_handlers_cover` | Function | `assert_all_baselined_handlers_cover(graph, baseline_path)` — handler analog: asserts every baselined handler node name is still live or covered by an `@on(previously=...)` alias. Takes the `EventGraph`. See [Handler renames](event-migrations.md#handler-renames) |
 | `assert_resume_recovers` | Function | `assert_resume_recovers(before, after, *, seed, resume_with, thread_id=None)` — behavioral recovery proof: invokes `before` to interrupt, resumes `after` on the same checkpoint, asserts a `Resumed` (real recovery). The handler analog of `assert_all_baselined_revive`; both graphs must share one checkpointer. See [Testing handler recovery](event-migrations.md#testing-handler-recovery) |
 | `CoverageError` | Exception | `AssertionError` base for both coverage failures; `except CoverageError` catches event and handler gates alike |

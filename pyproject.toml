@@ -24,7 +24,8 @@ dependencies = [
     # Compares a name-keyed service with the handler annotation at graph
     # build (``beartype.door``). Pure Python, no dependencies.
     "beartype>=0.22.0",
-    "langgraph>=0.2.0",
+    "langgraph>=1.2.4",
+    "langgraph-sdk>=0.4.4,<0.5.0",
     # NamespaceAwareSerde extends JsonPlusSerializer and relies on its
     # per-instance ``_unpack_ext_hook`` attribute (and on ``_msgpack_default``
     # / ``_option`` symbols). Floor pinned to 4.0.3: bundles the
