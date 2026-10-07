@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EventCodec` turns events into store records and back.** A field that holds an earlier event
+  of the log is stored as `{"$ref": index}` and revives as the same object. A tuple, a dict with
+  a `$` key, and a value outside JSON use `$tuple`, `$dict` and `$repr`. Each record goes through
+  `NamespaceAwareSerde.revive_event`, so every migration decorator applies. `replay={EventType:
+  factory}` registers the classes an event defines at run time, before the next record decodes.
+  A failed record raises `ValueError` naming its position, its type and any bad `$ref` value,
+  and the codec keeps no event of that call. A `SystemExit` from a replay function passes
+  through. A system event stored under the module `"langgraph_events"` resolves through the
+  import walk. `tolerate_unresolved()` decodes an unknown class to `UnrevivedIdentity`.
 - **`langgraph_events.store`: an event log with no checkpointer.** `Record` is one stored event:
   `module`, `type` and JSON `fields`. `EventStore` is the port, with `append` and `load`.
   `MemoryEventStore` keeps JSON text in memory. `JsonlEventStore(path)` writes one record per

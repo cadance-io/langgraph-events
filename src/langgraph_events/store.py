@@ -9,15 +9,25 @@ runs. A load rebuilds the log from the store and runs no handler.
 
 from __future__ import annotations
 
+import contextlib
+import dataclasses
 import json
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, BinaryIO, Protocol
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
+
+from langgraph_events._event import Event
+from langgraph_events._event_log import EventLog
+from langgraph_events.serde import NamespaceAwareSerde
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
     from types import TracebackType
+
+    from langgraph_events._event import Namespace
+    from langgraph_events.serde import Migration, UnrevivedIdentity
 
 
 def _reject_json_constant(constant: str) -> object:
@@ -186,3 +196,166 @@ class JsonlEventStore:
         traceback: TracebackType | None,
     ) -> None:
         self.close()
+
+
+_MARKERS = frozenset({"$ref", "$tuple", "$dict", "$repr"})
+"""The single keys that make a stored JSON object a marker, not a dict."""
+
+_NO_REPLAY: Mapping[type[Event], Callable[[Event], Iterable[type[Event]]]] = (
+    MappingProxyType({})
+)
+
+
+class EventCodec:
+    """Events to records and back, for one log.
+
+    The codec remembers the position of every event it encodes or decodes,
+    so a field that holds an earlier event of the log is stored as
+    ``{"$ref": index}`` and revives as that same object. Use one codec per
+    log.
+
+    Decode passes each record through the serde migration tables
+    (:meth:`NamespaceAwareSerde.revive_event`). *replay* maps an event type
+    to a function that returns the classes that event defines. The codec
+    calls it as soon as such an event decodes, and registers each class
+    before the next record decodes. The function must be the factory the
+    live handler calls. It runs no handler.
+    """
+
+    def __init__(
+        self,
+        migrations: Sequence[Migration] = (),
+        *,
+        namespaces: Sequence[type[Namespace]] = (),
+        events: Sequence[type[Event]] = (),
+        replay: Mapping[
+            type[Event], Callable[[Event], Iterable[type[Event]]]
+        ] = _NO_REPLAY,
+    ) -> None:
+        self._serde = NamespaceAwareSerde(
+            migrations, namespaces=namespaces, events=events
+        )
+        self._replay = dict(replay)
+        self._registry: dict[tuple[str, str], type[Event]] = {}
+        self._book: list[Event | UnrevivedIdentity] = []
+        self._index_of: dict[int, int] = {}
+
+    def register(self, cls: type[Event]) -> None:
+        """Make *cls* revivable by its identity, ahead of the import walk."""
+        self._registry[(cls.__module__, cls.__qualname__)] = cls
+
+    @contextlib.contextmanager
+    def tolerate_unresolved(self) -> Iterator[list[UnrevivedIdentity]]:
+        """Decode an unrevivable record to an ``UnrevivedIdentity``.
+
+        Delegates to :meth:`NamespaceAwareSerde.tolerate_unresolved`. Yields
+        the collector. A reader uses this to inspect a log whose classes are
+        gone. Do not build an :class:`EventStream` over such a codec.
+        """
+        with self._serde.tolerate_unresolved() as missing:
+            yield missing
+
+    def encode(self, events: Sequence[Event]) -> list[Record]:
+        """One record per event. Each event takes the next log position."""
+        base = len(self._book)
+        fresh: dict[int, int] = {}
+        records = []
+        for offset, event in enumerate(events):
+            cls = type(event)
+            records.append(
+                Record(
+                    cls.__module__,
+                    cls.__qualname__,
+                    {
+                        field.name: self._dump(getattr(event, field.name), fresh)
+                        for field in dataclasses.fields(cast("Any", event))
+                    },
+                )
+            )
+            fresh[id(event)] = base + offset
+        self._book.extend(events)
+        self._index_of.update(fresh)
+        return records
+
+    def decode(self, records: Sequence[Record]) -> EventLog:
+        """Revive *records* as the next events of the log.
+
+        Raises ``ValueError`` naming the record position and identity when a
+        record does not revive, a ``$ref`` does not point to an earlier
+        event, or a replay function raises. The codec then keeps no event
+        of this call.
+        """
+        base = len(self._book)
+        try:
+            for index, record in enumerate(records, start=base):
+                self._book.append(self._decode_one(index, record))
+        except BaseException:
+            del self._book[base:]
+            raise
+        decoded = self._book[base:]
+        self._index_of.update(
+            (id(event), base + index) for index, event in enumerate(decoded)
+        )
+        return EventLog._from_owned(tuple(decoded))
+
+    def _decode_one(self, index: int, record: Record) -> Event | UnrevivedIdentity:
+        identity = f"{record.module}.{record.type}"
+        try:
+            kwargs = {
+                key: self._load(value, index) for key, value in record.fields.items()
+            }
+            event = self._serde.revive_event(
+                record.module, record.type, kwargs, resolve=self._resolve
+            )
+            for kind, replay in self._replay.items():
+                if isinstance(event, kind):
+                    for cls in replay(event):
+                        self.register(cls)
+        except Exception as exc:
+            raise ValueError(f"record #{index} {identity}: {exc}") from exc
+        return event
+
+    def _resolve(self, module: str, qualname: str) -> type[Event] | None:
+        return self._registry.get((module, qualname))
+
+    def _dump(self, value: object, fresh: Mapping[int, int]) -> object:
+        if value is None or isinstance(value, bool | int | float | str):
+            return value
+        if isinstance(value, Event):
+            index = self._index_of.get(id(value), fresh.get(id(value)))
+            if index is not None:
+                return {"$ref": index}
+        if isinstance(value, list | tuple):
+            items = [self._dump(item, fresh) for item in value]
+            return items if isinstance(value, list) else {"$tuple": items}
+        if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+            dumped = {key: self._dump(item, fresh) for key, item in value.items()}
+            escaped = any(key.startswith("$") for key in value)
+            return {"$dict": dumped} if escaped else dumped
+        return {"$repr": repr(value)}
+
+    def _load(self, value: object, index: int) -> object:
+        if isinstance(value, list):
+            return [self._load(item, index) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if len(value) == 1 and next(iter(value)) in _MARKERS:
+            return self._load_marker(*next(iter(value.items())), index)
+        return {key: self._load(item, index) for key, item in value.items()}
+
+    def _load_marker(self, marker: str, body: object, index: int) -> object:
+        if marker == "$ref":
+            if isinstance(body, bool) or not isinstance(body, int):
+                raise ValueError(f"$ref {body!r} is not an integer")
+            if not 0 <= body < index:
+                raise ValueError(
+                    f"$ref {body} must point to an earlier event, below {index}"
+                )
+            return self._book[body]
+        if marker == "$tuple" and isinstance(body, list):
+            return tuple(self._load(item, index) for item in body)
+        if marker == "$dict" and isinstance(body, dict):
+            return {key: self._load(item, index) for key, item in body.items()}
+        if marker == "$repr" and isinstance(body, str):
+            return body
+        raise ValueError(f"{marker} holds {type(body).__name__}")
