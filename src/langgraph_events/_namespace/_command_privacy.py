@@ -67,7 +67,9 @@ def enforce_command_privacy(
                     raise CommandPrivacyError(
                         _unnested_outcome_msg(owner, event_cls, event_owner)
                     )
-            elif event_owner is not None:
+            elif event_owner is not None and not (
+                meta.handles_command and issubclass(event_owner, meta.event_types)
+            ):
                 # Any non-inline handler: forbidden from emitting Command-
                 # private events. Only the owning Command's inline handle()
                 # may produce them — colocate the emission there.

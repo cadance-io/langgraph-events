@@ -111,7 +111,7 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
     - Pinned reactors fire for both pre- and post-check failures without distinguishing them — inspect `event.would_emit` to tell them apart.
 
 !!! note "Semantics"
-    - Predicates receive `EventLog`; must be **sync** (async rejected at decoration) and **pure functions of `log`**.
+    - Predicates receive `EventLog` and can also accept the triggering event as a second positional parameter. One-argument predicates remain supported. Predicates must be **sync** (async rejected at decoration) and pure functions of their arguments.
     - Pre-check log = committed events. Post-check log = committed + everything the current node call has buffered.
     - Multiple invariants short-circuit; one `InvariantViolated` per phase.
     - Predicate exceptions propagate (not converted to violations).

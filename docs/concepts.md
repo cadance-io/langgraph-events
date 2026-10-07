@@ -78,6 +78,7 @@ graph = EventGraph.from_namespaces(Order, handlers=[react])
 - Annotated return types must cover every nested `DomainEvent`.
 - Every name in the return annotation must resolve at run time from the handler module's globals. Write the qualified name (`Order.Ship.Shipped`), not the bare nested name (`Shipped`). A bare nested name works today but fails under `from __future__ import annotations`, because the annotation is then a string resolved against module globals only. An unresolvable return annotation raises `TypeError` at graph construction.
 - `DomainEvent`s nested inside a `Command` are **Command-private** — only that Command's handler may emit them. Recovery reactors emit namespace-level siblings (e.g. `Order.Rejected`). Violations raise `CommandPrivacyError` at graph construction.
+- One handler can act as the `handle()` of a family of commands: `@on(MyMixin, handles_command=True)`, where each command class mixes in `MyMixin` (an `EventMixin` subclass). The handler may emit the outcomes of the command instance it receives, and no other's. A declared return type may name only outcomes of the commands the handler subscribes to. Use it for commands minted at run time, which cannot carry an inline handler of their own.
 
 Declare `invariants` and `raises` as class-level attributes:
 

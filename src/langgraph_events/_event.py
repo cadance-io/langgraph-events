@@ -957,8 +957,9 @@ class InvariantViolated(SystemEvent):
 
     Either phase short-circuits on the first failing invariant.  Predicate
     exceptions propagate — they are NOT turned into violations.  Predicates
-    should be pure functions of ``log`` since the same predicate runs in both
-    phases.
+    should be pure functions of ``log`` and the triggering event since the
+    same predicate runs in both phases. A predicate can accept either
+    ``(log)`` or ``(log, source_event)``.
 
     Subscribe via ``@on(InvariantViolated)`` for all violations, or pin to a
     specific invariant via the ``invariant=`` field matcher::

@@ -7,6 +7,7 @@ that implement the hub-and-spoke reactive loop on top of LangGraph's StateGraph.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import operator
 import time
@@ -569,14 +570,28 @@ def _next_delay_or_give_up(
     return delay
 
 
-def _find_failing_invariant(meta: HandlerMeta, log: EventLog) -> type | None:
+def _call_invariant(
+    predicate: Callable[..., bool], log: EventLog, source_event: Event
+) -> bool:
+    """Call *predicate* with its supported invariant arguments."""
+    try:
+        inspect.signature(predicate).bind(log, source_event)
+    except (TypeError, ValueError):
+        return predicate(log)
+    else:
+        return predicate(log, source_event)
+
+
+def _find_failing_invariant(
+    meta: HandlerMeta, log: EventLog, source_event: Event
+) -> type | None:
     """Return the first invariant whose predicate fails against *log*, else None.
 
     Predicates are sync-only (validated at decoration). Predicate exceptions
     propagate (do not become violations).
     """
     for inv_cls, predicate in meta.invariants:
-        if not predicate(log):
+        if not _call_invariant(predicate, log, source_event):
             return inv_cls
     return None
 
@@ -593,7 +608,9 @@ def _check_invariants(
     if not meta.invariants:
         return None
     inv_cls = _find_failing_invariant(
-        meta, EventLog._from_state(state["events"], state.get("causes"), check=False)
+        meta,
+        EventLog._from_state(state["events"], state.get("causes"), check=False),
+        event,
     )
     if inv_cls is None:
         return None
@@ -633,7 +650,7 @@ def _check_invariants_post(
         [*(state.get("causes") or []), *pending_causes],
         check=False,
     )
-    inv_cls = _find_failing_invariant(meta, simulated)
+    inv_cls = _find_failing_invariant(meta, simulated, event)
     if inv_cls is None:
         return None
     return InvariantViolated(
@@ -985,8 +1002,12 @@ def _collect_result(
     lg_interrupt: Callable[[Any], Any],
     meta: HandlerMeta | None = None,
     return_contract: Any = None,
+    source: Event | None = None,
 ) -> None:
-    """Normalise handler return and handle Interrupted / Scatter."""
+    """Normalise handler return and handle Interrupted / Scatter.
+
+    *source* is the event the handler was called with.
+    """
     if result is None:
         return
 
@@ -999,7 +1020,7 @@ def _collect_result(
     if return_contract is not None:
         _assert_return_matches(result, meta, return_contract)
 
-    _assert_no_private_leak(result, meta)
+    _assert_no_private_leak(result, meta, source)
 
     result._collect_into(new_events, lg_interrupt)
 
@@ -1024,7 +1045,7 @@ def _collect_and_check(
     a single ``InvariantViolated`` carrying ``would_emit``.
     """
     pre_len = len(new_events)
-    _collect_result(result, new_events, lg_interrupt, meta, return_contract)
+    _collect_result(result, new_events, lg_interrupt, meta, return_contract, event)
     emitted = new_events[pre_len:]
     pending_causes = list(new_causes)
     _record_causes(pending_causes, new_events, trigger, meta.node_name)
@@ -1036,7 +1057,9 @@ def _collect_and_check(
         new_events.append(violation)
 
 
-def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -> None:
+def _assert_no_private_leak(
+    result: Event | Scatter, meta: HandlerMeta | None, source: Event | None
+) -> None:
     """Defense-in-depth runtime check for Command-private leaks.
 
     Empty-typed ``Scatter`` annotations (bare, ``Scatter[Any]``,
@@ -1046,6 +1069,9 @@ def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -
     ``-> DomainEvent``) constructs ``Scatter([Cmd.Private(...)])`` at runtime
     — Python's type system doesn't enforce annotations at the call site, so
     the runtime check catches what the static check structurally cannot see.
+
+    A ``handles_command`` handler may emit the outcomes of *source*, the
+    command it was called with, and no other command's.
     """
     if meta is None:
         return
@@ -1061,12 +1087,15 @@ def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -
         if not isinstance(ev, DomainEvent):
             continue
         owner_cmd = getattr(type(ev), "__command__", None)
-        if owner_cmd is not None:
-            raise CommandPrivacyError(
-                f"Reactor {meta.name!r} emitted {type(ev).__qualname__}, "
-                f"which is private to {owner_cmd.__qualname__}. Only "
-                f"{owner_cmd.__qualname__}.handle() may emit it."
-            )
+        if owner_cmd is None:
+            continue
+        if meta.handles_command and owner_cmd is type(source):
+            continue
+        raise CommandPrivacyError(
+            f"Reactor {meta.name!r} emitted {type(ev).__qualname__}, "
+            f"which is private to {owner_cmd.__qualname__}. Only "
+            f"{owner_cmd.__qualname__}.handle() may emit it."
+        )
 
 
 def _assert_return_matches(

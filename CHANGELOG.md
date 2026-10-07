@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`EventMixin`: a public base for a mixin that `@on` subscribes to.** Subclass it, compose
   the subclass with an Event branch or a `Command`, and `@on(MyMixin)` receives every event
   that carries it. `MessageEvent` and `Auditable` subclass it.
+- **`@on(..., handles_command=True)` lets one handler record outcomes for a family of
+  commands.** The handler may emit the outcomes nested under the command instance it receives,
+  and no other's. A declared return type may name only outcomes of the commands it subscribes
+  to. Subscribe it to `Command` subclasses or to an `EventMixin`; any other type raises
+  `TypeError`. This replaces stamping the private `_inline_command` attribute.
+- **Invariant predicates can receive the triggering event.** Predicates that accept two
+  positional arguments receive `(log, source_event)`. One-argument predicates remain supported.
 
 ### Fixed
 

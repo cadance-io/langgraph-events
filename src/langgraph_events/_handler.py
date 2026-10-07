@@ -11,7 +11,7 @@ from collections import abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from langgraph_events._event import Event, EventMixin, Invariant
+from langgraph_events._event import Command, Event, EventMixin, Invariant
 from langgraph_events._event_log import (
     EventLog,
 )
@@ -227,6 +227,25 @@ def _infer_event_type(fn: Any) -> type[Event]:
     return event_type
 
 
+def _validate_handles_command(
+    handles_command: bool, event_types: tuple[type[Event], ...]
+) -> None:
+    """``handles_command=True`` needs a bool, and only Command or mixin types."""
+    if not isinstance(handles_command, bool):
+        raise TypeError(
+            f"@on() handles_command= must be a bool, got {handles_command!r}"
+        )
+    if not handles_command:
+        return
+    for event_type in event_types:
+        if not issubclass(event_type, (Command, EventMixin)):
+            raise TypeError(
+                f"@on(handles_command=True) subscribes to {event_type.__qualname__}, "
+                f"which is not a Command or an EventMixin. Only a command has "
+                f"outcomes for the handler to emit."
+            )
+
+
 def normalize_previous_names(previously: Any, *, owner: str) -> tuple[str, ...]:
     """Validate and normalise a ``previously=`` value into an alias tuple.
 
@@ -263,6 +282,7 @@ def _build_on_decorator(
     node_name: str | None = None,
     previous_names: tuple[str, ...] = (),
     retry: RetryPolicy | None = None,
+    handles_command: bool = False,
 ) -> Callable[[F], F]:
     """Validate arguments and return the decorator that stamps attributes.
 
@@ -276,6 +296,7 @@ def _build_on_decorator(
             raise TypeError(f"@on() requires Event subclasses or mixins, got {et!r}")
 
     raises_tuple = normalize_exception_tuple(raises, owner="@on() raises=")
+    _validate_handles_command(handles_command, event_types)
 
     if retry is not None and not isinstance(retry, RetryPolicy):
         raise TypeError(
@@ -341,6 +362,7 @@ def _build_on_decorator(
         fn._invariants = invariants_tuple  # type: ignore[attr-defined]
         fn._previous_names = previous_names  # type: ignore[attr-defined]
         fn._retry = retry  # type: ignore[attr-defined]
+        fn._handles_command = handles_command  # type: ignore[attr-defined]
         # ``node_name`` has no class-level declaration to re-stamp from (see
         # ``extract_handler_meta``), so there is no stale value to correct and
         # an unconditional stamp would only erase an explicit
@@ -360,6 +382,7 @@ def on(
     node_name: str | None = None,
     previously: str | tuple[str, ...] = (),
     retry: RetryPolicy | None = None,
+    handles_command: bool = False,
     **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
 ) -> Any:
     """Subscribe a handler to one or more event types.
@@ -409,6 +432,12 @@ def on(
     positionally via ``**field_matchers``. Inline ``Command`` handlers declare
     historic node names as a class attribute instead:
     ``previously: ClassVar = (...)``.
+
+    ``handles_command=True`` lets one handler act as the ``handle()`` of each
+    command it receives: it may emit the outcomes nested under the command
+    instance it was called with, and no other command's outcomes. Subscribe
+    it to ``Command`` subclasses or to an :class:`EventMixin` that commands
+    carry. ``handles_command`` is a reserved keyword too.
     """
     if node_name is not None and not isinstance(node_name, str):
         raise TypeError(f"@on() node_name= must be a str, got {node_name!r}")
@@ -421,6 +450,7 @@ def on(
         and node_name is None
         and not previous_names
         and retry is None
+        and not handles_command
     )
     sole_arg_is_function = len(event_types) == 1 and (
         inspect.isfunction(event_types[0]) or inspect.ismethod(event_types[0])
@@ -441,6 +471,7 @@ def on(
                 node_name=node_name,
                 previous_names=previous_names,
                 retry=retry,
+                handles_command=handles_command,
             )(fn)
 
         return inferring
@@ -453,6 +484,7 @@ def on(
         node_name=node_name,
         previous_names=previous_names,
         retry=retry,
+        handles_command=handles_command,
     )
 
 
@@ -498,6 +530,7 @@ class HandlerMeta:
     # Declared via ``@on(retry=...)`` or a ``retry`` class attribute on a
     # Command. ``None`` means one attempt, the pre-retry behaviour.
     retry: RetryPolicy | None = None
+    handles_command: bool = False
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
     # (param_name, registered_service_type) for params whose annotation is a
     # base class of (or identical to) a service type registered on
@@ -815,6 +848,7 @@ def extract_handler_meta(
         field_inject_params=field_inject_params,
         raises=raises,
         retry=retry,
+        handles_command=getattr(fn, "_handles_command", False),
         invariants=invariants,
         service_params=service_params,
         service_name_params=service_name_params,
