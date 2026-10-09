@@ -1092,6 +1092,33 @@ def describe_NamespaceAwareSerde():
                 assert not isinstance(back.value, Story.Approve.Approved)
                 assert back.value.note == "persona"
 
+        def when_the_interrupt_carries_a_response_schema():
+            # LangGraph 1.2 adds ``response_schema``. ``interrupt()`` stores
+            # it as a JSON Schema dict.
+            def it_keeps_the_schema():
+                serde = NamespaceAwareSerde()
+                schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+                iv = Interrupt(value="ask", id="abc123", response_schema=schema)
+
+                back = serde.loads_typed(serde.dumps_typed(iv))
+
+                assert back.response_schema == schema
+                assert back.value == "ask"
+                assert back.id == "abc123"
+
+        def when_the_interrupt_has_no_response_schema():
+            # A library version that predates LangGraph 1.2 reads only the
+            # pair ``(value, id)``. Keeping that encoding lets it read the
+            # checkpoint after a downgrade.
+            def it_writes_the_pair_encoding():
+                serde = NamespaceAwareSerde()
+
+                _, data = serde.dumps_typed(Interrupt(value="ask", id="abc123"))
+
+                inner = ormsgpack.packb(("ask", "abc123"), option=_option)
+                expected = ormsgpack.Ext(EXT_INTERRUPT, inner)
+                assert data == ormsgpack.packb(expected, option=_option)
+
         def when_a_checkpoint_carries_multiple_interrupts():
             # LangGraph's runner emits a *tuple* of ``Interrupt``s on a
             # checkpoint write (one per parallel branch / interrupt site).
@@ -1164,17 +1191,18 @@ def describe_NamespaceAwareSerde():
                     assert log.latest(ReviewApproved) == ReviewApproved()
 
         def describe_Interrupt_schema_guard():
-            # ``_default``/``_ext_hook`` track ``Interrupt`` by its two known
-            # fields (``value``, ``id``). If LangGraph ever adds another
-            # field, our hardcoded reconstruction would silently drop it on
-            # round-trip — this guard surfaces that drift loudly so the
-            # serde gets updated alongside the LangGraph bump.
+            # ``_default``/``_ext_hook`` track ``Interrupt`` by its three known
+            # fields (``value``, ``id``, ``response_schema``). If LangGraph
+            # ever adds another field, our hardcoded reconstruction would
+            # silently drop it on round-trip — this guard surfaces that drift
+            # loudly so the serde gets updated alongside the LangGraph bump.
             def it_matches_the_schema_we_encode():
+                known = {"value", "id", "response_schema"}
                 fields = {f.name for f in dataclasses.fields(Interrupt)}
-                assert fields == {"value", "id"}, (
+                assert fields == known, (
                     f"langgraph.types.Interrupt fields drifted from "
-                    f"{{'value', 'id'}} to {fields}. NamespaceAwareSerde "
-                    f"hardcodes (value, id) in _jsonplus.py — extend "
+                    f"{known} to {fields}. NamespaceAwareSerde hardcodes "
+                    f"(value, id, response_schema) in _jsonplus.py — extend "
                     f"_default and the EXT_INTERRUPT branch of _ext_hook "
                     f"to cover the new field(s)."
                 )

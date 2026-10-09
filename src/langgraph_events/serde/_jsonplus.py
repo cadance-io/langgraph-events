@@ -289,15 +289,23 @@ def _make_default(
             # inside ``obj.value`` reachable through this hook and revivable
             # under EXT_NAMESPACE_AWARE_EVENT.
             #
-            # Tracks (value, id) explicitly rather than walking
-            # ``dataclasses.fields(obj)`` — Interrupt has a custom
+            # Tracks (value, id, response_schema) explicitly rather than
+            # walking ``dataclasses.fields(obj)`` — Interrupt has a custom
             # ``__init__`` that doesn't accept arbitrary kwargs, so a
             # generic walk would not round-trip cleanly anyway.
             # ``it_matches_the_schema_we_encode`` in tests/test_serde.py
             # guards against silent field drift.
+            #
+            # LangGraph 1.2 adds ``response_schema``. Without one, the pair
+            # encoding stays, so a library version that predates 1.2 can
+            # still read the checkpoint.
+            schema = getattr(obj, "response_schema", None)
+            fields = (
+                (obj.value, obj.id) if schema is None else (obj.value, obj.id, schema)
+            )
             return ormsgpack.Ext(
                 EXT_INTERRUPT,
-                ormsgpack.packb((obj.value, obj.id), default=_default, option=_option),
+                ormsgpack.packb(fields, default=_default, option=_option),
             )
         return _msgpack_default(obj)
 
@@ -354,11 +362,15 @@ def _make_ext_hook(
         if code == EXT_INTERRUPT:
             # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
             # inside ``value`` resolves back to its namespaced class.
-            value, id_ = ormsgpack.unpackb(
+            value, id_, *schema = ormsgpack.unpackb(
                 data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
             )
+            # A pair is a checkpoint with no response_schema, or one written
+            # before LangGraph 1.2. Only a triple passes the keyword, so an
+            # older LangGraph still revives the pair.
+            extra = {"response_schema": schema[0]} if schema else {}
             try:
-                return Interrupt(value=value, id=id_)
+                return Interrupt(value=value, id=id_, **extra)
             except TypeError as exc:
                 # Mirrors the EXT_NAMESPACE_AWARE_EVENT branch below: degrade
                 # gracefully through ``loads_typed``'s ``errors`` channel if

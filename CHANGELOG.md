@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A checkpoint keeps the `response_schema` of a LangGraph interrupt.** LangGraph 1.2 adds
+  `Interrupt.response_schema`. `NamespaceAwareSerde` encoded only `value` and `id`, so the
+  schema was lost when a paused thread was read back. The serializer now writes the schema
+  when it is set. An interrupt without a schema keeps the earlier encoding, so an earlier
+  library version can still read the checkpoint.
 - **A `None` field of a model reaches the AG-UI client as `null`.** The AG-UI encoder dumps
   each event with `exclude_none=True`. Pydantic applies that flag to each nested model too. So
   a model in the reducer state lost each `None` field, and the key was absent on the wire. The
