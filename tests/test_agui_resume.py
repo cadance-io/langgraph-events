@@ -137,11 +137,26 @@ def describe_agui_messages_to_langchain():
                             ]
 
                 def with_a_file_source():
-                    def it_emits_the_provider_handle_as_file_id():
+                    """A file source names a handle in the provider account.
+
+                    The server sends it with its own credentials. A client
+                    handle could then read a file that the client does not own.
+                    """
+
+                    def _message() -> UserMessage:
                         source = FileSource(value="file-42", provider="openai")
-                        msg = UserMessage(id="u1", content=[ImagePart(source=source)])
-                        [out] = agui_messages_to_langchain([msg])
-                        assert out.content == [{"type": "image", "file_id": "file-42"}]
+                        return UserMessage(
+                            id="u-file",
+                            content=[TextPart(text="kept"), ImagePart(source=source)],
+                        )
+
+                    def it_drops_the_part():
+                        [out] = agui_messages_to_langchain([_message()])
+                        assert out.content == [{"type": "text", "text": "kept"}]
+
+                    def it_logs_a_warning_naming_the_message(caplog):
+                        agui_messages_to_langchain([_message()])
+                        assert any("u-file" in r.message for r in caplog.records)
 
                 def with_an_id():
                     def it_keeps_the_id():

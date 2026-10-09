@@ -30,22 +30,38 @@ _BLOCK_TYPES = {
 }
 """The LangChain standard block type for each AG-UI content part type."""
 
-_SOURCE_KEYS = {"data": "base64", "url": "url", "file": "file_id"}
+_SOURCE_KEYS = {"data": "base64", "url": "url"}
 """The LangChain block key that holds the value of each AG-UI part source."""
 
 
 def _content_to_langchain(
-    content: str | list[InputContentPart],
+    content: str | list[InputContentPart], message_id: str
 ) -> str | list[str | dict[str, Any]]:
     """Convert AG-UI message content to LangChain message content.
 
-    Each part becomes the LangChain standard block of the same modality. A
-    ``file`` source is a handle that the provider issued, so it becomes
-    ``file_id``.
+    Each part becomes the LangChain standard block of the same modality.
+
+    A part with a ``file`` source is dropped, with a WARNING. That source
+    names a handle in the provider account. The server sends the handle with
+    its own credentials, so a client handle could read a file that the client
+    does not own.
     """
     if isinstance(content, str):
         return content
-    return [_part_to_block(part) for part in content]
+    kept = [part for part in content if not _has_file_source(part)]
+    if len(kept) < len(content):
+        logger.warning(
+            "Dropping %d content part(s) with a file source from AG-UI message "
+            "%s — a client must not name a provider file handle.",
+            len(content) - len(kept),
+            message_id,
+        )
+    return [_part_to_block(part) for part in kept]
+
+
+def _has_file_source(part: InputContentPart) -> bool:
+    source = getattr(part, "source", None)
+    return getattr(source, "type", None) == "file"
 
 
 def _part_to_block(part: InputContentPart) -> dict[str, Any]:
@@ -102,7 +118,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
             out.append(
                 HumanMessage(
                     id=m.id,
-                    content=_content_to_langchain(m.content),
+                    content=_content_to_langchain(m.content, m.id),
                     name=m.name,
                     additional_kwargs=collect_inbound_extras(m),
                 )
@@ -160,7 +176,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
             out.append(
                 ToolMessage(
                     id=m.id,
-                    content=_content_to_langchain(m.content),
+                    content=_content_to_langchain(m.content, m.id),
                     tool_call_id=m.tool_call_id,
                     # A truthy `error` marks the failure, in both directions.
                     # The outbound mapper never sends an empty `error`, so a

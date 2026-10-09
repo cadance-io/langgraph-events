@@ -17,8 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multimodal content becomes LangChain standard content blocks.** Before, each `binary` part
   became an OpenAI `image_url` block, whatever its MIME type. Now each `image`, `audio`,
   `video` and `document` part becomes the standard block of the same modality. A `data`
-  source becomes `base64`, a `url` source becomes `url`, and a `file` source becomes
-  `file_id`. A `ToolMessage` with list content uses the same conversion. A consumer that reads
+  source becomes `base64`, and a `url` source becomes `url`. A part with a `file` source is
+  dropped with a WARNING. That source names a handle in the provider account, and the server
+  sends it with its own credentials. So a client handle could read a file that the client does
+  not own. A `ToolMessage` with list content uses the same conversion. A consumer that reads
   `image_url` blocks must read the standard blocks instead.
 - **`MessagesSnapshot` sends block content as AG-UI content parts.** The mapping is the reverse
   of the inbound one, for a `UserMessage` and a `ToolMessage`. Before, a tool result with block

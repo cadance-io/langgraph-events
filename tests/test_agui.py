@@ -2941,7 +2941,7 @@ def describe_user_message_content_conversion():
                 TextPart(id="p1", text="look"),
                 ImagePart(source=DataSource(value="AAA=", mime_type="image/png")),
                 DocumentPart(source=UrlSource(value="https://x/y", mime_type="a/b")),
-                VideoPart(source=FileSource(value="f-1")),
+                VideoPart(source=UrlSource(value="https://x/v")),
             ]
             [inbound] = agui_messages_to_langchain(
                 [AguiUserMessage(id="u1", content=parts)]
