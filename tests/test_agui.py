@@ -17,6 +17,7 @@ from ag_ui.core import ToolMessage as AguiToolMessage
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+from pydantic import BaseModel
 
 from langgraph_events import (
     Event,
@@ -108,6 +109,20 @@ class ReviewWithPayload(InterruptedWithPayload[_ReviewPayload]):
 
     def interrupt_payload(self) -> _ReviewPayload:
         return _ReviewPayload(kind="review", draft=self.draft)
+
+
+class Note(BaseModel):
+    """A client value with an optional field, to check the None on the wire."""
+
+    text: str
+    owner: str | None = None
+
+
+class NotedReview(InterruptedWithPayload[dict[str, Any]]):
+    """Payload-typed interrupt that carries a pydantic model."""
+
+    def interrupt_payload(self) -> dict[str, Any]:
+        return {"note": Note(text="draft")}
 
 
 class ApprovalGiven(IntegrationEvent):
@@ -1480,6 +1495,66 @@ def describe_transport():
 
         response = create_starlette_response(_events())
         assert isinstance(response, StreamingResponse)
+
+
+def describe_encode_sse_stream():
+    """A ``None`` field of a nested model must reach the client as ``null``.
+
+    The AG-UI encoder dumps each event with ``exclude_none=True``. Pydantic
+    applies that flag to every nested model, so the adapter must hand the
+    encoder JSON-safe values.
+    """
+
+    async def _wire(events: list[BaseEvent]) -> list[dict[str, Any]]:
+        from langgraph_events.agui import encode_sse_stream
+
+        async def _events():
+            for event in events:
+                yield event
+
+        lines = [line async for line in encode_sse_stream(_events())]
+        return [json.loads(line.removeprefix("data: ")) for line in lines]
+
+    def when_a_reducer_holds_a_model():
+        async def it_keeps_a_none_field_as_null():
+            from langgraph_events import ScalarReducer
+
+            note = ScalarReducer(
+                name="note", event_type=UserAsked, fn=lambda e: Note(text=e.question)
+            )
+            graph = _graph(reply, reducers=[message_reducer(), note])
+
+            wire = await _wire(await _stream(graph))
+
+            snapshots = [w for w in wire if w["type"] == "STATE_SNAPSHOT"]
+            assert snapshots[-1]["snapshot"]["note"] == {"text": "go", "owner": None}
+
+    def when_an_interrupt_payload_holds_a_model():
+        async def it_keeps_a_none_field_as_null():
+            @on(UserAsked)
+            def ask_review(event: UserAsked) -> NotedReview:
+                return NotedReview()
+
+            graph = _graph(ask_review, checkpointer=MemorySaver())
+
+            wire = await _wire(await _stream(graph))
+
+            custom = [w for w in wire if w.get("name") == "interrupted"]
+            assert custom[0]["value"]["note"] == {"text": "draft", "owner": None}
+
+    def when_a_custom_event_frame_holds_a_model():
+        async def it_keeps_a_none_field_as_null(monkeypatch):
+            from langgraph_events.stream import CustomEventFrame
+
+            graph = _graph(reply)
+            _patch_astream(
+                monkeypatch, graph, CustomEventFrame(name="noted", data=Note(text="x"))
+            )
+
+            wire = await _wire(await _stream(graph))
+
+            custom = [w for w in wire if w.get("name") == "noted"]
+            assert custom[0]["value"] == {"text": "x", "owner": None}
 
 
 def describe_interrupt_detection():

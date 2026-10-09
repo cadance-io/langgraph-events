@@ -19,6 +19,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from pydantic import BaseModel
+from pydantic_core import to_jsonable_python
 
 from langgraph_events._event import (
     Event,
@@ -351,22 +352,10 @@ class InterruptedMapper:
         if not isinstance(event, Interrupted):
             return None
         if isinstance(event, InterruptedWithPayload):
-            return [
-                CustomEvent(
-                    type=EventType.CUSTOM,
-                    name="interrupted",
-                    value=event.interrupt_payload(),
-                )
-            ]
+            return [build_custom_event("interrupted", event.interrupt_payload())]
         if not isinstance(event, AGUISerializable):
             return _handle_unmapped(type(event), self._on_unmapped)
-        return [
-            CustomEvent(
-                type=EventType.CUSTOM,
-                name="interrupted",
-                value=event.agui_dict(),
-            )
-        ]
+        return [build_custom_event("interrupted", event.agui_dict())]
 
 
 class FallbackMapper:
@@ -383,13 +372,7 @@ class FallbackMapper:
             if isinstance(event, AGUICustomEvent)
             else type(event).__name__
         )
-        return [
-            CustomEvent(
-                type=EventType.CUSTOM,
-                name=name,
-                value=event.agui_dict(),
-            )
-        ]
+        return [build_custom_event(name, event.agui_dict())]
 
 
 def default_mappers(on_unmapped: str = "warn") -> list[Any]:
@@ -402,11 +385,26 @@ def default_mappers(on_unmapped: str = "warn") -> list[Any]:
     ]
 
 
+def _json_safe(value: Any) -> Any:
+    """Return ``value`` as plain JSON data, with each ``None`` field kept.
+
+    The AG-UI encoder dumps an event with ``exclude_none=True``. Pydantic
+    applies that flag to each nested model too, so a ``None`` field of a
+    model is lost. A ``None`` in plain data stays on the wire.
+    """
+    return to_jsonable_python(value, by_alias=True)
+
+
+def build_custom_event(name: str, value: Any) -> CustomEvent:
+    """Build a CustomEvent with a JSON-safe value."""
+    return CustomEvent(type=EventType.CUSTOM, name=name, value=_json_safe(value))
+
+
 def build_state_snapshot(reducers: dict[str, Any]) -> StateSnapshotEvent:
-    """Build a StateSnapshotEvent from reducer data."""
+    """Build a StateSnapshotEvent with JSON-safe reducer data."""
     return StateSnapshotEvent(
         type=EventType.STATE_SNAPSHOT,
-        snapshot=reducers,
+        snapshot=_json_safe(reducers),
     )
 
 

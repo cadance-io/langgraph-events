@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `None` field of a model reaches the AG-UI client as `null`.** The AG-UI encoder dumps
+  each event with `exclude_none=True`. Pydantic applies that flag to each nested model too. So
+  a model in the reducer state lost each `None` field, and the key was absent on the wire. The
+  adapter now converts the value of each `StateSnapshotEvent` and each `CustomEvent` to plain
+  JSON data before the encoder sees it. This covers the reducer state, an interrupt payload, an
+  `agui_dict()` value and a custom event frame. A `None` in plain data stays on the wire, so a
+  client gets each key that its contract declares.
+
 ## [0.35.1] - 2026-10-03
 
 ### Fixed
