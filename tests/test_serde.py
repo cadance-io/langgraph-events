@@ -1191,11 +1191,11 @@ def describe_NamespaceAwareSerde():
                     assert log.latest(ReviewApproved) == ReviewApproved()
 
         def describe_Interrupt_schema_guard():
-            # ``_default``/``_ext_hook`` track ``Interrupt`` by its three known
-            # fields (``value``, ``id``, ``response_schema``). If LangGraph
-            # ever adds another field, our hardcoded reconstruction would
-            # silently drop it on round-trip — this guard surfaces that drift
-            # loudly so the serde gets updated alongside the LangGraph bump.
+            # ``_default`` and ``_ext_hook`` encode the three known fields of
+            # ``Interrupt``: ``value``, ``id`` and ``response_schema``. If
+            # LangGraph adds a field, the serde drops it on a round trip. This
+            # guard fails on that change. Update the serde in the same
+            # LangGraph upgrade.
             def it_matches_the_schema_we_encode():
                 known = {"value", "id", "response_schema"}
                 fields = {f.name for f in dataclasses.fields(Interrupt)}

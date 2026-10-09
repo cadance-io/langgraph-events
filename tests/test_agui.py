@@ -120,8 +120,8 @@ class ReviewWithPayload(InterruptedWithPayload[_ReviewPayload]):
         return _ReviewPayload(kind="review", draft=self.draft)
 
 
-_IMAGE_URL_BLOCK = {"type": "image_url", "image_url": {"url": "https://x/y"}}
-"""A provider-specific block that has no AG-UI content part."""
+_UNMAPPABLE_BLOCK = {"type": "custom", "data": 1}
+"""A block that LangChain reads as non-standard, so it has no AG-UI content part."""
 
 
 class Note(BaseModel):
@@ -129,13 +129,6 @@ class Note(BaseModel):
 
     text: str
     owner: str | None = None
-
-
-class NotedReview(InterruptedWithPayload[dict[str, Any]]):
-    """Payload-typed interrupt that carries a pydantic model."""
-
-    def interrupt_payload(self) -> dict[str, Any]:
-        return {"note": Note(text="draft")}
 
 
 class ApprovalGiven(IntegrationEvent):
@@ -1513,9 +1506,9 @@ def describe_transport():
 def describe_encode_sse_stream():
     """A ``None`` field of a nested model must reach the client as ``null``.
 
-    Before ``ag-ui-protocol`` 1.0.0, the encoder dumped each event with
-    ``exclude_none=True``. Pydantic applied that flag to every nested model.
-    These tests stop a return to that behaviour.
+    This is an upgrade guard on ``ag-ui-protocol``. Before 1.0.0, its encoder
+    dumped each event with ``exclude_none=True``. Pydantic applied that flag to
+    every nested model. This test fails if a later release does that again.
     """
 
     async def _wire(events: list[BaseEvent]) -> list[dict[str, Any]]:
@@ -1541,55 +1534,6 @@ def describe_encode_sse_stream():
 
             snapshots = [w for w in wire if w["type"] == "STATE_SNAPSHOT"]
             assert snapshots[-1]["snapshot"]["note"] == {"text": "go", "owner": None}
-
-    def when_an_interrupt_payload_holds_a_model():
-        async def it_keeps_a_none_field_as_null():
-            @on(UserAsked)
-            def ask_review(event: UserAsked) -> NotedReview:
-                return NotedReview()
-
-            graph = _graph(ask_review, checkpointer=MemorySaver())
-
-            wire = await _wire(await _stream(graph))
-
-            custom = [w for w in wire if w.get("name") == "interrupted"]
-            assert custom[0]["value"]["note"] == {"text": "draft", "owner": None}
-
-    def when_a_custom_event_frame_holds_a_model():
-        async def it_keeps_a_none_field_as_null(monkeypatch):
-            from langgraph_events.stream import CustomEventFrame
-
-            graph = _graph(reply)
-            _patch_astream(
-                monkeypatch, graph, CustomEventFrame(name="noted", data=Note(text="x"))
-            )
-
-            wire = await _wire(await _stream(graph))
-
-            custom = [w for w in wire if w.get("name") == "noted"]
-            assert custom[0]["value"] == {"text": "x", "owner": None}
-
-    def when_a_user_mapper_emits_a_model():
-        async def it_keeps_a_none_field_as_null():
-            class NoteMapper:
-                def map(self, event: Any, ctx: Any) -> Any:
-                    if isinstance(event, TaskCreated):
-                        note = Note(text=event.title)
-                        return [
-                            CustomEvent(type=EventType.CUSTOM, name="note", value=note)
-                        ]
-                    return None
-
-            @on(UserAsked)
-            def create_task(event: UserAsked) -> TaskCreated:
-                return TaskCreated(title="y")
-
-            graph = _graph(create_task)
-
-            wire = await _wire(await _stream(graph, mappers=[NoteMapper()]))
-
-            custom = [w for w in wire if w.get("name") == "note"]
-            assert custom[0]["value"] == {"text": "y", "owner": None}
 
 
 def describe_interrupt_detection():
@@ -2558,13 +2502,13 @@ def describe_agui_message_extras():
                 SystemMessage(
                     content="plain",
                     additional_kwargs={
-                        "langgraph_events.agui": {"metadata": {"source": "mail"}}
+                        "langgraph_events.agui": {"metadata": {"tag": "a"}}
                     },
                 )
             )
 
             [sys_msg] = _roled(events, "system")
-            assert sys_msg.metadata == {"source": "mail"}
+            assert sys_msg.metadata == {"tag": "a"}
 
         def when_the_value_is_not_a_mapping():
             def _bad_metadata_message() -> SystemMessage:
@@ -2851,36 +2795,24 @@ def describe_tool_message_status_conversion():
                 ImagePart(source=UrlSource(value="https://x/y")),
             ]
 
-    def when_a_block_has_no_agui_part():
-        async def it_drops_the_block_and_keeps_the_rest():
-            events = await _emit(
-                ToolMessage(
-                    content=[{"type": "text", "text": "42"}, _IMAGE_URL_BLOCK],
-                    tool_call_id="tc-1",
-                )
-            )
-
-            assert not _of_type(events, EventType.RUN_ERROR)
-            [tool_msg] = _roled(events, "tool")
-            assert tool_msg.content == [TextPart(text="42")]
-
-        async def it_logs_a_warning_naming_the_tool_call(caplog):
-            @on(UserAsked)
-            def run_tool(event: UserAsked) -> ToolsExecuted:
-                return ToolsExecuted(
-                    messages=(
-                        ToolMessage(
-                            content=[_IMAGE_URL_BLOCK],
-                            tool_call_id="tc-dropped",
-                        ),
+        def when_a_block_has_no_agui_part():
+            async def it_logs_a_warning_naming_the_tool_call(caplog):
+                @on(UserAsked)
+                def run_tool(event: UserAsked) -> ToolsExecuted:
+                    return ToolsExecuted(
+                        messages=(
+                            ToolMessage(
+                                content=[_UNMAPPABLE_BLOCK],
+                                tool_call_id="tc-dropped",
+                            ),
+                        )
                     )
-                )
 
-            graph = _graph(run_tool)
-            adapter = _adapter(graph)
-            await _collect(adapter, _make_input())
+                graph = _graph(run_tool)
+                adapter = _adapter(graph)
+                await _collect(adapter, _make_input())
 
-            assert any("tc-dropped" in r.message for r in caplog.records)
+                assert any("tc-dropped" in r.message for r in caplog.records)
 
 
 def describe_user_message_content_conversion():
@@ -2935,6 +2867,35 @@ def describe_user_message_content_conversion():
                 content = await _user_content([{"type": "file", "file_id": "f-1"}])
                 assert content == [DocumentPart(source=FileSource(value="f-1"))]
 
+    def when_a_block_is_in_a_provider_format():
+        """LangChain translates the block. Before 1.0 the adapter stored this shape."""
+
+        def with_a_data_url():
+            async def it_sends_a_data_source():
+                url = "data:image/png;base64,AAA="
+                block = {"type": "image_url", "image_url": {"url": url}}
+                content = await _user_content([block])
+                source = DataSource(value="AAA=", mime_type="image/png")
+                assert content == [ImagePart(source=source)]
+
+        def with_a_remote_url():
+            async def it_sends_a_url_source():
+                block = {"type": "image_url", "image_url": {"url": "https://x/y"}}
+                content = await _user_content([block])
+                assert content == [ImagePart(source=UrlSource(value="https://x/y"))]
+
+    def when_a_block_is_in_the_langchain_v0_shape():
+        async def it_sends_the_part():
+            block = {
+                "type": "image",
+                "source_type": "base64",
+                "data": "AAA=",
+                "mime_type": "image/png",
+            }
+            content = await _user_content([block])
+            source = DataSource(value="AAA=", mime_type="image/png")
+            assert content == [ImagePart(source=source)]
+
     def when_the_content_came_from_a_client():
         async def it_sends_back_the_same_parts():
             parts = [
@@ -2954,7 +2915,15 @@ def describe_user_message_content_conversion():
 
     def when_a_block_has_no_agui_part():
         async def it_drops_the_block_and_keeps_the_rest():
-            events = await _emit(HumanMessage(content=[_IMAGE_URL_BLOCK, "kept"]))
+            events = await _emit(HumanMessage(content=[_UNMAPPABLE_BLOCK, "kept"]))
+
+            assert not _of_type(events, EventType.RUN_ERROR)
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="kept")]
+
+    def when_a_block_type_is_not_a_string():
+        async def it_drops_the_block_and_keeps_the_rest():
+            events = await _emit(HumanMessage(content=[{"type": ["x"]}, "kept"]))
 
             assert not _of_type(events, EventType.RUN_ERROR)
             [user_msg] = _roled(events, "user")

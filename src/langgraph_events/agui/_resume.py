@@ -21,17 +21,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_BLOCK_TYPES = {
-    "text": "text",
-    "image": "image",
-    "audio": "audio",
-    "video": "video",
-    "document": "file",
-}
-"""The LangChain standard block type for each AG-UI content part type."""
+BLOCK_TYPES = {"image": "image", "audio": "audio", "video": "video", "document": "file"}
+"""The LangChain standard block type for each AG-UI media part type."""
 
-_SOURCE_KEYS = {"data": "base64", "url": "url"}
-"""The LangChain block key that holds the value of each AG-UI part source."""
+SOURCE_KEYS = {"data": "base64", "url": "url"}
+"""The LangChain block key that holds the value of each AG-UI source type.
+
+A ``file`` source is not in the table, so an inbound part with one is dropped.
+That source names a handle in the provider account. The server sends the
+handle with its own credentials, so a client handle can read a file that the
+client does not own.
+"""
 
 
 def _content_to_langchain(
@@ -39,16 +39,14 @@ def _content_to_langchain(
 ) -> str | list[str | dict[str, Any]]:
     """Convert AG-UI message content to LangChain message content.
 
-    Each part becomes the LangChain standard block of the same modality.
-
-    A part with a ``file`` source is dropped, with a WARNING. That source
-    names a handle in the provider account. The server sends the handle with
-    its own credentials, so a client handle could read a file that the client
-    does not own.
+    Each part becomes the LangChain standard block of the same modality. A part
+    with a source type outside :data:`SOURCE_KEYS` is dropped with a WARNING.
+    Part ``metadata`` is dropped with a WARNING, because a LangChain block has
+    no field for it.
     """
     if isinstance(content, str):
         return content
-    kept = [part for part in content if not _has_file_source(part)]
+    kept = [p for p in content if p.type == "text" or p.source.type in SOURCE_KEYS]
     if len(kept) < len(content):
         logger.warning(
             "Dropping %d content part(s) with a file source from AG-UI message "
@@ -56,23 +54,27 @@ def _content_to_langchain(
             len(content) - len(kept),
             message_id,
         )
+    with_metadata = sum(part.metadata is not None for part in kept)
+    if with_metadata:
+        logger.warning(
+            "Dropping the metadata of %d content part(s) from AG-UI message %s "
+            "— a LangChain content block has no field for it.",
+            with_metadata,
+            message_id,
+        )
     return [_part_to_block(part) for part in kept]
 
 
-def _has_file_source(part: InputContentPart) -> bool:
-    source = getattr(part, "source", None)
-    return getattr(source, "type", None) == "file"
-
-
 def _part_to_block(part: InputContentPart) -> dict[str, Any]:
-    block: dict[str, Any] = {"type": _BLOCK_TYPES[part.type]}
     if part.type == "text":
-        block["text"] = part.text
+        block: dict[str, Any] = {"type": "text", "text": part.text}
     else:
-        block[_SOURCE_KEYS[part.source.type]] = part.source.value
-        mime_type = getattr(part.source, "mime_type", None)
-        if mime_type:
-            block["mime_type"] = mime_type
+        block = {
+            "type": BLOCK_TYPES[part.type],
+            SOURCE_KEYS[part.source.type]: part.source.value,
+        }
+        if part.source.mime_type:
+            block["mime_type"] = part.source.mime_type
     if part.id is not None:
         block["id"] = part.id
     return block
@@ -211,6 +213,12 @@ def merge_frontend_messages(
     :func:`agui_messages_to_langchain`, and merges via langgraph's
     ``add_messages`` (id-based dedup).
 
+    A stored message wins over an inbound message with the same id. The
+    server owns each message that its ``MessagesSnapshot`` sent, as AG-UI
+    defines that event. A client echoes that history back, and an echo can
+    be lossy, for example when a part is dropped. So only a message with a
+    new id is converted and added.
+
     Defensive default: malformed tool-call JSON is dropped (with a WARNING).
     Pass ``drop_invalid_tool_calls=False`` for strict parity with upstream.
     """
@@ -218,8 +226,9 @@ def merge_frontend_messages(
 
     reducers = (checkpoint_state or {}).get("reducers") or {}
     existing = list(reducers.get(reducer_name) or [])
+    stored_ids = {m.id for m in existing}
     new = agui_messages_to_langchain(
-        input_data.messages or [],
+        [m for m in input_data.messages or [] if m.id not in stored_ids],
         drop_invalid_tool_calls=drop_invalid_tool_calls,
     )
     # langgraph's add_messages signature accepts dict/tuple/str shapes for

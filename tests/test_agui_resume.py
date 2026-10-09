@@ -79,16 +79,6 @@ def describe_agui_messages_to_langchain():
                     [out] = agui_messages_to_langchain([msg])
                     assert out.content == [{"type": "text", "text": "hi there"}]
 
-                def with_an_id():
-                    def it_keeps_the_id():
-                        msg = UserMessage(
-                            id="u1", content=[TextPart(id="p1", text="a")]
-                        )
-                        [out] = agui_messages_to_langchain([msg])
-                        assert out.content == [
-                            {"type": "text", "text": "a", "id": "p1"}
-                        ]
-
             def when_part_is_media():
                 @pytest.mark.parametrize(
                     ("part_type", "block_type"),
@@ -140,7 +130,7 @@ def describe_agui_messages_to_langchain():
                     """A file source names a handle in the provider account.
 
                     The server sends it with its own credentials. A client
-                    handle could then read a file that the client does not own.
+                    handle can then read a file that the client does not own.
                     """
 
                     def _message() -> UserMessage:
@@ -157,6 +147,22 @@ def describe_agui_messages_to_langchain():
                     def it_logs_a_warning_naming_the_message(caplog):
                         agui_messages_to_langchain([_message()])
                         assert any("u-file" in r.message for r in caplog.records)
+
+                def with_part_metadata():
+                    """A LangChain block has no field for it."""
+
+                    def _message() -> UserMessage:
+                        source = UrlSource(value="https://x/y")
+                        part = ImagePart(source=source, metadata={"tag": "a"})
+                        return UserMessage(id="u-meta", content=[part])
+
+                    def it_drops_the_metadata():
+                        [out] = agui_messages_to_langchain([_message()])
+                        assert out.content == [{"type": "image", "url": "https://x/y"}]
+
+                    def it_logs_a_warning_naming_the_message(caplog):
+                        agui_messages_to_langchain([_message()])
+                        assert any("u-meta" in r.message for r in caplog.records)
 
                 def with_an_id():
                     def it_keeps_the_id():
@@ -318,10 +324,10 @@ def describe_agui_messages_to_langchain():
         """AG-UI 1.0 declares ``metadata``. Before 1.0 it was an extra field."""
 
         def it_collects_it_under_the_reserved_additional_kwargs_key():
-            msg = AGUISystemMessage(id="s1", content="x", metadata={"source": "mail"})
+            msg = AGUISystemMessage(id="s1", content="x", metadata={"tag": "a"})
             [out] = agui_messages_to_langchain([msg])
             assert out.additional_kwargs == {
-                "langgraph_events.agui": {"metadata": {"source": "mail"}}
+                "langgraph_events.agui": {"metadata": {"tag": "a"}}
             }
 
     def when_message_carries_more_extra_data_than_the_cap_allows():
@@ -599,12 +605,36 @@ def describe_merge_frontend_messages():
             assert result[0].id == "u1"
 
     def when_existing_and_new_share_id():
-        def it_dedups_via_add_messages():
+        """A snapshot sends the messages the server owns, and the client echoes them.
+
+        The server copy stays. An echo can be lossy, for example a dropped part.
+        """
+
+        def it_keeps_the_stored_message():
             existing = [HumanMessage(id="u1", content="old")]
             inp = make_run_agent_input(messages=[UserMessage(id="u1", content="new")])
             result = merge_frontend_messages(inp, {"reducers": {"messages": existing}})
             assert len(result) == 1
-            assert result[0].content == "new"
+            assert result[0].content == "old"
+
+        def with_an_echo_of_a_stored_file_handle():
+            def _merge() -> Any:
+                block = {"type": "image", "file_id": "file-42"}
+                existing = [HumanMessage(id="u1", content=[block])]
+                source = FileSource(value="file-42")
+                echo = UserMessage(id="u1", content=[ImagePart(source=source)])
+                inp = make_run_agent_input(messages=[echo])
+                return merge_frontend_messages(
+                    inp, {"reducers": {"messages": existing}}
+                )
+
+            def it_keeps_the_block():
+                [out] = _merge()
+                assert out.content == [{"type": "image", "file_id": "file-42"}]
+
+            def it_logs_no_file_source_warning(caplog):
+                _merge()
+                assert not any("file source" in r.message for r in caplog.records)
 
     def when_input_messages_are_empty():
         def it_returns_existing_messages_unchanged():

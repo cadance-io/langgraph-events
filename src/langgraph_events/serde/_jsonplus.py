@@ -297,8 +297,8 @@ def _make_default(
             # guards against silent field drift.
             #
             # LangGraph 1.2 adds ``response_schema``. Without one, the pair
-            # encoding stays, so a library version that predates 1.2 can
-            # still read the checkpoint.
+            # encoding stays. So a langgraph-events version without LangGraph
+            # 1.2 support can still read the checkpoint.
             schema = getattr(obj, "response_schema", None)
             fields = (
                 (obj.value, obj.id) if schema is None else (obj.value, obj.id, schema)
@@ -379,7 +379,8 @@ def _make_ext_hook(
                 # time, but this covers an unpinned-LangGraph runtime gap).
                 errors.append(
                     f"Cannot revive langgraph.types.Interrupt(value=..., "
-                    f"id=...): {type(exc).__name__}: {exc}. The Interrupt "
+                    f"id=..., response_schema=...): {type(exc).__name__}: "
+                    f"{exc}. A response_schema needs LangGraph 1.2. The Interrupt "
                     f"dataclass shape may have changed since the checkpoint "
                     f"was written; update NamespaceAwareSerde to track the "
                     f"new fields."

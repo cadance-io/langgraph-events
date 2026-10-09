@@ -28,6 +28,14 @@ a dot, so it is not a Python identifier and no integration can produce it as a
 keyword argument. Read the constant rather than the literal.
 """
 
+AGUI_EXTRAS_OPEN_FIELDS = frozenset({"metadata"})
+"""Declared AG-UI message fields that use the extras slot.
+
+AG-UI 1.0 declares each one as an open ``Metadata`` mapping, and 0.x carried
+it as an extra field. Inbound, the field goes to the slot under its own name.
+Outbound, a mapping entry with that name sets the declared field.
+"""
+
 AGUI_EXTRAS_MAX_BYTES = 8192
 """Size cap on the extra fields one inbound AG-UI message may carry.
 
@@ -48,9 +56,9 @@ def collect_inbound_extras(message: Any) -> dict[str, Any]:
 
     AG-UI models allow extra fields. Whatever the client sent beyond the
     declared schema is kept under :data:`AGUI_EXTRAS_KEY`, which is the same
-    slot the outbound mapper reads. The declared ``metadata`` field goes to
-    the same slot, because AG-UI 1.0 declares the field that 0.x carried as an
-    extra. A message with neither gets an empty ``additional_kwargs``.
+    slot the outbound mapper reads. Each field in :data:`AGUI_EXTRAS_OPEN_FIELDS`
+    goes to the same slot. A message with neither gets an empty
+    ``additional_kwargs``.
 
     **This is a trust boundary.** The value is whatever the client put on the
     wire. It enters ``additional_kwargs``, flows through ``add_messages`` into
@@ -70,9 +78,10 @@ def collect_inbound_extras(message: Any) -> dict[str, Any]:
     again on every retry.
     """
     payload = dict(getattr(message, "model_extra", None) or {})
-    metadata = getattr(message, "metadata", None)
-    if metadata is not None:
-        payload["metadata"] = metadata
+    for name in AGUI_EXTRAS_OPEN_FIELDS:
+        value = getattr(message, name, None)
+        if value is not None:
+            payload[name] = value
     if not payload:
         return {}
     message_id = getattr(message, "id", None)
