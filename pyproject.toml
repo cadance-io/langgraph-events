@@ -42,7 +42,7 @@ Documentation = "https://cadance-io.github.io/langgraph-events/"
 Changelog = "https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-agui = ["ag-ui-protocol>=0.1.0"]
+agui = ["ag-ui-protocol>=1.0.0", "langchain-core>=1.0.0"]
 
 [dependency-groups]
 dev = [
@@ -54,7 +54,7 @@ dev = [
     "pre-commit>=4.0",
     "pytest-cov>=4.0",
     "langchain-openai>=1.1.10",
-    "ag-ui-protocol>=0.1.0",
+    "ag-ui-protocol>=1.0.0",
 ]
 examples = [
     "langchain-openai>=0.2.0",

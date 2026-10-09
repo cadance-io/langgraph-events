@@ -9,14 +9,20 @@ import pytest
 from ag_ui.core.types import (
     ActivityMessage,
     AssistantMessage,
-    BinaryInputContent,
+    AudioPart,
+    DataSource,
     DeveloperMessage,
+    DocumentPart,
+    FileSource,
     FunctionCall,
+    ImagePart,
     ReasoningMessage,
     RunAgentInput,
-    TextInputContent,
+    TextPart,
     ToolCall,
+    UrlSource,
     UserMessage,
+    VideoPart,
 )
 from ag_ui.core.types import SystemMessage as AGUISystemMessage
 from ag_ui.core.types import ToolMessage as AGUIToolMessage
@@ -68,79 +74,85 @@ def describe_agui_messages_to_langchain():
 
         def when_content_is_a_multimodal_list():
             def when_part_is_text():
-                def it_emits_a_text_part_dict():
-                    msg = UserMessage(
-                        id="u1",
-                        content=[TextInputContent(text="hi there")],
-                    )
+                def it_emits_a_text_block():
+                    msg = UserMessage(id="u1", content=[TextPart(text="hi there")])
                     [out] = agui_messages_to_langchain([msg])
                     assert out.content == [{"type": "text", "text": "hi there"}]
 
-            def when_part_is_binary():
-                def with_url():
-                    def it_uses_url_as_image_url():
+                def with_an_id():
+                    def it_keeps_the_id():
                         msg = UserMessage(
-                            id="u1",
-                            content=[
-                                BinaryInputContent(
-                                    mime_type="image/png", url="https://x/y.png"
-                                )
-                            ],
+                            id="u1", content=[TextPart(id="p1", text="a")]
                         )
                         [out] = agui_messages_to_langchain([msg])
                         assert out.content == [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": "https://x/y.png"},
-                            }
+                            {"type": "text", "text": "a", "id": "p1"}
                         ]
 
-                def with_data_only():
-                    def it_builds_data_uri_using_mime_type():
-                        msg = UserMessage(
-                            id="u1",
-                            content=[
-                                BinaryInputContent(mime_type="image/png", data="AAA=")
-                            ],
-                        )
+            def when_part_is_media():
+                @pytest.mark.parametrize(
+                    ("part_type", "block_type"),
+                    [
+                        (ImagePart, "image"),
+                        (AudioPart, "audio"),
+                        (VideoPart, "video"),
+                        (DocumentPart, "file"),
+                    ],
+                )
+                def it_emits_the_standard_block_of_the_same_modality(
+                    part_type: Any, block_type: str
+                ):
+                    source = UrlSource(value="https://x/y")
+                    msg = UserMessage(id="u1", content=[part_type(source=source)])
+                    [out] = agui_messages_to_langchain([msg])
+                    assert out.content == [{"type": block_type, "url": "https://x/y"}]
+
+                def with_a_data_source():
+                    def it_emits_an_inline_base64_block():
+                        source = DataSource(value="AAA=", mime_type="image/png")
+                        msg = UserMessage(id="u1", content=[ImagePart(source=source)])
                         [out] = agui_messages_to_langchain([msg])
                         assert out.content == [
                             {
-                                "type": "image_url",
-                                "image_url": {"url": "data:image/png;base64,AAA="},
+                                "type": "image",
+                                "base64": "AAA=",
+                                "mime_type": "image/png",
                             }
                         ]
 
-                def with_id_only():
-                    def it_uses_id_as_image_url():
+                def with_a_url_source():
+                    def when_the_source_names_a_mime_type():
+                        def it_keeps_the_mime_type():
+                            source = UrlSource(value="https://x/y.pdf", mime_type="a/b")
+                            msg = UserMessage(
+                                id="u1", content=[DocumentPart(source=source)]
+                            )
+                            [out] = agui_messages_to_langchain([msg])
+                            assert out.content == [
+                                {
+                                    "type": "file",
+                                    "url": "https://x/y.pdf",
+                                    "mime_type": "a/b",
+                                }
+                            ]
+
+                def with_a_file_source():
+                    def it_emits_the_provider_handle_as_file_id():
+                        source = FileSource(value="file-42", provider="openai")
+                        msg = UserMessage(id="u1", content=[ImagePart(source=source)])
+                        [out] = agui_messages_to_langchain([msg])
+                        assert out.content == [{"type": "image", "file_id": "file-42"}]
+
+                def with_an_id():
+                    def it_keeps_the_id():
+                        source = UrlSource(value="https://x/y")
                         msg = UserMessage(
-                            id="u1",
-                            content=[
-                                BinaryInputContent(mime_type="image/png", id="ref-42")
-                            ],
+                            id="u1", content=[ImagePart(id="p1", source=source)]
                         )
                         [out] = agui_messages_to_langchain([msg])
                         assert out.content == [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": "ref-42"},
-                            }
+                            {"type": "image", "url": "https://x/y", "id": "p1"}
                         ]
-
-                def with_url_and_data():
-                    def it_prefers_url_over_data():
-                        msg = UserMessage(
-                            id="u1",
-                            content=[
-                                BinaryInputContent(
-                                    mime_type="image/png",
-                                    url="https://x/y.png",
-                                    data="AAA=",
-                                )
-                            ],
-                        )
-                        [out] = agui_messages_to_langchain([msg])
-                        assert out.content[0]["image_url"]["url"] == "https://x/y.png"
 
     def when_message_is_assistant():
         def when_content_is_none_and_no_tool_calls():
@@ -233,6 +245,20 @@ def describe_agui_messages_to_langchain():
             [out] = agui_messages_to_langchain([msg])
             assert out.status == "success"
 
+        def when_content_is_a_multimodal_list():
+            def it_emits_the_standard_blocks():
+                source = UrlSource(value="https://x/y")
+                msg = AGUIToolMessage(
+                    id="tm1",
+                    content=[TextPart(text="chart"), ImagePart(source=source)],
+                    tool_call_id="tc1",
+                )
+                [out] = agui_messages_to_langchain([msg])
+                assert out.content == [
+                    {"type": "text", "text": "chart"},
+                    {"type": "image", "url": "https://x/y"},
+                ]
+
         def when_the_error_field_is_set():
             def it_maps_the_error_field_to_an_error_status():
                 msg = AGUIToolMessage(
@@ -271,6 +297,16 @@ def describe_agui_messages_to_langchain():
             [out] = agui_messages_to_langchain([msg])
             assert out.additional_kwargs == {
                 "langgraph_events.agui": {"failure": {"retryable": True}}
+            }
+
+    def when_message_carries_metadata():
+        """AG-UI 1.0 declares ``metadata``. Before 1.0 it was an extra field."""
+
+        def it_collects_it_under_the_reserved_additional_kwargs_key():
+            msg = AGUISystemMessage(id="s1", content="x", metadata={"source": "mail"})
+            [out] = agui_messages_to_langchain([msg])
+            assert out.additional_kwargs == {
+                "langgraph_events.agui": {"metadata": {"source": "mail"}}
             }
 
     def when_message_carries_more_extra_data_than_the_cap_allows():

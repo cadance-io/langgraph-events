@@ -9,17 +9,25 @@ from functools import cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ag_ui.core import (
+    AudioPart,
     BaseEvent,
     CustomEvent,
+    DataSource,
+    DocumentPart,
     EventType,
+    FileSource,
+    ImagePart,
+    InputContentPart,
     MessagesSnapshotEvent,
     StateSnapshotEvent,
+    TextPart,
     ToolCallArgsEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
+    UrlSource,
+    VideoPart,
 )
 from pydantic import BaseModel
-from pydantic_core import to_jsonable_python
 
 from langgraph_events._event import (
     Event,
@@ -99,7 +107,7 @@ def _handle_unmapped(cls: type, on_unmapped: str) -> list[BaseEvent]:
 def _warn_dropped_extras(cls: type, kind: str, detail: str) -> None:
     """Warn once that AG-UI passthrough fields were dropped from *cls*.
 
-    *kind* is the dedupe key, not the message. It takes one of three fixed
+    *kind* is the dedupe key, not the message. It takes one of four fixed
     values, so the dedupe set stays bounded however many bad messages arrive.
     *detail* carries the specifics for the reader.
     """
@@ -151,12 +159,17 @@ def _build_agui_message(
     and cause. This matches the ``tool`` branch below, which degrades block
     content rather than raising.
 
-    Three causes drop something:
+    Four causes drop something:
 
     - the reserved key holds a non-mapping — the whole value goes;
     - an entry key is not a string — that entry goes, because ``**`` refuses it;
+    - the entry ``metadata`` holds a non-mapping — that entry goes;
     - an entry addresses a declared field — that entry goes, because it would
       rewrite protocol data.
+
+    ``metadata`` is the one declared field that an entry can set. AG-UI 1.0
+    declares it as an open container of extra data, and 0.x carried it as an
+    extra field. The inbound side collects it into the same slot.
     """
     extras = getattr(source, "additional_kwargs", None) or {}
     passthrough = extras.get(AGUI_EXTRAS_KEY)
@@ -181,7 +194,15 @@ def _build_agui_message(
             f"{', '.join(repr(k) for k in unusable)} is not.",
         )
 
-    collisions = sorted(set(usable) & _declared_names(cls))
+    if "metadata" in usable and not isinstance(usable["metadata"], Mapping):
+        del usable["metadata"]
+        _warn_dropped_extras(
+            cls,
+            "metadata-not-a-mapping",
+            f"the entry metadata must be a mapping, because {cls.__name__} "
+            f"declares metadata as one.",
+        )
+    collisions = sorted(set(usable) & _declared_names(cls) - {"metadata"})
     for name in collisions:
         del usable[name]
     if collisions:
@@ -193,6 +214,76 @@ def _build_agui_message(
             f"through the LangChain message.",
         )
     return cls(**fields, **usable)
+
+
+_PART_TYPES: dict[str, Any] = {
+    "image": ImagePart,
+    "audio": AudioPart,
+    "video": VideoPart,
+    "file": DocumentPart,
+}
+"""The AG-UI content part for each LangChain standard media block type."""
+
+
+def _content_to_agui(
+    content: str | list[Any], label: str
+) -> str | list[InputContentPart]:
+    """Convert LangChain message content to AG-UI message content.
+
+    Each standard block becomes the AG-UI part of the same modality. A block
+    with no AG-UI part is dropped, with one WARNING that names *label*. A
+    raise here would break each later ``connect()`` on the thread, as
+    :func:`_build_agui_message` explains.
+    """
+    if isinstance(content, str):
+        return content
+    parts = [_block_to_part(block) for block in content]
+    kept = [part for part in parts if part is not None]
+    if len(kept) < len(parts):
+        logger.warning(
+            "Dropping %d content block(s) from message %s — they have no AG-UI "
+            "content part. The rest of the content is unchanged.",
+            len(parts) - len(kept),
+            label,
+        )
+    return kept
+
+
+def _block_to_part(block: Any) -> InputContentPart | None:
+    if isinstance(block, str):
+        return TextPart(text=block)
+    if not isinstance(block, Mapping):
+        return None
+    block_id = _text_value(block, "id")
+    if block.get("type") == "text":
+        text = block.get("text")
+        return TextPart(id=block_id, text=text) if isinstance(text, str) else None
+    part_type = _PART_TYPES.get(block.get("type"))  # type: ignore[arg-type]
+    source = _block_source(block)
+    if part_type is None or source is None:
+        return None
+    return part_type(id=block_id, source=source)
+
+
+def _block_source(block: Mapping[str, Any]) -> Any:
+    """Return the AG-UI part source of a standard block, or ``None``.
+
+    An inline block needs its ``mime_type``, because AG-UI requires one on a
+    ``data`` source.
+    """
+    mime_type = _text_value(block, "mime_type")
+    if url := _text_value(block, "url"):
+        return UrlSource(value=url, mime_type=mime_type)
+    if (data := _text_value(block, "base64")) and mime_type:
+        return DataSource(value=data, mime_type=mime_type)
+    if file_id := _text_value(block, "file_id"):
+        return FileSource(value=file_id)
+    return None
+
+
+def _text_value(block: Mapping[str, Any], key: str) -> str | None:
+    value = block.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _langchain_to_agui_messages(
@@ -220,7 +311,7 @@ def _langchain_to_agui_messages(
                     msg,
                     id=msg_id,
                     role="user",
-                    content=msg.content,
+                    content=_content_to_agui(msg.content, msg_id),
                     name=msg_name,
                 )
             )
@@ -261,22 +352,15 @@ def _langchain_to_agui_messages(
                 )
             )
         elif msg_type == "tool":
-            # AG-UI declares tool content as a plain string, and ToolMessage
-            # has no name field. Block content has no lossless mapping, so it
-            # degrades to "" rather than raising inside the snapshot build.
-            content = msg.content if isinstance(msg.content, str) else ""
-            if not isinstance(msg.content, str):
-                logger.warning(
-                    "Dropping block content from tool result %s — AG-UI declares "
-                    "ToolMessage.content as a string, so there is no lossless "
-                    "mapping. The client receives an empty content.",
-                    getattr(msg, "tool_call_id", "") or msg_id,
-                )
+            # AG-UI's ToolMessage has no name field.
+            tool_call_id = getattr(msg, "tool_call_id", "")
+            content = _content_to_agui(msg.content, tool_call_id or msg_id)
             # An errored result must reach the client as a truthy `error`, or
-            # `if (msg.error)` reads the failure as a success. The content is
-            # the reason when there is one. Empty content — genuine, or block
-            # content degraded above — falls back to the status literal.
+            # `if (msg.error)` reads the failure as a success. String content
+            # is the reason when there is one. Empty or block content falls
+            # back to the status literal, because `error` is a string.
             is_error = getattr(msg, "status", None) == TOOL_ERROR_STATUS
+            reason = content if isinstance(content, str) else ""
             result.append(
                 _build_agui_message(
                     AguiToolMessage,
@@ -284,8 +368,8 @@ def _langchain_to_agui_messages(
                     id=msg_id,
                     role="tool",
                     content=content,
-                    tool_call_id=getattr(msg, "tool_call_id", ""),
-                    error=(content or TOOL_ERROR_STATUS) if is_error else None,
+                    tool_call_id=tool_call_id,
+                    error=(reason or TOOL_ERROR_STATUS) if is_error else None,
                 )
             )
     return result
@@ -352,10 +436,22 @@ class InterruptedMapper:
         if not isinstance(event, Interrupted):
             return None
         if isinstance(event, InterruptedWithPayload):
-            return [build_custom_event("interrupted", event.interrupt_payload())]
+            return [
+                CustomEvent(
+                    type=EventType.CUSTOM,
+                    name="interrupted",
+                    value=event.interrupt_payload(),
+                )
+            ]
         if not isinstance(event, AGUISerializable):
             return _handle_unmapped(type(event), self._on_unmapped)
-        return [build_custom_event("interrupted", event.agui_dict())]
+        return [
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="interrupted",
+                value=event.agui_dict(),
+            )
+        ]
 
 
 class FallbackMapper:
@@ -372,7 +468,13 @@ class FallbackMapper:
             if isinstance(event, AGUICustomEvent)
             else type(event).__name__
         )
-        return [build_custom_event(name, event.agui_dict())]
+        return [
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name=name,
+                value=event.agui_dict(),
+            )
+        ]
 
 
 def default_mappers(on_unmapped: str = "warn") -> list[Any]:
@@ -385,26 +487,11 @@ def default_mappers(on_unmapped: str = "warn") -> list[Any]:
     ]
 
 
-def _json_safe(value: Any) -> Any:
-    """Return ``value`` as plain JSON data, with each ``None`` field kept.
-
-    The AG-UI encoder dumps an event with ``exclude_none=True``. Pydantic
-    applies that flag to each nested model too, so a ``None`` field of a
-    model is lost. A ``None`` in plain data stays on the wire.
-    """
-    return to_jsonable_python(value, by_alias=True)
-
-
-def build_custom_event(name: str, value: Any) -> CustomEvent:
-    """Build a CustomEvent with a JSON-safe value."""
-    return CustomEvent(type=EventType.CUSTOM, name=name, value=_json_safe(value))
-
-
 def build_state_snapshot(reducers: dict[str, Any]) -> StateSnapshotEvent:
-    """Build a StateSnapshotEvent with JSON-safe reducer data."""
+    """Build a StateSnapshotEvent from reducer data."""
     return StateSnapshotEvent(
         type=EventType.STATE_SNAPSHOT,
-        snapshot=_json_safe(reducers),
+        snapshot=reducers,
     )
 
 

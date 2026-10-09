@@ -48,8 +48,9 @@ def collect_inbound_extras(message: Any) -> dict[str, Any]:
 
     AG-UI models allow extra fields. Whatever the client sent beyond the
     declared schema is kept under :data:`AGUI_EXTRAS_KEY`, which is the same
-    slot the outbound mapper reads. A message with no extra fields gets an
-    empty ``additional_kwargs``.
+    slot the outbound mapper reads. The declared ``metadata`` field goes to
+    the same slot, because AG-UI 1.0 declares the field that 0.x carried as an
+    extra. A message with neither gets an empty ``additional_kwargs``.
 
     **This is a trust boundary.** The value is whatever the client put on the
     wire. It enters ``additional_kwargs``, flows through ``add_messages`` into
@@ -68,10 +69,12 @@ def collect_inbound_extras(message: Any) -> dict[str, Any]:
     would let a client break its own resume, and the same value would arrive
     again on every retry.
     """
-    extra = getattr(message, "model_extra", None)
-    if not extra:
+    payload = dict(getattr(message, "model_extra", None) or {})
+    metadata = getattr(message, "metadata", None)
+    if metadata is not None:
+        payload["metadata"] = metadata
+    if not payload:
         return {}
-    payload = dict(extra)
     message_id = getattr(message, "id", None)
     try:
         size = len(json.dumps(payload))

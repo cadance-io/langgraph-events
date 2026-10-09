@@ -14,12 +14,52 @@ from typing import TYPE_CHECKING, Any
 from ._extras import collect_inbound_extras
 
 if TYPE_CHECKING:
-    from ag_ui.core import Message
+    from ag_ui.core import InputContentPart, Message
     from ag_ui.core.types import RunAgentInput
     from langchain_core.messages import BaseMessage
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
 
 logger = logging.getLogger(__name__)
+
+_BLOCK_TYPES = {
+    "text": "text",
+    "image": "image",
+    "audio": "audio",
+    "video": "video",
+    "document": "file",
+}
+"""The LangChain standard block type for each AG-UI content part type."""
+
+_SOURCE_KEYS = {"data": "base64", "url": "url", "file": "file_id"}
+"""The LangChain block key that holds the value of each AG-UI part source."""
+
+
+def _content_to_langchain(
+    content: str | list[InputContentPart],
+) -> str | list[str | dict[str, Any]]:
+    """Convert AG-UI message content to LangChain message content.
+
+    Each part becomes the LangChain standard block of the same modality. A
+    ``file`` source is a handle that the provider issued, so it becomes
+    ``file_id``.
+    """
+    if isinstance(content, str):
+        return content
+    return [_part_to_block(part) for part in content]
+
+
+def _part_to_block(part: InputContentPart) -> dict[str, Any]:
+    block: dict[str, Any] = {"type": _BLOCK_TYPES[part.type]}
+    if part.type == "text":
+        block["text"] = part.text
+    else:
+        block[_SOURCE_KEYS[part.source.type]] = part.source.value
+        mime_type = getattr(part.source, "mime_type", None)
+        if mime_type:
+            block["mime_type"] = mime_type
+    if part.id is not None:
+        block["id"] = part.id
+    return block
 
 
 def agui_messages_to_langchain(  # noqa: PLR0912
@@ -49,10 +89,6 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     from ag_ui.core import AssistantMessage, UserMessage  # noqa: PLC0415
     from ag_ui.core import SystemMessage as AGUISystemMessage  # noqa: PLC0415
     from ag_ui.core import ToolMessage as AGUIToolMessage  # noqa: PLC0415
-    from ag_ui.core.types import (  # noqa: PLC0415
-        BinaryInputContent,
-        TextInputContent,
-    )
     from langchain_core.messages import (  # noqa: PLC0415
         AIMessage,
         HumanMessage,
@@ -63,24 +99,10 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     out: list[BaseMessage] = []
     for m in messages:
         if isinstance(m, UserMessage):
-            content: str | list[str | dict[Any, Any]]
-            if isinstance(m.content, list):
-                parts: list[str | dict[Any, Any]] = []
-                for p in m.content:
-                    if isinstance(p, TextInputContent):
-                        parts.append({"type": "text", "text": p.text})
-                    elif isinstance(p, BinaryInputContent):
-                        url = p.url or (
-                            f"data:{p.mime_type};base64,{p.data}" if p.data else p.id
-                        )
-                        parts.append({"type": "image_url", "image_url": {"url": url}})
-                content = parts
-            else:
-                content = m.content
             out.append(
                 HumanMessage(
                     id=m.id,
-                    content=content,
+                    content=_content_to_langchain(m.content),
                     name=m.name,
                     additional_kwargs=collect_inbound_extras(m),
                 )
@@ -138,7 +160,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
             out.append(
                 ToolMessage(
                     id=m.id,
-                    content=m.content,
+                    content=_content_to_langchain(m.content),
                     tool_call_id=m.tool_call_id,
                     # A truthy `error` marks the failure, in both directions.
                     # The outbound mapper never sends an empty `error`, so a

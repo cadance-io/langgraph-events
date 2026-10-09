@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `agui` extra requires `ag-ui-protocol>=1.0.0` and `langchain-core>=1.0.0`.** An
+  application that pins either package lower must raise its pin to install this release.
+- **A client must speak AG-UI 1.0.** The 1.0 protocol retires the `binary` content part. A
+  `RunAgentInput` whose message carries one now fails validation. Upgrade the client together
+  with the server.
+- **Multimodal content becomes LangChain standard content blocks.** Before, each `binary` part
+  became an OpenAI `image_url` block, whatever its MIME type. Now each `image`, `audio`,
+  `video` and `document` part becomes the standard block of the same modality. A `data`
+  source becomes `base64`, a `url` source becomes `url`, and a `file` source becomes
+  `file_id`. A `ToolMessage` with list content uses the same conversion. A consumer that reads
+  `image_url` blocks must read the standard blocks instead.
+- **`MessagesSnapshot` sends block content as AG-UI content parts.** The mapping is the reverse
+  of the inbound one, for a `UserMessage` and a `ToolMessage`. Before, a tool result with block
+  content reached the client as `""`, and a user message with an image failed the snapshot
+  build. A block with no AG-UI part, such as an `image_url` block, is dropped with a WARNING.
+- **The extras slot carries the AG-UI 1.0 message `metadata` field.** Before 1.0, `metadata`
+  was an extra field. AG-UI 1.0 declares it, so it no longer reached the extras slot. Inbound,
+  the field now goes to `additional_kwargs[AGUI_EXTRAS_KEY]["metadata"]`. Outbound, that entry
+  sets the declared field. The round trip is as before 1.0.
+
 ### Fixed
 
 - **A checkpoint keeps the `response_schema` of a LangGraph interrupt.** LangGraph 1.2 adds
@@ -14,13 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema was lost when a paused thread was read back. The serializer now writes the schema
   when it is set. An interrupt without a schema keeps the earlier encoding, so an earlier
   library version can still read the checkpoint.
-- **A `None` field of a model reaches the AG-UI client as `null`.** The AG-UI encoder dumps
-  each event with `exclude_none=True`. Pydantic applies that flag to each nested model too. So
-  a model in the reducer state lost each `None` field, and the key was absent on the wire. The
-  adapter now converts the value of each `StateSnapshotEvent` and each `CustomEvent` to plain
-  JSON data before the encoder sees it. This covers the reducer state, an interrupt payload, an
-  `agui_dict()` value and a custom event frame. A `None` in plain data stays on the wire, so a
-  client gets each key that its contract declares.
+- **A `None` field of a model reaches the AG-UI client as `null`.** Before 1.0.0, the AG-UI
+  encoder dumped each event with `exclude_none=True`. Pydantic applied that flag to each nested
+  model too. So a model in the reducer state, in an interrupt payload or in a custom event lost
+  each `None` field, and the key was absent on the wire. The 1.0.0 encoder keeps the key. This
+  applies to each event, including an event that a user mapper builds.
 
 ## [0.35.1] - 2026-10-03
 

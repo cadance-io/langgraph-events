@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from ag_ui.core import (
     BaseEvent,
+    CustomEvent,
     EventType,
     RunErrorEvent,
     RunFinishedEvent,
@@ -38,7 +39,6 @@ from ._events import FrontendStateMutated
 from ._mappers import (
     FallbackMapper,
     UnmappedEventError,
-    build_custom_event,
     build_messages_snapshot,
     build_state_snapshot,
     default_mappers,
@@ -657,7 +657,11 @@ class AGUIAdapter:
             elif isinstance(item, StateSnapshotFrame):
                 yield build_state_snapshot(item.data)
             elif isinstance(item, CustomEventFrame):
-                yield build_custom_event(item.name, item.data)
+                yield CustomEvent(
+                    type=EventType.CUSTOM,
+                    name=item.name,
+                    value=item.data,
+                )
             elif isinstance(item, StreamFrame):
                 (
                     agui_events,

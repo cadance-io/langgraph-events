@@ -137,11 +137,14 @@ For redaction or value transformation, write a custom `EventMapper`.
 
 | LangChain | AG-UI | Direction | Notes |
 |---|---|---|---|
-| `id`, `content` | `id`, `content` | both | `AssistantMessage.content` is `None` for block content; `SystemMessage`/`ToolMessage` degrade it to `""`. A degraded `ToolMessage` logs a `WARNING` naming the tool call, because the content is lost. |
+| `id`, `content` | `id`, `content` | both | `AssistantMessage.content` is `None` for block content, and `SystemMessage` degrades it to `""`, because AG-UI declares both as text. A `UserMessage` or `ToolMessage` carries block content as content parts — see the next row. |
 | `name` | `name` | both | `UserMessage`, `AssistantMessage`, `SystemMessage` only — AG-UI's `ToolMessage` declares no `name`. |
 | `AIMessage.tool_calls` | `AssistantMessage.tool_calls` | both | `args` are JSON-encoded into `function.arguments`. |
 | `ToolMessage.status` | `ToolMessage.error` | both | Presence maps both ways. `status="error"` sends the content as `error`, or the literal `"error"` when the content is empty, because a falsy `error` reads as a success. A truthy inbound `error` sets `status="error"`. The error *text* does not come back: LangChain's `ToolMessage` has no field for it, and `content` is where a tool's failure reason belongs. |
 | *(none)* | `encrypted_value` | neither | Declared on AG-UI `BaseMessage`, `ToolMessage` and `ToolCall`. The adapter never reads it inbound and never sets it outbound, so a value the client sent is dropped. It is a declared field, so it cannot ride through the extras slot either. |
+| `content` blocks | `content` parts | both | On a `UserMessage` or `ToolMessage`, each part maps to the LangChain standard block of the same modality: `text`, `image`, `audio`, `video`, and `file` for a `document` part. A `data` source maps to `base64` with `mime_type`. A `url` source maps to `url`. A `file` source is a handle that the provider issued, so it maps to `file_id`. A part `id` is kept. Outbound, a block with no AG-UI part is dropped with a `WARNING` that names the message, for example an `image_url` block, or a `base64` block without `mime_type`. |
+| `additional_kwargs[AGUI_EXTRAS_KEY]["metadata"]` | `metadata` | both | AG-UI 1.0 declares `metadata` as an open container of extra data. Before 1.0 it was an extra field, so it stays in the extras slot. A non-mapping value is dropped outbound, with a `WARNING`. |
+| *(none)* | `subagent_run_id` | neither | Declared on AG-UI 1.0 messages. The adapter never reads it inbound and never sets it outbound. |
 | `additional_kwargs[AGUI_EXTRAS_KEY]` | *(extra fields)* | both | Passthrough — see below. |
 
 ### Passing extra data on a message
@@ -390,7 +393,7 @@ Streaming-path errors propagate to the frontend as a `RUN_ERROR` event with the 
 `detect_new_tool_results` covers the frontend-tool-result arm of resume. A result the client marks with `error` becomes a LangChain `ToolMessage` with `status="error"`, so the model reads the failure as a failure. The other arm — frontend sends `Command(resume=…)` plus new chat messages — has three helpers that collapse `resume_factory` boilerplate:
 
 - **`extract_resume_input(input_data)`** — pull & decode `RunAgentInput.forwarded_props["command"]["resume"]`.
-- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal `UserMessage` content included) to LangChain `BaseMessage`. `ReasoningMessage` / `DeveloperMessage` skipped (DEBUG); `ActivityMessage` / unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls with unparseable JSON args are dropped (WARNING). A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]` (see [Message field mapping](#message-field-mapping)).
+- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal content included, see [Message field mapping](#message-field-mapping)) to LangChain `BaseMessage`. `ReasoningMessage` / `DeveloperMessage` skipped (DEBUG); `ActivityMessage` / unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls with unparseable JSON args are dropped (WARNING). A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]` (see [Message field mapping](#message-field-mapping)).
 - **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — read existing messages from checkpoint, convert, merge via `add_messages` (id-based dedup; missing ids get UUIDs assigned). Returns a tuple.
 
 ```python
