@@ -8,15 +8,25 @@ from typing import Any
 
 import pytest
 from ag_ui.core import (
+    AudioPart,
     BaseEvent,
     CustomEvent,
+    DataSource,
+    DocumentPart,
     EventType,
+    FileSource,
+    ImagePart,
     RunAgentInput,
+    TextPart,
+    UrlSource,
+    VideoPart,
 )
 from ag_ui.core import ToolMessage as AguiToolMessage
+from ag_ui.core import UserMessage as AguiUserMessage
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
+from pydantic import BaseModel
 
 from langgraph_events import (
     Event,
@@ -108,6 +118,17 @@ class ReviewWithPayload(InterruptedWithPayload[_ReviewPayload]):
 
     def interrupt_payload(self) -> _ReviewPayload:
         return _ReviewPayload(kind="review", draft=self.draft)
+
+
+_UNMAPPABLE_BLOCK = {"type": "custom", "data": 1}
+"""A block that LangChain reads as non-standard, so it has no AG-UI content part."""
+
+
+class Note(BaseModel):
+    """A client value with an optional field, to check the None on the wire."""
+
+    text: str
+    owner: str | None = None
 
 
 class ApprovalGiven(IntegrationEvent):
@@ -1482,6 +1503,39 @@ def describe_transport():
         assert isinstance(response, StreamingResponse)
 
 
+def describe_encode_sse_stream():
+    """A ``None`` field of a nested model must reach the client as ``null``.
+
+    This is an upgrade guard on ``ag-ui-protocol``. Before 1.0.0, its encoder
+    dumped each event with ``exclude_none=True``. Pydantic applied that flag to
+    every nested model. This test fails if a later release does that again.
+    """
+
+    async def _wire(events: list[BaseEvent]) -> list[dict[str, Any]]:
+        from langgraph_events.agui import encode_sse_stream
+
+        async def _events():
+            for event in events:
+                yield event
+
+        lines = [line async for line in encode_sse_stream(_events())]
+        return [json.loads(line.removeprefix("data: ")) for line in lines]
+
+    def when_a_reducer_holds_a_model():
+        async def it_keeps_a_none_field_as_null():
+            from langgraph_events import ScalarReducer
+
+            note = ScalarReducer(
+                name="note", event_type=UserAsked, fn=lambda e: Note(text=e.question)
+            )
+            graph = _graph(reply, reducers=[message_reducer(), note])
+
+            wire = await _wire(await _stream(graph))
+
+            snapshots = [w for w in wire if w["type"] == "STATE_SNAPSHOT"]
+            assert snapshots[-1]["snapshot"]["note"] == {"text": "go", "owner": None}
+
+
 def describe_interrupt_detection():
     async def it_detects_interrupts_from_checkpoint():
         """Adapter emits interrupted CustomEvent from checkpoint."""
@@ -2437,6 +2491,52 @@ def describe_agui_message_extras():
             [sys_msg] = _roled(events, "system")
             assert sys_msg.model_extra == {}
 
+    def when_an_entry_names_metadata():
+        """AG-UI 1.0 declares ``metadata`` as an open container of extra data.
+
+        Before 1.0 it was an extra field, so the slot keeps carrying it.
+        """
+
+        async def it_sets_the_declared_metadata_field():
+            events = await _emit(
+                SystemMessage(
+                    content="plain",
+                    additional_kwargs={
+                        "langgraph_events.agui": {"metadata": {"tag": "a"}}
+                    },
+                )
+            )
+
+            [sys_msg] = _roled(events, "system")
+            assert sys_msg.metadata == {"tag": "a"}
+
+        def when_the_value_is_not_a_mapping():
+            def _bad_metadata_message() -> SystemMessage:
+                return SystemMessage(
+                    content="plain",
+                    additional_kwargs={
+                        "langgraph_events.agui": {"metadata": "x", "failure": "kept"}
+                    },
+                )
+
+            async def it_drops_the_entry_and_keeps_the_rest():
+                events = await _emit(_bad_metadata_message())
+
+                assert not _of_type(events, EventType.RUN_ERROR)
+                [sys_msg] = _roled(events, "system")
+                assert sys_msg.metadata is None
+                assert sys_msg.model_extra == {"failure": "kept"}
+
+            async def it_warns_naming_the_key():
+                _warned_extras.clear()
+                caught = await _stream_warnings(
+                    _graph(_emitting(_bad_metadata_message()))
+                )
+
+                assert [
+                    x for x in caught if "metadata must be a mapping" in str(x.message)
+                ]
+
     def when_an_entry_names_a_declared_agui_field():
         """The declared field wins — the entry would rewrite protocol data."""
 
@@ -2668,7 +2768,7 @@ def describe_tool_message_status_conversion():
 
                 [tool_msg] = _roled(events, "tool")
                 assert tool_msg.error == "error"
-                assert tool_msg.content == ""
+                assert tool_msg.content == [TextPart(text="boom")]
 
     def when_the_status_is_success():
         async def it_leaves_the_agui_error_field_unset():
@@ -2678,35 +2778,156 @@ def describe_tool_message_status_conversion():
             assert tool_msg.error is None
 
     def when_the_content_is_a_block_list():
-        async def it_still_builds_the_snapshot():
+        async def it_sends_the_blocks_as_content_parts():
             events = await _emit(
                 ToolMessage(
-                    content=[{"type": "text", "text": "42"}],
+                    content=[
+                        {"type": "text", "text": "42"},
+                        {"type": "image", "url": "https://x/y"},
+                    ],
                     tool_call_id="tc-1",
                 )
             )
 
-            assert not _of_type(events, EventType.RUN_ERROR)
             [tool_msg] = _roled(events, "tool")
-            assert tool_msg.content == ""
+            assert tool_msg.content == [
+                TextPart(text="42"),
+                ImagePart(source=UrlSource(value="https://x/y")),
+            ]
 
-        async def it_logs_a_warning_naming_the_tool_call(caplog):
-            @on(UserAsked)
-            def run_tool(event: UserAsked) -> ToolsExecuted:
-                return ToolsExecuted(
-                    messages=(
-                        ToolMessage(
-                            content=[{"type": "text", "text": "42"}],
-                            tool_call_id="tc-dropped",
-                        ),
+        def when_a_block_has_no_agui_part():
+            async def it_logs_a_warning_naming_the_tool_call(caplog):
+                @on(UserAsked)
+                def run_tool(event: UserAsked) -> ToolsExecuted:
+                    return ToolsExecuted(
+                        messages=(
+                            ToolMessage(
+                                content=[_UNMAPPABLE_BLOCK],
+                                tool_call_id="tc-dropped",
+                            ),
+                        )
                     )
-                )
 
-            graph = _graph(run_tool)
-            adapter = _adapter(graph)
-            await _collect(adapter, _make_input())
+                graph = _graph(run_tool)
+                adapter = _adapter(graph)
+                await _collect(adapter, _make_input())
 
-            assert any("tc-dropped" in r.message for r in caplog.records)
+                assert any("tc-dropped" in r.message for r in caplog.records)
+
+
+def describe_user_message_content_conversion():
+    """LangChain standard blocks become the AG-UI 1.0 content parts."""
+
+    async def _user_content(content: list[Any]) -> list[Any]:
+        events = await _emit(HumanMessage(content=content))
+        [user_msg] = _roled(events, "user")
+        return user_msg.content
+
+    def when_a_block_is_text():
+        async def it_sends_a_text_part():
+            content = await _user_content([{"type": "text", "text": "hi", "id": "p1"}])
+            assert content == [TextPart(id="p1", text="hi")]
+
+    def when_an_entry_is_a_string():
+        async def it_sends_a_text_part():
+            assert await _user_content(["hi"]) == [TextPart(text="hi")]
+
+    def when_a_block_is_media():
+        @pytest.mark.parametrize(
+            ("block_type", "part_type"),
+            [
+                ("image", ImagePart),
+                ("audio", AudioPart),
+                ("video", VideoPart),
+                ("file", DocumentPart),
+            ],
+        )
+        async def it_sends_the_part_of_the_same_modality(
+            block_type: str, part_type: Any
+        ):
+            content = await _user_content([{"type": block_type, "url": "https://x/y"}])
+            assert content == [part_type(source=UrlSource(value="https://x/y"))]
+
+        def with_inline_base64():
+            async def it_sends_a_data_source():
+                block = {"type": "image", "base64": "AAA=", "mime_type": "image/png"}
+                content = await _user_content([block])
+                source = DataSource(value="AAA=", mime_type="image/png")
+                assert content == [ImagePart(source=source)]
+
+            def when_the_mime_type_is_missing():
+                async def it_drops_the_block():
+                    block = {"type": "image", "base64": "AAA="}
+                    assert await _user_content([block, "kept"]) == [
+                        TextPart(text="kept")
+                    ]
+
+        def with_a_file_id():
+            async def it_sends_a_file_source():
+                content = await _user_content([{"type": "file", "file_id": "f-1"}])
+                assert content == [DocumentPart(source=FileSource(value="f-1"))]
+
+    def when_a_block_is_in_a_provider_format():
+        """LangChain translates the block. Before 1.0 the adapter stored this shape."""
+
+        def with_a_data_url():
+            async def it_sends_a_data_source():
+                url = "data:image/png;base64,AAA="
+                block = {"type": "image_url", "image_url": {"url": url}}
+                content = await _user_content([block])
+                source = DataSource(value="AAA=", mime_type="image/png")
+                assert content == [ImagePart(source=source)]
+
+        def with_a_remote_url():
+            async def it_sends_a_url_source():
+                block = {"type": "image_url", "image_url": {"url": "https://x/y"}}
+                content = await _user_content([block])
+                assert content == [ImagePart(source=UrlSource(value="https://x/y"))]
+
+    def when_a_block_is_in_the_langchain_v0_shape():
+        async def it_sends_the_part():
+            block = {
+                "type": "image",
+                "source_type": "base64",
+                "data": "AAA=",
+                "mime_type": "image/png",
+            }
+            content = await _user_content([block])
+            source = DataSource(value="AAA=", mime_type="image/png")
+            assert content == [ImagePart(source=source)]
+
+    def when_the_content_came_from_a_client():
+        async def it_sends_back_the_same_parts():
+            parts = [
+                TextPart(id="p1", text="look"),
+                ImagePart(source=DataSource(value="AAA=", mime_type="image/png")),
+                DocumentPart(source=UrlSource(value="https://x/y", mime_type="a/b")),
+                VideoPart(source=UrlSource(value="https://x/v")),
+            ]
+            [inbound] = agui_messages_to_langchain(
+                [AguiUserMessage(id="u1", content=parts)]
+            )
+
+            events = await _emit(inbound)
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == parts
+
+    def when_a_block_has_no_agui_part():
+        async def it_drops_the_block_and_keeps_the_rest():
+            events = await _emit(HumanMessage(content=[_UNMAPPABLE_BLOCK, "kept"]))
+
+            assert not _of_type(events, EventType.RUN_ERROR)
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="kept")]
+
+    def when_a_block_type_is_not_a_string():
+        async def it_drops_the_block_and_keeps_the_rest():
+            events = await _emit(HumanMessage(content=[{"type": ["x"]}, "kept"]))
+
+            assert not _of_type(events, EventType.RUN_ERROR)
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="kept")]
 
 
 def describe_multiple_custom_reducers():

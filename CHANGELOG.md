@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The `agui` extra requires `ag-ui-protocol>=1.0.0` and `langchain-core>=1.0.0`.** An
+  application that pins either package lower must raise its pin to install this release.
+- **A client must speak AG-UI 1.0.** The 1.0 protocol retires the `binary` content part. A
+  `RunAgentInput` whose message carries one now fails validation. Upgrade the client together
+  with the server.
+- **Multimodal content becomes LangChain standard content blocks.** Before, each `binary` part
+  became an OpenAI `image_url` block, whatever its MIME type. Now each `image`, `audio`,
+  `video` and `document` part becomes the standard block of the same modality. A `data`
+  source becomes `base64`, and a `url` source becomes `url`. A `ToolMessage` with list
+  content uses the same conversion. A consumer that reads `image_url` blocks must read the
+  standard blocks instead.
+- **An inbound part with a `file` source is dropped with a WARNING.** That source names a
+  handle in the provider account. The server sends the handle with its own credentials. So a
+  client handle can read a file that the client does not own.
+- **Inbound part `metadata` is dropped with a WARNING.** A LangChain content block has no field
+  for it.
+- **`MessagesSnapshot` sends block content as AG-UI content parts.** LangChain first translates
+  each block to a standard block, so an `image_url` block and the LangChain v0 block shape also
+  map. The 0.35 adapter stored each inbound image as an `image_url` block. A block with no
+  AG-UI part is dropped with a WARNING. Before, a tool result with block content reached the
+  client as `""`. A user message with an image made the snapshot build fail.
+- **`merge_frontend_messages` keeps a stored message when an inbound message has the same id.**
+  AG-UI defines `MessagesSnapshot` as the messages that the server owns. A client echoes them
+  back on the next run, and an echo can be lossy. Before, the echo replaced the stored message.
+  So an assistant message with block content became `""`, and a stored file handle was lost.
+  A client can no longer edit a stored message through an echo.
+- **The extras slot carries the `metadata` field of an AG-UI 1.0 message.** Before 1.0,
+  `metadata` was an extra field. AG-UI 1.0 declares it, so it no longer reached the extras
+  slot. Inbound, the field now goes to `additional_kwargs[AGUI_EXTRAS_KEY]["metadata"]`.
+  Outbound, that entry sets the declared field. The round trip is as before 1.0.
+
+### Fixed
+
+- **A checkpoint keeps the `response_schema` of a LangGraph interrupt.** LangGraph 1.2 adds
+  `Interrupt.response_schema`. `NamespaceAwareSerde` encoded only `value` and `id`, so the
+  schema was lost when a paused thread was read back. The serializer now writes the schema
+  when it is set. An interrupt without a schema keeps the earlier encoding, so an earlier
+  library version can still read the checkpoint. An earlier library version cannot read an
+  interrupt that has a schema.
+- **A `None` field of a model reaches the AG-UI client as `null`.** Before 1.0.0, the AG-UI
+  encoder dumped each event with `exclude_none=True`. Pydantic applied that flag to each nested
+  model too. So a model in the reducer state, in an interrupt payload or in a custom event lost
+  each `None` field. The key was then absent on the wire. The 1.0.0 encoder keeps the key. This
+  applies to each event, including an event that a user mapper builds.
+
 ## [0.35.1] - 2026-10-03
 
 ### Fixed

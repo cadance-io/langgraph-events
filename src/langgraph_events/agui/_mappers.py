@@ -12,13 +12,15 @@ from ag_ui.core import (
     BaseEvent,
     CustomEvent,
     EventType,
+    InputContentPart,
     MessagesSnapshotEvent,
     StateSnapshotEvent,
     ToolCallArgsEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
-from pydantic import BaseModel
+from langchain_core.utils.utils import LC_AUTO_PREFIX
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from langgraph_events._event import (
     Event,
@@ -33,8 +35,9 @@ from ._events import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
 )
-from ._extras import AGUI_EXTRAS_KEY
+from ._extras import AGUI_EXTRAS_KEY, AGUI_EXTRAS_OPEN_FIELDS
 from ._protocols import AGUICustomEvent, AGUISerializable
+from ._resume import BLOCK_TYPES, SOURCE_KEYS
 
 if TYPE_CHECKING:
     from ag_ui.core import Message
@@ -98,7 +101,7 @@ def _handle_unmapped(cls: type, on_unmapped: str) -> list[BaseEvent]:
 def _warn_dropped_extras(cls: type, kind: str, detail: str) -> None:
     """Warn once that AG-UI passthrough fields were dropped from *cls*.
 
-    *kind* is the dedupe key, not the message. It takes one of three fixed
+    *kind* is the dedupe key, not the message. It takes one of four fixed
     values, so the dedupe set stays bounded however many bad messages arrive.
     *detail* carries the specifics for the reader.
     """
@@ -150,12 +153,18 @@ def _build_agui_message(
     and cause. This matches the ``tool`` branch below, which degrades block
     content rather than raising.
 
-    Three causes drop something:
+    Four causes drop something:
 
     - the reserved key holds a non-mapping — the whole value goes;
     - an entry key is not a string — that entry goes, because ``**`` refuses it;
+    - an entry in :data:`AGUI_EXTRAS_OPEN_FIELDS` holds a non-mapping — that
+      entry goes;
     - an entry addresses a declared field — that entry goes, because it would
       rewrite protocol data.
+
+    An entry can set a declared field only when the field is in
+    :data:`AGUI_EXTRAS_OPEN_FIELDS`. The inbound side collects those fields
+    into the same slot.
     """
     extras = getattr(source, "additional_kwargs", None) or {}
     passthrough = extras.get(AGUI_EXTRAS_KEY)
@@ -180,7 +189,21 @@ def _build_agui_message(
             f"{', '.join(repr(k) for k in unusable)} is not.",
         )
 
-    collisions = sorted(set(usable) & _declared_names(cls))
+    not_mappings = sorted(
+        name
+        for name in AGUI_EXTRAS_OPEN_FIELDS & set(usable)
+        if not isinstance(usable[name], Mapping)
+    )
+    for name in not_mappings:
+        del usable[name]
+    if not_mappings:
+        _warn_dropped_extras(
+            cls,
+            "open-field-not-a-mapping",
+            f"the entry {', '.join(not_mappings)} must be a mapping, because "
+            f"{cls.__name__} declares it as one.",
+        )
+    collisions = sorted(set(usable) & _declared_names(cls) - AGUI_EXTRAS_OPEN_FIELDS)
     for name in collisions:
         del usable[name]
     if collisions:
@@ -192,6 +215,92 @@ def _build_agui_message(
             f"through the LangChain message.",
         )
     return cls(**fields, **usable)
+
+
+_PART_TYPES = {block: part for part, block in BLOCK_TYPES.items()}
+"""The AG-UI media part type for each LangChain standard block type."""
+
+_SOURCE_TYPES = {key: source for source, key in SOURCE_KEYS.items()} | {
+    "file_id": "file"
+}
+"""The AG-UI source type for each LangChain block key that holds a value.
+
+``file_id`` maps outbound only. The server already holds that handle.
+"""
+
+_CONTENT_PART: TypeAdapter[InputContentPart] = TypeAdapter(InputContentPart)
+
+
+def _content_to_agui(message: Any, label: str) -> str | list[InputContentPart]:
+    """Convert LangChain message content to AG-UI message content.
+
+    LangChain translates each block to a standard block first, so a provider
+    format such as ``image_url`` also maps. Each standard block becomes the
+    AG-UI part of the same modality. A block with no AG-UI part is dropped,
+    with one WARNING that names *label*. If this function raises, each later
+    ``connect()`` on the thread fails. :func:`_build_agui_message` explains why.
+    """
+    if isinstance(message.content, str):
+        return message.content
+    try:
+        blocks = message.content_blocks
+    except (TypeError, ValueError) as exc:
+        logger.warning(
+            "LangChain cannot translate the content of message %s (%s). The "
+            "blocks are converted as stored.",
+            label,
+            exc,
+        )
+        blocks = message.content
+    parts = [_block_to_part(block) for block in blocks]
+    kept = [part for part in parts if part is not None]
+    if len(kept) < len(parts):
+        logger.warning(
+            "Dropping %d content block(s) from message %s — they have no AG-UI "
+            "content part. The rest of the content is unchanged.",
+            len(parts) - len(kept),
+            label,
+        )
+    return kept
+
+
+def _block_to_part(block: Any) -> InputContentPart | None:
+    if isinstance(block, str):
+        block = {"type": "text", "text": block}
+    if not isinstance(block, Mapping) or not isinstance(block.get("type"), str):
+        return None
+    block_id = _text_value(block, "id")
+    data: dict[str, Any] = {
+        # LangChain marks an id that it generated with LC_AUTO_PREFIX.
+        "id": None if block_id and block_id.startswith(LC_AUTO_PREFIX) else block_id
+    }
+    if block["type"] == "text":
+        data |= {"type": "text", "text": block.get("text")}
+    else:
+        part_type = _PART_TYPES.get(block["type"])
+        source = _block_source(block)
+        if part_type is None or source is None:
+            return None
+        data |= {"type": part_type, "source": source}
+    try:
+        return _CONTENT_PART.validate_python(data)
+    except ValidationError:
+        return None
+
+
+def _block_source(block: Mapping[str, Any]) -> dict[str, Any] | None:
+    for key, source_type in _SOURCE_TYPES.items():
+        if value := _text_value(block, key):
+            source = {"type": source_type, "value": value}
+            if mime_type := _text_value(block, "mime_type"):
+                source["mime_type"] = mime_type
+            return source
+    return None
+
+
+def _text_value(block: Mapping[str, Any], key: str) -> str | None:
+    value = block.get(key)
+    return value if isinstance(value, str) and value else None
 
 
 def _langchain_to_agui_messages(
@@ -219,7 +328,7 @@ def _langchain_to_agui_messages(
                     msg,
                     id=msg_id,
                     role="user",
-                    content=msg.content,
+                    content=_content_to_agui(msg, msg_id),
                     name=msg_name,
                 )
             )
@@ -260,22 +369,15 @@ def _langchain_to_agui_messages(
                 )
             )
         elif msg_type == "tool":
-            # AG-UI declares tool content as a plain string, and ToolMessage
-            # has no name field. Block content has no lossless mapping, so it
-            # degrades to "" rather than raising inside the snapshot build.
-            content = msg.content if isinstance(msg.content, str) else ""
-            if not isinstance(msg.content, str):
-                logger.warning(
-                    "Dropping block content from tool result %s — AG-UI declares "
-                    "ToolMessage.content as a string, so there is no lossless "
-                    "mapping. The client receives an empty content.",
-                    getattr(msg, "tool_call_id", "") or msg_id,
-                )
+            # AG-UI's ToolMessage has no name field.
+            tool_call_id = getattr(msg, "tool_call_id", "")
+            content = _content_to_agui(msg, tool_call_id or msg_id)
             # An errored result must reach the client as a truthy `error`, or
-            # `if (msg.error)` reads the failure as a success. The content is
-            # the reason when there is one. Empty content — genuine, or block
-            # content degraded above — falls back to the status literal.
+            # `if (msg.error)` reads the failure as a success. String content
+            # is the reason when there is one. Empty or block content falls
+            # back to the status literal, because `error` is a string.
             is_error = getattr(msg, "status", None) == TOOL_ERROR_STATUS
+            reason = content if isinstance(content, str) else ""
             result.append(
                 _build_agui_message(
                     AguiToolMessage,
@@ -283,8 +385,8 @@ def _langchain_to_agui_messages(
                     id=msg_id,
                     role="tool",
                     content=content,
-                    tool_call_id=getattr(msg, "tool_call_id", ""),
-                    error=(content or TOOL_ERROR_STATUS) if is_error else None,
+                    tool_call_id=tool_call_id,
+                    error=(reason or TOOL_ERROR_STATUS) if is_error else None,
                 )
             )
     return result

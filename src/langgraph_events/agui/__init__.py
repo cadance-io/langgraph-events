@@ -10,6 +10,7 @@ from langgraph_events.agui._events import (
 from langgraph_events.agui._extras import (
     AGUI_EXTRAS_KEY,
     AGUI_EXTRAS_MAX_BYTES,
+    AGUI_EXTRAS_OPEN_FIELDS,
 )
 from langgraph_events.agui._mappers import (
     FallbackMapper,
@@ -42,6 +43,7 @@ from langgraph_events.agui._transport import (
 __all__ = [
     "AGUI_EXTRAS_KEY",
     "AGUI_EXTRAS_MAX_BYTES",
+    "AGUI_EXTRAS_OPEN_FIELDS",
     "AGUIAdapter",
     "AGUICustomEvent",
     "AGUISerializable",

@@ -14,12 +14,70 @@ from typing import TYPE_CHECKING, Any
 from ._extras import collect_inbound_extras
 
 if TYPE_CHECKING:
-    from ag_ui.core import Message
+    from ag_ui.core import InputContentPart, Message
     from ag_ui.core.types import RunAgentInput
     from langchain_core.messages import BaseMessage
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
 
 logger = logging.getLogger(__name__)
+
+BLOCK_TYPES = {"image": "image", "audio": "audio", "video": "video", "document": "file"}
+"""The LangChain standard block type for each AG-UI media part type."""
+
+SOURCE_KEYS = {"data": "base64", "url": "url"}
+"""The LangChain block key that holds the value of each AG-UI source type.
+
+A ``file`` source is not in the table, so an inbound part with one is dropped.
+That source names a handle in the provider account. The server sends the
+handle with its own credentials, so a client handle can read a file that the
+client does not own.
+"""
+
+
+def _content_to_langchain(
+    content: str | list[InputContentPart], message_id: str
+) -> str | list[str | dict[str, Any]]:
+    """Convert AG-UI message content to LangChain message content.
+
+    Each part becomes the LangChain standard block of the same modality. A part
+    with a source type outside :data:`SOURCE_KEYS` is dropped with a WARNING.
+    Part ``metadata`` is dropped with a WARNING, because a LangChain block has
+    no field for it.
+    """
+    if isinstance(content, str):
+        return content
+    kept = [p for p in content if p.type == "text" or p.source.type in SOURCE_KEYS]
+    if len(kept) < len(content):
+        logger.warning(
+            "Dropping %d content part(s) with a file source from AG-UI message "
+            "%s — a client must not name a provider file handle.",
+            len(content) - len(kept),
+            message_id,
+        )
+    with_metadata = sum(part.metadata is not None for part in kept)
+    if with_metadata:
+        logger.warning(
+            "Dropping the metadata of %d content part(s) from AG-UI message %s "
+            "— a LangChain content block has no field for it.",
+            with_metadata,
+            message_id,
+        )
+    return [_part_to_block(part) for part in kept]
+
+
+def _part_to_block(part: InputContentPart) -> dict[str, Any]:
+    if part.type == "text":
+        block: dict[str, Any] = {"type": "text", "text": part.text}
+    else:
+        block = {
+            "type": BLOCK_TYPES[part.type],
+            SOURCE_KEYS[part.source.type]: part.source.value,
+        }
+        if part.source.mime_type:
+            block["mime_type"] = part.source.mime_type
+    if part.id is not None:
+        block["id"] = part.id
+    return block
 
 
 def agui_messages_to_langchain(  # noqa: PLR0912
@@ -49,10 +107,6 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     from ag_ui.core import AssistantMessage, UserMessage  # noqa: PLC0415
     from ag_ui.core import SystemMessage as AGUISystemMessage  # noqa: PLC0415
     from ag_ui.core import ToolMessage as AGUIToolMessage  # noqa: PLC0415
-    from ag_ui.core.types import (  # noqa: PLC0415
-        BinaryInputContent,
-        TextInputContent,
-    )
     from langchain_core.messages import (  # noqa: PLC0415
         AIMessage,
         HumanMessage,
@@ -63,24 +117,10 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     out: list[BaseMessage] = []
     for m in messages:
         if isinstance(m, UserMessage):
-            content: str | list[str | dict[Any, Any]]
-            if isinstance(m.content, list):
-                parts: list[str | dict[Any, Any]] = []
-                for p in m.content:
-                    if isinstance(p, TextInputContent):
-                        parts.append({"type": "text", "text": p.text})
-                    elif isinstance(p, BinaryInputContent):
-                        url = p.url or (
-                            f"data:{p.mime_type};base64,{p.data}" if p.data else p.id
-                        )
-                        parts.append({"type": "image_url", "image_url": {"url": url}})
-                content = parts
-            else:
-                content = m.content
             out.append(
                 HumanMessage(
                     id=m.id,
-                    content=content,
+                    content=_content_to_langchain(m.content, m.id),
                     name=m.name,
                     additional_kwargs=collect_inbound_extras(m),
                 )
@@ -138,7 +178,7 @@ def agui_messages_to_langchain(  # noqa: PLR0912
             out.append(
                 ToolMessage(
                     id=m.id,
-                    content=m.content,
+                    content=_content_to_langchain(m.content, m.id),
                     tool_call_id=m.tool_call_id,
                     # A truthy `error` marks the failure, in both directions.
                     # The outbound mapper never sends an empty `error`, so a
@@ -173,6 +213,12 @@ def merge_frontend_messages(
     :func:`agui_messages_to_langchain`, and merges via langgraph's
     ``add_messages`` (id-based dedup).
 
+    A stored message wins over an inbound message with the same id. The
+    server owns each message that its ``MessagesSnapshot`` sent, as AG-UI
+    defines that event. A client echoes that history back, and an echo can
+    be lossy, for example when a part is dropped. So only a message with a
+    new id is converted and added.
+
     Defensive default: malformed tool-call JSON is dropped (with a WARNING).
     Pass ``drop_invalid_tool_calls=False`` for strict parity with upstream.
     """
@@ -180,8 +226,9 @@ def merge_frontend_messages(
 
     reducers = (checkpoint_state or {}).get("reducers") or {}
     existing = list(reducers.get(reducer_name) or [])
+    stored_ids = {m.id for m in existing}
     new = agui_messages_to_langchain(
-        input_data.messages or [],
+        [m for m in input_data.messages or [] if m.id not in stored_ids],
         drop_invalid_tool_calls=drop_invalid_tool_calls,
     )
     # langgraph's add_messages signature accepts dict/tuple/str shapes for
