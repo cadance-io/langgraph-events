@@ -283,7 +283,7 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 
 ### A request that is still open
 
-A handler often needs the latest request that no answer has closed yet.
+A handler often needs the latest request that no answer follows yet.
 `not_followed_by=` states that rule in one query. Complex event processing calls
 it a negation, or "A not followed by B".
 
@@ -293,13 +293,18 @@ def reply(event: MessageReceived, log: EventLog) -> MessageSent:
     pending = log.latest(QuestionAsked, not_followed_by=Answered | Withdrawn)
     if pending is None:
         return MessageSent(text="No question waits for an answer.")
-    return MessageSent(text=f"Your answer to: {pending.question}")
+    return MessageSent(text=f"Still waiting for an answer to: {pending.question}")
 ```
 
 `log.latest(T, not_followed_by=U)` finds the most recent `T`. It returns `None` when
-an event of `U` comes after that `T`. `U` can be one class or a union of classes. The
-match itself never closes, so `T` can also be a member of `U`. Events of `U` before
-the most recent `T` do not count. The result keeps the type `T | None`.
+an event of `U` comes after that `T`. Events of `U` before the most recent `T` do not
+count. The result keeps the type `T | None`.
+
+| Rule | Detail |
+|---|---|
+| Value of `U` | One `Event` class, or a union of `Event` classes written with `\|`. Any other value raises `TypeError`, also on an empty log. |
+| An event of both `T` and `U` | It is a match, not a follower. So `T` can also be a member of `U`. |
+| A later subclass of `T` | It is a match, also when it is a member of `U`. |
 
 ### Causes
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, get_args, overload
 
 from langgraph_events._causes import FRAMEWORK, NOT_RECORDED, dropped, resolve
 from langgraph_events._event import Event
@@ -223,6 +223,17 @@ def _table_from_causes(
     return _CauseTable(events, None, entries=tuple(entries))
 
 
+def _require_event_classes(classes: object) -> None:
+    """Raise ``TypeError`` unless *classes* is an Event class or a union of them."""
+    members = get_args(classes) or (classes,)
+    for member in members:
+        if not (isinstance(member, type) and issubclass(member, Event)):
+            raise TypeError(
+                f"not_followed_by must be an Event class or a union of Event "
+                f"classes, but {classes!r} holds {member!r}."
+            )
+
+
 class EventLog:
     """Immutable, ordered container of events with query methods.
 
@@ -371,9 +382,14 @@ class EventLog:
     ) -> T | None:
         """Return the most recent event of *event_type*, or ``None``.
 
-        With *not_followed_by*, return ``None`` when an event of that type or
-        union comes after the most recent match. The match itself never closes.
+        *not_followed_by* is one Event class, or a union of Event classes
+        written with ``|``. With it, return ``None`` when an event of that class
+        or union comes after the most recent match. An event that matches
+        *event_type* is the result, also when it matches *not_followed_by*.
+        Any other value raises ``TypeError``.
         """
+        if not_followed_by is not None:
+            _require_event_classes(not_followed_by)
         for e in reversed(self._events):
             if isinstance(e, event_type):
                 return e

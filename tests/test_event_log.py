@@ -74,40 +74,49 @@ def describe_EventLog():
 
         def describe_not_followed_by():
 
-            def when_no_closing_event_follows_the_last_match():
+            def when_no_later_event_matches_not_followed_by():
 
-                def it_returns_the_last_match():
-                    log = EventLog([Beta(v=1), Alpha(v=2), AlphaChild(v=3)])
-                    assert log.latest(Alpha, not_followed_by=Beta) == AlphaChild(v=3)
+                def it_returns_the_match():
+                    log = EventLog([Beta(v=1), Alpha(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Beta) == Alpha(v=2)
 
-            def when_a_closing_event_follows_the_last_match():
+            def when_a_later_event_matches_not_followed_by():
 
                 def it_returns_none():
                     log = EventLog([Alpha(v=1), Beta(v=2)])
                     assert log.latest(Alpha, not_followed_by=Beta) is None
 
-            def when_a_closing_event_comes_only_before_the_last_match():
+            def when_only_an_earlier_event_matches_not_followed_by():
 
-                def it_returns_the_last_match(log):
+                def it_returns_the_match(log):
                     assert log.latest(Alpha, not_followed_by=Beta) == Alpha(v=3)
 
-            def when_the_closing_type_is_a_union():
+            def when_not_followed_by_is_a_union():
 
-                def it_closes_on_any_member():
-                    log = EventLog([Beta(v=1), AlphaChild(v=2)])
+                @pytest.mark.parametrize("later", [Gamma(v=2), Alpha(v=2)])
+                def it_returns_none_for_a_later_event_of_each_member(later):
+                    log = EventLog([Beta(v=1), later])
                     assert log.latest(Beta, not_followed_by=Gamma | Alpha) is None
 
-            def when_the_match_is_also_a_closing_type():
+            def when_the_match_also_matches_not_followed_by():
 
-                def it_does_not_close_itself():
+                def it_returns_the_match():
                     log = EventLog([Alpha(v=1), Beta(v=2)])
                     assert log.latest(Beta, not_followed_by=Alpha | Beta) == Beta(v=2)
 
-            def when_no_match():
+            def when_a_later_event_is_a_subclass_of_the_match_type():
 
-                def it_returns_none():
-                    log = EventLog([Beta(v=1)])
-                    assert log.latest(Alpha, not_followed_by=Beta) is None
+                def it_returns_that_event_as_the_match():
+                    log = EventLog([Alpha(v=1), AlphaChild(v=2)])
+                    result = log.latest(Alpha, not_followed_by=AlphaChild)
+                    assert result == AlphaChild(v=2)
+
+            def when_not_followed_by_is_not_an_event_class():
+
+                @pytest.mark.parametrize("bad", ["Beta", int, Beta | int])
+                def it_raises_type_error_on_an_empty_log(bad):
+                    with pytest.raises(TypeError, match="not_followed_by"):
+                        EventLog([]).latest(Alpha, not_followed_by=bad)
 
     def describe_has():
 

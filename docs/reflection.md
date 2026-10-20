@@ -102,7 +102,7 @@ event-type name (subclass-aware, like the Python API):
 | `list` | `index` (offset), `limit` | all events in order, paged |
 | `get` | `index` | full field dump of one event + kind/namespace/command + recorded cause |
 | `filter` / `select` | `type`, `limit` | matching events as `#index` lines |
-| `latest` / `first` | `type` | newest / oldest match |
+| `latest` / `first` | `type` | newest / oldest match. The op takes no `not_followed_by`: only the Python API has it |
 | `has` / `count` | `type` | `true`/`false` / a number |
 | `after` / `before` | `type`, `limit` | events after / before the first match |
 | `evidence` | `index` | every fact on how that event came to be |
