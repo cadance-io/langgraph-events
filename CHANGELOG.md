@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventLog.latest(T, not_followed_by=U)` finds the latest `T` that no `U` follows.** It
+  returns `None` when an event of `U` comes after the most recent `T`. `U` can be one class
+  or a union of classes, and the result keeps the type `T | None`. A handler that reads
+  "the latest request that is still open" then needs no loop over `log.events`. See
+  [A request that is still open](docs/concepts.md#a-request-that-is-still-open).
+
 ## [0.36.0] - 2026-10-10
 
 ### Changed

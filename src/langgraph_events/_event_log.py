@@ -11,6 +11,7 @@ from langgraph_events._event import Event
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
+    from types import UnionType
 
     from langgraph_events._causes import CauseEntry
 
@@ -362,11 +363,22 @@ class EventLog:
         """Return all events matching *event_type* (including subclasses)."""
         return [e for e in self._events if isinstance(e, event_type)]
 
-    def latest(self, event_type: type[T]) -> T | None:
-        """Return the most recent event of *event_type*, or ``None``."""
+    def latest(
+        self,
+        event_type: type[T],
+        *,
+        not_followed_by: type[Event] | UnionType | None = None,
+    ) -> T | None:
+        """Return the most recent event of *event_type*, or ``None``.
+
+        With *not_followed_by*, return ``None`` when an event of that type or
+        union comes after the most recent match. The match itself never closes.
+        """
         for e in reversed(self._events):
             if isinstance(e, event_type):
                 return e
+            if not_followed_by is not None and isinstance(e, not_followed_by):
+                return None
         return None
 
     def has(self, event_type: type[Event]) -> bool:

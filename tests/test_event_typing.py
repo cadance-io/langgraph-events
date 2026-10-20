@@ -1,4 +1,4 @@
-"""Static typing assertions for the ``@dataclass_transform`` on ``Event``.
+"""Static typing assertions for ``Event`` and the ``EventLog`` queries.
 
 These are checked by **mypy**, not pytest — the bodies are typing-only.
 Run: ``uv run mypy tests/test_event_typing.py``
@@ -9,13 +9,16 @@ invisible and every construction has to be silenced. A passing mypy run proves t
 things, three of them negative — under strict ``warn_unused_ignores`` an unused
 ignore is itself an error, so an ignore only survives if what it silences is
 genuinely rejected.
+
+``EventLog.latest(..., not_followed_by=...)`` accepts a union of event classes,
+and its result keeps the type of the first argument.
 """
 
 from __future__ import annotations
 
 from typing import assert_type
 
-from langgraph_events import Event, HandlerReturn, IntegrationEvent
+from langgraph_events import Event, EventLog, HandlerReturn, IntegrationEvent
 
 
 class Ordered(IntegrationEvent):
@@ -53,3 +56,19 @@ def the_package_reexports_its_documented_public_names() -> None:
         return None
 
     assert_type(catch_all(Ordered()), HandlerReturn)
+
+
+class Shipped(IntegrationEvent):
+    pass
+
+
+class Refunded(IntegrationEvent):
+    pass
+
+
+def latest_not_followed_by_a_union_keeps_the_match_type(log: EventLog) -> None:
+    assert_type(log.latest(Ordered, not_followed_by=Shipped | Refunded), Ordered | None)
+
+
+def latest_not_followed_by_one_class_keeps_the_match_type(log: EventLog) -> None:
+    assert_type(log.latest(Ordered, not_followed_by=Shipped), Ordered | None)

@@ -29,6 +29,10 @@ class AlphaChild(Alpha):
     extra: str = ""
 
 
+class Gamma(IntegrationEvent):
+    v: int = 0
+
+
 def describe_EventLog():
 
     @pytest.fixture
@@ -67,6 +71,43 @@ def describe_EventLog():
             def it_returns_none():
                 log = EventLog([Alpha(v=1)])
                 assert log.latest(Beta) is None
+
+        def describe_not_followed_by():
+
+            def when_no_closing_event_follows_the_last_match():
+
+                def it_returns_the_last_match():
+                    log = EventLog([Beta(v=1), Alpha(v=2), AlphaChild(v=3)])
+                    assert log.latest(Alpha, not_followed_by=Beta) == AlphaChild(v=3)
+
+            def when_a_closing_event_follows_the_last_match():
+
+                def it_returns_none():
+                    log = EventLog([Alpha(v=1), Beta(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Beta) is None
+
+            def when_a_closing_event_comes_only_before_the_last_match():
+
+                def it_returns_the_last_match(log):
+                    assert log.latest(Alpha, not_followed_by=Beta) == Alpha(v=3)
+
+            def when_the_closing_type_is_a_union():
+
+                def it_closes_on_any_member():
+                    log = EventLog([Beta(v=1), AlphaChild(v=2)])
+                    assert log.latest(Beta, not_followed_by=Gamma | Alpha) is None
+
+            def when_the_match_is_also_a_closing_type():
+
+                def it_does_not_close_itself():
+                    log = EventLog([Alpha(v=1), Beta(v=2)])
+                    assert log.latest(Beta, not_followed_by=Alpha | Beta) == Beta(v=2)
+
+            def when_no_match():
+
+                def it_returns_none():
+                    log = EventLog([Beta(v=1)])
+                    assert log.latest(Alpha, not_followed_by=Beta) is None
 
     def describe_has():
 
