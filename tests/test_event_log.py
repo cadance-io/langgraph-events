@@ -113,10 +113,34 @@ def describe_EventLog():
 
             def when_not_followed_by_is_not_an_event_class():
 
-                @pytest.mark.parametrize("bad", ["Beta", int, Beta | int])
+                @pytest.mark.parametrize(
+                    "bad",
+                    [
+                        "Beta",
+                        int,
+                        Beta | int,
+                        type[Beta],
+                        list[Beta],
+                        (Beta, Gamma),
+                    ],
+                )
                 def it_raises_type_error_on_an_empty_log(bad):
                     with pytest.raises(TypeError, match="not_followed_by"):
                         EventLog([]).latest(Alpha, not_followed_by=bad)
+
+                def it_names_the_wrong_value():
+                    with pytest.raises(TypeError, match="got <class 'int'>"):
+                        EventLog([]).latest(Alpha, not_followed_by=int)
+
+                def it_names_the_wrong_member_of_a_union():
+                    with pytest.raises(TypeError, match="holds <class 'int'>"):
+                        EventLog([]).latest(Alpha, not_followed_by=Beta | int)
+
+            def when_not_followed_by_is_a_tuple():
+
+                def it_shows_the_union_to_write():
+                    with pytest.raises(TypeError, match=r"Beta \| Gamma"):
+                        EventLog([]).latest(Alpha, not_followed_by=(Beta, Gamma))
 
     def describe_has():
 

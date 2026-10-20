@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
+from types import UnionType
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, get_args, overload
 
 from langgraph_events._causes import FRAMEWORK, NOT_RECORDED, dropped, resolve
@@ -11,7 +12,6 @@ from langgraph_events._event import Event
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
-    from types import UnionType
 
     from langgraph_events._causes import CauseEntry
 
@@ -223,15 +223,24 @@ def _table_from_causes(
     return _CauseTable(events, None, entries=tuple(entries))
 
 
+def _is_event_class(value: object) -> bool:
+    return isinstance(value, type) and issubclass(value, Event)
+
+
 def _require_event_classes(classes: object) -> None:
     """Raise ``TypeError`` unless *classes* is an Event class or a union of them."""
-    members = get_args(classes) or (classes,)
-    for member in members:
-        if not (isinstance(member, type) and issubclass(member, Event)):
-            raise TypeError(
-                f"not_followed_by must be an Event class or a union of Event "
-                f"classes, but {classes!r} holds {member!r}."
-            )
+    rule = "not_followed_by must be an Event class or a union of them written with |"
+    if isinstance(classes, UnionType):
+        for member in get_args(classes):
+            if not _is_event_class(member):
+                raise TypeError(f"{rule}, but {classes!r} holds {member!r}.")
+        return
+    if _is_event_class(classes):
+        return
+    if isinstance(classes, tuple | list) and classes:
+        union = " | ".join(getattr(c, "__name__", repr(c)) for c in classes)
+        raise TypeError(f"{rule}, got {classes!r}. Write {union}.")
+    raise TypeError(f"{rule}, got {classes!r}.")
 
 
 class EventLog:
@@ -386,7 +395,11 @@ class EventLog:
         written with ``|``. With it, return ``None`` when an event of that class
         or union comes after the most recent match. An event that matches
         *event_type* is the result, also when it matches *not_followed_by*.
-        Any other value raises ``TypeError``.
+        Any other value raises ``TypeError``. Only the most recent match is
+        checked, and fields are not compared. ``after()`` cuts at the first
+        match, so ``log.after(T)`` is not this query.
+
+        Example: ``log.latest(Asked, not_followed_by=Answered | Withdrawn)``.
         """
         if not_followed_by is not None:
             _require_event_classes(not_followed_by)
