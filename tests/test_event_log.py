@@ -6,6 +6,7 @@ import pytest
 from conftest import Order
 
 from langgraph_events import (
+    Auditable,
     Cause,
     Event,
     EventLog,
@@ -31,6 +32,10 @@ class AlphaChild(Alpha):
 
 class Gamma(IntegrationEvent):
     v: int = 0
+
+
+class AuditedGamma(Gamma, Auditable):
+    pass
 
 
 def describe_EventLog():
@@ -97,6 +102,20 @@ def describe_EventLog():
                 def it_returns_none_for_a_later_event_of_each_member(later):
                     log = EventLog([Beta(v=1), later])
                     assert log.latest(Beta, not_followed_by=Gamma | Alpha) is None
+
+            def when_not_followed_by_is_an_event_mixin():
+
+                def it_returns_none_for_a_later_event_with_the_mixin():
+                    log = EventLog([Alpha(v=1), AuditedGamma(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Auditable) is None
+
+                def it_returns_the_match_when_no_later_event_has_the_mixin():
+                    log = EventLog([Alpha(v=1), Gamma(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Auditable) == Alpha(v=1)
+
+                def it_accepts_the_mixin_in_a_union():
+                    log = EventLog([Alpha(v=1), AuditedGamma(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Beta | Auditable) is None
 
             def when_the_match_also_matches_not_followed_by():
 

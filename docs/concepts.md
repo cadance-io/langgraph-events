@@ -302,7 +302,7 @@ count. The result keeps the type `T | None`.
 
 | Rule | Detail |
 |---|---|
-| Value of `U` | One `Event` class, or a union of `Event` classes written with `\|`. Any other value raises `TypeError`, also on an empty log. |
+| Value of `U` | One `Event` class or event mixin, such as `Auditable`, or a union of them written with `\|`. Any other value raises `TypeError`, also on an empty log. |
 | An event of both `T` and `U` | It is a match, not a follower. So `T` can also be a member of `U`. |
 | A later subclass of `T` | It is a match, also when it is a member of `U`. |
 | An older `T` with no follower | It is not returned. Only the most recent `T` is checked. To list every open `T`, loop over `log.filter(T)`. |
