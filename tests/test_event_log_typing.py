@@ -3,17 +3,17 @@
 These are checked by **mypy**, not pytest. The bodies are typing-only.
 Run: ``uv run mypy tests/test_event_log_typing.py``
 
-``latest(..., not_followed_by=...)`` accepts one Event class, one event mixin,
-or a union of them. Its result keeps the type of the first argument, so a caller
-reads the fields of the match without a cast. A type cannot say "event mixin",
-so mypy accepts any class there, and the runtime check refuses the rest.
+``latest(..., not_followed_by=...)`` accepts one Event class or a union of them.
+Its result keeps the type of the first argument, so a caller reads the fields of
+the match without a cast. Under strict ``warn_unused_ignores`` an unused ignore is
+an error, so the ignore below proves that mypy rejects a class that is not an Event.
 """
 
 from __future__ import annotations
 
 from typing import assert_type
 
-from langgraph_events import Auditable, EventLog, IntegrationEvent
+from langgraph_events import EventLog, IntegrationEvent
 
 
 class Ordered(IntegrationEvent):
@@ -36,12 +36,5 @@ def latest_not_followed_by_one_class_keeps_the_match_type(log: EventLog) -> None
     assert_type(log.latest(Ordered, not_followed_by=Shipped), Ordered | None)
 
 
-def latest_not_followed_by_a_mixin_keeps_the_match_type(log: EventLog) -> None:
-    assert_type(log.latest(Ordered, not_followed_by=Auditable), Ordered | None)
-
-
-def latest_not_followed_by_a_mixin_union_keeps_the_match_type(
-    log: EventLog,
-) -> None:
-    result = log.latest(Ordered, not_followed_by=Shipped | Auditable)
-    assert_type(result, Ordered | None)
+def latest_not_followed_by_rejects_a_class_that_is_not_an_event(log: EventLog) -> None:
+    log.latest(Ordered, not_followed_by=int)  # type: ignore[arg-type]

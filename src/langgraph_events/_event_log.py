@@ -224,19 +224,12 @@ def _table_from_causes(
 
 
 def _is_event_class(value: object) -> bool:
-    """True for an Event class or an event mixin, as ``@on`` accepts them."""
-    return isinstance(value, type) and (
-        issubclass(value, Event) or getattr(value, "_event_mixin", False)
-    )
+    return isinstance(value, type) and issubclass(value, Event)
 
 
 def _require_event_classes(classes: object) -> None:
-    """Raise ``TypeError`` unless *classes* is an Event class, an event mixin,
-    or a union of them."""
-    rule = (
-        "not_followed_by must be an Event class, an event mixin,"
-        " or a union of them written with |"
-    )
+    """Raise ``TypeError`` unless *classes* is an Event class or a union of them."""
+    rule = "not_followed_by must be an Event class or a union of them written with |"
     if isinstance(classes, UnionType):
         for member in get_args(classes):
             if not _is_event_class(member):
@@ -394,18 +387,17 @@ class EventLog:
         self,
         event_type: type[T],
         *,
-        not_followed_by: type[object] | UnionType | None = None,
+        not_followed_by: type[Event] | UnionType | None = None,
     ) -> T | None:
         """Return the most recent event of *event_type*, or ``None``.
 
-        *not_followed_by* is one Event class or event mixin, such as
-        ``Auditable``, or a union of them written with ``|``. With it, return
-        ``None`` when an event of that class or union comes after the most
-        recent match. An event that matches *event_type* is the result, also
-        when it matches *not_followed_by*. Any other value raises
-        ``TypeError``. Only the most recent match is checked, and fields are
-        not compared. ``after()`` cuts at the first match, so ``log.after(T)``
-        is not this query.
+        *not_followed_by* is one Event class, or a union of Event classes
+        written with ``|``. With it, return ``None`` when an event of that class
+        or union comes after the most recent match. An event that matches
+        *event_type* is the result, also when it matches *not_followed_by*.
+        Any other value raises ``TypeError``. Only the most recent match is
+        checked, and fields are not compared. ``after()`` cuts at the first
+        match, so ``log.after(T)`` is not this query.
 
         Example: ``log.latest(Asked, not_followed_by=Answered | Withdrawn)``.
         """
