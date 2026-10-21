@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ag_ui.core import RunAgentInput
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -122,6 +125,13 @@ class MapperContext:
             )
         if name not in self._client_tool_names:
             skipped.add(index)
+            logger.debug(
+                "Skipped LLM tool call %r (id=%r): the client lists only %s "
+                "in RunAgentInput.tools.",
+                name,
+                tool_call_id,
+                sorted(self._client_tool_names),
+            )
             return None
         per_run[index] = tool_call_id
         return tool_call_id, True

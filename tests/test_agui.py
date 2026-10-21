@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from typing import Any
 
@@ -3035,6 +3036,29 @@ def describe_tool_call_streaming():
 
             assert _tool_call_types(events) == []
             assert _text(events) == "routing"
+
+        async def it_logs_the_skipped_tool_once_at_debug(monkeypatch, caplog):
+            caplog.set_level(logging.DEBUG, logger="langgraph_events.agui")
+            graph = _graph(reply)
+
+            _patch_compiled_astream(
+                monkeypatch,
+                graph,
+                _tool_call_chunk_event(
+                    "run-b",
+                    {"name": "route", "args": "", "id": "tc-b", "index": 0},
+                ),
+                _tool_call_chunk_event(
+                    "run-b",
+                    {"name": "", "args": '{"to":"x"}', "id": "", "index": 0},
+                ),
+                _chat_model_end("run-b", AIMessage(id="msg-b", content="")),
+            )
+
+            await _stream(graph, _client_tools_input("search"), seed_factory=_ask("q"))
+
+            skipped = [r for r in caplog.records if "route" in r.getMessage()]
+            assert [r.levelno for r in skipped] == [logging.DEBUG]
 
     def when_the_client_lists_one_of_two_parallel_tools():
         async def it_emits_only_the_listed_triple(monkeypatch):
