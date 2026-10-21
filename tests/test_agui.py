@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from typing import Any
 
@@ -18,6 +19,7 @@ from ag_ui.core import (
     ImagePart,
     RunAgentInput,
     TextPart,
+    Tool,
     UrlSource,
     VideoPart,
 )
@@ -2997,7 +2999,157 @@ def _tool_call_chunk_event(
     }
 
 
+def _client_tools_input(*names: str) -> RunAgentInput:
+    return _make_input(
+        tools=[Tool(name=n, description=n, parameters={}) for n in names]
+    )
+
+
+def _text(events: list[BaseEvent]) -> str:
+    return "".join(e.delta for e in _of_type(events, EventType.TEXT_MESSAGE_CONTENT))
+
+
 def describe_tool_call_streaming():
+
+    def when_the_client_does_not_list_the_tool():
+        async def it_emits_no_tool_call_events_and_streams_the_text(monkeypatch):
+            graph = _graph(reply)
+
+            _patch_compiled_astream(
+                monkeypatch,
+                graph,
+                _tool_call_chunk_event(
+                    "run-b",
+                    {"name": "route", "args": "", "id": "tc-b", "index": 0},
+                    content="routing",
+                ),
+                _tool_call_chunk_event(
+                    "run-b",
+                    {"name": "", "args": '{"to":"x"}', "id": "", "index": 0},
+                ),
+                _chat_model_end("run-b", AIMessage(id="msg-b", content="routing")),
+            )
+
+            events = await _stream(
+                graph, _client_tools_input("search"), seed_factory=_ask("q")
+            )
+
+            assert _tool_call_types(events) == []
+            assert _text(events) == "routing"
+
+        async def it_logs_the_skipped_tool_once_at_debug(monkeypatch, caplog):
+            caplog.set_level(logging.DEBUG, logger="langgraph_events.agui")
+            graph = _graph(reply)
+
+            _patch_compiled_astream(
+                monkeypatch,
+                graph,
+                _tool_call_chunk_event(
+                    "run-b",
+                    {"name": "route", "args": "", "id": "tc-b", "index": 0},
+                ),
+                _tool_call_chunk_event(
+                    "run-b",
+                    {"name": "", "args": '{"to":"x"}', "id": "", "index": 0},
+                ),
+                _chat_model_end("run-b", AIMessage(id="msg-b", content="")),
+            )
+
+            await _stream(graph, _client_tools_input("search"), seed_factory=_ask("q"))
+
+            skipped = [r for r in caplog.records if "route" in r.getMessage()]
+            assert [r.levelno for r in skipped] == [logging.DEBUG]
+
+    def when_the_client_lists_one_of_two_parallel_tools():
+        async def it_emits_only_the_listed_triple(monkeypatch):
+            graph = _graph(reply)
+
+            _patch_compiled_astream(
+                monkeypatch,
+                graph,
+                _tool_call_chunk_event(
+                    "run-q",
+                    {"name": "route", "args": "", "id": "tc-r", "index": 0},
+                    {"name": "search", "args": "", "id": "tc-s", "index": 1},
+                ),
+                _tool_call_chunk_event(
+                    "run-q",
+                    {"name": "", "args": '{"to":"x"}', "id": "", "index": 0},
+                    {"name": "", "args": '{"q":"a"}', "id": "", "index": 1},
+                ),
+                _chat_model_end("run-q", AIMessage(id="msg-q", content="")),
+            )
+
+            events = await _stream(
+                graph, _client_tools_input("search"), seed_factory=_ask("q")
+            )
+
+            tool_events = [e for e in events if e.type in _TOOL_CALL_TRIPLE]
+            assert [(e.type, e.tool_call_id) for e in tool_events] == [
+                (EventType.TOOL_CALL_START, "tc-s"),
+                (EventType.TOOL_CALL_ARGS, "tc-s"),
+                (EventType.TOOL_CALL_END, "tc-s"),
+            ]
+
+    def when_the_stream_errors_inside_an_unlisted_call():
+        async def it_emits_no_tool_call_end(monkeypatch):
+            graph = _graph(reply)
+
+            async def fake_astream(*args, **kwargs):
+                del args, kwargs
+                yield _tool_call_chunk_event(
+                    "run-u",
+                    {"name": "route", "args": "", "id": "tc-u", "index": 0},
+                )
+                raise RuntimeError("LLM failed")
+
+            monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
+
+            events = await _stream(graph, seed_factory=_ask("q"))
+
+            assert _tool_call_types(events) == []
+            assert events[-1].type == EventType.RUN_ERROR
+
+    def when_resuming():
+        async def _resume_streaming(monkeypatch, input_data, name):
+            graph = _graph(ask_approval, reply, checkpointer=MemorySaver())
+            await graph.ainvoke(
+                UserAsked(question="go"), config=_config(input_data.thread_id)
+            )
+            _patch_compiled_astream(
+                monkeypatch,
+                graph,
+                _tool_call_chunk_event(
+                    "run-r",
+                    {"name": name, "args": "", "id": "tc-r", "index": 0},
+                    content="resumed",
+                ),
+                _tool_call_chunk_event(
+                    "run-r",
+                    {"name": "", "args": "{}", "id": "", "index": 0},
+                ),
+                _chat_model_end("run-r", AIMessage(id="msg-r", content="resumed")),
+            )
+            return await _resume(graph, input_data)
+
+        def when_the_client_does_not_list_the_tool():
+            async def it_emits_no_tool_call_events_and_streams_the_text(
+                monkeypatch,
+            ):
+                events = await _resume_streaming(
+                    monkeypatch, _client_tools_input(), "route"
+                )
+
+                assert _tool_call_types(events) == []
+                assert _text(events) == "resumed"
+
+        def when_the_client_lists_the_tool():
+            async def it_emits_start_args_end(monkeypatch):
+                events = await _resume_streaming(
+                    monkeypatch, _client_tools_input("search"), "search"
+                )
+
+                assert _tool_call_types(events) == _TOOL_CALL_TRIPLE
 
     def when_single_tool_call():
         async def it_emits_start_args_end_in_order(monkeypatch):
@@ -3017,7 +3169,9 @@ def describe_tool_call_streaming():
                 _chat_model_end("run-a", AIMessage(id="msg-x", content="ok")),
             )
 
-            events = await _stream(graph, seed_factory=_ask("q"))
+            events = await _stream(
+                graph, _client_tools_input("search"), seed_factory=_ask("q")
+            )
 
             tc_types = _tool_call_types(events)
             assert tc_types == _TOOL_CALL_TRIPLE
@@ -3050,7 +3204,11 @@ def describe_tool_call_streaming():
                 _chat_model_end("run-p", AIMessage(id="msg-y", content="ok")),
             )
 
-            events = await _stream(graph, seed_factory=_ask("q"))
+            events = await _stream(
+                graph,
+                _client_tools_input("search", "lookup"),
+                seed_factory=_ask("q"),
+            )
 
             starts = _of_type(events, EventType.TOOL_CALL_START)
             args_evs = _of_type(events, EventType.TOOL_CALL_ARGS)
@@ -3074,7 +3232,9 @@ def describe_tool_call_streaming():
                 _chat_model_end("run-m", AIMessage(id="msg-z", content="thinking…")),
             )
 
-            events = await _stream(graph, seed_factory=_ask("q"))
+            events = await _stream(
+                graph, _client_tools_input("search"), seed_factory=_ask("q")
+            )
 
             text_start = next(
                 e for e in events if e.type == EventType.TEXT_MESSAGE_START
@@ -3096,7 +3256,9 @@ def describe_tool_call_streaming():
                 _chat_model_end("run-n", AIMessage(id="msg-n", content="")),
             )
 
-            events = await _stream(graph, seed_factory=_ask("q"))
+            events = await _stream(
+                graph, _client_tools_input("search"), seed_factory=_ask("q")
+            )
 
             tc_start = next(e for e in events if e.type == EventType.TOOL_CALL_START)
             assert tc_start.parent_message_id is None
@@ -3156,7 +3318,9 @@ def describe_tool_call_streaming():
 
             monkeypatch.setattr(graph.compiled, "astream_events", fake_astream)
 
-            events = await _stream(graph, seed_factory=_ask("q"))
+            events = await _stream(
+                graph, _client_tools_input("search"), seed_factory=_ask("q")
+            )
 
             tc_end = next(
                 (e for e in events if e.type == EventType.TOOL_CALL_END), None

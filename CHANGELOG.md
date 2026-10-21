@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: an LLM tool call streams only when the client lists its tool.** The
+  `AGUIAdapter` reads the tool names in `RunAgentInput.tools` for the whole run. This applies
+  to a new run and to a resumed run. A tool call whose name is not in that list emits no
+  `TOOL_CALL_START`, `TOOL_CALL_ARGS` or `TOOL_CALL_END`. The adapter logs each skipped call
+  once at `DEBUG`, with the tool name. The text tokens of the same LLM run still stream.
+  Before, every LLM tool call streamed. A client that runs tools by name could then run its
+  own tool when a backend tool call had the same name.
+  - A client that sends an empty `tools` list now gets no LLM tool-call events.
+  - To stream a call that the client executes, list its tool in `RunAgentInput.tools`.
+  - Do not list a backend tool to show it in the UI. The client then treats it as a tool to
+    execute. To show a backend tool call, emit `ToolCallStartEvent`, `ToolCallArgsEvent`,
+    `ToolCallEndEvent` and `ToolCallResultEvent` from a custom `EventMapper`.
+  - `FrontendToolCallRequested` still emits its tool call, whatever the list holds.
+  - The `MESSAGES_SNAPSHOT` history does not change. It still holds every tool call of an
+    `AIMessage`. A snapshot is history, and the spec scopes `RunAgentInput.tools` to execution.
+  - `MapperContext.ensure_tool_call_id` returns `None` for every chunk of a skipped call.
+
+  The [AG-UI tools spec](https://docs.ag-ui.com/concepts/tools) keeps `RunAgentInput.tools`
+  for client-provided tools only.
+
 ## [0.37.0] - 2026-10-21
 
 ### Added
