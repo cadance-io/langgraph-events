@@ -40,7 +40,7 @@ def latest_not_followed_by_a_mixin_keeps_the_match_type(log: EventLog) -> None:
     assert_type(log.latest(Ordered, not_followed_by=Auditable), Ordered | None)
 
 
-def latest_not_followed_by_a_union_with_a_mixin_keeps_the_match_type(
+def latest_not_followed_by_a_mixin_union_keeps_the_match_type(
     log: EventLog,
 ) -> None:
     result = log.latest(Ordered, not_followed_by=Shipped | Auditable)

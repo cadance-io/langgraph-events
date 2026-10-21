@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "the latest request that is still open" then needs no loop over `log.events`. See
   [A request that is still open](docs/concepts.md#a-request-that-is-still-open).
 
+### Fixed
+
+- **A return annotation that holds a class that is not an `Event` raises `TypeError` at
+  graph construction.** Before, the class gave no edge. A handler annotated with an event
+  mixin then looked like a side effect, and the events it returned were not routed. Each
+  member must be an `Event` subclass, `Scatter[...]` or `None`. See
+  [Return contract](docs/concepts.md#return-contract).
+
 ## [0.36.0] - 2026-10-10
 
 ### Changed

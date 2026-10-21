@@ -283,6 +283,14 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
             if issubclass(arg, Interrupted):
                 has_interrupted = True
             event_types.append(arg)
+        else:
+            raise TypeError(
+                f"Handler {fn.__qualname__!r} has a return annotation that "
+                f"holds {arg!r}, which is not an Event subclass. The framework "
+                f"reads the return annotation to route the events, so each "
+                f"member must be an Event subclass, Scatter[...] or None. For "
+                f"an event mixin, name the Event classes that compose it."
+            )
 
     return ReturnInfo(event_types, scatter_types, has_interrupted, True)
 

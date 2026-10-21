@@ -105,13 +105,18 @@ def describe_EventLog():
 
             def when_not_followed_by_is_an_event_mixin():
 
-                def it_returns_none_for_a_later_event_with_the_mixin():
-                    log = EventLog([Alpha(v=1), AuditedGamma(v=2)])
-                    assert log.latest(Alpha, not_followed_by=Auditable) is None
+                def and_a_later_event_composes_the_mixin():
 
-                def it_returns_the_match_when_no_later_event_has_the_mixin():
-                    log = EventLog([Alpha(v=1), Gamma(v=2)])
-                    assert log.latest(Alpha, not_followed_by=Auditable) == Alpha(v=1)
+                    def it_returns_none():
+                        log = EventLog([Alpha(v=1), AuditedGamma(v=2)])
+                        assert log.latest(Alpha, not_followed_by=Auditable) is None
+
+                def and_no_later_event_composes_the_mixin():
+
+                    def it_returns_the_match():
+                        log = EventLog([Alpha(v=1), Gamma(v=2)])
+                        result = log.latest(Alpha, not_followed_by=Auditable)
+                        assert result == Alpha(v=1)
 
                 def it_accepts_the_mixin_in_a_union():
                     log = EventLog([Alpha(v=1), AuditedGamma(v=2)])
