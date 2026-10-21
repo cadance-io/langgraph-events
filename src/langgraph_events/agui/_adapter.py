@@ -526,9 +526,12 @@ class AGUIAdapter:
         item: LLMToolCallChunk,
         ctx: MapperContext,
     ) -> list[BaseEvent]:
-        resolved_id, is_new = ctx.ensure_tool_call_id(
+        tracked = ctx.ensure_tool_call_id(
             item.run_id, item.call_index, item.tool_call_id, item.name
         )
+        if tracked is None:
+            return []
+        resolved_id, is_new = tracked
         events: list[BaseEvent] = []
         if is_new:
             events.append(

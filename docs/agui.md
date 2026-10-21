@@ -298,7 +298,7 @@ The AG-UI spec positions tool calls as "inherently frontend-executed" and as the
 
 1. **Tool definitions in** — page's `useFrontendTool` registrations arrive as `RunAgentInput.tools`. `build_langchain_tools(...)` converts them to OpenAI-format dicts for `llm.bind_tools(...)`.
 2. **Tool calls out** — two paths, both mapping to `ToolCallStart`/`ToolCallArgs`/`ToolCallEnd`:
-    - **LLM-initiated** — bound LLM `tool_call_chunks` auto-translate to the streaming triple.
+    - **LLM-initiated** — bound LLM `tool_call_chunks` auto-translate to the streaming triple. The adapter streams a call only when its name is in `RunAgentInput.tools`. A call to a backend tool emits no `ToolCallStart`, `ToolCallArgs` or `ToolCallEnd`. The text tokens of the same LLM run still stream. The `MessagesSnapshot` history still holds every tool call. See the [AG-UI tools spec](https://docs.ag-ui.com/concepts/tools).
     - **Handler-initiated** — return `FrontendToolCallRequested(Interrupted)` from a handler. Graph pauses; AG-UI emits the triple. (Same machinery as `ApprovalRequested(Interrupted)` in [`examples/expense_approval.py`](https://github.com/cadance-io/langgraph-events/blob/main/examples/expense_approval.py).)
 3. **Tool results back** — frontend handler return value comes back as `role: "tool"`. `detect_new_tool_results(input_data, checkpoint_state)` returns the new `ToolMessage`s; wrap as `MessageEvent` and return from `resume_factory`.
 

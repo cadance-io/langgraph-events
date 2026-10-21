@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Behavior change: an LLM tool call streams only when the client lists its tool.** The
+  `AGUIAdapter` reads the tool names in `RunAgentInput.tools` for the whole run. This applies
+  to a new run and to a resumed run. A tool call whose name is not in that list emits no
+  `TOOL_CALL_START`, `TOOL_CALL_ARGS` or `TOOL_CALL_END`. Before, every LLM tool call
+  streamed. A client that runs tools by name then ran a backend tool that had the same name
+  as a client tool. The text tokens of the same LLM run still stream.
+  `FrontendToolCallRequested` still emits its tool call, whatever the list holds. The
+  `MESSAGES_SNAPSHOT` history does not change. It still holds every tool call of an
+  `AIMessage`. A client that sends an empty `tools` list now gets no LLM tool-call events. To
+  keep a call streaming, list its tool in `RunAgentInput.tools`. The
+  [AG-UI tools spec](https://docs.ag-ui.com/concepts/tools) keeps `RunAgentInput.tools` for
+  client-provided tools only.
+
 ## [0.37.0] - 2026-10-21
 
 ### Added

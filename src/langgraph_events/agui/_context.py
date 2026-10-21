@@ -30,6 +30,13 @@ class MapperContext:
     _open_tool_calls: dict[str, dict[int, str]] = dataclasses.field(
         default_factory=dict, repr=False
     )
+    _skipped_tool_calls: dict[str, set[int]] = dataclasses.field(
+        default_factory=dict, repr=False
+    )
+    _client_tool_names: frozenset[str] = dataclasses.field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._client_tool_names = frozenset(t.name for t in self.input_data.tools or [])
 
     def next_message_id(self) -> str:
         """Return a monotonically increasing message ID for this stream."""
@@ -76,13 +83,17 @@ class MapperContext:
         index: int,
         tool_call_id: str,
         name: str,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool] | None:
         """Track a streaming tool-call chunk and report whether it is new.
 
         Returns ``(resolved_tool_call_id, is_new)``. The first chunk for a
         given ``(run_id, index)`` records the id; later chunks look it up
         instead of overwriting with the empty string that continuation
         chunks typically carry.
+
+        Returns ``None`` for every chunk of a call whose name is not in
+        ``RunAgentInput.tools``. Such a call is a backend tool, so the
+        client must not receive it.
 
         Raises ``ValueError`` if the first chunk for an ``(run_id, index)``
         carries an empty ``tool_call_id`` or ``name`` — the OpenAI streaming
@@ -92,6 +103,9 @@ class MapperContext:
         existing = per_run.get(index)
         if existing is not None:
             return existing, False
+        skipped = self._skipped_tool_calls.setdefault(run_id, set())
+        if index in skipped:
+            return None
         if not tool_call_id:
             raise ValueError(
                 f"First tool_call_chunk for (run_id={run_id!r}, "
@@ -106,11 +120,15 @@ class MapperContext:
                 "Required on the first chunk per the OpenAI streaming "
                 "contract."
             )
+        if name not in self._client_tool_names:
+            skipped.add(index)
+            return None
         per_run[index] = tool_call_id
         return tool_call_id, True
 
     def close_tool_calls_for_run(self, run_id: str) -> list[str]:
         """Close and return tool_call_ids opened under *run_id*."""
+        self._skipped_tool_calls.pop(run_id, None)
         per_run = self._open_tool_calls.pop(run_id, {})
         return list(per_run.values())
 
