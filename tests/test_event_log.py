@@ -29,6 +29,10 @@ class AlphaChild(Alpha):
     extra: str = ""
 
 
+class Gamma(IntegrationEvent):
+    v: int = 0
+
+
 def describe_EventLog():
 
     @pytest.fixture
@@ -67,6 +71,76 @@ def describe_EventLog():
             def it_returns_none():
                 log = EventLog([Alpha(v=1)])
                 assert log.latest(Beta) is None
+
+        def describe_not_followed_by():
+
+            def when_no_later_event_matches_not_followed_by():
+
+                def it_returns_the_match():
+                    log = EventLog([Beta(v=1), Alpha(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Beta) == Alpha(v=2)
+
+            def when_a_later_event_matches_not_followed_by():
+
+                def it_returns_none():
+                    log = EventLog([Alpha(v=1), Beta(v=2)])
+                    assert log.latest(Alpha, not_followed_by=Beta) is None
+
+            def when_only_an_earlier_event_matches_not_followed_by():
+
+                def it_returns_the_match(log):
+                    assert log.latest(Alpha, not_followed_by=Beta) == Alpha(v=3)
+
+            def when_not_followed_by_is_a_union():
+
+                @pytest.mark.parametrize("later", [Gamma(v=2), Alpha(v=2)])
+                def it_returns_none_for_a_later_event_of_each_member(later):
+                    log = EventLog([Beta(v=1), later])
+                    assert log.latest(Beta, not_followed_by=Gamma | Alpha) is None
+
+            def when_the_match_also_matches_not_followed_by():
+
+                def it_returns_the_match():
+                    log = EventLog([Alpha(v=1), Beta(v=2)])
+                    assert log.latest(Beta, not_followed_by=Alpha | Beta) == Beta(v=2)
+
+            def when_a_later_event_is_a_subclass_of_the_match_type():
+
+                def it_returns_that_event_as_the_match():
+                    log = EventLog([Alpha(v=1), AlphaChild(v=2)])
+                    result = log.latest(Alpha, not_followed_by=AlphaChild)
+                    assert result == AlphaChild(v=2)
+
+            def when_not_followed_by_is_not_an_event_class():
+
+                @pytest.mark.parametrize(
+                    "bad",
+                    [
+                        "Beta",
+                        int,
+                        Beta | int,
+                        type[Beta],
+                        list[Beta],
+                        (Beta, Gamma),
+                    ],
+                )
+                def it_raises_type_error_on_an_empty_log(bad):
+                    with pytest.raises(TypeError, match="not_followed_by"):
+                        EventLog([]).latest(Alpha, not_followed_by=bad)
+
+                def it_names_the_wrong_value():
+                    with pytest.raises(TypeError, match="got <class 'int'>"):
+                        EventLog([]).latest(Alpha, not_followed_by=int)
+
+                def it_names_the_wrong_member_of_a_union():
+                    with pytest.raises(TypeError, match="holds <class 'int'>"):
+                        EventLog([]).latest(Alpha, not_followed_by=Beta | int)
+
+            def when_not_followed_by_is_a_tuple():
+
+                def it_shows_the_union_to_write():
+                    with pytest.raises(TypeError, match=r"Beta \| Gamma"):
+                        EventLog([]).latest(Alpha, not_followed_by=(Beta, Gamma))
 
     def describe_has():
 

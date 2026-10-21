@@ -271,6 +271,7 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 |---|---|
 | `log.filter(T)` | `list[T]` |
 | `log.latest(T)` / `log.first(T)` | `T \| None` |
+| `log.latest(T, not_followed_by=U)` | `T \| None`: the most recent `T`, or `None` when a `U` comes after it. See [A request that is still open](#a-request-that-is-still-open) |
 | `log.has(T)` | `bool` |
 | `log.count(T)` | `int` |
 | `log.select(T)` / `log.after(T)` / `log.before(T)` | chainable `EventLog` |
@@ -279,6 +280,34 @@ def evaluate(event: DraftProduced, log: EventLog) -> CritiqueReceived | FinalDra
 | `log.flow(e)` | `tuple[Event, ...]`: the chain of `Cause` that ends at `e` |
 | `log.causes` | one origin per event, aligned with `events`, or `None` when the log records no causes |
 | `len(log)`, `log[i]` | container protocol |
+
+### A request that is still open
+
+A handler often needs the latest request that no answer follows yet.
+`not_followed_by=` states that rule in one query. Complex event processing calls
+it a negation, or "A not followed by B".
+
+```python
+@on(MessageReceived)
+def reply(event: MessageReceived, log: EventLog) -> MessageSent:
+    pending = log.latest(QuestionAsked, not_followed_by=Answered | Withdrawn)
+    if pending is None:
+        return MessageSent(text="No question waits for an answer.")
+    return MessageSent(text=f"Still waiting for an answer to: {pending.question}")
+```
+
+`log.latest(T, not_followed_by=U)` finds the most recent `T`. It returns `None` when
+an event of `U` comes after that `T`. Events of `U` before the most recent `T` do not
+count. The result keeps the type `T | None`.
+
+| Rule | Detail |
+|---|---|
+| Value of `U` | One `Event` class, or a union of `Event` classes written with `\|`. Any other value raises `TypeError`, also on an empty log. |
+| An event of both `T` and `U` | It is a match, not a follower. So `T` can also be a member of `U`. |
+| A later subclass of `T` | It is a match, also when it is a member of `U`. |
+| An older `T` with no follower | It is not returned. Only the most recent `T` is checked. To list every open `T`, loop over `log.filter(T)`. |
+| Fields | They are not compared. Any event of `U` closes the `T`. To pair a request with its own answer, compare an ID in your handler. |
+| `after(T)` and `before(T)` | They cut at the first `T`, not the latest one. So `log.after(T)` does not give this query. |
 
 ### Causes
 
