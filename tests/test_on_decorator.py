@@ -932,3 +932,37 @@ def describe_unresolvable_return_annotation():
             message = str(exc.value)
             assert "handler" in message
             assert "MissingReturnEvent" in message
+
+
+class _CardMixin:
+    _event_mixin = True
+
+
+def describe_return_annotation_that_is_not_an_event():
+    # The return annotation builds the topology. A class that is not an Event
+    # draws no edge, so the handler looked like a side effect and its events
+    # were never routed.
+
+    def when_the_return_annotation_is_an_event_mixin():
+
+        def it_raises_naming_the_handler_and_the_class():
+            @on(SampleEvent)
+            def handler(event: SampleEvent) -> _CardMixin:
+                return _CardMixin()
+
+            with pytest.raises(TypeError) as exc:
+                EventGraph([handler])
+
+            message = str(exc.value)
+            assert "handler" in message
+            assert "_CardMixin" in message
+
+    def when_a_union_member_is_not_an_event():
+
+        def it_raises_naming_that_member():
+            @on(SampleEvent)
+            def handler(event: SampleEvent) -> SampleEvent | int | None:
+                return None
+
+            with pytest.raises(TypeError, match="int"):
+                EventGraph([handler])
