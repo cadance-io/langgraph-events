@@ -11,7 +11,6 @@ import pytest
 from conftest import SET_NAME_ERRORS, set_name_cause
 
 from langgraph_events import (
-    Auditable,
     Command,
     IntegrationEvent,
     MessageEvent,
@@ -86,9 +85,7 @@ def describe_integration_event_placement():
 
             def with_behavioural_mixins():
                 def it_loads():
-                    class UserMessageReceived(
-                        IntegrationEvent, MessageEvent, Auditable
-                    ):
+                    class UserMessageReceived(IntegrationEvent, MessageEvent):
                         text: str = ""
 
                     assert UserMessageReceived(text="hi").text == "hi"

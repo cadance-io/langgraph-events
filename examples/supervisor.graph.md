@@ -90,7 +90,7 @@ graph LR
     Produced -.->|folds| _reducer_context_parts
     Completed -.->|folds| _reducer_context_parts
     Run -.->|folds| _reducer_context_parts
-%% Side-effect handlers: audit_trail (Auditable)
+%% Side-effect handlers: audit_trail (Event)
     linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
     linkStyle 12,13,14 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
@@ -109,7 +109,7 @@ Namespaces:
 Reducers:
   context_parts  (folds Produced, Completed, Run)
 Policies:
-  audit_trail  (Auditable)  [side-effect]
+  audit_trail  (Event)  [side-effect]
 Causal notes:
   Run → Research  via supervisor  [orchestrate]
   Run → Code  via supervisor  [orchestrate]

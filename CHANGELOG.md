@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: the `Auditable` mixin and its `trail()` method are deleted.** The mixin added
+  no framework behaviour. It gave `trail()` and an `@on(Auditable)` subscription target. An
+  event without the mixin was left out of that subscription, with no error. The framework
+  never called `trail()`. To migrate, remove `Auditable` from each class base and from each
+  import. Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every
+  dispatched event. The handler then also receives the events that were not marked, and
+  framework events such as `Resumed`, `HandlerRaised` and `HandlerRetried`. An
+  `Interrupted` event reaches it when the thread resumes. A `Halted` event never reaches it.
+  To keep a handler on a subset of events, name the event types: `@on(A, B)`. Replace
+  `event.trail()` with `repr(event)`. Unlike `trail()`, `repr()` does not shorten long
+  values. For a full-field dump of an event in a run's log, use `Reflection.event()`. A
+  checkpoint does not change, because a stored event keeps its module and qualname.
+- **The migration can show new `OrphanedEventWarning`s.** `@on(Auditable)` counted as a
+  consumer of every marked event, so it hid the orphan warning for each one. `@on(Event)`
+  does not hide it (see *Fixed*). After the migration, an event that only the audit handler
+  received is reported as an orphan. Subscribe a real consumer to it, or declare it as a
+  `DomainEvent` in a `Namespace`, which is an end-of-chain fact by design.
+
+### Fixed
+
+- **A catch-all `@on(Event)` handler no longer hides an `OrphanedEventWarning`.** Before, a
+  subscription to `Event` counted as a consumer of every produced event, so no event of the
+  graph was ever reported as an orphan.
+
 ## [0.38.0] - 2026-10-21
 
 ### Changed

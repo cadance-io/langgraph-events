@@ -6,8 +6,8 @@ to specialist agents automatically. The supervisor handler subscribes to the
 sub-commands (``Task.Research``, ``Task.Code``) or the final ``Finalized``
 fact — no routing functions, no subgraph state adapters.
 
-The **Auditable trait** auto-logs every event as it flows, replacing manual
-isinstance printing with a single side-effect handler.
+A single ``@on(Event)`` side-effect handler logs every event as it flows,
+with ``repr()``. It replaces manual isinstance printing.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -24,9 +24,9 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 from langgraph_events import (
-    Auditable,
     Command,
     DomainEvent,
+    Event,
     EventGraph,
     EventLog,
     Namespace,
@@ -46,7 +46,7 @@ class Contextualizable(Protocol):
     def context_part(self) -> str: ...
 
 
-class Task(Namespace, Auditable):
+class Task(Namespace):
     """A coordinated multi-step task.
 
     ``Run`` is the user intent — the entry command. The supervisor handler
@@ -55,16 +55,16 @@ class Task(Namespace, Auditable):
     when enough context has been gathered.
     """
 
-    class Run(Command, Auditable):
+    class Run(Command):
         description: str = ""
 
         def context_part(self) -> str:
             return f"[User Task] {self.description}"
 
-    class Research(Command, Auditable):
+    class Research(Command):
         query: str = ""
 
-        class Completed(DomainEvent, Auditable):
+        class Completed(DomainEvent):
             findings: str = ""
 
             def context_part(self) -> str:
@@ -85,11 +85,11 @@ class Task(Namespace, Auditable):
             response = await researcher_llm.ainvoke(messages)
             return Task.Research.Completed(findings=response.content)
 
-    class Code(Command, Auditable):
+    class Code(Command):
         spec: str = ""
         context: str = ""
 
-        class Produced(DomainEvent, Auditable):
+        class Produced(DomainEvent):
             code: str = ""
 
             def context_part(self) -> str:
@@ -113,7 +113,7 @@ class Task(Namespace, Auditable):
             response = await coder_llm.ainvoke(messages)
             return Task.Code.Produced(code=response.content)
 
-    class Finalized(DomainEvent, Auditable):
+    class Finalized(DomainEvent):
         """Final synthesized answer — terminal domain fact."""
 
         answer: str = ""
@@ -172,10 +172,10 @@ context_reducer = Reducer(
 # ---------------------------------------------------------------------------
 
 
-@on(Auditable)
-def audit_trail(event: Auditable) -> None:
-    """Side-effect handler: logs all auditable events as they flow."""
-    print(f"  {event.trail()}")
+@on(Event)
+def audit_trail(event: Event) -> None:
+    """Side-effect handler: logs every event as it flows."""
+    print(f"  {event!r}")
 
 
 @on(Task.Run, Task.Research.Completed, Task.Code.Produced)

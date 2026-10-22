@@ -17,8 +17,8 @@ tools** (CopilotKit v2 `useFrontendTool`). Illustrates:
   frontend's ``useFrontendTool`` handler. When the frontend returns its
   result, ``detect_new_tool_results`` surfaces it and the resume factory
   continues the ReAct loop with ``ToolsExecuted``.
-- Mixed taxonomy — DDD events (``Sent``, ``Blocked``) and integration
-  events (``LLMResponded``, ``ToolsExecuted``, ``AnswerProduced``)
+- Mixed taxonomy — DDD events (``Sent``, ``Blocked``, ``AnswerProduced``)
+  and integration events (``LLMResponded``, ``ToolsExecuted``)
   coexist in one graph with a shared ``message_reducer()``.
 
 For the **handler-initiated path** (backend returns
@@ -53,7 +53,6 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
-    Auditable,
     Command,
     DomainEvent,
     Event,
@@ -92,7 +91,8 @@ class Conversation(Namespace):
     policy before the user's message reaches the LLM. Everything
     downstream (LLM call, frontend tool results) lives outside the
     domain as ``IntegrationEvent`` handlers — the LLM and frontend
-    tools are external services, not owned by the conversation.
+    tools are external services, not owned by the conversation. The
+    final answer comes back into the domain as ``AnswerProduced``.
     """
 
     class Send(Command):
@@ -125,6 +125,11 @@ class Conversation(Namespace):
                 message=HumanMessage(content=self.content),
             )
 
+    class AnswerProduced(DomainEvent):
+        """Final text answer — terminal fact of the conversation."""
+
+        content: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Integration events — LLM / frontend-tool boundary
@@ -141,22 +146,16 @@ class ToolsRegistered(IntegrationEvent):
     tools: tuple[Any, ...] = ()
 
 
-class LLMResponded(IntegrationEvent, MessageEvent, Auditable):
+class LLMResponded(IntegrationEvent, MessageEvent):
     """LLM returned a response (may include frontend tool calls)."""
 
     message: AIMessage = None  # type: ignore[assignment]
 
 
-class ToolsExecuted(IntegrationEvent, MessageEvent, Auditable):
+class ToolsExecuted(IntegrationEvent, MessageEvent):
     """Resume event — the frontend returned one or more tool messages."""
 
     messages: tuple[ToolMessage, ...] = ()
-
-
-class AnswerProduced(IntegrationEvent, Auditable):
-    """Final text answer — terminal event."""
-
-    content: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -172,10 +171,10 @@ messages = message_reducer()
 # ---------------------------------------------------------------------------
 
 
-@on(Auditable)
-def audit_trail(event: Auditable) -> None:
-    """Side-effect handler: logs all auditable events as they flow."""
-    print(f"  {event.trail()}")
+@on(Event)
+def audit_trail(event: Event) -> None:
+    """Side-effect handler: logs every event as it flows."""
+    print(f"  {event!r}")
 
 
 @on(Conversation.Send.Sent, ToolsExecuted)
@@ -200,7 +199,7 @@ async def call_llm(
 
 
 @on(LLMResponded)
-def finalize_answer(event: LLMResponded) -> AnswerProduced | None:
+def finalize_answer(event: LLMResponded) -> Conversation.AnswerProduced | None:
     """Emit the terminal ``AnswerProduced`` when the LLM answered without
     calling tools. When ``tool_calls`` are present, do nothing — the
     AG-UI adapter's streaming path has already emitted
@@ -211,7 +210,7 @@ def finalize_answer(event: LLMResponded) -> AnswerProduced | None:
     """
     if event.message.tool_calls:
         return None
-    return AnswerProduced(content=event.message.content)
+    return Conversation.AnswerProduced(content=event.message.content)
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +280,7 @@ async def main() -> None:
             Conversation.Send(content="Say hello in three words."),
         ]
     )
-    answer = log1.latest(AnswerProduced)
+    answer = log1.latest(Conversation.AnswerProduced)
     if answer:
         print(f"\nAnswer: {answer.content}")
 

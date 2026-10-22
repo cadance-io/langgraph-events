@@ -15,10 +15,9 @@
 
 | Export | Type | Description |
 |---|---|---|
-| `Auditable` | Mixin | Marker for auto-logged events; `trail()` returns a compact summary. Compose with any event branch |
 | `MessageEvent` | Mixin | Wraps LangChain `BaseMessage`; declares `message` or `messages` field. Compose with any event branch |
 | `SystemPromptSet` | Event | Built-in `IntegrationEvent` + `MessageEvent` for system prompts |
-| `Event` | Internal | Base class (not user-facing). Valid as type annotation and reducer `event_type=` catch-all |
+| `Event` | Base class | Do not subclass directly. Valid as type annotation, `@on(Event)` catch-all and reducer `event_type=` catch-all. |
 
 ## Handler Subscription
 

@@ -11,7 +11,6 @@ from langgraph_events._custom_event import (
 )
 from langgraph_events._event import (
     Abandoned,
-    Auditable,
     Cancelled,
     Command,
     DomainEvent,
@@ -108,7 +107,6 @@ __all__ = [
     "SKIP",
     "STATE_SNAPSHOT_EVENT_NAME",
     "Abandoned",
-    "Auditable",
     "BaseReducer",
     "Cancelled",
     "Cause",

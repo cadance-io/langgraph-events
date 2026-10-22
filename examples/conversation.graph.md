@@ -67,11 +67,11 @@ graph LR
     classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     subgraph Conversation["Conversation namespace"]
         direction LR
+        AnswerProduced(AnswerProduced):::devt
         Blocked(Blocked):::devt
         Send{{Send}}:::cmd
         Sent(Sent):::devt
     end
-    AnswerProduced[/AnswerProduced/]:::intg
     LLMResponded[/LLMResponded/]:::intg
     ToolsExecuted[/ToolsExecuted/]:::intg
     _reducer_messages[(messages)]:::reducer
@@ -85,7 +85,7 @@ graph LR
     Sent -.->|folds| _reducer_messages
     LLMResponded -.->|folds| _reducer_messages
     ToolsExecuted -.->|folds| _reducer_messages
-%% Side-effect handlers: audit_trail (Auditable)
+%% Side-effect handlers: audit_trail (Event)
     linkStyle 7,8,9 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
@@ -97,16 +97,16 @@ Namespaces:
     Command: Send
       → Sent
       → Blocked
+    Event: AnswerProduced
 Integration events:
   ToolsExecuted
   LLMResponded
-  AnswerProduced
 Reducers:
   messages  (folds Sent, LLMResponded, ToolsExecuted)
 Policies:
   call_llm  (Sent, ToolsExecuted → LLMResponded)
   finalize_answer  (LLMResponded → AnswerProduced)
-  audit_trail  (Auditable)  [side-effect]
+  audit_trail  (Event)  [side-effect]
 Seed events:
   Send
   ToolsExecuted
