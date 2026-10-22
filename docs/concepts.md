@@ -490,7 +490,7 @@ def guard(event: Content.Classified) -> Reply | Content.Blocked:
 
 `MessageEvent` is a plain mixin (not an `Event` subclass). Compose it with any event branch.
 
-**Audit trail.** Every event has `trail()`, which returns a compact one-line summary. `@on(Event)` subscribes a handler to every event:
+**Audit trail.** Every event has `trail()`, which returns a compact one-line summary. The name `trail` is reserved, so a field named `trail` raises `TypeError`. `@on(Event)` subscribes a handler to every dispatched event. That includes framework events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`. A `Halted` event never reaches it, because a `Halted` event ends the run before any handler matches. A catch-all handler does not hide an `OrphanedEventWarning`:
 
 ```python
 @on(Event)

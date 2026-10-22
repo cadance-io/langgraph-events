@@ -42,6 +42,11 @@ class Event:
         super().__init_subclass__(**kwargs)
         if "__dataclass_fields__" not in cls.__dict__:
             dataclasses.dataclass(frozen=True)(cls)
+        if any(f.name == "trail" for f in dataclasses.fields(cls)):  # type: ignore[arg-type]
+            raise TypeError(
+                f"{cls.__name__!r} declares a field named 'trail'. The name "
+                f"'trail' is reserved for Event.trail(). Rename the field."
+            )
         if Event in cls.__bases__ and not _event_base:
             raise TypeError(
                 f"{cls.__name__!r} subclasses Event directly. Use one of: "

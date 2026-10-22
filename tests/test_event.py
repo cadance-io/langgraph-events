@@ -96,6 +96,14 @@ def describe_Event():
                 class Bare(Event):
                     pass
 
+    def when_a_field_is_named_trail():
+
+        def it_raises_TypeError():
+            with pytest.raises(TypeError, match="'trail' is reserved"):
+
+                class Hiked(IntegrationEvent):
+                    trail: str = ""
+
     def when_integration_event_subclass():
 
         def it_accepts():

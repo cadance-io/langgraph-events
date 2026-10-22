@@ -4014,6 +4014,23 @@ def describe_OrphanedEventWarning():
             )
             assert filename.endswith("test_event_graph.py")
 
+        def when_a_catch_all_event_handler_exists():
+
+            def it_still_warns():
+                class AuditedOrphan(IntegrationEvent):
+                    pass
+
+                @on(Started)
+                def produce_orphan(event: Started) -> AuditedOrphan:
+                    return AuditedOrphan()
+
+                @on(Event)
+                def audit(event: Event) -> None:
+                    return None
+
+                with pytest.warns(OrphanedEventWarning, match="AuditedOrphan"):
+                    EventGraph([produce_orphan, audit])
+
         def it_warns_for_orphaned_scatter_types():
             class ScatterOrphan(IntegrationEvent):
                 pass

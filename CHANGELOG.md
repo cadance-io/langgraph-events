@@ -13,9 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The mixin added no framework behaviour. It only gave `trail()` and an `@on(Auditable)`
   subscription target. An event without the mixin was left out of that subscription, with
   no error. To migrate, remove `Auditable` from each class base and from each import.
-  Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every event.
-  The output of `trail()` does not change. A checkpoint does not change either, because a
-  stored event keeps its module and qualname.
+  Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every dispatched
+  event. The handler then also receives the events that were not marked, and framework
+  events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`. A `Halted`
+  event never reaches it. The output of `trail()` does not change. A checkpoint does not
+  change either, because a stored event keeps its module and qualname.
+- **BREAKING: an event field named `trail` raises `TypeError` at class creation.** The
+  field would hide `Event.trail()`. Rename the field. If a checkpoint stores the event, also
+  migrate the stored field, as *Dropping, merging or retyping a field* in
+  `docs/event-migrations.md` shows.
+
+### Fixed
+
+- **A catch-all `@on(Event)` handler no longer hides an `OrphanedEventWarning`.** Before, a
+  subscription to `Event` counted as a consumer of every produced event, so no event of the
+  graph was ever reported as an orphan.
 
 ## [0.38.0] - 2026-10-21
 

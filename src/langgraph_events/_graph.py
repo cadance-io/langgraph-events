@@ -614,7 +614,8 @@ def _register_produced_types(
                 or getattr(t, "__namespace__", None) is not None
             )
         )
-        and not any(issubclass(t, s) for s in subscribed)
+        # A catch-all ``@on(Event)`` observer does not process an event.
+        and not any(issubclass(t, s) for s in subscribed if s is not Event)
     }
     if orphaned:
         names = ", ".join(sorted(t.__name__ for t in orphaned))
