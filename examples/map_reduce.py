@@ -4,8 +4,8 @@ Demonstrates fan-out/fan-in using ``Scatter`` and ``EventLog.filter()`` inside
 a DDD ``Batch`` domain. Replaces LangGraph's verbose ``Send`` API and
 worker subgraph patterns with a simple command-plus-scatter flow.
 
-The **Auditable trait** auto-logs every event as it flows, replacing manual
-isinstance printing with a single side-effect handler.
+A single ``@on(Event)`` side-effect handler logs every event as it flows,
+with ``Event.trail()``. It replaces manual isinstance printing.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -20,9 +20,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from langgraph_events import (
-    Auditable,
     Command,
     DomainEvent,
+    Event,
     EventGraph,
     EventLog,
     Namespace,
@@ -44,7 +44,7 @@ class Batch(Namespace):
     all documents have been processed.
     """
 
-    class Summarize(Command, Auditable):
+    class Summarize(Command):
         """Summarize this batch of documents.
 
         ``Summarize`` is purely a fan-out command — the per-doc work and the
@@ -56,20 +56,20 @@ class Batch(Namespace):
 
         documents: tuple = ()  # tuple of (title, content) pairs
 
-    class DocDispatched(DomainEvent, Auditable):
+    class DocDispatched(DomainEvent):
         """Scatter target — one document dispatched for summarization."""
 
         title: str = ""
         content: str = ""
         batch_size: int = 0
 
-    class DocSummarized(DomainEvent, Auditable):
+    class DocSummarized(DomainEvent):
         """Per-document summary — gathered into the final outcome."""
 
         title: str = ""
         summary: str = ""
 
-    class Summarized(DomainEvent, Auditable):
+    class Summarized(DomainEvent):
         """Final outcome — combined summary of the whole batch."""
 
         combined: str = ""
@@ -128,9 +128,9 @@ llm = ChatOpenAI(model="gpt-4o-mini")
 # ---------------------------------------------------------------------------
 
 
-@on(Auditable)
-def audit_trail(event: Auditable) -> None:
-    """Side-effect handler: logs all auditable events as they flow."""
+@on(Event)
+def audit_trail(event: Event) -> None:
+    """Side-effect handler: logs every event as it flows."""
     print(f"  {event.trail()}")
 
 

@@ -31,8 +31,8 @@ class Event:
     """Internal base class for all events.
 
     Not intended for direct subclassing — use ``DomainEvent``,
-    ``IntegrationEvent``, ``Command``, or compose with ``Auditable`` /
-    ``MessageEvent``.  Direct subclassing raises ``TypeError``.
+    ``IntegrationEvent`` or ``Command``, and compose with ``MessageEvent``
+    when needed.  Direct subclassing raises ``TypeError``.
 
     Valid as a type annotation (``event: Event``) and as a reducer
     filter (``event_type=Event`` catches all events).
@@ -47,8 +47,24 @@ class Event:
                 f"{cls.__name__!r} subclasses Event directly. Use one of: "
                 f"DomainEvent (inside Namespace/Command), IntegrationEvent "
                 f"(cross-boundary facts), Command (inside Namespace), or "
-                f"compose with Auditable / MessageEvent."
+                f"compose with MessageEvent."
             )
+
+    def trail(self) -> str:
+        """Return a compact, human-readable summary of this event."""
+        name = type(self).__name__
+        parts = []
+        for f in dc_fields(self):  # type: ignore[arg-type]
+            val = getattr(self, f.name)
+            if isinstance(val, str) and len(val) > 80:
+                val = val[:80] + "..."
+            elif isinstance(val, tuple) and len(val) > 3:
+                val = f"({len(val)} items)"
+            s = repr(val)
+            if len(s) > 80:
+                s = s[:77] + "..."
+            parts.append(f"{f.name}={s}")
+        return f"[{name}] {', '.join(parts)}"
 
     def _collect_into(
         self,
@@ -627,7 +643,7 @@ class MessageEvent:
 
     Example::
 
-        class UserMessageReceived(IntegrationEvent, MessageEvent, Auditable):
+        class UserMessageReceived(IntegrationEvent, MessageEvent):
             message: HumanMessage
     """
 
@@ -644,38 +660,6 @@ class MessageEvent:
             f"{type(self).__name__} must declare a 'message' or 'messages' field, "
             f"or override as_messages()"
         )
-
-
-class Auditable:
-    """Mixin for events that should be auto-logged.
-
-    Compose with an Event branch — this class is a behavioural mixin,
-    not an ``Event`` subclass.  Use ``@on(Auditable)`` to subscribe to
-    every auditable event.
-
-    Example::
-
-        class OrderPlaced(DomainEvent, Auditable):
-            order_id: str = ""
-    """
-
-    _event_mixin: ClassVar[bool] = True
-
-    def trail(self) -> str:
-        """Return a compact, human-readable summary of this event."""
-        name = type(self).__name__
-        parts = []
-        for f in dc_fields(self):  # type: ignore[arg-type]
-            val = getattr(self, f.name)
-            if isinstance(val, str) and len(val) > 80:
-                val = val[:80] + "..."
-            elif isinstance(val, tuple) and len(val) > 3:
-                val = f"({len(val)} items)"
-            s = repr(val)
-            if len(s) > 80:
-                s = s[:77] + "..."
-            parts.append(f"{f.name}={s}")
-        return f"[{name}] {', '.join(parts)}"
 
 
 class Halted(SystemEvent):
@@ -971,8 +955,7 @@ class SystemPromptSet(IntegrationEvent, MessageEvent):
     """Built-in event for setting the system prompt as a first-class citizen.
 
     Wraps a ``SystemMessage`` so that the system prompt appears in the event
-    log, is queryable via ``EventLog``, and participates in the ``Auditable``
-    trail when mixed in.
+    log and is queryable via ``EventLog``.
 
     Categorized as ``IntegrationEvent`` — it crosses the user↔graph boundary
     (user code constructs it, the graph ingests it); ``SystemEvent`` is

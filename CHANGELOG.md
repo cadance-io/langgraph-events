@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING: the `Auditable` mixin is deleted.** `trail()` is now a method of every event.
+  The mixin added no framework behaviour. It only gave `trail()` and an `@on(Auditable)`
+  subscription target. An event without the mixin was left out of that subscription, with
+  no error. To migrate, remove `Auditable` from each class base and from each import.
+  Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every event.
+  The output of `trail()` does not change. A checkpoint does not change either, because a
+  stored event keeps its module and qualname.
+
 ## [0.38.0] - 2026-10-21
 
 ### Changed

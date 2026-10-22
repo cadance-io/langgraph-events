@@ -259,7 +259,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Sent -.->|folds| _reducer_messages
         LLMResponded -.->|folds| _reducer_messages
         ToolsExecuted -.->|folds| _reducer_messages
-    %% Side-effect handlers: audit_trail (Auditable)
+    %% Side-effect handlers: audit_trail (Event)
         linkStyle 7,8,9 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
 
@@ -280,7 +280,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     Policies:
       call_llm  (Sent, ToolsExecuted → LLMResponded)
       finalize_answer  (LLMResponded → AnswerProduced)
-      audit_trail  (Auditable)  [side-effect]
+      audit_trail  (Event)  [side-effect]
     Seed events:
       Send
       ToolsExecuted
@@ -332,7 +332,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Produced -.->|folds| _reducer_context_parts
         Completed -.->|folds| _reducer_context_parts
         Run -.->|folds| _reducer_context_parts
-    %% Side-effect handlers: audit_trail (Auditable)
+    %% Side-effect handlers: audit_trail (Event)
         linkStyle 1,2,4,5,7,8 stroke:#0369a1,stroke-width:3px
         linkStyle 12,13,14 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
     ```
@@ -351,7 +351,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     Reducers:
       context_parts  (folds Produced, Completed, Run)
     Policies:
-      audit_trail  (Auditable)  [side-effect]
+      audit_trail  (Event)  [side-effect]
     Causal notes:
       Run → Research  via supervisor  [orchestrate]
       Run → Code  via supervisor  [orchestrate]
@@ -394,7 +394,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Summarize -.->|split_batch| DocDispatched
         DocDispatched -->|summarize_one| DocSummarized
         DocSummarized -->|gather_summaries| Summarized
-    %% Side-effect handlers: audit_trail (Auditable)
+    %% Side-effect handlers: audit_trail (Event)
         linkStyle 1 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
     ```
 
@@ -410,7 +410,7 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
     Policies:
       summarize_one  (DocDispatched → DocSummarized)
       gather_summaries  (DocSummarized → Summarized)
-      audit_trail  (Auditable)  [side-effect]
+      audit_trail  (Event)  [side-effect]
     Seed events:
       Summarize
     ```

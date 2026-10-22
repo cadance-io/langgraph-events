@@ -85,7 +85,7 @@ graph LR
     Sent -.->|folds| _reducer_messages
     LLMResponded -.->|folds| _reducer_messages
     ToolsExecuted -.->|folds| _reducer_messages
-%% Side-effect handlers: audit_trail (Auditable)
+%% Side-effect handlers: audit_trail (Event)
     linkStyle 7,8,9 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
@@ -106,7 +106,7 @@ Reducers:
 Policies:
   call_llm  (Sent, ToolsExecuted → LLMResponded)
   finalize_answer  (LLMResponded → AnswerProduced)
-  audit_trail  (Auditable)  [side-effect]
+  audit_trail  (Event)  [side-effect]
 Seed events:
   Send
   ToolsExecuted

@@ -22,7 +22,6 @@ import asyncio
 from typing import Protocol, runtime_checkable
 
 from langgraph_events import (
-    Auditable,
     Command,
     DomainEvent,
     EventGraph,
@@ -56,12 +55,12 @@ class Content(Namespace):
     then analyze — those facts are free-standing under the domain.
     """
 
-    class Process(Command, Auditable):
+    class Process(Command):
         """Process a piece of content through the pipeline."""
 
         text: str = ""
 
-        class Classified(DomainEvent, Auditable):
+        class Classified(DomainEvent):
             """Classification outcome — category + safety flag."""
 
             category: str = ""
@@ -79,7 +78,7 @@ class Content(Namespace):
                 return Content.Process.Classified(category="technical")
             return Content.Process.Classified(category="general")
 
-    class Approved(DomainEvent, Auditable):
+    class Approved(DomainEvent):
         """Content cleared the safety gate — free-standing under Content."""
 
         text: str = ""
@@ -88,7 +87,7 @@ class Content(Namespace):
         def stage_label(self) -> str:
             return "approved"
 
-    class Analyzed(DomainEvent, Auditable):
+    class Analyzed(DomainEvent):
         """Analysis produced — terminal free-standing fact."""
 
         summary: str = ""

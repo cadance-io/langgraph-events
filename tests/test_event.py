@@ -1,4 +1,4 @@
-"""Tests for Event base class, Auditable, and MessageEvent."""
+"""Tests for Event base class and MessageEvent."""
 
 import dataclasses
 import warnings
@@ -8,7 +8,6 @@ from conftest import SET_NAME_ERRORS, set_name_cause
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 from langgraph_events import (
-    Auditable,
     Cancelled,
     Command,
     DomainEvent,
@@ -105,15 +104,12 @@ def describe_Event():
 
             assert issubclass(Ok, Event)
 
-
-def describe_Auditable():
-
     def describe_trail():
 
         def when_default_formatting():
 
             def it_includes_class_name_and_field_values():
-                class OrderPlaced(IntegrationEvent, Auditable):
+                class OrderPlaced(IntegrationEvent):
                     order_id: str = ""
                     total: float = 0.0
 
@@ -126,7 +122,7 @@ def describe_Auditable():
         def when_string_exceeds_80_chars():
 
             def it_truncates():
-                class LongContent(IntegrationEvent, Auditable):
+                class LongContent(IntegrationEvent):
                     content: str = ""
 
                 long_str = "x" * 200
@@ -138,7 +134,7 @@ def describe_Auditable():
         def when_tuple_exceeds_3_items():
 
             def it_shows_item_count():
-                class BatchEvent(IntegrationEvent, Auditable):
+                class BatchEvent(IntegrationEvent):
                     items: tuple = ()
 
                 e = BatchEvent(items=(1, 2, 3, 4, 5))
@@ -148,7 +144,7 @@ def describe_Auditable():
         def when_tuple_has_exactly_3_items():
 
             def it_shows_full_repr_not_summary():
-                class SmallBatch(IntegrationEvent, Auditable):
+                class SmallBatch(IntegrationEvent):
                     items: tuple = ()
 
                 e = SmallBatch(items=(1, 2, 3))
@@ -162,7 +158,7 @@ def describe_Auditable():
         def when_repr_of_non_string_value_exceeds_80_chars():
 
             def it_truncates_repr():
-                class BigData(IntegrationEvent, Auditable):
+                class BigData(IntegrationEvent):
                     data: list = None  # type: ignore[assignment]
 
                 # Use a list (not str, not tuple) with a repr > 80 chars
@@ -172,15 +168,6 @@ def describe_Auditable():
                 # The repr() of the list is truncated at 77 chars + "..."
                 assert "..." in trail
                 assert len(trail) < 200
-
-    def it_produces_trail_for_auto_dataclass():
-        class TrackedOrder(IntegrationEvent, Auditable):
-            order_id: str = ""
-
-        e = TrackedOrder(order_id="A1")
-        trail = e.trail()
-        assert "[TrackedOrder]" in trail
-        assert "order_id='A1'" in trail
 
 
 def describe_MessageEvent():
@@ -504,7 +491,7 @@ def describe_Command():
             # Mixins are not Commands — composing one stays legal.
             def it_accepts():
                 class Widget5(Namespace):
-                    class Place(Command, Auditable):
+                    class Place(Command, MessageEvent):
                         def handle(self) -> None:
                             return None
 

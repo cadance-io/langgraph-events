@@ -75,7 +75,7 @@ graph LR
     Summarize -.->|split_batch| DocDispatched
     DocDispatched -->|summarize_one| DocSummarized
     DocSummarized -->|gather_summaries| Summarized
-%% Side-effect handlers: audit_trail (Auditable)
+%% Side-effect handlers: audit_trail (Event)
     linkStyle 1 stroke:#7c3aed,stroke-width:2.5px,stroke-dasharray:8 3
 ```
 
@@ -91,7 +91,7 @@ Namespaces:
 Policies:
   summarize_one  (DocDispatched → DocSummarized)
   gather_summaries  (DocSummarized → Summarized)
-  audit_trail  (Auditable)  [side-effect]
+  audit_trail  (Event)  [side-effect]
 Seed events:
   Summarize
 ```

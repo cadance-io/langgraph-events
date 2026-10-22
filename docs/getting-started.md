@@ -62,13 +62,10 @@ log.has(Order.Shipped)
 `IntegrationEvent` for facts that don't belong to any domain (external signals, shared events). Must live at module scope.
 
 ```python
-from langgraph_events import Auditable, IntegrationEvent
+from langgraph_events import IntegrationEvent
 
 class MessageReceived(IntegrationEvent):
     text: str
-
-class TaskStarted(IntegrationEvent, Auditable):  # @on(Auditable) for auto-logging
-    name: str
 ```
 
 ## Common Tasks

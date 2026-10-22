@@ -30,7 +30,6 @@ from __future__ import annotations
 import warnings
 
 from langgraph_events import (
-    Auditable,
     Command,
     DomainEvent,
     EventGraph,
@@ -81,7 +80,7 @@ class Question(Namespace):
     turns it into the terminal ``GaveUp`` ``Halted`` signal.
     """
 
-    class Ask(Command, Auditable):
+    class Ask(Command):
         """Entry command — asks a question, may take several tries to answer."""
 
         question: str = ""
@@ -93,7 +92,7 @@ class Question(Namespace):
         # a server-supplied ``exception.retry_after`` over the computed curve.
         retry = RetryPolicy(max_attempts=MAX_ATTEMPTS, base_delay=0.05, max_delay=1.0)
 
-        class Answered(DomainEvent, Auditable):
+        class Answered(DomainEvent):
             """Question answered — terminal outcome of Ask."""
 
             answer: str = ""
@@ -155,9 +154,7 @@ def main() -> None:
 
 def _print_trail(log: EventLog) -> None:
     for ev in log:
-        if isinstance(ev, Auditable):
-            print(f"  {ev.trail()}")
-        elif isinstance(ev, HandlerRetried):
+        if isinstance(ev, HandlerRetried):
             print(
                 f"  [HandlerRetried] attempt {ev.attempt} raised "
                 f"{type(ev.exception).__name__}; backing off "
@@ -168,6 +165,8 @@ def _print_trail(log: EventLog) -> None:
             print(f"  [HandlerRaised] handler={ev.handler} exception={exc_name}")
         elif isinstance(ev, Halted):
             print(f"  [{type(ev).__name__}] {ev}")
+        else:
+            print(f"  {ev.trail()}")
 
 
 if __name__ == "__main__":

@@ -53,7 +53,6 @@ from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
-    Auditable,
     Command,
     DomainEvent,
     Event,
@@ -141,19 +140,19 @@ class ToolsRegistered(IntegrationEvent):
     tools: tuple[Any, ...] = ()
 
 
-class LLMResponded(IntegrationEvent, MessageEvent, Auditable):
+class LLMResponded(IntegrationEvent, MessageEvent):
     """LLM returned a response (may include frontend tool calls)."""
 
     message: AIMessage = None  # type: ignore[assignment]
 
 
-class ToolsExecuted(IntegrationEvent, MessageEvent, Auditable):
+class ToolsExecuted(IntegrationEvent, MessageEvent):
     """Resume event — the frontend returned one or more tool messages."""
 
     messages: tuple[ToolMessage, ...] = ()
 
 
-class AnswerProduced(IntegrationEvent, Auditable):
+class AnswerProduced(IntegrationEvent):
     """Final text answer — terminal event."""
 
     content: str = ""
@@ -172,9 +171,9 @@ messages = message_reducer()
 # ---------------------------------------------------------------------------
 
 
-@on(Auditable)
-def audit_trail(event: Auditable) -> None:
-    """Side-effect handler: logs all auditable events as they flow."""
+@on(Event)
+def audit_trail(event: Event) -> None:
+    """Side-effect handler: logs every event as it flows."""
     print(f"  {event.trail()}")
 
 

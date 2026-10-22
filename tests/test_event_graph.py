@@ -506,6 +506,26 @@ def describe_EventGraph():
                 log = graph.invoke(ChildReceived(x="hello", y="world"))
                 assert log.latest(ResultProduced) == ResultProduced(v="hello")
 
+            def it_fires_an_event_handler_for_every_event():
+                class Asked(IntegrationEvent):
+                    q: str = ""
+
+                class Answered(IntegrationEvent):
+                    a: str = ""
+
+                seen: list[str] = []
+
+                @on(Asked)
+                def answer(event: Asked) -> Answered:
+                    return Answered(a=event.q)
+
+                @on(Event)
+                def record(event: Event) -> None:
+                    seen.append(type(event).__name__)
+
+                EventGraph([answer, record]).invoke(Asked(q="x"))
+                assert seen == ["Asked", "Answered"]
+
         def describe_side_effect_handlers():
 
             def it_executes_side_effect_on_none_return():

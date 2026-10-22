@@ -17,7 +17,7 @@ Four event base classes plus a `Namespace`:
 | `SystemEvent` | Framework-emitted fact | Past-participle | Top-level (`Halted` subclasses may nest for locality) |
 | `Invariant` | Named rule gating a handler | Noun phrase (`CustomerNotBanned`) | Anywhere; nesting under `Command` encouraged |
 
-Event class names use past-participle — they're facts. `Auditable` / `MessageEvent` are mixins (compose with any branch). `Invariant` is a marker class, not an `Event` subclass — see [control-flow](control-flow.md#invariants).
+Event class names use past-participle — they're facts. `MessageEvent` is a mixin (compose with any branch). `Invariant` is a marker class, not an `Event` subclass — see [control-flow](control-flow.md#invariants).
 
 `Command` / `DomainEvent` must nest inside a `Namespace`; `IntegrationEvent` must be top-level; direct `Event` subclassing is forbidden. All three raise `TypeError` at class creation.
 
@@ -488,23 +488,20 @@ def guard(event: Content.Classified) -> Reply | Content.Blocked:
 
 ## Mixins
 
-`Auditable` and `MessageEvent` are plain mixins (not `Event` subclasses). Compose with any event branch.
+`MessageEvent` is a plain mixin (not an `Event` subclass). Compose it with any event branch.
 
-**`Auditable`** — auto-logging marker. `@on(Auditable)` subscribes to all marked events:
+**Audit trail.** Every event has `trail()`, which returns a compact one-line summary. `@on(Event)` subscribes a handler to every event:
 
 ```python
-class OrderPlaced(DomainEvent, Auditable):
-    order_id: str
-
-@on(Auditable)
-def audit(event: Auditable) -> None:
-    print(event.trail())
+@on(Event)
+def audit(event: Event) -> None:
+    print(event.trail())  # [Placed] order_id='A-1'
 ```
 
 **`MessageEvent`** — wraps LangChain `BaseMessage`; declare a `message` or `messages` field; pair with `message_reducer()`:
 
 ```python
-class UserMessageReceived(IntegrationEvent, MessageEvent, Auditable):
+class UserMessageReceived(IntegrationEvent, MessageEvent):
     message: HumanMessage
 ```
 
