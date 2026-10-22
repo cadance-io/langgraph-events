@@ -241,11 +241,11 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
         subgraph Conversation["Conversation namespace"]
             direction LR
+            AnswerProduced(AnswerProduced):::devt
             Blocked(Blocked):::devt
             Send{{Send}}:::cmd
             Sent(Sent):::devt
         end
-        AnswerProduced[/AnswerProduced/]:::intg
         LLMResponded[/LLMResponded/]:::intg
         ToolsExecuted[/ToolsExecuted/]:::intg
         _reducer_messages[(messages)]:::reducer
@@ -271,10 +271,10 @@ ReAct tool-calling agent wired end-to-end to **AG-UI frontend tools** (CopilotKi
         Command: Send
           → Sent
           → Blocked
+        Event: AnswerProduced
     Integration events:
       ToolsExecuted
       LLMResponded
-      AnswerProduced
     Reducers:
       messages  (folds Sent, LLMResponded, ToolsExecuted)
     Policies:

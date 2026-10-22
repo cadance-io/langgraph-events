@@ -117,7 +117,7 @@ async def call_llm(event: Event) -> AssistantMessage: ...
 
 Bare `@on` requires a single annotated `Event` parameter (errors at decoration otherwise).
 
-`@on(Event)` subscribes a handler to every dispatched event. That includes framework events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`. A `Halted` event never reaches it, because a `Halted` event ends the run before any handler matches. A catch-all handler does not hide an `OrphanedEventWarning`.
+`@on(Event)` subscribes a handler to every dispatched event. That includes framework events such as `Resumed`, `HandlerRaised` and `HandlerRetried`. An `Interrupted` event reaches it when the thread resumes. A `Halted` event never reaches it, because a `Halted` event ends the run before any handler matches. `@on(Event)` does not hide an `OrphanedEventWarning`.
 
 ```python
 @on(Event)

@@ -67,11 +67,11 @@ graph LR
     classDef reducer fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e
     subgraph Conversation["Conversation namespace"]
         direction LR
+        AnswerProduced(AnswerProduced):::devt
         Blocked(Blocked):::devt
         Send{{Send}}:::cmd
         Sent(Sent):::devt
     end
-    AnswerProduced[/AnswerProduced/]:::intg
     LLMResponded[/LLMResponded/]:::intg
     ToolsExecuted[/ToolsExecuted/]:::intg
     _reducer_messages[(messages)]:::reducer
@@ -97,10 +97,10 @@ Namespaces:
     Command: Send
       → Sent
       → Blocked
+    Event: AnswerProduced
 Integration events:
   ToolsExecuted
   LLMResponded
-  AnswerProduced
 Reducers:
   messages  (folds Sent, LLMResponded, ToolsExecuted)
 Policies:
