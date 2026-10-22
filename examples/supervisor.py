@@ -7,7 +7,7 @@ sub-commands (``Task.Research``, ``Task.Code``) or the final ``Finalized``
 fact — no routing functions, no subgraph state adapters.
 
 A single ``@on(Event)`` side-effect handler logs every event as it flows,
-with ``Event.trail()``. It replaces manual isinstance printing.
+with ``repr()``. It replaces manual isinstance printing.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -175,7 +175,7 @@ context_reducer = Reducer(
 @on(Event)
 def audit_trail(event: Event) -> None:
     """Side-effect handler: logs every event as it flows."""
-    print(f"  {event.trail()}")
+    print(f"  {event!r}")
 
 
 @on(Task.Run, Task.Research.Completed, Task.Code.Produced)

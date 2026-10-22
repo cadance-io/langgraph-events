@@ -174,7 +174,7 @@ messages = message_reducer()
 @on(Event)
 def audit_trail(event: Event) -> None:
     """Side-effect handler: logs every event as it flows."""
-    print(f"  {event.trail()}")
+    print(f"  {event!r}")
 
 
 @on(Conversation.Send.Sent, ToolsExecuted)

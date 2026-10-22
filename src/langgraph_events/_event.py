@@ -42,11 +42,6 @@ class Event:
         super().__init_subclass__(**kwargs)
         if "__dataclass_fields__" not in cls.__dict__:
             dataclasses.dataclass(frozen=True)(cls)
-        if any(f.name == "trail" for f in dataclasses.fields(cls)):  # type: ignore[arg-type]
-            raise TypeError(
-                f"{cls.__name__!r} declares a field named 'trail'. The name "
-                f"'trail' is reserved for Event.trail(). Rename the field."
-            )
         if Event in cls.__bases__ and not _event_base:
             raise TypeError(
                 f"{cls.__name__!r} subclasses Event directly. Use one of: "
@@ -54,22 +49,6 @@ class Event:
                 f"(cross-boundary facts), Command (inside Namespace), or "
                 f"compose with MessageEvent."
             )
-
-    def trail(self) -> str:
-        """Return a compact, human-readable summary of this event."""
-        name = type(self).__name__
-        parts = []
-        for f in dc_fields(self):  # type: ignore[arg-type]
-            val = getattr(self, f.name)
-            if isinstance(val, str) and len(val) > 80:
-                val = val[:80] + "..."
-            elif isinstance(val, tuple) and len(val) > 3:
-                val = f"({len(val)} items)"
-            s = repr(val)
-            if len(s) > 80:
-                s = s[:77] + "..."
-            parts.append(f"{f.name}={s}")
-        return f"[{name}] {', '.join(parts)}"
 
     def _collect_into(
         self,
@@ -705,8 +684,7 @@ class Abandoned(Halted):
 
     ``discarded`` is the discarded interrupt's **qualname**, not the
     instance. A revived instance would leave a non-event in the log once
-    the class is deleted, and ``.trail()`` would then raise
-    ``AttributeError``. Always the qualname, e.g. ``"Order.
+    the class is deleted. Always the qualname, e.g. ``"Order.
     ApprovalRequested"`` for a class nested in a ``Namespace``, never the
     bare ``"ApprovalRequested"``. The qualname stays unambiguous under
     nesting. It is what a checkpoint records, so it stays the same

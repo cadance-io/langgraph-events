@@ -117,6 +117,14 @@ async def call_llm(event: Event) -> AssistantMessage: ...
 
 Bare `@on` requires a single annotated `Event` parameter (errors at decoration otherwise).
 
+`@on(Event)` subscribes a handler to every dispatched event. That includes framework events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`. A `Halted` event never reaches it, because a `Halted` event ends the run before any handler matches. A catch-all handler does not hide an `OrphanedEventWarning`.
+
+```python
+@on(Event)
+def audit(event: Event) -> None:
+    print(repr(event))  # Order.Placed(order_id='A-1')
+```
+
 ### Signature injection
 
 Handler params resolve from:
@@ -489,14 +497,6 @@ def guard(event: Content.Classified) -> Reply | Content.Blocked:
 ## Mixins
 
 `MessageEvent` is a plain mixin (not an `Event` subclass). Compose it with any event branch.
-
-**Audit trail.** Every event has `trail()`, which returns a compact one-line summary. The name `trail` is reserved, so a field named `trail` raises `TypeError`. `@on(Event)` subscribes a handler to every dispatched event. That includes framework events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`. A `Halted` event never reaches it, because a `Halted` event ends the run before any handler matches. A catch-all handler does not hide an `OrphanedEventWarning`:
-
-```python
-@on(Event)
-def audit(event: Event) -> None:
-    print(event.trail())  # [Placed] order_id='A-1'
-```
 
 **`MessageEvent`** — wraps LangChain `BaseMessage`; declare a `message` or `messages` field; pair with `message_reducer()`:
 

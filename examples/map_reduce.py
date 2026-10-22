@@ -5,7 +5,7 @@ a DDD ``Batch`` domain. Replaces LangGraph's verbose ``Send`` API and
 worker subgraph patterns with a simple command-plus-scatter flow.
 
 A single ``@on(Event)`` side-effect handler logs every event as it flows,
-with ``Event.trail()``. It replaces manual isinstance printing.
+with ``repr()``. It replaces manual isinstance printing.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -131,7 +131,7 @@ llm = ChatOpenAI(model="gpt-4o-mini")
 @on(Event)
 def audit_trail(event: Event) -> None:
     """Side-effect handler: logs every event as it flows."""
-    print(f"  {event.trail()}")
+    print(f"  {event!r}")
 
 
 @on(Batch.Summarize)

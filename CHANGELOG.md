@@ -9,19 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
-- **BREAKING: the `Auditable` mixin is deleted.** `trail()` is now a method of every event.
-  The mixin added no framework behaviour. It only gave `trail()` and an `@on(Auditable)`
-  subscription target. An event without the mixin was left out of that subscription, with
-  no error. To migrate, remove `Auditable` from each class base and from each import.
-  Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every dispatched
-  event. The handler then also receives the events that were not marked, and framework
-  events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`. A `Halted`
-  event never reaches it. The output of `trail()` does not change. A checkpoint does not
-  change either, because a stored event keeps its module and qualname.
-- **BREAKING: an event field named `trail` raises `TypeError` at class creation.** The
-  field would hide `Event.trail()`. Rename the field. If a checkpoint stores the event, also
-  migrate the stored field, as *Dropping, merging or retyping a field* in
-  `docs/event-migrations.md` shows.
+- **BREAKING: the `Auditable` mixin and its `trail()` method are deleted.** The mixin added
+  no framework behaviour. It gave `trail()` and an `@on(Auditable)` subscription target. An
+  event without the mixin was left out of that subscription, with no error. The framework
+  never called `trail()`. To migrate, remove `Auditable` from each class base and from each
+  import. Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every
+  dispatched event. The handler then also receives the events that were not marked, and
+  framework events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`.
+  A `Halted` event never reaches it. Replace `event.trail()` with `repr(event)`, or with
+  `Reflection.event()` for a full-field dump. A checkpoint does not change, because a stored
+  event keeps its module and qualname.
 
 ### Fixed
 

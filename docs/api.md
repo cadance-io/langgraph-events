@@ -17,7 +17,7 @@
 |---|---|---|
 | `MessageEvent` | Mixin | Wraps LangChain `BaseMessage`; declares `message` or `messages` field. Compose with any event branch |
 | `SystemPromptSet` | Event | Built-in `IntegrationEvent` + `MessageEvent` for system prompts |
-| `Event` | Base class | Do not subclass directly. Valid as type annotation, `@on(Event)` catch-all and reducer `event_type=` catch-all. `trail()` returns a compact one-line summary of any event. A field named `trail` raises `TypeError` |
+| `Event` | Base class | Do not subclass directly. Valid as type annotation, `@on(Event)` catch-all and reducer `event_type=` catch-all. |
 
 ## Handler Subscription
 

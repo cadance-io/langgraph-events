@@ -166,7 +166,7 @@ def _print_trail(log: EventLog) -> None:
         elif isinstance(ev, Halted):
             print(f"  [{type(ev).__name__}] {ev}")
         else:
-            print(f"  {ev.trail()}")
+            print(f"  {ev!r}")
 
 
 if __name__ == "__main__":
