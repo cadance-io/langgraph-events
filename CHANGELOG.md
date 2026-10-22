@@ -16,9 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   import. Replace `@on(Auditable)` with `@on(Event)`, which subscribes a handler to every
   dispatched event. The handler then also receives the events that were not marked, and
   framework events such as `Interrupted`, `Resumed`, `HandlerRaised` and `HandlerRetried`.
-  A `Halted` event never reaches it. Replace `event.trail()` with `repr(event)`, or with
-  `Reflection.event()` for a full-field dump. A checkpoint does not change, because a stored
-  event keeps its module and qualname.
+  A `Halted` event never reaches it. Replace `event.trail()` with `repr(event)`. For a
+  full-field dump of an event in a run's log, use `Reflection.event()`. A checkpoint does
+  not change, because a stored event keeps its module and qualname.
 
 ### Fixed
 
