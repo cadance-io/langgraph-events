@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **An `AGUIAdapter` turn loads the checkpoint once before the run, not three or four
+  times.** A full checkpoint load revives every stored message, so on a long thread each
+  load is slow. The turn-start snapshot, the resume-pending check and the reducer seed now
+  share one load. The adapter takes the interrupts that the run raises from the stream, so
+  it does no load after the run. Two exceptions keep a second load. A resume that commits
+  client state writes a new checkpoint, so the run loads it again. A run where two
+  handlers pause in one step loads the checkpoint after the run to get the interrupts in
+  task order. `astream_resume()` with `include_llm_tokens` or `include_custom_events` also
+  shares one load between the pending check and the reducer seed. The LangGraph run still
+  does its own load. The output events do not change.
+
 ## [0.39.0] - 2026-10-23
 
 ### Removed

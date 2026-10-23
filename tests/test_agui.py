@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import warnings
@@ -463,18 +464,20 @@ def _tool_input(**fields: Any) -> RunAgentInput:
 
 
 def _patch_astream(monkeypatch: Any, target: Any, *frames: Any) -> list[dict[str, Any]]:
-    """Stub ``target.astream_events`` to yield ``frames``; return recorded kwargs."""
+    """Stub ``target._astream_events_turn`` to yield ``frames``; return recorded
+    kwargs."""
     calls: list[dict[str, Any]] = []
 
     async def fake_astream_events(
         seed: Any,
+        turn: Any,
         *,
         include_reducers: Any,
         include_llm_tokens: Any,
         include_custom_events: Any,
         config: Any,
     ) -> Any:
-        del seed
+        del seed, turn
         calls.append(
             {
                 "include_reducers": include_reducers,
@@ -486,7 +489,7 @@ def _patch_astream(monkeypatch: Any, target: Any, *frames: Any) -> list[dict[str
         for frame in frames:
             yield frame
 
-    monkeypatch.setattr(target, "astream_events", fake_astream_events)
+    monkeypatch.setattr(target, "_astream_events_turn", fake_astream_events)
     return calls
 
 
@@ -1877,6 +1880,85 @@ def describe_async_checkpoint_reads():
         assert len(interrupted) == 1
 
 
+class _LoadCountingSaver(MemorySaver):
+    """A ``MemorySaver`` that counts each checkpoint load."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loads = 0
+
+    async def aget_tuple(self, config: Any) -> Any:
+        self.loads += 1
+        return await super().aget_tuple(config)
+
+
+def describe_checkpoint_loads_per_turn():
+    # The LangGraph run loads the checkpoint once on its own. Each count
+    # below is that load plus the loads that the adapter does.
+
+    def when_the_turn_resumes_an_interrupt():
+        async def it_loads_the_checkpoint_once_before_the_run():
+            saver = _LoadCountingSaver()
+            graph = _graph(ask_approval, approve, checkpointer=saver)
+            await graph.ainvoke(UserAsked(question="go"), config=_config("t-loads"))
+            saver.loads = 0
+
+            events = await _resume(graph, _make_input(thread_id="t-loads"))
+
+            assert saver.loads == 2
+            assert events[-1].type == EventType.RUN_FINISHED
+            assert _last_snapshot(events).messages[-1].content == "Approved!"
+
+        def when_the_resume_raises_a_new_interrupt():
+            async def it_takes_the_new_interrupt_from_the_stream():
+                @on(ApprovalGiven)
+                def ask_again(event: ApprovalGiven) -> ApprovalRequested:
+                    return ApprovalRequested(draft="second")
+
+                saver = _LoadCountingSaver()
+                graph = _graph(ask_approval, ask_again, checkpointer=saver)
+                config = _config("t-loads-again")
+                await graph.ainvoke(UserAsked(question="go"), config=config)
+                saver.loads = 0
+
+                events = await _resume(graph, _make_input(thread_id="t-loads-again"))
+
+                assert saver.loads == 2
+                assert [e.value["draft"] for e in _custom(events, "interrupted")] == [
+                    "second"
+                ]
+
+    def when_the_turn_runs_a_seed():
+        async def it_loads_the_checkpoint_once_before_the_run():
+            saver = _LoadCountingSaver()
+            graph = _graph(reply, checkpointer=saver)
+
+            events = await _stream(graph, _make_input(thread_id="t-loads-seed"))
+
+            assert saver.loads == 2
+            assert _last_snapshot(events).messages[-1].content == "ok"
+
+        def when_two_handlers_pause_in_one_step():
+            async def it_emits_the_interrupts_in_handler_order():
+                @on(UserAsked)
+                async def ask_slow(event: UserAsked) -> ApprovalRequested:
+                    await asyncio.sleep(0.05)
+                    return ApprovalRequested(draft="slow")
+
+                @on(UserAsked)
+                async def ask_fast(event: UserAsked) -> ApprovalRequested:
+                    return ApprovalRequested(draft="fast")
+
+                graph = _graph(ask_slow, ask_fast, checkpointer=MemorySaver())
+
+                events = await _stream(graph, _make_input(thread_id="t-two-pauses"))
+
+                assert [e.value["draft"] for e in _custom(events, "interrupted")] == [
+                    "slow",
+                    "fast",
+                ]
+
+
 def describe_seed_factory_state():
     def when_factory_accepts_state():
         async def it_passes_checkpoint_state_to_seed_factory():
@@ -2344,19 +2426,20 @@ def describe_unclosed_stream_on_error():
 
         async def exploding_stream(
             seed,
+            turn,
             *,
             include_reducers,
             include_llm_tokens,
             include_custom_events,
             config,
         ):
-            del seed, include_reducers, include_llm_tokens
+            del seed, turn, include_reducers, include_llm_tokens
             del include_custom_events, config
             yield LLMToken(run_id="llm-run-1", content="partial ")
             yield LLMToken(run_id="llm-run-1", content="content")
             raise RuntimeError("mid-stream failure")
 
-        monkeypatch.setattr(graph, "astream_events", exploding_stream)
+        monkeypatch.setattr(graph, "_astream_events_turn", exploding_stream)
 
         events = await _stream(graph)
 

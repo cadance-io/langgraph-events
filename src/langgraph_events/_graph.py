@@ -62,6 +62,7 @@ from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
 from langgraph_events._rewrite import (
+    _INTERRUPT_CHANNEL,
     RewriteReport,
     ThreadPlan,
     ThreadRewrite,
@@ -353,6 +354,29 @@ class _PendingInterrupts(NamedTuple):
     has_interrupt: bool
     events: list[Event]
     unresolved_names: list[str]
+
+
+@dataclasses.dataclass
+class _Turn:
+    """The checkpoint facts that one async stream shares.
+
+    One full checkpoint load revives every stored message, so a long thread
+    makes each load slow. A turn loads the checkpoint at most once before
+    the run, and the pending check and the reducer seed share that load.
+
+    ``before`` is the snapshot before the run. ``None`` means that
+    :meth:`abefore` loads it on first use. ``interrupts`` receives the value
+    of each interrupt that the run raises, in stream order. Only
+    ``_astream_v2`` fills it.
+    """
+
+    before: StateSnapshot | None = None
+    interrupts: list[Any] = dataclasses.field(default_factory=list)
+
+    async def abefore(self, compiled: CompiledStateGraph, config: Any) -> StateSnapshot:
+        if self.before is None:
+            self.before = await compiled.aget_state(config)
+        return self.before
 
 
 class StreamFrame(NamedTuple):
@@ -1694,7 +1718,7 @@ class EventGraph:
             return True
         return bool(self._compile().get_state(config).next)
 
-    async def _aresume_is_pending(self, kwargs: dict[str, Any]) -> bool:
+    async def _aresume_is_pending(self, kwargs: dict[str, Any], turn: _Turn) -> bool:
         """Async sibling of :meth:`_resume_is_pending`.
 
         Reads the checkpoint via ``aget_state`` so the async resume entry
@@ -1704,7 +1728,7 @@ class EventGraph:
         config = kwargs.get("config")
         if config is None:
             return True
-        return bool((await self._compile().aget_state(config)).next)
+        return bool((await turn.abefore(self._compile(), config)).next)
 
     def _unresumable_message(
         self, log: EventLog | None = None, config: Any = None
@@ -1861,7 +1885,7 @@ class EventGraph:
         awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("aresume")
-        if not await self._aresume_is_pending(kwargs):
+        if not await self._aresume_is_pending(kwargs, _Turn()):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
 
@@ -2767,6 +2791,7 @@ class EventGraph:
         inp: Any,
         seeds: list[Event],
         *,
+        turn: _Turn,
         reducer_names: list[str],
         include_llm_tokens: bool,
         include_custom_events: bool,
@@ -2780,14 +2805,14 @@ class EventGraph:
         # (subsequent run / resume), start from the checkpointed values so
         # the shadow state matches what the compiled graph already restored.
         # Fall back to r.seed() only on the true first run.
-        # NOTE: this issues an extra aget_state round-trip when reducers are
-        # present and a checkpointer is configured.
+        # NOTE: with reducers and a checkpointer, this reads the turn's one
+        # load before the run. The pending check shares that load.
         reducer_state: dict[str, Any] = {}
         checkpoint_values: dict[str, Any] | None = None
         if reducer_names and self._checkpointer is not None:
             config = kwargs.get("config")
             if config is not None:
-                snapshot = await compiled.aget_state(config)
+                snapshot = await turn.abefore(compiled, config)
                 if snapshot.values:
                     checkpoint_values = snapshot.values
 
@@ -2902,6 +2927,12 @@ class EventGraph:
                 continue
 
             chunk = raw.get("data", {}).get("chunk")
+            if isinstance(chunk, dict):
+                turn.interrupts.extend(
+                    i.value
+                    for i in chunk.get(_INTERRUPT_CHANNEL, ())
+                    if i.value is not None
+                )
             for event in self._events_from_chunk(chunk, seen):
                 if reducer_names:
                     changed = self._update_reducer_state(
@@ -3045,6 +3076,7 @@ class EventGraph:
         include_reducers: bool | list[str],
         include_llm_tokens: bool,
         include_custom_events: bool,
+        turn: _Turn,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags."""
@@ -3055,6 +3087,7 @@ class EventGraph:
             self._astream_v2(
                 inp,
                 seeds,
+                turn=turn,
                 reducer_names=reducer_names,
                 include_llm_tokens=include_llm_tokens,
                 include_custom_events=include_custom_events,
@@ -3098,8 +3131,31 @@ class EventGraph:
                 and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
                 from LangGraph.
         """
+        async for item in self._astream_resume_turn(
+            value,
+            _Turn(),
+            seeds=seeds,
+            include_reducers=include_reducers,
+            include_llm_tokens=include_llm_tokens,
+            include_custom_events=include_custom_events,
+            **kwargs,
+        ):
+            yield item
+
+    async def _astream_resume_turn(
+        self,
+        value: Event,
+        turn: _Turn,
+        *,
+        seeds: list[Event] | None,
+        include_reducers: bool | list[str],
+        include_llm_tokens: bool,
+        include_custom_events: bool,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamItem]:
+        """:meth:`astream_resume` with the caller's *turn*."""
         self._require_checkpointer("astream_resume")
-        if not await self._aresume_is_pending(kwargs):
+        if not await self._aresume_is_pending(kwargs, turn):
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
             if self._on_unresumable == "halt":
@@ -3113,6 +3169,7 @@ class EventGraph:
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
+            turn=turn,
             **kwargs,
         ):
             yield item
@@ -3139,6 +3196,27 @@ class EventGraph:
                 and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
                 from LangGraph.
         """
+        async for item in self._astream_events_turn(
+            seed,
+            _Turn(),
+            include_reducers=include_reducers,
+            include_llm_tokens=include_llm_tokens,
+            include_custom_events=include_custom_events,
+            **kwargs,
+        ):
+            yield item
+
+    async def _astream_events_turn(
+        self,
+        seed: Event | list[Event],
+        turn: _Turn,
+        *,
+        include_reducers: bool | list[str],
+        include_llm_tokens: bool,
+        include_custom_events: bool,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamItem]:
+        """:meth:`astream_events` with the caller's *turn*."""
         inp = self._prepare_input(seed)
         async for item in self._astream_entry(
             inp,
@@ -3146,6 +3224,7 @@ class EventGraph:
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
+            turn=turn,
             **kwargs,
         ):
             yield item

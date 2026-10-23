@@ -2771,6 +2771,32 @@ def describe_EventGraph():
             types = [type(e).__name__ for e in events]
             assert "Ended" in types
 
+        @pytest.mark.asyncio
+        async def it_loads_the_checkpoint_once_before_the_v2_run():
+            loads = 0
+
+            class LoadCountingSaver(MemorySaver):
+                async def aget_tuple(self, config):  # type: ignore[override]
+                    nonlocal loads
+                    loads += 1
+                    return await super().aget_tuple(config)
+
+            graph = EventGraph(
+                [_pause_at_step_one, _finish_completed],
+                checkpointer=LoadCountingSaver(),
+                reducers=[_data_reducer()],
+            )
+            config = {"configurable": {"thread_id": "sr-loads"}}
+            await graph.ainvoke(Started(data="go"), config=config)
+            loads = 0
+
+            frames = await _v2_resume_frames(graph, config)
+
+            # One load is the LangGraph run's own. The other one is shared
+            # by the pending check and the reducer seed.
+            assert loads == 2
+            assert frames[-1].reducers["data_items"] == ["go"]
+
         def it_yields_new_interrupted_during_resume():
             @on(Completed)
             def step_two(event: Completed) -> _StepInterrupted:
