@@ -20,6 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shares one load between the pending check and the reducer seed. The LangGraph run still
   does its own load. The output events do not change.
 
+### Removed
+
+- **BREAKING: `merge_frontend_messages` is deleted. Use `detect_new_frontend_messages`.**
+  The old function returned the stored message history plus the new inbound messages. A
+  resume event stored that full list, and lge stores each resume event a second time in
+  `Resumed.value`. So the append-only events channel grew with the number of resumes times
+  the number of messages, and each checkpoint load revived all of them. The new function
+  takes the same arguments and returns only the inbound messages whose id is not stored. A
+  stored message still wins over an inbound message with the same id. Invalid tool calls
+  still drop by default. To migrate, replace
+  `merge_frontend_messages(input_data, checkpoint_state)` with
+  `detect_new_frontend_messages(input_data, checkpoint_state)`. Put the result on the
+  resume event as it is. The message reducer appends it to the history. A caller that needs
+  the full history can read `checkpoint_state["reducers"]["messages"]`. A thread that is
+  already stored keeps its old resume events.
+
 ## [0.39.0] - 2026-10-23
 
 ### Removed

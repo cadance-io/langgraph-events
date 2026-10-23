@@ -395,14 +395,14 @@ Streaming-path errors propagate to the frontend as a `RUN_ERROR` event with the 
 
 - **`extract_resume_input(input_data)`** — pull & decode `RunAgentInput.forwarded_props["command"]["resume"]`.
 - **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`** — convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage` — multimodal content included, see [Message field mapping](#message-field-mapping)) to LangChain `BaseMessage`. `ReasoningMessage` / `DeveloperMessage` skipped (DEBUG); `ActivityMessage` / unknown roles raise `ValueError`. With `drop_invalid_tool_calls=True`, tool calls with unparseable JSON args are dropped (WARNING). A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]` (see [Message field mapping](#message-field-mapping)).
-- **`merge_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — read existing messages from checkpoint, convert, merge via `add_messages` (id-based dedup; missing ids get UUIDs assigned). Returns a tuple. A stored message wins over an inbound message with the same id. AG-UI defines `MessagesSnapshot` as the messages that the server owns, and a client echo of them can be lossy.
+- **`detect_new_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`** — read the stored messages from `checkpoint_state["reducers"][reducer_name]`, then convert only the inbound messages whose id is not stored. Returns a tuple of the new messages only. A stored message wins over an inbound message with the same id. AG-UI defines `MessagesSnapshot` as the messages that the server owns, and a client echo of them can be lossy. If two inbound messages have the same id, the result holds the last copy, at the position of the first copy.
 
 ```python
 from langgraph_events import IntegrationEvent, MessageEvent
 from langgraph_events.agui import (
+    detect_new_frontend_messages,
     detect_new_tool_results,
     extract_resume_input,
-    merge_frontend_messages,
 )
 
 
@@ -422,9 +422,12 @@ def resume_factory(input_data, checkpoint_state=None):
     resume_input = extract_resume_input(input_data)
     if resume_input is None:
         return None
-    merged = merge_frontend_messages(input_data, checkpoint_state)
-    return UserResumed(response=resume_input, messages=merged)
+    new_messages = detect_new_frontend_messages(input_data, checkpoint_state)
+    return UserResumed(response=resume_input, messages=new_messages)
 ```
+
+!!! warning "A stored resume event must carry only the new messages"
+    The checkpoint stores each resume event twice: once as the event, and once in `Resumed.value`. The events channel is append-only, and each checkpoint load revives every stored event. If a resume event carries the full message history, the checkpoint grows with the number of resumes times the number of messages. Each turn then loads more slowly. The message reducer already holds the full history, and it appends the new messages of each `MessageEvent`. To read the full history in a `resume_factory`, read `checkpoint_state["reducers"]["messages"]`.
 
 !!! tip "Falsy resume handling"
     `extract_resume_input` treats all falsy values (`0`, `""`, `[]`, `{}`, `False`) as "no resume". For meaningful "deny" signals, send `{"approved": false}` instead of bare `false`.
