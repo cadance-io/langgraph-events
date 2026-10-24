@@ -1691,8 +1691,9 @@ class EventGraph:
             config, pad_causes(values, None), as_node="__seed__"
         )
 
-    def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
-        """Whether the thread has work to resume into.
+    @staticmethod
+    def _awaits_resume(snapshot: StateSnapshot) -> bool:
+        """Whether *snapshot* has work to resume into.
 
         Keyed on the checkpoint's ``next`` (scheduled nodes), not the
         higher-level ``is_interrupted`` flag: a caller may ``pre_seed`` before
@@ -1702,13 +1703,21 @@ class EventGraph:
         so ``resume()`` would be a silent no-op (paused handler gone, thread
         already finished, or resumed twice). A Phase-1 ``@on(previously=...)``
         alias keeps the node live, so a declared rename still reports ``True``.
-        If no ``config`` was passed, assume pending and let the normal path
-        surface any error.
+
+        A pending interrupt also counts, see :meth:`_is_interrupted`.
+        """
+        return bool(snapshot.next) or EventGraph._is_interrupted(snapshot)
+
+    def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
+        """Whether the thread of ``kwargs["config"]`` has work to resume into.
+
+        See :meth:`_awaits_resume`. If no ``config`` was passed, assume
+        pending and let the normal path surface any error.
         """
         config = kwargs.get("config")
         if config is None:
             return True
-        return bool(self._compile().get_state(config).next)
+        return self._awaits_resume(self._compile().get_state(config))
 
     async def _aresume_is_pending(self, kwargs: dict[str, Any]) -> bool:
         """Async sibling of :meth:`_resume_is_pending`.
@@ -1720,7 +1729,7 @@ class EventGraph:
         config = kwargs.get("config")
         if config is None:
             return True
-        return bool((await self._compile().aget_state(config)).next)
+        return self._awaits_resume(await self._compile().aget_state(config))
 
     def _unresumable_message(
         self, log: EventLog | None = None, config: Any = None
@@ -1857,6 +1866,18 @@ class EventGraph:
     def _unresumable_event(value: Event) -> Unresumable:
         return Unresumable(resume_value=type(value).__name__)
 
+    @staticmethod
+    def _require_resume_event(value: Any) -> None:
+        """Raise ``TypeError`` if *value* is not an ``Event``.
+
+        The check runs before the graph runs. LangGraph saves a resume value
+        in the checkpoint before the paused handler reads it. A rerun then
+        reads the saved value again, so a bad value strands the thread.
+        """
+        if not isinstance(value, Event):
+            got = type(value).__name__
+            raise TypeError(f"resume() requires an Event instance, got {got}")
+
     def resume(self, value: Event, **kwargs: Any) -> EventLog:
         """Resume an interrupted graph with a domain event.
 
@@ -1865,6 +1886,7 @@ class EventGraph:
         awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("resume")
+        self._require_resume_event(value)
         if not self._resume_is_pending(kwargs):
             return self._apply_unresumable_policy(value, kwargs)
         return self._run(LGCommand(resume=value), **kwargs)
@@ -1877,6 +1899,7 @@ class EventGraph:
         awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("aresume")
+        self._require_resume_event(value)
         if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
@@ -1885,9 +1908,10 @@ class EventGraph:
     def _is_interrupted(snapshot: StateSnapshot) -> bool:
         """Whether *snapshot* is currently paused at a real interrupt.
 
-        ``snapshot.tasks[*].interrupts`` distinguishes a real interrupt
-        from a cancelled or crashed graph, which also leaves
-        ``snapshot.next`` set.
+        Reads ``snapshot.tasks[*].interrupts``, not ``snapshot.next``. A
+        cancelled or crashed graph also leaves ``next`` set. Before LangGraph
+        1.2.13, ``next`` also drops a task that holds a ``__resume__`` write,
+        for example a handler that pauses a second time in one run.
 
         Topology-dependent: ``snapshot.tasks`` only reports a task the
         graph that produced *snapshot* can still schedule, so a thread
@@ -1897,8 +1921,7 @@ class EventGraph:
         (discovery, ``abandon()``) reads the checkpoint's raw pending
         writes instead — see :meth:`_pending_interrupt_writes`.
         """
-        has_interrupt = any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
-        return bool(snapshot.next) and has_interrupt
+        return any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
 
     @staticmethod
     def _pending_interrupt_events(snapshot: StateSnapshot) -> list[Event]:
@@ -3057,6 +3080,7 @@ class EventGraph:
                 a list of reducer names for selective inclusion.
         """
         self._require_checkpointer("stream_resume")
+        self._require_resume_event(value)
         if not self._resume_is_pending(kwargs):
             log = self._apply_unresumable_policy(value, kwargs)  # raises for raise
             if self._on_unresumable == "halt":
@@ -3138,10 +3162,11 @@ class EventGraph:
         # of ``config`` passes it, so the pending check and the reducer seed
         # do not load it again.
         self._require_checkpointer("astream_resume")
+        self._require_resume_event(value)
         config = kwargs.get("config")
         if _snapshot is None and config is not None:
             _snapshot = await self._compile().aget_state(config)
-        if _snapshot is not None and not _snapshot.next:
+        if _snapshot is not None and not self._awaits_resume(_snapshot):
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
             if self._on_unresumable == "halt":

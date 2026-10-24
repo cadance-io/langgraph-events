@@ -31,6 +31,7 @@ from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command as LGCommand
+from langgraph.types import interrupt as lg_interrupt
 from pydantic import BaseModel
 
 from langgraph_events import (
@@ -298,6 +299,13 @@ def ask_pending(event: UserAsked) -> ApprovalRequested:
 @on(UserAsked)
 def ask_ship(event: UserAsked) -> ApprovalRequested:
     return ApprovalRequested(draft="ship it?")
+
+
+@on(UserAsked)
+def ask_twice(event: UserAsked) -> AgentReplied:
+    lg_interrupt(ApprovalRequested(draft="first"))
+    lg_interrupt(ApprovalRequested(draft="second"))
+    return AgentReplied(message=AIMessage(content="Approved twice!"))
 
 
 @on(UserAsked)
@@ -1388,6 +1396,49 @@ def describe_AGUIAdapter():
                 assert "events" in seen_state
                 assert "messages" in seen_state
                 assert len(seen_state["pending_interrupts"]) == 1
+
+        def when_the_resume_factory_returns_a_non_event():
+            async def it_keeps_the_thread_resumable():
+                graph = _graph(ask_approval, approve, checkpointer=MemorySaver())
+                config = _config("t-bad-resume")
+                await graph.ainvoke(UserAsked(question="go"), config=config)
+                failed = await _resume(
+                    graph,
+                    _make_input(thread_id="t-bad-resume"),
+                    resume_factory=lambda inp: {"approved": True},
+                )
+
+                events = await _resume(graph, _make_input(thread_id="t-bad-resume"))
+
+                assert failed[-1].type == EventType.RUN_ERROR
+                assert events[-1].type == EventType.RUN_FINISHED
+                assert _roled(events, "assistant")[-1].content == "Approved!"
+
+        def when_one_handler_pauses_twice():
+            async def it_replays_the_second_interrupt_on_connect():
+                graph = _graph(ask_twice, checkpointer=MemorySaver())
+                config = _config("t-pause-twice-connect")
+                await graph.ainvoke(UserAsked(question="go"), config=config)
+                await _resume(graph, _make_input(thread_id="t-pause-twice-connect"))
+
+                events = await _connect(
+                    graph, _make_input(thread_id="t-pause-twice-connect")
+                )
+
+                assert [e.value["draft"] for e in _custom(events, "interrupted")] == [
+                    "second"
+                ]
+
+            async def it_resumes_the_second_interrupt():
+                graph = _graph(ask_twice, checkpointer=MemorySaver())
+                config = _config("t-pause-twice")
+                await graph.ainvoke(UserAsked(question="go"), config=config)
+                await _resume(graph, _make_input(thread_id="t-pause-twice"))
+
+                events = await _resume(graph, _make_input(thread_id="t-pause-twice"))
+
+                assert events[-1].type == EventType.RUN_FINISHED
+                assert _roled(events, "assistant")[-1].content == "Approved twice!"
 
     def describe_init():
         def when_resume_factory_missing_checkpointer():

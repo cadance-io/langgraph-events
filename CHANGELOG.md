@@ -63,6 +63,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of `merge_frontend_messages` raises an `ImportError` that names the replacement. A
   thread that is already stored keeps its old resume events.
 
+### Fixed
+
+- **A resume with a value that is not an `Event` no longer strands the thread.**
+  `resume()`, `aresume()`, `stream_resume()` and `astream_resume()` now raise `TypeError`
+  before the graph runs. Before, LangGraph saved the bad value in the checkpoint. Each
+  later resume then read the saved value again and raised the same `TypeError`.
+- **A handler that pauses a second time in one run can be resumed again.** Before
+  LangGraph 1.2.13, `StateSnapshot.next` drops a task that holds a saved resume value.
+  The resume check read only `next`, so the next resume raised `UnresumableError`. The
+  check now also reads the pending interrupts of the snapshot. `get_state().is_interrupted`
+  and the `AGUIAdapter` interrupt replay read the pending interrupts in the same way.
+
 ## [0.39.0] - 2026-10-23
 
 ### Removed

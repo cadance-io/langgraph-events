@@ -179,8 +179,6 @@ class AGUIAdapter:
     @staticmethod
     def _interrupts_from_snapshot(snapshot: StateSnapshot) -> list[Any]:
         """Extract Interrupted payload events from a checkpoint snapshot."""
-        if not snapshot.next:
-            return []
         result: list[Any] = []
         for task in snapshot.tasks:
             for interrupt in getattr(task, "interrupts", ()):

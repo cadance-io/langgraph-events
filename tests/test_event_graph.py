@@ -4486,6 +4486,28 @@ def _raw_pause(event: Started) -> None:
     lg_interrupt("raw payload")
 
 
+@on(Started)
+def _pause_twice(event: Started) -> Ended:
+    """Pauses two times in one run of the handler."""
+    lg_interrupt("first")
+    lg_interrupt("second")
+    return Ended(result="went")
+
+
+_RESUME_ENTRYPOINTS = pytest.mark.parametrize(
+    "drive",
+    [
+        lambda graph, value, cfg: graph.resume(value, config=cfg),
+        lambda graph, value, cfg: asyncio.run(graph.aresume(value, config=cfg)),
+        lambda graph, value, cfg: list(graph.stream_resume(value, config=cfg)),
+        lambda graph, value, cfg: asyncio.run(
+            _adrain(graph.astream_resume(value, config=cfg))
+        ),
+    ],
+    ids=["resume", "aresume", "stream_resume", "astream_resume"],
+)
+
+
 class _StartOnA(IntegrationEvent):
     """Seed for `_wait_on_a`, kept distinct from `_StartOnB` so two
     threads_paused_on() threads pause on different classes."""
@@ -4687,6 +4709,40 @@ def describe_on_unresumable():
             v2, cfg = _resumable_pair(MemorySaver(), tid)
             with pytest.raises(UnresumableError):
                 drive(v2, cfg)
+
+    def when_a_resume_value_is_not_an_event():
+        @_RESUME_ENTRYPOINTS
+        def it_keeps_the_thread_resumable(drive):
+            cfg = {"configurable": {"thread_id": "unres-bad-value"}}
+            graph = EventGraph([_waiter, _go_ends], checkpointer=MemorySaver())
+            graph.invoke(Started(data="x"), config=cfg)
+            with pytest.raises(TypeError, match="requires an Event"):
+                drive(graph, "not an event", cfg)
+
+            drive(graph, _Go(), cfg)
+
+            assert graph.get_state(cfg).events.latest(Ended) == Ended(result="went")
+
+    def when_one_handler_pauses_twice():
+        def it_reports_the_second_pause_as_interrupted():
+            cfg = {"configurable": {"thread_id": "unres-pause-twice-state"}}
+            graph = EventGraph([_pause_twice], checkpointer=MemorySaver())
+            graph.invoke(Started(data="x"), config=cfg)
+
+            graph.resume(_Go(), config=cfg)
+
+            assert graph.get_state(cfg).is_interrupted
+
+        @_RESUME_ENTRYPOINTS
+        def it_resumes_the_second_pause(drive):
+            cfg = {"configurable": {"thread_id": "unres-pause-twice"}}
+            graph = EventGraph([_pause_twice], checkpointer=MemorySaver())
+            graph.invoke(Started(data="x"), config=cfg)
+            drive(graph, _Go(), cfg)
+
+            drive(graph, _Go(), cfg)
+
+            assert graph.get_state(cfg).events.latest(Ended) == Ended(result="went")
 
 
 def describe_abandon():
