@@ -21,7 +21,7 @@ from langgraph_events._event import Event, Resumed
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
-    from langgraph.checkpoint.base import Checkpoint, CheckpointTuple
+    from langgraph.checkpoint.base import ChannelVersions, Checkpoint, CheckpointTuple
 
     from langgraph_events._causes import CauseEntry
     from langgraph_events.serde._jsonplus import (
@@ -189,7 +189,7 @@ def _count_drops(
     return counts
 
 
-def _clear_resumed(entry: Any, drop: tuple[type[Event], ...]) -> Any:
+def _clear_resumed(entry: object, drop: tuple[type[Event], ...]) -> object:
     """A ``Resumed`` keeps the interrupt it answered and the value that
     answered it. A dropped class in either slot becomes ``None``. The
     field is typed optional for exactly this: once the class is deleted
@@ -441,7 +441,10 @@ def _copy_checkpoint(checkpoint: Checkpoint, values: dict[str, Any]) -> Checkpoi
 
 
 def _mirror_seen(
-    versions_seen: dict[str, dict[str, Any]], channel: str, old: Any, new: Any
+    versions_seen: dict[str, ChannelVersions],
+    channel: str,
+    old: object,
+    new: str | int | float,
 ) -> None:
     """Pregel triggers a node when a channel version is greater than the
     version the node has seen. A bumped version must not read as an
@@ -453,7 +456,7 @@ def _mirror_seen(
 
 def _verify_value(
     serde: NamespaceAwareSerde,
-    value: Any,
+    value: object,
     where: str,
     forbidden: set[tuple[str, str]],
     historic: set[tuple[str, str]],

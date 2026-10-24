@@ -238,7 +238,7 @@ def _make_default(
     rebuilt by the constructor on read, which rejects it as a kwarg (#172).
     """
 
-    def _default(obj: Any) -> Any:
+    def _default(obj: object) -> object:
         if isinstance(obj, UnrevivedIdentity):
             # #170: a read-side placeholder must never become a stored
             # value. Upstream's hook would encode this named tuple by
@@ -358,7 +358,7 @@ def _make_ext_hook(
     ``NamespaceAwareSerde._record_reads`` passes one.
     """
 
-    def _ext_hook(code: int, data: bytes) -> Any:
+    def _ext_hook(code: int, data: bytes) -> object:
         if code == EXT_INTERRUPT:
             # Inner unpack uses our hook so a nested EXT_NAMESPACE_AWARE_EVENT
             # inside ``value`` resolves back to its namespaced class.
@@ -684,7 +684,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         """
         return self._live_identities | frozenset(self._rename_table.keys())
 
-    def dumps_typed(self, obj: Any) -> tuple[str, bytes]:
+    def dumps_typed(self, obj: object) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):
             return super().dumps_typed(obj)
         # The hook from ``_make_default`` is a strict superset of
@@ -710,7 +710,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 raise ValueError(refusals[-1]) from exc
             raise
 
-    def loads_typed(self, data: tuple[str, bytes]) -> Any:
+    def loads_typed(self, data: tuple[str, bytes]) -> Any:  # noqa: ANN401 - returns any value LangGraph stored, as SerializerProtocol declares
         type_, data_ = data
         if type_ != "msgpack":
             return super().loads_typed(data)

@@ -14,15 +14,13 @@ import itertools
 import sys
 import typing
 from dataclasses import dataclass, fields, is_dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeGuard, TypeVar
 
 from langgraph_events._event import Event, _iter_nested_events
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-
-    from langgraph_events._reducer import BaseReducer
 
 # Local sentinel for "no ``default`` supplied". ``dataclasses.MISSING`` looks
 # like the canonical choice but it's special-cased by ``@dataclass`` itself
@@ -223,7 +221,7 @@ class Migration:
         module: str | None = None,
         qualname: str | None = None,
         field: str,
-        default: Any = _MISSING,
+        default: object = _MISSING,
         default_factory: Callable[[], Any] | None = None,
     ) -> Migration:
         """Single-op add-field sugar.
@@ -524,7 +522,7 @@ def _bucket_splits(
 
 def _validate_split_target(
     label: str,
-    target: Any,
+    target: object,
     scope: Mapping[tuple[str, str], type] | None,
 ) -> None:
     """Refuse *target* unless it is an ``Event`` subclass the read path
@@ -764,7 +762,7 @@ def _resolve_identity(
     qualname: str,
     *,
     scope: Mapping[tuple[str, str], type] | None = None,
-) -> Any:
+) -> Any:  # noqa: ANN401 - returns whatever the qualname names; a caller checks or calls it
     """Resolve an event identity to its live class — *scope* first, import
     walk as the fallback.
 
@@ -1128,7 +1126,7 @@ _BACKFILL_ATTR = "__lge_backfill__"
 def backfill(
     field: str,
     *,
-    default: Any = _MISSING,
+    default: object = _MISSING,
     default_factory: Callable[[], Any] | None = None,
 ) -> Callable[[type], type]:
     """Back-fill ``field`` for payloads written before it existed.
@@ -1285,14 +1283,14 @@ def _serde_event_classes(
     return out
 
 
-def _annotation_types(tp: Any) -> Iterator[Any]:
+def _annotation_types(tp: object) -> Iterator[object]:
     """*tp* and every type argument under it, depth first."""
     yield tp
     for arg in typing.get_args(tp):
         yield from _annotation_types(arg)
 
 
-def _is_pydantic_model(tp: Any) -> bool:
+def _is_pydantic_model(tp: object) -> TypeGuard[type]:
     """Duck-typed the same way the LangGraph serializer decides to write
     a pydantic ext record: a class with a callable ``model_dump`` (v2)
     or a callable ``dict`` (v1). Both decode branches upstream revive by
@@ -1583,7 +1581,15 @@ def _unreachable_migrate_from_siblings(
     return found
 
 
-def replay_reducer(reducer: BaseReducer, events: Iterable[Event]) -> Any:
+V_co = TypeVar("V_co", covariant=True)
+V = TypeVar("V")
+
+
+class _Replayable(Protocol[V_co]):
+    def seed(self, events: list[Event]) -> V_co: ...
+
+
+def replay_reducer(reducer: _Replayable[V], events: Iterable[Event]) -> V:
     """Rebuild a reducer's channel value from *events*.
 
     Use after a reducer's projection function or output shape changed
