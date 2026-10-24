@@ -97,14 +97,13 @@ class RewriteReport:
 
 
 @dataclass(frozen=True)
-class ThreadPlan:
-    """The outcome of :func:`plan_thread`, plus what to store when the
-    status is ``"rewrite"``."""
+class RewritePlan:
+    """A ``"rewrite"`` outcome of :func:`plan_thread`, plus what to store."""
 
     result: ThreadRewrite
-    checkpoint: Checkpoint | None = None
-    new_versions: dict[str, Any] = field(default_factory=dict)
-    interrupt_writes: tuple[tuple[str, str, Any], ...] = ()
+    checkpoint: Checkpoint
+    new_versions: dict[str, Any]
+    interrupt_writes: tuple[tuple[str, str, Any], ...]
 
 
 def identity_label(module: str, qualname: str) -> str:
@@ -213,7 +212,7 @@ def plan_thread(
     serde: NamespaceAwareSerde,
     drop: tuple[type[Event], ...],
     next_version: Callable[[Any, None], Any],
-) -> ThreadPlan:
+) -> ThreadRewrite | RewritePlan:
     """Decide what to do with one thread, and build the checkpoint to
     store when the answer is ``"rewrite"``.
 
@@ -230,11 +229,10 @@ def plan_thread(
     drop_identities = {(cls.__module__, cls.__qualname__) for cls in drop}
     present = any(live in drop_identities for _stored, live, _touched in reads)
 
-    def refused(reason: str) -> ThreadPlan:
-        result = ThreadRewrite(
+    def refused(reason: str) -> ThreadRewrite:
+        return ThreadRewrite(
             thread_id, "refused", migrated=pairs, dropped=dropped, reason=reason
         )
-        return ThreadPlan(result)
 
     if unresolved:
         names = ", ".join(dict.fromkeys(u.qualname for u in unresolved))
@@ -243,7 +241,7 @@ def plan_thread(
             f"tombstone first"
         )
     if not pairs and not dropped and not present:
-        return ThreadPlan(ThreadRewrite(thread_id, "unchanged"))
+        return ThreadRewrite(thread_id, "unchanged")
 
     pending = list(tup.pending_writes or ())
     reason = _pending_refusal(pending, values, drop)
@@ -258,7 +256,7 @@ def plan_thread(
     )
     if reason is not None:
         return refused(reason)
-    return ThreadPlan(
+    return RewritePlan(
         ThreadRewrite(thread_id, "rewrite", migrated=pairs, dropped=dropped),
         checkpoint=checkpoint,
         new_versions=new_versions,
