@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The resume check read only `next`, so the next resume raised `UnresumableError`. The
   check now also reads the pending interrupts of the snapshot. `get_state().is_interrupted`
   and the `AGUIAdapter` interrupt replay read the pending interrupts in the same way.
+- **A resume no longer streams again the events of the paused step.** Two handlers can
+  run in one step, where one handler writes an event and the other handler pauses. On
+  resume, LangGraph streams the saved writes of the finished handler again. The stream
+  read them as new events. So the stream yielded the event a second time, and the
+  reducer values in `StreamFrame` counted its contribution twice. The `AGUIAdapter` then
+  showed a message without an id twice in the `MessagesSnapshot`, and it mapped the event
+  again. The checkpoint held one copy. Now the stream skips the replayed writes. The run
+  that wrote the event already streamed it.
 
 ## [0.39.0] - 2026-10-23
 

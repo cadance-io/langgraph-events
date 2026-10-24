@@ -1367,6 +1367,43 @@ def describe_AGUIAdapter():
                     assert len(interrupted_events) == 1
                     assert called["checkpoint"] == 1
 
+            def when_another_handler_writes_in_the_paused_step():
+                """LangGraph streams the saved writes of that step again on resume."""
+
+                async def it_shows_an_id_less_message_once():
+                    graph = _graph(
+                        reply, ask_approval, approve, checkpointer=MemorySaver()
+                    )
+                    config = _config("t-paused-step-message")
+                    await graph.ainvoke(UserAsked(question="go"), config=config)
+
+                    events = await _resume(
+                        graph, _make_input(thread_id="t-paused-step-message")
+                    )
+
+                    assert [m.content for m in _roled(events, "assistant")] == [
+                        "ok",
+                        "Approved!",
+                    ]
+
+                async def it_does_not_emit_the_event_again():
+                    @on(UserAsked)
+                    def create_task(event: UserAsked) -> TaskCreated:
+                        return TaskCreated(title="before the pause")
+
+                    graph = _graph(
+                        create_task, ask_approval, checkpointer=MemorySaver()
+                    )
+                    config = _config("t-paused-step-event")
+                    await graph.ainvoke(UserAsked(question="go"), config=config)
+
+                    events = await _resume(
+                        graph, _make_input(thread_id="t-paused-step-event")
+                    )
+
+                    assert _custom(events, "TaskCreated") == []
+                    assert events[-1].type == EventType.RUN_FINISHED
+
             async def it_passes_checkpoint_state_to_resume_factory():
                 seen_state: dict[str, Any] = {}
 

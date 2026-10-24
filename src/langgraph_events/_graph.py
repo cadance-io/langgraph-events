@@ -2770,9 +2770,14 @@ class EventGraph:
 
     @staticmethod
     def _events_from_chunk(chunk: Any, seen: set[int]) -> list[Event]:
-        """Extract unseen events from an updates-mode stream chunk."""
+        """Extract unseen events from an updates-mode stream chunk.
+
+        A chunk marked ``cached`` replays the saved writes of a task that
+        finished before a pause. The run that wrote them streamed them, and
+        the checkpoint already holds them, so they are not new events.
+        """
         events: list[Event] = []
-        if isinstance(chunk, dict):
+        if isinstance(chunk, dict) and not chunk.get("__metadata__", {}).get("cached"):
             for node_output in chunk.values():
                 if isinstance(node_output, dict):
                     for event in node_output.get("events", []):
