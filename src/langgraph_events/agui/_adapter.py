@@ -65,6 +65,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ag_ui.core import RunAgentInput
+    from langchain_core.runnables import RunnableConfig
+    from langgraph.types import StateSnapshot
 
     from langgraph_events._graph import EventGraph
 
@@ -175,7 +177,7 @@ class AGUIAdapter:
         return []  # pragma: no cover — FallbackMapper always claims
 
     @staticmethod
-    def _interrupts_from_snapshot(snapshot: Any) -> list[Any]:
+    def _interrupts_from_snapshot(snapshot: StateSnapshot) -> list[Any]:
         """Extract Interrupted payload events from a checkpoint snapshot."""
         if not snapshot.next:
             return []
@@ -187,14 +189,16 @@ class AGUIAdapter:
                     result.append(value)
         return result
 
-    async def _aget_checkpoint_snapshot(self, config: Any) -> Any | None:
+    async def _aget_checkpoint_snapshot(
+        self, config: RunnableConfig
+    ) -> StateSnapshot | None:
         """Return async checkpoint snapshot, or None when unsupported."""
         if self._graph._checkpointer is None:
             return None
         return await self._graph.compiled.aget_state(config)
 
     @staticmethod
-    def _build_checkpoint_state(snapshot: Any) -> CheckpointState:
+    def _build_checkpoint_state(snapshot: StateSnapshot) -> CheckpointState:
         """Build resume-factory state payload from a checkpoint snapshot.
 
         The graph seeds its reducer state from *snapshot* after the factory
@@ -235,7 +239,7 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
-    ) -> Any:
+    ) -> Event | None:
         """Call resume_factory with optional checkpoint state if supported."""
         if self._resume_factory is None:
             return None
@@ -248,7 +252,7 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
-    ) -> Any:
+    ) -> Event | list[Event]:
         """Call seed_factory with optional checkpoint state if supported."""
         factory = cast("Any", self._seed_factory)
         if self._seed_accepts_state:
@@ -261,7 +265,7 @@ class AGUIAdapter:
         thread_id: str,
         *,
         deadline: float | None = None,
-    ) -> dict[str, Any]:
+    ) -> RunnableConfig:
         """Build LangGraph config, including passthrough forwarded props.
 
         When ``deadline`` is provided, delegates to
@@ -298,7 +302,7 @@ class AGUIAdapter:
             _inject_deadline_keys(configurable, deadline)
             config["configurable"] = configurable
 
-        return config
+        return cast("RunnableConfig", config)
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph."""
@@ -328,7 +332,7 @@ class AGUIAdapter:
 
     def _should_gate_with_checkpoint_replay(
         self,
-        resume_event: Any,
+        resume_event: Event | None,
         checkpoint_state: CheckpointState | None,
     ) -> bool:
         """Whether interrupt gate should short-circuit to checkpoint replay."""
@@ -377,9 +381,9 @@ class AGUIAdapter:
     async def _resume_event_stream(
         self,
         input_data: RunAgentInput,
-        resume_event: Any,
-        config: Any,
-        snapshot: Any | None,
+        resume_event: Event,
+        config: RunnableConfig,
+        snapshot: StateSnapshot | None,
     ) -> AsyncIterator[StreamItem]:
         """Resume path that routes ``FrontendStateMutated`` through both
         reducer dispatch and the LangGraph channel state.
@@ -428,7 +432,7 @@ class AGUIAdapter:
         return FrontendStateMutated(state=filtered)
 
     async def _commit_resume_frontend_state(
-        self, fsm: FrontendStateMutated, config: Any
+        self, fsm: FrontendStateMutated, config: RunnableConfig
     ) -> None:
         """Persist FSM into the audit log AND apply reducer contributions
         to user channels — both before the resume's domain dispatch runs.
@@ -469,9 +473,9 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
-        resume_event: Any,
-        config: Any,
-        snapshot: Any | None,
+        resume_event: Event | None,
+        config: RunnableConfig,
+        snapshot: StateSnapshot | None,
     ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream.
 
@@ -621,7 +625,7 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         ctx: MapperContext,
-        config: Any,
+        config: RunnableConfig,
     ) -> AsyncIterator[BaseEvent]:
         """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run — lazy checkpoint read
@@ -753,7 +757,7 @@ class AGUIAdapter:
             run_id=run_id,
         )
 
-        config: Any = self._build_config(input_data, thread_id, deadline=deadline)
+        config = self._build_config(input_data, thread_id, deadline=deadline)
 
         try:
             async for agui_event in self._stream_event_source(input_data, ctx, config):
