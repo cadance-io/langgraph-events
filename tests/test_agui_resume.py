@@ -754,6 +754,51 @@ def describe_detect_new_frontend_messages():
             with pytest.raises(json.JSONDecodeError):
                 detect_new_frontend_messages(inp, None, drop_invalid_tool_calls=False)
 
+    def when_the_paused_step_writes_a_message():
+        """The step pauses, so its saved write holds the message before the merge."""
+
+        def without_an_id():
+            def when_the_client_echoes_the_snapshot():
+                async def it_does_not_store_the_echo_again():
+                    graph = EventGraph(
+                        [answer_idless, wait_beside_the_answer],
+                        reducers=[message_reducer()],
+                        checkpointer=MemorySaver(),
+                    )
+                    adapter = AGUIAdapter(
+                        graph=graph,
+                        seed_factory=lambda inp: ChatSaid(
+                            messages=detect_new_frontend_messages(inp, None)
+                        ),
+                        resume_factory=_chat_resume_factory,
+                    )
+
+                    history: list[Any] = []
+                    for turn in ("u1", "u2"):
+                        history.append(UserMessage(id=turn, content=f"say {turn}"))
+                        resume = {} if turn == "u1" else {"command": {"resume": "next"}}
+                        inp = make_run_agent_input(
+                            messages=list(history), forwarded_props=resume
+                        )
+                        events = [e async for e in adapter.stream(inp)]
+                        snapshots = [
+                            e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                        ]
+                        history = list(snapshots[-1].messages)
+
+                    assert [m.content for m in history] == [
+                        "say u1",
+                        "ok",
+                        "say u2",
+                        "ok",
+                    ]
+                    values = await graph.compiled.aget_state(
+                        {"configurable": {"thread_id": "t"}}
+                    )
+                    assert [m.id for m in values.values["messages"]] == [
+                        m.id for m in history
+                    ]
+
     def when_a_resume_factory_stores_the_result_on_each_turn():
         async def it_stores_only_the_new_messages_on_each_resume_event():
             graph = EventGraph(
@@ -823,6 +868,16 @@ def answer(event: ChatSaid) -> ChatAnswered:
 
 @on(ChatAnswered)
 def wait_for_reply(event: ChatAnswered) -> ReplyAwaited:
+    return ReplyAwaited()
+
+
+@on(ChatSaid)
+def answer_idless(event: ChatSaid) -> ChatAnswered:
+    return ChatAnswered(message=AIMessage(content="ok"))
+
+
+@on(ChatSaid)
+def wait_beside_the_answer(event: ChatSaid) -> ReplyAwaited:
     return ReplyAwaited()
 
 

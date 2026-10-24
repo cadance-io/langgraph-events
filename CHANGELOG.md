@@ -82,6 +82,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   showed a message without an id twice in the `MessagesSnapshot`, and it mapped the event
   again. The checkpoint held one copy. Now the stream skips the replayed writes. The run
   that wrote the event already streamed it.
+- **A message without an id keeps one id while its step is paused.** The message reducer
+  gave the message its id only when the step merged its writes. A paused step saved its
+  write before that merge, so each checkpoint read gave the message a new id. A client
+  that sent the history back then stored the message a second time, because
+  `detect_new_frontend_messages` did not find the id that the client saw. Now
+  `message_reducer()` gives the id when it projects the message, before the write is
+  saved. It sets the id in place on the message object, as `add_messages` does.
 
 ## [0.39.0] - 2026-10-23
 

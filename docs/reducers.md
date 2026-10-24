@@ -156,6 +156,8 @@ For genuinely bespoke channels, subclass the public `BaseReducer` directly.
 
 Built-in reducer for LangChain messages — projects `MessageEvent.as_messages()` into the `messages` channel using `add_messages` for id-based dedup.
 
+A message without an id gets a UUID id when the reducer projects it, in place on the message object, as `add_messages` does. The id is then saved with the step's write. So a step that pauses keeps one id for the message, and every `MessagesSnapshot` shows that id.
+
 ```python
 messages = message_reducer()
 # or with a default prompt:

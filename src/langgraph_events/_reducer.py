@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import (
@@ -449,7 +450,14 @@ def message_reducer(
     resolved_default = default or []
 
     def fn(event: MessageEvent) -> list[BaseMessage]:
-        return event.as_messages()
+        # ``add_messages`` gives a message without an id its id in place, but
+        # only when the step merges its writes. A paused step saves its write
+        # before that merge, so each checkpoint read would give a new id.
+        messages = event.as_messages()
+        for message in messages:
+            if message.id is None:
+                message.id = str(uuid.uuid4())
+        return messages
 
     return Reducer(
         name=name,
