@@ -73,7 +73,7 @@ def _validate_invariants(
     return tuple(validated)
 
 
-def _annotation_accepts_none(hint: Any) -> bool:
+def _annotation_accepts_none(hint: object) -> bool:
     """Return True if *hint* permits ``None`` as a value.
 
     A handler reducer-parameter whose annotation rejects ``None`` (e.g.
@@ -99,7 +99,9 @@ def _annotation_accepts_none(hint: Any) -> bool:
     return False
 
 
-def _resolve_each_annotation(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
+def _resolve_each_annotation(
+    fn: Callable[..., object],
+) -> tuple[dict[str, Any], dict[str, str]]:
     """Resolve ``fn``'s annotations one at a time.
 
     ``typing.get_type_hints`` is all-or-nothing. One unresolvable annotation
@@ -137,7 +139,9 @@ def _resolve_each_annotation(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
     return hints, errors
 
 
-def _resolve_hints_and_errors(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
+def _resolve_hints_and_errors(
+    fn: Callable[..., object],
+) -> tuple[dict[str, Any], dict[str, str]]:
     """Return ``fn``'s resolved hints and its per-annotation failures.
 
     Both ``_infer_event_type`` (at decoration) and ``extract_handler_meta``
@@ -155,7 +159,7 @@ def _resolve_hints_and_errors(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
     The cache lives on the underlying function, so a bound method caches once
     for every instance. A callable that rejects attributes is not cached.
     """
-    target = getattr(fn, "__func__", fn)
+    target: Any = getattr(fn, "__func__", fn)
     cached = getattr(target, "_resolved_hints", None)
     if cached is not None:
         return cached, {}
@@ -170,12 +174,12 @@ def _resolve_hints_and_errors(fn: Any) -> tuple[dict[str, Any], dict[str, str]]:
     return hints, errors
 
 
-def _resolve_type_hints(fn: Any) -> dict[str, Any]:
+def _resolve_type_hints(fn: Callable[..., object]) -> dict[str, Any]:
     """Return ``fn``'s resolvable type hints. Unresolvable ones are absent."""
     return _resolve_hints_and_errors(fn)[0]
 
 
-def _infer_event_type(fn: Any) -> type[Event]:
+def _infer_event_type(fn: Callable[..., object]) -> type[Event]:
     """Read an ``Event`` subclass off ``fn``'s first parameter annotation.
 
     Used by ``@on`` when positional event types are omitted. Raises
@@ -225,7 +229,7 @@ def _infer_event_type(fn: Any) -> type[Event]:
     return event_type
 
 
-def normalize_previous_names(previously: Any, *, owner: str) -> tuple[str, ...]:
+def normalize_previous_names(previously: object, *, owner: str) -> tuple[str, ...]:
     """Validate and normalise a ``previously=`` value into an alias tuple.
 
     *owner* prefixes error messages with the declaration site's voice —
@@ -362,7 +366,7 @@ def on(
     previously: str | tuple[str, ...] = (),
     retry: RetryPolicy | None = None,
     **field_matchers: type[Event] | type[Exception] | type[Invariant] | str,
-) -> Any:
+) -> Any:  # noqa: ANN401 - bare @on returns the function, @on(...) returns a decorator
     """Subscribe a handler to one or more event types.
 
     Three shapes, escalating by what's needed:

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from langgraph_events._namespace._model import NamespaceModel
+
+if TYPE_CHECKING:
+    from langgraph_events._retry import RetryPolicy
 
 SCHEMA_VERSION = "3"
 """Top-level ``schema_version`` string stamped on ``to_dict()`` output.
@@ -23,7 +26,7 @@ def _qn(cls: type) -> str:
     return cls.__qualname__
 
 
-def _encode_retry(policy: Any) -> dict[str, Any] | None:
+def _encode_retry(policy: RetryPolicy | None) -> dict[str, Any] | None:
     """Encode a ``RetryPolicy``, or ``None`` when the handler declares none.
 
     Walks the dataclass fields so a new policy field cannot silently go
@@ -38,7 +41,9 @@ def _encode_retry(policy: Any) -> dict[str, Any] | None:
     return encoded
 
 
-def _encode_reaction(r: Any) -> dict[str, Any]:
+def _encode_reaction(
+    r: NamespaceModel.CommandHandler | NamespaceModel.Policy,
+) -> dict[str, Any]:
     base: dict[str, Any] = {
         "name": r.name,
         "produces": [_qn(t) for t in r.produces],

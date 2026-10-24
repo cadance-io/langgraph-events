@@ -1,6 +1,6 @@
 """AG-UI adapter layer for langgraph-events."""
 
-from typing import Any
+from typing import NoReturn
 
 from langgraph_events.agui._adapter import AGUIAdapter
 from langgraph_events.agui._context import MapperContext
@@ -56,7 +56,7 @@ _REMOVED: dict[str, str] = {
 }
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> NoReturn:
     migration = _REMOVED.get(name)
     if migration is None:
         raise AttributeError(

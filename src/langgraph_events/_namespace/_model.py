@@ -136,7 +136,7 @@ def _build_node_id_map(d: NamespaceModel) -> dict[type, str]:
     }
 
 
-def _matcher_repr(matcher: Any, is_type: bool) -> str:
+def _matcher_repr(matcher: object, is_type: bool) -> str:
     if is_type and isinstance(matcher, type):
         return matcher.__name__
     return repr(matcher)

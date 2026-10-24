@@ -191,7 +191,7 @@ def _render_state(state: dict[str, Any]) -> str:
     return "\n".join(f"{name}: {safe_repr(value)}" for name, value in state.items())
 
 
-def _coerce_int(value: Any) -> int | None:
+def _coerce_int(value: str | float) -> int | None:
     """Best-effort int coercion for model-supplied arguments ("3" → 3)."""
     try:
         return int(value)

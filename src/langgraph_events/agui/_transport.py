@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from ag_ui.core import BaseEvent
     from ag_ui.encoder import EventEncoder
+    from starlette.responses import StreamingResponse
 
 
 async def encode_sse_stream(
@@ -39,7 +40,7 @@ async def encode_sse_stream(
 def create_starlette_response(
     events: AsyncIterator[BaseEvent],
     accept: str | None = None,
-) -> Any:
+) -> StreamingResponse:
     """Create a Starlette ``StreamingResponse`` from AG-UI events.
 
     Convenience wrapper — lazy-imports starlette so the dependency
