@@ -7,18 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The async stream yields an `InterruptFrame` for each interrupt that the run leaves
+  pending.** `astream_events()` and `astream_resume()` with `include_llm_tokens` or
+  `include_custom_events` yield these frames after the run, in checkpoint task order.
+  `InterruptFrame.value` is the interrupt payload, for example the `Interrupted` event
+  that a handler returned. Before, a caller loaded the checkpoint after the run to find
+  the interrupts. A run where two handlers pause in one step still loads the checkpoint
+  once after the run, because the handlers can finish in either order. Import the frame
+  from `langgraph_events.stream`. A consumer that handles each unknown stream item as an
+  event must skip the new frame.
+
 ### Changed
 
 - **An `AGUIAdapter` turn loads the checkpoint once before the run, not three or four
   times.** A full checkpoint load revives every stored message, so on a long thread each
-  load is slow. The turn-start snapshot, the resume-pending check and the reducer seed now
-  share one load. The adapter takes the interrupts that the run raises from the stream, so
-  it does no load after the run. Two exceptions keep a second load. A resume that commits
-  client state writes a new checkpoint, so the run loads it again. A run where two
-  handlers pause in one step loads the checkpoint after the run to get the interrupts in
-  task order. `astream_resume()` with `include_llm_tokens` or `include_custom_events` also
-  shares one load between the pending check and the reducer seed. The LangGraph run still
-  does its own load. The output events do not change.
+  load is slow. The adapter loads the checkpoint once at the start of the turn. It passes
+  that snapshot to `astream_events()` or `astream_resume()`, so the resume-pending check
+  and the reducer seed do not load it again. The adapter takes the pending interrupts
+  from the `InterruptFrame` items of the stream, so it does no load after the run. Two
+  exceptions keep a second load. A resume that commits client state writes a new
+  checkpoint, so `astream_resume()` loads it again. A run where two handlers pause in one
+  step loads the checkpoint after the run. `astream_resume()` with `include_llm_tokens`
+  or `include_custom_events` also shares one load between the pending check and the
+  reducer seed. The LangGraph run still does its own load. The output events do not
+  change. The adapter passes the snapshot in a private keyword argument. An override of
+  `astream_events()` or `astream_resume()` must accept extra keyword arguments and pass
+  them on.
+- **A seed or resume factory gets a copy of each reducer value in `checkpoint_state`.**
+  The run seeds its reducer state from the snapshot that the factory reads. So a factory
+  that changes `checkpoint_state["reducers"]` in place changes only its copy. The copy is
+  shallow. Do not change a stored message object in place.
 
 ### Removed
 

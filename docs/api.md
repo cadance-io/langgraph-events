@@ -131,6 +131,7 @@ from langgraph_events.stream import (
     StreamFrame,           # (event, reducers, changed_reducers) — include_reducers=True
     LLMToken, LLMStreamEnd,  # LLM token delta / completion — include_llm_tokens=True
     CustomEventFrame, StateSnapshotFrame,  # include_custom_events=True
+    InterruptFrame,  # pending interrupt — include_llm_tokens or include_custom_events
 )
 ```
 

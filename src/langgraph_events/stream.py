@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from langgraph_events._graph import (
     CustomEventFrame,
+    InterruptFrame,
     LLMStreamEnd,
     LLMToken,
     LLMToolCallChunk,
@@ -22,6 +23,7 @@ from langgraph_events._graph import (
 
 __all__ = [
     "CustomEventFrame",
+    "InterruptFrame",
     "LLMStreamEnd",
     "LLMToken",
     "LLMToolCallChunk",

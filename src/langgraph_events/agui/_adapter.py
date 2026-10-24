@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import uuid
@@ -23,10 +24,10 @@ from ag_ui.core import (
 )
 
 from langgraph_events._event import Event, Interrupted
-from langgraph_events._graph import _Turn
 from langgraph_events._internal import _inject_deadline_keys
 from langgraph_events.stream import (
     CustomEventFrame,
+    InterruptFrame,
     LLMStreamEnd,
     LLMToken,
     LLMToolCallChunk,
@@ -194,8 +195,15 @@ class AGUIAdapter:
 
     @staticmethod
     def _build_checkpoint_state(snapshot: Any) -> CheckpointState:
-        """Build resume-factory state payload from a checkpoint snapshot."""
-        reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
+        """Build resume-factory state payload from a checkpoint snapshot.
+
+        The graph seeds its reducer state from *snapshot* after the factory
+        runs. So the factory gets a copy of each reducer value, and a change
+        to a copy does not reach the run.
+        """
+        values = snapshot.values if isinstance(snapshot.values, dict) else {}
+        reducers = {name: copy.copy(value) for name, value in values.items()}
+        snapshot = snapshot._replace(values=reducers)
         pending = AGUIAdapter._interrupts_from_snapshot(snapshot)
         return {
             "reducers": reducers,
@@ -371,7 +379,7 @@ class AGUIAdapter:
         input_data: RunAgentInput,
         resume_event: Any,
         config: Any,
-        turn: _Turn,
+        snapshot: Any | None,
     ) -> AsyncIterator[StreamItem]:
         """Resume path that routes ``FrontendStateMutated`` through both
         reducer dispatch and the LangGraph channel state.
@@ -395,15 +403,15 @@ class AGUIAdapter:
         fsm = self._build_resume_frontend_state_event(input_data)
         if fsm is not None:
             await self._commit_resume_frontend_state(fsm, config)
-            # The commit writes a new checkpoint, so the run loads it again.
-            turn.before = None
-        async for item in self._graph._astream_resume_turn(
+            # The commit writes a new checkpoint, so *snapshot* is stale.
+            snapshot = None
+        async for item in self._graph.astream_resume(
             resume_event,
-            turn,
             seeds=[fsm] if fsm is not None else [],
             include_reducers=self._activation,
             include_llm_tokens=True,
             include_custom_events=True,
+            _snapshot=snapshot,
             config=config,
         ):
             yield item
@@ -463,19 +471,23 @@ class AGUIAdapter:
         checkpoint_state: CheckpointState | None,
         resume_event: Any,
         config: Any,
-        turn: _Turn,
+        snapshot: Any | None,
     ) -> AsyncIterator[StreamItem]:
-        """Create the underlying EventGraph async event stream."""
+        """Create the underlying EventGraph async event stream.
+
+        *snapshot* is the checkpoint that the turn loaded before the run. The
+        graph uses it, so it does not load the checkpoint again.
+        """
         if resume_event is not None:
-            return self._resume_event_stream(input_data, resume_event, config, turn)
+            return self._resume_event_stream(input_data, resume_event, config, snapshot)
         seed = self._call_seed_factory(input_data, checkpoint_state)
         seeds = self._prepend_frontend_state(input_data, seed)
-        return self._graph._astream_events_turn(
+        return self._graph.astream_events(
             seeds,
-            turn,
             include_reducers=self._activation,
             include_llm_tokens=True,
             include_custom_events=True,
+            _snapshot=snapshot,
             config=config,
         )
 
@@ -566,10 +578,10 @@ class AGUIAdapter:
         *,
         is_resume: bool,
         state_snapshot_emitted: bool,
-    ) -> tuple[list[BaseEvent], bool, bool]:
+    ) -> tuple[list[BaseEvent], bool]:
         event = item.event
         if is_resume and self._is_interrupt(event):
-            return [], False, state_snapshot_emitted
+            return [], state_snapshot_emitted
 
         events: list[BaseEvent] = []
         changed_reducers = item.changed_reducers
@@ -592,11 +604,7 @@ class AGUIAdapter:
             events.append(build_messages_snapshot(messages))
 
         events.extend(self._map_event(event, ctx))
-        return (
-            events,
-            self._is_interrupt(event),
-            state_snapshot_emitted,
-        )
+        return events, state_snapshot_emitted
 
     def _events_from_bare_item(
         self,
@@ -604,10 +612,10 @@ class AGUIAdapter:
         ctx: MapperContext,
         *,
         is_resume: bool,
-    ) -> tuple[list[BaseEvent], bool]:
+    ) -> list[BaseEvent]:
         if is_resume and self._is_interrupt(item):
-            return [], False
-        return self._map_event(item, ctx), self._is_interrupt(item)
+            return []
+        return self._map_event(item, ctx)
 
     async def _stream_event_source(  # noqa: PLR0912
         self,
@@ -630,10 +638,8 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        turn = _Turn(before=checkpoint_snapshot)
         resume_event = self._call_resume_factory(input_data, checkpoint_state)
         is_resume = resume_event is not None
-        emitted_interrupt_in_stream = False
         emitted_state_snapshot = False
 
         # Interrupt gate: re-emit state without executing when interrupted
@@ -653,7 +659,7 @@ class AGUIAdapter:
             checkpoint_state,
             resume_event,
             config,
-            turn,
+            checkpoint_snapshot,
         )
 
         async for item in event_stream:
@@ -674,10 +680,12 @@ class AGUIAdapter:
                     name=item.name,
                     value=item.data,
                 )
+            elif isinstance(item, InterruptFrame):
+                for agui_event in self._map_event(item.value, ctx):
+                    yield agui_event
             elif isinstance(item, StreamFrame):
                 (
                     agui_events,
-                    emitted_interrupt,
                     emitted_state_snapshot,
                 ) = self._events_from_stream_frame(
                     item,
@@ -685,21 +693,14 @@ class AGUIAdapter:
                     is_resume=is_resume,
                     state_snapshot_emitted=emitted_state_snapshot,
                 )
-                emitted_interrupt_in_stream = (
-                    emitted_interrupt_in_stream or emitted_interrupt
-                )
                 for agui_event in agui_events:
                     yield agui_event
             else:
-                agui_events, emitted_interrupt = self._events_from_bare_item(
+                for agui_event in self._events_from_bare_item(
                     item,
                     ctx,
                     is_resume=is_resume,
-                )
-                emitted_interrupt_in_stream = (
-                    emitted_interrupt_in_stream or emitted_interrupt
-                )
-                for agui_event in agui_events:
+                ):
                     yield agui_event
 
         for message_id in ctx.drain_open_stream_message_ids():
@@ -712,23 +713,6 @@ class AGUIAdapter:
                 type=EventType.TOOL_CALL_END,
                 tool_call_id=tc_id,
             )
-
-        if not emitted_interrupt_in_stream:
-            for interrupted in await self._interrupts_after_run(turn, config):
-                for agui_event in self._map_event(interrupted, ctx):
-                    yield agui_event
-
-    async def _interrupts_after_run(self, turn: _Turn, config: Any) -> list[Any]:
-        """The interrupts pending after the run, in checkpoint task order.
-
-        The stream reports each interrupt when its handler pauses. Two
-        handlers that pause in one step can finish in either order. Only in
-        that case, a checkpoint load gives the stable task order.
-        """
-        if len(turn.interrupts) < 2:
-            return turn.interrupts
-        snapshot = await self._aget_checkpoint_snapshot(config)
-        return self._interrupts_from_snapshot(snapshot) if snapshot is not None else []
 
     async def stream(
         self,

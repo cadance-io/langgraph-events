@@ -356,29 +356,6 @@ class _PendingInterrupts(NamedTuple):
     unresolved_names: list[str]
 
 
-@dataclasses.dataclass
-class _Turn:
-    """The checkpoint facts that one async stream shares.
-
-    One full checkpoint load revives every stored message, so a long thread
-    makes each load slow. A turn loads the checkpoint at most once before
-    the run, and the pending check and the reducer seed share that load.
-
-    ``before`` is the snapshot before the run. ``None`` means that
-    :meth:`abefore` loads it on first use. ``interrupts`` receives the value
-    of each interrupt that the run raises, in stream order. Only
-    ``_astream_v2`` fills it.
-    """
-
-    before: StateSnapshot | None = None
-    interrupts: list[Any] = dataclasses.field(default_factory=list)
-
-    async def abefore(self, compiled: CompiledStateGraph, config: Any) -> StateSnapshot:
-        if self.before is None:
-            self.before = await compiled.aget_state(config)
-        return self.before
-
-
 class StreamFrame(NamedTuple):
     """A yielded frame from ``stream_events()`` when ``include_reducers`` is enabled.
 
@@ -429,6 +406,20 @@ class CustomEventFrame(NamedTuple):
     data: Any
 
 
+class InterruptFrame(NamedTuple):
+    """An interrupt that the run left pending.
+
+    The async stream yields one frame for each pending interrupt, after the
+    run ends, in checkpoint task order. Only the stream with
+    ``include_llm_tokens`` or ``include_custom_events`` yields it.
+
+    ``value`` is the payload of the interrupt. For a handler that returns an
+    :class:`Interrupted` event, the value is that event.
+    """
+
+    value: Any
+
+
 class StateSnapshotFrame(NamedTuple):
     """A typed state snapshot custom frame emitted from v2 stream events."""
 
@@ -443,6 +434,7 @@ StreamItem = (
     | LLMToolCallChunk
     | CustomEventFrame
     | StateSnapshotFrame
+    | InterruptFrame
 )
 
 
@@ -1718,7 +1710,7 @@ class EventGraph:
             return True
         return bool(self._compile().get_state(config).next)
 
-    async def _aresume_is_pending(self, kwargs: dict[str, Any], turn: _Turn) -> bool:
+    async def _aresume_is_pending(self, kwargs: dict[str, Any]) -> bool:
         """Async sibling of :meth:`_resume_is_pending`.
 
         Reads the checkpoint via ``aget_state`` so the async resume entry
@@ -1728,7 +1720,7 @@ class EventGraph:
         config = kwargs.get("config")
         if config is None:
             return True
-        return bool((await turn.abefore(self._compile(), config)).next)
+        return bool((await self._compile().aget_state(config)).next)
 
     def _unresumable_message(
         self, log: EventLog | None = None, config: Any = None
@@ -1885,7 +1877,7 @@ class EventGraph:
         awaiting input, the ``on_unresumable`` policy applies (default raise).
         """
         self._require_checkpointer("aresume")
-        if not await self._aresume_is_pending(kwargs, _Turn()):
+        if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(LGCommand(resume=value), **kwargs)
 
@@ -2791,13 +2783,17 @@ class EventGraph:
         inp: Any,
         seeds: list[Event],
         *,
-        turn: _Turn,
+        snapshot: StateSnapshot | None,
         reducer_names: list[str],
         include_llm_tokens: bool,
         include_custom_events: bool,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
-        """Stream events using LangGraph's v2 event API with LLM token support."""
+        """Stream events using LangGraph's v2 event API with LLM token support.
+
+        *snapshot* is the checkpoint of ``config`` before the run, or ``None``
+        when the caller did not load it.
+        """
         compiled = self._compile()
         is_resume = isinstance(inp, LGCommand)
 
@@ -2805,14 +2801,13 @@ class EventGraph:
         # (subsequent run / resume), start from the checkpointed values so
         # the shadow state matches what the compiled graph already restored.
         # Fall back to r.seed() only on the true first run.
-        # NOTE: with reducers and a checkpointer, this reads the turn's one
-        # load before the run. The pending check shares that load.
         reducer_state: dict[str, Any] = {}
         checkpoint_values: dict[str, Any] | None = None
         if reducer_names and self._checkpointer is not None:
             config = kwargs.get("config")
             if config is not None:
-                snapshot = await turn.abefore(compiled, config)
+                if snapshot is None:
+                    snapshot = await compiled.aget_state(config)
                 if snapshot.values:
                     checkpoint_values = snapshot.values
 
@@ -2861,6 +2856,7 @@ class EventGraph:
                 yield s
 
         seen: set[int] = set()
+        interrupts: list[Any] = []
 
         async for raw in compiled.astream_events(
             inp,
@@ -2928,11 +2924,7 @@ class EventGraph:
 
             chunk = raw.get("data", {}).get("chunk")
             if isinstance(chunk, dict):
-                turn.interrupts.extend(
-                    i.value
-                    for i in chunk.get(_INTERRUPT_CHANNEL, ())
-                    if i.value is not None
-                )
+                interrupts.extend(chunk.get(_INTERRUPT_CHANNEL, ()))
             for event in self._events_from_chunk(chunk, seen):
                 if reducer_names:
                     changed = self._update_reducer_state(
@@ -2947,6 +2939,16 @@ class EventGraph:
                     )
                 else:
                     yield event
+
+        config = kwargs.get("config")
+        if len(interrupts) > 1 and config is not None:
+            # Handlers that pause in one step finish in any order. The
+            # checkpoint holds the interrupts in task order.
+            after = await compiled.aget_state(config)
+            interrupts = [i for task in after.tasks for i in task.interrupts]
+        for interrupt in interrupts:
+            if interrupt.value is not None:
+                yield InterruptFrame(value=interrupt.value)
 
     def _stream_sync(
         self,
@@ -3076,7 +3078,7 @@ class EventGraph:
         include_reducers: bool | list[str],
         include_llm_tokens: bool,
         include_custom_events: bool,
-        turn: _Turn,
+        snapshot: StateSnapshot | None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags."""
@@ -3087,7 +3089,7 @@ class EventGraph:
             self._astream_v2(
                 inp,
                 seeds,
-                turn=turn,
+                snapshot=snapshot,
                 reducer_names=reducer_names,
                 include_llm_tokens=include_llm_tokens,
                 include_custom_events=include_custom_events,
@@ -3107,6 +3109,7 @@ class EventGraph:
         include_reducers: bool | list[str] = False,
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
+        _snapshot: StateSnapshot | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_resume()``.
@@ -3131,31 +3134,14 @@ class EventGraph:
                 and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
                 from LangGraph.
         """
-        async for item in self._astream_resume_turn(
-            value,
-            _Turn(),
-            seeds=seeds,
-            include_reducers=include_reducers,
-            include_llm_tokens=include_llm_tokens,
-            include_custom_events=include_custom_events,
-            **kwargs,
-        ):
-            yield item
-
-    async def _astream_resume_turn(
-        self,
-        value: Event,
-        turn: _Turn,
-        *,
-        seeds: list[Event] | None,
-        include_reducers: bool | list[str],
-        include_llm_tokens: bool,
-        include_custom_events: bool,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamItem]:
-        """:meth:`astream_resume` with the caller's *turn*."""
+        # _snapshot is private. A caller that already loaded the checkpoint
+        # of ``config`` passes it, so the pending check and the reducer seed
+        # do not load it again.
         self._require_checkpointer("astream_resume")
-        if not await self._aresume_is_pending(kwargs, turn):
+        config = kwargs.get("config")
+        if _snapshot is None and config is not None:
+            _snapshot = await self._compile().aget_state(config)
+        if _snapshot is not None and not _snapshot.next:
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
             if self._on_unresumable == "halt":
@@ -3169,7 +3155,7 @@ class EventGraph:
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
-            turn=turn,
+            snapshot=_snapshot,
             **kwargs,
         ):
             yield item
@@ -3181,6 +3167,7 @@ class EventGraph:
         include_reducers: bool | list[str] = False,
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
+        _snapshot: StateSnapshot | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_events()``.
@@ -3196,27 +3183,7 @@ class EventGraph:
                 and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
                 from LangGraph.
         """
-        async for item in self._astream_events_turn(
-            seed,
-            _Turn(),
-            include_reducers=include_reducers,
-            include_llm_tokens=include_llm_tokens,
-            include_custom_events=include_custom_events,
-            **kwargs,
-        ):
-            yield item
-
-    async def _astream_events_turn(
-        self,
-        seed: Event | list[Event],
-        turn: _Turn,
-        *,
-        include_reducers: bool | list[str],
-        include_llm_tokens: bool,
-        include_custom_events: bool,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamItem]:
-        """:meth:`astream_events` with the caller's *turn*."""
+        # _snapshot is private: see astream_resume().
         inp = self._prepare_input(seed)
         async for item in self._astream_entry(
             inp,
@@ -3224,7 +3191,7 @@ class EventGraph:
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
-            turn=turn,
+            snapshot=_snapshot,
             **kwargs,
         ):
             yield item

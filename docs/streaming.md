@@ -43,6 +43,7 @@ async for item in graph.astream_events(
 | `include_reducers=True` | Reducer snapshots alongside events | `StreamFrame(event, reducers, changed_reducers)` |
 | `include_llm_tokens=True` | Real-time LLM token deltas | `LLMToken(run_id, content)`, `LLMStreamEnd(run_id, message_id)` |
 | `include_custom_events=True` | Custom event passthrough | `CustomEventFrame(name, data)`, `StateSnapshotFrame(data)` |
+| `include_llm_tokens=True` or `include_custom_events=True` | The interrupts that the run leaves pending, after the run, in checkpoint task order | `InterruptFrame(value)` |
 
 ## Emission Helpers
 

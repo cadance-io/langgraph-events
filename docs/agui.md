@@ -100,6 +100,7 @@ Outside the chain, the adapter also emits:
 
 - `StateSnapshot` / `MessagesSnapshot` from `StreamFrame` reducer data (`MessagesSnapshot` requires `message_reducer()`).
 - `StateSnapshotFrame` → `StateSnapshot`; `CustomEventFrame` → `CustomEvent` (name/value passthrough).
+- `InterruptFrame` → its `value` through the mapper chain. The run yields one frame for each interrupt that it leaves pending.
 - Lifecycle: `RunStarted`, `RunFinished`, `RunError` on exception.
 - Skips redundant snapshots when `changed_reducers` is available.
 
@@ -260,7 +261,8 @@ def resume_factory(
     checkpoint_state: dict[str, Any] | None,
 ) -> Event | None:
     # checkpoint_state: CheckpointState TypedDict with reducers, events,
-    # messages, pending_interrupts, is_interrupted, snapshot.
+    # messages, pending_interrupts, is_interrupted, snapshot. Each reducer
+    # value is a shallow copy, so a change to it does not reach the run.
     state = input_data.state or {}
     if "approved" in state:
         return ApprovalSubmitted(approved=state["approved"])
