@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import StateSnapshot
+    from langgraph.types import Interrupt, StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
@@ -411,7 +411,9 @@ class InterruptFrame(NamedTuple):
 
     The async stream yields one frame for each pending interrupt, after the
     run ends, in checkpoint task order. Only the stream with
-    ``include_llm_tokens`` or ``include_custom_events`` yields it.
+    ``include_llm_tokens`` or ``include_custom_events`` yields it. The other
+    stream paths keep their item types, so a consumer of those paths gets no
+    new item type.
 
     ``value`` is the payload of the interrupt. For a handler that returns an
     :class:`Interrupted` event, the value is that event.
@@ -436,6 +438,15 @@ StreamItem = (
     | StateSnapshotFrame
     | InterruptFrame
 )
+
+
+def _snapshot_interrupts(snapshot: StateSnapshot) -> list[Interrupt]:
+    """Every interrupt that *snapshot* holds pending, in checkpoint task order.
+
+    Reads ``StateSnapshot.tasks[].interrupts``. A task with no interrupt
+    holds an empty tuple.
+    """
+    return [i for task in snapshot.tasks for i in task.interrupts]
 
 
 def _coerce_snapshot_data(data: Any) -> dict[str, Any]:
@@ -1695,16 +1706,20 @@ class EventGraph:
     def _awaits_resume(snapshot: StateSnapshot) -> bool:
         """Whether *snapshot* has work to resume into.
 
-        Keyed on the checkpoint's ``next`` (scheduled nodes), not the
-        higher-level ``is_interrupted`` flag: a caller may ``pre_seed`` before
-        resuming (e.g. ``AGUIAdapter`` commits a ``FrontendStateMutated``),
-        which clears ``is_interrupted`` while the interrupt is still pending —
-        but ``next`` stays non-empty. ``next == ()`` means nothing is scheduled,
-        so ``resume()`` would be a silent no-op (paused handler gone, thread
-        already finished, or resumed twice). A Phase-1 ``@on(previously=...)``
-        alias keeps the node live, so a declared rename still reports ``True``.
+        A resume is awaited when the checkpoint's ``next`` is set, or when a
+        task holds a pending interrupt. With neither, nothing is scheduled.
+        Then ``resume()`` does nothing: the paused handler is gone, the thread
+        finished, or the thread was resumed twice.
 
-        A pending interrupt also counts, see :meth:`_is_interrupted`.
+        ``next`` is read because a caller can ``pre_seed`` before it resumes,
+        for example ``AGUIAdapter`` commits a ``FrontendStateMutated``. That
+        write hides the pending interrupt, but ``next`` stays set. A Phase-1
+        ``@on(previously=...)`` alias keeps the node live, so a declared
+        rename still reports ``True``.
+
+        The interrupts are read because LangGraph before 1.2.13 drops from
+        ``next`` a task that holds a saved resume write. A handler that pauses
+        a second time in one run is such a task. See :meth:`_is_interrupted`.
         """
         return bool(snapshot.next) or EventGraph._is_interrupted(snapshot)
 
@@ -1719,17 +1734,33 @@ class EventGraph:
             return True
         return self._awaits_resume(self._compile().get_state(config))
 
-    async def _aresume_is_pending(self, kwargs: dict[str, Any]) -> bool:
-        """Async sibling of :meth:`_resume_is_pending`.
+    async def _aresume_snapshot(
+        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None
+    ) -> StateSnapshot | None:
+        """The checkpoint of ``kwargs["config"]`` for an async resume.
 
-        Reads the checkpoint via ``aget_state`` so the async resume entry
-        points (:meth:`aresume`/:meth:`astream_resume`) never drive an
-        async-only checkpointer synchronously from the running event loop.
+        Returns *snapshot* when the caller already loaded it. Otherwise loads
+        it with ``aget_state``, so an async resume never drives an async-only
+        checkpointer synchronously from the running event loop. Returns
+        ``None`` if no ``config`` was passed.
         """
+        if snapshot is not None:
+            return snapshot
         config = kwargs.get("config")
         if config is None:
-            return True
-        return self._awaits_resume(await self._compile().aget_state(config))
+            return None
+        return await self._compile().aget_state(config)
+
+    async def _aresume_is_pending(
+        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None = None
+    ) -> bool:
+        """Async sibling of :meth:`_resume_is_pending`.
+
+        Pass *snapshot* when the checkpoint is already loaded, so this check
+        does not load it again. See :meth:`_aresume_snapshot`.
+        """
+        snapshot = await self._aresume_snapshot(kwargs, snapshot)
+        return snapshot is None or self._awaits_resume(snapshot)
 
     def _unresumable_message(
         self, log: EventLog | None = None, config: Any = None
@@ -1921,7 +1952,7 @@ class EventGraph:
         (discovery, ``abandon()``) reads the checkpoint's raw pending
         writes instead — see :meth:`_pending_interrupt_writes`.
         """
-        return any(getattr(task, "interrupts", ()) for task in snapshot.tasks)
+        return bool(_snapshot_interrupts(snapshot))
 
     @staticmethod
     def _pending_interrupt_events(snapshot: StateSnapshot) -> list[Event]:
@@ -1937,12 +1968,11 @@ class EventGraph:
         """
         seen: set[str] = set()
         values: list[Event] = []
-        for task in snapshot.tasks:
-            for i in getattr(task, "interrupts", ()):
-                value = i.value
-                if isinstance(value, Event) and type(value).__name__ not in seen:
-                    seen.add(type(value).__name__)
-                    values.append(value)
+        for i in _snapshot_interrupts(snapshot):
+            value = i.value
+            if isinstance(value, Event) and type(value).__name__ not in seen:
+                seen.add(type(value).__name__)
+                values.append(value)
         return values
 
     @staticmethod
@@ -2886,7 +2916,7 @@ class EventGraph:
                 yield s
 
         seen: set[int] = set()
-        interrupts: list[Any] = []
+        interrupts: list[Interrupt] = []
 
         async for raw in compiled.astream_events(
             inp,
@@ -2970,15 +3000,28 @@ class EventGraph:
                 else:
                     yield event
 
-        config = kwargs.get("config")
-        if len(interrupts) > 1 and config is not None:
-            # Handlers that pause in one step finish in any order. The
-            # checkpoint holds the interrupts in task order.
-            after = await compiled.aget_state(config)
-            interrupts = [i for task in after.tasks for i in task.interrupts]
-        for interrupt in interrupts:
-            if interrupt.value is not None:
-                yield InterruptFrame(value=interrupt.value)
+        for frame in await self._apending_interrupt_frames(
+            interrupts, kwargs.get("config")
+        ):
+            yield frame
+
+    async def _apending_interrupt_frames(
+        self, streamed: list[Interrupt], config: RunnableConfig | None
+    ) -> list[InterruptFrame]:
+        """One frame for each interrupt that the run left pending.
+
+        *streamed* holds the interrupts in the order that the run streamed
+        them. Handlers that pause in one step finish in any order. So for
+        more than one interrupt, the checkpoint is loaded again, because it
+        holds the interrupts in task order.
+        """
+        interrupts = streamed
+        if len(streamed) > 1 and config is not None:
+            after = await self._compile().aget_state(config)
+            interrupts = _snapshot_interrupts(after)
+        return [
+            InterruptFrame(value=i.value) for i in interrupts if i.value is not None
+        ]
 
     def _stream_sync(
         self,
@@ -3112,7 +3155,11 @@ class EventGraph:
         snapshot: StateSnapshot | None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
-        """Shared async-stream dispatcher — picks v2 vs core based on flags."""
+        """Shared async-stream dispatcher — picks v2 vs core based on flags.
+
+        Only the v2 path uses *snapshot*, to seed its reducer state. The core
+        path loads no checkpoint, so it has no use for *snapshot*.
+        """
         kwargs.pop("stream_mode", None)
         kwargs = self._apply_deadline_kwarg(kwargs)
         reducer_names = self._resolve_reducer_names(include_reducers)
@@ -3164,16 +3211,16 @@ class EventGraph:
             include_custom_events: When True, yields ``CustomEventFrame``
                 and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
                 from LangGraph.
+            _snapshot: Private to ``AGUIAdapter``. Do not pass it. It is the
+                checkpoint of ``config`` that the adapter loaded for the turn.
+                The pending check uses it, so it does not load the checkpoint
+                again. With ``include_llm_tokens`` or ``include_custom_events``,
+                the reducer seed uses it too.
         """
-        # _snapshot is private. A caller that already loaded the checkpoint
-        # of ``config`` passes it, so the pending check and the reducer seed
-        # do not load it again.
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
-        config = kwargs.get("config")
-        if _snapshot is None and config is not None:
-            _snapshot = await self._compile().aget_state(config)
-        if _snapshot is not None and not self._awaits_resume(_snapshot):
+        snapshot = await self._aresume_snapshot(kwargs, _snapshot)
+        if not await self._aresume_is_pending(kwargs, snapshot):
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
             if self._on_unresumable == "halt":
@@ -3187,7 +3234,7 @@ class EventGraph:
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
-            snapshot=_snapshot,
+            snapshot=snapshot,
             **kwargs,
         ):
             yield item
@@ -3214,8 +3261,13 @@ class EventGraph:
             include_custom_events: When True, yields ``CustomEventFrame``
                 and ``StateSnapshotFrame`` frames for ``on_custom_event`` payloads
                 from LangGraph.
+            _snapshot: Private to ``AGUIAdapter``. Do not pass it. It is the
+                checkpoint of ``config`` that the adapter loaded for the turn.
+                The reducer seed uses it, so it does not load the checkpoint
+                again. Only the stream with ``include_llm_tokens`` or
+                ``include_custom_events`` uses it, because the other stream
+                loads no checkpoint.
         """
-        # _snapshot is private: see astream_resume().
         inp = self._prepare_input(seed)
         async for item in self._astream_entry(
             inp,

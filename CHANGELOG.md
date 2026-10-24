@@ -23,18 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An `AGUIAdapter` turn loads the checkpoint once before the run, not three or four
   times.** A full checkpoint load revives every stored message, so on a long thread each
-  load is slow. The adapter loads the checkpoint once at the start of the turn. It passes
-  that snapshot to `astream_events()` or `astream_resume()`, so the resume-pending check
-  and the reducer seed do not load it again. The adapter takes the pending interrupts
-  from the `InterruptFrame` items of the stream, so it does no load after the run. Two
-  exceptions keep a second load. A resume that commits client state writes a new
-  checkpoint, so `astream_resume()` loads it again. A run where two handlers pause in one
-  step loads the checkpoint after the run. `astream_resume()` with `include_llm_tokens`
-  or `include_custom_events` also shares one load between the pending check and the
-  reducer seed. The LangGraph run still does its own load. The output events do not
-  change. The adapter passes the snapshot in a private keyword argument. An override of
-  `astream_events()` or `astream_resume()` must accept extra keyword arguments and pass
-  them on.
+  load is slow. The adapter passes the snapshot that it loaded to `astream_events()` or
+  `astream_resume()`. So the resume-pending check and the reducer seed do not load the
+  checkpoint again. The adapter takes the pending interrupts from the `InterruptFrame`
+  items of the stream. So it does not load the checkpoint after the run, except when two
+  handlers pause in one step (see the `InterruptFrame` entry). A resume that commits client
+  state still loads the checkpoint a second time, because the commit writes a new
+  checkpoint. The LangGraph run still does its own load. The output events do not change.
+- **`astream_resume()` with reducers loads the checkpoint once before the run, not
+  twice.** This applies with `include_reducers` and with `include_llm_tokens` or
+  `include_custom_events`. The resume-pending check and the reducer seed share the load.
+- **An override of `astream_events()` or `astream_resume()` must accept extra keyword
+  arguments and pass them on.** `AGUIAdapter` passes its checkpoint snapshot to these
+  methods in a private keyword argument. An override that does not accept the argument
+  makes each AG-UI turn raise `TypeError`.
 - **A seed or resume factory gets a copy of each reducer value in `checkpoint_state`.**
   The run seeds its reducer state from the snapshot that the factory reads. So a factory
   that changes `checkpoint_state["reducers"]` in place changes only its copy. The copy is

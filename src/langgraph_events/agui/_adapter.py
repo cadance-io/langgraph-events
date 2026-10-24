@@ -24,6 +24,7 @@ from ag_ui.core import (
 )
 
 from langgraph_events._event import Event, Interrupted
+from langgraph_events._graph import _snapshot_interrupts
 from langgraph_events._internal import _inject_deadline_keys
 from langgraph_events.stream import (
     CustomEventFrame,
@@ -179,13 +180,7 @@ class AGUIAdapter:
     @staticmethod
     def _interrupts_from_snapshot(snapshot: StateSnapshot) -> list[Any]:
         """Extract Interrupted payload events from a checkpoint snapshot."""
-        result: list[Any] = []
-        for task in snapshot.tasks:
-            for interrupt in getattr(task, "interrupts", ()):
-                value = getattr(interrupt, "value", None)
-                if value is not None:
-                    result.append(value)
-        return result
+        return [i.value for i in _snapshot_interrupts(snapshot) if i.value is not None]
 
     async def _aget_checkpoint_snapshot(
         self, config: RunnableConfig
@@ -205,7 +200,6 @@ class AGUIAdapter:
         """
         values = snapshot.values if isinstance(snapshot.values, dict) else {}
         reducers = {name: copy.copy(value) for name, value in values.items()}
-        snapshot = snapshot._replace(values=reducers)
         pending = AGUIAdapter._interrupts_from_snapshot(snapshot)
         return {
             "reducers": reducers,
@@ -213,7 +207,7 @@ class AGUIAdapter:
             "messages": reducers.get("messages"),
             "pending_interrupts": pending,
             "is_interrupted": bool(pending),
-            "snapshot": snapshot,
+            "snapshot": snapshot._replace(values=reducers),
         }
 
     @staticmethod
