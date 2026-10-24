@@ -29,7 +29,9 @@ def _annotation_source(factory: Callable[..., Any]) -> Callable[..., Any]:
     return type(factory).__call__
 
 
-def _missing_return_annotation(factory: Any, source: Callable[..., Any]) -> str:
+def _missing_return_annotation(
+    factory: Callable[..., object], source: Callable[..., Any]
+) -> str:
     """Build the error for a factory whose return annotation is absent."""
     lead = "RunScoped(factory=...) requires a return annotation on the factory"
     why = (

@@ -93,6 +93,8 @@ if TYPE_CHECKING:
     from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde, UnrevivedIdentity
 
+    _GraphInput = dict[str, Any] | LGCommand
+
     _PlanThread = Callable[..., ThreadPlan]
     """``plan_thread`` with the serde, drop classes and version function bound."""
 
@@ -165,7 +167,7 @@ _ABSTRACT_EVENT_BASES: tuple[type, ...] = (
 )
 
 
-def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
+def _scatter_event_types(scatter_alias: object) -> list[type[Event]]:
     """Extract Event types from a parameterized ``Scatter[X]`` alias.
 
     Unpacks Union/UnionType members so ``Scatter[A | B]`` behaves like
@@ -185,7 +187,7 @@ def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
     return out
 
 
-def _format_scatter_repr(scatter_alias: Any) -> str:
+def _format_scatter_repr(scatter_alias: object) -> str:
     """Render a Scatter annotation back into a readable form for error text."""
     args = typing.get_args(scatter_alias)
     if not args:
@@ -449,7 +451,7 @@ def _snapshot_interrupts(snapshot: StateSnapshot) -> list[Interrupt]:
     return [i for task in snapshot.tasks for i in task.interrupts]
 
 
-def _coerce_snapshot_data(data: Any) -> dict[str, Any]:
+def _coerce_snapshot_data(data: object) -> dict[str, Any]:
     if isinstance(data, dict):
         return cast("dict[str, Any]", data)
     return {}
@@ -936,7 +938,7 @@ def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any
     return provided
 
 
-def _resolve_self(hint: Any, source: Any) -> Any:
+def _resolve_self(hint: object, source: Callable[..., object]) -> object:
     """Replace ``typing.Self`` with the class the method is bound to.
 
     ``get_type_hints`` leaves ``Self`` as is. A method bound to a class
@@ -951,7 +953,7 @@ def _resolve_self(hint: Any, source: Any) -> Any:
     return owner if isinstance(owner, type) else type(owner)
 
 
-def _hint_label(hint: Any) -> str:
+def _hint_label(hint: object) -> str:
     """Render an annotation for an error message.
 
     A generic alias such as ``list[str]`` forwards ``__qualname__`` to its
@@ -962,7 +964,7 @@ def _hint_label(hint: Any) -> str:
     return repr(hint)
 
 
-def _factory_label(factory: Any) -> str:
+def _factory_label(factory: object) -> str:
     """Render a ``RunScoped`` factory for an error message."""
     if inspect.isroutine(factory):
         return factory.__qualname__
@@ -970,7 +972,7 @@ def _factory_label(factory: Any) -> str:
 
 
 def _satisfies(
-    check: Callable[[Any, Any], bool], subject: Any, declared: Any
+    check: Callable[[Any, Any], bool], subject: object, declared: object
 ) -> bool | str:
     """Apply a ``beartype.door`` check. A string is the reason it cannot run.
 
@@ -1152,7 +1154,7 @@ class EventGraph:
         max_rounds: int = 100,
         reducers: list[BaseReducer] | None = None,
         services: Sequence[Any] | Mapping[str, Any] | None = None,
-        checkpointer: Any = None,
+        checkpointer: Any = None,  # noqa: ANN401 - BaseCheckpointSaver needs a non-optional ThreadPlan.checkpoint
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
@@ -1579,13 +1581,13 @@ class EventGraph:
         kwargs["config"] = config
         return kwargs
 
-    def _run(self, inp: Any, **kwargs: Any) -> EventLog:
+    def _run(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
-    async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
+    async def _arun(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
@@ -1763,7 +1765,7 @@ class EventGraph:
         return snapshot is None or self._awaits_resume(snapshot)
 
     def _unresumable_message(
-        self, log: EventLog | None = None, config: Any = None
+        self, log: EventLog | None = None, config: RunnableConfig | None = None
     ) -> str:
         """Diagnostic for a ``resume()`` that would be a no-op.
 
@@ -1794,7 +1796,7 @@ class EventGraph:
         )
 
     def _unresumable_short_circuits(
-        self, log: EventLog | None = None, config: Any = None
+        self, log: EventLog | None = None, config: RunnableConfig | None = None
     ) -> bool:
         """Apply ``on_unresumable``'s ``raise``/``warn`` arm. ``False``
         means append a terminal event (``halt``). ``True`` means return
@@ -1846,7 +1848,7 @@ class EventGraph:
             [StateUpdate(None, END)],
         ]
 
-    def _settle(self, config: Any, terminal: Event) -> EventLog:
+    def _settle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Append *terminal* and settle the thread via :meth:`_settle_supersteps`."""
         # `_cursor` is correct only because this reads via `get_state`,
         # whose snapshot applies the same pending writes the leading
@@ -1854,17 +1856,17 @@ class EventGraph:
         # without raising an error, and no test in this suite catches it.
         events = self.get_state(config).events
         self._compile().bulk_update_state(
-            cast("RunnableConfig", config),
+            config,
             self._settle_supersteps(events, terminal),
         )
         return self.get_state(config).events
 
-    async def _asettle(self, config: Any, terminal: Event) -> EventLog:
+    async def _asettle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Async sibling of :meth:`_settle`."""
         # Same `_cursor` reasoning as `_settle`, via `aget_state`.
         events = (await self.aget_state(config)).events
         await self._compile().abulk_update_state(
-            cast("RunnableConfig", config),
+            config,
             self._settle_supersteps(events, terminal),
         )
         return (await self.aget_state(config)).events
@@ -1877,7 +1879,7 @@ class EventGraph:
         Runs only when :meth:`_resume_is_pending` is ``False``, so no
         completed sibling write can be lost on this path.
         """
-        config = kwargs.get("config")
+        config = kwargs["config"]
         log = self.get_state(config).events
         if self._unresumable_short_circuits(log, config):
             return log
@@ -1887,7 +1889,7 @@ class EventGraph:
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
         """Async sibling of :meth:`_apply_unresumable_policy`."""
-        config = kwargs.get("config")
+        config = kwargs["config"]
         log = (await self.aget_state(config)).events
         if self._unresumable_short_circuits(log, config):
             return log
@@ -1898,7 +1900,7 @@ class EventGraph:
         return Unresumable(resume_value=type(value).__name__)
 
     @staticmethod
-    def _require_resume_event(value: Any) -> None:
+    def _require_resume_event(value: object) -> None:
         """Raise ``TypeError`` if *value* is not an ``Event``.
 
         The check runs before the graph runs. LangGraph saves a resume value
@@ -2552,7 +2554,9 @@ class EventGraph:
         return self._rewrite_outcome(tup, after, plan)
 
     @staticmethod
-    def _rewrite_base_config(cfg: RunnableConfig, tup: CheckpointTuple) -> Any:
+    def _rewrite_base_config(
+        cfg: RunnableConfig, tup: CheckpointTuple
+    ) -> RunnableConfig:
         """The config ``put`` takes: the parent, so the parent link stays,
         or a bare thread config on a thread with one checkpoint.
         ``MemorySaver.put`` reads ``checkpoint_ns`` with no default."""
@@ -2727,12 +2731,12 @@ class EventGraph:
             interrupted=interrupted,
         )
 
-    def get_state(self, config: Any) -> GraphState:
+    def get_state(self, config: Any) -> GraphState:  # noqa: ANN401 - callers pass plain dict configs that RunnableConfig rejects
         """Get event-level state of a checkpointed thread."""
         self._require_checkpointer("get_state")
         return self._graph_state(self._compile().get_state(config))
 
-    async def aget_state(self, config: Any) -> GraphState:
+    async def aget_state(self, config: Any) -> GraphState:  # noqa: ANN401 - callers pass plain dict configs that RunnableConfig rejects
         """Async version of :meth:`get_state`.
 
         Reads the checkpoint via ``aget_state`` so async-only checkpointers
@@ -2745,7 +2749,7 @@ class EventGraph:
     # --- LLM token helpers ---
 
     @staticmethod
-    def _extract_text_content(chunk: Any) -> str:
+    def _extract_text_content(chunk: object) -> str:
         """Extract text from a LangChain chat model stream chunk."""
         content = getattr(chunk, "content", None)
         if isinstance(content, str):
@@ -2799,7 +2803,7 @@ class EventGraph:
         return []
 
     @staticmethod
-    def _events_from_chunk(chunk: Any, seen: set[int]) -> list[Event]:
+    def _events_from_chunk(chunk: object, seen: set[int]) -> list[Event]:
         """Extract unseen events from an updates-mode stream chunk.
 
         A chunk marked ``cached`` replays the saved writes of a task that
@@ -2840,7 +2844,7 @@ class EventGraph:
 
     async def _astream_v2(  # noqa: PLR0912, PLR0915
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         *,
         snapshot: StateSnapshot | None,
@@ -3025,7 +3029,7 @@ class EventGraph:
 
     def _stream_sync(
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         reducer_names: list[str],
         **kwargs: Any,
@@ -3052,7 +3056,7 @@ class EventGraph:
 
     async def _astream_core(
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         reducer_names: list[str],
         **kwargs: Any,
@@ -3146,7 +3150,7 @@ class EventGraph:
 
     async def _astream_entry(
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         *,
         include_reducers: bool | list[str],

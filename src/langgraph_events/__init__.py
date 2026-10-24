@@ -87,7 +87,7 @@ _DEPRECATED_AGUI_ALIASES: dict[str, str] = {
 }
 
 
-def __getattr__(name: str) -> Any:
+def __getattr__(name: str) -> Any:  # noqa: ANN401 - module __getattr__ returns lazily imported members
     target_module = _DEPRECATED_AGUI_ALIASES.get(name)
     if target_module is None:
         raise AttributeError(f"module 'langgraph_events' has no attribute {name!r}")

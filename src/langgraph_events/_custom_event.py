@@ -65,7 +65,7 @@ def _require_async_emitter() -> _AsyncEmitter:
     return emitter
 
 
-def emit_custom(name: str, data: Any) -> None:
+def emit_custom(name: str, data: object) -> None:
     """Emit a LangGraph custom stream event from inside a handler.
 
     The payload is surfaced in ``EventGraph.astream_events(...,
@@ -74,7 +74,7 @@ def emit_custom(name: str, data: Any) -> None:
     _require_sync_emitter()(name, data)
 
 
-async def aemit_custom(name: str, data: Any) -> None:
+async def aemit_custom(name: str, data: object) -> None:
     """Async variant of ``emit_custom`` for async handlers."""
     await _require_async_emitter()(name, data)
 
