@@ -431,6 +431,8 @@ def resume_factory(input_data, checkpoint_state=None):
 !!! warning "A stored resume event must carry only the new messages"
     The checkpoint stores each resume event twice: once as the event, and once in `Resumed.value`. The events channel is append-only, and each checkpoint load revives every stored event. If a resume event carries the full message history, the checkpoint grows with the number of resumes times the number of messages. Each turn then loads more slowly. The message reducer already holds the full history, and it appends the new messages of each `MessageEvent`. To read the full history in a `resume_factory`, read `checkpoint_state["reducers"]["messages"]`.
 
+    `event.messages` on the resume event holds only the new messages. A handler that reads `event.messages` as the whole conversation sends only the newest messages, for example to an LLM, with no error. Such a handler must inject the messages reducer instead, with a `messages: list[BaseMessage]` parameter. See [`message_reducer`](reducers.md#message_reducer).
+
 !!! tip "Falsy resume handling"
     `extract_resume_input` treats all falsy values (`0`, `""`, `[]`, `{}`, `False`) as "no resume". For meaningful "deny" signals, send `{"approved": false}` instead of bare `false`.
 

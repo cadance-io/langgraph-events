@@ -594,6 +594,18 @@ def describe_extract_resume_input():
             assert extract_resume_input(inp) is None
 
 
+def describe_merge_frontend_messages():
+    def when_a_caller_imports_it():
+        def it_names_the_replacement_and_the_history_caveat():
+            with pytest.raises(ImportError) as caught:
+                from langgraph_events.agui import (  # noqa: F401
+                    merge_frontend_messages,
+                )
+            message = str(caught.value)
+            assert "detect_new_frontend_messages" in message
+            assert "inject the messages reducer" in message
+
+
 def describe_detect_new_frontend_messages():
     def when_checkpoint_state_is_none():
         def it_returns_the_converted_input_messages():

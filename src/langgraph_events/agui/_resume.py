@@ -221,11 +221,12 @@ def detect_new_frontend_messages(
     The result does not hold the stored history. Put it on the stored resume
     event as it is. The message reducer then appends it to the history. A
     resume event that holds the full history makes each checkpoint grow with
-    the number of resumes times the number of messages.
+    the number of resumes times the number of messages. A handler that needs
+    the whole conversation must inject the messages reducer, not read
+    ``event.messages``.
 
-    If two inbound messages have the same id, the result holds one message.
-    That message is the last copy, at the position of the first copy, as
-    ``add_messages`` merges them.
+    If two inbound messages have the same id, the result holds the last copy,
+    at the position of the first copy.
 
     Defensive default: malformed tool-call JSON is dropped (with a WARNING).
     Pass ``drop_invalid_tool_calls=False`` for strict parity with upstream.

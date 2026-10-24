@@ -52,9 +52,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still drop by default. To migrate, replace
   `merge_frontend_messages(input_data, checkpoint_state)` with
   `detect_new_frontend_messages(input_data, checkpoint_state)`. Put the result on the
-  resume event as it is. The message reducer appends it to the history. A caller that needs
-  the full history can read `checkpoint_state["reducers"]["messages"]`. A thread that is
-  already stored keeps its old resume events.
+  resume event as it is. The message reducer appends it to the history.
+
+  WARNING: after this change, `event.messages` on the resume event holds only the new
+  messages. A handler that reads `event.messages` as the whole conversation then sends
+  only the newest messages, for example to an LLM, with no error. Such a handler must
+  inject the messages reducer instead, with a `messages: list[BaseMessage]` parameter.
+  See [`message_reducer`](docs/reducers.md#message_reducer). A `resume_factory` that
+  needs the full history can read `checkpoint_state["reducers"]["messages"]`. An import
+  of `merge_frontend_messages` raises an `ImportError` that names the replacement. A
+  thread that is already stored keeps its old resume events.
 
 ## [0.39.0] - 2026-10-23
 
