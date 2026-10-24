@@ -2993,13 +2993,16 @@ def describe_EventGraph():
         def when_two_handlers_pause_in_one_step():
             @pytest.mark.asyncio
             async def it_yields_the_interrupts_in_handler_order():
+                fast_paused = asyncio.Event()
+
                 @on(Started)
                 async def pause_slow(event: Started) -> _StepInterrupted:
-                    await asyncio.sleep(0.05)
+                    await asyncio.wait_for(fast_paused.wait(), timeout=5)
                     return _StepInterrupted(step=1)
 
                 @on(Started)
                 async def pause_fast(event: Started) -> _StepInterrupted:
+                    fast_paused.set()
                     return _StepInterrupted(step=2)
 
                 graph = EventGraph([pause_slow, pause_fast], checkpointer=MemorySaver())

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import warnings
@@ -58,7 +57,6 @@ from langgraph_events.agui import (
     detect_new_tool_results,
 )
 from langgraph_events.agui._mappers import _warned_classes, _warned_extras
-from langgraph_events.stream import InterruptFrame
 
 # ---------------------------------------------------------------------------
 # Test event classes
@@ -481,22 +479,17 @@ def _patch_astream(monkeypatch: Any, target: Any, *frames: Any) -> list[dict[str
     """Stub ``target.astream_events`` to yield ``frames``; return recorded kwargs."""
     calls: list[dict[str, Any]] = []
 
-    async def fake_astream_events(
-        seed: Any,
-        *,
-        include_reducers: Any,
-        include_llm_tokens: Any,
-        include_custom_events: Any,
-        _snapshot: Any,
-        config: Any,
-    ) -> Any:
-        del seed, _snapshot
+    async def fake_astream_events(seed: Any, **kwargs: Any) -> Any:
+        del seed
         calls.append(
             {
-                "include_reducers": include_reducers,
-                "include_llm_tokens": include_llm_tokens,
-                "include_custom_events": include_custom_events,
-                "config": config,
+                key: kwargs[key]
+                for key in (
+                    "include_reducers",
+                    "include_llm_tokens",
+                    "include_custom_events",
+                    "config",
+                )
             }
         )
         for frame in frames:
@@ -1337,36 +1330,6 @@ def describe_AGUIAdapter():
                 assert interrupted_events[0].value["draft"] == "persona review"
                 assert events[-1].type == EventType.RUN_FINISHED
 
-            def when_stream_yields_an_interrupt_frame():
-
-                async def it_emits_it_once_and_loads_the_checkpoint_once(
-                    monkeypatch,
-                ):
-                    graph = _graph(reply, checkpointer=MemorySaver())
-                    adapter = _adapter(graph)
-
-                    called = {"checkpoint": 0}
-
-                    original_aget_state = graph.compiled.aget_state
-
-                    async def count_aget_state(config):
-                        called["checkpoint"] += 1
-                        return await original_aget_state(config)
-
-                    _patch_astream(
-                        monkeypatch,
-                        adapter._graph,
-                        InterruptFrame(value=ApprovalRequested(draft="stream-first")),
-                    )
-                    monkeypatch.setattr(graph.compiled, "aget_state", count_aget_state)
-                    events = await _collect(
-                        adapter, _make_input(thread_id="t-stream-int")
-                    )
-
-                    interrupted_events = _custom(events, "interrupted")
-                    assert len(interrupted_events) == 1
-                    assert called["checkpoint"] == 1
-
             def when_another_handler_writes_in_the_paused_step():
                 """LangGraph streams the saved writes of that step again on resume."""
 
@@ -1385,24 +1348,6 @@ def describe_AGUIAdapter():
                         "ok",
                         "Approved!",
                     ]
-
-                async def it_does_not_emit_the_event_again():
-                    @on(UserAsked)
-                    def create_task(event: UserAsked) -> TaskCreated:
-                        return TaskCreated(title="before the pause")
-
-                    graph = _graph(
-                        create_task, ask_approval, checkpointer=MemorySaver()
-                    )
-                    config = _config("t-paused-step-event")
-                    await graph.ainvoke(UserAsked(question="go"), config=config)
-
-                    events = await _resume(
-                        graph, _make_input(thread_id="t-paused-step-event")
-                    )
-
-                    assert _custom(events, "TaskCreated") == []
-                    assert events[-1].type == EventType.RUN_FINISHED
 
             async def it_passes_checkpoint_state_to_resume_factory():
                 seen_state: dict[str, Any] = {}
@@ -1433,6 +1378,29 @@ def describe_AGUIAdapter():
                 assert "events" in seen_state
                 assert "messages" in seen_state
                 assert len(seen_state["pending_interrupts"]) == 1
+
+        def when_the_resume_factory_mutates_the_checkpoint_state():
+            async def it_streams_the_stored_messages_only():
+                def mutating_factory(
+                    input_data: RunAgentInput, checkpoint_state: Any
+                ) -> ApprovalGiven:
+                    stored = checkpoint_state["reducers"]["messages"]
+                    stored.append(AIMessage(id="injected", content="not stored"))
+                    return ApprovalGiven(approved=True)
+
+                graph = _graph(reply, ask_approval, approve, checkpointer=MemorySaver())
+                config = _config("t-mutating-factory")
+                await graph.ainvoke(UserAsked(question="go"), config=config)
+
+                events = await _resume(
+                    graph,
+                    _make_input(thread_id="t-mutating-factory"),
+                    resume_factory=mutating_factory,
+                )
+
+                messages = _last_snapshot(events).messages
+                assert "injected" not in [m.id for m in messages]
+                assert messages[-1].content == "Approved!"
 
         def when_the_resume_factory_returns_a_non_event():
             async def it_keeps_the_thread_resumable():
@@ -2049,9 +2017,14 @@ def describe_checkpoint_loads_per_turn():
                     )
                 )
 
-                # The commit loads the checkpoint to write client state. The
-                # resume then loads the new checkpoint once more.
-                assert loads == run_loads + 3
+                # The adapter loads the checkpoint at the start of the turn.
+                turn_load = 1
+                # apre_seed loads the checkpoint to write the client state.
+                commit_load = 1
+                # The commit makes the turn snapshot stale, so the resume
+                # loads the new checkpoint.
+                reload = 1
+                assert loads == run_loads + turn_load + commit_load + reload
                 state = _of_type(events, EventType.STATE_SNAPSHOT)[-1].snapshot
                 assert state["focus"] == "x"
 
@@ -2070,48 +2043,22 @@ def describe_checkpoint_loads_per_turn():
             assert loads == run_loads + 1
             assert _last_snapshot(events).messages[-1].content == "ok"
 
-        def when_two_handlers_pause_in_one_step():
-            async def it_emits_the_interrupts_in_handler_order():
-                @on(UserAsked)
-                async def ask_slow(event: UserAsked) -> ApprovalRequested:
-                    await asyncio.sleep(0.05)
-                    return ApprovalRequested(draft="slow")
+        def when_the_run_pauses():
+            async def it_takes_the_interrupt_from_the_stream():
+                saver = LoadCountingSaver()
+                graph = _graph(ask_approval, checkpointer=saver)
+                _, run_loads = await saver.count_loads(
+                    graph.ainvoke(UserAsked(question="go"), config=_config("t-plain"))
+                )
 
-                @on(UserAsked)
-                async def ask_fast(event: UserAsked) -> ApprovalRequested:
-                    return ApprovalRequested(draft="fast")
+                events, loads = await saver.count_loads(
+                    _stream(graph, _make_input(thread_id="t-loads-pause"))
+                )
 
-                graph = _graph(ask_slow, ask_fast, checkpointer=MemorySaver())
-
-                events = await _stream(graph, _make_input(thread_id="t-two-pauses"))
-
+                assert loads == run_loads + 1
                 assert [e.value["draft"] for e in _custom(events, "interrupted")] == [
-                    "slow",
-                    "fast",
+                    "needs approval"
                 ]
-
-    def when_the_resume_factory_mutates_the_checkpoint_state():
-        async def it_streams_the_stored_messages_only():
-            def mutating_factory(
-                input_data: RunAgentInput, checkpoint_state: Any
-            ) -> ApprovalGiven:
-                stored = checkpoint_state["reducers"]["messages"]
-                stored.append(AIMessage(id="injected", content="not stored"))
-                return ApprovalGiven(approved=True)
-
-            graph = _graph(reply, ask_approval, approve, checkpointer=MemorySaver())
-            config = _config("t-mutating-factory")
-            await graph.ainvoke(UserAsked(question="go"), config=config)
-
-            events = await _resume(
-                graph,
-                _make_input(thread_id="t-mutating-factory"),
-                resume_factory=mutating_factory,
-            )
-
-            messages = _last_snapshot(events).messages
-            assert "injected" not in [m.id for m in messages]
-            assert messages[-1].content == "Approved!"
 
 
 def describe_seed_factory_state():

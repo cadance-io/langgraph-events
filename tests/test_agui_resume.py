@@ -760,27 +760,12 @@ def describe_detect_new_frontend_messages():
         def without_an_id():
             def when_the_client_echoes_the_snapshot():
                 async def it_does_not_store_the_echo_again():
-                    graph = EventGraph(
-                        [answer_idless, wait_beside_the_answer],
-                        reducers=[message_reducer()],
-                        checkpointer=MemorySaver(),
-                    )
-                    adapter = AGUIAdapter(
-                        graph=graph,
-                        seed_factory=lambda inp: ChatSaid(
-                            messages=detect_new_frontend_messages(inp, None)
-                        ),
-                        resume_factory=_chat_resume_factory,
-                    )
+                    graph = _chat_graph(answer_idless, wait_beside_the_answer)
+                    adapter = _chat_adapter(graph)
 
                     history: list[Any] = []
                     for turn in ("u1", "u2"):
-                        history.append(UserMessage(id=turn, content=f"say {turn}"))
-                        resume = {} if turn == "u1" else {"command": {"resume": "next"}}
-                        inp = make_run_agent_input(
-                            messages=list(history), forwarded_props=resume
-                        )
-                        events = [e async for e in adapter.stream(inp)]
+                        events = await _chat_turn(adapter, history, turn)
                         snapshots = [
                             e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
                         ]
@@ -801,27 +786,12 @@ def describe_detect_new_frontend_messages():
 
     def when_a_resume_factory_stores_the_result_on_each_turn():
         async def it_stores_only_the_new_messages_on_each_resume_event():
-            graph = EventGraph(
-                [answer, wait_for_reply],
-                reducers=[message_reducer()],
-                checkpointer=MemorySaver(),
-            )
-            adapter = AGUIAdapter(
-                graph=graph,
-                seed_factory=lambda inp: ChatSaid(
-                    messages=detect_new_frontend_messages(inp, None)
-                ),
-                resume_factory=_chat_resume_factory,
-            )
+            graph = _chat_graph(answer, wait_for_reply)
+            adapter = _chat_adapter(graph)
 
             history: list[Any] = []
             for turn in ("u1", "u2", "u3"):
-                history.append(UserMessage(id=turn, content=f"say {turn}"))
-                resume = {} if turn == "u1" else {"command": {"resume": "next"}}
-                inp = make_run_agent_input(
-                    messages=list(history), forwarded_props=resume
-                )
-                events = [e async for e in adapter.stream(inp)]
+                events = await _chat_turn(adapter, history, turn)
                 assert events[-1].type == EventType.RUN_FINISHED
                 history.append(AssistantMessage(id=f"a-{turn}", content="ok"))
 
@@ -887,3 +857,30 @@ def _chat_resume_factory(
     if extract_resume_input(input_data) is None:
         return None
     return ChatSaid(messages=detect_new_frontend_messages(input_data, checkpoint_state))
+
+
+def _chat_graph(*handlers: Any) -> EventGraph:
+    return EventGraph(
+        list(handlers), reducers=[message_reducer()], checkpointer=MemorySaver()
+    )
+
+
+def _chat_adapter(graph: EventGraph) -> AGUIAdapter:
+    return AGUIAdapter(
+        graph=graph,
+        seed_factory=lambda inp: ChatSaid(
+            messages=detect_new_frontend_messages(inp, None)
+        ),
+        resume_factory=_chat_resume_factory,
+    )
+
+
+async def _chat_turn(adapter: AGUIAdapter, history: list[Any], turn: str) -> list[Any]:
+    """Append the user message *turn* to *history*, send it, return the events.
+
+    A turn with an empty *history* starts the thread. A later turn resumes it.
+    """
+    resume = {"command": {"resume": "next"}} if history else {}
+    history.append(UserMessage(id=turn, content=f"say {turn}"))
+    inp = make_run_agent_input(messages=list(history), forwarded_props=resume)
+    return [e async for e in adapter.stream(inp)]
