@@ -2,6 +2,8 @@
 
 Streaming yields events in real-time for live UI updates. All methods have async variants: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`.
 
+A resume stream yields only the events that the resumed run writes. A step can hold a handler that finished and a handler that paused. The resume stream does not yield the finished handler's events again.
+
 ```python
 from langgraph_events import emit_custom, emit_state_snapshot
 from langgraph_events.stream import (

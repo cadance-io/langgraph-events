@@ -2775,6 +2775,8 @@ class EventGraph:
         A chunk marked ``cached`` replays the saved writes of a task that
         finished before a pause. The run that wrote them streamed them, and
         the checkpoint already holds them, so they are not new events.
+        LangGraph also marks a node cache hit ``cached``, but ``_compile``
+        sets no node cache, so here the marker means only that replay.
         """
         events: list[Event] = []
         if isinstance(chunk, dict) and not chunk.get("__metadata__", {}).get("cached"):

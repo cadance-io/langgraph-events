@@ -274,6 +274,12 @@ def _finish_completed(event: Completed) -> Ended:
     return Ended(result=event.result)
 
 
+@on(Started)
+def _end_beside_the_pause(event: Started) -> Ended:
+    """Finishes in the step that ``_pause_at_step_one`` pauses."""
+    return Ended(result="before the pause")
+
+
 def _echo_graph(**kwargs: typing.Any) -> EventGraph:
     """An ``EventGraph`` whose sole handler echoes ``Started`` into ``Ended``."""
     return EventGraph([_echo], **kwargs)
@@ -2796,6 +2802,39 @@ def describe_EventGraph():
 
             assert loads == run_loads + 1
             assert frames[-1].reducers["data_items"] == ["go"]
+
+        def _paused_step_graph(thread_id, **kwargs):
+            """A thread paused in a step where another handler wrote ``Ended``.
+
+            On resume, LangGraph streams that step's saved writes again, marked
+            ``cached``.
+            """
+            graph = EventGraph(
+                [_pause_at_step_one, _end_beside_the_pause, _finish_completed],
+                checkpointer=MemorySaver(),
+                **kwargs,
+            )
+            config = {"configurable": {"thread_id": thread_id}}
+            graph.invoke(Started(data="go"), config=config)
+            return graph, config
+
+        def it_does_not_yield_again_an_event_of_the_paused_step():
+            graph, config = _paused_step_graph("sr-paused-step")
+
+            events = list(graph.stream_resume(Completed(result="done"), config=config))
+
+            assert [e.result for e in events if isinstance(e, Ended)] == ["done"]
+
+        @pytest.mark.asyncio
+        async def it_counts_once_a_reducer_contribution_of_the_paused_step():
+            ended = Reducer("ended", event_type=Ended, fn=lambda e: [e.result])
+            graph, config = _paused_step_graph(
+                "sr-paused-step-reducer", reducers=[ended]
+            )
+
+            frames = await _v2_resume_frames(graph, config)
+
+            assert frames[-1].reducers["ended"] == ["before the pause", "done"]
 
         def it_yields_new_interrupted_during_resume():
             @on(Completed)
