@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Public signatures in `src/` use a precise type in place of `Any`.** The runtime
+  behaviour does not change. A type checker can now report some calls that it accepted
+  before. These signatures became narrower:
+  - `EventGraph(checkpointer=...)` takes `BaseCheckpointSaver | None`.
+  - `EventGraph.get_state()` and `aget_state()` take a `RunnableConfig`. Annotate a
+    config that you build as a dict literal with `RunnableConfig`.
+  - `replay_reducer()` returns the type of the reducer value. For a `ScalarReducer` or a
+    plain `BaseReducer`, that type is `object`.
+  - `Reducer.empty`, `collect()` and `seed()` return `list[Any]`. The same members of
+    `ScalarReducer` return `object`.
+  - `collect_inbound_extras()` takes a pydantic `BaseModel`.
+  - `create_starlette_response()` returns a `StreamingResponse`.
+- **Ruff rule `ANN401` forbids `Any` in a parameter or return type in `src/`.** `Any`
+  stays permitted on `*args` and `**kwargs` that forward to another callable. A kept
+  `Any` must have a `# noqa: ANN401` comment that gives the reason.
+
 ## [0.40.0] - 2026-10-24
 
 ### Added
