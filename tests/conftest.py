@@ -1,7 +1,8 @@
 """Shared fixtures and event classes for the test suite."""
 
 import sys
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, TypeVar
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -26,6 +27,27 @@ SET_NAME_ERRORS = RuntimeError if _WRAPS_SET_NAME_ERRORS else TypeError
 def set_name_cause(error: BaseException) -> BaseException:
     """The error ``__set_name__`` raised, unwrapped on the Pythons that wrap it."""
     return error.__cause__ if _WRAPS_SET_NAME_ERRORS else error
+
+
+_T = TypeVar("_T")
+
+
+class LoadCountingSaver(MemorySaver):
+    """A ``MemorySaver`` that counts each async checkpoint load."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loads = 0
+
+    async def aget_tuple(self, config: Any) -> Any:
+        self.loads += 1
+        return await super().aget_tuple(config)
+
+    async def count_loads(self, run: Awaitable[_T]) -> tuple[_T, int]:
+        """Await *run*. Return its result and the number of loads it did."""
+        before = self.loads
+        result = await run
+        return result, self.loads - before
 
 
 # ---------------------------------------------------------------------------

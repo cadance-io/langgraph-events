@@ -198,43 +198,46 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     return out
 
 
-def merge_frontend_messages(
+def detect_new_frontend_messages(
     input_data: RunAgentInput,
     checkpoint_state: dict[str, Any] | None,
     *,
     reducer_name: str = "messages",
     drop_invalid_tool_calls: bool = True,
 ) -> tuple[BaseMessage, ...]:
-    """Merge frontend AG-UI messages into the existing reducer message list.
+    """Return the frontend AG-UI messages that the thread does not hold yet.
 
-    Reads existing messages from
+    Reads the stored messages from
     ``checkpoint_state["reducers"][reducer_name]`` (empty if missing or
-    ``None``), converts ``input_data.messages`` via
-    :func:`agui_messages_to_langchain`, and merges via langgraph's
-    ``add_messages`` (id-based dedup).
+    ``None``). Converts each message of ``input_data.messages`` whose id is
+    not stored, via :func:`agui_messages_to_langchain`.
 
     A stored message wins over an inbound message with the same id. The
     server owns each message that its ``MessagesSnapshot`` sent, as AG-UI
     defines that event. A client echoes that history back, and an echo can
     be lossy, for example when a part is dropped. So only a message with a
-    new id is converted and added.
+    new id is converted and returned.
+
+    The result does not hold the stored history. Put it on the stored resume
+    event as it is. The message reducer then appends it to the history. A
+    resume event that holds the full history makes each checkpoint grow with
+    the number of resumes times the number of messages. A handler that needs
+    the whole conversation must inject the messages reducer, not read
+    ``event.messages``.
+
+    If two inbound messages have the same id, the result holds the last copy,
+    at the position of the first copy.
 
     Defensive default: malformed tool-call JSON is dropped (with a WARNING).
     Pass ``drop_invalid_tool_calls=False`` for strict parity with upstream.
     """
-    from langgraph.graph.message import add_messages  # noqa: PLC0415
-
     reducers = (checkpoint_state or {}).get("reducers") or {}
-    existing = list(reducers.get(reducer_name) or [])
-    stored_ids = {m.id for m in existing}
+    stored_ids = {m.id for m in reducers.get(reducer_name) or []}
     new = agui_messages_to_langchain(
         [m for m in input_data.messages or [] if m.id not in stored_ids],
         drop_invalid_tool_calls=drop_invalid_tool_calls,
     )
-    # langgraph's add_messages signature accepts dict/tuple/str shapes for
-    # checkpoint-stored messages; our inputs and output are always BaseMessage.
-    merged: list[BaseMessage] = add_messages(existing, new)  # type: ignore[arg-type,assignment]
-    return tuple(merged)
+    return tuple({m.id: m for m in new}.values())
 
 
 def extract_resume_input(input_data: RunAgentInput) -> Any:

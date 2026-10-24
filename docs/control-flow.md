@@ -178,6 +178,8 @@ if state.is_interrupted:
 log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 ```
 
+The resume value must be an `Event`. Another value raises `TypeError` before the graph runs, so the thread stays paused and a later `resume()` can answer it. A handler that pauses two times in one run is resumed two times. After the first resume, the thread is paused again and `get_state(config).is_interrupted` is `True`. Under the default `on_unresumable="raise"`, `resume()` raises [`UnresumableError`](api.md#warnings) only when no registered handler waits for an answer.
+
 See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
 
 ### Ending a pause without answering it — `abandon()`

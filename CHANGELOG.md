@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The async stream yields an `InterruptFrame` for each interrupt that the run leaves
+  pending.** `astream_events()` and `astream_resume()` with `include_llm_tokens` or
+  `include_custom_events` yield these frames after the run, in checkpoint task order.
+  `InterruptFrame.value` is the interrupt payload, for example the `Interrupted` event
+  that a handler returned. Before, a caller loaded the checkpoint after the run to find
+  the interrupts. A run where two handlers pause in one step still loads the checkpoint
+  once after the run, because the handlers can finish in either order. Import the frame
+  from `langgraph_events.stream`. A consumer that handles each unknown stream item as an
+  event must skip the new frame.
+
+### Changed
+
+- **An `AGUIAdapter` turn loads the checkpoint once before the run, not three or four
+  times.** A full checkpoint load revives every stored message, so on a long thread each
+  load is slow. The adapter passes the snapshot that it loaded to `astream_events()` or
+  `astream_resume()`. So the resume-pending check and the reducer seed do not load the
+  checkpoint again. The adapter takes the pending interrupts from the `InterruptFrame`
+  items of the stream. So it does not load the checkpoint after the run, except when two
+  handlers pause in one step (see the `InterruptFrame` entry). A resume that commits client
+  state still loads the checkpoint a second time, because the commit writes a new
+  checkpoint. The LangGraph run still does its own load. The output events do not change.
+- **`astream_resume()` with reducers loads the checkpoint once before the run, not
+  twice.** This applies with `include_reducers` and with `include_llm_tokens` or
+  `include_custom_events`. The resume-pending check and the reducer seed share the load.
+- **An override of `astream_events()` or `astream_resume()` must accept extra keyword
+  arguments and pass them on.** `AGUIAdapter` passes its checkpoint snapshot to these
+  methods in a private keyword argument. An override that does not accept the argument
+  makes each AG-UI turn raise `TypeError`.
+- **A seed or resume factory gets a copy of each reducer value in `checkpoint_state`.**
+  The run seeds its reducer state from the snapshot that the factory reads. So a factory
+  that changes `checkpoint_state["reducers"]` in place changes only its copy. The copy is
+  shallow. Do not change a stored message object in place.
+
+### Removed
+
+- **BREAKING: `merge_frontend_messages` is deleted. Use `detect_new_frontend_messages`.**
+  The old function returned the stored message history plus the new inbound messages. A
+  resume event stored that full list, and lge stores each resume event a second time in
+  `Resumed.value`. So the append-only events channel grew with the number of resumes times
+  the number of messages, and each checkpoint load revived all of them. The new function
+  takes the same arguments and returns only the inbound messages whose id is not stored. A
+  stored message still wins over an inbound message with the same id. Invalid tool calls
+  still drop by default. To migrate, replace
+  `merge_frontend_messages(input_data, checkpoint_state)` with
+  `detect_new_frontend_messages(input_data, checkpoint_state)`. Put the result on the
+  resume event as it is. The message reducer appends it to the history.
+
+  WARNING: after this change, `event.messages` on the resume event holds only the new
+  messages. A handler that reads `event.messages` as the whole conversation then sends
+  only the newest messages, for example to an LLM, with no error. Such a handler must
+  inject the messages reducer instead, with a `messages: list[BaseMessage]` parameter.
+  See [`message_reducer`](docs/reducers.md#message_reducer). A `resume_factory` that
+  needs the full history can read `checkpoint_state["reducers"]["messages"]`. An import
+  of `merge_frontend_messages` raises an `ImportError` that names the replacement. A
+  thread that is already stored keeps its old resume events.
+
+### Fixed
+
+- **A resume with a value that is not an `Event` no longer strands the thread.**
+  `resume()`, `aresume()`, `stream_resume()` and `astream_resume()` now raise `TypeError`
+  before the graph runs. Before, LangGraph saved the bad value in the checkpoint. Each
+  later resume then read the saved value again and raised the same `TypeError`.
+- **A handler that pauses a second time in one run can be resumed again.** Before
+  LangGraph 1.2.13, `StateSnapshot.next` drops a task that holds a saved resume value.
+  The resume check read only `next`, so the next resume raised `UnresumableError`. The
+  check now also reads the pending interrupts of the snapshot. `get_state().is_interrupted`
+  and the `AGUIAdapter` interrupt replay read the pending interrupts in the same way.
+- **A resume no longer streams again the events of the paused step.** Two handlers can
+  run in one step, where one handler writes an event and the other handler pauses. On
+  resume, LangGraph streams the saved writes of the finished handler again. The stream
+  read them as new events. So the stream yielded the event a second time, and the
+  reducer values in `StreamFrame` counted its contribution twice. The `AGUIAdapter` then
+  showed a message without an id twice in the `MessagesSnapshot`, and it mapped the event
+  again. The checkpoint held one copy. Now the stream skips the replayed writes. The run
+  that wrote the event already streamed it.
+- **A message without an id keeps one id while its step is paused.** The message reducer
+  gave the message its id only when the step merged its writes. A paused step saved its
+  write before that merge, so each checkpoint read gave the message a new id. A client
+  that sent the history back then stored the message a second time, because
+  `detect_new_frontend_messages` did not find the id that the client saw. Now
+  `message_reducer()` gives the id when it projects the message, before the write is
+  saved. It sets the id in place on the message object, as `add_messages` does.
+
 ## [0.39.0] - 2026-10-23
 
 ### Removed

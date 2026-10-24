@@ -10,6 +10,7 @@ import pytest
 from conftest import (
     Completed,
     Ended,
+    LoadCountingSaver,
     MessageReceived,
     MessageSent,
     Order,
@@ -25,6 +26,7 @@ from langchain_core.messages import (
 )
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END
+from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
 from langgraph.types import interrupt as lg_interrupt
 
@@ -62,6 +64,7 @@ from langgraph_events import (
 )
 from langgraph_events.stream import (
     CustomEventFrame,
+    InterruptFrame,
     LLMStreamEnd,
     LLMToken,
     LLMToolCallChunk,
@@ -269,6 +272,12 @@ def _pause_at_step_one(event: Started) -> _StepInterrupted:
 def _finish_completed(event: Completed) -> Ended:
     """Resume-side step that turns a ``Completed`` resume value into ``Ended``."""
     return Ended(result=event.result)
+
+
+@on(Started)
+def _end_beside_the_pause(event: Started) -> Ended:
+    """Finishes in the step that ``_pause_at_step_one`` pauses."""
+    return Ended(result="before the pause")
 
 
 def _echo_graph(**kwargs: typing.Any) -> EventGraph:
@@ -2771,6 +2780,62 @@ def describe_EventGraph():
             types = [type(e).__name__ for e in events]
             assert "Ended" in types
 
+        @pytest.mark.asyncio
+        async def it_loads_the_checkpoint_once_more_than_the_run():
+            saver = LoadCountingSaver()
+            graph = EventGraph(
+                [_pause_at_step_one, _finish_completed],
+                checkpointer=saver,
+                reducers=[_data_reducer()],
+            )
+            plain = {"configurable": {"thread_id": "sr-loads-plain"}}
+            config = {"configurable": {"thread_id": "sr-loads"}}
+            for thread in (plain, config):
+                await graph.ainvoke(Started(data="go"), config=thread)
+            _, run_loads = await saver.count_loads(
+                graph.compiled.ainvoke(
+                    LGCommand(resume=Completed(result="done")), config=plain
+                )
+            )
+
+            frames, loads = await saver.count_loads(_v2_resume_frames(graph, config))
+
+            assert loads == run_loads + 1
+            assert frames[-1].reducers["data_items"] == ["go"]
+
+        def _paused_step_graph(thread_id, **kwargs):
+            """A thread paused in a step where another handler wrote ``Ended``.
+
+            On resume, LangGraph streams that step's saved writes again, marked
+            ``cached``.
+            """
+            graph = EventGraph(
+                [_pause_at_step_one, _end_beside_the_pause, _finish_completed],
+                checkpointer=MemorySaver(),
+                **kwargs,
+            )
+            config = {"configurable": {"thread_id": thread_id}}
+            graph.invoke(Started(data="go"), config=config)
+            return graph, config
+
+        def it_does_not_yield_again_an_event_of_the_paused_step():
+            graph, config = _paused_step_graph("sr-paused-step")
+
+            events = list(graph.stream_resume(Completed(result="done"), config=config))
+
+            assert [e.result for e in events if isinstance(e, Ended)] == ["done"]
+
+        @pytest.mark.asyncio
+        async def it_counts_once_a_reducer_contribution_of_the_paused_step():
+            ended = Reducer("ended", event_type=Ended, fn=lambda e: [e.result])
+            graph, config = _paused_step_graph(
+                "sr-paused-step-reducer", reducers=[ended]
+            )
+
+            frames = await _v2_resume_frames(graph, config)
+
+            assert frames[-1].reducers["ended"] == ["before the pause", "done"]
+
         def it_yields_new_interrupted_during_resume():
             @on(Completed)
             def step_two(event: Completed) -> _StepInterrupted:
@@ -2869,6 +2934,87 @@ def describe_EventGraph():
             stream_frames = await _v2_resume_frames(graph, config)
             assert len(stream_frames) > 0
             assert stream_frames[0].reducers["proposal"] == "chosen"
+
+    def describe_interrupt_frames():
+        def _interrupt_values(items):
+            return [i.value for i in items if isinstance(i, InterruptFrame)]
+
+        def when_a_handler_pauses_the_run():
+            @pytest.mark.asyncio
+            async def it_yields_the_pending_interrupt_after_the_run():
+                graph, config = _interruptible_graph("if-seed")
+
+                items = await _adrain(
+                    graph.astream_events(
+                        Started(data="go"), include_custom_events=True, config=config
+                    )
+                )
+
+                assert isinstance(items[-1], InterruptFrame)
+                assert [v.step for v in _interrupt_values(items)] == [1]
+
+        def when_the_run_does_not_pause():
+            @pytest.mark.asyncio
+            async def it_yields_no_interrupt_frame():
+                graph = EventGraph([_echo], checkpointer=MemorySaver())
+                config = {"configurable": {"thread_id": "if-none"}}
+
+                items = await _adrain(
+                    graph.astream_events(
+                        Started(data="go"), include_custom_events=True, config=config
+                    )
+                )
+
+                assert _interrupt_values(items) == []
+
+        def when_the_resume_pauses_again():
+            @pytest.mark.asyncio
+            async def it_yields_only_the_new_interrupt():
+                @on(Completed)
+                def step_two(event: Completed) -> _StepInterrupted:
+                    return _StepInterrupted(step=2)
+
+                graph = EventGraph(
+                    [_pause_at_step_one, step_two], checkpointer=MemorySaver()
+                )
+                config = {"configurable": {"thread_id": "if-resume"}}
+                await graph.ainvoke(Started(data="go"), config=config)
+
+                items = await _adrain(
+                    graph.astream_resume(
+                        Completed(result="next"),
+                        include_custom_events=True,
+                        config=config,
+                    )
+                )
+
+                assert [v.step for v in _interrupt_values(items)] == [2]
+
+        def when_two_handlers_pause_in_one_step():
+            @pytest.mark.asyncio
+            async def it_yields_the_interrupts_in_handler_order():
+                fast_paused = asyncio.Event()
+
+                @on(Started)
+                async def pause_slow(event: Started) -> _StepInterrupted:
+                    await asyncio.wait_for(fast_paused.wait(), timeout=5)
+                    return _StepInterrupted(step=1)
+
+                @on(Started)
+                async def pause_fast(event: Started) -> _StepInterrupted:
+                    fast_paused.set()
+                    return _StepInterrupted(step=2)
+
+                graph = EventGraph([pause_slow, pause_fast], checkpointer=MemorySaver())
+                config = {"configurable": {"thread_id": "if-two"}}
+
+                items = await _adrain(
+                    graph.astream_events(
+                        Started(data="go"), include_custom_events=True, config=config
+                    )
+                )
+
+                assert [v.step for v in _interrupt_values(items)] == [1, 2]
 
     def describe_reflection_loop():
 
@@ -4382,6 +4528,28 @@ def _raw_pause(event: Started) -> None:
     lg_interrupt("raw payload")
 
 
+@on(Started)
+def _pause_twice(event: Started) -> Ended:
+    """Pauses two times in one run of the handler."""
+    lg_interrupt("first")
+    lg_interrupt("second")
+    return Ended(result="went")
+
+
+_RESUME_ENTRYPOINTS = pytest.mark.parametrize(
+    "drive",
+    [
+        lambda graph, value, cfg: graph.resume(value, config=cfg),
+        lambda graph, value, cfg: asyncio.run(graph.aresume(value, config=cfg)),
+        lambda graph, value, cfg: list(graph.stream_resume(value, config=cfg)),
+        lambda graph, value, cfg: asyncio.run(
+            _adrain(graph.astream_resume(value, config=cfg))
+        ),
+    ],
+    ids=["resume", "aresume", "stream_resume", "astream_resume"],
+)
+
+
 class _StartOnA(IntegrationEvent):
     """Seed for `_wait_on_a`, kept distinct from `_StartOnB` so two
     threads_paused_on() threads pause on different classes."""
@@ -4583,6 +4751,40 @@ def describe_on_unresumable():
             v2, cfg = _resumable_pair(MemorySaver(), tid)
             with pytest.raises(UnresumableError):
                 drive(v2, cfg)
+
+    def when_a_resume_value_is_not_an_event():
+        @_RESUME_ENTRYPOINTS
+        def it_keeps_the_thread_resumable(drive):
+            cfg = {"configurable": {"thread_id": "unres-bad-value"}}
+            graph = EventGraph([_waiter, _go_ends], checkpointer=MemorySaver())
+            graph.invoke(Started(data="x"), config=cfg)
+            with pytest.raises(TypeError, match="requires an Event"):
+                drive(graph, "not an event", cfg)
+
+            drive(graph, _Go(), cfg)
+
+            assert graph.get_state(cfg).events.latest(Ended) == Ended(result="went")
+
+    def when_one_handler_pauses_twice():
+        def it_reports_the_second_pause_as_interrupted():
+            cfg = {"configurable": {"thread_id": "unres-pause-twice-state"}}
+            graph = EventGraph([_pause_twice], checkpointer=MemorySaver())
+            graph.invoke(Started(data="x"), config=cfg)
+
+            graph.resume(_Go(), config=cfg)
+
+            assert graph.get_state(cfg).is_interrupted
+
+        @_RESUME_ENTRYPOINTS
+        def it_resumes_the_second_pause(drive):
+            cfg = {"configurable": {"thread_id": "unres-pause-twice"}}
+            graph = EventGraph([_pause_twice], checkpointer=MemorySaver())
+            graph.invoke(Started(data="x"), config=cfg)
+            drive(graph, _Go(), cfg)
+
+            drive(graph, _Go(), cfg)
+
+            assert graph.get_state(cfg).events.latest(Ended) == Ended(result="went")
 
 
 def describe_abandon():

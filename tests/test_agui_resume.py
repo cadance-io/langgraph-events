@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 import pytest
+from ag_ui.core import EventType
 from ag_ui.core.types import (
     ActivityMessage,
     AssistantMessage,
@@ -26,12 +27,28 @@ from ag_ui.core.types import (
 )
 from ag_ui.core.types import SystemMessage as AGUISystemMessage
 from ag_ui.core.types import ToolMessage as AGUIToolMessage
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langgraph.checkpoint.memory import MemorySaver
 
+from langgraph_events import (
+    EventGraph,
+    IntegrationEvent,
+    Interrupted,
+    MessageEvent,
+    message_reducer,
+    on,
+)
 from langgraph_events.agui import (
+    AGUIAdapter,
     agui_messages_to_langchain,
+    detect_new_frontend_messages,
     extract_resume_input,
-    merge_frontend_messages,
 )
 
 
@@ -578,31 +595,59 @@ def describe_extract_resume_input():
 
 
 def describe_merge_frontend_messages():
+    def when_a_caller_imports_it():
+        def it_names_the_replacement_and_the_history_caveat():
+            with pytest.raises(ImportError) as caught:
+                from langgraph_events.agui import (  # noqa: F401
+                    merge_frontend_messages,
+                )
+            message = str(caught.value)
+            assert "detect_new_frontend_messages" in message
+            assert "inject the messages reducer" in message
+
+
+def describe_detect_new_frontend_messages():
     def when_checkpoint_state_is_none():
-        def it_returns_only_converted_input_messages():
+        def it_returns_the_converted_input_messages():
             inp = make_run_agent_input(messages=[UserMessage(id="u1", content="hi")])
-            result = merge_frontend_messages(inp, None)
+            result = detect_new_frontend_messages(inp, None)
             assert len(result) == 1
             assert isinstance(result[0], HumanMessage)
             assert result[0].id == "u1"
 
         def it_returns_a_tuple():
             inp = make_run_agent_input(messages=[UserMessage(id="u1", content="hi")])
-            assert isinstance(merge_frontend_messages(inp, None), tuple)
+            assert isinstance(detect_new_frontend_messages(inp, None), tuple)
 
     def when_checkpoint_has_no_reducers_key():
-        def it_returns_only_converted_input_messages():
+        def it_returns_the_converted_input_messages():
             inp = make_run_agent_input(messages=[UserMessage(id="u1", content="hi")])
-            result = merge_frontend_messages(inp, {})
-            assert len(result) == 1
-            assert result[0].id == "u1"
+            result = detect_new_frontend_messages(inp, {})
+            assert [m.id for m in result] == ["u1"]
 
     def when_checkpoint_has_reducers_but_no_messages_reducer():
-        def it_returns_only_converted_input_messages():
+        def it_returns_the_converted_input_messages():
             inp = make_run_agent_input(messages=[UserMessage(id="u1", content="hi")])
-            result = merge_frontend_messages(inp, {"reducers": {}})
-            assert len(result) == 1
-            assert result[0].id == "u1"
+            result = detect_new_frontend_messages(inp, {"reducers": {}})
+            assert [m.id for m in result] == ["u1"]
+
+    def when_input_echoes_the_stored_history():
+        def it_returns_only_the_new_messages():
+            existing = [
+                HumanMessage(id="u1", content="hi"),
+                AIMessage(id="a1", content="hello"),
+            ]
+            inp = make_run_agent_input(
+                messages=[
+                    UserMessage(id="u1", content="hi"),
+                    AssistantMessage(id="a1", content="hello"),
+                    UserMessage(id="u2", content="next"),
+                ]
+            )
+            result = detect_new_frontend_messages(
+                inp, {"reducers": {"messages": existing}}
+            )
+            assert [(m.id, m.content) for m in result] == [("u2", "next")]
 
     def when_existing_and_new_share_id():
         """A snapshot sends the messages the server owns, and the client echoes them.
@@ -610,51 +655,72 @@ def describe_merge_frontend_messages():
         The server copy stays. An echo can be lossy, for example a dropped part.
         """
 
-        def it_keeps_the_stored_message():
+        def it_returns_no_message():
             existing = [HumanMessage(id="u1", content="old")]
             inp = make_run_agent_input(messages=[UserMessage(id="u1", content="new")])
-            result = merge_frontend_messages(inp, {"reducers": {"messages": existing}})
-            assert len(result) == 1
-            assert result[0].content == "old"
+            result = detect_new_frontend_messages(
+                inp, {"reducers": {"messages": existing}}
+            )
+            assert result == ()
 
         def with_an_echo_of_a_stored_file_handle():
-            def _merge() -> Any:
+            def it_logs_no_file_source_warning(caplog):
                 block = {"type": "image", "file_id": "file-42"}
                 existing = [HumanMessage(id="u1", content=[block])]
                 source = FileSource(value="file-42")
                 echo = UserMessage(id="u1", content=[ImagePart(source=source)])
                 inp = make_run_agent_input(messages=[echo])
-                return merge_frontend_messages(
-                    inp, {"reducers": {"messages": existing}}
-                )
-
-            def it_keeps_the_block():
-                [out] = _merge()
-                assert out.content == [{"type": "image", "file_id": "file-42"}]
-
-            def it_logs_no_file_source_warning(caplog):
-                _merge()
+                detect_new_frontend_messages(inp, {"reducers": {"messages": existing}})
                 assert not any("file source" in r.message for r in caplog.records)
 
+    def when_a_stored_message_has_no_id():
+        def it_returns_every_input_message():
+            existing = [HumanMessage(content="no id")]
+            inp = make_run_agent_input(messages=[UserMessage(id="u1", content="hi")])
+            result = detect_new_frontend_messages(
+                inp, {"reducers": {"messages": existing}}
+            )
+            assert [m.id for m in result] == ["u1"]
+
+    def when_input_repeats_an_id():
+        def it_returns_the_last_copy_at_the_first_position():
+            inp = make_run_agent_input(
+                messages=[
+                    UserMessage(id="u1", content="first"),
+                    UserMessage(id="u2", content="other"),
+                    UserMessage(id="u1", content="last"),
+                ]
+            )
+            result = detect_new_frontend_messages(inp, None)
+            assert [(m.id, m.content) for m in result] == [
+                ("u1", "last"),
+                ("u2", "other"),
+            ]
+
     def when_input_messages_are_empty():
-        def it_returns_existing_messages_unchanged():
+        def it_returns_no_message():
             existing = [HumanMessage(id="u1", content="kept")]
             inp = make_run_agent_input()
-            result = merge_frontend_messages(inp, {"reducers": {"messages": existing}})
-            assert len(result) == 1
-            assert result[0].id == "u1"
-            assert result[0].content == "kept"
+            result = detect_new_frontend_messages(
+                inp, {"reducers": {"messages": existing}}
+            )
+            assert result == ()
 
     def when_reducer_name_is_overridden():
-        def it_pulls_from_the_named_reducer():
+        def it_skips_the_messages_of_the_named_reducer():
             existing = [HumanMessage(id="u1", content="kept")]
-            inp = make_run_agent_input(messages=[UserMessage(id="u2", content="new")])
-            result = merge_frontend_messages(
+            inp = make_run_agent_input(
+                messages=[
+                    UserMessage(id="u1", content="kept"),
+                    UserMessage(id="u2", content="new"),
+                ]
+            )
+            result = detect_new_frontend_messages(
                 inp,
                 {"reducers": {"chat": existing}},
                 reducer_name="chat",
             )
-            assert [m.id for m in result] == ["u1", "u2"]
+            assert [m.id for m in result] == ["u2"]
 
     def when_drop_invalid_tool_calls_is_default():
         def it_drops_invalid_tool_calls_silently():
@@ -669,7 +735,7 @@ def describe_merge_frontend_messages():
                 ],
             )
             inp = make_run_agent_input(messages=[msg])
-            result = merge_frontend_messages(inp, None)
+            result = detect_new_frontend_messages(inp, None)
             assert result == ()
 
     def when_drop_invalid_tool_calls_is_false():
@@ -686,4 +752,135 @@ def describe_merge_frontend_messages():
             )
             inp = make_run_agent_input(messages=[msg])
             with pytest.raises(json.JSONDecodeError):
-                merge_frontend_messages(inp, None, drop_invalid_tool_calls=False)
+                detect_new_frontend_messages(inp, None, drop_invalid_tool_calls=False)
+
+    def when_the_paused_step_writes_a_message():
+        """The step pauses, so its saved write holds the message before the merge."""
+
+        def without_an_id():
+            def when_the_client_echoes_the_snapshot():
+                async def it_does_not_store_the_echo_again():
+                    graph = _chat_graph(answer_idless, wait_beside_the_answer)
+                    adapter = _chat_adapter(graph)
+
+                    history: list[Any] = []
+                    for turn in ("u1", "u2"):
+                        events = await _chat_turn(adapter, history, turn)
+                        snapshots = [
+                            e for e in events if e.type == EventType.MESSAGES_SNAPSHOT
+                        ]
+                        history = list(snapshots[-1].messages)
+
+                    assert [m.content for m in history] == [
+                        "say u1",
+                        "ok",
+                        "say u2",
+                        "ok",
+                    ]
+                    values = await graph.compiled.aget_state(
+                        {"configurable": {"thread_id": "t"}}
+                    )
+                    assert [m.id for m in values.values["messages"]] == [
+                        m.id for m in history
+                    ]
+
+    def when_a_resume_factory_stores_the_result_on_each_turn():
+        async def it_stores_only_the_new_messages_on_each_resume_event():
+            graph = _chat_graph(answer, wait_for_reply)
+            adapter = _chat_adapter(graph)
+
+            history: list[Any] = []
+            for turn in ("u1", "u2", "u3"):
+                events = await _chat_turn(adapter, history, turn)
+                assert events[-1].type == EventType.RUN_FINISHED
+                history.append(AssistantMessage(id=f"a-{turn}", content="ok"))
+
+            state = await graph.aget_state({"configurable": {"thread_id": "t"}})
+            stored = [[m.id for m in e.messages] for e in state.events.filter(ChatSaid)]
+            assert stored == [["u1"], ["u2"], ["u3"]]
+            values = await graph.compiled.aget_state(
+                {"configurable": {"thread_id": "t"}}
+            )
+            assert [m.id for m in values.values["messages"]] == [
+                "u1",
+                "a-u1",
+                "u2",
+                "a-u2",
+                "u3",
+                "a-u3",
+            ]
+
+
+class ChatSaid(IntegrationEvent, MessageEvent):
+    messages: tuple[BaseMessage, ...] = ()
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {}
+
+
+class ChatAnswered(IntegrationEvent, MessageEvent):
+    message: AIMessage = None  # type: ignore[assignment]
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {}
+
+
+class ReplyAwaited(Interrupted):
+    def agui_dict(self) -> dict[str, Any]:
+        return {}
+
+
+@on(ChatSaid)
+def answer(event: ChatSaid) -> ChatAnswered:
+    reply_id = f"a-{event.messages[-1].id}"
+    return ChatAnswered(message=AIMessage(id=reply_id, content="ok"))
+
+
+@on(ChatAnswered)
+def wait_for_reply(event: ChatAnswered) -> ReplyAwaited:
+    return ReplyAwaited()
+
+
+@on(ChatSaid)
+def answer_idless(event: ChatSaid) -> ChatAnswered:
+    return ChatAnswered(message=AIMessage(content="ok"))
+
+
+@on(ChatSaid)
+def wait_beside_the_answer(event: ChatSaid) -> ReplyAwaited:
+    return ReplyAwaited()
+
+
+def _chat_resume_factory(
+    input_data: RunAgentInput, checkpoint_state: dict[str, Any] | None
+) -> ChatSaid | None:
+    if extract_resume_input(input_data) is None:
+        return None
+    return ChatSaid(messages=detect_new_frontend_messages(input_data, checkpoint_state))
+
+
+def _chat_graph(*handlers: Any) -> EventGraph:
+    return EventGraph(
+        list(handlers), reducers=[message_reducer()], checkpointer=MemorySaver()
+    )
+
+
+def _chat_adapter(graph: EventGraph) -> AGUIAdapter:
+    return AGUIAdapter(
+        graph=graph,
+        seed_factory=lambda inp: ChatSaid(
+            messages=detect_new_frontend_messages(inp, None)
+        ),
+        resume_factory=_chat_resume_factory,
+    )
+
+
+async def _chat_turn(adapter: AGUIAdapter, history: list[Any], turn: str) -> list[Any]:
+    """Append the user message *turn* to *history*, send it, return the events.
+
+    A turn with an empty *history* starts the thread. A later turn resumes it.
+    """
+    resume = {"command": {"resume": "next"}} if history else {}
+    history.append(UserMessage(id=turn, content=f"say {turn}"))
+    inp = make_run_agent_input(messages=list(history), forwarded_props=resume)
+    return [e async for e in adapter.stream(inp)]

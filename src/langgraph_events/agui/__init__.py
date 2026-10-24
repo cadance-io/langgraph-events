@@ -1,5 +1,7 @@
 """AG-UI adapter layer for langgraph-events."""
 
+from typing import Any
+
 from langgraph_events.agui._adapter import AGUIAdapter
 from langgraph_events.agui._context import MapperContext
 from langgraph_events.agui._events import (
@@ -28,8 +30,8 @@ from langgraph_events.agui._protocols import (
 )
 from langgraph_events.agui._resume import (
     agui_messages_to_langchain,
+    detect_new_frontend_messages,
     extract_resume_input,
-    merge_frontend_messages,
 )
 from langgraph_events.agui._tools import (
     build_langchain_tools,
@@ -39,6 +41,29 @@ from langgraph_events.agui._transport import (
     create_starlette_response,
     encode_sse_stream,
 )
+
+# --- Removed names ------------------------------------------------------
+# Each import of a removed name raises ``ImportError`` with its migration.
+# Names listed here are intentionally absent from ``__all__``.
+_REMOVED: dict[str, str] = {
+    "merge_frontend_messages": (
+        "'merge_frontend_messages' was removed. Use "
+        "'detect_new_frontend_messages'. It returns only the inbound messages "
+        "that the thread does not store, not the full history. A handler that "
+        "reads 'event.messages' as the whole conversation must inject the "
+        "messages reducer instead."
+    ),
+}
+
+
+def __getattr__(name: str) -> Any:
+    migration = _REMOVED.get(name)
+    if migration is None:
+        raise AttributeError(
+            f"module 'langgraph_events.agui' has no attribute {name!r}"
+        )
+    raise ImportError(migration)
+
 
 __all__ = [
     "AGUI_EXTRAS_KEY",
@@ -62,8 +87,8 @@ __all__ = [
     "agui_messages_to_langchain",
     "build_langchain_tools",
     "create_starlette_response",
+    "detect_new_frontend_messages",
     "detect_new_tool_results",
     "encode_sse_stream",
     "extract_resume_input",
-    "merge_frontend_messages",
 ]

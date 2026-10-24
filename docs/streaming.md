@@ -2,6 +2,8 @@
 
 Streaming yields events in real-time for live UI updates. All methods have async variants: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`.
 
+A resume stream yields only the events that the resumed run writes. A step can hold a handler that finished and a handler that paused. The resume stream does not yield the finished handler's events again.
+
 ```python
 from langgraph_events import emit_custom, emit_state_snapshot
 from langgraph_events.stream import (
@@ -43,6 +45,7 @@ async for item in graph.astream_events(
 | `include_reducers=True` | Reducer snapshots alongside events | `StreamFrame(event, reducers, changed_reducers)` |
 | `include_llm_tokens=True` | Real-time LLM token deltas | `LLMToken(run_id, content)`, `LLMStreamEnd(run_id, message_id)` |
 | `include_custom_events=True` | Custom event passthrough | `CustomEventFrame(name, data)`, `StateSnapshotFrame(data)` |
+| `include_llm_tokens=True` or `include_custom_events=True` | The interrupts that the run leaves pending, after the run, in checkpoint task order | `InterruptFrame(value)` |
 
 ## Emission Helpers
 
