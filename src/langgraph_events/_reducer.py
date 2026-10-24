@@ -277,7 +277,7 @@ class ScalarReducer(BaseReducer):
             last = event
         return self.fn(last) if last is not SKIP else SKIP
 
-    def has_contributions(self, result: object) -> bool:
+    def has_contributions(self, result: Any) -> bool:  # noqa: ANN401 - a subclass narrows this to its own collect() result
         return result is not SKIP
 
     def output_type(self) -> object:

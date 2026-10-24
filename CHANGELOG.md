@@ -12,11 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Public signatures in `src/` use a precise type in place of `Any`.** The runtime
   behaviour does not change. A type checker can now report some calls that it accepted
   before. These signatures became narrower:
-  - `EventGraph(checkpointer=...)` takes `BaseCheckpointSaver | None`.
   - `EventGraph.get_state()` and `aget_state()` take a `RunnableConfig`. Annotate a
     config that you build as a dict literal with `RunnableConfig`.
   - `replay_reducer()` returns the type of the reducer value. For a `ScalarReducer` or a
     plain `BaseReducer`, that type is `object`.
+  - `BaseReducer.empty`, `collect()`, `seed()`, `state_annotation()` and `output_type()`
+    return `object`. A subclass can still declare a narrower return type.
   - `Reducer.empty`, `collect()` and `seed()` return `list[Any]`. The same members of
     `ScalarReducer` return `object`.
   - `collect_inbound_extras()` takes a pydantic `BaseModel`.

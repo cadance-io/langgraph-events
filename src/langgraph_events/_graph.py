@@ -12,6 +12,7 @@ from collections.abc import Mapping as _Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, TypeVar, cast
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
@@ -83,10 +84,10 @@ if TYPE_CHECKING:
     )
 
     from langchain_core.runnables import RunnableConfig
-    from langgraph.checkpoint.base import BaseCheckpointSaver, CheckpointTuple
+    from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import Interrupt, StateSnapshot
+    from langgraph.types import Checkpointer, Interrupt, StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
@@ -1154,7 +1155,7 @@ class EventGraph:
         max_rounds: int = 100,
         reducers: list[BaseReducer] | None = None,
         services: Sequence[Any] | Mapping[str, Any] | None = None,
-        checkpointer: BaseCheckpointSaver | None = None,
+        checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
@@ -1547,7 +1548,7 @@ class EventGraph:
                     )
 
     def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
-        if self._checkpointer is None:
+        if not isinstance(self._checkpointer, BaseCheckpointSaver):
             raise ValueError(f"{method}() requires a checkpointer")
         return self._checkpointer
 
