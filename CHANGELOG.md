@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-10-24
+
 ### Added
 
 - **The async stream yields an `InterruptFrame` for each interrupt that the run leaves
@@ -1533,7 +1535,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.39.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/cadance-io/langgraph-events/compare/v0.39.0...v0.40.0
 [0.39.0]: https://github.com/cadance-io/langgraph-events/compare/v0.38.0...v0.39.0
 [0.38.0]: https://github.com/cadance-io/langgraph-events/compare/v0.37.0...v0.38.0
 [0.37.0]: https://github.com/cadance-io/langgraph-events/compare/v0.36.0...v0.37.0
