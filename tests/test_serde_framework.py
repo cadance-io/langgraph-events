@@ -7,12 +7,15 @@ The fixtures hold bytes that real old releases wrote. Regenerate them with
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 from typing import Any
 
 import ormsgpack
 import pytest
+from langchain_core.messages import SystemMessage
 
+import langgraph_events
 from langgraph_events import (
     Cancelled,
     DomainEvent,
@@ -22,8 +25,12 @@ from langgraph_events import (
     Interrupted,
     Namespace,
     RunPausedOnDeadline,
+    SystemEvent,
+    SystemPromptSet,
 )
+from langgraph_events._event import is_abstract_event
 from langgraph_events.serde import Migration, NamespaceAwareSerde
+from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
 from langgraph_events.serde._jsonplus import EXT_INTERRUPT
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -34,6 +41,29 @@ class ClientNS(Namespace):
 
     class Ping(DomainEvent):
         n: int = 0
+
+
+def _releases() -> list[str]:
+    folders = (FIXTURES / "framework_events").iterdir()
+    return sorted(
+        (f.name for f in folders),
+        key=lambda name: tuple(int(n) for n in name[1:].split("_")),
+    )
+
+
+def _exported_framework_classes() -> set[str]:
+    exported = (getattr(langgraph_events, name) for name in langgraph_events.__all__)
+    return {
+        cls.__qualname__
+        for cls in exported
+        if isinstance(cls, type)
+        and (issubclass(cls, SystemEvent) or cls is SystemPromptSet)
+        and not is_abstract_event(cls)
+    }
+
+
+def _kebab(qualname: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "-", qualname).lower()
 
 
 def _stored(release: str) -> dict[str, tuple[str, bytes]]:
@@ -93,6 +123,8 @@ EXCEPTION = "ValueError('boom')"
 
 RAISED = {"handler": "work", "source_event": Cancelled(), "exception": EXCEPTION}
 
+PROMPT = {"message": SystemMessage(content="Be terse.")}
+
 V0_40_0 = {
     "Abandoned": ("Abandoned", {"reason": "stale", "discarded": "Approval"}),
     "Cancelled": ("Cancelled", {}),
@@ -117,6 +149,7 @@ V0_40_0 = {
     "MaxRoundsExceeded": ("MaxRoundsExceeded", {"rounds": 7}),
     "Resumed": ("Resumed", {"value": Cancelled(), "interrupted": Interrupted()}),
     "RunPaused": ("RunPausedOnDeadline", {"elapsed_seconds": 2.5}),
+    "SystemPromptSet": ("SystemPromptSet", PROMPT),
     "Unresumable": ("Unresumable", {"resume_value": "Approval"}),
 }
 
@@ -132,13 +165,27 @@ V0_24_0 = {
             "MaxRoundsExceeded",
             "Resumed",
             "RunPaused",
+            "SystemPromptSet",
             "Unresumable",
         )
     },
-    "HandlerRaised-no-key": ("HandlerRaised", RAISED),
+    "HandlerRaised": ("HandlerRaised", RAISED),
 }
 
-EXPECTED = {"v0_40_0": V0_40_0, "v0_24_0": V0_24_0}
+# The release this branch will be. Its own bytes revive unchanged.
+V0_41_0 = {
+    **{
+        label: V0_40_0[label]
+        for label in V0_40_0
+        if label
+        not in {"HandlerRaised-deadline", "HandlerRaised-no-deadline", "RunPaused"}
+    },
+    "HandlerAbandonedOnDeadline": ("HandlerAbandonedOnDeadline", RAISED),
+    "HandlerRaised": ("HandlerRaised", RAISED),
+    "RunPausedOnDeadline": ("RunPausedOnDeadline", {"elapsed_seconds": 2.5}),
+}
+
+EXPECTED = {"v0_41_0": V0_41_0, "v0_40_0": V0_40_0, "v0_24_0": V0_24_0}
 
 STORED = [(release, label) for release in EXPECTED for label in EXPECTED[release]]
 
@@ -283,3 +330,38 @@ def describe_framework_migrations():
                     ValueError, match=r"lge already migrates .*'HandlerRaised'"
                 ):
                     NamespaceAwareSerde([transform], namespaces=[ClientNS])
+
+    def describe_fixture_gate():
+        def it_stores_every_exported_framework_class_in_the_newest_release():
+            stored = {
+                _identity(data)[1] for _, data in _stored(_releases()[-1]).values()
+            }
+            assert _exported_framework_classes() - stored == set()
+
+        @pytest.mark.parametrize(
+            "operation",
+            [op for m in FRAMEWORK_MIGRATIONS for op in m.operations],
+            ids=lambda op: op.qualname,
+        )
+        def it_stores_the_source_of_each_framework_migration(operation):
+            stored = {
+                tuple(_identity(data))
+                for release in _releases()
+                for _, data in _stored(release).values()
+            }
+            assert (operation.module, operation.qualname) in stored
+
+        @pytest.mark.parametrize(
+            "migration", FRAMEWORK_MIGRATIONS, ids=lambda m: m.name
+        )
+        def it_names_each_framework_migration_by_the_rule(migration):
+            (operation,) = migration.operations
+            kind = {
+                "RenameEvent": "rename",
+                "AddField": "fill",
+                "TransformFields": "transform",
+                "SplitEvent": "split",
+            }[type(operation).__name__]
+            assert re.fullmatch(
+                rf"lge-\d+\.\d+-{_kebab(operation.qualname)}-{kind}", migration.name
+            )
