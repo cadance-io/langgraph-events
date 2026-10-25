@@ -13,7 +13,7 @@ from langgraph_events import (
     Interrupted,
     Reflection,
     Resumed,
-    RunPaused,
+    RunPausedOnDeadline,
     on,
 )
 from langgraph_events.serde import NamespaceAwareSerde
@@ -123,7 +123,7 @@ def describe_overview():
     def when_the_run_is_paused():
         def it_reports_paused_status():
             graph = EventGraph([Order.Place])
-            log = EventLog([Order.Place(customer_id="c1"), RunPaused()])
+            log = EventLog([Order.Place(customer_id="c1"), RunPausedOnDeadline()])
 
             assert "status: paused" in graph.reflect(log).overview()
 

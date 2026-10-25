@@ -13,6 +13,8 @@ from langgraph_events import (
     DomainEvent,
     Event,
     Halted,
+    HandlerAbandoned,
+    HandlerAbandonedOnDeadline,
     HandlerRaised,
     IntegrationEvent,
     Interrupted,
@@ -21,6 +23,7 @@ from langgraph_events import (
     Namespace,
     Resumed,
     RunPaused,
+    RunPausedOnDeadline,
     SystemEvent,
     on_namespace_finalize,
 )
@@ -675,6 +678,30 @@ def describe_SystemEvent():
             keeps the design decision visible.
             """
             assert not issubclass(RunPaused, Halted)
+
+
+def describe_cause_bases():
+    def describe_RunPaused():
+        def when_built_directly():
+            def it_raises_TypeError():
+                with pytest.raises(TypeError, match="RunPaused names no cause"):
+                    RunPaused(elapsed_seconds=1.0)
+
+        def when_built_as_RunPausedOnDeadline():
+            def it_is_a_RunPaused():
+                assert isinstance(RunPausedOnDeadline(elapsed_seconds=1.0), RunPaused)
+
+    def describe_HandlerAbandoned():
+        def when_built_directly():
+            def it_raises_TypeError():
+                with pytest.raises(TypeError, match="HandlerAbandoned names no cause"):
+                    HandlerAbandoned(handler="work")
+
+        def when_built_as_HandlerAbandonedOnDeadline():
+            def it_is_a_HandlerRaised():
+                assert isinstance(
+                    HandlerAbandonedOnDeadline(handler="work"), HandlerRaised
+                )
 
 
 def describe_on_namespace_finalize():

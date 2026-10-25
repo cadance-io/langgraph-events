@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`HandlerAbandoned`, `HandlerAbandonedOnDeadline` and `RunPausedOnDeadline` name the
+  cause of a give-up or of a pause as a type.** A `RetryPolicy` that gives up because the
+  next backoff would cross the run's `deadline=` emits a `HandlerAbandonedOnDeadline`. It
+  is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` catcher still runs for it.
+  An exhausted attempt budget still emits a plain `HandlerRaised`. A deadline pause emits a
+  `RunPausedOnDeadline`, which is a `RunPaused`.
+- **Every `NamespaceAwareSerde` applies lge's own read migrations for its framework
+  events.** They apply whatever `namespaces=` and `events=` you pass. A checkpoint that
+  0.40.0 wrote revives with the new types:
+  - a `HandlerRaised` with `abandoned_for_deadline=True` revives as a
+    `HandlerAbandonedOnDeadline`;
+  - a `HandlerRaised` with `abandoned_for_deadline=False` revives as a plain
+    `HandlerRaised`;
+  - a `RunPaused` revives as a `RunPausedOnDeadline`.
+
+  A framework migration never relabels a write.
+
 ### Changed
+
+- **BREAKING: `HandlerRaised.abandoned_for_deadline` is removed.** There is no deprecated
+  property. Replace `event.abandoned_for_deadline` with
+  `isinstance(event, HandlerAbandonedOnDeadline)`. A test that builds
+  `HandlerRaised(abandoned_for_deadline=True)` must build `HandlerAbandonedOnDeadline(...)`.
+- **BREAKING: `RunPaused` cannot be built directly.** `RunPaused(...)` raises `TypeError`.
+  Build `RunPausedOnDeadline(...)` instead. `isinstance(e, RunPaused)` and
+  `log.latest(RunPaused)` still match every pause. `HandlerAbandoned` also raises
+  `TypeError` when built directly.
+- **BREAKING: the `legacy_write=True` guards judge the client's migrations only.** lge's
+  framework migrations do not count. They never relabel a write, so `legacy_write=True`
+  still constructs. A framework event is always written under its own live identity, so
+  an old release cannot read `HandlerAbandonedOnDeadline` or `RunPausedOnDeadline`. Drain
+  in-flight threads before a rollback to 0.40.0.
+- **BREAKING: a client subclass of `HandlerRaised` stored by 0.40.0 does not revive on its
+  own.** The framework split keys on `HandlerRaised` only. The stored subclass payload
+  carries the `abandoned_for_deadline` key, and its class no longer declares it. Drop the
+  key with a `@transform_fields` on the subclass:
+
+  ```python
+  def drop_deadline_flag(kw: dict) -> dict:
+      kw.pop("abandoned_for_deadline", None)
+      return kw
+
+
+  @transform_fields(drop_deadline_flag)
+  class Escalated(HandlerRaised): ...
+  ```
 
 - **Public signatures in `src/` use a precise type in place of `Any`.** The runtime
   behaviour does not change. A type checker can now report some calls that it accepted

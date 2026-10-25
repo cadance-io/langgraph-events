@@ -37,12 +37,13 @@ from langgraph_events._event import (
     Cancelled,
     Event,
     Halted,
+    HandlerAbandonedOnDeadline,
     HandlerRaised,
     HandlerRetried,
     InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
-    RunPaused,
+    RunPausedOnDeadline,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
@@ -238,7 +239,7 @@ def make_router_node(
                     "_round": current_round,
                 }
             started_at = configurable[_DEADLINE_STARTED_AT_KEY]
-            paused = RunPaused(
+            paused = RunPausedOnDeadline(
                 elapsed_seconds=time.monotonic() - started_at,
             )
             return pad_causes(
@@ -435,19 +436,14 @@ def _make_handler_raised(
     event: Event,
     exc: Exception,
     *,
-    abandoned_for_deadline: bool = False,
+    kind: type[HandlerRaised] = HandlerRaised,
 ) -> HandlerRaised:
     """Build a ``HandlerRaised`` event for a caught declared exception.
 
     The traceback is kept: this is the terminal failure, the one people debug
     from.  Its retry breadcrumbs drop theirs — see :func:`_detach_traceback`.
     """
-    return HandlerRaised(
-        handler=meta.name,
-        source_event=event,
-        exception=exc,
-        abandoned_for_deadline=abandoned_for_deadline,
-    )
+    return kind(handler=meta.name, source_event=event, exception=exc)
 
 
 def _detach_traceback(exc: BaseException) -> None:
@@ -509,8 +505,8 @@ def _next_delay_or_give_up(
     router only checks the deadline *between* rounds, so an in-flight backoff
     cannot be preempted, and burning what is left of the budget on an attempt
     that almost certainly cannot finish either just delays the pause.  Giving
-    up here lets the run reach the router and emit ``RunPaused`` promptly.
-    The raise is tagged ``abandoned_for_deadline=True`` so it stays
+    up here lets the run reach the router and emit ``RunPausedOnDeadline``
+    promptly. The give-up is a ``HandlerAbandonedOnDeadline``, so it stays
     distinguishable from an exhausted attempt budget.
 
     Shared by both dispatch paths; only the sleep call itself differs between
@@ -527,7 +523,7 @@ def _next_delay_or_give_up(
     delay = policy.delay_for(attempt, exc)
     if deadline is not None and time.monotonic() + delay >= deadline:
         new_events.append(
-            _make_handler_raised(meta, event, exc, abandoned_for_deadline=True)
+            _make_handler_raised(meta, event, exc, kind=HandlerAbandonedOnDeadline)
         )
         return None
     if policy.observe == "emit":

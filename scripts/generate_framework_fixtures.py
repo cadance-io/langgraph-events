@@ -10,6 +10,10 @@ The output feeds ``tests/test_serde_framework.py``. Each file holds the
 msgpack bytes that ``dumps_typed`` wrote for one event. The file stem is
 the event's label. The bytes stay binary so that no text scanner reads
 them as a secret.
+
+``tests/fixtures/framework_events/v0_24_0`` comes from v0.24.0 in the same
+way. That release predates ``abandoned_for_deadline``, so it holds a
+``HandlerRaised`` payload without the key.
 """
 
 from __future__ import annotations

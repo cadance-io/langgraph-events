@@ -16,6 +16,8 @@ from langgraph_events import (
     Command,
     DomainEvent,
     EventGraph,
+    HandlerAbandoned,
+    HandlerAbandonedOnDeadline,
     HandlerRaised,
     HandlerRetried,
     IntegrationEvent,
@@ -694,10 +696,17 @@ def describe_retry_scope():
                 assert not log.has(HandlerRetried)
                 assert log.count(HandlerRaised) == 1
 
-            def it_marks_the_raise_abandoned_for_deadline(slept, overshooting):
+            def it_emits_a_HandlerAbandonedOnDeadline(slept, overshooting):
                 graph, _ = overshooting
                 log = graph.invoke(Item(n=1), deadline=_budget())
-                assert log.latest(HandlerRaised).abandoned_for_deadline is True
+                assert isinstance(log.latest(HandlerRaised), HandlerAbandonedOnDeadline)
+
+            def it_runs_the_HandlerRaised_catcher(slept, overshooting):
+                # The run continues after a deadline give-up, so the
+                # @on(HandlerRaised, exception=FlakyError) catcher fires.
+                graph, _ = overshooting
+                log = graph.invoke(Item(n=1), deadline=_budget())
+                assert log.latest(Recovered) == Recovered(reason="gave up")
 
             async def it_gives_up_before_awaiting_a_sleep(slept, overshooting):
                 # ``ainvoke`` routes through ``_process_events_async``, whose
@@ -707,7 +716,7 @@ def describe_retry_scope():
                 assert attempts.calls == 1
                 assert slept == []
                 assert not log.has(HandlerRetried)
-                assert log.latest(HandlerRaised).abandoned_for_deadline is True
+                assert isinstance(log.latest(HandlerRaised), HandlerAbandonedOnDeadline)
 
         def when_the_next_backoff_fits_inside_it():
             def it_retries_the_whole_budget(slept):
@@ -726,17 +735,19 @@ def describe_retry_scope():
                 log = graph.invoke(Item(n=1), deadline=_budget())
                 assert attempts.calls == 3
                 assert slept == [0.1, 0.2]
-                assert log.latest(HandlerRaised).abandoned_for_deadline is False
+                assert type(log.latest(HandlerRaised)) is HandlerRaised
+                assert not isinstance(log.latest(HandlerRaised), HandlerAbandoned)
 
         def when_no_deadline_is_set():
-            def it_leaves_the_raise_unmarked(slept, overshooting):
+            def it_emits_a_plain_HandlerRaised(slept, overshooting):
                 # Same policy, no ``deadline=``: the 60s backoff is slept and
                 # the budget runs out the ordinary way.
                 graph, attempts = overshooting
                 log = graph.invoke(Item(n=1))
                 assert attempts.calls == 5
                 assert slept == [60.0] * 4
-                assert log.latest(HandlerRaised).abandoned_for_deadline is False
+                assert type(log.latest(HandlerRaised)) is HandlerRaised
+                assert not isinstance(log.latest(HandlerRaised), HandlerAbandoned)
 
     def describe_invariants():
         def it_evaluates_the_predicate_once_per_dispatch(slept):

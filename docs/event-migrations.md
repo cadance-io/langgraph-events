@@ -146,7 +146,7 @@ Semantics:
 - `migrate_from(transform=...)` takes exactly one historic qualname per decorator, the same rule as `backfill=`. The two can sit on one decorator. The transform runs first.
 
 !!! warning "Transforms cannot ride `legacy_write` (enforced)"
-    A transform runs on read and has no inverse. A write relabelled under the oldest historic identity would carry the current shape, which the old release's class does not accept. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when any transform is declared, in either stage. Drain in-flight threads before the cutover, or accept read-only compatibility.
+    A transform runs on read and has no inverse. A write relabelled under the oldest historic identity would carry the current shape, which the old release's class does not accept. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when you declare any transform, in either stage. lge's own [framework migrations](#framework-events) do not count. Drain in-flight threads before the cutover, or accept read-only compatibility.
 
 !!! note "The revive gate sends `None` placeholders"
     A v3 baseline records the fields a class dropped. `assert_all_baselined_revive` sends `None` for each of them, so the transform runs through the real read path. A transform that reads a dropped value, for example `kw.pop("legacy_flag").upper()`, raises on `None` and fails the gate. The failure line says so. Guard the value in the transform, or pin a real payload with `synthesize_legacy_payload`.
@@ -221,7 +221,7 @@ Semantics:
 - **There is no dotted discriminator path.** A nested value normally arrives revived, so `result.status` means `getattr`. Under `LANGGRAPH_STRICT_MSGPACK=true`, or when the value's module is not in `allowed_msgpack_modules`, the same stored bytes arrive as a plain `dict`. A path resolver would have to try both, and a deployment that changes the allowlist would change which branch fires. The author's callable owns the access instead. A `KeyError` there is ordinary Python, and the traceback names that code.
 
 !!! warning "Splits cannot ride `legacy_write` (enforced)"
-    A split runs on read and has no inverse. An old release has no class for the target. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when any split is declared. Drain in-flight threads before the cutover, or accept read-only compatibility.
+    A split runs on read and has no inverse. An old release has no class for the target. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when you declare any split. lge's own [framework migrations](#framework-events) do not count. Drain in-flight threads before the cutover, or accept read-only compatibility.
 
 !!! note "The revive gate sends `None` placeholders"
     `assert_all_baselined_revive` sends `None` for every required field of the source, and for every recorded field it dropped. Return `None` from `select` when the discriminating value is absent or `None`. The gate then proves the source still constructs. A `select` that reads the placeholder, for example `kw["result"]["status"]`, raises and fails the gate. The failure line says so. Pin each branch with real values through `synthesize_legacy_payload`, as above.
@@ -364,6 +364,38 @@ Strict mode demotes unrecognised classes to raw kwargs `dict` instead of malform
 - Per-serde allowlist: `NamespaceAwareSerde(..., allowed_msgpack_modules=[("module", "ClassName"), ...])`. Use in production for fine-grained scoping.
 
 Strict mode does NOT raise at the serde boundary. For "fail at deserialization, not first access" semantics, use `replay_reducer` to rebuild from event truth.
+
+## Framework events
+
+lge owns the read migrations for its own framework events, such as `HandlerRaised` and `RunPaused`. Every `NamespaceAwareSerde` applies them, whatever `namespaces=` and `events=` you pass. You do not declare them.
+
+| Name | Stored payload | Revives as |
+|---|---|---|
+| `lge-0.41-handler-raised-split` | `HandlerRaised` with `abandoned_for_deadline=True` | `HandlerAbandonedOnDeadline`, without the key |
+| `lge-0.41-handler-raised-split` | `HandlerRaised` with `abandoned_for_deadline=False` | `HandlerRaised`, without the key |
+| `lge-0.41-handler-raised-split` | `HandlerRaised` without the key | `HandlerRaised`, unchanged |
+| `lge-0.41-run-paused-split` | `RunPaused` | `RunPausedOnDeadline` |
+
+A framework migration never relabels a write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
+
+WARNING: an old release cannot read a framework event type that it does not have, such as `HandlerAbandonedOnDeadline`. Drain in-flight threads before you roll back to an older release.
+
+A framework split keys on the framework class only. A subclass of `HandlerRaised` that you declared has its own identity, so the split does not apply to it. If 0.40.0 stored your subclass, its payload carries the `abandoned_for_deadline` key. Drop the key with a `@transform_fields` on your subclass:
+
+```python
+from langgraph_events import HandlerRaised
+from langgraph_events.serde import transform_fields
+
+
+def drop_deadline_flag(kw: dict) -> dict:
+    kw.pop("abandoned_for_deadline", None)
+    return kw
+
+
+@transform_fields(drop_deadline_flag)
+class Escalated(HandlerRaised):
+    note: str = ""
+```
 
 ## What is NOT migrated
 

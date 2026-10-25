@@ -17,11 +17,13 @@ from langgraph_events import (
     Cancelled,
     DomainEvent,
     Event,
+    HandlerAbandonedOnDeadline,
+    HandlerRaised,
     Interrupted,
     Namespace,
-    RunPaused,
+    RunPausedOnDeadline,
 )
-from langgraph_events.serde import Migration, NamespaceAwareSerde, _jsonplus
+from langgraph_events.serde import Migration, NamespaceAwareSerde
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -58,28 +60,14 @@ def _written_identity(serde: NamespaceAwareSerde, event: Event) -> list[str]:
 
 EXCEPTION = "ValueError('boom')"
 
+RAISED = {"handler": "work", "source_event": Cancelled(), "exception": EXCEPTION}
+
 V0_40_0 = {
     "Abandoned": ("Abandoned", {"reason": "stale", "discarded": "Approval"}),
     "Cancelled": ("Cancelled", {}),
     "Halted": ("Halted", {}),
-    "HandlerRaised-deadline": (
-        "HandlerRaised",
-        {
-            "handler": "work",
-            "source_event": Cancelled(),
-            "exception": EXCEPTION,
-            "abandoned_for_deadline": True,
-        },
-    ),
-    "HandlerRaised-no-deadline": (
-        "HandlerRaised",
-        {
-            "handler": "work",
-            "source_event": Cancelled(),
-            "exception": EXCEPTION,
-            "abandoned_for_deadline": False,
-        },
-    ),
+    "HandlerRaised-deadline": ("HandlerAbandonedOnDeadline", RAISED),
+    "HandlerRaised-no-deadline": ("HandlerRaised", RAISED),
     "HandlerRetried": (
         "HandlerRetried",
         {
@@ -97,9 +85,31 @@ V0_40_0 = {
     ),
     "MaxRoundsExceeded": ("MaxRoundsExceeded", {"rounds": 7}),
     "Resumed": ("Resumed", {"value": Cancelled(), "interrupted": Interrupted()}),
-    "RunPaused": ("RunPaused", {"elapsed_seconds": 2.5}),
+    "RunPaused": ("RunPausedOnDeadline", {"elapsed_seconds": 2.5}),
     "Unresumable": ("Unresumable", {"resume_value": "Approval"}),
 }
+
+# v0.24.0 predates the deadline flag, so its HandlerRaised has no key.
+V0_24_0 = {
+    **{
+        label: V0_40_0[label]
+        for label in (
+            "Cancelled",
+            "Halted",
+            "Interrupted",
+            "InvariantViolated",
+            "MaxRoundsExceeded",
+            "Resumed",
+            "RunPaused",
+            "Unresumable",
+        )
+    },
+    "HandlerRaised-no-key": ("HandlerRaised", RAISED),
+}
+
+EXPECTED = {"v0_40_0": V0_40_0, "v0_24_0": V0_24_0}
+
+STORED = [(release, label) for release in EXPECTED for label in EXPECTED[release]]
 
 
 @pytest.fixture
@@ -107,58 +117,55 @@ def client_serde() -> NamespaceAwareSerde:
     return NamespaceAwareSerde(namespaces=[ClientNS])
 
 
-@pytest.fixture
-def a_framework_split(monkeypatch):
-    def bump(kw: dict[str, Any]) -> tuple[type, dict[str, Any]]:
-        return RunPaused, {**kw, "elapsed_seconds": 99.0}
-
-    split = Migration.split_event(
-        "test-stand-in", source=RunPaused, select=bump, targets=(RunPaused,)
-    )
-    monkeypatch.setattr(_jsonplus, "FRAMEWORK_MIGRATIONS", (split,), raising=False)
-
-
 def describe_framework_migrations():
     def describe_stored_framework_events():
-        def when_v0_40_0_wrote_them():
-            def it_expects_every_stored_entry():
-                assert sorted(V0_40_0) == sorted(_stored("v0_40_0"))
+        @pytest.mark.parametrize("release", sorted(EXPECTED))
+        def it_expects_every_stored_entry(release):
+            assert sorted(EXPECTED[release]) == sorted(_stored(release))
 
-            @pytest.mark.parametrize("label", sorted(V0_40_0))
-            def it_revives_each_one_in_a_client_serde(client_serde, label):
-                revived = _revived(client_serde, "v0_40_0", label)
-                name, fields = V0_40_0[label]
-                assert type(revived).__name__ == name
-                assert _fields(revived) == fields
+        @pytest.mark.parametrize(("release", "label"), STORED)
+        def it_revives_each_one_in_a_client_serde(client_serde, release, label):
+            revived = _revived(client_serde, release, label)
+            name, fields = EXPECTED[release][label]
+            assert type(revived).__name__ == name
+            assert _fields(revived) == fields
 
-    def describe_reading():
-        def when_lge_declares_a_split():
-            def it_applies_it_in_a_client_serde(a_framework_split, client_serde):
-                revived = _revived(client_serde, "v0_40_0", "RunPaused")
-                assert revived == RunPaused(elapsed_seconds=99.0)
+    def describe_round_trip():
+        @pytest.mark.parametrize(
+            "event",
+            [
+                HandlerAbandonedOnDeadline(handler="work", source_event=Cancelled()),
+                HandlerRaised(handler="work", source_event=Cancelled()),
+                RunPausedOnDeadline(elapsed_seconds=2.5),
+            ],
+            ids=lambda event: type(event).__name__,
+        )
+        def it_revives_what_it_writes(client_serde, event):
+            assert client_serde.loads_typed(client_serde.dumps_typed(event)) == event
 
     def describe_writing():
-        def when_lge_declares_a_split():
-            def it_keeps_the_live_identity(a_framework_split, client_serde):
-                assert _written_identity(client_serde, RunPaused()) == [
-                    "langgraph_events._event",
-                    "RunPaused",
-                ]
+        def it_keeps_the_live_identity(client_serde):
+            event = HandlerAbandonedOnDeadline(handler="work")
+            assert _written_identity(client_serde, event) == [
+                "langgraph_events._event",
+                "HandlerAbandonedOnDeadline",
+            ]
 
     def describe_legacy_write():
         def when_only_lge_declares_a_split():
-            def it_constructs(a_framework_split):
+            def it_constructs():
                 NamespaceAwareSerde(namespaces=[ClientNS], legacy_write=True)
 
-            def it_keeps_the_live_identity(a_framework_split):
+            def it_keeps_the_live_identity():
                 serde = NamespaceAwareSerde(namespaces=[ClientNS], legacy_write=True)
-                assert _written_identity(serde, RunPaused()) == [
+                event = HandlerAbandonedOnDeadline(handler="work")
+                assert _written_identity(serde, event) == [
                     "langgraph_events._event",
-                    "RunPaused",
+                    "HandlerAbandonedOnDeadline",
                 ]
 
         def when_the_client_declares_its_own_split():
-            def it_refuses_to_construct(a_framework_split):
+            def it_refuses_to_construct():
                 split = Migration.split_event(
                     source=ClientNS.Ping,
                     select=lambda kw: None,

@@ -720,7 +720,11 @@ class Unresumable(Halted):
 
 
 class RunPaused(SystemEvent):
-    """Soft pause emitted by the router when a per-run deadline expires.
+    """Soft pause emitted by the router between dispatch rounds.
+
+    ``RunPaused`` is the base class. It names no cause, so it cannot be built
+    directly. The router emits a subclass that names the cause, such as
+    :class:`RunPausedOnDeadline`. Catch ``RunPaused`` to see every pause.
 
     Distinct from :class:`Halted` — *not* terminal across runs.  The router
     advances the cursor past this event so a fresh ``/run`` on the same
@@ -746,6 +750,17 @@ class RunPaused(SystemEvent):
     """
 
     elapsed_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if type(self) is RunPaused:
+            raise TypeError(
+                "RunPaused names no cause. Build one of its subclasses, "
+                "such as RunPausedOnDeadline."
+            )
+
+
+class RunPausedOnDeadline(RunPaused):
+    """Soft pause emitted by the router when the run's ``deadline=`` expired."""
 
 
 class Interrupted(SystemEvent):
@@ -804,12 +819,13 @@ class HandlerRaised(SystemEvent):
     - ``handler``: name of the handler that raised.
     - ``source_event``: the event the raising handler was processing.
     - ``exception``: the caught exception instance, traceback intact.
-    - ``abandoned_for_deadline``: ``True`` when a ``RetryPolicy`` still had
-      attempts left but the next backoff would have crossed the run's
-      ``deadline=``, so the retry loop gave up early. ``False`` for every
-      other raise — no policy, out-of-scope exception, or a genuinely
-      exhausted attempt budget. Lets an operator tell "ran out of time"
-      from "ran out of tries".
+
+    An exhausted attempt budget, an exception outside the policy's ``on=``,
+    and a handler with no policy each emit a plain ``HandlerRaised``. A
+    ``RetryPolicy`` that gives up with attempts left emits a
+    :class:`HandlerAbandoned` subclass that names the cause. Use
+    ``isinstance(e, HandlerAbandonedOnDeadline)`` to tell "ran out of time"
+    from "ran out of tries".
 
     This is the *terminal* failure, so it keeps its traceback — the framework
     retains exactly one live traceback per failing invocation, and this is it.
@@ -824,7 +840,29 @@ class HandlerRaised(SystemEvent):
     handler: str = ""
     source_event: Event | None = None
     exception: Exception | None = None
-    abandoned_for_deadline: bool = False
+
+
+class HandlerAbandoned(HandlerRaised):
+    """A ``RetryPolicy`` gave up while it still had attempts left.
+
+    The run's pause budget refused the next backoff wait. Each subclass
+    names the cause. Catch ``HandlerRaised`` to see every give-up, or catch
+    a subclass to see one cause only.
+    """
+
+    def __post_init__(self) -> None:
+        if type(self) is HandlerAbandoned:
+            raise TypeError(
+                "HandlerAbandoned names no cause. Build one of its subclasses, "
+                "such as HandlerAbandonedOnDeadline."
+            )
+
+
+class HandlerAbandonedOnDeadline(HandlerAbandoned):
+    """The next backoff wait would land on or past the run's ``deadline=``.
+
+    The run continues to the router, so every ``HandlerRaised`` catcher runs.
+    """
 
 
 class HandlerRetried(SystemEvent):
