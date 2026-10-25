@@ -23,6 +23,8 @@ from langgraph_events import (
     IntegrationEvent,
     Interrupted,
     Namespace,
+    RunPaused,
+    RunPausedOnDeadline,
     Scatter,
     SystemEvent,
     on,
@@ -312,6 +314,26 @@ def describe_scatter_must_declare_concrete_types():
 
                 with pytest.raises(TypeError, match=r"Scatter"):
                     EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_Scatter_of_an_abstract_framework_event():
+            def it_raises_TypeError_at_build():
+                @on(_ScatHost.Trigger)
+                def burst(event: _ScatHost.Trigger) -> Scatter[RunPaused]:
+                    return Scatter([RunPausedOnDeadline()])
+
+                with pytest.raises(TypeError, match=r"Scatter\[RunPaused\]"):
+                    EventGraph([_ScatHost.Persist, burst])
+
+        def when_return_is_an_abstract_framework_event():
+            # A base in a plain return annotation is legitimate: the handler
+            # returns a concrete subclass, and the return contract checks it
+            # with isinstance, as it does for ``-> SystemEvent``.
+            def it_builds_the_graph():
+                @on(_ScatHost.Trigger)
+                def pause(event: _ScatHost.Trigger) -> RunPaused:
+                    return RunPausedOnDeadline()
+
+                EventGraph([_ScatHost.Persist, pause])  # no raise
 
         def when_return_is_Scatter_of_TypeVar():
             def it_raises_TypeError_at_build():

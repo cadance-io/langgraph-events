@@ -1,8 +1,20 @@
 """Read migrations for the stored shapes of lge's own framework events.
 
 Every ``NamespaceAwareSerde`` applies them, whatever ``namespaces=`` or
-``events=`` the client passes. They never relabel a write, so the
-``legacy_write`` guards ignore them.
+``events=`` the client passes. They are not relabelled on write: a framework
+event is always written under its own live identity. So the ``legacy_write``
+guards ignore them, and an old release cannot read a new framework type.
+
+Each migration holds one operation. Its name is
+``lge-<major>.<minor>-<source>-<kind>``:
+
+- ``<major>.<minor>`` is the first release that reads the new shape.
+- ``<source>`` is the source class qualname in kebab case, for example
+  ``handler-raised`` for ``HandlerRaised``.
+- ``<kind>`` is ``rename``, ``fill``, ``transform`` or ``split``.
+
+``tests/test_serde_framework.py`` enforces the rule. It also requires a
+stored fixture for the source identity of each operation.
 """
 
 from __future__ import annotations

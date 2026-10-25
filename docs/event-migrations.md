@@ -376,13 +376,18 @@ lge owns the read migrations for its own framework events, such as `HandlerRaise
 | `lge-0.41-handler-raised-split` | `HandlerRaised` without the key | `HandlerRaised`, unchanged |
 | `lge-0.41-run-paused-split` | `RunPaused` | `RunPausedOnDeadline` |
 
-A framework migration never relabels a write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
+lge's framework migrations are not relabelled on write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
 
 `HandlerAbandonedOnSignal` and `RunPausedOnSignal` have no framework migration. No release before 0.41.0 wrote them.
 
-v0.40.0 cannot revive the four types that 0.41.0 adds: `HandlerAbandonedOnDeadline`, `HandlerAbandonedOnSignal`, `RunPausedOnDeadline` and `RunPausedOnSignal`. To keep a rollback path, a client on 0.40.0 can pass a forward-compat migration list. Each `Migration.rename` maps one new identity in `langgraph_events._event` onto `HandlerRaised` or `RunPaused`. A `Migration.transform_fields` on `HandlerAbandonedOnDeadline` can set `abandoned_for_deadline=True`. 0.41.0 refuses that list with `ValueError`, because each old name is a live class. Remove the list when you upgrade.
+!!! warning "Only `NamespaceAwareSerde` applies these migrations"
+    With LangGraph's plain `JsonPlusSerializer`, an old `RunPaused` or `HandlerRaised` revives as `None`, with no error. `EventGraph(checkpointer=...)` keeps the serializer of the checkpointer. Only `EventGraph.from_namespaces` puts a `NamespaceAwareSerde` on it. Otherwise, pass `serde=NamespaceAwareSerde(...)` to the checkpointer yourself.
 
-A framework split keys on the framework class only. A subclass of `HandlerRaised` that you declared has its own identity, so the split does not apply to it. If 0.40.0 stored your subclass, its payload carries the `abandoned_for_deadline` key. Drop the key with a `@transform_fields` on your subclass:
+lge refuses a migration of your own on an identity that lge migrates. For example, a `split_event` or a `transform_fields` on `HandlerRaised` raises `ValueError` at construction. A class-stage transform runs before lge's split, so it could drop the field that the split reads. Declare the migration on a subclass of your own, which has its own identity.
+
+### Your own subclass of a framework event
+
+A framework split keys on the framework class only. A subclass of `HandlerRaised` that you declared has its own identity, so the split does not apply to it. If 0.40.0 stored your subclass, its payload carries the `abandoned_for_deadline` key. Drop the key with a `@transform_fields` on your subclass. If your subclass can carry `True`, map the value to a field of your own before you pop it.
 
 ```python
 from langgraph_events import HandlerRaised
@@ -398,6 +403,46 @@ def drop_deadline_flag(kw: dict) -> dict:
 class Escalated(HandlerRaised):
     note: str = ""
 ```
+
+### Rolling back to an older release
+
+An older release has no class for a new framework type, such as `HandlerAbandonedOnDeadline`. It fails on the first read with `Cannot revive langgraph_events._event.RunPausedOnDeadline`.
+
+Draining in-flight threads before the rollback does not prevent this. The `events` channel is written whole at each checkpoint. So a thread that takes one step on the new release stores its whole history under the new identities, old events included. `rewrite_store()` also rewrites the old events.
+
+Before you roll back, give the serde of the older release read migrations that map each new type back to its old shape. For a rollback from 0.41.0 to 0.40.0:
+
+```python
+# On 0.40.0, the release you roll back to. 0.41.0 refuses this list, because
+# its renames shadow live classes: delete it when you upgrade again.
+from langgraph_events import HandlerRaised, RunPaused
+from langgraph_events.serde import Migration, NamespaceAwareSerde
+
+LGE = "langgraph_events._event"
+
+
+def flag_deadline(kw: dict) -> dict:
+    return {**kw, "abandoned_for_deadline": True}
+
+
+ROLLBACK_FROM_041 = (
+    Migration.rename(
+        old_module=LGE, old_qualname="HandlerAbandonedOnDeadline", to=HandlerRaised
+    ),
+    Migration.transform_fields(
+        module=LGE, qualname="HandlerAbandonedOnDeadline", transform=flag_deadline
+    ),
+    Migration.rename(
+        old_module=LGE, old_qualname="HandlerAbandonedOnSignal", to=HandlerRaised
+    ),
+    Migration.rename(old_module=LGE, old_qualname="RunPausedOnDeadline", to=RunPaused),
+    Migration.rename(old_module=LGE, old_qualname="RunPausedOnSignal", to=RunPaused),
+)
+
+serde = NamespaceAwareSerde(ROLLBACK_FROM_041, namespaces=[Orders])
+```
+
+On 0.40.0, a `HandlerAbandonedOnDeadline` then revives as `HandlerRaised(abandoned_for_deadline=True)`, and a `HandlerAbandonedOnSignal` revives as a plain `HandlerRaised`. A `RunPausedOnDeadline` and a `RunPausedOnSignal` each revive as `RunPaused`.
 
 ## What is NOT migrated
 

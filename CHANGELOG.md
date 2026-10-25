@@ -46,8 +46,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `HandlerRaised`;
   - a `RunPaused` revives as a `RunPausedOnDeadline`.
 
-  A framework migration never relabels a write. `HandlerAbandonedOnSignal` and
-  `RunPausedOnSignal` need no migration, because no earlier release wrote them.
+  lge's framework migrations are not relabelled on write. Only `NamespaceAwareSerde`
+  applies them. With LangGraph's plain `JsonPlusSerializer`, an old `RunPaused` or
+  `HandlerRaised` revives as `None`, with no error. `EventGraph(checkpointer=...)` keeps
+  the serializer of the checkpointer. Only `EventGraph.from_namespaces` puts a
+  `NamespaceAwareSerde` on it.
+
+  `HandlerAbandonedOnSignal` and `RunPausedOnSignal` need no migration, because no earlier
+  release wrote them.
 
 ### Changed
 
@@ -59,13 +65,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Build `RunPausedOnDeadline(...)` or `RunPausedOnSignal(...)` instead.
   `isinstance(e, RunPaused)` and `log.latest(RunPaused)` still match every pause.
   `HandlerAbandoned` also raises `TypeError` when built directly.
+- **BREAKING: `Event`, `DomainEvent`, `IntegrationEvent` and `SystemEvent` cannot be built
+  directly.** Each one raises `TypeError` and names its concrete subclasses. These classes,
+  `RunPaused` and `HandlerAbandoned` share one rule: an abstract event class names no
+  concrete event. `Scatter[RunPaused]` and `Scatter[HandlerAbandoned]` now fail at graph
+  build, as `Scatter[DomainEvent]` already did. A plain return annotation such as
+  `-> RunPaused` still builds, because the handler returns a concrete subclass.
 - **BREAKING: the `legacy_write=True` guards judge the client's migrations only.** lge's
-  framework migrations do not count. They never relabel a write, so `legacy_write=True`
-  still constructs. A framework event is always written under its own live identity.
+  framework migrations do not count, so `legacy_write=True` still constructs. A framework
+  event is always written under its own live identity.
+- **BREAKING: a rollback to 0.40.0 needs read migrations on 0.40.0.** 0.40.0 cannot read
+  the four new types `HandlerAbandonedOnDeadline`, `HandlerAbandonedOnSignal`,
+  `RunPausedOnDeadline` and `RunPausedOnSignal`. It fails with
+  `Cannot revive langgraph_events._event.RunPausedOnDeadline`. Draining in-flight threads
+  does not prevent this. The `events` channel is written whole at each checkpoint, so a
+  thread that takes one step on this release stores its whole history under the new
+  identities. `rewrite_store()` also rewrites the old events. Before you roll back, give
+  the 0.40.0 serde migrations that map each new type back to its 0.40.0 shape. "Rolling
+  back to an older release" in `docs/event-migrations.md` shows the list.
+- **BREAKING: a client migration on an identity that lge migrates raises `ValueError`.**
+  For example, `Migration.split_event(source=HandlerRaised, ...)` or
+  `Migration.transform_fields(target=HandlerRaised, ...)` now fails at serde construction,
+  with "lge already migrates ...". A class-stage transform runs before lge's split, so it
+  could drop the field that the split reads. Declare the migration on a subclass of your
+  own.
 - **BREAKING: a client subclass of `HandlerRaised` stored by 0.40.0 does not revive on its
   own.** The framework split keys on `HandlerRaised` only. The stored subclass payload
   carries the `abandoned_for_deadline` key, and its class no longer declares it. Drop the
-  key with a `@transform_fields` on the subclass:
+  key with a `@transform_fields` on the subclass. If your subclass can carry `True`, map
+  the value to a field of your own before you pop it:
 
   ```python
   def drop_deadline_flag(kw: dict) -> dict:
@@ -77,11 +105,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class Escalated(HandlerRaised): ...
   ```
 
-- **v0.40.0 cannot revive the four new event types.** They are
-  `HandlerAbandonedOnDeadline`, `HandlerAbandonedOnSignal`, `RunPausedOnDeadline` and
-  `RunPausedOnSignal`. A client that needs a rollback path can add a forward-compat rename
-  list on 0.40.0. See
-  [Framework events](docs/event-migrations.md#framework-events).
 - **Public signatures in `src/` use a precise type in place of `Any`.** The runtime
   behaviour does not change. A type checker can now report some calls that it accepted
   before. These signatures became narrower:
