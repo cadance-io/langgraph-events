@@ -364,17 +364,135 @@ def _target_identity(
     return module, qualname
 
 
+@dataclass(frozen=True)
+class MigrationTables:
+    """The per-purpose lookup tables one serde reads through.
+
+    :func:`_flatten_and_validate` builds them from a migration list, so
+    every table is already validated. Keys are ``(module, qualname)``.
+    """
+
+    rename_table: dict[tuple[str, str], tuple[str, str]]
+    addfield_table: dict[tuple[str, str], tuple[AddField, ...]]
+    origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]]
+    transform_table: dict[tuple[str, str], TransformFields]
+    origin_transform_table: dict[tuple[str, str], TransformFields]
+    split_table: dict[tuple[str, str], SplitEvent]
+
+    def _named(self) -> tuple[tuple[str, dict[tuple[str, str], Any]], ...]:
+        return (
+            ("rename", self.rename_table),
+            ("AddField", self.addfield_table),
+            ("origin AddField", self.origin_addfield_table),
+            ("TransformFields", self.transform_table),
+            ("origin TransformFields", self.origin_transform_table),
+            ("SplitEvent", self.split_table),
+        )
+
+    def merged(self, other: MigrationTables) -> MigrationTables:
+        """These tables plus *other*. Refuses a key that both declare.
+
+        The read path runs one entry per key and table, so a second entry
+        would be ignored in silence.
+        """
+        for (kind, mine), (_, theirs) in zip(
+            self._named(), other._named(), strict=True
+        ):
+            for module, qualname in mine.keys() & theirs.keys():
+                raise ValueError(
+                    f"Duplicate {kind} migration on {module}:{qualname!r}. "
+                    f"Each identity may carry at most one."
+                )
+        return MigrationTables(
+            *(
+                {**mine, **theirs}
+                for (_, mine), (_, theirs) in zip(
+                    self._named(), other._named(), strict=True
+                )
+            )
+        )
+
+    def refuse_legacy_write(self) -> None:
+        """Raise ``ValueError`` when ``legacy_write=True`` cannot invert
+        these tables for an old reader."""
+        # Origin-scoped fills are the fan-in signal, and a fan-in cannot
+        # ride legacy_write: writes would relabel EVERY instance under the
+        # oldest historic identity, collapsing the per-origin distinction
+        # the fills exist to preserve — and the old releases' classes do
+        # not accept the back-filled field anyway.
+        if self.origin_addfield_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with origin-scoped "
+                "back-fills (migrate_from(backfill=...) or AddField keyed "
+                "on a historic identity). Drain in-flight threads before "
+                "the consolidation cutover, or drop legacy_write and accept "
+                "read-only compatibility. See 'Consolidating N classes into "
+                "one' in docs/event-migrations.md."
+            )
+        # A transform has no inverse. A write relabelled under the oldest
+        # historic identity would carry the CURRENT shape, which the old
+        # release's class does not accept, and the transform only runs on
+        # read.
+        if self.transform_table or self.origin_transform_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a TransformFields "
+                "(transform_fields, migrate_from(transform=...) or a "
+                "hand-authored TransformFields). A transform runs on read and "
+                "has no inverse, so an old release cannot read what this one "
+                "writes. Drain in-flight threads before the cutover, or drop "
+                "legacy_write and accept read-only compatibility. See "
+                "'Dropping, merging or retyping a field' in "
+                "docs/event-migrations.md."
+            )
+        # A split has no inverse either: an old release has no class for
+        # the target, and select only runs on read.
+        if self.split_table:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a SplitEvent "
+                "(split_event, Migration.split_event or a hand-authored "
+                "SplitEvent). A split runs on read and has no inverse, so an "
+                "old release cannot read what this one writes. Drain "
+                "in-flight threads before the cutover, or drop legacy_write "
+                "and accept read-only compatibility. See 'Splitting one "
+                "stored event into two on a payload value' in "
+                "docs/event-migrations.md."
+            )
+
+    def migrate(
+        self, module: str, qualname: str, kwargs: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Run the read-side migration rule and return ``(module, qualname,
+        kwargs)`` for the constructor.
+
+        Order: the origin stage (transform, then origin-scoped fills), the
+        rename, then the class stage (transform, then split, then
+        class-global fills). A transform runs before the fills of its
+        stage, and its return value replaces the kwargs. A split can change
+        the identity, so the class fills applied after it are those of the
+        RESULTING identity. Origin fills run before class fills so the
+        precedence is: explicit payload value > origin-scoped fill >
+        class-global fill (``setdefault`` never overwrites). An op lives in
+        exactly one table — origin keys are rename sources, post keys are
+        live identities, disjoint by validation — and each table is read at
+        its own stage, so no op is ever applied twice.
+        """
+        key = (module, qualname)
+        kwargs = _transform_kwargs(self.origin_transform_table.get(key), kwargs)
+        _inject_addfields(self.origin_addfield_table.get(key, ()), kwargs)
+        module, qualname = _resolve_rename(module, qualname, self.rename_table)
+        key = (module, qualname)
+        kwargs = _transform_kwargs(self.transform_table.get(key), kwargs)
+        module, qualname, kwargs = _split_kwargs(
+            self.split_table.get(key), module, qualname, kwargs
+        )
+        _inject_addfields(self.addfield_table.get((module, qualname), ()), kwargs)
+        return module, qualname, kwargs
+
+
 def _flatten_and_validate(
     migrations: Sequence[Migration],
     scope: Mapping[tuple[str, str], type] | None = None,
-) -> tuple[
-    dict[tuple[str, str], tuple[str, str]],
-    dict[tuple[str, str], tuple[AddField, ...]],
-    dict[tuple[str, str], tuple[AddField, ...]],
-    dict[tuple[str, str], TransformFields],
-    dict[tuple[str, str], TransformFields],
-    dict[tuple[str, str], SplitEvent],
-]:
+) -> MigrationTables:
     """Collapse all operations into per-purpose lookup tables.
 
     Rename ops fold into a direct historic→final map (chain ``A→B→C``
@@ -452,7 +570,7 @@ def _flatten_and_validate(
         transform_ops, rename_table, scope
     )
     split_table = _bucket_splits(split_ops, rename_table, scope)
-    return (
+    return MigrationTables(
         rename_table,
         addfield_table,
         origin_addfield_table,
@@ -951,43 +1069,6 @@ def _split_kwargs(
             ),
         )
     return target.__module__, target.__qualname__, new_kwargs
-
-
-def _apply_identity_migrations(
-    module: str,
-    qualname: str,
-    kwargs: dict[str, Any],
-    rename_table: dict[tuple[str, str], tuple[str, str]],
-    addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-    origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-    transform_table: dict[tuple[str, str], TransformFields],
-    origin_transform_table: dict[tuple[str, str], TransformFields],
-    split_table: dict[tuple[str, str], SplitEvent],
-) -> tuple[str, str, dict[str, Any]]:
-    """Run the read-side migration rule and return ``(module, qualname,
-    kwargs)`` for the constructor.
-
-    Order: the origin stage (transform, then origin-scoped fills), the
-    rename, then the class stage (transform, then split, then class-global
-    fills). A transform runs before the fills of its stage, and its return
-    value replaces the kwargs. A split can change the identity, so the
-    class fills applied after it are those of the RESULTING identity.
-    Origin fills run before class fills so the precedence is: explicit
-    payload value > origin-scoped fill > class-global fill (``setdefault``
-    never overwrites). An op lives in exactly one table — origin keys are
-    rename sources, post keys are live identities, disjoint by validation
-    — and each table is read at its own stage, so no op is ever applied
-    twice.
-    """
-    kwargs = _transform_kwargs(origin_transform_table.get((module, qualname)), kwargs)
-    _inject_addfields(origin_addfield_table.get((module, qualname), ()), kwargs)
-    module, qualname = _resolve_rename(module, qualname, rename_table)
-    kwargs = _transform_kwargs(transform_table.get((module, qualname)), kwargs)
-    module, qualname, kwargs = _split_kwargs(
-        split_table.get((module, qualname)), module, qualname, kwargs
-    )
-    _inject_addfields(addfield_table.get((module, qualname), ()), kwargs)
-    return module, qualname, kwargs
 
 
 _MIGRATE_FROM_ATTR = "__lge_migrate_from__"

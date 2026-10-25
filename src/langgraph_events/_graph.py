@@ -27,15 +27,14 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerRaised,
-    IntegrationEvent,
     Interrupted,
     Invariant,
     InvariantViolated,
     Namespace,
     Scatter,
-    SystemEvent,
     Unresumable,
     _iter_nested_outcomes,
+    is_abstract_event,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import (
@@ -160,14 +159,6 @@ class ReturnContract(NamedTuple):
     """Human-readable origin of the contract, used in error messages."""
 
 
-_ABSTRACT_EVENT_BASES: tuple[type, ...] = (
-    Event,
-    DomainEvent,
-    IntegrationEvent,
-    SystemEvent,
-)
-
-
 def _scatter_event_types(scatter_alias: object) -> list[type[Event]]:
     """Extract Event types from a parameterized ``Scatter[X]`` alias.
 
@@ -209,10 +200,11 @@ def _raise_empty_scatter(fn: Callable[..., Any], offending: str) -> None:
     """Reject a Scatter annotation that contributes no concrete event types.
 
     Bare ``Scatter``, ``Scatter[Any]``, ``Scatter[TypeVar]``, and
-    ``Scatter[<abstract base>]`` (Event/DomainEvent/IntegrationEvent/
-    SystemEvent) all bypass build-time privacy enforcement because the
-    resolved target set is empty or non-discriminating. Raise at build time
-    so users can't paper over a privacy violation by widening the annotation.
+    ``Scatter[<abstract event>]`` (see ``is_abstract_event``, for example
+    DomainEvent or RunPaused) all bypass build-time privacy enforcement
+    because the resolved target set is empty or non-discriminating. Raise at
+    build time so users can't paper over a privacy violation by widening the
+    annotation.
     """
     handler_name = getattr(fn, "__name__", "handler")
     cmd: type[Command] | None = getattr(fn, "_inline_command", None)
@@ -280,7 +272,7 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
             _raise_empty_scatter(fn, "bare `Scatter`")
         elif typing.get_origin(arg) is Scatter:
             members = _scatter_event_types(arg)
-            if not members or any(m in _ABSTRACT_EVENT_BASES for m in members):
+            if not members or any(is_abstract_event(m) for m in members):
                 _raise_empty_scatter(fn, f"`{_format_scatter_repr(arg)}`")
             scatter_types.extend(members)
         elif isinstance(arg, type) and issubclass(arg, Event):

@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Build `RunPausedOnDeadline(...)` instead. `isinstance(e, RunPaused)` and
   `log.latest(RunPaused)` still match every pause. `HandlerAbandoned` also raises
   `TypeError` when built directly.
+- **BREAKING: `Event`, `DomainEvent`, `IntegrationEvent` and `SystemEvent` cannot be built
+  directly.** Each one raises `TypeError` and names its concrete subclasses. These classes,
+  `RunPaused` and `HandlerAbandoned` share one rule: an abstract event class names no
+  concrete event. `Scatter[RunPaused]` and `Scatter[HandlerAbandoned]` now fail at graph
+  build, as `Scatter[DomainEvent]` already did. A plain return annotation such as
+  `-> RunPaused` still builds, because the handler returns a concrete subclass.
 - **BREAKING: the `legacy_write=True` guards judge the client's migrations only.** lge's
   framework migrations do not count. They never relabel a write, so `legacy_write=True`
   still constructs. A framework event is always written under its own live identity, so

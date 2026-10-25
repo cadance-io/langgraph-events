@@ -1485,7 +1485,7 @@ def describe_NamespaceAwareSerde():
                 # marker and produced a second entry, triggering
                 # "Duplicate rename source" at serde construction.
                 serde = NamespaceAwareSerde(namespaces=[SubLeak])
-                sources = [old_qn for (_, old_qn) in serde._rename_table]
+                sources = [old_qn for (_, old_qn) in serde._tables.rename_table]
                 assert sources == ["SubLeak.OldParent"]
 
             def it_encodes_subclass_instances_under_their_own_qualname():
@@ -2238,7 +2238,7 @@ def describe_NamespaceAwareSerde():
 
                 a_sources = [
                     old_qn
-                    for (_, old_qn) in serde._rename_table
+                    for (_, old_qn) in serde._tables.rename_table
                     if old_qn.startswith("ScopeFixtureA.")
                 ]
                 assert a_sources == []
@@ -2250,7 +2250,7 @@ def describe_NamespaceAwareSerde():
 
                 a_sources = [
                     old_qn
-                    for (_, old_qn) in serde._rename_table
+                    for (_, old_qn) in serde._tables.rename_table
                     if old_qn.startswith("ScopeFixtureA.")
                 ]
                 assert a_sources == ["ScopeFixtureA.Persisted"]
@@ -2261,8 +2261,8 @@ def describe_NamespaceAwareSerde():
                 # authored ``migrations=`` entries (none here) would apply.
                 serde = NamespaceAwareSerde()
 
-                assert serde._rename_table == {}
-                assert serde._addfield_table == {}
+                assert serde._tables.rename_table == {}
+                assert serde._tables.addfield_table == {}
 
         def when_class_is_decorated_but_out_of_scope():
             def with_legacy_write_enabled():
@@ -3258,7 +3258,7 @@ def describe_backfill():
             # addfield table.
             serde = NamespaceAwareSerde(namespaces=[BackfillSubLeak])
 
-            targets = [qn for (_, qn) in serde._addfield_table]
+            targets = [qn for (_, qn) in serde._tables.addfield_table]
             assert targets == ["BackfillSubLeak.Parent"]
 
     def when_backfill_decorators_are_stacked():
@@ -3343,7 +3343,7 @@ def describe_origin_scoped_backfill():
             # duplicate-fill guard at construction.
             serde = NamespaceAwareSerde(namespaces=[OriginBackfillSubLeak])
 
-            assert list(serde._origin_addfield_table) == [
+            assert list(serde._tables.origin_addfield_table) == [
                 (OriginBackfillSubLeak.__module__, "OriginBackfillSubLeak.OldParent")
             ]
 

@@ -313,7 +313,7 @@ def _verify_and_bump(
     """Verify every value ``put`` will encode, and bump the version of
     each channel whose value changed or carries an event. Returns the
     refusal reason, or ``None`` and the ``new_versions`` for ``put``."""
-    historic = set(serde._rename_table)
+    historic = set(serde._tables.rename_table)
     versions: dict[str, Any] = checkpoint["channel_versions"]
     new_versions: dict[str, Any] = {}
     for channel, value in checkpoint["channel_values"].items():
