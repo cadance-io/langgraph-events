@@ -25,7 +25,7 @@ from ag_ui.core import (
 
 from langgraph_events._event import Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
-from langgraph_events._internal import _inject_deadline_keys
+from langgraph_events._internal import _FRAMEWORK_KEY_PREFIX, _with_pause_budget
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -260,11 +260,10 @@ class AGUIAdapter:
     ) -> RunnableConfig:
         """Build LangGraph config, including passthrough forwarded props.
 
-        When ``deadline`` is provided, delegates to
-        :func:`_inject_deadline_keys` (same writer as the
-        :class:`EventGraph` entry points) so the framework router sees
-        the per-run soft-timeout keys and emits :class:`RunPaused` on
-        expiry.
+        Drops every client ``configurable`` key with the framework prefix
+        ``__lge_``, so a client cannot plant a pause of its own. Delegates
+        ``deadline`` to :func:`_with_pause_budget`, the same writer as the
+        :class:`EventGraph` entry points.
         """
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         forwarded_raw = input_data.forwarded_props
@@ -283,18 +282,21 @@ class AGUIAdapter:
         if isinstance(candidate, dict):
             merged = {**candidate}
             configurable = candidate.get("configurable")
+            client_keys = configurable if isinstance(configurable, dict) else {}
             merged["configurable"] = {
-                **(configurable if isinstance(configurable, dict) else {}),
+                **{
+                    key: value
+                    for key, value in client_keys.items()
+                    if not str(key).startswith(_FRAMEWORK_KEY_PREFIX)
+                },
                 "thread_id": thread_id,
             }
             config = merged
 
-        if deadline is not None:
-            configurable = dict(config.get("configurable", {}))
-            _inject_deadline_keys(configurable, deadline)
-            config["configurable"] = configurable
-
-        return cast("RunnableConfig", config)
+        return cast(
+            "RunnableConfig",
+            _with_pause_budget(cast("RunnableConfig", config), deadline),
+        )
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph."""

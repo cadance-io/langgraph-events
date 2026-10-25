@@ -1204,6 +1204,45 @@ def describe_AGUIAdapter():
 
                 assert events[-1].type == EventType.RUN_FINISHED
 
+        def when_the_client_forwards_framework_pause_keys():
+
+            async def it_drops_them_and_runs_to_the_end():
+                class PauseMapper:
+                    def map(
+                        self, event: Event, ctx: MapperContext
+                    ) -> list[BaseEvent] | None:
+                        if not isinstance(event, RunPaused):
+                            return None
+                        return [
+                            CustomEvent(
+                                type=EventType.CUSTOM, name="run.paused", value={}
+                            )
+                        ]
+
+                adapter = _adapter(
+                    _graph(reply_hi), seed_factory=_ask("hi"), mappers=[PauseMapper()]
+                )
+                planted = {
+                    "__lge_deadline": 0.0,
+                    "__lge_deadline_started_at": "not-a-time",
+                    "__lge_pause_budget": "not-a-budget",
+                }
+
+                events = [
+                    event
+                    async for event in adapter.stream(
+                        _make_input(
+                            forwarded_props={
+                                "configurable": {"tenant_id": "acme", **planted}
+                            }
+                        )
+                    )
+                ]
+
+                assert not [e for e in events if e.type == EventType.RUN_ERROR]
+                assert _custom(events, "run.paused") == []
+                assert events[-1].type == EventType.RUN_FINISHED
+
     def describe_custom_mappers():
         async def it_allows_user_mapper_to_claim_events():
             @on(UserAsked)

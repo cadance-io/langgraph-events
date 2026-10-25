@@ -3401,19 +3401,12 @@ def describe_EventGraph():
                     another ``RunPaused`` to the events channel.
                     """
                     from langgraph_events._internal import (
-                        _DEADLINE_KEY,
-                        _DEADLINE_STARTED_AT_KEY,
+                        _with_pause_budget,
                         make_router_node,
                     )
 
                     router = make_router_node(max_rounds=100)
-                    now = time.monotonic()
-                    config: dict[str, typing.Any] = {
-                        "configurable": {
-                            _DEADLINE_KEY: now - 1,
-                            _DEADLINE_STARTED_AT_KEY: now - 2,
-                        }
-                    }
+                    config = _with_pause_budget(None, deadline=time.monotonic() - 1)
                     state: dict[str, typing.Any] = {
                         "events": [Started(data="seed")],
                         "_cursor": 1,

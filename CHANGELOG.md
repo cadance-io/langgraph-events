@@ -75,6 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`AGUIAdapter` drops every client `forwarded_props` `configurable` key that starts with
+  `__lge_`.** The framework keeps its per-run pause state under that prefix. Before, a
+  client could plant such a key and crash its own run, or pause it.
 - **A resume with an expired deadline dispatches the resume value before it pauses.**
   Before, the router paused on the resume round. It stored the resume value and never
   dispatched it, so no later run handled the answer. Now the resume round always

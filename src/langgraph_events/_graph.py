@@ -48,10 +48,10 @@ from langgraph_events._handler import (
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _BASE_FIELDS,
-    _inject_deadline_keys,
     _InputState,
     _leaf_node,
     _OutputState,
+    _with_pause_budget,
     build_state_schema,
     make_dispatch,
     make_handler_node,
@@ -1565,22 +1565,15 @@ class EventGraph:
 
     @staticmethod
     def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
+        """Pop ``deadline`` and write the run's pause budget into the config.
 
-        Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
-        and threads it into a copied ``config`` dict, so callers can pass
-        ``deadline=...`` through any entry point
-        (invoke/ainvoke/resume/aresume/stream_events/...) and the router
-        sees it via parameter injection.
+        Every entry point (invoke/ainvoke/resume/aresume/stream_events/...)
+        routes its kwargs through here, so the router and the retry loop
+        read the budget from the run's config.
         """
-        deadline = kwargs.pop("deadline", None)
-        if deadline is None:
-            return kwargs
-        config = dict(kwargs.get("config") or {})
-        configurable = dict(config.get("configurable", {}))
-        _inject_deadline_keys(configurable, deadline)
-        config["configurable"] = configurable
-        kwargs["config"] = config
+        config = _with_pause_budget(kwargs.get("config"), kwargs.pop("deadline", None))
+        if config is not None:
+            kwargs["config"] = config
         return kwargs
 
     def _run(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
