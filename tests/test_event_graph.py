@@ -3673,12 +3673,12 @@ def describe_EventGraph():
                     assert log.count(RunPausedOnSignal) == 1
                     assert log.latest(Ended) is None
 
-            def when_the_value_has_no_is_set_method():
+            def when_the_value_is_not_a_signal_instance():
 
                 @pytest.mark.parametrize(
                     "bad",
-                    [threading.Event().is_set, True],
-                    ids=["bound-is_set", "bool"],
+                    [threading.Event().is_set, True, threading.Event],
+                    ids=["bound-is_set", "bool", "class"],
                 )
                 def it_raises_TypeError_before_any_round_runs(bad):
                     ran: list[str] = []

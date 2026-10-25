@@ -36,6 +36,7 @@ from langgraph_events._event import (
     Cancelled,
     Event,
     Halted,
+    HandlerAbandonedOnSignal,
     HandlerRaised,
     HandlerRetried,
     InvariantViolated,
@@ -246,6 +247,29 @@ def make_router_node(
     return router
 
 
+def _dispatchable(state: StateDict) -> list[tuple[int, Event]]:
+    """The pending events that a handler can take, each with its log index.
+
+    The pending events sit at [_cursor - len(_pending), _cursor) in events on
+    every path that dispatches a handler: the seed, the router and RunPaused.
+    MaxRoundsExceeded leaves _cursor at the halted event, but dispatch sends a
+    Halted event to END, so no handler reads it.
+
+    A router round never dispatches a ``HandlerAbandonedOnSignal``. Its run
+    pauses over it. When a sibling handler interrupts in the same superstep,
+    the run ends before the router reads the signal, and the resume round
+    must skip the give-up too. The seed round dispatches every seed.
+    """
+    pending = state.get("_pending", [])
+    base = state["_cursor"] - len(pending)
+    routed = state.get("_round", 0) > 0
+    return [
+        (base + k, e)
+        for k, e in enumerate(pending)
+        if not (routed and isinstance(e, HandlerAbandonedOnSignal))
+    ]
+
+
 def make_dispatch(
     handler_metas: list[HandlerMeta],
 ) -> Callable[[StateDict], list[str | Send] | str]:
@@ -271,8 +295,11 @@ def make_dispatch(
         # handlers is the command qualname rather than the method name.
         matched: list[str] = []
         seen: set[str] = set()
+        dispatchable = [e for _, e in _dispatchable(state)]
         for meta in handler_metas:
-            if meta.node_name not in seen and any(meta.matches(e) for e in pending):
+            if meta.node_name not in seen and any(
+                meta.matches(e) for e in dispatchable
+            ):
                 seen.add(meta.node_name)
                 matched.append(meta.node_name)
 
@@ -824,13 +851,7 @@ def make_handler_node(
     def _prepare(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[tuple[int, Event]], dict[str, Any], _PauseBudget]:
-        pending = state["_pending"]
-        # The pending events sit at [_cursor - len(_pending), _cursor) in
-        # events on every path that dispatches a handler: the seed, the router
-        # and RunPaused. MaxRoundsExceeded leaves _cursor at the halted event,
-        # but dispatch sends a Halted event to END, so no handler reads it.
-        base = state["_cursor"] - len(pending)
-        matching = [(base + k, e) for k, e in enumerate(pending) if meta.matches(e)]
+        matching = [(i, e) for i, e in _dispatchable(state) if meta.matches(e)]
         inject = _build_inject(
             meta,
             state,

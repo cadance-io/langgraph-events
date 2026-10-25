@@ -125,16 +125,20 @@ def _with_pause_budget(
     ``{}`` for ``None``. Otherwise the result is a copy, so the caller's dict
     is never mutated.
 
-    Raises ``TypeError`` when *pause_on* has no callable ``is_set``, before
-    any round runs. ``pause_on=event.is_set`` is the usual mistake.
+    Raises ``TypeError`` when *pause_on* is a class, or has no callable
+    ``is_set``, before any round runs. ``pause_on=event.is_set`` and
+    ``pause_on=threading.Event`` are the usual mistakes.
     """
     if deadline is None and pause_on is None:
         return config or {}
-    if pause_on is not None and not callable(getattr(pause_on, "is_set", None)):
+    if pause_on is not None and (
+        isinstance(pause_on, type) or not callable(getattr(pause_on, "is_set", None))
+    ):
         raise TypeError(
             f"pause_on= must be an object with an is_set() method, for "
-            f"example an asyncio.Event, got {type(pause_on).__name__}: "
-            f"{pause_on!r}. Pass the event itself, not event.is_set."
+            f"example an asyncio.Event(), got {type(pause_on).__name__}: "
+            f"{pause_on!r}. Pass the event itself, not event.is_set or the "
+            f"Event class."
         )
     latch = None if pause_on is None else _SignalLatch(pause_on)
     budget = _PauseBudget(time.monotonic(), deadline, latch)

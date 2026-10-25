@@ -939,6 +939,49 @@ def describe_retry_scope():
                 )
                 assert log.latest(Recovered) == Recovered(reason="gave up")
 
+        def when_a_sibling_handler_interrupts_in_the_same_superstep():
+            # The interrupt ends the run before the router reads the signal,
+            # so the thread stores the give-up with no RunPausedOnSignal. The
+            # resume round dispatches, and it must still skip the give-up.
+            @pytest.fixture
+            def resumed(slept):
+                @on(Item)
+                def asker(event: Item) -> NeedsInput:
+                    return NeedsInput(question="ok?")
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def worker(event: Item) -> Handled:
+                    raise FlakyError("always")
+
+                @on(Started)
+                def answered(event: Started) -> Ended:
+                    return Ended(result=event.data)
+
+                graph = EventGraph(
+                    [asker, worker, catch_any, answered], checkpointer=MemorySaver()
+                )
+                config = {"configurable": {"thread_id": "sibling-interrupt"}}
+                signal = threading.Event()
+                signal.set()
+                first = graph.invoke(Item(n=1), config=config, pause_on=signal)
+                assert first.has(HandlerAbandonedOnSignal)
+                assert not first.has(RunPausedOnSignal)
+                return graph.resume(Started(data="yes"), config=config)
+
+            def it_dispatches_no_catcher_on_the_give_up(resumed):
+                assert resumed.has(HandlerAbandonedOnSignal)
+                assert not resumed.has(Recovered)
+
+            def it_dispatches_the_resume_value(resumed):
+                assert resumed.latest(Ended) == Ended(result="yes")
+
+            def it_does_not_pause_the_resumed_run(resumed):
+                assert not resumed.has(RunPausedOnSignal)
+
         def when_the_run_is_checkpointed():
             def it_revives_the_signal_give_up(slept):
                 @on(
