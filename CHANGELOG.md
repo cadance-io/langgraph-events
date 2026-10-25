@@ -73,6 +73,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stays permitted on `*args` and `**kwargs` that forward to another callable. A kept
   `Any` must have a `# noqa: ANN401` comment that gives the reason.
 
+### Fixed
+
+- **A resume with an expired deadline dispatches the resume value before it pauses.**
+  Before, the router paused on the resume round. It stored the resume value and never
+  dispatched it, so no later run handled the answer. Now the resume round always
+  dispatches, the same as the first round of a fresh run. The router pauses at the next
+  round.
+
 ## [0.40.0] - 2026-10-24
 
 ### Added

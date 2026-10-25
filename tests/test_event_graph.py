@@ -181,6 +181,39 @@ def _deadline_graph(thread_id: str) -> tuple[EventGraph, dict[str, typing.Any]]:
     return graph, {"configurable": {"thread_id": thread_id}}
 
 
+class _ConfirmationRequested(Interrupted):
+    """Interrupt raised by :func:`_interrupting_graph` on ``Started``."""
+
+
+class _Confirmed(IntegrationEvent):
+    """Resume value for :func:`_interrupting_graph`."""
+
+
+@on(Started)
+def _need_input(event: Started) -> _ConfirmationRequested:
+    return _ConfirmationRequested()
+
+
+@on(_Confirmed)
+def _handle_confirm(event: _Confirmed) -> Ended:
+    return Ended(result="confirmed")
+
+
+@on(Ended)
+def _after_confirm(event: Ended) -> Processed:
+    """Runs one round after the resume round, so it shows where a pause lands."""
+    return Processed(data="after")
+
+
+def _interrupting_graph(thread_id: str) -> tuple[EventGraph, dict[str, typing.Any]]:
+    """Checkpointed graph that interrupts on ``Started`` and resumes on
+    ``_Confirmed``, plus its config."""
+    graph = EventGraph(
+        [_need_input, _handle_confirm, _after_confirm], checkpointer=MemorySaver()
+    )
+    return graph, {"configurable": {"thread_id": thread_id}}
+
+
 class _DedupError(Exception):
     """Declared raise used by the handler-dedup suites."""
 
@@ -3262,40 +3295,19 @@ def describe_EventGraph():
 
             def when_resuming_an_interrupted_run():
 
-                def it_respects_deadline_on_the_resume_path():
+                def it_dispatches_the_resume_value_before_pausing():
                     """``deadline=`` flows through the ``resume()`` entry
-                    point the same way it flows through ``invoke()`` — the
-                    router emits ``RunPaused`` between dispatch rounds.
-                    Pins the contract that the shared
-                    ``_apply_deadline_kwarg`` injector covers the resume
-                    path too.
+                    point the same way it flows through ``invoke()``. The
+                    resume round dispatches the resume value first, so the
+                    answer is not lost. The router pauses at the next round.
                     """
-                    from langgraph.checkpoint.memory import MemorySaver
-
-                    class ConfirmationRequested(Interrupted):
-                        pass
-
-                    class Confirmed(IntegrationEvent):
-                        pass
-
-                    @on(Started)
-                    def need_input(event: Started) -> ConfirmationRequested:
-                        return ConfirmationRequested()
-
-                    @on(Confirmed)
-                    def handle_confirm(event: Confirmed) -> Ended:
-                        return Ended(result="confirmed")
-
-                    graph = EventGraph(
-                        [need_input, handle_confirm],
-                        checkpointer=MemorySaver(),
-                    )
-                    config = {"configurable": {"thread_id": "resume-deadline"}}
+                    graph, config = _interrupting_graph("resume-deadline")
                     graph.invoke(Started(data="test"), config=config)
 
-                    log = graph.resume(Confirmed(), config=config, deadline=0.0)
-                    assert log.latest(RunPaused) is not None
-                    assert log.latest(Ended) is None
+                    log = graph.resume(_Confirmed(), config=config, deadline=0.0)
+                    assert log.latest(Ended) is not None
+                    assert log.latest(Processed) is None
+                    assert isinstance(log.latest(RunPaused), RunPausedOnDeadline)
 
             def when_a_fresh_run_follows_a_paused_run():
 

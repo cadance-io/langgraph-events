@@ -227,7 +227,9 @@ def make_router_node(
                 FRAMEWORK,
             )
         configurable = (config or {}).get("configurable", {})
-        deadline = configurable.get(_DEADLINE_KEY)
+        # The resume round always dispatches, like the seed round. A pause
+        # here would store the resume value and never dispatch it.
+        deadline = None if has_resume else configurable.get(_DEADLINE_KEY)
         if deadline is not None and time.monotonic() >= deadline:
             if state.get("_run_paused_emitted"):
                 # Late fan-ins past the deadline drain without
