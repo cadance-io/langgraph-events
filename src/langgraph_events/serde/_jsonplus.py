@@ -23,7 +23,7 @@ import ormsgpack
 from langgraph.types import Interrupt
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from langgraph_events.serde.migrations._core import (
         AddField,
@@ -78,6 +78,7 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # ``__init__`` re-exports ``testing``, which imports those names back from
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
+from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde.migrations._core import (  # noqa: E402
     SplitError,
     TransformError,
@@ -527,7 +528,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 f"and revives it with getattr on the module. On a miss it "
                 f"returns a raw dict with no error. {remedy}"
             )
-        all_migrations = (*decorated, *migrations)
+        client_migrations = (*decorated, *migrations)
         (
             self._rename_table,
             self._addfield_table,
@@ -535,49 +536,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             self._transform_table,
             self._origin_transform_table,
             self._split_table,
-        ) = _flatten_and_validate(all_migrations, scope)
-        # Origin-scoped fills are the fan-in signal, and a fan-in cannot
-        # ride legacy_write: writes would relabel EVERY instance under the
-        # oldest historic identity, collapsing the per-origin distinction
-        # the fills exist to preserve — and the old releases' classes do
-        # not accept the back-filled field anyway.
-        if legacy_write and self._origin_addfield_table:
-            raise ValueError(
-                "legacy_write=True cannot be combined with origin-scoped "
-                "back-fills (migrate_from(backfill=...) or AddField keyed "
-                "on a historic identity). Drain in-flight threads before "
-                "the consolidation cutover, or drop legacy_write and accept "
-                "read-only compatibility. See 'Consolidating N classes into "
-                "one' in docs/event-migrations.md."
-            )
-        # A transform has no inverse. A write relabelled under the oldest
-        # historic identity would carry the CURRENT shape, which the old
-        # release's class does not accept, and the transform only runs on
-        # read. Refuse at construction, like the origin-fill case above.
-        if legacy_write and (self._transform_table or self._origin_transform_table):
-            raise ValueError(
-                "legacy_write=True cannot be combined with a TransformFields "
-                "(transform_fields, migrate_from(transform=...) or a "
-                "hand-authored TransformFields). A transform runs on read and "
-                "has no inverse, so an old release cannot read what this one "
-                "writes. Drain in-flight threads before the cutover, or drop "
-                "legacy_write and accept read-only compatibility. See "
-                "'Dropping, merging or retyping a field' in "
-                "docs/event-migrations.md."
-            )
-        # A split has no inverse either: an old release has no class for
-        # the target, and select only runs on read.
-        if legacy_write and self._split_table:
-            raise ValueError(
-                "legacy_write=True cannot be combined with a SplitEvent "
-                "(split_event, Migration.split_event or a hand-authored "
-                "SplitEvent). A split runs on read and has no inverse, so an "
-                "old release cannot read what this one writes. Drain "
-                "in-flight threads before the cutover, or drop legacy_write "
-                "and accept read-only compatibility. See 'Splitting one "
-                "stored event into two on a payload value' in "
-                "docs/event-migrations.md."
-            )
+        ) = _flatten_and_validate((*client_migrations, *FRAMEWORK_MIGRATIONS), scope)
+        if legacy_write:
+            self._refuse_legacy_write(client_migrations, scope)
         # The read path resolves through ``_scope`` before it falls back to
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
         # key set: the identities revivable with no migration at all.
@@ -598,6 +559,61 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 f"Namespace passed via namespaces=, or pass it directly "
                 f"in events=.",
                 UnreachableMigrationWarning,
+            )
+
+    @staticmethod
+    def _refuse_legacy_write(
+        client_migrations: Sequence[Migration], scope: Mapping[tuple[str, str], type]
+    ) -> None:
+        """Refuse ``legacy_write=True`` with a client migration it cannot invert.
+
+        Only the client's own migrations count. lge's framework migrations
+        never relabel a write, so they cannot break an old reader.
+        """
+        _, _, origin_fills, transforms, origin_transforms, splits = (
+            _flatten_and_validate(client_migrations, scope)
+        )
+        # Origin-scoped fills are the fan-in signal, and a fan-in cannot
+        # ride legacy_write: writes would relabel EVERY instance under the
+        # oldest historic identity, collapsing the per-origin distinction
+        # the fills exist to preserve — and the old releases' classes do
+        # not accept the back-filled field anyway.
+        if origin_fills:
+            raise ValueError(
+                "legacy_write=True cannot be combined with origin-scoped "
+                "back-fills (migrate_from(backfill=...) or AddField keyed "
+                "on a historic identity). Drain in-flight threads before "
+                "the consolidation cutover, or drop legacy_write and accept "
+                "read-only compatibility. See 'Consolidating N classes into "
+                "one' in docs/event-migrations.md."
+            )
+        # A transform has no inverse. A write relabelled under the oldest
+        # historic identity would carry the CURRENT shape, which the old
+        # release's class does not accept, and the transform only runs on
+        # read. Refuse at construction, like the origin-fill case above.
+        if transforms or origin_transforms:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a TransformFields "
+                "(transform_fields, migrate_from(transform=...) or a "
+                "hand-authored TransformFields). A transform runs on read and "
+                "has no inverse, so an old release cannot read what this one "
+                "writes. Drain in-flight threads before the cutover, or drop "
+                "legacy_write and accept read-only compatibility. See "
+                "'Dropping, merging or retyping a field' in "
+                "docs/event-migrations.md."
+            )
+        # A split has no inverse either: an old release has no class for
+        # the target, and select only runs on read.
+        if splits:
+            raise ValueError(
+                "legacy_write=True cannot be combined with a SplitEvent "
+                "(split_event, Migration.split_event or a hand-authored "
+                "SplitEvent). A split runs on read and has no inverse, so an "
+                "old release cannot read what this one writes. Drain "
+                "in-flight threads before the cutover, or drop legacy_write "
+                "and accept read-only compatibility. See 'Splitting one "
+                "stored event into two on a payload value' in "
+                "docs/event-migrations.md."
             )
 
     @contextlib.contextmanager
