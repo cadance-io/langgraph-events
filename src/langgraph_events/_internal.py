@@ -7,10 +7,8 @@ that implement the hub-and-spoke reactive loop on top of LangGraph's StateGraph.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
 import operator
-import time
 from collections.abc import Awaitable, Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
@@ -38,25 +36,20 @@ from langgraph_events._event import (
     Cancelled,
     Event,
     Halted,
-    HandlerAbandonedOnDeadline,
-    HandlerAbandonedOnSignal,
     HandlerRaised,
     HandlerRetried,
     InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
-    RunPaused,
-    RunPausedOnDeadline,
-    RunPausedOnSignal,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
+from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._services import RunScoped
 from langgraph_events._types import (  # noqa: TC001
     HandlerReturn,
-    PauseSignal,
     StateDict,
 )
 
@@ -78,104 +71,6 @@ _BASE_FIELDS: dict[str, Any] = {
     # Router-side gate: one RunPaused per /run regardless of fan-ins (#88).
     "_run_paused_emitted": bool,
 }
-
-# Every ``configurable`` key the framework writes starts with this prefix.
-# The AG-UI adapter drops a client key with it, so a client cannot plant one.
-# The checkpoint does not store ``configurable``, and tracing metadata skips
-# a key with a ``__`` prefix, so the pause signal object is never serialized.
-_FRAMEWORK_KEY_PREFIX = "__lge_"
-_PAUSE_BUDGET_KEY = f"{_FRAMEWORK_KEY_PREFIX}pause_budget"
-
-
-class _SignalLatch:
-    """The run's ``pause_on=`` signal, held set from its first set read.
-
-    The retry loop and the router both read the signal. When a caller clears
-    it between their reads, the retry loop has already given up for the
-    pause, so the router must still pause. The first ``True`` from
-    ``is_set()`` therefore commits the run to a pause.
-    """
-
-    __slots__ = ("_latched", "_signal")
-
-    def __init__(self, signal: PauseSignal) -> None:
-        self._signal = signal
-        self._latched = False
-
-    def is_set(self) -> bool:
-        if not self._latched:
-            self._latched = self._signal.is_set()
-        return self._latched
-
-
-@dataclasses.dataclass(frozen=True)
-class _PauseBudget:
-    """When a run must pause: its ``deadline=``, its ``pause_on=``, or both.
-
-    One per run, in the run's ``configurable``. The router asks it for the
-    pause event between rounds. The retry loop asks it whether the signal is
-    set, and whether a backoff wait ends before the deadline. Both read the
-    same :class:`_SignalLatch`, so they cannot disagree on the signal.
-    """
-
-    started_at: float
-    deadline: float | None
-    signal: _SignalLatch | None
-
-    def pause_now(self) -> RunPaused | None:
-        """The pause event the router must emit now, or ``None`` to continue.
-
-        A set signal wins over an expired deadline: the caller asked for it.
-        """
-        now = time.monotonic()
-        if self.signal_set():
-            return RunPausedOnSignal(elapsed_seconds=now - self.started_at)
-        if self.deadline is not None and now >= self.deadline:
-            return RunPausedOnDeadline(elapsed_seconds=now - self.started_at)
-        return None
-
-    def signal_set(self) -> bool:
-        """Whether the run's ``pause_on=`` signal is set."""
-        return self.signal is not None and self.signal.is_set()
-
-    def fits_deadline(self, delay: float) -> bool:
-        """Whether a backoff of *delay* seconds ends before the deadline."""
-        return self.deadline is None or time.monotonic() + delay < self.deadline
-
-
-def _with_pause_budget(
-    config: RunnableConfig | None,
-    deadline: float | None,
-    pause_on: PauseSignal | None,
-) -> RunnableConfig | None:
-    """Return *config* with the run's :class:`_PauseBudget` in ``configurable``.
-
-    Single writer for every entry point that accepts ``deadline=`` or
-    ``pause_on=``. With neither set, *config* comes back unchanged.
-    Otherwise the result is a copy, so the caller's dict is never mutated.
-
-    Raises ``TypeError`` when *pause_on* has no callable ``is_set``, before
-    any round runs. ``pause_on=event.is_set`` is the usual mistake.
-    """
-    if deadline is None and pause_on is None:
-        return config
-    if pause_on is not None and not callable(getattr(pause_on, "is_set", None)):
-        raise TypeError(
-            f"pause_on= must be an object with an is_set() method, for "
-            f"example an asyncio.Event, got {type(pause_on).__name__}: "
-            f"{pause_on!r}. Pass the event itself, not event.is_set."
-        )
-    latch = None if pause_on is None else _SignalLatch(pause_on)
-    budget = _PauseBudget(time.monotonic(), deadline, latch)
-    out: dict[str, Any] = dict(config or {})
-    configurable: dict[str, Any] = out.get("configurable", {})
-    out["configurable"] = {**configurable, _PAUSE_BUDGET_KEY: budget}
-    return cast("RunnableConfig", out)
-
-
-def _pause_budget(config: RunnableConfig | None) -> _PauseBudget | None:
-    """The run's :class:`_PauseBudget`, or ``None`` when it has none."""
-    return (config or {}).get("configurable", {}).get(_PAUSE_BUDGET_KEY)
 
 
 class _InputState(TypedDict):
@@ -317,8 +212,7 @@ def make_router_node(
             )
         # The resume round always dispatches, like the seed round. A pause
         # here would store the resume value and never dispatch it.
-        budget = None if has_resume else _pause_budget(config)
-        paused = budget.pause_now() if budget is not None else None
+        paused = None if has_resume else _pause_budget(config).pause_now()
         if paused is not None:
             if state.get("_run_paused_emitted"):
                 # Late fan-ins past the pause drain without
@@ -575,7 +469,7 @@ def _next_delay_or_give_up(
     exc: Exception,
     attempt: int,
     new_events: list[Event],
-    budget: _PauseBudget | None,
+    budget: _PauseBudget,
 ) -> float | None:
     """Seconds to wait before re-invoking *meta*, or ``None`` to give up.
 
@@ -586,16 +480,13 @@ def _next_delay_or_give_up(
     recorded per ``policy.observe`` (append a ``HandlerRetried``, log a
     warning, or stay quiet) and the delay returned.
 
-    *budget* is ``None`` when the caller passed neither ``deadline=`` nor
-    ``pause_on=``.  A sleep that does not fit is refused outright rather than
+    A sleep that the run's *budget* refuses is refused outright rather than
     clamped: the router only pauses *between* rounds, so an in-flight backoff
     cannot be preempted, and a wait before an attempt that the pause will cut
     off only delays the pause.  Giving up here lets the run reach the router
-    and emit the pause promptly.  A set signal gives up as a
-    ``HandlerAbandonedOnSignal``.  The budget's latch makes the router pause
-    after it, so no catcher sees it in this run.  A wait past the deadline
-    gives up as a ``HandlerAbandonedOnDeadline``, so it stays
-    distinguishable from an exhausted attempt budget.
+    and emit the pause promptly.  The give-up names the cause, as a
+    ``HandlerAbandonedOnSignal`` or a ``HandlerAbandonedOnDeadline``, so it
+    stays distinguishable from an exhausted attempt budget.
 
     Shared by both dispatch paths; only the sleep call itself differs between
     them.
@@ -609,15 +500,9 @@ def _next_delay_or_give_up(
         new_events.append(_make_handler_raised(meta, event, exc, kind=HandlerRaised))
         return None
     delay = policy.delay_for(attempt, exc)
-    if budget is not None and budget.signal_set():
-        new_events.append(
-            _make_handler_raised(meta, event, exc, kind=HandlerAbandonedOnSignal)
-        )
-        return None
-    if budget is not None and not budget.fits_deadline(delay):
-        new_events.append(
-            _make_handler_raised(meta, event, exc, kind=HandlerAbandonedOnDeadline)
-        )
+    abandoned = budget.refuse_wait(delay)
+    if abandoned is not None:
+        new_events.append(_make_handler_raised(meta, event, exc, kind=abandoned))
         return None
     if policy.observe == "emit":
         # Why the breadcrumb must not carry the attempt's frames is in
@@ -814,8 +699,8 @@ def _process_events_sync(
     new_events: list[Event],
     new_causes: list[CauseEntry],
     lg_interrupt: Callable[[Any], Any],
+    budget: _PauseBudget,
     return_contract: ReturnContract | None = None,
-    budget: _PauseBudget | None = None,
 ) -> None:
     """Per-event invocation loop for the sync dispatch path.
 
@@ -864,8 +749,8 @@ async def _process_events_async(
     new_events: list[Event],
     new_causes: list[CauseEntry],
     lg_interrupt: Callable[[Any], Any],
+    budget: _PauseBudget,
     return_contract: ReturnContract | None = None,
-    budget: _PauseBudget | None = None,
 ) -> None:
     """Per-event invocation loop for the async dispatch path.
 
@@ -938,7 +823,7 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[tuple[int, Event]], dict[str, Any], _PauseBudget | None]:
+    ) -> tuple[list[tuple[int, Event]], dict[str, Any], _PauseBudget]:
         pending = state["_pending"]
         # The pending events sit at [_cursor - len(_pending), _cursor) in
         # events on every path that dispatches a handler: the seed, the router
@@ -1008,8 +893,8 @@ def make_handler_node(
                 new_events,
                 new_causes,
                 lg_interrupt,
-                return_contract,
                 budget,
+                return_contract,
             )
         finally:
             _reset_custom_emitters(tokens)
@@ -1029,8 +914,8 @@ def make_handler_node(
                 new_events,
                 new_causes,
                 lg_interrupt,
-                return_contract,
                 budget,
+                return_contract,
             )
         except asyncio.CancelledError:
             return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))

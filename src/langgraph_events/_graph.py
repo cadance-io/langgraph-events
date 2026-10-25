@@ -50,7 +50,6 @@ from langgraph_events._internal import (
     _InputState,
     _leaf_node,
     _OutputState,
-    _with_pause_budget,
     build_state_schema,
     make_dispatch,
     make_handler_node,
@@ -61,6 +60,7 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._pause import _with_pause_budget
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
     RewritePlan,
@@ -1563,13 +1563,11 @@ class EventGraph:
         routes its kwargs through here, so the router and the retry loop
         read them from the run's config.
         """
-        config = _with_pause_budget(
+        kwargs["config"] = _with_pause_budget(
             kwargs.get("config"),
             kwargs.pop("deadline", None),
             kwargs.pop("pause_on", None),
         )
-        if config is not None:
-            kwargs["config"] = config
         return kwargs
 
     def _run(self, inp: _GraphInput, **kwargs: Any) -> EventLog:

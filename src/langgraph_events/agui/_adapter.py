@@ -25,7 +25,7 @@ from ag_ui.core import (
 
 from langgraph_events._event import Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
-from langgraph_events._internal import _FRAMEWORK_KEY_PREFIX, _with_pause_budget
+from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX, _with_pause_budget
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -289,16 +289,13 @@ class AGUIAdapter:
                 **{
                     key: value
                     for key, value in client_keys.items()
-                    if not str(key).startswith(_FRAMEWORK_KEY_PREFIX)
+                    if not key.startswith(_FRAMEWORK_KEY_PREFIX)
                 },
                 "thread_id": thread_id,
             }
             config = merged
 
-        return cast(
-            "RunnableConfig",
-            _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on),
-        )
+        return _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on)
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph."""

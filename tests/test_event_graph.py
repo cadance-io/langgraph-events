@@ -3403,10 +3403,8 @@ def describe_EventGraph():
                     ``dispatch`` returns ``END``) and must not append
                     another ``RunPaused`` to the events channel.
                     """
-                    from langgraph_events._internal import (
-                        _with_pause_budget,
-                        make_router_node,
-                    )
+                    from langgraph_events._internal import make_router_node
+                    from langgraph_events._pause import _with_pause_budget
 
                     router = make_router_node(max_rounds=100)
                     config = _with_pause_budget(
