@@ -744,8 +744,9 @@ class AGUIAdapter:
                 ``None`` (default) disables.
 
         Raises:
-            TypeError: *pause_on* has no callable ``is_set``. The stream
-                raises it on the first iteration, before ``RUN_STARTED``.
+            TypeError: *pause_on* is a class, or has no callable
+                ``is_set``. The stream raises it on the first iteration,
+                before ``RUN_STARTED``.
         """
         run_id = input_data.run_id or str(uuid.uuid4())
         thread_id = input_data.thread_id or str(uuid.uuid4())

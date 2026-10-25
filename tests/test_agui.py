@@ -29,6 +29,7 @@ from ag_ui.core import UserMessage as AguiUserMessage
 from conftest import LoadCountingSaver
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig  # noqa: TC002 -- @on resolves it
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command as LGCommand
 from langgraph.types import interrupt as lg_interrupt
@@ -553,6 +554,24 @@ def _of_type(events: list[BaseEvent], event_type: EventType) -> list[Any]:
 
 def _custom(events: list[BaseEvent], name: str) -> list[Any]:
     return [e for e in _of_type(events, EventType.CUSTOM) if e.name == name]
+
+
+class _PauseMapper:
+    """Map each ``RunPaused`` of class *cause* to a ``run.paused`` custom event."""
+
+    def __init__(self, cause: type[RunPaused] = RunPaused) -> None:
+        self._cause = cause
+
+    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+        if not isinstance(event, self._cause):
+            return None
+        return [
+            CustomEvent(
+                type=EventType.CUSTOM,
+                name="run.paused",
+                value={"elapsed_seconds": event.elapsed_seconds},
+            )
+        ]
 
 
 def _snapshots(events: list[BaseEvent]) -> list[Any]:
@@ -1159,25 +1178,9 @@ def describe_AGUIAdapter():
                 ``EventMapper``. This is the supported DX path per #88.
                 """
 
-                class PauseMapper:
-                    def map(
-                        self, event: Event, ctx: MapperContext
-                    ) -> list[BaseEvent] | None:
-                        if not isinstance(event, RunPaused):
-                            return None
-                        return [
-                            CustomEvent(
-                                type=EventType.CUSTOM,
-                                name="run.paused",
-                                value={
-                                    "elapsed_seconds": event.elapsed_seconds,
-                                },
-                            )
-                        ]
-
                 graph = _graph(reply_hi)
                 adapter = _adapter(
-                    graph, seed_factory=_ask("hi"), mappers=[PauseMapper()]
+                    graph, seed_factory=_ask("hi"), mappers=[_PauseMapper()]
                 )
 
                 events: list[BaseEvent] = []
@@ -1209,21 +1212,11 @@ def describe_AGUIAdapter():
         def when_the_pause_signal_is_set():
 
             async def it_maps_the_pause_and_finishes_the_run():
-                class PauseMapper:
-                    def map(
-                        self, event: Event, ctx: MapperContext
-                    ) -> list[BaseEvent] | None:
-                        if not isinstance(event, RunPausedOnSignal):
-                            return None
-                        return [
-                            CustomEvent(
-                                type=EventType.CUSTOM, name="run.paused", value={}
-                            )
-                        ]
-
                 graph = _graph(reply_hi)
                 adapter = _adapter(
-                    graph, seed_factory=_ask("hi"), mappers=[PauseMapper()]
+                    graph,
+                    seed_factory=_ask("hi"),
+                    mappers=[_PauseMapper(RunPausedOnSignal)],
                 )
                 signal = asyncio.Event()
                 signal.set()
@@ -1236,6 +1229,50 @@ def describe_AGUIAdapter():
                 assert len(_custom(events, "run.paused")) == 1
                 assert events[-1].type == EventType.RUN_FINISHED
 
+            def when_the_turn_resumes_an_interrupt():
+                async def it_dispatches_the_resume_value_then_pauses():
+                    @on(ApprovalGiven)
+                    def approve(event: ApprovalGiven) -> TaskCreated:
+                        return TaskCreated(title="approved")
+
+                    followed_up: list[str] = []
+
+                    @on(TaskCreated)
+                    def follow_up(event: TaskCreated) -> AgentReplied:
+                        followed_up.append(event.title)
+                        return AgentReplied(message=AIMessage(content="later"))
+
+                    graph = _graph(
+                        ask_draft, approve, follow_up, checkpointer=MemorySaver()
+                    )
+                    config = _config("t-resume-signal")
+                    await graph.ainvoke(UserAsked(question="go"), config=config)
+                    adapter = _adapter(
+                        graph,
+                        seed_factory=_ask("unused"),
+                        resume_factory=lambda inp: ApprovalGiven(approved=True),
+                        mappers=[
+                            _task_mapper("task.created", "title"),
+                            _PauseMapper(RunPausedOnSignal),
+                        ],
+                    )
+                    signal = asyncio.Event()
+                    signal.set()
+
+                    events = [
+                        event
+                        async for event in adapter.stream(
+                            _make_input(thread_id="t-resume-signal"), pause_on=signal
+                        )
+                    ]
+
+                    assert [
+                        e.value["title"] for e in _custom(events, "task.created")
+                    ] == ["approved"]
+                    assert len(_custom(events, "run.paused")) == 1
+                    assert followed_up == []
+                    assert events[-1].type == EventType.RUN_FINISHED
+
         def when_the_pause_signal_has_no_is_set_method():
 
             async def it_raises_TypeError_before_the_run_starts():
@@ -1247,27 +1284,25 @@ def describe_AGUIAdapter():
 
         def when_the_client_forwards_framework_pause_keys():
 
-            async def it_drops_them_and_runs_to_the_end():
-                class PauseMapper:
-                    def map(
-                        self, event: Event, ctx: MapperContext
-                    ) -> list[BaseEvent] | None:
-                        if not isinstance(event, RunPaused):
-                            return None
-                        return [
-                            CustomEvent(
-                                type=EventType.CUSTOM, name="run.paused", value={}
-                            )
-                        ]
+            @pytest.fixture
+            def seen() -> dict[str, Any]:
+                return {}
+
+            @pytest.fixture
+            async def events(seen):
+                @on(UserAsked)
+                def read_config(
+                    event: UserAsked, config: RunnableConfig
+                ) -> AgentReplied:
+                    seen.update(config["configurable"])
+                    return AgentReplied(message=AIMessage(content="hi"))
 
                 adapter = _adapter(
-                    _graph(reply_hi), seed_factory=_ask("hi"), mappers=[PauseMapper()]
+                    _graph(read_config),
+                    seed_factory=_ask("hi"),
+                    mappers=[_PauseMapper()],
                 )
-                planted = {
-                    "__lge_deadline": 0.0,
-                    "__lge_deadline_started_at": "not-a-time",
-                    "__lge_pause_budget": "not-a-budget",
-                }
+                planted = {"__lge_pause_budget": "not-a-budget", "__lge_x": 1}
 
                 events = [
                     event
@@ -1280,9 +1315,18 @@ def describe_AGUIAdapter():
                     )
                 ]
 
+                return events
+
+            def it_runs_to_the_end_unpaused(events):
                 assert not [e for e in events if e.type == EventType.RUN_ERROR]
                 assert _custom(events, "run.paused") == []
                 assert events[-1].type == EventType.RUN_FINISHED
+
+            def it_drops_every_framework_key(events, seen):
+                assert not [key for key in seen if key.startswith("__lge_")]
+
+            def it_keeps_a_normal_key(events, seen):
+                assert seen["tenant_id"] == "acme"
 
     def describe_custom_mappers():
         async def it_allows_user_mapper_to_claim_events():

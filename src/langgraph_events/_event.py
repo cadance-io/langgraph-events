@@ -921,13 +921,16 @@ class HandlerAbandonedOnSignal(HandlerAbandoned):
 
     The run pauses at the next round, so a backoff wait only delays the
     pause, and the retry loop gives up instead of starting it. The router
-    then emits :class:`RunPausedOnSignal` before it dispatches this event,
-    so no catcher runs on it in this run. The event stays in the log.
+    then emits :class:`RunPausedOnSignal` instead of dispatching this event,
+    so no catcher runs on it. The event stays in the log.
     ``@on(HandlerRaised, exception=X)`` and ``log.latest(HandlerRaised)``
     still match it.
 
-    A thread that stores this event also stores the
-    :class:`RunPausedOnSignal` that follows it.
+    A thread can store this event with no :class:`RunPausedOnSignal`. A
+    sibling handler that interrupts in the same round ends the run before
+    the router reads the signal, and the resume round skips this event. A
+    give-up in the last round that ``max_rounds`` allows halts the run with
+    :class:`MaxRoundsExceeded`. Only a seeded event reaches a catcher.
     """
 
 

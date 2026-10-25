@@ -17,9 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   contract. The router calls `is_set()` between dispatch rounds. When it returns `True`,
   the router emits a `RunPausedOnSignal` and the run ends cleanly. A deadline is fixed
   when the run starts, so it cannot stop a live run early. A signal can, for example when
-  the process gets a shutdown request. A `pause_on=` value with no callable `is_set`, for
-  example `pause_on=event.is_set` or `pause_on=True`, raises `TypeError` before any round
-  runs.
+  the process gets a shutdown request. A `pause_on=` value that is a class, or that has
+  no callable `is_set`, raises `TypeError` before any round runs. Examples are
+  `pause_on=event.is_set`, `pause_on=True` and `pause_on=threading.Event`. A resume round
+  always dispatches the resume value. The router pauses at the next round.
+- **`deadline=` and `pause_on=` are typed keyword-only parameters on every `EventGraph`
+  entry point.** Before, they passed through `**kwargs`. `help(graph.invoke)` now shows
+  them, and a type checker rejects a value of the wrong type.
 - **Each pause and each early give-up names its cause as a type.** `isinstance` and `@on`
   match the cause.
   - `RunPaused` is the base of every pause. A deadline pause emits a
@@ -29,14 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     attempts left. A give-up because the next backoff would cross the run's `deadline=`
     emits a `HandlerAbandonedOnDeadline`. The run continues, so an
     `@on(HandlerRaised, exception=X)` catcher runs for it. A give-up because the
-    `pause_on=` signal is set emits a `HandlerAbandonedOnSignal`. The router emits
-    `RunPausedOnSignal` before it dispatches the give-up, so no catcher runs on it.
+    `pause_on=` signal is set emits a `HandlerAbandonedOnSignal`.
   - An exhausted attempt budget still emits a plain `HandlerRaised`.
 - **A `RetryPolicy` backoff reads the `pause_on=` signal before every wait.** When the
   signal is set, the policy gives up instead of starting the wait, because the run pauses
   at the next round anyway. A wait that is already in progress runs to its end. The first
   set read of the signal commits the run to a pause. So the retry loop and the router read
-  the same answer, also when the caller clears the signal between the two reads.
+  the same answer, also when the caller clears the signal between the two reads. The
+  router pauses over the give-up instead of dispatching it, so no catcher runs on it. A
+  resume round does not dispatch it either, for example after a sibling handler
+  interrupted in the same round.
 - **Every `NamespaceAwareSerde` applies lge's own read migrations for its framework
   events.** They apply whatever `namespaces=` and `events=` you pass. A checkpoint that
   0.40.0 wrote revives with the new types:
@@ -131,7 +137,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before, the router paused on the resume round. It stored the resume value and never
   dispatched it, so no later run handled the answer. Now the resume round always
   dispatches, the same as the first round of a fresh run. The router pauses at the next
-  round. The same rule applies to `pause_on=`.
+  round.
 
 ## [0.40.0] - 2026-10-24
 

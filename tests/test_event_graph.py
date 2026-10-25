@@ -3545,7 +3545,6 @@ def describe_EventGraph():
 
                     assert log.count(RunPaused) == 1
                     assert type(log.latest(RunPaused)) is RunPausedOnSignal
-                    assert not log.has(RunPausedOnDeadline)
 
             def when_a_fresh_run_follows_a_signal_pause():
 
@@ -3565,55 +3564,58 @@ def describe_EventGraph():
                     assert log.latest(Ended).result == "second"
 
             def when_resuming_an_interrupted_run():
-
-                def it_dispatches_the_resume_value_before_pausing():
-                    graph, config = _interrupting_graph("resume-pause")
-                    graph.invoke(Started(data="test"), config=config)
-                    signal = threading.Event()
-                    signal.set()
-
-                    log = graph.resume(_Confirmed(), config=config, pause_on=signal)
-
-                    assert log.latest(Ended) is not None
-                    assert log.latest(Processed) is None
-                    assert log.latest(RunPausedOnSignal) is not None
-
-                def it_dispatches_the_resume_value_in_stream_resume():
-                    graph, config = _interrupting_graph("stream-resume-pause")
-                    graph.invoke(Started(data="test"), config=config)
-                    signal = threading.Event()
-                    signal.set()
-
-                    events = list(
-                        graph.stream_resume(
-                            _Confirmed(), config=config, pause_on=signal
-                        )
-                    )
-
+                # Each entry point dispatches the resume value, then pauses at
+                # the next round, before the downstream Processed.
+                def _assert_resumed_then_paused(events):
                     assert any(isinstance(e, Ended) for e in events)
                     assert not any(isinstance(e, Processed) for e in events)
                     assert any(isinstance(e, RunPausedOnSignal) for e in events)
 
-                async def it_dispatches_the_resume_value_in_astream_resume():
-                    graph, config = _interrupting_graph("astream-resume-pause")
-                    await graph.ainvoke(Started(data="test"), config=config)
-                    signal = asyncio.Event()
-                    signal.set()
+                def for_resume():
+                    def it_dispatches_the_resume_value_before_pausing():
+                        graph, config = _interrupting_graph("resume-pause")
+                        graph.invoke(Started(data="test"), config=config)
+                        signal = threading.Event()
+                        signal.set()
 
-                    events = [
-                        e
-                        async for e in graph.astream_resume(
-                            _Confirmed(), config=config, pause_on=signal
+                        log = graph.resume(_Confirmed(), config=config, pause_on=signal)
+
+                        _assert_resumed_then_paused(list(log))
+
+                def for_stream_resume():
+                    def it_dispatches_the_resume_value_before_pausing():
+                        graph, config = _interrupting_graph("stream-resume-pause")
+                        graph.invoke(Started(data="test"), config=config)
+                        signal = threading.Event()
+                        signal.set()
+
+                        events = list(
+                            graph.stream_resume(
+                                _Confirmed(), config=config, pause_on=signal
+                            )
                         )
-                    ]
 
-                    assert any(isinstance(e, Ended) for e in events)
-                    assert not any(isinstance(e, Processed) for e in events)
-                    assert any(isinstance(e, RunPausedOnSignal) for e in events)
+                        _assert_resumed_then_paused(events)
+
+                def for_astream_resume():
+                    async def it_dispatches_the_resume_value_before_pausing():
+                        graph, config = _interrupting_graph("astream-resume-pause")
+                        await graph.ainvoke(Started(data="test"), config=config)
+                        signal = asyncio.Event()
+                        signal.set()
+
+                        events = [
+                            e
+                            async for e in graph.astream_resume(
+                                _Confirmed(), config=config, pause_on=signal
+                            )
+                        ]
+
+                        _assert_resumed_then_paused(events)
 
             def when_streaming_events():
 
-                def it_yields_the_pause_in_the_sync_stream():
+                def it_yields_the_pause_in_stream_events():
                     graph, config = _pause_graph("pause-sync-stream")
                     signal = threading.Event()
                     signal.set()
@@ -3626,7 +3628,7 @@ def describe_EventGraph():
 
                     assert any(isinstance(e, RunPausedOnSignal) for e in events)
 
-                async def it_yields_the_pause():
+                async def it_yields_the_pause_in_astream_events():
                     graph, config = _pause_graph("pause-stream")
                     signal = asyncio.Event()
                     signal.set()
