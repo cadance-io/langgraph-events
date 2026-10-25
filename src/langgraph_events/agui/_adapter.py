@@ -25,7 +25,7 @@ from ag_ui.core import (
 
 from langgraph_events._event import Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
-from langgraph_events._internal import _inject_deadline_keys
+from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX, _with_pause_budget
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from langgraph.types import StateSnapshot
 
     from langgraph_events._graph import EventGraph
+    from langgraph_events._types import PauseSignal
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
 
@@ -257,14 +258,14 @@ class AGUIAdapter:
         thread_id: str,
         *,
         deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
     ) -> RunnableConfig:
         """Build LangGraph config, including passthrough forwarded props.
 
-        When ``deadline`` is provided, delegates to
-        :func:`_inject_deadline_keys` (same writer as the
-        :class:`EventGraph` entry points) so the framework router sees
-        the per-run soft-timeout keys and emits :class:`RunPausedOnDeadline`
-        on expiry.
+        Drops every client ``configurable`` key with the framework prefix
+        ``__lge_``, so a client cannot plant a pause of its own. Delegates
+        ``deadline`` and ``pause_on`` to :func:`_with_pause_budget`, the
+        same writer as the :class:`EventGraph` entry points.
         """
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         forwarded_raw = input_data.forwarded_props
@@ -283,18 +284,18 @@ class AGUIAdapter:
         if isinstance(candidate, dict):
             merged = {**candidate}
             configurable = candidate.get("configurable")
+            client_keys = configurable if isinstance(configurable, dict) else {}
             merged["configurable"] = {
-                **(configurable if isinstance(configurable, dict) else {}),
+                **{
+                    key: value
+                    for key, value in client_keys.items()
+                    if not key.startswith(_FRAMEWORK_KEY_PREFIX)
+                },
                 "thread_id": thread_id,
             }
             config = merged
 
-        if deadline is not None:
-            configurable = dict(config.get("configurable", {}))
-            _inject_deadline_keys(configurable, deadline)
-            config["configurable"] = configurable
-
-        return cast("RunnableConfig", config)
+        return _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on)
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph."""
@@ -715,6 +716,7 @@ class AGUIAdapter:
         input_data: RunAgentInput,
         *,
         deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
     ) -> AsyncIterator[BaseEvent]:
         """Yield AG-UI events for one request.
 
@@ -726,13 +728,25 @@ class AGUIAdapter:
             input_data: AG-UI ``RunAgentInput``.
             deadline: Absolute ``time.monotonic()`` value.  When the run's
                 router observes a current time >= deadline between
-                dispatch rounds, it emits :class:`RunPausedOnDeadline` (mapped to a
-                ``CustomEvent(name="interrupted", value={"kind":
-                "soft_timeout", "elapsed_seconds": …})`` on the wire) and
-                the run finalises cleanly.  Pair with a strictly larger
-                outer hard cancellation (``asyncio.wait_for`` /
-                ``timeout=`` etc.) to avoid wire-format violations from
-                mid-stream cancellation.  ``None`` (default) disables.
+                dispatch rounds, it emits :class:`RunPausedOnDeadline` and
+                the run finalises cleanly.  ``RunPaused`` has no default
+                wire mapping.  Register a custom mapper to send it.  Pair
+                with a strictly larger outer hard cancellation
+                (``asyncio.wait_for`` / ``timeout=`` etc.) to avoid
+                wire-format violations from mid-stream cancellation.
+                ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``.  When the router observes
+                ``is_set()`` between dispatch rounds, it emits
+                :class:`RunPausedOnSignal` and the run finalises cleanly,
+                the same way as a deadline pause.  Set the signal to stop
+                a live run early, for example when the process shuts down.
+                ``None`` (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable
+                ``is_set``. The stream raises it on the first iteration,
+                before ``RUN_STARTED``.
         """
         run_id = input_data.run_id or str(uuid.uuid4())
         thread_id = input_data.thread_id or str(uuid.uuid4())
@@ -743,13 +757,15 @@ class AGUIAdapter:
             input_data=input_data,
         )
 
+        config = self._build_config(
+            input_data, thread_id, deadline=deadline, pause_on=pause_on
+        )
+
         yield RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=thread_id,
             run_id=run_id,
         )
-
-        config = self._build_config(input_data, thread_id, deadline=deadline)
 
         try:
             async for agui_event in self._stream_event_source(input_data, ctx, config):

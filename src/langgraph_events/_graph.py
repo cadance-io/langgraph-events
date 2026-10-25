@@ -47,7 +47,6 @@ from langgraph_events._handler import (
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _BASE_FIELDS,
-    _inject_deadline_keys,
     _InputState,
     _leaf_node,
     _OutputState,
@@ -61,6 +60,7 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._pause import _with_pause_budget
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
     RewritePlan,
@@ -90,7 +90,7 @@ if TYPE_CHECKING:
 
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
-    from langgraph_events._types import StateDict
+    from langgraph_events._types import PauseSignal, StateDict
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde, UnrevivedIdentity
 
     _GraphInput = dict[str, Any] | LGCommand
@@ -1555,34 +1555,28 @@ class EventGraph:
         seeds = seed if isinstance(seed, list) else [seed]
         return {"events": seeds, "causes": [None] * len(seeds)}
 
-    @staticmethod
-    def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Pop ``deadline`` from kwargs and inject it into the LangGraph config.
-
-        Thin wrapper over :func:`_inject_deadline_keys` that pops the kwarg
-        and threads it into a copied ``config`` dict, so callers can pass
-        ``deadline=...`` through any entry point
-        (invoke/ainvoke/resume/aresume/stream_events/...) and the router
-        sees it via parameter injection.
-        """
-        deadline = kwargs.pop("deadline", None)
-        if deadline is None:
-            return kwargs
-        config = dict(kwargs.get("config") or {})
-        configurable = dict(config.get("configurable", {}))
-        _inject_deadline_keys(configurable, deadline)
-        config["configurable"] = configurable
-        kwargs["config"] = config
-        return kwargs
-
-    def _run(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+    def _run(
+        self,
+        inp: _GraphInput,
+        *,
+        deadline: float | None,
+        pause_on: PauseSignal | None,
+        **kwargs: Any,
+    ) -> EventLog:
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
-    async def _arun(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+    async def _arun(
+        self,
+        inp: _GraphInput,
+        *,
+        deadline: float | None,
+        pause_on: PauseSignal | None,
+        **kwargs: Any,
+    ) -> EventLog:
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
@@ -1658,19 +1652,51 @@ class EventGraph:
 
         return graph
 
-    def invoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
+    def invoke(
+        self,
+        seed: Event | list[Event],
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
         """Run the graph synchronously with one or more seed events.
 
         Args:
             seed: A single event or list of events to start the graph.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
 
         Returns an ``EventLog`` containing all events produced during the run.
-        """
-        return self._run(self._prepare_input(seed), **kwargs)
 
-    async def ainvoke(self, seed: Event | list[Event], **kwargs: Any) -> EventLog:
-        """Run the graph asynchronously with one or more seed events."""
-        return await self._arun(self._prepare_input(seed), **kwargs)
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
+        """
+        return self._run(
+            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+        )
+
+    async def ainvoke(
+        self,
+        seed: Event | list[Event],
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
+        """Run the graph asynchronously with one or more seed events.
+
+        Takes the same arguments as :meth:`invoke`.
+        """
+        return await self._arun(
+            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+        )
 
     def pre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
         """Inject external state into reducer channels before the first run.
@@ -1905,31 +1931,66 @@ class EventGraph:
             got = type(value).__name__
             raise TypeError(f"resume() requires an Event instance, got {got}")
 
-    def resume(self, value: Event, **kwargs: Any) -> EventLog:
+    def resume(
+        self,
+        value: Event,
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
         """Resume an interrupted graph with a domain event.
 
         The event is auto-dispatched (handlers subscribed to its type fire),
         then a ``Resumed`` event is created alongside it. If the thread is not
         awaiting input, the ``on_unresumable`` policy applies (default raise).
+        The resume round always dispatches. A pause can start at the next
+        round.
+
+        Args:
+            value: The domain event to resume with.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
         self._require_checkpointer("resume")
         self._require_resume_event(value)
         if not self._resume_is_pending(kwargs):
             return self._apply_unresumable_policy(value, kwargs)
-        return self._run(LGCommand(resume=value), **kwargs)
+        return self._run(
+            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
+        )
 
-    async def aresume(self, value: Event, **kwargs: Any) -> EventLog:
+    async def aresume(
+        self,
+        value: Event,
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
         """Async version of resume().
 
         The event is auto-dispatched (handlers subscribed to its type fire),
         then a ``Resumed`` event is created alongside it. If the thread is not
         awaiting input, the ``on_unresumable`` policy applies (default raise).
+        Takes the same arguments as :meth:`resume`.
         """
         self._require_checkpointer("aresume")
         self._require_resume_event(value)
         if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
-        return await self._arun(LGCommand(resume=value), **kwargs)
+        return await self._arun(
+            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
+        )
 
     @staticmethod
     def _is_interrupted(snapshot: StateSnapshot) -> bool:
@@ -3031,10 +3092,13 @@ class EventGraph:
         inp: _GraphInput,
         seeds: list[Event],
         reducer_names: list[str],
+        *,
+        deadline: float | None,
+        pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         compiled = self._compile()
         if not reducer_names:
             yield from seeds
@@ -3087,6 +3151,8 @@ class EventGraph:
         seed: Event | list[Event],
         *,
         include_reducers: bool | list[str] = False,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Yield individual events as they are produced during graph execution.
@@ -3100,11 +3166,29 @@ class EventGraph:
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
         inp = self._prepare_input(seed)
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
-        yield from self._stream_sync(inp, inp["events"], reducer_names, **kwargs)
+        yield from self._stream_sync(
+            inp,
+            inp["events"],
+            reducer_names,
+            deadline=deadline,
+            pause_on=pause_on,
+            **kwargs,
+        )
 
     def stream_resume(
         self,
@@ -3112,6 +3196,8 @@ class EventGraph:
         *,
         seeds: list[Event] | None = None,
         include_reducers: bool | list[str] = False,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Yield events produced when resuming an interrupted graph.
@@ -3131,6 +3217,17 @@ class EventGraph:
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
         self._require_checkpointer("stream_resume")
         self._require_resume_event(value)
@@ -3144,7 +3241,12 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
         reducer_names = self._resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
-            LGCommand(resume=value), seeds or [], reducer_names, **kwargs
+            LGCommand(resume=value),
+            seeds or [],
+            reducer_names,
+            deadline=deadline,
+            pause_on=pause_on,
+            **kwargs,
         )
 
     async def _astream_entry(
@@ -3156,6 +3258,8 @@ class EventGraph:
         include_llm_tokens: bool,
         include_custom_events: bool,
         snapshot: StateSnapshot | None,
+        deadline: float | None,
+        pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags.
@@ -3164,7 +3268,7 @@ class EventGraph:
         path loads no checkpoint, so it has no use for *snapshot*.
         """
         kwargs.pop("stream_mode", None)
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(
@@ -3191,6 +3295,8 @@ class EventGraph:
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
         _snapshot: StateSnapshot | None = None,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_resume()``.
@@ -3219,6 +3325,17 @@ class EventGraph:
                 The pending check uses it, so it does not load the checkpoint
                 again. With ``include_llm_tokens`` or ``include_custom_events``,
                 the reducer seed uses it too.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
@@ -3238,6 +3355,8 @@ class EventGraph:
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
             snapshot=snapshot,
+            deadline=deadline,
+            pause_on=pause_on,
             **kwargs,
         ):
             yield item
@@ -3250,6 +3369,8 @@ class EventGraph:
         include_llm_tokens: bool = False,
         include_custom_events: bool = False,
         _snapshot: StateSnapshot | None = None,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_events()``.
@@ -3270,6 +3391,17 @@ class EventGraph:
                 again. Only the stream with ``include_llm_tokens`` or
                 ``include_custom_events`` uses it, because the other stream
                 loads no checkpoint.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
         inp = self._prepare_input(seed)
         async for item in self._astream_entry(
@@ -3279,6 +3411,8 @@ class EventGraph:
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
             snapshot=_snapshot,
+            deadline=deadline,
+            pause_on=pause_on,
             **kwargs,
         ):
             yield item

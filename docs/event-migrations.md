@@ -378,6 +378,8 @@ lge owns the read migrations for its own framework events, such as `HandlerRaise
 
 lge's framework migrations are not relabelled on write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
 
+`HandlerAbandonedOnSignal` and `RunPausedOnSignal` have no framework migration. No release before 0.41.0 wrote them.
+
 !!! warning "Only `NamespaceAwareSerde` applies these migrations"
     With LangGraph's plain `JsonPlusSerializer`, an old `RunPaused` or `HandlerRaised` revives as `None`, with no error. `EventGraph(checkpointer=...)` keeps the serializer of the checkpointer. Only `EventGraph.from_namespaces` puts a `NamespaceAwareSerde` on it. Otherwise, pass `serde=NamespaceAwareSerde(...)` to the checkpointer yourself.
 
@@ -430,13 +432,17 @@ ROLLBACK_FROM_041 = (
     Migration.transform_fields(
         module=LGE, qualname="HandlerAbandonedOnDeadline", transform=flag_deadline
     ),
+    Migration.rename(
+        old_module=LGE, old_qualname="HandlerAbandonedOnSignal", to=HandlerRaised
+    ),
     Migration.rename(old_module=LGE, old_qualname="RunPausedOnDeadline", to=RunPaused),
+    Migration.rename(old_module=LGE, old_qualname="RunPausedOnSignal", to=RunPaused),
 )
 
 serde = NamespaceAwareSerde(ROLLBACK_FROM_041, namespaces=[Orders])
 ```
 
-On 0.40.0, a `HandlerAbandonedOnDeadline` then revives as `HandlerRaised(abandoned_for_deadline=True)`, and a `RunPausedOnDeadline` revives as `RunPaused`.
+On 0.40.0, a `HandlerAbandonedOnDeadline` then revives as `HandlerRaised(abandoned_for_deadline=True)`, and a `HandlerAbandonedOnSignal` revives as a plain `HandlerRaised`. A `RunPausedOnDeadline` and a `RunPausedOnSignal` each revive as `RunPaused`.
 
 ## What is NOT migrated
 

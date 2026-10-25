@@ -9,12 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`HandlerAbandoned`, `HandlerAbandonedOnDeadline` and `RunPausedOnDeadline` name the
-  cause of a give-up or of a pause as a type.** A `RetryPolicy` that gives up because the
-  next backoff would cross the run's `deadline=` emits a `HandlerAbandonedOnDeadline`. It
-  is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` catcher still runs for it.
-  An exhausted attempt budget still emits a plain `HandlerRaised`. A deadline pause emits a
-  `RunPausedOnDeadline`, which is a `RunPaused`.
+- **A run can pause on a signal, not only on a deadline.** Pass `pause_on=` to any entry
+  point that accepts `deadline=`: `invoke`, `ainvoke`, `resume`, `aresume`,
+  `stream_events`, `astream_events`, `stream_resume`, `astream_resume` and
+  `AGUIAdapter.stream`. The value is an object with `is_set()`, for example an
+  `asyncio.Event` or a `threading.Event`. The new `PauseSignal` protocol states this
+  contract. The router calls `is_set()` between dispatch rounds. When it returns `True`,
+  the router emits a `RunPausedOnSignal` and the run ends cleanly. A deadline is fixed
+  when the run starts, so it cannot stop a live run early. A signal can, for example when
+  the process gets a shutdown request. A `pause_on=` value that is a class, or that has
+  no callable `is_set`, raises `TypeError` before any round runs. Examples are
+  `pause_on=event.is_set`, `pause_on=True` and `pause_on=threading.Event`. A resume round
+  always dispatches the resume value. The router pauses at the next round.
+- **`deadline=` and `pause_on=` are typed keyword-only parameters on every `EventGraph`
+  entry point.** Before, they passed through `**kwargs`. `help(graph.invoke)` now shows
+  them, and a type checker rejects a value of the wrong type.
+- **Each pause and each early give-up names its cause as a type.** `isinstance` and `@on`
+  match the cause.
+  - `RunPaused` is the base of every pause. A deadline pause emits a
+    `RunPausedOnDeadline`. A signal pause emits a `RunPausedOnSignal`. When the signal is
+    set and the deadline has also expired, the router emits `RunPausedOnSignal`.
+  - `HandlerAbandoned(HandlerRaised)` is the base of a `RetryPolicy` give-up with
+    attempts left. A give-up because the next backoff would cross the run's `deadline=`
+    emits a `HandlerAbandonedOnDeadline`. The run continues, so an
+    `@on(HandlerRaised, exception=X)` catcher runs for it. A give-up because the
+    `pause_on=` signal is set emits a `HandlerAbandonedOnSignal`.
+  - An exhausted attempt budget still emits a plain `HandlerRaised`.
+- **A `RetryPolicy` backoff reads the `pause_on=` signal before every wait.** When the
+  signal is set, the policy gives up instead of starting the wait, because the run pauses
+  at the next round anyway. A wait that is already in progress runs to its end. The first
+  set read of the signal commits the run to a pause. So the retry loop and the router read
+  the same answer, also when the caller clears the signal between the two reads. The
+  router pauses over the give-up instead of dispatching it, so no catcher runs on it. A
+  resume round does not dispatch it either, for example after a sibling handler
+  interrupted in the same round.
 - **Every `NamespaceAwareSerde` applies lge's own read migrations for its framework
   events.** They apply whatever `namespaces=` and `events=` you pass. A checkpoint that
   0.40.0 wrote revives with the new types:
@@ -30,6 +58,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the serializer of the checkpointer. Only `EventGraph.from_namespaces` puts a
   `NamespaceAwareSerde` on it.
 
+  `HandlerAbandonedOnSignal` and `RunPausedOnSignal` need no migration, because no earlier
+  release wrote them.
+
 ### Changed
 
 - **BREAKING: `HandlerRaised.abandoned_for_deadline` is removed.** There is no deprecated
@@ -37,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `isinstance(event, HandlerAbandonedOnDeadline)`. A test that builds
   `HandlerRaised(abandoned_for_deadline=True)` must build `HandlerAbandonedOnDeadline(...)`.
 - **BREAKING: `RunPaused` cannot be built directly.** `RunPaused(...)` raises `TypeError`.
-  Build `RunPausedOnDeadline(...)` instead. `isinstance(e, RunPaused)` and
-  `log.latest(RunPaused)` still match every pause. `HandlerAbandoned` also raises
-  `TypeError` when built directly.
+  Build `RunPausedOnDeadline(...)` or `RunPausedOnSignal(...)` instead.
+  `isinstance(e, RunPaused)` and `log.latest(RunPaused)` still match every pause.
+  `HandlerAbandoned` also raises `TypeError` when built directly.
 - **BREAKING: `Event`, `DomainEvent`, `IntegrationEvent` and `SystemEvent` cannot be built
   directly.** Each one raises `TypeError` and names its concrete subclasses. These classes,
   `RunPaused` and `HandlerAbandoned` share one rule: an abstract event class names no
@@ -50,14 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   framework migrations do not count, so `legacy_write=True` still constructs. A framework
   event is always written under its own live identity.
 - **BREAKING: a rollback to 0.40.0 needs read migrations on 0.40.0.** 0.40.0 cannot read
-  `HandlerAbandonedOnDeadline` or `RunPausedOnDeadline`. It fails with
+  the four new types `HandlerAbandonedOnDeadline`, `HandlerAbandonedOnSignal`,
+  `RunPausedOnDeadline` and `RunPausedOnSignal`. It fails with
   `Cannot revive langgraph_events._event.RunPausedOnDeadline`. Draining in-flight threads
   does not prevent this. The `events` channel is written whole at each checkpoint, so a
   thread that takes one step on this release stores its whole history under the new
   identities. `rewrite_store()` also rewrites the old events. Before you roll back, give
-  the 0.40.0 serde migrations that map `HandlerAbandonedOnDeadline` and
-  `RunPausedOnDeadline` back to the 0.40.0 shapes. "Rolling back to an older release" in
-  `docs/event-migrations.md` shows the list.
+  the 0.40.0 serde migrations that map each new type back to its 0.40.0 shape. "Rolling
+  back to an older release" in `docs/event-migrations.md` shows the list.
 - **BREAKING: a client migration on an identity that lge migrates raises `ValueError`.**
   For example, `Migration.split_event(source=HandlerRaised, ...)` or
   `Migration.transform_fields(target=HandlerRaised, ...)` now fails at serde construction,
@@ -96,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Ruff rule `ANN401` forbids `Any` in a parameter or return type in `src/`.** `Any`
   stays permitted on `*args` and `**kwargs` that forward to another callable. A kept
   `Any` must have a `# noqa: ANN401` comment that gives the reason.
+
+### Fixed
+
+- **`AGUIAdapter` drops every client `forwarded_props` `configurable` key that starts with
+  `__lge_`.** The framework keeps its per-run pause state under that prefix. Before, a
+  client could plant such a key and crash its own run, or pause it.
+- **A resume with an expired deadline dispatches the resume value before it pauses.**
+  Before, the router paused on the resume round. It stored the resume value and never
+  dispatched it, so no later run handled the answer. Now the resume round always
+  dispatches, the same as the first round of a fresh run. The router pauses at the next
+  round.
 
 ## [0.40.0] - 2026-10-24
 

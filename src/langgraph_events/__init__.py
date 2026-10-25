@@ -18,6 +18,7 @@ from langgraph_events._event import (
     Halted,
     HandlerAbandoned,
     HandlerAbandonedOnDeadline,
+    HandlerAbandonedOnSignal,
     HandlerRaised,
     HandlerRetried,
     IntegrationEvent,
@@ -30,6 +31,7 @@ from langgraph_events._event import (
     Resumed,
     RunPaused,
     RunPausedOnDeadline,
+    RunPausedOnSignal,
     Scatter,
     SystemEvent,
     SystemPromptSet,
@@ -79,6 +81,7 @@ from langgraph_events._services import RunScoped
 from langgraph_events._types import (
     HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
+from langgraph_events._types import PauseSignal
 from langgraph_events._warn import warn_user
 
 # --- Deprecated top-level aliases ----------------------------------------
@@ -129,6 +132,7 @@ __all__ = [
     "Halted",
     "HandlerAbandoned",
     "HandlerAbandonedOnDeadline",
+    "HandlerAbandonedOnSignal",
     "HandlerRaised",
     "HandlerRetried",
     "IntegrationEvent",
@@ -144,6 +148,7 @@ __all__ = [
     "NamespaceModel",
     "NotRecorded",
     "OrphanedEventWarning",
+    "PauseSignal",
     "QueryTool",
     "Reducer",
     "ReducerNotSetError",
@@ -153,6 +158,7 @@ __all__ = [
     "RewriteReport",
     "RunPaused",
     "RunPausedOnDeadline",
+    "RunPausedOnSignal",
     "RunScoped",
     "ScalarReducer",
     "Scatter",

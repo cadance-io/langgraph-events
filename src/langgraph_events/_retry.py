@@ -7,9 +7,11 @@ in place when it raises one of its declared ``raises=`` exceptions, waiting
 ``delay_for(attempt, exc)`` seconds between tries.  Only the *final* failure surfaces
 as ``HandlerRaised``, so catchers become pure escalation handlers.
 
-The backoff is bounded by the run's ``deadline=``: a wait that would land on or
-past it is abandoned rather than started, and the give-up is a
-``HandlerAbandonedOnDeadline``.  See ``_internal._next_delay_or_give_up``.
+The backoff is bounded by the run's ``deadline=`` and ``pause_on=``: a wait that
+would land on or past the deadline, or that would start after the signal is set,
+is abandoned rather than started.  A deadline give-up is a
+``HandlerAbandonedOnDeadline``.  A signal give-up is a ``HandlerAbandonedOnSignal``.
+See ``_internal._next_delay_or_give_up``.
 
 Not to be confused with ``langgraph.types.RetryPolicy``, which is a *node*-level
 policy that re-runs an entire LangGraph node.  This one is scoped to a single

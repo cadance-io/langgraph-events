@@ -9,7 +9,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import operator
-import time
 from collections.abc import Awaitable, Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
@@ -37,20 +36,23 @@ from langgraph_events._event import (
     Cancelled,
     Event,
     Halted,
-    HandlerAbandonedOnDeadline,
+    HandlerAbandonedOnSignal,
     HandlerRaised,
     HandlerRetried,
     InvariantViolated,
     MaxRoundsExceeded,
     Resumed,
-    RunPausedOnDeadline,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
+from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._services import RunScoped
-from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
+from langgraph_events._types import (  # noqa: TC001
+    HandlerReturn,
+    StateDict,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -70,23 +72,6 @@ _BASE_FIELDS: dict[str, Any] = {
     # Router-side gate: one RunPaused per /run regardless of fan-ins (#88).
     "_run_paused_emitted": bool,
 }
-
-# Per-call deadline keys written into LangGraph ``configurable`` by the
-# graph/adapter entry points and read by the router below. Names are
-# centralised so a grep for the constant finds every writer and reader.
-_DEADLINE_KEY = "__lge_deadline"
-_DEADLINE_STARTED_AT_KEY = "__lge_deadline_started_at"
-
-
-def _inject_deadline_keys(configurable: dict[str, Any], deadline: float) -> None:
-    """Write the paired deadline keys into a ``configurable`` dict.
-
-    Single writer for the two-key contract: every entry point that accepts
-    a ``deadline=`` kwarg routes through here so the router can rely on
-    both keys being present.
-    """
-    configurable[_DEADLINE_KEY] = deadline
-    configurable[_DEADLINE_STARTED_AT_KEY] = time.monotonic()
 
 
 class _InputState(TypedDict):
@@ -226,11 +211,12 @@ def make_router_node(
                 },
                 FRAMEWORK,
             )
-        configurable = (config or {}).get("configurable", {})
-        deadline = configurable.get(_DEADLINE_KEY)
-        if deadline is not None and time.monotonic() >= deadline:
+        # The resume round always dispatches, like the seed round. A pause
+        # here would store the resume value and never dispatch it.
+        paused = None if has_resume else _pause_budget(config).pause_now()
+        if paused is not None:
             if state.get("_run_paused_emitted"):
-                # Late fan-ins past the deadline drain without
+                # Late fan-ins past the pause drain without
                 # re-emitting; in-flight events persist via
                 # operator.add. See #88.
                 return {
@@ -238,10 +224,6 @@ def make_router_node(
                     "_pending": [],
                     "_round": current_round,
                 }
-            started_at = configurable[_DEADLINE_STARTED_AT_KEY]
-            paused = RunPausedOnDeadline(
-                elapsed_seconds=time.monotonic() - started_at,
-            )
             return pad_causes(
                 {
                     # Advance cursor PAST the paused event so a fresh /run on
@@ -263,6 +245,29 @@ def make_router_node(
         }
 
     return router
+
+
+def _dispatchable(state: StateDict) -> list[tuple[int, Event]]:
+    """The pending events that a handler can take, each with its log index.
+
+    The pending events sit at [_cursor - len(_pending), _cursor) in events on
+    every path that dispatches a handler: the seed, the router and RunPaused.
+    MaxRoundsExceeded leaves _cursor at the halted event, but dispatch sends a
+    Halted event to END, so no handler reads it.
+
+    A router round never dispatches a ``HandlerAbandonedOnSignal``. Its run
+    pauses over it. When a sibling handler interrupts in the same superstep,
+    the run ends before the router reads the signal, and the resume round
+    must skip the give-up too. The seed round dispatches every seed.
+    """
+    pending = state.get("_pending", [])
+    base = state["_cursor"] - len(pending)
+    routed = state.get("_round", 0) > 0
+    return [
+        (base + k, e)
+        for k, e in enumerate(pending)
+        if not (routed and isinstance(e, HandlerAbandonedOnSignal))
+    ]
 
 
 def make_dispatch(
@@ -290,8 +295,11 @@ def make_dispatch(
         # handlers is the command qualname rather than the method name.
         matched: list[str] = []
         seen: set[str] = set()
+        dispatchable = [e for _, e in _dispatchable(state)]
         for meta in handler_metas:
-            if meta.node_name not in seen and any(meta.matches(e) for e in pending):
+            if meta.node_name not in seen and any(
+                meta.matches(e) for e in dispatchable
+            ):
                 seen.add(meta.node_name)
                 matched.append(meta.node_name)
 
@@ -488,26 +496,24 @@ def _next_delay_or_give_up(
     exc: Exception,
     attempt: int,
     new_events: list[Event],
-    deadline: float | None,
+    budget: _PauseBudget,
 ) -> float | None:
     """Seconds to wait before re-invoking *meta*, or ``None`` to give up.
 
     ``None`` means the retry loop is over and the terminal ``HandlerRaised``
     has already been appended to *new_events* — no policy, the budget is
     spent, this exception is out of the policy's ``on=`` scope, or the next
-    backoff would cross *deadline*.  Otherwise the attempt is recorded per
-    ``policy.observe`` (append a ``HandlerRetried``, log a warning, or stay
-    quiet) and the delay returned.
+    backoff does not fit the run's *budget*.  Otherwise the attempt is
+    recorded per ``policy.observe`` (append a ``HandlerRetried``, log a
+    warning, or stay quiet) and the delay returned.
 
-    *deadline* is the run's soft-timeout instant on ``time.monotonic()``'s
-    clock, or ``None`` when the caller passed no ``deadline=``.  A sleep that
-    would land on or past it is refused outright rather than clamped: the
-    router only checks the deadline *between* rounds, so an in-flight backoff
-    cannot be preempted, and burning what is left of the budget on an attempt
-    that almost certainly cannot finish either just delays the pause.  Giving
-    up here lets the run reach the router and emit ``RunPausedOnDeadline``
-    promptly. The give-up is a ``HandlerAbandonedOnDeadline``, so it stays
-    distinguishable from an exhausted attempt budget.
+    A sleep that the run's *budget* refuses is refused outright rather than
+    clamped: the router only pauses *between* rounds, so an in-flight backoff
+    cannot be preempted, and a wait before an attempt that the pause will cut
+    off only delays the pause.  Giving up here lets the run reach the router
+    and emit the pause promptly.  The give-up names the cause, as a
+    ``HandlerAbandonedOnSignal`` or a ``HandlerAbandonedOnDeadline``, so it
+    stays distinguishable from an exhausted attempt budget.
 
     Shared by both dispatch paths; only the sleep call itself differs between
     them.
@@ -521,10 +527,9 @@ def _next_delay_or_give_up(
         new_events.append(_make_handler_raised(meta, event, exc, kind=HandlerRaised))
         return None
     delay = policy.delay_for(attempt, exc)
-    if deadline is not None and time.monotonic() + delay >= deadline:
-        new_events.append(
-            _make_handler_raised(meta, event, exc, kind=HandlerAbandonedOnDeadline)
-        )
+    abandoned = budget.refuse_wait(delay)
+    if abandoned is not None:
+        new_events.append(_make_handler_raised(meta, event, exc, kind=abandoned))
         return None
     if policy.observe == "emit":
         # Why the breadcrumb must not carry the attempt's frames is in
@@ -721,8 +726,8 @@ def _process_events_sync(
     new_events: list[Event],
     new_causes: list[CauseEntry],
     lg_interrupt: Callable[[Any], Any],
+    budget: _PauseBudget,
     return_contract: ReturnContract | None = None,
-    deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the sync dispatch path.
 
@@ -741,7 +746,7 @@ def _process_events_sync(
                 result = _invoke_sync_path(meta, event, call_inject)
             except meta.raises as exc:
                 delay = _next_delay_or_give_up(
-                    meta, event, exc, attempt, new_events, deadline
+                    meta, event, exc, attempt, new_events, budget
                 )
                 if delay is None:
                     break
@@ -771,8 +776,8 @@ async def _process_events_async(
     new_events: list[Event],
     new_causes: list[CauseEntry],
     lg_interrupt: Callable[[Any], Any],
+    budget: _PauseBudget,
     return_contract: ReturnContract | None = None,
-    deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the async dispatch path.
 
@@ -791,7 +796,7 @@ async def _process_events_async(
                 result = await _invoke_async_path(meta, event, call_inject)
             except meta.raises as exc:
                 delay = _next_delay_or_give_up(
-                    meta, event, exc, attempt, new_events, deadline
+                    meta, event, exc, attempt, new_events, budget
                 )
                 if delay is None:
                     break
@@ -845,14 +850,8 @@ def make_handler_node(
 
     def _prepare(
         state: StateDict, config: RunnableConfig
-    ) -> tuple[list[tuple[int, Event]], dict[str, Any], float | None]:
-        pending = state["_pending"]
-        # The pending events sit at [_cursor - len(_pending), _cursor) in
-        # events on every path that dispatches a handler: the seed, the router
-        # and RunPaused. MaxRoundsExceeded leaves _cursor at the halted event,
-        # but dispatch sends a Halted event to END, so no handler reads it.
-        base = state["_cursor"] - len(pending)
-        matching = [(base + k, e) for k, e in enumerate(pending) if meta.matches(e)]
+    ) -> tuple[list[tuple[int, Event]], dict[str, Any], _PauseBudget]:
+        matching = [(i, e) for i, e in _dispatchable(state) if meta.matches(e)]
         inject = _build_inject(
             meta,
             state,
@@ -862,10 +861,7 @@ def make_handler_node(
             svcs_by_name,
             model_provider=model_provider,
         )
-        # Read once per node call, not per event: the retry loop only needs
-        # it on the failure path, and the no-deadline case stays a ``None``.
-        deadline = (config or {}).get("configurable", {}).get(_DEADLINE_KEY)
-        return matching, inject, deadline
+        return matching, inject, _pause_budget(config)
 
     def _bind_custom_emitters(
         config: RunnableConfig,
@@ -905,7 +901,7 @@ def make_handler_node(
         # Precondition check — outside the raises= catch boundary so a user
         # with raises=RuntimeError can't swallow this framework diagnostic.
         _check_sync_invocation_of_async(meta)
-        matching, inject, deadline = _prepare(state, config)
+        matching, inject, budget = _prepare(state, config)
         new_events: list[Event] = []
         new_causes: list[CauseEntry] = []
         tokens = _bind_custom_emitters(config)
@@ -918,15 +914,15 @@ def make_handler_node(
                 new_events,
                 new_causes,
                 lg_interrupt,
+                budget,
                 return_contract,
-                deadline,
             )
         finally:
             _reset_custom_emitters(tokens)
         return _finalize({"events": new_events, "causes": new_causes})
 
     async def _run_handler_async(state: StateDict, config: RunnableConfig) -> StateDict:
-        matching, inject, deadline = _prepare(state, config)
+        matching, inject, budget = _prepare(state, config)
         new_events: list[Event] = []
         new_causes: list[CauseEntry] = []
         tokens = _bind_custom_emitters(config)
@@ -939,8 +935,8 @@ def make_handler_node(
                 new_events,
                 new_causes,
                 lg_interrupt,
+                budget,
                 return_contract,
-                deadline,
             )
         except asyncio.CancelledError:
             return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))

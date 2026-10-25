@@ -73,6 +73,7 @@ BUILDERS: dict[str, Callable[[type], dict[str, object]]] = {
     "Cancelled": _one(),
     "Halted": _one(),
     "HandlerAbandonedOnDeadline": _one(**_raised()),
+    "HandlerAbandonedOnSignal": _one(**_raised()),
     "HandlerRaised": _handler_raised,
     "HandlerRetried": _one(**_raised(attempt=1, delay_seconds=0.5)),
     "Interrupted": _one(),
@@ -81,6 +82,7 @@ BUILDERS: dict[str, Callable[[type], dict[str, object]]] = {
     "Resumed": _one(value=Cancelled(), interrupted=lge.Interrupted()),
     "RunPaused": _one(elapsed_seconds=2.5),
     "RunPausedOnDeadline": _one(elapsed_seconds=2.5),
+    "RunPausedOnSignal": _one(elapsed_seconds=2.5),
     "SystemPromptSet": _one(message=SystemMessage(content="Be terse.")),
     "Unresumable": _one(resume_value="Approval"),
 }

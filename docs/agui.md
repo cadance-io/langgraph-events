@@ -476,7 +476,7 @@ Pure `Interrupted` (no payload) is still the right pick for non-frontend HITL.
 
 ## Soft-timeout
 
-`stream()` accepts an optional `deadline: float` keyword — an absolute `time.monotonic()` reference. When the graph's router observes a current time past the deadline between dispatch rounds, it emits `RunPaused` (see [Control Flow → Soft-timeout](control-flow.md#soft-timeout-runpaused)) and the run finalises cleanly through the same drain + `RunFinishedEvent` path as a normal completion. No early break, no special control flow in the adapter.
+`stream()` accepts an optional `deadline: float` keyword — an absolute `time.monotonic()` reference. When the graph's router observes a current time past the deadline between dispatch rounds, it emits a `RunPausedOnDeadline`, which is a `RunPaused` (see [Control Flow → Soft-timeout](control-flow.md#soft-timeout-runpaused)) and the run finalises cleanly through the same drain + `RunFinishedEvent` path as a normal completion. No early break, no special control flow in the adapter.
 
 ```python
 from time import monotonic
@@ -517,6 +517,14 @@ class PauseMapper:
 
 
 adapter = AGUIAdapter(graph, seed_factory=..., mappers=[PauseMapper()])
+```
+
+`stream()` also accepts `pause_on=`, an object with `is_set()` such as an `asyncio.Event`. When the router observes the signal between dispatch rounds, it emits `RunPausedOnSignal`, a subclass of `RunPaused`. The run then finalises through the same path as a deadline pause. Use it to stop a live run before a process shuts down. See [Control Flow → Pause on a signal](control-flow.md#pause-on-a-signal-runpausedonsignal).
+
+```python
+async def run(input_data: RunAgentInput, stopping: asyncio.Event) -> None:
+    async for event in adapter.stream(input_data, pause_on=stopping):
+        await publish(event)
 ```
 
 For an inline pause notice in the message channel (no custom wire event needed), see the reducer recipe in [Control Flow → Surfacing the pause inline](control-flow.md#surfacing-the-pause-inline).

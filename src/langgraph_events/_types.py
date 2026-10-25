@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import types
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from langgraph_events._event import Event, Scatter
 
@@ -24,3 +24,12 @@ ReducerFn = Callable[[list, list], list]
 
 #: TypeVar for the @on decorator — preserves the decorated function's type.
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+class PauseSignal(Protocol):
+    """A ``pause_on=`` signal: the router calls ``is_set()`` between rounds.
+
+    ``asyncio.Event`` and ``threading.Event`` satisfy this protocol.
+    """
+
+    def is_set(self) -> bool: ...
