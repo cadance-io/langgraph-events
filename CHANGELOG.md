@@ -24,7 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `HandlerRaised`;
   - a `RunPaused` revives as a `RunPausedOnDeadline`.
 
-  A framework migration never relabels a write.
+  lge's framework migrations are not relabelled on write. Only `NamespaceAwareSerde`
+  applies them. With LangGraph's plain `JsonPlusSerializer`, an old `RunPaused` or
+  `HandlerRaised` revives as `None`, with no error. `EventGraph(checkpointer=...)` keeps
+  the serializer of the checkpointer. Only `EventGraph.from_namespaces` puts a
+  `NamespaceAwareSerde` on it.
 
 ### Changed
 
@@ -43,14 +47,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build, as `Scatter[DomainEvent]` already did. A plain return annotation such as
   `-> RunPaused` still builds, because the handler returns a concrete subclass.
 - **BREAKING: the `legacy_write=True` guards judge the client's migrations only.** lge's
-  framework migrations do not count. They never relabel a write, so `legacy_write=True`
-  still constructs. A framework event is always written under its own live identity, so
-  an old release cannot read `HandlerAbandonedOnDeadline` or `RunPausedOnDeadline`. Drain
-  in-flight threads before a rollback to 0.40.0.
+  framework migrations do not count, so `legacy_write=True` still constructs. A framework
+  event is always written under its own live identity.
+- **BREAKING: a rollback to 0.40.0 needs read migrations on 0.40.0.** 0.40.0 cannot read
+  `HandlerAbandonedOnDeadline` or `RunPausedOnDeadline`. It fails with
+  `Cannot revive langgraph_events._event.RunPausedOnDeadline`. Draining in-flight threads
+  does not prevent this. The `events` channel is written whole at each checkpoint, so a
+  thread that takes one step on this release stores its whole history under the new
+  identities. `rewrite_store()` also rewrites the old events. Before you roll back, give
+  the 0.40.0 serde migrations that map `HandlerAbandonedOnDeadline` and
+  `RunPausedOnDeadline` back to the 0.40.0 shapes. "Rolling back to an older release" in
+  `docs/event-migrations.md` shows the list.
+- **BREAKING: a client migration on an identity that lge migrates raises `ValueError`.**
+  For example, `Migration.split_event(source=HandlerRaised, ...)` or
+  `Migration.transform_fields(target=HandlerRaised, ...)` now fails at serde construction,
+  with "lge already migrates ...". A class-stage transform runs before lge's split, so it
+  could drop the field that the split reads. Declare the migration on a subclass of your
+  own.
 - **BREAKING: a client subclass of `HandlerRaised` stored by 0.40.0 does not revive on its
   own.** The framework split keys on `HandlerRaised` only. The stored subclass payload
   carries the `abandoned_for_deadline` key, and its class no longer declares it. Drop the
-  key with a `@transform_fields` on the subclass:
+  key with a `@transform_fields` on the subclass. If your subclass can carry `True`, map
+  the value to a field of your own before you pop it:
 
   ```python
   def drop_deadline_flag(kw: dict) -> dict:

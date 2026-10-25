@@ -886,9 +886,10 @@ class HandlerRaised(SystemEvent):
 class HandlerAbandoned(HandlerRaised, _abstract=True):
     """A ``RetryPolicy`` gave up while it still had attempts left.
 
-    The run's pause budget refused the next backoff wait. Each subclass
-    names the cause. Catch ``HandlerRaised`` to see every give-up, or catch
-    a subclass to see one cause only.
+    The policy refused the next backoff wait. Each subclass names the
+    cause. Catch ``HandlerAbandoned`` to see every early give-up, or catch
+    a subclass to see one cause only. A ``HandlerRaised`` catcher also sees
+    an exhausted attempt budget.
     """
 
 

@@ -436,7 +436,7 @@ def _make_handler_raised(
     event: Event,
     exc: Exception,
     *,
-    kind: type[HandlerRaised] = HandlerRaised,
+    kind: type[HandlerRaised],
 ) -> HandlerRaised:
     """Build a ``HandlerRaised`` event for a caught declared exception.
 
@@ -518,7 +518,7 @@ def _next_delay_or_give_up(
         or attempt >= policy.max_attempts
         or not policy.retries(exc, meta.raises)
     ):
-        new_events.append(_make_handler_raised(meta, event, exc))
+        new_events.append(_make_handler_raised(meta, event, exc, kind=HandlerRaised))
         return None
     delay = policy.delay_for(attempt, exc)
     if deadline is not None and time.monotonic() + delay >= deadline:

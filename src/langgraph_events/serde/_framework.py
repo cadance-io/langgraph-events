@@ -1,8 +1,9 @@
 """Read migrations for the stored shapes of lge's own framework events.
 
 Every ``NamespaceAwareSerde`` applies them, whatever ``namespaces=`` or
-``events=`` the client passes. They never relabel a write, so the
-``legacy_write`` guards ignore them.
+``events=`` the client passes. They are not relabelled on write: a framework
+event is always written under its own live identity. So the ``legacy_write``
+guards ignore them, and an old release cannot read a new framework type.
 """
 
 from __future__ import annotations

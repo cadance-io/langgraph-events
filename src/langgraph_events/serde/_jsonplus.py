@@ -515,7 +515,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         client = _flatten_and_validate((*decorated, *migrations), scope)
         if legacy_write:
             client.refuse_legacy_write()
-        self._tables = client.merged(_flatten_and_validate(FRAMEWORK_MIGRATIONS, scope))
+        self._tables = client.with_framework(
+            _flatten_and_validate(FRAMEWORK_MIGRATIONS, scope)
+        )
         # The read path resolves through ``_scope`` before it falls back to
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
         # key set: the identities revivable with no migration at all.

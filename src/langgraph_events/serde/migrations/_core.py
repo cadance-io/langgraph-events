@@ -389,25 +389,29 @@ class MigrationTables:
             ("SplitEvent", self.split_table),
         )
 
-    def merged(self, other: MigrationTables) -> MigrationTables:
-        """These tables plus *other*. Refuses a key that both declare.
+    def with_framework(self, framework: MigrationTables) -> MigrationTables:
+        """These client tables plus lge's *framework* tables.
 
-        The read path runs one entry per key and table, so a second entry
-        would be ignored in silence.
+        lge owns the read migrations of its own identities. A client entry
+        on one of them is refused, in any table: a second split would be
+        ignored, and a class-stage transform runs before lge's split, so it
+        could drop the field that the split reads.
         """
-        for (kind, mine), (_, theirs) in zip(
-            self._named(), other._named(), strict=True
-        ):
-            for module, qualname in mine.keys() & theirs.keys():
+        owned = {key for _, table in framework._named() for key in table}
+        for kind, table in self._named():
+            for module, qualname in sorted(table.keys() & owned):
                 raise ValueError(
-                    f"Duplicate {kind} migration on {module}:{qualname!r}. "
-                    f"Each identity may carry at most one."
+                    f"lge already migrates {module}:{qualname!r} on read. A "
+                    f"{kind} of your own on that identity would conflict with "
+                    f"it. Declare the migration on a subclass of your own, "
+                    f"which has its own identity. See 'Framework events' in "
+                    f"docs/event-migrations.md."
                 )
         return MigrationTables(
             *(
                 {**mine, **theirs}
                 for (_, mine), (_, theirs) in zip(
-                    self._named(), other._named(), strict=True
+                    self._named(), framework._named(), strict=True
                 )
             )
         )

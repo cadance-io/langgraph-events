@@ -16,7 +16,6 @@ from langgraph_events import (
     Command,
     DomainEvent,
     EventGraph,
-    HandlerAbandoned,
     HandlerAbandonedOnDeadline,
     HandlerRaised,
     HandlerRetried,
@@ -736,7 +735,6 @@ def describe_retry_scope():
                 assert attempts.calls == 3
                 assert slept == [0.1, 0.2]
                 assert type(log.latest(HandlerRaised)) is HandlerRaised
-                assert not isinstance(log.latest(HandlerRaised), HandlerAbandoned)
 
         def when_no_deadline_is_set():
             def it_emits_a_plain_HandlerRaised(slept, overshooting):
@@ -747,7 +745,6 @@ def describe_retry_scope():
                 assert attempts.calls == 5
                 assert slept == [60.0] * 4
                 assert type(log.latest(HandlerRaised)) is HandlerRaised
-                assert not isinstance(log.latest(HandlerRaised), HandlerAbandoned)
 
     def describe_invariants():
         def it_evaluates_the_predicate_once_per_dispatch(slept):

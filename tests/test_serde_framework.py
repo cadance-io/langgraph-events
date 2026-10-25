@@ -24,6 +24,7 @@ from langgraph_events import (
     RunPausedOnDeadline,
 )
 from langgraph_events.serde import Migration, NamespaceAwareSerde
+from langgraph_events.serde._jsonplus import EXT_INTERRUPT
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -50,12 +51,42 @@ def _fields(event: Event) -> dict[str, Any]:
     return {f.name: getattr(event, f.name) for f in dataclasses.fields(event)}
 
 
-def _written_identity(serde: NamespaceAwareSerde, event: Event) -> list[str]:
-    _, data = serde.dumps_typed(event)
-    module, qualname, _ = ormsgpack.unpackb(
-        data, ext_hook=lambda _code, payload: ormsgpack.unpackb(payload)
-    )
+def _identity(data: bytes) -> list[str]:
+    """The identity of the outer stored event in *data*."""
+
+    def outer(_code: int, payload: bytes) -> object:
+        return ormsgpack.unpackb(payload, ext_hook=lambda _code, _payload: None)
+
+    module, qualname, _ = ormsgpack.unpackb(data, ext_hook=outer)
     return [module, qualname]
+
+
+def _written_identity(serde: NamespaceAwareSerde, event: Event) -> list[str]:
+    return _identity(serde.dumps_typed(event)[1])
+
+
+def _identities_in(data: bytes) -> list[list[str]]:
+    """Every stored event identity in *data*, however deep it sits."""
+    found: list[list[str]] = []
+
+    def hook(_code: int, payload: bytes) -> object:
+        unpacked = ormsgpack.unpackb(payload, ext_hook=hook)
+        if isinstance(unpacked, list) and len(unpacked) == 3:
+            found.append(unpacked[:2])
+        return None
+
+    ormsgpack.unpackb(data, ext_hook=hook)
+    return found
+
+
+def _ext(data: bytes) -> ormsgpack.Ext:
+    return ormsgpack.unpackb(data, ext_hook=ormsgpack.Ext)
+
+
+def _escalation_split() -> Migration:
+    return Migration.split_event(
+        source=HandlerRaised, select=lambda kw: None, targets=(HandlerRaised,)
+    )
 
 
 EXCEPTION = "ValueError('boom')"
@@ -175,3 +206,80 @@ def describe_framework_migrations():
                     NamespaceAwareSerde(
                         [split], namespaces=[ClientNS], legacy_write=True
                     )
+
+    def describe_a_rewrite_of_a_0_40_0_checkpoint():
+        # The events channel is written whole at each checkpoint. One step on
+        # this release stores every old framework event of the thread again.
+        def it_stores_each_old_event_under_its_new_identity(client_serde):
+            stored = _stored("v0_40_0")
+            history = [
+                client_serde.loads_typed(stored["RunPaused"]),
+                client_serde.loads_typed(stored["HandlerRaised-deadline"]),
+            ]
+            _, written = client_serde.dumps_typed(history)
+            assert sorted(qualname for _, qualname in _identities_in(written)) == [
+                "Cancelled",
+                "HandlerAbandonedOnDeadline",
+                "RunPausedOnDeadline",
+            ]
+
+        def it_writes_identities_that_0_40_0_never_stored(client_serde):
+            # The v0_40_0 folder holds every concrete framework class that
+            # 0.40.0 exports. An identity outside it has no class there.
+            old = {tuple(_identity(data)) for _, data in _stored("v0_40_0").values()}
+            history = [client_serde.loads_typed(_stored("v0_40_0")["RunPaused"])]
+            _, written = client_serde.dumps_typed(history)
+            new = {tuple(identity) for identity in _identities_in(written)}
+            assert new.isdisjoint(old)
+
+        def it_counts_the_old_event_as_touched_until_rewritten(client_serde):
+            with client_serde._record_reads() as first:
+                event = client_serde.loads_typed(_stored("v0_40_0")["RunPaused"])
+            with client_serde._record_reads() as second:
+                client_serde.loads_typed(client_serde.dumps_typed(event))
+            assert [touched for *_, touched in first] == [True]
+            assert [touched for *_, touched in second] == [False]
+
+    def describe_inside_an_interrupt():
+        def it_revives_an_old_HandlerRaised_in_the_value(client_serde):
+            raised = _ext(_stored("v0_40_0")["HandlerRaised-deadline"][1])
+            wrapped = ormsgpack.packb(
+                ormsgpack.Ext(EXT_INTERRUPT, ormsgpack.packb((raised, "id-1")))
+            )
+            interrupt = client_serde.loads_typed(("msgpack", wrapped))
+            assert type(interrupt.value) is HandlerAbandonedOnDeadline
+
+    def describe_client_migrations():
+        def when_the_client_passes_its_own_migrations():
+            def it_still_applies_the_framework_split():
+                serde = NamespaceAwareSerde(
+                    [
+                        Migration.rename(
+                            old_module=__name__,
+                            old_qualname="ClientNS.Gone",
+                            to=ClientNS.Ping,
+                        )
+                    ],
+                    namespaces=[ClientNS],
+                )
+                revived = serde.loads_typed(_stored("v0_40_0")["RunPaused"])
+                assert type(revived) is RunPausedOnDeadline
+
+        def when_the_client_splits_a_framework_identity():
+            def it_refuses_to_construct():
+                with pytest.raises(
+                    ValueError, match=r"lge already migrates .*'HandlerRaised'"
+                ):
+                    NamespaceAwareSerde([_escalation_split()], namespaces=[ClientNS])
+
+        def when_the_client_transforms_a_framework_split_source():
+            # A class-stage transform runs before lge's split, so it could
+            # drop the field that the split reads.
+            def it_refuses_to_construct():
+                transform = Migration.transform_fields(
+                    target=HandlerRaised, transform=lambda kw: kw
+                )
+                with pytest.raises(
+                    ValueError, match=r"lge already migrates .*'HandlerRaised'"
+                ):
+                    NamespaceAwareSerde([transform], namespaces=[ClientNS])
