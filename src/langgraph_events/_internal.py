@@ -10,7 +10,7 @@ import asyncio
 import logging
 import operator
 import time
-from collections.abc import Callable, Coroutine  # noqa: TC003
+from collections.abc import Awaitable, Callable, Coroutine  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 if TYPE_CHECKING:
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
+    from langgraph_events._graph import ReturnContract
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
 
@@ -119,7 +120,13 @@ def build_state_schema(reducers: dict[str, BaseReducer]) -> type:
 # ---------------------------------------------------------------------------
 
 
-def _leaf_node(func: Any, afunc: Any, name: str) -> RunnableLambda:
+def _leaf_node(
+    func: Callable[[StateDict], StateDict]
+    | Callable[[StateDict, RunnableConfig], StateDict],
+    afunc: Callable[[StateDict], Awaitable[StateDict]]
+    | Callable[[StateDict, RunnableConfig], Awaitable[StateDict]],
+    name: str,
+) -> RunnableLambda:
     """Wrap a node whose source LangGraph need not read.
 
     LangGraph reads a node function's source to find nested graphs. No
@@ -717,8 +724,8 @@ def _process_events_sync(
     inject: dict[str, Any],
     new_events: list[Event],
     new_causes: list[CauseEntry],
-    lg_interrupt: Any,
-    return_contract: Any = None,
+    lg_interrupt: Callable[[Any], Any],
+    return_contract: ReturnContract | None = None,
     deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the sync dispatch path.
@@ -767,8 +774,8 @@ async def _process_events_async(
     inject: dict[str, Any],
     new_events: list[Event],
     new_causes: list[CauseEntry],
-    lg_interrupt: Any,
-    return_contract: Any = None,
+    lg_interrupt: Callable[[Any], Any],
+    return_contract: ReturnContract | None = None,
     deadline: float | None = None,
 ) -> None:
     """Per-event invocation loop for the async dispatch path.
@@ -813,7 +820,7 @@ async def _process_events_async(
 def make_handler_node(
     meta: HandlerMeta,
     reducers: dict[str, BaseReducer] | None = None,
-    return_contract: Any = None,
+    return_contract: ReturnContract | None = None,
     services_by_type: dict[type, Any] | None = None,
     services_by_name: dict[str, Any] | None = None,
     *,
@@ -953,7 +960,7 @@ def _collect_result(
     new_events: list[Event],
     lg_interrupt: Callable[[Any], Any],
     meta: HandlerMeta | None = None,
-    return_contract: Any = None,
+    return_contract: ReturnContract | None = None,
 ) -> None:
     """Normalise handler return and handle Interrupted / Scatter."""
     if result is None:
@@ -980,7 +987,7 @@ def _collect_and_check(
     meta: HandlerMeta,
     state: StateDict,
     event: Event,
-    return_contract: Any = None,
+    return_contract: ReturnContract | None = None,
     *,
     new_causes: list[CauseEntry],
     trigger: int,
@@ -1039,7 +1046,7 @@ def _assert_no_private_leak(result: Event | Scatter, meta: HandlerMeta | None) -
 
 
 def _assert_return_matches(
-    result: Event | Scatter, meta: HandlerMeta | None, contract: Any
+    result: Event | Scatter, meta: HandlerMeta | None, contract: ReturnContract
 ) -> None:
     """Enforce that *result* satisfies the handler's ``ReturnContract``."""
     handler_desc = f"Handler {meta.name!r}" if meta is not None else "Handler"

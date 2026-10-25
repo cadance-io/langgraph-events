@@ -63,7 +63,7 @@ class CheckpointState(TypedDict):
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
     from ag_ui.core import RunAgentInput
     from langchain_core.runnables import RunnableConfig
@@ -169,7 +169,7 @@ class AGUIAdapter:
             return base
         return {k: v for k, v in base.items() if k in self._allowed_keys}
 
-    def _map_event(self, event: Any, ctx: MapperContext) -> list[BaseEvent]:
+    def _map_event(self, event: object, ctx: MapperContext) -> list[BaseEvent]:
         """Run event through the mapper chain. First non-None wins."""
         for mapper in self._mappers:
             result = mapper.map(event, ctx)
@@ -211,7 +211,7 @@ class AGUIAdapter:
         }
 
     @staticmethod
-    def _accepts_extra_positional(fn: Any) -> bool:
+    def _accepts_extra_positional(fn: Callable[..., object]) -> bool:
         """Whether *fn* accepts a second positional arg (checkpoint state)."""
         parameters = tuple(inspect.signature(fn).parameters.values())
         if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters):
@@ -488,7 +488,7 @@ class AGUIAdapter:
         )
 
     @staticmethod
-    def _is_interrupt(event: Any) -> bool:
+    def _is_interrupt(event: object) -> bool:
         return isinstance(event, Interrupted)
 
     def _events_from_llm_token(
@@ -604,7 +604,7 @@ class AGUIAdapter:
 
     def _events_from_bare_item(
         self,
-        item: Any,
+        item: object,
         ctx: MapperContext,
         *,
         is_resume: bool,

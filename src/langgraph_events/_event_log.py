@@ -164,7 +164,7 @@ def _cause_at(table: _CauseTable, position: int) -> CauseValue:
     return _decode(table.events, table.entries[position])
 
 
-def _decode(events: tuple[Event, ...], entry: Any) -> CauseValue:
+def _decode(events: tuple[Event, ...], entry: CauseEntry) -> CauseValue:
     if entry is None:
         return None
     tag = entry[0]
@@ -177,11 +177,11 @@ def _decode(events: tuple[Event, ...], entry: Any) -> CauseValue:
     return Cause(source=events[tag], via=entry[1])
 
 
-def _is_handler_entry(entry: Any) -> bool:
+def _is_handler_entry(entry: CauseEntry) -> bool:
     return entry is not None and isinstance(entry[0], int)
 
 
-def _encode(i: int, cause: Any, positions: dict[int, int]) -> CauseEntry:
+def _encode(i: int, cause: object, positions: dict[int, int]) -> CauseEntry:
     if cause is None:
         return None
     if isinstance(cause, Cause):

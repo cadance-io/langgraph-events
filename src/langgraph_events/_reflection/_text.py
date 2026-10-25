@@ -20,8 +20,6 @@ from langgraph_events._event import (
 from langgraph_events._event_log import FrameworkEvent, UnknownCause
 
 if TYPE_CHECKING:
-    from typing import Any
-
     from langgraph_events._event_log import EventLog
     from langgraph_events._namespace import NamespaceModel
 
@@ -33,7 +31,7 @@ _MAX_DETAIL_VALUE_LEN = 2000
 _MAX_ANOMALY_LINES = 5
 
 
-def safe_repr(value: Any, *, max_len: int = _MAX_DETAIL_VALUE_LEN) -> str:
+def safe_repr(value: object, *, max_len: int = _MAX_DETAIL_VALUE_LEN) -> str:
     """``repr`` bounded in length and hardened against throwing ``__repr__``."""
     try:
         text = repr(value)

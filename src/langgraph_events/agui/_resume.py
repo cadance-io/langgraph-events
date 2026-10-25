@@ -240,7 +240,7 @@ def detect_new_frontend_messages(
     return tuple({m.id: m for m in new}.values())
 
 
-def extract_resume_input(input_data: RunAgentInput) -> Any:
+def extract_resume_input(input_data: RunAgentInput) -> Any:  # noqa: ANN401 - decoded JSON value, callers index it
     """Pull resume input from ``RunAgentInput.forwarded_props.command.resume``.
 
     If the value is a string, attempts ``json.loads`` (returns the decoded

@@ -53,7 +53,7 @@ class Event:
     def _collect_into(
         self,
         new_events: list[Event],
-        interrupt_fn: Any,
+        interrupt_fn: Callable[[Event], object],
     ) -> None:
         """Append this result to *new_events*.
 
@@ -392,7 +392,10 @@ def _inherits_namespace(cls: type) -> bool:
     )
 
 
-def _validate_handle_signature(cls: type, handle: Any) -> None:
+def _validate_handle_signature(
+    cls: type,
+    handle: Callable[..., object] | staticmethod[Any, Any] | classmethod[Any, Any, Any],
+) -> None:
     """Check that the inline handler takes ``self`` as its first parameter.
 
     Reducer / log / config / store params are validated later at graph
@@ -763,7 +766,7 @@ class Interrupted(SystemEvent):
     def _collect_into(
         self,
         new_events: list[Event],
-        interrupt_fn: Any,
+        interrupt_fn: Callable[[Event], object],
     ) -> None:
         """Record the interrupt, pause, and create a Resumed event."""
         new_events.append(self)
@@ -992,7 +995,7 @@ class Scatter:
 
     __slots__ = ("events",)
 
-    def __class_getitem__(cls, params: Any) -> types.GenericAlias:
+    def __class_getitem__(cls, params: object) -> types.GenericAlias:
         """Support ``Scatter[EventType]`` in type annotations."""
         if not isinstance(params, tuple):
             params = (params,)
@@ -1013,7 +1016,7 @@ class Scatter:
     def _collect_into(
         self,
         new_events: list[Event],
-        interrupt_fn: Any,
+        interrupt_fn: Callable[[Event], object],
     ) -> None:
         """Expand scatter events into the collection list."""
         new_events.extend(self.events)

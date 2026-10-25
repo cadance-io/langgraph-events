@@ -74,12 +74,15 @@ Use this so a reset event need not know the empty state's shape — and so
 """
 
 
-def _last_write_wins(existing: Any, new: Any) -> Any:
+T = TypeVar("T")
+
+
+def _last_write_wins(existing: object, new: T) -> T:
     """Binary operator that always takes the newer value."""
     return new
 
 
-def _matches_namespace(event: Any, dom: type[Namespace] | None) -> bool:
+def _matches_namespace(event: object, dom: type[Namespace] | None) -> bool:
     """Return True if *event* belongs to *dom* (or *dom* is None = no filter).
 
     Membership is the namespace *object*. Names are unique only within a
@@ -121,28 +124,28 @@ class BaseReducer(ABC):
                 self.namespace = owner
 
     @abstractmethod
-    def state_annotation(self) -> Any:
+    def state_annotation(self) -> object:
         """LangGraph state channel type annotation."""
 
     @property
     @abstractmethod
-    def empty(self) -> Any:
+    def empty(self) -> object:
         """Default value when no contributions exist."""
 
     @abstractmethod
-    def collect(self, events: list[Event]) -> Any:
+    def collect(self, events: list[Event]) -> object:
         """Gather contributions from events."""
 
     @abstractmethod
-    def has_contributions(self, result: Any) -> bool:
+    def has_contributions(self, result: Any) -> bool:  # noqa: ANN401 - a subclass narrows this to its own collect() result
         """Whether collect() produced a meaningful update."""
 
     @abstractmethod
-    def output_type(self) -> Any:
+    def output_type(self) -> object:
         """Output schema field type."""
 
     @abstractmethod
-    def seed(self, events: list[Event]) -> Any:
+    def seed(self, events: list[Event]) -> object:
         """Initialize with default + seed event contributions."""
 
 
@@ -182,14 +185,14 @@ class Reducer(BaseReducer):
     default: list[Any] = field(kw_only=True, default_factory=list)
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
 
-    def state_annotation(self) -> Any:
+    def state_annotation(self) -> object:
         return Annotated[list, self.reducer]
 
     @property
-    def empty(self) -> Any:
+    def empty(self) -> list[Any]:
         return list(self.default)
 
-    def collect(self, events: list[Event]) -> Any:
+    def collect(self, events: list[Event]) -> list[Any]:
         contributions: list[Any] = []
         for event in events:
             if not isinstance(event, self.event_type):
@@ -206,13 +209,13 @@ class Reducer(BaseReducer):
                 contributions.extend(contrib)
         return contributions
 
-    def has_contributions(self, result: Any) -> bool:
+    def has_contributions(self, result: list[Any]) -> bool:
         return bool(result)
 
-    def output_type(self) -> Any:
+    def output_type(self) -> object:
         return list
 
-    def seed(self, events: list[Event]) -> Any:
+    def seed(self, events: list[Event]) -> list[Any]:
         values = list(self.default)
         values.extend(self.collect(events))
         return values
@@ -257,14 +260,14 @@ class ScalarReducer(BaseReducer):
     default: Any = field(kw_only=True, default=None)
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
 
-    def state_annotation(self) -> Any:
+    def state_annotation(self) -> object:
         return Annotated[Any, _last_write_wins]
 
     @property
-    def empty(self) -> Any:
+    def empty(self) -> object:
         return self.default
 
-    def collect(self, events: list[Event]) -> Any:
+    def collect(self, events: list[Event]) -> object:
         last: Any = SKIP
         for event in events:
             if not isinstance(event, self.event_type):
@@ -274,13 +277,13 @@ class ScalarReducer(BaseReducer):
             last = event
         return self.fn(last) if last is not SKIP else SKIP
 
-    def has_contributions(self, result: Any) -> bool:
+    def has_contributions(self, result: Any) -> bool:  # noqa: ANN401 - a subclass narrows this to its own collect() result
         return result is not SKIP
 
-    def output_type(self) -> Any:
+    def output_type(self) -> object:
         return Any
 
-    def seed(self, events: list[Event]) -> Any:
+    def seed(self, events: list[Event]) -> object:
         result = self.collect(events)
         return result if self.has_contributions(result) else self.default
 
@@ -300,7 +303,7 @@ class Foldable(Protocol):
     calls ``event.fold(state)``) without falling back to ``Any``.
     """
 
-    def fold(self, state: Any) -> Any: ...
+    def fold(self, state: Any) -> Any: ...  # noqa: ANN401 - matches the fold of any event; FoldReducer[S] holds the state type
 
 
 @dataclass(frozen=True)
@@ -364,7 +367,7 @@ class FoldReducer(BaseReducer, Generic[S]):
         # ``getattr(r, "reducer")``.
         return self._merge
 
-    def state_annotation(self) -> Any:
+    def state_annotation(self) -> object:
         # Stays ``Any`` on purpose: LangGraph's BinaryOperatorAggregate calls
         # ``Any()`` (which raises) so the channel starts MISSING and the first
         # write is set directly, matching ScalarReducer. A concrete ``S`` whose
@@ -385,10 +388,10 @@ class FoldReducer(BaseReducer, Generic[S]):
             ]
         )
 
-    def has_contributions(self, result: Any) -> bool:
+    def has_contributions(self, result: _Contributions) -> bool:
         return bool(result.events)
 
-    def output_type(self) -> Any:
+    def output_type(self) -> object:
         return Any
 
     def seed(self, events: list[Event]) -> S:

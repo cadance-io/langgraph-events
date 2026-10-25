@@ -401,7 +401,9 @@ class _FlowEdge:
     via: str | None = None
 
 
-def _reaction_subscribes(r: Any) -> tuple[type[Event], ...]:
+def _reaction_subscribes(
+    r: NamespaceModel.CommandHandler | NamespaceModel.Policy,
+) -> tuple[type[Event], ...]:
     """Return the subscribed events for a CommandHandler or Policy."""
     if isinstance(r, NamespaceModel.CommandHandler):
         return r.commands

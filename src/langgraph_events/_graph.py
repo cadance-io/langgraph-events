@@ -12,6 +12,7 @@ from collections.abc import Mapping as _Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypedDict, TypeVar, cast
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
@@ -63,8 +64,8 @@ from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
+    RewritePlan,
     RewriteReport,
-    ThreadPlan,
     ThreadRewrite,
     plan_thread,
     validate_drop,
@@ -86,14 +87,16 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import Interrupt, StateSnapshot
+    from langgraph.types import Checkpointer, Interrupt, StateSnapshot
 
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
     from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde, UnrevivedIdentity
 
-    _PlanThread = Callable[..., ThreadPlan]
+    _GraphInput = dict[str, Any] | LGCommand
+
+    _PlanThread = Callable[..., ThreadRewrite | RewritePlan]
     """``plan_thread`` with the serde, drop classes and version function bound."""
 
 
@@ -165,7 +168,7 @@ _ABSTRACT_EVENT_BASES: tuple[type, ...] = (
 )
 
 
-def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
+def _scatter_event_types(scatter_alias: object) -> list[type[Event]]:
     """Extract Event types from a parameterized ``Scatter[X]`` alias.
 
     Unpacks Union/UnionType members so ``Scatter[A | B]`` behaves like
@@ -185,7 +188,7 @@ def _scatter_event_types(scatter_alias: Any) -> list[type[Event]]:
     return out
 
 
-def _format_scatter_repr(scatter_alias: Any) -> str:
+def _format_scatter_repr(scatter_alias: object) -> str:
     """Render a Scatter annotation back into a readable form for error text."""
     args = typing.get_args(scatter_alias)
     if not args:
@@ -449,7 +452,7 @@ def _snapshot_interrupts(snapshot: StateSnapshot) -> list[Interrupt]:
     return [i for task in snapshot.tasks for i in task.interrupts]
 
 
-def _coerce_snapshot_data(data: Any) -> dict[str, Any]:
+def _coerce_snapshot_data(data: object) -> dict[str, Any]:
     if isinstance(data, dict):
         return cast("dict[str, Any]", data)
     return {}
@@ -936,7 +939,7 @@ def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any
     return provided
 
 
-def _resolve_self(hint: Any, source: Any) -> Any:
+def _resolve_self(hint: object, source: Callable[..., object]) -> object:
     """Replace ``typing.Self`` with the class the method is bound to.
 
     ``get_type_hints`` leaves ``Self`` as is. A method bound to a class
@@ -951,7 +954,7 @@ def _resolve_self(hint: Any, source: Any) -> Any:
     return owner if isinstance(owner, type) else type(owner)
 
 
-def _hint_label(hint: Any) -> str:
+def _hint_label(hint: object) -> str:
     """Render an annotation for an error message.
 
     A generic alias such as ``list[str]`` forwards ``__qualname__`` to its
@@ -962,7 +965,7 @@ def _hint_label(hint: Any) -> str:
     return repr(hint)
 
 
-def _factory_label(factory: Any) -> str:
+def _factory_label(factory: object) -> str:
     """Render a ``RunScoped`` factory for an error message."""
     if inspect.isroutine(factory):
         return factory.__qualname__
@@ -970,7 +973,7 @@ def _factory_label(factory: Any) -> str:
 
 
 def _satisfies(
-    check: Callable[[Any, Any], bool], subject: Any, declared: Any
+    check: Callable[[Any, Any], bool], subject: object, declared: object
 ) -> bool | str:
     """Apply a ``beartype.door`` check. A string is the reason it cannot run.
 
@@ -1152,7 +1155,7 @@ class EventGraph:
         max_rounds: int = 100,
         reducers: list[BaseReducer] | None = None,
         services: Sequence[Any] | Mapping[str, Any] | None = None,
-        checkpointer: Any = None,
+        checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
@@ -1544,9 +1547,10 @@ class EventGraph:
                         f"remove the matcher."
                     )
 
-    def _require_checkpointer(self, method: str) -> None:
-        if self._checkpointer is None:
+    def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
+        if not isinstance(self._checkpointer, BaseCheckpointSaver):
             raise ValueError(f"{method}() requires a checkpointer")
+        return self._checkpointer
 
     @staticmethod
     def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
@@ -1579,13 +1583,13 @@ class EventGraph:
         kwargs["config"] = config
         return kwargs
 
-    def _run(self, inp: Any, **kwargs: Any) -> EventLog:
+    def _run(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
-    async def _arun(self, inp: Any, **kwargs: Any) -> EventLog:
+    async def _arun(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
         kwargs = self._apply_deadline_kwarg(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
@@ -1763,7 +1767,7 @@ class EventGraph:
         return snapshot is None or self._awaits_resume(snapshot)
 
     def _unresumable_message(
-        self, log: EventLog | None = None, config: Any = None
+        self, log: EventLog | None = None, config: RunnableConfig | None = None
     ) -> str:
         """Diagnostic for a ``resume()`` that would be a no-op.
 
@@ -1794,7 +1798,7 @@ class EventGraph:
         )
 
     def _unresumable_short_circuits(
-        self, log: EventLog | None = None, config: Any = None
+        self, log: EventLog | None = None, config: RunnableConfig | None = None
     ) -> bool:
         """Apply ``on_unresumable``'s ``raise``/``warn`` arm. ``False``
         means append a terminal event (``halt``). ``True`` means return
@@ -1846,7 +1850,7 @@ class EventGraph:
             [StateUpdate(None, END)],
         ]
 
-    def _settle(self, config: Any, terminal: Event) -> EventLog:
+    def _settle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Append *terminal* and settle the thread via :meth:`_settle_supersteps`."""
         # `_cursor` is correct only because this reads via `get_state`,
         # whose snapshot applies the same pending writes the leading
@@ -1854,17 +1858,17 @@ class EventGraph:
         # without raising an error, and no test in this suite catches it.
         events = self.get_state(config).events
         self._compile().bulk_update_state(
-            cast("RunnableConfig", config),
+            config,
             self._settle_supersteps(events, terminal),
         )
         return self.get_state(config).events
 
-    async def _asettle(self, config: Any, terminal: Event) -> EventLog:
+    async def _asettle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Async sibling of :meth:`_settle`."""
         # Same `_cursor` reasoning as `_settle`, via `aget_state`.
         events = (await self.aget_state(config)).events
         await self._compile().abulk_update_state(
-            cast("RunnableConfig", config),
+            config,
             self._settle_supersteps(events, terminal),
         )
         return (await self.aget_state(config)).events
@@ -1877,7 +1881,7 @@ class EventGraph:
         Runs only when :meth:`_resume_is_pending` is ``False``, so no
         completed sibling write can be lost on this path.
         """
-        config = kwargs.get("config")
+        config = kwargs["config"]
         log = self.get_state(config).events
         if self._unresumable_short_circuits(log, config):
             return log
@@ -1887,7 +1891,7 @@ class EventGraph:
         self, value: Event, kwargs: dict[str, Any]
     ) -> EventLog:
         """Async sibling of :meth:`_apply_unresumable_policy`."""
-        config = kwargs.get("config")
+        config = kwargs["config"]
         log = (await self.aget_state(config)).events
         if self._unresumable_short_circuits(log, config):
             return log
@@ -1898,7 +1902,7 @@ class EventGraph:
         return Unresumable(resume_value=type(value).__name__)
 
     @staticmethod
-    def _require_resume_event(value: Any) -> None:
+    def _require_resume_event(value: object) -> None:
         """Raise ``TypeError`` if *value* is not an ``Event``.
 
         The check runs before the graph runs. LangGraph saves a resume value
@@ -2071,9 +2075,10 @@ class EventGraph:
         discovery included.
         """
         thread_id = config.get("configurable", {}).get("thread_id")
+        saver = self._require_checkpointer(method)
         try:
             with self._tolerant_read() as unresolved:
-                tup = self._checkpointer.get_tuple(config)
+                tup = saver.get_tuple(config)
         except Exception as exc:
             raise RuntimeError(
                 f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
@@ -2086,9 +2091,10 @@ class EventGraph:
         """Async sibling of :meth:`_read_checkpoint_tuple`, via
         ``aget_tuple``."""
         thread_id = config.get("configurable", {}).get("thread_id")
+        saver = self._require_checkpointer(method)
         try:
             with self._tolerant_read() as unresolved:
-                tup = await self._checkpointer.aget_tuple(config)
+                tup = await saver.aget_tuple(config)
         except Exception as exc:
             raise RuntimeError(
                 f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
@@ -2379,7 +2385,7 @@ class EventGraph:
                 names.append(identity.qualname)
         return names
 
-    def _require_namespace_aware_serde(self, method: str) -> None:
+    def _require_namespace_aware_serde(self, method: str) -> NamespaceAwareSerde:
         """Raise ``ValueError`` naming *method* unless the checkpointer's
         serde is a ``NamespaceAwareSerde``.
 
@@ -2393,7 +2399,7 @@ class EventGraph:
 
         serde = getattr(self._checkpointer, "serde", None)
         if isinstance(serde, NamespaceAwareSerde):
-            return
+            return serde
         raise ValueError(
             f"{method}() needs a NamespaceAwareSerde on the checkpointer, "
             f"found {type(serde).__name__}. Only that serde can report an "
@@ -2541,18 +2547,21 @@ class EventGraph:
         )
 
     def _apply_thread_plan(
-        self, cfg: RunnableConfig, tup: CheckpointTuple, plan: ThreadPlan, method: str
+        self, cfg: RunnableConfig, tup: CheckpointTuple, plan: RewritePlan, method: str
     ) -> ThreadRewrite:
         """Write one planned rewrite, then prove the thread did not move."""
+        saver = self._require_checkpointer(method)
         base = self._rewrite_base_config(cfg, tup)
-        self._checkpointer.put(base, plan.checkpoint, tup.metadata, plan.new_versions)
+        saver.put(base, plan.checkpoint, tup.metadata, plan.new_versions)
         for task_id, channel, value in plan.interrupt_writes:
-            self._checkpointer.put_writes(tup.config, [(channel, value)], task_id)
+            saver.put_writes(tup.config, [(channel, value)], task_id)
         after, _unresolved = self._read_checkpoint_tuple(cfg, method)
         return self._rewrite_outcome(tup, after, plan)
 
     @staticmethod
-    def _rewrite_base_config(cfg: RunnableConfig, tup: CheckpointTuple) -> Any:
+    def _rewrite_base_config(
+        cfg: RunnableConfig, tup: CheckpointTuple
+    ) -> RunnableConfig:
         """The config ``put`` takes: the parent, so the parent link stays,
         or a bare thread config on a thread with one checkpoint.
         ``MemorySaver.put`` reads ``checkpoint_ns`` with no default."""
@@ -2565,7 +2574,7 @@ class EventGraph:
 
     @staticmethod
     def _rewrite_outcome(
-        tup: CheckpointTuple, after: CheckpointTuple | None, plan: ThreadPlan
+        tup: CheckpointTuple, after: CheckpointTuple | None, plan: RewritePlan
     ) -> ThreadRewrite:
         """A run between the read and the write lands a newer checkpoint.
         The store's latest id says so; the rewritten row still exists
@@ -2601,9 +2610,12 @@ class EventGraph:
             planned = plan(
                 thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
             )
-            result = planned.result
-            if apply and result.status == "rewrite":
+            if isinstance(planned, ThreadRewrite):
+                result = planned
+            elif apply:
                 result = self._apply_thread_plan(cfg, tup, planned, method)
+            else:
+                result = planned.result
             results.append(result)
         return RewriteReport(applied=apply, threads=tuple(results))
 
@@ -2613,9 +2625,8 @@ class EventGraph:
         """Shared preconditions of the rewrite walk. Returns the serde
         and the planner bound to this graph's serde, drop classes and
         version function."""
-        self._require_checkpointer(method)
-        self._require_namespace_aware_serde(method)
-        serde: NamespaceAwareSerde = self._checkpointer.serde
+        saver = self._require_checkpointer(method)
+        serde = self._require_namespace_aware_serde(method)
         if serde._legacy_write:
             raise ValueError(
                 f"{method}() cannot run under legacy_write=True: the rewrite "
@@ -2626,7 +2637,7 @@ class EventGraph:
             plan_thread,
             serde=serde,
             drop=validate_drop(serde, drop, method),
-            next_version=self._checkpointer.get_next_version,
+            next_version=saver.get_next_version,
         )
         return serde, plan
 
@@ -2675,24 +2686,24 @@ class EventGraph:
             planned = plan(
                 thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
             )
-            result = planned.result
-            if apply and result.status == "rewrite":
+            if isinstance(planned, ThreadRewrite):
+                result = planned
+            elif apply:
                 result = await self._aapply_thread_plan(cfg, tup, planned, method)
+            else:
+                result = planned.result
             results.append(result)
         return RewriteReport(applied=apply, threads=tuple(results))
 
     async def _aapply_thread_plan(
-        self, cfg: RunnableConfig, tup: CheckpointTuple, plan: ThreadPlan, method: str
+        self, cfg: RunnableConfig, tup: CheckpointTuple, plan: RewritePlan, method: str
     ) -> ThreadRewrite:
         """Async sibling of :meth:`_apply_thread_plan`."""
+        saver = self._require_checkpointer(method)
         base = self._rewrite_base_config(cfg, tup)
-        await self._checkpointer.aput(
-            base, plan.checkpoint, tup.metadata, plan.new_versions
-        )
+        await saver.aput(base, plan.checkpoint, tup.metadata, plan.new_versions)
         for task_id, channel, value in plan.interrupt_writes:
-            await self._checkpointer.aput_writes(
-                tup.config, [(channel, value)], task_id
-            )
+            await saver.aput_writes(tup.config, [(channel, value)], task_id)
         after, _unresolved = await self._aread_checkpoint_tuple(cfg, method)
         return self._rewrite_outcome(tup, after, plan)
 
@@ -2727,12 +2738,12 @@ class EventGraph:
             interrupted=interrupted,
         )
 
-    def get_state(self, config: Any) -> GraphState:
+    def get_state(self, config: RunnableConfig) -> GraphState:
         """Get event-level state of a checkpointed thread."""
         self._require_checkpointer("get_state")
         return self._graph_state(self._compile().get_state(config))
 
-    async def aget_state(self, config: Any) -> GraphState:
+    async def aget_state(self, config: RunnableConfig) -> GraphState:
         """Async version of :meth:`get_state`.
 
         Reads the checkpoint via ``aget_state`` so async-only checkpointers
@@ -2745,7 +2756,7 @@ class EventGraph:
     # --- LLM token helpers ---
 
     @staticmethod
-    def _extract_text_content(chunk: Any) -> str:
+    def _extract_text_content(chunk: object) -> str:
         """Extract text from a LangChain chat model stream chunk."""
         content = getattr(chunk, "content", None)
         if isinstance(content, str):
@@ -2799,7 +2810,7 @@ class EventGraph:
         return []
 
     @staticmethod
-    def _events_from_chunk(chunk: Any, seen: set[int]) -> list[Event]:
+    def _events_from_chunk(chunk: object, seen: set[int]) -> list[Event]:
         """Extract unseen events from an updates-mode stream chunk.
 
         A chunk marked ``cached`` replays the saved writes of a task that
@@ -2840,7 +2851,7 @@ class EventGraph:
 
     async def _astream_v2(  # noqa: PLR0912, PLR0915
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         *,
         snapshot: StateSnapshot | None,
@@ -3025,7 +3036,7 @@ class EventGraph:
 
     def _stream_sync(
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         reducer_names: list[str],
         **kwargs: Any,
@@ -3052,7 +3063,7 @@ class EventGraph:
 
     async def _astream_core(
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         reducer_names: list[str],
         **kwargs: Any,
@@ -3146,7 +3157,7 @@ class EventGraph:
 
     async def _astream_entry(
         self,
-        inp: Any,
+        inp: _GraphInput,
         seeds: list[Event],
         *,
         include_reducers: bool | list[str],

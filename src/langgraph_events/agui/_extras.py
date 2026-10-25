@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,7 @@ hint would breach and no higher one that keeps a thread's growth bounded.
 """
 
 
-def collect_inbound_extras(message: Any) -> dict[str, Any]:
+def collect_inbound_extras(message: BaseModel) -> dict[str, Any]:
     """Return the ``additional_kwargs`` payload for an inbound AG-UI message.
 
     AG-UI models allow extra fields. Whatever the client sent beyond the

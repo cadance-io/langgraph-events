@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from functools import cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -41,6 +41,7 @@ from ._resume import BLOCK_TYPES, SOURCE_KEYS
 
 if TYPE_CHECKING:
     from ag_ui.core import Message
+    from langchain_core.messages import BaseMessage
 
     from ._context import MapperContext
 
@@ -137,7 +138,7 @@ def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
 
 def _build_agui_message(
     cls: type[AGUIMessageT],
-    source: Any,
+    source: BaseMessage,
     **fields: Any,
 ) -> AGUIMessageT:
     """Build an AG-UI message, adding the passthrough fields *source* carries.
@@ -231,7 +232,7 @@ _SOURCE_TYPES = {key: source for source, key in SOURCE_KEYS.items()} | {
 _CONTENT_PART: TypeAdapter[InputContentPart] = TypeAdapter(InputContentPart)
 
 
-def _content_to_agui(message: Any, label: str) -> str | list[InputContentPart]:
+def _content_to_agui(message: BaseMessage, label: str) -> str | list[InputContentPart]:
     """Convert LangChain message content to AG-UI message content.
 
     LangChain translates each block to a standard block first, so a provider
@@ -242,6 +243,7 @@ def _content_to_agui(message: Any, label: str) -> str | list[InputContentPart]:
     """
     if isinstance(message.content, str):
         return message.content
+    blocks: Sequence[object]
     try:
         blocks = message.content_blocks
     except (TypeError, ValueError) as exc:
@@ -264,7 +266,7 @@ def _content_to_agui(message: Any, label: str) -> str | list[InputContentPart]:
     return kept
 
 
-def _block_to_part(block: Any) -> InputContentPart | None:
+def _block_to_part(block: object) -> InputContentPart | None:
     if isinstance(block, str):
         block = {"type": "text", "text": block}
     if not isinstance(block, Mapping) or not isinstance(block.get("type"), str):

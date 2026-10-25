@@ -21,7 +21,7 @@ from langgraph_events._event import Event, Resumed
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
-    from langgraph.checkpoint.base import Checkpoint, CheckpointTuple
+    from langgraph.checkpoint.base import ChannelVersions, Checkpoint, CheckpointTuple
 
     from langgraph_events._causes import CauseEntry
     from langgraph_events.serde._jsonplus import (
@@ -97,14 +97,13 @@ class RewriteReport:
 
 
 @dataclass(frozen=True)
-class ThreadPlan:
-    """The outcome of :func:`plan_thread`, plus what to store when the
-    status is ``"rewrite"``."""
+class RewritePlan:
+    """A ``"rewrite"`` outcome of :func:`plan_thread`, plus what to store."""
 
     result: ThreadRewrite
-    checkpoint: Checkpoint | None = None
-    new_versions: dict[str, Any] = field(default_factory=dict)
-    interrupt_writes: tuple[tuple[str, str, Any], ...] = ()
+    checkpoint: Checkpoint
+    new_versions: dict[str, Any]
+    interrupt_writes: tuple[tuple[str, str, Any], ...]
 
 
 def identity_label(module: str, qualname: str) -> str:
@@ -189,7 +188,7 @@ def _count_drops(
     return counts
 
 
-def _clear_resumed(entry: Any, drop: tuple[type[Event], ...]) -> Any:
+def _clear_resumed(entry: object, drop: tuple[type[Event], ...]) -> object:
     """A ``Resumed`` keeps the interrupt it answered and the value that
     answered it. A dropped class in either slot becomes ``None``. The
     field is typed optional for exactly this: once the class is deleted
@@ -213,7 +212,7 @@ def plan_thread(
     serde: NamespaceAwareSerde,
     drop: tuple[type[Event], ...],
     next_version: Callable[[Any, None], Any],
-) -> ThreadPlan:
+) -> ThreadRewrite | RewritePlan:
     """Decide what to do with one thread, and build the checkpoint to
     store when the answer is ``"rewrite"``.
 
@@ -230,11 +229,10 @@ def plan_thread(
     drop_identities = {(cls.__module__, cls.__qualname__) for cls in drop}
     present = any(live in drop_identities for _stored, live, _touched in reads)
 
-    def refused(reason: str) -> ThreadPlan:
-        result = ThreadRewrite(
+    def refused(reason: str) -> ThreadRewrite:
+        return ThreadRewrite(
             thread_id, "refused", migrated=pairs, dropped=dropped, reason=reason
         )
-        return ThreadPlan(result)
 
     if unresolved:
         names = ", ".join(dict.fromkeys(u.qualname for u in unresolved))
@@ -243,7 +241,7 @@ def plan_thread(
             f"tombstone first"
         )
     if not pairs and not dropped and not present:
-        return ThreadPlan(ThreadRewrite(thread_id, "unchanged"))
+        return ThreadRewrite(thread_id, "unchanged")
 
     pending = list(tup.pending_writes or ())
     reason = _pending_refusal(pending, values, drop)
@@ -258,7 +256,7 @@ def plan_thread(
     )
     if reason is not None:
         return refused(reason)
-    return ThreadPlan(
+    return RewritePlan(
         ThreadRewrite(thread_id, "rewrite", migrated=pairs, dropped=dropped),
         checkpoint=checkpoint,
         new_versions=new_versions,
@@ -441,7 +439,10 @@ def _copy_checkpoint(checkpoint: Checkpoint, values: dict[str, Any]) -> Checkpoi
 
 
 def _mirror_seen(
-    versions_seen: dict[str, dict[str, Any]], channel: str, old: Any, new: Any
+    versions_seen: dict[str, ChannelVersions],
+    channel: str,
+    old: object,
+    new: str | int | float,
 ) -> None:
     """Pregel triggers a node when a channel version is greater than the
     version the node has seen. A bumped version must not read as an
@@ -453,7 +454,7 @@ def _mirror_seen(
 
 def _verify_value(
     serde: NamespaceAwareSerde,
-    value: Any,
+    value: object,
     where: str,
     forbidden: set[tuple[str, str]],
     historic: set[tuple[str, str]],

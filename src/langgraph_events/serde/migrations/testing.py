@@ -18,6 +18,8 @@ import ormsgpack
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
+    from langchain_core.runnables import RunnableConfig
+
     from langgraph_events import EventGraph
     from langgraph_events._event_log import EventLog
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
@@ -199,7 +201,7 @@ def assert_resume_recovers(
             "rename — e.g. EventGraph(..., checkpointer=saver) for both."
         )
     tid = thread_id or f"resume-recovers-{uuid.uuid4().hex}"
-    config = {"configurable": {"thread_id": tid}}
+    config: RunnableConfig = {"configurable": {"thread_id": tid}}
     before.invoke(seed, config=config)
     if not before.get_state(config).is_interrupted:
         raise AssertionError(
