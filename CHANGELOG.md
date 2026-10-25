@@ -9,12 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`HandlerAbandoned`, `HandlerAbandonedOnDeadline` and `RunPausedOnDeadline` name the
-  cause of a give-up or of a pause as a type.** A `RetryPolicy` that gives up because the
-  next backoff would cross the run's `deadline=` emits a `HandlerAbandonedOnDeadline`. It
-  is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` catcher still runs for it.
-  An exhausted attempt budget still emits a plain `HandlerRaised`. A deadline pause emits a
-  `RunPausedOnDeadline`, which is a `RunPaused`.
+- **A run can pause on a signal, not only on a deadline.** Pass `pause_on=` to any entry
+  point that accepts `deadline=`: `invoke`, `ainvoke`, `resume`, `aresume`,
+  `stream_events`, `astream_events`, `stream_resume`, `astream_resume` and
+  `AGUIAdapter.stream`. The value is an object with `is_set()`, for example an
+  `asyncio.Event` or a `threading.Event`. The new `PauseSignal` protocol states this
+  contract. The router calls `is_set()` between dispatch rounds. When it returns `True`,
+  the router emits a `RunPausedOnSignal` and the run ends cleanly. A deadline is fixed
+  when the run starts, so it cannot stop a live run early. A signal can, for example when
+  the process gets a shutdown request. A `pause_on=` value with no callable `is_set`, for
+  example `pause_on=event.is_set` or `pause_on=True`, raises `TypeError` before any round
+  runs.
+- **Each pause and each early give-up names its cause as a type.** `isinstance` and `@on`
+  match the cause.
+  - `RunPaused` is the base of every pause. A deadline pause emits a
+    `RunPausedOnDeadline`. A signal pause emits a `RunPausedOnSignal`. When the signal is
+    set and the deadline has also expired, the router emits `RunPausedOnSignal`.
+  - `HandlerAbandoned(HandlerRaised)` is the base of a `RetryPolicy` give-up with
+    attempts left. A give-up because the next backoff would cross the run's `deadline=`
+    emits a `HandlerAbandonedOnDeadline`. The run continues, so an
+    `@on(HandlerRaised, exception=X)` catcher runs for it. A give-up because the
+    `pause_on=` signal is set emits a `HandlerAbandonedOnSignal`. The router emits
+    `RunPausedOnSignal` before it dispatches the give-up, so no catcher runs on it.
+  - An exhausted attempt budget still emits a plain `HandlerRaised`.
+- **A `RetryPolicy` backoff reads the `pause_on=` signal before every wait.** When the
+  signal is set, the policy gives up instead of starting the wait, because the run pauses
+  at the next round anyway. A wait that is already in progress runs to its end. The first
+  set read of the signal commits the run to a pause. So the retry loop and the router read
+  the same answer, also when the caller clears the signal between the two reads.
 - **Every `NamespaceAwareSerde` applies lge's own read migrations for its framework
   events.** They apply whatever `namespaces=` and `events=` you pass. A checkpoint that
   0.40.0 wrote revives with the new types:
@@ -24,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `HandlerRaised`;
   - a `RunPaused` revives as a `RunPausedOnDeadline`.
 
-  A framework migration never relabels a write.
+  A framework migration never relabels a write. `HandlerAbandonedOnSignal` and
+  `RunPausedOnSignal` need no migration, because no earlier release wrote them.
 
 ### Changed
 
@@ -33,14 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `isinstance(event, HandlerAbandonedOnDeadline)`. A test that builds
   `HandlerRaised(abandoned_for_deadline=True)` must build `HandlerAbandonedOnDeadline(...)`.
 - **BREAKING: `RunPaused` cannot be built directly.** `RunPaused(...)` raises `TypeError`.
-  Build `RunPausedOnDeadline(...)` instead. `isinstance(e, RunPaused)` and
-  `log.latest(RunPaused)` still match every pause. `HandlerAbandoned` also raises
-  `TypeError` when built directly.
+  Build `RunPausedOnDeadline(...)` or `RunPausedOnSignal(...)` instead.
+  `isinstance(e, RunPaused)` and `log.latest(RunPaused)` still match every pause.
+  `HandlerAbandoned` also raises `TypeError` when built directly.
 - **BREAKING: the `legacy_write=True` guards judge the client's migrations only.** lge's
   framework migrations do not count. They never relabel a write, so `legacy_write=True`
-  still constructs. A framework event is always written under its own live identity, so
-  an old release cannot read `HandlerAbandonedOnDeadline` or `RunPausedOnDeadline`. Drain
-  in-flight threads before a rollback to 0.40.0.
+  still constructs. A framework event is always written under its own live identity.
 - **BREAKING: a client subclass of `HandlerRaised` stored by 0.40.0 does not revive on its
   own.** The framework split keys on `HandlerRaised` only. The stored subclass payload
   carries the `abandoned_for_deadline` key, and its class no longer declares it. Drop the
@@ -56,6 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class Escalated(HandlerRaised): ...
   ```
 
+- **v0.40.0 cannot revive the four new event types.** They are
+  `HandlerAbandonedOnDeadline`, `HandlerAbandonedOnSignal`, `RunPausedOnDeadline` and
+  `RunPausedOnSignal`. A client that needs a rollback path can add a forward-compat rename
+  list on 0.40.0. See
+  [Framework events](docs/event-migrations.md#framework-events).
 - **Public signatures in `src/` use a precise type in place of `Any`.** The runtime
   behaviour does not change. A type checker can now report some calls that it accepted
   before. These signatures became narrower:
@@ -82,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before, the router paused on the resume round. It stored the resume value and never
   dispatched it, so no later run handled the answer. Now the resume round always
   dispatches, the same as the first round of a fresh run. The router pauses at the next
-  round.
+  round. The same rule applies to `pause_on=`.
 
 ## [0.40.0] - 2026-10-24
 

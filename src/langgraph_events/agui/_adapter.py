@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from langgraph.types import StateSnapshot
 
     from langgraph_events._graph import EventGraph
+    from langgraph_events._types import PauseSignal
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
 
@@ -257,13 +258,14 @@ class AGUIAdapter:
         thread_id: str,
         *,
         deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
     ) -> RunnableConfig:
         """Build LangGraph config, including passthrough forwarded props.
 
         Drops every client ``configurable`` key with the framework prefix
         ``__lge_``, so a client cannot plant a pause of its own. Delegates
-        ``deadline`` to :func:`_with_pause_budget`, the same writer as the
-        :class:`EventGraph` entry points.
+        ``deadline`` and ``pause_on`` to :func:`_with_pause_budget`, the
+        same writer as the :class:`EventGraph` entry points.
         """
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         forwarded_raw = input_data.forwarded_props
@@ -295,7 +297,7 @@ class AGUIAdapter:
 
         return cast(
             "RunnableConfig",
-            _with_pause_budget(cast("RunnableConfig", config), deadline),
+            _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on),
         )
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
@@ -717,6 +719,7 @@ class AGUIAdapter:
         input_data: RunAgentInput,
         *,
         deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
     ) -> AsyncIterator[BaseEvent]:
         """Yield AG-UI events for one request.
 
@@ -728,13 +731,24 @@ class AGUIAdapter:
             input_data: AG-UI ``RunAgentInput``.
             deadline: Absolute ``time.monotonic()`` value.  When the run's
                 router observes a current time >= deadline between
-                dispatch rounds, it emits :class:`RunPaused` (mapped to a
-                ``CustomEvent(name="interrupted", value={"kind":
-                "soft_timeout", "elapsed_seconds": …})`` on the wire) and
-                the run finalises cleanly.  Pair with a strictly larger
-                outer hard cancellation (``asyncio.wait_for`` /
-                ``timeout=`` etc.) to avoid wire-format violations from
-                mid-stream cancellation.  ``None`` (default) disables.
+                dispatch rounds, it emits :class:`RunPausedOnDeadline` and
+                the run finalises cleanly.  ``RunPaused`` has no default
+                wire mapping.  Register a custom mapper to send it.  Pair
+                with a strictly larger outer hard cancellation
+                (``asyncio.wait_for`` / ``timeout=`` etc.) to avoid
+                wire-format violations from mid-stream cancellation.
+                ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``.  When the router observes
+                ``is_set()`` between dispatch rounds, it emits
+                :class:`RunPausedOnSignal` and the run finalises cleanly,
+                the same way as a deadline pause.  Set the signal to stop
+                a live run early, for example when the process shuts down.
+                ``None`` (default) disables.
+
+        Raises:
+            TypeError: *pause_on* has no callable ``is_set``. The stream
+                raises it on the first iteration, before ``RUN_STARTED``.
         """
         run_id = input_data.run_id or str(uuid.uuid4())
         thread_id = input_data.thread_id or str(uuid.uuid4())
@@ -745,13 +759,15 @@ class AGUIAdapter:
             input_data=input_data,
         )
 
+        config = self._build_config(
+            input_data, thread_id, deadline=deadline, pause_on=pause_on
+        )
+
         yield RunStartedEvent(
             type=EventType.RUN_STARTED,
             thread_id=thread_id,
             run_id=run_id,
         )
-
-        config = self._build_config(input_data, thread_id, deadline=deadline)
 
         try:
             async for agui_event in self._stream_event_source(input_data, ctx, config):

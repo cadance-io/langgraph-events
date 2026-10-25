@@ -378,7 +378,9 @@ lge owns the read migrations for its own framework events, such as `HandlerRaise
 
 A framework migration never relabels a write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
 
-WARNING: an old release cannot read a framework event type that it does not have, such as `HandlerAbandonedOnDeadline`. Drain in-flight threads before you roll back to an older release.
+`HandlerAbandonedOnSignal` and `RunPausedOnSignal` have no framework migration. No release before 0.41.0 wrote them.
+
+v0.40.0 cannot revive the four types that 0.41.0 adds: `HandlerAbandonedOnDeadline`, `HandlerAbandonedOnSignal`, `RunPausedOnDeadline` and `RunPausedOnSignal`. To keep a rollback path, a client on 0.40.0 can pass a forward-compat migration list. Each `Migration.rename` maps one new identity in `langgraph_events._event` onto `HandlerRaised` or `RunPaused`. A `Migration.transform_fields` on `HandlerAbandonedOnDeadline` can set `abandoned_for_deadline=True`. 0.41.0 refuses that list with `ValueError`, because each old name is a live class. Remove the list when you upgrade.
 
 A framework split keys on the framework class only. A subclass of `HandlerRaised` that you declared has its own identity, so the split does not apply to it. If 0.40.0 stored your subclass, its payload carries the `abandoned_for_deadline` key. Drop the key with a `@transform_fields` on your subclass:
 

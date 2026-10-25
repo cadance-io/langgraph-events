@@ -233,7 +233,7 @@ For interrupts whose frontend needs an action-discriminated dict, subclass `lang
 
 Pass `deadline=time.monotonic() + budget` to any graph entry point (`invoke`, `ainvoke`, `astream_events`, `stream_events`, `resume`, `aresume`, `astream_resume`, `stream_resume`, or `AGUIAdapter.stream`). When the router observes a wall-clock time past the deadline between dispatch rounds, it emits a `RunPausedOnDeadline(elapsed_seconds=…)` and the run terminates cleanly.
 
-`RunPaused` is the base class of every pause. It names no cause, so `RunPaused(...)` raises `TypeError`. Each subclass names one cause. `RunPausedOnDeadline` is the deadline pause. Match `RunPaused` to see every pause, or match a subclass to see one cause.
+`RunPaused` is the base class of every pause. It names no cause, so `RunPaused(...)` raises `TypeError`. Each subclass names one cause. `RunPausedOnDeadline` is the deadline pause. `RunPausedOnSignal` is the [signal pause](#pause-on-a-signal-runpausedonsignal). Match `RunPaused` to see every pause, or match a subclass to see one cause.
 
 ```python
 from time import monotonic
@@ -258,7 +258,40 @@ The first round of a run and the resume round always dispatch. On `resume()` and
 
 `RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
 
-The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. The one exception is [`RetryPolicy`](#retries) backoff, which reads the same deadline before every wait: a sleep that would land on or past the boundary is abandoned rather than started, and the give-up surfaces as a `HandlerAbandonedOnDeadline`. So you do not have to size the worst-case total backoff, `max_delay * (max_attempts - 1)`, under your deadline budget — the waits between attempts are bounded for you. The attempts themselves are not: a single long-running handler call can still run past the boundary, and the pause lands at the first round boundary after it returns.
+The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. The one exception is [`RetryPolicy`](#retries) backoff, which reads the same deadline before every wait: a sleep that would land on or past the boundary is abandoned rather than started, and the give-up surfaces as a `HandlerAbandonedOnDeadline`. The backoff reads a `pause_on=` signal the same way, and a signal give-up surfaces as a `HandlerAbandonedOnSignal`, see below. So you do not have to size the worst-case total backoff, `max_delay * (max_attempts - 1)`, under your deadline budget — the waits between attempts are bounded for you. The attempts themselves are not: a single long-running handler call can still run past the boundary, and the pause lands at the first round boundary after it returns.
+
+### Pause on a signal — `RunPausedOnSignal`
+
+A deadline is fixed when the run starts. To stop a live run early, pass `pause_on=` to the same entry points. The value is an object with an `is_set()` method, for example an `asyncio.Event` or a `threading.Event`. The `PauseSignal` protocol states this contract. The router calls `is_set()` between dispatch rounds. When it returns `True`, the router emits `RunPausedOnSignal(elapsed_seconds=…)` and the run ends cleanly.
+
+```python
+import asyncio
+
+stopping = asyncio.Event()
+
+
+async def run_turn(seed: Event) -> EventLog:
+    return await graph.ainvoke(seed, config=config, pause_on=stopping)
+
+
+# At shutdown, the process sets the event.
+# Each live run stops at its next round boundary.
+stopping.set()
+```
+
+- `RunPausedOnSignal` is a subclass of `RunPaused`. Code that matches `RunPaused` also matches a signal pause. The resume semantics are the same. Match `RunPausedOnSignal` to tell the two causes apart, for example to show a different notice.
+- When the deadline has also expired, the router emits `RunPausedOnSignal`, not `RunPausedOnDeadline`. A set signal wins, because the caller asked for it.
+- `elapsed_seconds` counts from the start of the run, also when the run has no deadline.
+- The router reads the signal only between rounds. The handler calls of the current round finish first. Give the run an outer grace period that is longer than one round.
+- The first round of a run always runs, because the seed dispatches it before the router runs. A run with `deadline=0.0` does the same.
+- The resume round always runs. On `resume()` and the other resume entry points, the router dispatches the resume value before it checks the signal or the deadline. So a pause does not lose the answer.
+- Events that a handler emitted in the paused round stay in the log. No later run dispatches them. This is the same as a deadline pause.
+- The value must have a callable `is_set`. Otherwise the entry point raises `TypeError` before any round runs. A common mistake is `pause_on=stopping.is_set`. Pass the event itself.
+- A `RetryPolicy` backoff reads the signal before every wait. When the signal is set, the policy gives up instead of starting the wait, because the run pauses at the next round anyway. The give-up is a `HandlerAbandonedOnSignal`. It is a `HandlerAbandoned`, which is a `HandlerRaised`.
+- The router then emits `RunPausedOnSignal` before it dispatches the give-up. So the `HandlerAbandonedOnSignal` stays in the log, and no catcher runs on it in this run. A later run does not dispatch it either, the same as any event of the paused round.
+- The first set read commits the run to a pause. When the retry loop reads the signal set, the router pauses at the next round, also when the caller clears the signal between the two reads.
+- `@on(HandlerRaised, exception=X)` and `log.latest(HandlerRaised)` match a `HandlerAbandonedOnSignal`. A catcher that names only `HandlerAbandonedOnSignal` does not satisfy `raises=` coverage, because a handler can also fail for other reasons.
+- A backoff wait that is already in progress when the signal is set runs to its end, and `max_delay` bounds it. The policy gives up before the next wait.
 
 ### Surfacing the pause inline
 
@@ -389,7 +422,8 @@ def give_up(event: HandlerRaised) -> Question.GaveUp:
 - Declaring `retry=` without `raises=`, or an `on=` entry **disjoint from** every type in `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
 - Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts.
 - The backoff is **deadline-aware**. A sleep is never *started* if it would land on or past the run's `deadline=` — the policy gives up there and then, even with attempts left, so the run returns to the router instead of sleeping through the soft boundary. Nothing is clamped: burning the rest of the budget on an attempt that probably cannot finish either only delays the pause.
-- That give-up is a `HandlerAbandonedOnDeadline`. It is a `HandlerAbandoned`, which is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` catcher runs for it. The run continues to the router. An exhausted attempt budget, an out-of-`on=` exception and a handler with no policy each emit a plain `HandlerRaised`. Use `isinstance(event, HandlerAbandonedOnDeadline)` to tell "ran out of time" from "ran out of tries". `HandlerAbandoned` names no cause, so `HandlerAbandoned(...)` raises `TypeError`. The abandoned attempt emits no `HandlerRetried`, because no wait happened.
+- The backoff also reads the run's `pause_on=` signal. When the signal is set, the policy gives up before the next wait, because the run [pauses](#pause-on-a-signal-runpausedonsignal) at the next round anyway. That give-up is a `HandlerAbandonedOnSignal`, and it reaches no catcher, because the run pauses first.
+- A deadline give-up is a `HandlerAbandonedOnDeadline`. It is a `HandlerAbandoned`, which is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` catcher runs for it. The run continues to the router. An exhausted attempt budget, an out-of-`on=` exception and a handler with no policy each emit a plain `HandlerRaised`. Use `isinstance(event, HandlerAbandonedOnDeadline)` to tell "ran out of time" from "ran out of tries". `HandlerAbandoned` names no cause, so `HandlerAbandoned(...)` raises `TypeError`. The abandoned attempt emits no `HandlerRetried`, because no wait happened.
 - **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
 - **`HandlerRetried` carries the exception without its traceback.** The instance is live — matchers and field injection work on it — but `__traceback__` is detached. The terminal `HandlerRaised` keeps its own.
 - Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node. Import this one from `langgraph_events`.

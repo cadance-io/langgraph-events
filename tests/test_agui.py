@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import warnings
@@ -41,6 +42,7 @@ from langgraph_events import (
     Interrupted,
     MessageEvent,
     RunPaused,
+    RunPausedOnSignal,
     ScalarReducer,
     message_reducer,
     on,
@@ -1203,6 +1205,45 @@ def describe_AGUIAdapter():
                     events.append(event)
 
                 assert events[-1].type == EventType.RUN_FINISHED
+
+        def when_the_pause_signal_is_set():
+
+            async def it_maps_the_pause_and_finishes_the_run():
+                class PauseMapper:
+                    def map(
+                        self, event: Event, ctx: MapperContext
+                    ) -> list[BaseEvent] | None:
+                        if not isinstance(event, RunPausedOnSignal):
+                            return None
+                        return [
+                            CustomEvent(
+                                type=EventType.CUSTOM, name="run.paused", value={}
+                            )
+                        ]
+
+                graph = _graph(reply_hi)
+                adapter = _adapter(
+                    graph, seed_factory=_ask("hi"), mappers=[PauseMapper()]
+                )
+                signal = asyncio.Event()
+                signal.set()
+
+                events = [
+                    event
+                    async for event in adapter.stream(_make_input(), pause_on=signal)
+                ]
+
+                assert len(_custom(events, "run.paused")) == 1
+                assert events[-1].type == EventType.RUN_FINISHED
+
+        def when_the_pause_signal_has_no_is_set_method():
+
+            async def it_raises_TypeError_before_the_run_starts():
+                adapter = _adapter(_graph(reply_hi), seed_factory=_ask("hi"))
+                stream = adapter.stream(_make_input(), pause_on=True)
+
+                with pytest.raises(TypeError, match="pause_on"):
+                    await anext(stream)
 
         def when_the_client_forwards_framework_pause_keys():
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import threading
 import time
 import typing
 import warnings
@@ -51,6 +52,7 @@ from langgraph_events import (
     Resumed,
     RunPaused,
     RunPausedOnDeadline,
+    RunPausedOnSignal,
     ScalarReducer,
     Scatter,
     SystemPromptSet,
@@ -175,8 +177,9 @@ def _to_ended(event: MessageReceived) -> Ended:
     return Ended(result=event.text)
 
 
-def _deadline_graph(thread_id: str) -> tuple[EventGraph, dict[str, typing.Any]]:
-    """Checkpointed two-handler graph for the deadline suites, plus its config."""
+def _pause_graph(thread_id: str) -> tuple[EventGraph, dict[str, typing.Any]]:
+    """Checkpointed two-handler graph for the ``deadline=`` and ``pause_on=``
+    suites, plus its config."""
     graph = EventGraph([_to_processed, _to_ended], checkpointer=MemorySaver())
     return graph, {"configurable": {"thread_id": thread_id}}
 
@@ -3320,7 +3323,7 @@ def describe_EventGraph():
                     RunPaused being a SystemEvent rather than a Halted
                     subclass — MaxRoundsExceeded would re-terminate here.
                     """
-                    graph, config = _deadline_graph("deadline-resume")
+                    graph, config = _pause_graph("deadline-resume")
 
                     # Run 1: deadline already expired → RunPaused emitted.
                     log1 = graph.invoke(
@@ -3406,7 +3409,9 @@ def describe_EventGraph():
                     )
 
                     router = make_router_node(max_rounds=100)
-                    config = _with_pause_budget(None, deadline=time.monotonic() - 1)
+                    config = _with_pause_budget(
+                        None, deadline=time.monotonic() - 1, pause_on=None
+                    )
                     state: dict[str, typing.Any] = {
                         "events": [Started(data="seed")],
                         "_cursor": 1,
@@ -3452,7 +3457,7 @@ def describe_EventGraph():
                     the second run would inherit a stuck flag and
                     drain silently with no ``RunPaused`` event.
                     """
-                    graph, config = _deadline_graph("double-pause")
+                    graph, config = _pause_graph("double-pause")
 
                     log1 = graph.invoke(
                         Started(data="first"), deadline=0.0, config=config
@@ -3471,6 +3476,225 @@ def describe_EventGraph():
                         f"second /run must produce its own RunPaused; "
                         f"got {len(pauses)} pause(s) in log2"
                     )
+
+        def describe_pause_on():
+
+            def when_the_signal_is_set_before_the_run():
+
+                def it_pauses_at_the_first_round_boundary():
+                    graph, config = _pause_graph("pause-before")
+                    signal = threading.Event()
+                    signal.set()
+
+                    log = graph.invoke(
+                        Started(data="go"), config=config, pause_on=signal
+                    )
+
+                    assert log.latest(Processed) is not None
+                    assert log.latest(RunPausedOnSignal) is not None
+
+            def when_the_signal_is_set_during_a_round():
+
+                async def it_pauses_at_the_next_round():
+                    signal = asyncio.Event()
+
+                    @on(Started)
+                    async def first(event: Started) -> Processed:
+                        signal.set()
+                        return Processed(data=event.data)
+
+                    @on(Processed)
+                    async def second(event: Processed) -> Ended:
+                        return Ended(result=event.data)
+
+                    graph = EventGraph([first, second])
+                    log = await graph.ainvoke(Started(data="go"), pause_on=signal)
+
+                    assert log.latest(Processed) is not None
+                    assert log.latest(Ended) is None
+                    assert log.count(RunPaused) == 1
+                    paused = log.latest(RunPausedOnSignal)
+                    assert paused is not None
+                    assert paused.elapsed_seconds > 0.0
+
+            def when_the_signal_is_never_set():
+
+                def it_runs_to_completion():
+                    graph, config = _pause_graph("pause-never")
+
+                    log = graph.invoke(
+                        MessageReceived(text="go"),
+                        config=config,
+                        pause_on=threading.Event(),
+                    )
+
+                    assert log.latest(Ended) is not None
+                    assert log.latest(RunPaused) is None
+
+            def when_the_deadline_has_also_expired():
+
+                def it_emits_RunPausedOnSignal_not_RunPausedOnDeadline():
+                    graph, config = _pause_graph("pause-and-deadline")
+                    signal = threading.Event()
+                    signal.set()
+
+                    log = graph.invoke(
+                        Started(data="go"),
+                        config=config,
+                        deadline=0.0,
+                        pause_on=signal,
+                    )
+
+                    assert log.count(RunPaused) == 1
+                    assert type(log.latest(RunPaused)) is RunPausedOnSignal
+                    assert not log.has(RunPausedOnDeadline)
+
+            def when_a_fresh_run_follows_a_signal_pause():
+
+                async def it_continues_past_the_old_pause():
+                    graph, config = _pause_graph("pause-then-run")
+                    signal = asyncio.Event()
+                    signal.set()
+                    await graph.ainvoke(
+                        Started(data="first"), config=config, pause_on=signal
+                    )
+
+                    log = await graph.ainvoke(
+                        MessageReceived(text="second"), config=config
+                    )
+
+                    assert log.latest(Ended) is not None
+                    assert log.latest(Ended).result == "second"
+
+            def when_resuming_an_interrupted_run():
+
+                def it_dispatches_the_resume_value_before_pausing():
+                    graph, config = _interrupting_graph("resume-pause")
+                    graph.invoke(Started(data="test"), config=config)
+                    signal = threading.Event()
+                    signal.set()
+
+                    log = graph.resume(_Confirmed(), config=config, pause_on=signal)
+
+                    assert log.latest(Ended) is not None
+                    assert log.latest(Processed) is None
+                    assert log.latest(RunPausedOnSignal) is not None
+
+                def it_dispatches_the_resume_value_in_stream_resume():
+                    graph, config = _interrupting_graph("stream-resume-pause")
+                    graph.invoke(Started(data="test"), config=config)
+                    signal = threading.Event()
+                    signal.set()
+
+                    events = list(
+                        graph.stream_resume(
+                            _Confirmed(), config=config, pause_on=signal
+                        )
+                    )
+
+                    assert any(isinstance(e, Ended) for e in events)
+                    assert not any(isinstance(e, Processed) for e in events)
+                    assert any(isinstance(e, RunPausedOnSignal) for e in events)
+
+                async def it_dispatches_the_resume_value_in_astream_resume():
+                    graph, config = _interrupting_graph("astream-resume-pause")
+                    await graph.ainvoke(Started(data="test"), config=config)
+                    signal = asyncio.Event()
+                    signal.set()
+
+                    events = [
+                        e
+                        async for e in graph.astream_resume(
+                            _Confirmed(), config=config, pause_on=signal
+                        )
+                    ]
+
+                    assert any(isinstance(e, Ended) for e in events)
+                    assert not any(isinstance(e, Processed) for e in events)
+                    assert any(isinstance(e, RunPausedOnSignal) for e in events)
+
+            def when_streaming_events():
+
+                def it_yields_the_pause_in_the_sync_stream():
+                    graph, config = _pause_graph("pause-sync-stream")
+                    signal = threading.Event()
+                    signal.set()
+
+                    events = list(
+                        graph.stream_events(
+                            Started(data="go"), config=config, pause_on=signal
+                        )
+                    )
+
+                    assert any(isinstance(e, RunPausedOnSignal) for e in events)
+
+                async def it_yields_the_pause():
+                    graph, config = _pause_graph("pause-stream")
+                    signal = asyncio.Event()
+                    signal.set()
+
+                    events = [
+                        e
+                        async for e in graph.astream_events(
+                            Started(data="go"), config=config, pause_on=signal
+                        )
+                    ]
+
+                    assert any(isinstance(e, RunPausedOnSignal) for e in events)
+
+            def when_a_parallel_handler_sets_the_signal():
+
+                async def it_emits_RunPausedOnSignal_exactly_once_per_run():
+                    class FanOut(IntegrationEvent):
+                        pass
+
+                    class LeftDone(IntegrationEvent):
+                        pass
+
+                    class RightDone(IntegrationEvent):
+                        pass
+
+                    signal = asyncio.Event()
+
+                    @on(FanOut)
+                    async def left(event: FanOut) -> LeftDone:
+                        signal.set()
+                        return LeftDone()
+
+                    @on(FanOut)
+                    async def right(event: FanOut) -> RightDone:
+                        return RightDone()
+
+                    @on(LeftDone, RightDone)
+                    async def downstream(event: Event) -> Ended:
+                        return Ended(result="never")
+
+                    graph = EventGraph([left, right, downstream])
+                    log = await graph.ainvoke(FanOut(), pause_on=signal)
+
+                    assert log.count(RunPausedOnSignal) == 1
+                    assert log.latest(Ended) is None
+
+            def when_the_value_has_no_is_set_method():
+
+                @pytest.mark.parametrize(
+                    "bad",
+                    [threading.Event().is_set, True],
+                    ids=["bound-is_set", "bool"],
+                )
+                def it_raises_TypeError_before_any_round_runs(bad):
+                    ran: list[str] = []
+
+                    @on(Started)
+                    def handler(event: Started) -> Ended:
+                        ran.append(event.data)
+                        return Ended(result=event.data)
+
+                    graph = EventGraph([handler])
+
+                    with pytest.raises(TypeError, match="pause_on"):
+                        graph.invoke(Started(data="go"), pause_on=bad)
+                    assert ran == []
 
         def describe_cancellation():
 

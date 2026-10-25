@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
+import threading
 import time
 import traceback
 import weakref
@@ -11,13 +13,16 @@ from typing import ClassVar
 
 import pytest
 from conftest import Ended, Started
+from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     Command,
     DomainEvent,
     EventGraph,
+    EventLog,
     HandlerAbandoned,
     HandlerAbandonedOnDeadline,
+    HandlerAbandonedOnSignal,
     HandlerRaised,
     HandlerRetried,
     IntegrationEvent,
@@ -28,10 +33,12 @@ from langgraph_events import (
     Namespace,
     Resumed,
     RetryPolicy,
+    RunPausedOnSignal,
     Scatter,
     on,
 )
 from langgraph_events import _retry as _retry_mod
+from langgraph_events.serde import NamespaceAwareSerde
 
 
 class FlakyError(Exception):
@@ -299,6 +306,31 @@ def echo_failure(event: HandlerRaised) -> Recovered:
 def catch_any(event: HandlerRaised) -> Recovered:
     """Universal catcher — for graphs declaring more than one raise."""
     return Recovered(reason=str(event.exception))
+
+
+class _ReadsSetOnce:
+    """A ``pause_on=`` signal that reads set once, then clear.
+
+    Models a caller that clears its signal between two reads.
+    """
+
+    def __init__(self) -> None:
+        self._set = False
+
+    def set(self) -> None:
+        self._set = True
+
+    def is_set(self) -> bool:
+        was_set, self._set = self._set, False
+        return was_set
+
+
+def _assert_abandoned_on_signal(log: EventLog) -> None:
+    """The retry loop gave up on the signal, and the run paused before any catcher."""
+    abandoned = log.latest(HandlerRaised)
+    assert type(abandoned) is HandlerAbandonedOnSignal
+    assert log.after(HandlerAbandonedOnSignal).has(RunPausedOnSignal)
+    assert not log.has(Recovered)
 
 
 def _budget() -> float:
@@ -749,6 +781,192 @@ def describe_retry_scope():
                 assert type(log.latest(HandlerRaised)) is HandlerRaised
                 assert not isinstance(log.latest(HandlerRaised), HandlerAbandoned)
 
+    def describe_pause_on():
+        def when_the_signal_is_set_before_the_handler_fails():
+            def it_gives_up_before_sleeping(slept):
+                # The run pauses at the next round anyway, so a wait only
+                # delays the pause.
+                attempts = _Attempts(succeed_on=99)
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    raise FlakyError("always")
+
+                signal = threading.Event()
+                signal.set()
+                log = EventGraph([handler, gave_up]).invoke(Item(n=1), pause_on=signal)
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                _assert_abandoned_on_signal(log)
+
+            async def it_gives_up_before_awaiting_a_sleep(slept):
+                attempts = _Attempts(succeed_on=99)
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                async def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    raise FlakyError("always")
+
+                signal = asyncio.Event()
+                signal.set()
+                log = await EventGraph([handler, gave_up]).ainvoke(
+                    Item(n=1), pause_on=signal
+                )
+                assert attempts.calls == 1
+                assert slept == []
+                assert not log.has(HandlerRetried)
+                _assert_abandoned_on_signal(log)
+
+        def when_the_signal_is_set_between_two_attempts():
+            def it_stops_before_the_next_wait(slept):
+                attempts = _Attempts(succeed_on=99)
+                signal = threading.Event()
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=4, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    if attempts.calls == 2:
+                        signal.set()
+                    raise FlakyError("always")
+
+                log = EventGraph([handler, gave_up]).invoke(Item(n=1), pause_on=signal)
+                assert attempts.calls == 2
+                assert slept == [0.1]
+                _assert_abandoned_on_signal(log)
+
+            async def it_stops_before_the_next_awaited_wait(slept):
+                attempts = _Attempts(succeed_on=99)
+                signal = asyncio.Event()
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=4, base_delay=0.1, jitter=False),
+                )
+                async def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    if attempts.calls == 2:
+                        signal.set()
+                    raise FlakyError("always")
+
+                log = await EventGraph([handler, gave_up]).ainvoke(
+                    Item(n=1), pause_on=signal
+                )
+                assert attempts.calls == 2
+                assert slept == [0.1]
+                _assert_abandoned_on_signal(log)
+
+        def when_the_signal_is_cleared_before_the_router_reads_it():
+            def it_still_pauses_the_run(slept):
+                # The retry loop gave up because it read the signal set. The
+                # router must not read it again and dispatch the give-up.
+                signal = _ReadsSetOnce()
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    signal.set()
+                    raise FlakyError("always")
+
+                log = EventGraph([handler, gave_up]).invoke(Item(n=1), pause_on=signal)
+                _assert_abandoned_on_signal(log)
+
+        def when_the_signal_is_never_set():
+            def it_retries_the_whole_budget(slept):
+                attempts = _Attempts(succeed_on=99)
+
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    attempts.tick()
+                    raise FlakyError("always")
+
+                log = EventGraph([handler, gave_up]).invoke(
+                    Item(n=1), pause_on=threading.Event()
+                )
+                assert attempts.calls == 3
+                assert slept == [0.1, 0.2]
+                assert type(log.latest(HandlerRaised)) is HandlerRaised
+                assert log.has(Recovered)
+
+        def when_the_policy_gives_up_on_the_signal():
+            def it_emits_a_HandlerAbandoned(slept):
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    raise FlakyError("always")
+
+                signal = threading.Event()
+                signal.set()
+                log = EventGraph([handler, gave_up]).invoke(Item(n=1), pause_on=signal)
+                abandoned = log.latest(HandlerAbandonedOnSignal)
+                assert isinstance(abandoned, HandlerAbandoned)
+                assert isinstance(abandoned, HandlerRaised)
+                assert not isinstance(abandoned, HandlerAbandonedOnDeadline)
+
+        def when_a_catcher_matches_the_exception():
+            def it_catches_a_signal_give_up():
+                # A signal give-up reaches no catcher in its own run, because
+                # the run pauses. Seeding one shows that the subclass still
+                # matches ``@on(HandlerRaised, exception=X)``.
+                log = EventGraph([gave_up]).invoke(
+                    HandlerAbandonedOnSignal(
+                        handler="handler",
+                        source_event=Item(n=1),
+                        exception=FlakyError("always"),
+                    )
+                )
+                assert log.latest(Recovered) == Recovered(reason="gave up")
+
+        def when_the_run_is_checkpointed():
+            def it_revives_the_signal_give_up(slept):
+                @on(
+                    Item,
+                    raises=FlakyError,
+                    retry=RetryPolicy(max_attempts=3, base_delay=0.1, jitter=False),
+                )
+                def handler(event: Item) -> Handled:
+                    raise FlakyError("always")
+
+                graph = EventGraph(
+                    [handler, gave_up],
+                    checkpointer=MemorySaver(serde=NamespaceAwareSerde()),
+                )
+                config = {"configurable": {"thread_id": "signal-give-up"}}
+                signal = threading.Event()
+                signal.set()
+                graph.invoke(Item(n=1), config=config, pause_on=signal)
+
+                stored = graph.get_state(config).events
+                revived = stored.latest(HandlerAbandonedOnSignal)
+                assert type(revived) is HandlerAbandonedOnSignal
+                assert revived.handler == "handler"
+                assert revived.source_event == Item(n=1)
+                assert stored.has(RunPausedOnSignal)
+
     def describe_invariants():
         def it_evaluates_the_predicate_once_per_dispatch(slept):
             # ``_check_invariants`` sits outside the attempt loop: the pre and
@@ -780,8 +998,6 @@ def describe_retry_scope():
         def it_does_not_retry_a_pause(slept):
             # ``_collect_and_check`` runs outside the try/except, so the
             # GraphInterrupt it raises is never mistaken for a failed attempt.
-            from langgraph.checkpoint.memory import MemorySaver
-
             attempts = _Attempts(succeed_on=99)
 
             @on(

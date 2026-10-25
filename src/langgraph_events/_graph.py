@@ -1564,26 +1564,30 @@ class EventGraph:
         return {"events": seeds, "causes": [None] * len(seeds)}
 
     @staticmethod
-    def _apply_deadline_kwarg(kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Pop ``deadline`` and write the run's pause budget into the config.
+    def _apply_pause_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Pop ``deadline`` and ``pause_on`` and write them into the config.
 
         Every entry point (invoke/ainvoke/resume/aresume/stream_events/...)
         routes its kwargs through here, so the router and the retry loop
-        read the budget from the run's config.
+        read them from the run's config.
         """
-        config = _with_pause_budget(kwargs.get("config"), kwargs.pop("deadline", None))
+        config = _with_pause_budget(
+            kwargs.get("config"),
+            kwargs.pop("deadline", None),
+            kwargs.pop("pause_on", None),
+        )
         if config is not None:
             kwargs["config"] = config
         return kwargs
 
     def _run(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = self._apply_pause_kwargs(kwargs)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(self, inp: _GraphInput, **kwargs: Any) -> EventLog:
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = self._apply_pause_kwargs(kwargs)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
@@ -3035,7 +3039,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = self._apply_pause_kwargs(kwargs)
         compiled = self._compile()
         if not reducer_names:
             yield from seeds
@@ -3165,7 +3169,7 @@ class EventGraph:
         path loads no checkpoint, so it has no use for *snapshot*.
         """
         kwargs.pop("stream_mode", None)
-        kwargs = self._apply_deadline_kwarg(kwargs)
+        kwargs = self._apply_pause_kwargs(kwargs)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(

@@ -39,6 +39,7 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerAbandonedOnDeadline,
+    HandlerAbandonedOnSignal,
     HandlerRaised,
     HandlerRetried,
     InvariantViolated,
@@ -46,13 +47,18 @@ from langgraph_events._event import (
     Resumed,
     RunPaused,
     RunPausedOnDeadline,
+    RunPausedOnSignal,
     Scatter,
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import HandlerMeta  # noqa: TC001
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._services import RunScoped
-from langgraph_events._types import HandlerReturn, StateDict  # noqa: TC001
+from langgraph_events._types import (  # noqa: TC001
+    HandlerReturn,
+    PauseSignal,
+    StateDict,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -76,48 +82,91 @@ _BASE_FIELDS: dict[str, Any] = {
 # Every ``configurable`` key the framework writes starts with this prefix.
 # The AG-UI adapter drops a client key with it, so a client cannot plant one.
 # The checkpoint does not store ``configurable``, and tracing metadata skips
-# a key with a ``__`` prefix, so the budget is never serialized.
+# a key with a ``__`` prefix, so the pause signal object is never serialized.
 _FRAMEWORK_KEY_PREFIX = "__lge_"
 _PAUSE_BUDGET_KEY = f"{_FRAMEWORK_KEY_PREFIX}pause_budget"
 
 
+class _SignalLatch:
+    """The run's ``pause_on=`` signal, held set from its first set read.
+
+    The retry loop and the router both read the signal. When a caller clears
+    it between their reads, the retry loop has already given up for the
+    pause, so the router must still pause. The first ``True`` from
+    ``is_set()`` therefore commits the run to a pause.
+    """
+
+    __slots__ = ("_latched", "_signal")
+
+    def __init__(self, signal: PauseSignal) -> None:
+        self._signal = signal
+        self._latched = False
+
+    def is_set(self) -> bool:
+        if not self._latched:
+            self._latched = self._signal.is_set()
+        return self._latched
+
+
 @dataclasses.dataclass(frozen=True)
 class _PauseBudget:
-    """When a run must pause: its ``deadline=``.
+    """When a run must pause: its ``deadline=``, its ``pause_on=``, or both.
 
     One per run, in the run's ``configurable``. The router asks it for the
-    pause event between rounds. The retry loop asks it whether a backoff
-    wait ends before the deadline.
+    pause event between rounds. The retry loop asks it whether the signal is
+    set, and whether a backoff wait ends before the deadline. Both read the
+    same :class:`_SignalLatch`, so they cannot disagree on the signal.
     """
 
     started_at: float
-    deadline: float
+    deadline: float | None
+    signal: _SignalLatch | None
 
     def pause_now(self) -> RunPaused | None:
-        """The pause event the router must emit now, or ``None`` to continue."""
+        """The pause event the router must emit now, or ``None`` to continue.
+
+        A set signal wins over an expired deadline: the caller asked for it.
+        """
         now = time.monotonic()
-        if now >= self.deadline:
+        if self.signal_set():
+            return RunPausedOnSignal(elapsed_seconds=now - self.started_at)
+        if self.deadline is not None and now >= self.deadline:
             return RunPausedOnDeadline(elapsed_seconds=now - self.started_at)
         return None
 
+    def signal_set(self) -> bool:
+        """Whether the run's ``pause_on=`` signal is set."""
+        return self.signal is not None and self.signal.is_set()
+
     def fits_deadline(self, delay: float) -> bool:
         """Whether a backoff of *delay* seconds ends before the deadline."""
-        return time.monotonic() + delay < self.deadline
+        return self.deadline is None or time.monotonic() + delay < self.deadline
 
 
 def _with_pause_budget(
     config: RunnableConfig | None,
     deadline: float | None,
+    pause_on: PauseSignal | None,
 ) -> RunnableConfig | None:
     """Return *config* with the run's :class:`_PauseBudget` in ``configurable``.
 
-    Single writer for every entry point that accepts ``deadline=``. Without
-    a deadline, *config* comes back unchanged. Otherwise the result is a
-    copy, so the caller's dict is never mutated.
+    Single writer for every entry point that accepts ``deadline=`` or
+    ``pause_on=``. With neither set, *config* comes back unchanged.
+    Otherwise the result is a copy, so the caller's dict is never mutated.
+
+    Raises ``TypeError`` when *pause_on* has no callable ``is_set``, before
+    any round runs. ``pause_on=event.is_set`` is the usual mistake.
     """
-    if deadline is None:
+    if deadline is None and pause_on is None:
         return config
-    budget = _PauseBudget(time.monotonic(), deadline)
+    if pause_on is not None and not callable(getattr(pause_on, "is_set", None)):
+        raise TypeError(
+            f"pause_on= must be an object with an is_set() method, for "
+            f"example an asyncio.Event, got {type(pause_on).__name__}: "
+            f"{pause_on!r}. Pass the event itself, not event.is_set."
+        )
+    latch = None if pause_on is None else _SignalLatch(pause_on)
+    budget = _PauseBudget(time.monotonic(), deadline, latch)
     out: dict[str, Any] = dict(config or {})
     configurable: dict[str, Any] = out.get("configurable", {})
     out["configurable"] = {**configurable, _PAUSE_BUDGET_KEY: budget}
@@ -533,19 +582,20 @@ def _next_delay_or_give_up(
     ``None`` means the retry loop is over and the terminal ``HandlerRaised``
     has already been appended to *new_events* — no policy, the budget is
     spent, this exception is out of the policy's ``on=`` scope, or the next
-    backoff would cross the run's deadline.  Otherwise the attempt is
+    backoff does not fit the run's *budget*.  Otherwise the attempt is
     recorded per ``policy.observe`` (append a ``HandlerRetried``, log a
     warning, or stay quiet) and the delay returned.
 
-    *budget* is ``None`` when the caller passed no ``deadline=``.  A sleep
-    that would land on or past the deadline is refused outright rather than
-    clamped: the router only checks the deadline *between* rounds, so an
-    in-flight backoff cannot be preempted, and burning what is left of the
-    budget on an attempt that almost certainly cannot finish either just
-    delays the pause.  Giving up here lets the run reach the router and emit
-    ``RunPausedOnDeadline`` promptly. The give-up is a
-    ``HandlerAbandonedOnDeadline``, so it stays distinguishable from an
-    exhausted attempt budget.
+    *budget* is ``None`` when the caller passed neither ``deadline=`` nor
+    ``pause_on=``.  A sleep that does not fit is refused outright rather than
+    clamped: the router only pauses *between* rounds, so an in-flight backoff
+    cannot be preempted, and a wait before an attempt that the pause will cut
+    off only delays the pause.  Giving up here lets the run reach the router
+    and emit the pause promptly.  A set signal gives up as a
+    ``HandlerAbandonedOnSignal``.  The budget's latch makes the router pause
+    after it, so no catcher sees it in this run.  A wait past the deadline
+    gives up as a ``HandlerAbandonedOnDeadline``, so it stays
+    distinguishable from an exhausted attempt budget.
 
     Shared by both dispatch paths; only the sleep call itself differs between
     them.
@@ -559,6 +609,11 @@ def _next_delay_or_give_up(
         new_events.append(_make_handler_raised(meta, event, exc))
         return None
     delay = policy.delay_for(attempt, exc)
+    if budget is not None and budget.signal_set():
+        new_events.append(
+            _make_handler_raised(meta, event, exc, kind=HandlerAbandonedOnSignal)
+        )
+        return None
     if budget is not None and not budget.fits_deadline(delay):
         new_events.append(
             _make_handler_raised(meta, event, exc, kind=HandlerAbandonedOnDeadline)

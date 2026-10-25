@@ -399,8 +399,9 @@ def on(
     the framework re-invokes it in place on a declared raise, and
     ``HandlerRaised`` fires only once the budget is spent — or, earlier, once
     the next backoff would cross the run's ``deadline=``, in which case it is
-    a ``HandlerAbandonedOnDeadline``. Requires a non-empty ``raises=``;
-    the policy's ``on=`` must overlap it.
+    a ``HandlerAbandonedOnDeadline``. When the run's ``pause_on=`` signal is
+    set, the give-up is a ``HandlerAbandonedOnSignal``. Requires a non-empty
+    ``raises=``; the policy's ``on=`` must overlap it.
 
     Field matchers narrow dispatch — ``@on(Resumed, interrupted=Approval)``
     for ``isinstance`` match (works for Event, Exception, or Invariant

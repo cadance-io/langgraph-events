@@ -18,10 +18,12 @@ from langgraph_events import (
     DomainEvent,
     Event,
     HandlerAbandonedOnDeadline,
+    HandlerAbandonedOnSignal,
     HandlerRaised,
     Interrupted,
     Namespace,
     RunPausedOnDeadline,
+    RunPausedOnSignal,
 )
 from langgraph_events.serde import Migration, NamespaceAwareSerde
 
@@ -135,8 +137,10 @@ def describe_framework_migrations():
             "event",
             [
                 HandlerAbandonedOnDeadline(handler="work", source_event=Cancelled()),
+                HandlerAbandonedOnSignal(handler="work", source_event=Cancelled()),
                 HandlerRaised(handler="work", source_event=Cancelled()),
                 RunPausedOnDeadline(elapsed_seconds=2.5),
+                RunPausedOnSignal(elapsed_seconds=2.5),
             ],
             ids=lambda event: type(event).__name__,
         )
@@ -144,11 +148,20 @@ def describe_framework_migrations():
             assert client_serde.loads_typed(client_serde.dumps_typed(event)) == event
 
     def describe_writing():
-        def it_keeps_the_live_identity(client_serde):
-            event = HandlerAbandonedOnDeadline(handler="work")
+        @pytest.mark.parametrize(
+            "event",
+            [
+                HandlerAbandonedOnDeadline(handler="work"),
+                HandlerAbandonedOnSignal(handler="work"),
+                RunPausedOnDeadline(elapsed_seconds=2.5),
+                RunPausedOnSignal(elapsed_seconds=2.5),
+            ],
+            ids=lambda event: type(event).__name__,
+        )
+        def it_keeps_the_live_identity(client_serde, event):
             assert _written_identity(client_serde, event) == [
                 "langgraph_events._event",
-                "HandlerAbandonedOnDeadline",
+                type(event).__qualname__,
             ]
 
     def describe_legacy_write():

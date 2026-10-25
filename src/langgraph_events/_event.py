@@ -738,7 +738,7 @@ class RunPaused(SystemEvent):
     typed resume value.
 
     In-flight events from the current dispatch round that hadn't been
-    dispatched at the time the deadline fired are persisted in the event
+    dispatched at the time the pause fired are persisted in the event
     log but not dispatched — same semantic as :class:`MaxRoundsExceeded`.
 
     AG-UI wire format: ``RunPaused`` intentionally does **not** implement
@@ -761,6 +761,22 @@ class RunPaused(SystemEvent):
 
 class RunPausedOnDeadline(RunPaused):
     """Soft pause emitted by the router when the run's ``deadline=`` expired."""
+
+
+class RunPausedOnSignal(RunPaused):
+    """Soft pause emitted by the router when the run's ``pause_on=`` signal is set.
+
+    The caller passes ``pause_on=`` with an object that has ``is_set()``,
+    for example an ``asyncio.Event`` or a ``threading.Event``. The router
+    calls ``is_set()`` between dispatch rounds. When it returns ``True``,
+    the router emits this event and the run ends cleanly. A signal pause
+    has the same resume semantics as a deadline pause. See
+    :class:`RunPaused`.
+
+    When the deadline has also expired, the router emits this event, not
+    :class:`RunPausedOnDeadline`. ``elapsed_seconds`` counts from the start
+    of the run.
+    """
 
 
 class Interrupted(SystemEvent):
@@ -862,6 +878,21 @@ class HandlerAbandonedOnDeadline(HandlerAbandoned):
     """The next backoff wait would land on or past the run's ``deadline=``.
 
     The run continues to the router, so every ``HandlerRaised`` catcher runs.
+    """
+
+
+class HandlerAbandonedOnSignal(HandlerAbandoned):
+    """The run's ``pause_on=`` signal was set before the next backoff wait.
+
+    The run pauses at the next round, so a backoff wait only delays the
+    pause, and the retry loop gives up instead of starting it. The router
+    then emits :class:`RunPausedOnSignal` before it dispatches this event,
+    so no catcher runs on it in this run. The event stays in the log.
+    ``@on(HandlerRaised, exception=X)`` and ``log.latest(HandlerRaised)``
+    still match it.
+
+    A thread that stores this event also stores the
+    :class:`RunPausedOnSignal` that follows it.
     """
 
 
