@@ -50,6 +50,7 @@ from langgraph_events import (
     Reducer,
     Resumed,
     RunPaused,
+    RunPausedOnDeadline,
     ScalarReducer,
     Scatter,
     SystemPromptSet,
@@ -3235,14 +3236,14 @@ def describe_EventGraph():
 
             def when_deadline_is_already_expired():
 
-                def it_emits_RunPaused():
+                def it_emits_RunPausedOnDeadline():
                     @on(Started)
                     def handler(event: Started) -> Ended:
                         return Ended(result="should-not-matter")
 
                     graph = EventGraph([handler])
                     log = graph.invoke(Started(data="go"), deadline=0.0)
-                    assert log.latest(RunPaused) is not None
+                    assert isinstance(log.latest(RunPaused), RunPausedOnDeadline)
 
             def when_using_astream_events():
 

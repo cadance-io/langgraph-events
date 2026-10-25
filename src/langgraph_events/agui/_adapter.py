@@ -263,8 +263,8 @@ class AGUIAdapter:
         When ``deadline`` is provided, delegates to
         :func:`_inject_deadline_keys` (same writer as the
         :class:`EventGraph` entry points) so the framework router sees
-        the per-run soft-timeout keys and emits :class:`RunPaused` on
-        expiry.
+        the per-run soft-timeout keys and emits :class:`RunPausedOnDeadline`
+        on expiry.
         """
         config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
         forwarded_raw = input_data.forwarded_props
@@ -726,7 +726,7 @@ class AGUIAdapter:
             input_data: AG-UI ``RunAgentInput``.
             deadline: Absolute ``time.monotonic()`` value.  When the run's
                 router observes a current time >= deadline between
-                dispatch rounds, it emits :class:`RunPaused` (mapped to a
+                dispatch rounds, it emits :class:`RunPausedOnDeadline` (mapped to a
                 ``CustomEvent(name="interrupted", value={"kind":
                 "soft_timeout", "elapsed_seconds": …})`` on the wire) and
                 the run finalises cleanly.  Pair with a strictly larger

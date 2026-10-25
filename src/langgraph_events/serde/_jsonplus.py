@@ -25,12 +25,7 @@ from langgraph.types import Interrupt
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
-    from langgraph_events.serde.migrations._core import (
-        AddField,
-        Migration,
-        SplitEvent,
-        TransformFields,
-    )
+    from langgraph_events.serde.migrations._core import Migration, MigrationTables
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 try:
@@ -78,10 +73,10 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # ``__init__`` re-exports ``testing``, which imports those names back from
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
+from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde.migrations._core import (  # noqa: E402
     SplitError,
     TransformError,
-    _apply_identity_migrations,
     _CallableError,
     _collect_decorated_migrations,
     _flatten_and_validate,
@@ -315,12 +310,7 @@ def _make_default(
 def _make_ext_hook(
     errors: list[str],
     fallback: Callable[[int, bytes], Any],
-    rename_table: dict[tuple[str, str], tuple[str, str]],
-    addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-    origin_addfield_table: dict[tuple[str, str], tuple[AddField, ...]],
-    transform_table: dict[tuple[str, str], TransformFields],
-    origin_transform_table: dict[tuple[str, str], TransformFields],
-    split_table: dict[tuple[str, str], SplitEvent],
+    tables: MigrationTables,
     scope: dict[tuple[str, str], type],
     *,
     unresolved: list[UnrevivedIdentity] | None = None,
@@ -403,16 +393,8 @@ def _make_ext_hook(
             stored = (module_name, qualname)
             # A fill mutates ``kwargs`` in place: snapshot it first.
             before = dict(kwargs) if reads is not None else None
-            module_name, qualname, kwargs = _apply_identity_migrations(
-                module_name,
-                qualname,
-                kwargs,
-                rename_table,
-                addfield_table,
-                origin_addfield_table,
-                transform_table,
-                origin_transform_table,
-                split_table,
+            module_name, qualname, kwargs = tables.migrate(
+                module_name, qualname, kwargs
             )
             instance = _resolve_identity(module_name, qualname, scope=scope)(**kwargs)
             if reads is not None:
@@ -527,57 +509,15 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 f"and revives it with getattr on the module. On a miss it "
                 f"returns a raw dict with no error. {remedy}"
             )
-        all_migrations = (*decorated, *migrations)
-        (
-            self._rename_table,
-            self._addfield_table,
-            self._origin_addfield_table,
-            self._transform_table,
-            self._origin_transform_table,
-            self._split_table,
-        ) = _flatten_and_validate(all_migrations, scope)
-        # Origin-scoped fills are the fan-in signal, and a fan-in cannot
-        # ride legacy_write: writes would relabel EVERY instance under the
-        # oldest historic identity, collapsing the per-origin distinction
-        # the fills exist to preserve — and the old releases' classes do
-        # not accept the back-filled field anyway.
-        if legacy_write and self._origin_addfield_table:
-            raise ValueError(
-                "legacy_write=True cannot be combined with origin-scoped "
-                "back-fills (migrate_from(backfill=...) or AddField keyed "
-                "on a historic identity). Drain in-flight threads before "
-                "the consolidation cutover, or drop legacy_write and accept "
-                "read-only compatibility. See 'Consolidating N classes into "
-                "one' in docs/event-migrations.md."
-            )
-        # A transform has no inverse. A write relabelled under the oldest
-        # historic identity would carry the CURRENT shape, which the old
-        # release's class does not accept, and the transform only runs on
-        # read. Refuse at construction, like the origin-fill case above.
-        if legacy_write and (self._transform_table or self._origin_transform_table):
-            raise ValueError(
-                "legacy_write=True cannot be combined with a TransformFields "
-                "(transform_fields, migrate_from(transform=...) or a "
-                "hand-authored TransformFields). A transform runs on read and "
-                "has no inverse, so an old release cannot read what this one "
-                "writes. Drain in-flight threads before the cutover, or drop "
-                "legacy_write and accept read-only compatibility. See "
-                "'Dropping, merging or retyping a field' in "
-                "docs/event-migrations.md."
-            )
-        # A split has no inverse either: an old release has no class for
-        # the target, and select only runs on read.
-        if legacy_write and self._split_table:
-            raise ValueError(
-                "legacy_write=True cannot be combined with a SplitEvent "
-                "(split_event, Migration.split_event or a hand-authored "
-                "SplitEvent). A split runs on read and has no inverse, so an "
-                "old release cannot read what this one writes. Drain "
-                "in-flight threads before the cutover, or drop legacy_write "
-                "and accept read-only compatibility. See 'Splitting one "
-                "stored event into two on a payload value' in "
-                "docs/event-migrations.md."
-            )
+        # The legacy_write guards judge the client's tables only. lge's
+        # framework migrations are never relabelled on write, so a framework
+        # event is always written under its own live identity.
+        client = _flatten_and_validate((*decorated, *migrations), scope)
+        if legacy_write:
+            client.refuse_legacy_write()
+        self._tables = client.with_framework(
+            _flatten_and_validate(FRAMEWORK_MIGRATIONS, scope)
+        )
         # The read path resolves through ``_scope`` before it falls back to
         # importing — see ``_resolve_identity``. ``_live_identities`` is its
         # key set: the identities revivable with no migration at all.
@@ -682,7 +622,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         kwargs for an identity revived by other means (a live class or a
         rename), it does not make an identity revivable by itself.
         """
-        return self._live_identities | frozenset(self._rename_table.keys())
+        return self._live_identities | frozenset(self._tables.rename_table)
 
     def dumps_typed(self, obj: object) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):
@@ -723,12 +663,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 ext_hook=_make_ext_hook(
                     errors,
                     self._unpack_ext_hook,
-                    self._rename_table,
-                    self._addfield_table,
-                    self._origin_addfield_table,
-                    self._transform_table,
-                    self._origin_transform_table,
-                    self._split_table,
+                    self._tables,
                     self._scope,
                     unresolved=self._unresolved,
                     reads=self._reads,

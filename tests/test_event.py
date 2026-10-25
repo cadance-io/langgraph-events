@@ -1,6 +1,8 @@
 """Tests for Event base class and MessageEvent."""
 
+import copy
 import dataclasses
+import pickle
 import warnings
 
 import pytest
@@ -13,6 +15,8 @@ from langgraph_events import (
     DomainEvent,
     Event,
     Halted,
+    HandlerAbandoned,
+    HandlerAbandonedOnDeadline,
     HandlerRaised,
     IntegrationEvent,
     Interrupted,
@@ -21,6 +25,7 @@ from langgraph_events import (
     Namespace,
     Resumed,
     RunPaused,
+    RunPausedOnDeadline,
     SystemEvent,
     on_namespace_finalize,
 )
@@ -675,6 +680,61 @@ def describe_SystemEvent():
             keeps the design decision visible.
             """
             assert not issubclass(RunPaused, Halted)
+
+
+class _Leaf(RunPaused):
+    """A subclass that declares nothing is concrete."""
+
+
+def describe_abstract_events():
+    def when_built_directly():
+        @pytest.mark.parametrize(
+            ("base", "names"),
+            [
+                (RunPaused, "RunPausedOnDeadline"),
+                (HandlerAbandoned, "HandlerAbandonedOnDeadline"),
+            ],
+        )
+        def it_raises_TypeError_naming_the_concrete_subclasses(base, names):
+            with pytest.raises(
+                TypeError, match=rf"^{base.__name__} is abstract\. .*: {names}"
+            ):
+                base()
+
+        @pytest.mark.parametrize(
+            "base", [Event, DomainEvent, IntegrationEvent, SystemEvent]
+        )
+        def it_raises_TypeError_for_each_event_base(base):
+            with pytest.raises(TypeError, match=rf"^{base.__name__} is abstract\."):
+                base()
+
+    def when_a_subclass_declares_nothing():
+        def it_builds():
+            assert isinstance(_Leaf(elapsed_seconds=1.0), RunPaused)
+
+    def describe_a_concrete_subclass():
+        @pytest.mark.parametrize(
+            "event",
+            [
+                RunPausedOnDeadline(elapsed_seconds=1.0),
+                HandlerAbandonedOnDeadline(handler="work", source_event=Cancelled()),
+            ],
+            ids=lambda event: type(event).__name__,
+        )
+        @pytest.mark.parametrize(
+            "clone",
+            [
+                copy.copy,
+                copy.deepcopy,
+                lambda e: pickle.loads(pickle.dumps(e)),  # noqa: S301 - own data
+                dataclasses.replace,
+            ],
+            ids=["copy", "deepcopy", "pickle", "replace"],
+        )
+        def it_survives_a_clone(event, clone):
+            cloned = clone(event)
+            assert type(cloned) is type(event)
+            assert cloned == event
 
 
 def describe_on_namespace_finalize():

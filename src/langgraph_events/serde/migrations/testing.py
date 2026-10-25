@@ -271,7 +271,7 @@ def _resolve_check(
     directions. *recorded_fields* is unused: resolution never looks at a
     field."""
     target_module, target_qualname = _resolve_rename(
-        module, qualname, serde._rename_table
+        module, qualname, serde._tables.rename_table
     )
     try:
         obj = _resolve_identity(target_module, target_qualname, scope=serde._scope)
@@ -301,13 +301,13 @@ def _revive_check(
     actually inject.
     """
     target_module, target_qualname = _resolve_rename(
-        module, qualname, serde._rename_table
+        module, qualname, serde._tables.rename_table
     )
     backfilled = frozenset(
         op.field
         for op in (
-            *serde._origin_addfield_table.get((module, qualname), ()),
-            *serde._addfield_table.get((target_module, target_qualname), ()),
+            *serde._tables.origin_addfield_table.get((module, qualname), ()),
+            *serde._tables.addfield_table.get((target_module, target_qualname), ()),
         )
     )
     kwargs = _placeholder_kwargs(

@@ -298,7 +298,7 @@ def describe_events_outside_a_namespace():
 
             serde = NamespaceAwareSerde(namespaces=[], events=[Loose])
 
-            assert serde._rename_table  # decorator on a loose event is honoured
+            assert serde._tables.rename_table  # decorator on a loose event is honoured
 
 
 def describe_from_namespaces_auto_wiring():
@@ -380,7 +380,7 @@ def describe_one_class_reached_twice():
                 events=[_Filled.Do.Done],
             )
 
-            assert serde._origin_addfield_table
+            assert serde._tables.origin_addfield_table
 
 
 class _Alef(IntegrationEvent):
