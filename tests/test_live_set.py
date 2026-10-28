@@ -366,6 +366,21 @@ def describe_rewrite_live_set():
                     assert outcome.clean
                     assert releases.plan("t1") == ["unchanged"]
 
+    def when_a_subgraph_checkpoint_holds_the_live_shape():
+        def it_reports_the_run_as_clean(tmp_path: Path):
+            releases = _releases(tmp_path)
+            releases.seed("t1")
+            rewrite_live_set(releases.current, expect=releases.expect, apply=True)
+            _copy_to_namespace(releases.saver, "t1", "child:1")
+
+            outcome = rewrite_live_set(
+                releases.current, expect=releases.expect, apply=True
+            )
+
+            assert isinstance(outcome, LiveSetOutcome)
+            assert outcome.subgraphs == ()
+            assert outcome.clean
+
     def when_a_subgraph_checkpoint_holds_an_old_shape():
         def it_reads_it_and_reports_the_run_as_not_clean(tmp_path: Path):
             releases = _releases(tmp_path)
