@@ -49,6 +49,7 @@ from langgraph_events.serde.migrations._gate import (
 from langgraph_events.serde.migrations._target import (
     MigrationTarget,
     TargetError,
+    ThreadKey,
 )
 from langgraph_events.serde.migrations.testing import (
     assert_migration_gate,
@@ -73,6 +74,7 @@ __all__ = [
     "SplitEvent",
     "SurvivedRelease",
     "TargetError",
+    "ThreadKey",
     "TransformFields",
     "Uncovered",
     "Unrevivable",

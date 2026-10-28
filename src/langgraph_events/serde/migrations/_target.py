@@ -1,4 +1,4 @@
-"""The graph and the baseline file that every gate command reads."""
+"""The graph, the baseline file and the store that every command reads."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph_events.serde import _jsonplus
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -22,21 +23,71 @@ if TYPE_CHECKING:
     from langgraph_events.serde.migrations._core import MigrationSet
 
 
+_THREAD_KEYS_QUERY = "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints"
+
+
 class TargetError(Exception):
-    """The target cannot give a graph with a ``NamespaceAwareSerde``."""
+    """The target cannot give what a command needs from it."""
+
+
+@dataclass(frozen=True, order=True)
+class ThreadKey:
+    """One checkpoint namespace of one thread. ``""`` is the root namespace."""
+
+    thread_id: str
+    checkpoint_ns: str
 
 
 @dataclass(frozen=True)
 class MigrationTarget:
-    """One graph and its committed baseline.
+    """One graph, its committed baseline and its store.
 
     ``graph`` builds the graph on the checkpointer it receives. The gate
     passes an empty in-memory saver, so building reads no store.
-    ``baseline`` is the path of the committed baseline file.
+    ``baseline`` is the path of the committed baseline file. ``store``
+    opens the real checkpointer. Only ``rewrite`` uses it. ``threads``
+    lists the checkpoint namespaces of the store. It is needed only for a
+    saver other than ``PostgresSaver`` or ``MemorySaver``, or for a store
+    that more than one graph shares.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph]
     baseline: Path
+    store: Callable[[], AbstractContextManager[BaseCheckpointSaver[Any]]] | None = None
+    threads: Callable[[BaseCheckpointSaver[Any]], Iterable[ThreadKey]] | None = None
+
+    def thread_keys(self, saver: BaseCheckpointSaver[Any]) -> tuple[ThreadKey, ...]:
+        """Every checkpoint namespace of every thread in *saver*, sorted.
+
+        Raises:
+            TargetError: when the target has no ``threads`` and the saver
+                is not a ``PostgresSaver`` or a ``MemorySaver``.
+        """
+        if self.threads is not None:
+            return tuple(sorted(set(self.threads(saver))))
+        if isinstance(saver, MemorySaver):
+            return tuple(
+                sorted(
+                    ThreadKey(thread_id, ns)
+                    for thread_id, namespaces in saver.storage.items()
+                    for ns, checkpoints in namespaces.items()
+                    if checkpoints
+                )
+            )
+        postgres = _postgres_saver_class()
+        if postgres is not None and isinstance(saver, postgres):
+            with saver._cursor() as cursor:
+                cursor.execute(_THREAD_KEYS_QUERY)
+                rows = cursor.fetchall()
+            return tuple(
+                sorted(ThreadKey(r["thread_id"], r["checkpoint_ns"]) for r in rows)
+            )
+        raise TargetError(
+            f"The target cannot list the threads of a {type(saver).__name__}. "
+            f"Set threads= on the MigrationTarget to a function that takes the "
+            f"saver and returns a ThreadKey for each thread and checkpoint "
+            f"namespace, for example from: {_THREAD_KEYS_QUERY}."
+        )
 
     def snapshot(self) -> Snapshot:
         """What the code holds, built once for every rule.
@@ -61,6 +112,16 @@ class MigrationTarget:
                 f"A client migration has no valid key: {error}"
             ) from error
         return Snapshot(graph, serde, migrations)
+
+
+def _postgres_saver_class() -> type | None:
+    try:
+        from langgraph.checkpoint.postgres import (  # noqa: PLC0415
+            PostgresSaver,
+        )
+    except ImportError:
+        return None
+    return PostgresSaver
 
 
 @dataclass(frozen=True)
