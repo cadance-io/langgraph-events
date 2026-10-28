@@ -629,6 +629,18 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         """
         return self._live_identities | frozenset(self._tables.rename_table)
 
+    def live_fields(self) -> dict[tuple[str, str], frozenset[str]]:
+        """The init fields of every live event class this serde speaks for.
+
+        The keys are the identities that :meth:`revivable_identities`
+        revives with no migration. Init fields only: the serde writes
+        those, and the constructor rebuilds an ``init=False`` field.
+        """
+        return {
+            identity: frozenset(f.name for f in dataclasses.fields(cls) if f.init)
+            for identity, cls in self._scope.items()
+        }
+
     def client_migrations(self) -> MigrationSet:
         """The read-time migrations the client declared on this serde.
 

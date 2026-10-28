@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING, Any
 from langgraph_events.serde.migrations._core import (
     MigrationKey,
     MigrationSet,
+    _rename_sources,
     migration_fingerprint,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
-    from langgraph_events import EventGraph
     from langgraph_events.serde.migrations._target import Snapshot
 
 Identity = tuple[str, str]
@@ -56,12 +56,51 @@ class MigrationRecord:
 
 @dataclass(frozen=True)
 class MigrationsUnrecorded:
-    """A baseline of version 1 to 3. It recorded no migration.
+    """A baseline of version 1 to 3. It recorded no migration and no live
+    fields.
 
-    This is not "no migration": the release rule cannot run against it.
+    This is not "no migration": the release rule cannot run against it,
+    and an update against it drops no history.
     """
 
     version: int
+
+
+@dataclass(frozen=True)
+class CodeRecord:
+    """What the code held when a version 4 baseline was written.
+
+    ``migrations`` holds one record per client migration. ``live`` holds
+    the init fields of each live event class. After a clean deploy, every
+    record of a class is in its live shape, so ``live`` is the history
+    that stays when a migration of the class leaves the code.
+    """
+
+    migrations: tuple[MigrationRecord, ...]
+    live: Mapping[Identity, frozenset[str]]
+
+    @property
+    def keys(self) -> frozenset[MigrationKey]:
+        return frozenset(record.key for record in self.migrations)
+
+    def prune(
+        self, history: Mapping[Identity, Fields], current: MigrationSet
+    ) -> dict[Identity, Fields]:
+        """*history* after the deploy of this code rewrote the store.
+
+        Each migration of this code that *current* no longer holds resets
+        the identity it keyed. A rename source, or an identity a rename of
+        this code read away, has no record left: it leaves the history.
+        Any other identity keeps the live fields of this code.
+        """
+        pruned = dict(history)
+        sources = _rename_sources(self.keys)
+        for key in current.deleted_since(self.keys):
+            if key.kind == "rename" or key.identity in sources:
+                pruned.pop(key.identity, None)
+            elif key.identity in self.live:
+                pruned[key.identity] = self.live[key.identity]
+        return pruned
 
 
 @dataclass(frozen=True)
@@ -71,7 +110,7 @@ class Baseline:
     events: Mapping[Identity, Fields]
     retired: Mapping[Identity, Fields]
     handlers: frozenset[str]
-    migrations: tuple[MigrationRecord, ...] | MigrationsUnrecorded
+    code: CodeRecord | MigrationsUnrecorded
 
     @classmethod
     def read(cls, path: Path) -> Baseline:
@@ -81,7 +120,7 @@ class Baseline:
             ValueError: when the file has an unsupported version or shape.
         """
         if not path.exists():
-            return cls({}, {}, frozenset(), ())
+            return cls({}, {}, frozenset(), CodeRecord((), {}))
         raw: dict[str, Any] = json.loads(path.read_text())
         version = raw.get("version")
         if version not in _SUPPORTED_BASELINE_VERSIONS:
@@ -91,22 +130,41 @@ class Baseline:
             )
         if version >= 3:
             _check_v3_shape(raw, path)
+        if version >= 4:
+            _check_v4_shape(raw, path)
         return cls(
             events=_fields_by_identity(raw["events"]),
             retired=_fields_by_identity(raw.get("retired", [])),
             handlers=frozenset(entry["name"] for entry in raw.get("handlers", [])),
-            migrations=(
-                _read_migrations(raw.get("migrations", []), path)
+            code=(
+                CodeRecord(
+                    _read_migrations(raw.get("migrations", []), path),
+                    {
+                        (e["module"], e["qualname"]): frozenset(e["live"])
+                        for e in raw["events"]
+                    },
+                )
                 if version >= 4
                 else MigrationsUnrecorded(version)
             ),
         )
 
     def write(self, path: Path) -> None:
-        """Write this baseline to *path* as version 4."""
+        """Write this baseline to *path* as version 4.
+
+        Raises:
+            TypeError: when the baseline records no code. Only a read of a
+                version 1 to 3 file gives one, and no write path keeps it.
+        """
+        if isinstance(self.code, MigrationsUnrecorded):
+            raise TypeError("A baseline of version 1 to 3 is never written.")
+        live = self.code.live
         payload = {
             "version": BASELINE_VERSION,
-            "events": [_entry(i, f) for i, f in sorted(self.events.items())],
+            "events": [
+                {**_entry(i, f), "live": sorted(live[i])}
+                for i, f in sorted(self.events.items())
+            ],
             "retired": [_entry(i, f) for i, f in sorted(self.retired.items())],
             "handlers": [{"name": name} for name in sorted(self.handlers)],
             "migrations": [
@@ -119,9 +177,9 @@ class Baseline:
     @property
     def recorded_keys(self) -> frozenset[MigrationKey] | MigrationsUnrecorded:
         """The recorded migration keys, or the reason none are recorded."""
-        if isinstance(self.migrations, MigrationsUnrecorded):
-            return self.migrations
-        return frozenset(record.key for record in self.migrations)
+        if isinstance(self.code, MigrationsUnrecorded):
+            return self.code
+        return self.code.keys
 
     @property
     def fingerprint(self) -> str | MigrationsUnrecorded:
@@ -135,32 +193,32 @@ class Baseline:
         """The baseline the code now needs. Idempotent for one *previous*.
 
         ``events`` and ``retired`` are cumulative: a recorded field stays,
-        and an identity the graph no longer reaches moves to ``retired``.
-        One exception is a migration that *previous* recorded and the code
-        no longer holds. The deploy rewrote every record it covered, so
-        the history of its identity resets. See :meth:`_reset`.
-        ``handlers`` is rebuilt. ``migrations`` is exactly the code's keys,
-        and a hold stays on a key the code still holds.
+        and an identity the serde no longer speaks for moves to
+        ``retired``. One exception is a migration that *previous* recorded
+        and the code no longer holds. The deploy of *previous* rewrote every
+        record it covered, so the history of its identity resets. See
+        :meth:`CodeRecord.prune`. ``handlers`` is rebuilt. ``migrations``
+        is exactly the code's keys, and a hold stays on a key the code
+        still holds.
         """
-        live = _live_fields(code.graph)
-        recorded = {**self.retired, **self.events}
-        merged: dict[Identity, Fields] = {
-            identity: fields | (recorded.get(identity) or frozenset())
-            for identity, fields in live.items()
-        }
-        retired = {i: f for i, f in recorded.items() if i not in live}
-        previous_keys = previous.recorded_keys if previous is not None else None
-        if isinstance(previous_keys, frozenset):
-            for key in code.migrations.deleted_since(previous_keys):
-                _reset(key, previous_keys, code.migrations, live, merged, retired)
+        live = code.serde.live_fields()
+        history: Mapping[Identity, Fields] = {**self.retired, **self.events}
+        if previous is not None and isinstance(previous.code, CodeRecord):
+            history = previous.code.prune(history, code.migrations)
         holds = {record.key: record.hold for record in self.records}
         return Baseline(
-            events=merged,
-            retired=retired,
+            events={
+                identity: fields | (history.get(identity) or frozenset())
+                for identity, fields in live.items()
+            },
+            retired={i: f for i, f in history.items() if i not in live},
             handlers=frozenset(code.graph.handler_names),
-            migrations=tuple(
-                MigrationRecord(key, holds.get(key))
-                for key in sorted(code.migrations.keys)
+            code=CodeRecord(
+                tuple(
+                    MigrationRecord(key, holds.get(key))
+                    for key in sorted(code.migrations.keys)
+                ),
+                live,
             ),
         )
 
@@ -170,17 +228,22 @@ class Baseline:
         Raises:
             ValueError: when the baseline does not record *key*.
         """
-        records = self.records
-        if key not in {record.key for record in records}:
+        code = self.code
+        if isinstance(code, MigrationsUnrecorded) or key not in code.keys:
             raise ValueError(
                 f"The baseline does not record {key.label!r}. Hold only a "
                 f"migration the code holds, and run `baseline update` first."
             )
         return dataclasses.replace(
             self,
-            migrations=tuple(
-                MigrationRecord(record.key, hold if record.key == key else record.hold)
-                for record in records
+            code=CodeRecord(
+                tuple(
+                    MigrationRecord(
+                        record.key, hold if record.key == key else record.hold
+                    )
+                    for record in code.migrations
+                ),
+                code.live,
             ),
         )
 
@@ -202,6 +265,17 @@ class Baseline:
                         f"~ {label} fields {_listed(mine[identity])} -> "
                         f"{_listed(theirs[identity])}"
                     )
+        if isinstance(self.code, CodeRecord) and isinstance(other.code, CodeRecord):
+            for identity in sorted(self.code.live.keys() & other.code.live.keys()):
+                mine_live, their_live = (
+                    self.code.live[identity],
+                    other.code.live[identity],
+                )
+                if mine_live != their_live:
+                    lines.append(
+                        f"~ event {identity[0]}:{identity[1]} live "
+                        f"{_listed(mine_live)} -> {_listed(their_live)}"
+                    )
         for handler in sorted(self.handlers - other.handlers):
             lines.append(f"- handler {handler}")
         for handler in sorted(other.handlers - self.handlers):
@@ -222,65 +296,9 @@ class Baseline:
     @property
     def records(self) -> tuple[MigrationRecord, ...]:
         """The migration records. Empty for a baseline that records none."""
-        if isinstance(self.migrations, MigrationsUnrecorded):
+        if isinstance(self.code, MigrationsUnrecorded):
             return ()
-        return self.migrations
-
-
-def _reset(
-    key: MigrationKey,
-    previous: frozenset[MigrationKey],
-    code: MigrationSet,
-    live: Mapping[Identity, frozenset[str]],
-    events: dict[Identity, Fields],
-    retired: dict[Identity, Fields],
-) -> None:
-    """Reset the history of the identity a deleted shipped *key* covered.
-
-    A rename source, or an identity a previous rename read away, has no
-    record left after the deploy: it leaves ``retired``. Any other identity
-    keeps records in the shape of its live class only, so its fields are
-    the live fields, read through a current rename when one exists.
-    """
-    identity = key.identity
-    sources = {k.identity for k in previous if k.kind == "rename"}
-    if key.kind == "rename" or identity in sources:
-        retired.pop(identity, None)
-        return
-    terminus = code.renames.get(identity, identity)
-    if terminus not in live:
-        return
-    if identity in events:
-        events[identity] = live[terminus]
-    elif identity in retired:
-        retired[identity] = live[terminus]
-
-
-def _live_fields(graph: EventGraph) -> dict[Identity, frozenset[str]]:
-    """The init fields of every event class reachable from *graph*.
-
-    Init fields only: the serde writes those, and an ``init=False`` field
-    is rebuilt by the constructor.
-    """
-    return {
-        (cls.__module__, cls.__qualname__): frozenset(
-            f.name for f in dataclasses.fields(cls) if f.init
-        )
-        for cls in _event_classes(graph)
-    }
-
-
-def _event_classes(graph: EventGraph) -> Iterable[type]:
-    """Commands, their outcomes, namespace events, integration and system
-    events: the surface the serde encodes."""
-    model = graph.namespaces()
-    for namespace in model.namespaces.values():
-        for command in namespace.commands.values():
-            yield command.cls
-            yield from command.outcomes
-        yield from namespace.events
-    yield from model.integration_events
-    yield from model.system_events
+        return self.code.migrations
 
 
 def _listed(fields: Fields) -> str:
@@ -326,6 +344,19 @@ def _fields_by_identity(entries: list[dict[str, Any]]) -> dict[Identity, Fields]
         )
         for entry in entries
     }
+
+
+def _check_v4_shape(raw: dict[str, Any], path: Path) -> None:
+    """Reject an ``events`` entry with no ``live``. It is mandatory from
+    version 4: a prune against the file reads it."""
+    incomplete = [e["qualname"] for e in raw["events"] if "live" not in e]
+    if incomplete:
+        raise ValueError(
+            f"Baseline at {path} is version 4 but these events entries have "
+            f"no `live`: {', '.join(incomplete)}. Give each entry "
+            f'"live": [] and run `baseline update`. The update fills the list '
+            f"from the live class."
+        )
 
 
 def _check_v3_shape(raw: dict[str, Any], path: Path) -> None:
