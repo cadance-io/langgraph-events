@@ -21,6 +21,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   callable object (`module:Class()`), because a replacement of such a callable reads as the
   same key.
 
+- **One migration gate replaces the four baseline gates.** Declare a `MigrationTarget`
+  with a graph factory and the committed baseline file. `check(target, previous=None)`
+  runs the rules `baseline`, `names`, `coverage`, `revive`, `handlers` and `release`,
+  and returns a `GateReport` of typed findings: `BaselineStale`, `AnonymousCallable`,
+  `Uncovered`, `Unrevivable`, `HandlerMissing` and `SurvivedRelease`. Each finding
+  prints one next command with the caller's own arguments. `assert_migration_gate`
+  raises `GateError`, an `AssertionError`, on a finding. The report states which
+  rules ran, and why the release rule did not run.
+- **The baseline records each client migration.** The baseline file is version 4. Its
+  `migrations` list holds the label of every client migration and any hold. A file of
+  version 1 to 3 still loads, and the release rule does not run against it.
+  `update_baseline(target, previous=None)` writes the file the code needs.
+- **A read-time migration ships in one release and leaves the code in the next.** With
+  `previous`, the baseline of the previous release, `check` reports each shipped
+  migration that the code still holds. A previous key follows a current rename. After
+  the deletion, `update_baseline(..., previous=...)` drops the history the migration
+  covered, so the gate never asks to add the migration back. `hold_migration` keeps a
+  shipped migration for one more release: the hold records the fingerprint of the
+  previous baseline. `MigrationSet` gains `fingerprint`, `shipped_in` and
+  `deleted_since`.
+- **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
+  `check`, `baseline update`, `baseline hold` and `fingerprint`. Exit 0 is a pass, 1 a
+  finding, 2 a usage or target error.
+
+### Changed
+
+- **BREAKING: the read path names an identity as `module:qualname`.** `Cannot revive`
+  and the write-side placeholder refusal used `module.qualname`. A failed transform or
+  split is named by its migration label, for example
+  `transform myapp.events:Order via myapp.events:drop_total`.
+- **The `revive` rule only resolves an identity of this library.** A `None` placeholder
+  cannot satisfy a library class that validates a required field, for example
+  `FrontendToolCallRequested`. A client identity still revives through the read path.
+
+### Removed
+
+- **BREAKING: the old baseline gates and the detect module are removed.**
+  `assert_all_baselined_cover`, `assert_all_baselined_resolve`,
+  `assert_all_baselined_revive`, `assert_all_baselined_handlers_cover`, `CoverageError`,
+  `MigrationCoverageError`, `HandlerCoverageError` and the module
+  `langgraph_events.serde.migrations.detect` (`detect_changes`, `write_baseline`,
+  `BaselineRegressionError`) are gone. Use `check` or `assert_migration_gate`, and
+  `update_baseline`. A client class whose `__post_init__` rejects a `None` placeholder
+  on a required field has no resolve-only gate now. Give the field a `@backfill` or a
+  default.
+- **BREAKING: the positional CLI form is removed.**
+  `python -m langgraph_events.serde.migrations <module:factory> <baseline>` exits 2 and
+  prints the new command line.
+
 ## [0.41.0] - 2026-10-25
 
 ### Added
