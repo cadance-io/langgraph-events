@@ -13,6 +13,7 @@ from langgraph_events.serde.migrations import (
     AddField,
     Migration,
     MigrationKey,
+    MigrationSet,
     RenameEvent,
     backfill,
     migrate_from,
@@ -300,3 +301,95 @@ def describe_MigrationKey():
             def it_refuses_the_key():
                 with pytest.raises(ValueError, match="MigrationKey"):
                     MigrationKey("transform", "app.events", "Order", via="")
+
+
+def _keys(*labels: str) -> frozenset[MigrationKey]:
+    return frozenset(MigrationKey.parse(label) for label in labels)
+
+
+def _set(*labels: str, renames: dict[str, str] | None = None) -> MigrationSet:
+    def identity(text: str) -> tuple[str, str]:
+        module, _, qualname = text.partition(":")
+        return module, qualname
+
+    return MigrationSet(
+        _keys(*labels),
+        {identity(s): identity(t) for s, t in (renames or {}).items()},
+    )
+
+
+def describe_MigrationSet():
+    def describe_fingerprint():
+        def it_hashes_the_sorted_labels_under_a_versioned_prefix():
+            fingerprint = _set("fill m:A[x]", "rename m:Old").fingerprint
+
+            assert fingerprint == "lge-m1-f178eae2be39f503"
+
+        def it_ignores_the_order_of_the_keys():
+            first = _set("fill m:A[x]", "rename m:Old").fingerprint
+            second = _set("rename m:Old", "fill m:A[x]").fingerprint
+
+            assert first == second
+
+        def it_gives_an_empty_set_a_fingerprint():
+            assert _set().fingerprint == "lge-m1-e3b0c44298fc1c14"
+
+    def describe_shipped_in():
+        def when_a_previous_key_is_still_in_the_code():
+            def it_reports_the_key():
+                current = _set("fill m:A[x]", "fill m:B[y]")
+
+                shipped = current.shipped_in(_keys("fill m:A[x]"))
+
+                assert shipped == _keys("fill m:A[x]")
+
+        def when_a_class_stage_key_follows_a_current_rename():
+            def it_reports_the_moved_key():
+                current = _set(
+                    "rename m:X", "transform m:Y via m:_f", renames={"m:X": "m:Y"}
+                )
+
+                shipped = current.shipped_in(_keys("transform m:X via m:_f"))
+
+                assert shipped == _keys("transform m:Y via m:_f")
+
+        def when_an_origin_stage_key_was_deleted():
+            def it_does_not_follow_the_rename_to_a_class_fill():
+                current = _set(
+                    "rename m:Old", "fill m:New[f]", renames={"m:Old": "m:New"}
+                )
+
+                shipped = current.shipped_in(_keys("rename m:Old", "fill m:Old[f]"))
+
+                assert shipped == _keys("rename m:Old")
+
+        def when_no_previous_key_is_in_the_code():
+            def it_reports_nothing():
+                assert _set("fill m:A[x]").shipped_in(_keys("fill m:B[y]")) == set()
+
+    def describe_deleted_since():
+        def when_a_previous_key_left_the_code():
+            def it_reports_the_previous_key():
+                current = _set("fill m:A[x]")
+
+                deleted = current.deleted_since(_keys("fill m:A[x]", "rename m:Old"))
+
+                assert deleted == _keys("rename m:Old")
+
+        def when_a_previous_key_moved_through_a_current_rename():
+            def it_reports_nothing():
+                current = _set(
+                    "rename m:X", "transform m:Y via m:_f", renames={"m:X": "m:Y"}
+                )
+
+                assert current.deleted_since(_keys("transform m:X via m:_f")) == set()
+
+        def when_an_origin_stage_key_was_deleted():
+            def it_reports_the_origin_key():
+                current = _set(
+                    "rename m:Old", "fill m:New[f]", renames={"m:Old": "m:New"}
+                )
+
+                deleted = current.deleted_since(_keys("rename m:Old", "fill m:Old[f]"))
+
+                assert deleted == _keys("fill m:Old[f]")

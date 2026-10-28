@@ -9,6 +9,8 @@ prior library versions — this is a read-side affordance only. See #70.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import hashlib
 import importlib
 import itertools
 import re
@@ -440,6 +442,11 @@ class MigrationKey:
         )
 
     @property
+    def identity(self) -> tuple[str, str]:
+        """``(module, qualname)``, the identity the key is keyed on."""
+        return self.module, self.qualname
+
+    @property
     def label(self) -> str:
         """``<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]``."""
         label = f"{self.kind} {self.module}:{self.qualname}"
@@ -498,6 +505,54 @@ class MigrationSet:
 
     keys: frozenset[MigrationKey]
     renames: Mapping[tuple[str, str], tuple[str, str]]
+
+    @property
+    def fingerprint(self) -> str:
+        """A short name of :attr:`keys`. Equal sets give equal fingerprints."""
+        return migration_fingerprint(self.keys)
+
+    def shipped_in(self, previous: frozenset[MigrationKey]) -> frozenset[MigrationKey]:
+        """The keys of this set that *previous* also holds.
+
+        A previous key matches as recorded, or moved through :attr:`renames`
+        onto the live class. A key whose identity is a rename source in
+        *previous* never moves: it names a stored identity on purpose.
+        """
+        sources = _rename_sources(previous)
+        return frozenset(
+            match for key in previous for match in self._matches(key, sources)
+        )
+
+    def deleted_since(
+        self, previous: frozenset[MigrationKey]
+    ) -> frozenset[MigrationKey]:
+        """The keys of *previous* that no key of this set matches.
+
+        The match rule is the rule of :meth:`shipped_in`.
+        """
+        sources = _rename_sources(previous)
+        return frozenset(key for key in previous if not self._matches(key, sources))
+
+    def _matches(
+        self, key: MigrationKey, sources: frozenset[tuple[str, str]]
+    ) -> frozenset[MigrationKey]:
+        candidates = {key}
+        terminus = self.renames.get(key.identity)
+        if terminus is not None and key.identity not in sources:
+            candidates.add(
+                dataclasses.replace(key, module=terminus[0], qualname=terminus[1])
+            )
+        return frozenset(candidates & self.keys)
+
+
+def migration_fingerprint(keys: Iterable[MigrationKey]) -> str:
+    """``lge-m1-`` and 16 hex digits of the SHA-256 of the sorted labels."""
+    labels = "\n".join(sorted(key.label for key in keys))
+    return "lge-m1-" + hashlib.sha256(labels.encode()).hexdigest()[:16]
+
+
+def _rename_sources(keys: frozenset[MigrationKey]) -> frozenset[tuple[str, str]]:
+    return frozenset(key.identity for key in keys if key.kind == "rename")
 
 
 @dataclass(frozen=True)
@@ -1682,7 +1737,7 @@ def _collect_decorated_migrations(
     itself. Events in it revive directly with no migration.
     ``NamespaceAwareSerde`` stores it as the read path's first port of call
     (:func:`_resolve_identity`) and derives its ``revivable_identities`` /
-    ``assert_all_baselined_cover`` key set from it; the walk already
+    the gate's coverage key set from it; the walk already
     happens here so the map is free.
     """
     out: list[Migration] = []

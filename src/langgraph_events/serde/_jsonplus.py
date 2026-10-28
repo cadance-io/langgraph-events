@@ -77,8 +77,9 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde.migrations._core import (  # noqa: E402
     MigrationSet,
-    SplitError,
-    TransformError,
+    SplitEvent,
+    TransformFields,
+    _callable_id,
     _CallableError,
     _collect_decorated_migrations,
     _flatten_and_validate,
@@ -165,19 +166,20 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     **be** the tombstone: redecorating it with the decorator it already
     carries fixes nothing.
     """
-    if isinstance(exc, SplitError):
-        op = exc.op
+    op = exc.op if isinstance(exc, _CallableError) else None
+    if isinstance(op, SplitEvent):
         return (
-            f"The select keyed on {op.module}.{op.qualname} must accept a "
+            f"The migration split {op.module}:{op.qualname} via "
+            f"{_callable_id(op.select)} must accept a "
             f"payload of every era. It must return None when the "
             f"discriminating value is absent or None, or a (target, kwargs) "
             f"tuple whose target is in targets=. See 'Splitting one stored "
             f"event into two on a payload value' in docs/event-migrations.md."
         )
-    if isinstance(exc, TransformError):
-        op = exc.op
+    if isinstance(op, TransformFields):
         return (
-            f"The transform keyed on {op.module}.{op.qualname} must accept a "
+            f"The migration transform {op.module}:{op.qualname} via "
+            f"{_callable_id(op.transform)} must accept a "
             f"payload from every era and return a dict. Guard a key that can "
             f"be absent or None: kw.pop('x', None) and a None check. See "
             f"'Dropping, merging or retyping a field' in "
@@ -242,7 +244,7 @@ def _make_default(
             # class name, so it would round-trip and a strict read could
             # not tell it from a real event.
             refusals.append(
-                f"Refusing to store {obj.module}.{obj.qualname}: it is an "
+                f"Refusing to store {obj.module}:{obj.qualname}: it is an "
                 f"UnrevivedIdentity placeholder, and a placeholder must never "
                 f"be stored. Recover the class with a tombstone, see "
                 f"'Recovering a delete-first deployment' in "
@@ -431,7 +433,7 @@ def _make_ext_hook(
                 else f"{type(exc).__name__}: {exc}"
             )
             errors.append(
-                f"Cannot revive {module_name}.{qualname}: {failure}. "
+                f"Cannot revive {module_name}:{qualname}: {failure}. "
                 f"{_revival_remedy(qualname, exc)}"
             )
             raise
