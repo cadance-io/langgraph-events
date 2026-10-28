@@ -115,6 +115,19 @@ class Trimmed(Namespace):
             return Trimmed.Place.Placed(note=self.note)
 
 
+class TrimmedWide(Namespace):
+    class Place(Command):
+        note: str = ""
+
+        @transform_fields(_drop_total)
+        class Placed(DomainEvent):
+            note: str = ""
+            legacy_b: str = ""
+
+        def handle(self) -> TrimmedWide.Place.Placed:
+            return TrimmedWide.Place.Placed(note=self.note)
+
+
 class TrimmedLambda(Namespace):
     class Place(Command):
         note: str = ""
@@ -348,18 +361,42 @@ def _key(label: str) -> MigrationKey:
     return MigrationKey.parse(label)
 
 
-def _deleted_transform(tmp_path: Path) -> tuple[MigrationTarget, Path]:
+def _deleted_transform(
+    tmp_path: Path, shipped: type[Namespace] = Trimmed
+) -> tuple[MigrationTarget, Path]:
     """Release N held a transform on ``Shop.Place.Placed`` that dropped
-    ``total``. The code of release N+1 deleted it. Returns the N+1 target,
-    whose committed baseline is still N's, and N's baseline."""
-    shipped = _target(tmp_path, Trimmed, name="previous.json")
-    update_baseline(shipped)
-    raw = json.loads(shipped.baseline.read_text().replace("Trimmed", "Shop"))
-    raw["events"][1]["fields"] = ["note", "total"]
-    shipped.baseline.write_text(json.dumps(raw))
+    ``total``. *shipped* is the namespace of release N. The code of release
+    N+1 deleted the transform. Returns the N+1 target, whose committed
+    baseline is still N's, and N's baseline."""
+    release = _target(tmp_path, shipped, name="previous.json")
+    update_baseline(release)
+    raw = json.loads(release.baseline.read_text().replace(shipped.__name__, "Shop"))
+    placed = raw["events"][1]
+    placed["fields"] = sorted({*placed["fields"], "total"})
+    release.baseline.write_text(json.dumps(raw))
     target = _target(tmp_path, Shop)
-    target.baseline.write_text(shipped.baseline.read_text())
-    return target, shipped.baseline
+    target.baseline.write_text(release.baseline.read_text())
+    return target, release.baseline
+
+
+def _moved_transform(tmp_path: Path) -> MigrationTarget:
+    """The committed baseline records the transform of ``_drop_total`` on
+    ``Old.Placed``. The code renamed ``Old.Placed`` to
+    ``Trimmed.Place.Placed``, and the transform followed the class."""
+    target = _target(
+        tmp_path,
+        Trimmed,
+        migrations=(
+            Migration.rename(
+                old_module=_MODULE, old_qualname="Old.Placed", to=Trimmed.Place.Placed
+            ),
+        ),
+    )
+    update_baseline(target)
+    raw = _read(target.baseline)
+    raw["migrations"] = [{"label": f"transform {_MODULE}:Old.Placed via {_DROP_TOTAL}"}]
+    target.baseline.write_text(json.dumps(raw))
+    return target
 
 
 def describe_update_baseline():
@@ -372,13 +409,26 @@ def describe_update_baseline():
             assert _read(target.baseline) == {
                 "version": 4,
                 "events": [
-                    _entry(_MODULE, "Renamed.Place", ["note"]),
-                    _entry(_MODULE, "Renamed.Place.Placed", ["note"]),
+                    {**_entry(_MODULE, "Renamed.Place", ["note"]), "live": ["note"]},
+                    {
+                        **_entry(_MODULE, "Renamed.Place.Placed", ["note"]),
+                        "live": ["note"],
+                    },
                 ],
                 "retired": [],
                 "handlers": [{"name": "Renamed.Place"}],
                 "migrations": [{"label": f"rename {_MODULE}:Renamed.Placed"}],
             }
+
+    def when_the_serde_reads_an_event_no_handler_produces():
+        def it_records_the_event(tmp_path: Path):
+            target = _target(tmp_path, Shop, scope=(Retiring,))
+
+            update_baseline(target)
+
+            assert _fields(target.baseline)["Retiring.RetiredApprovalGate"] == [
+                "order_id"
+            ]
 
     def when_a_class_has_an_init_false_field():
         def it_records_the_init_fields_only(tmp_path: Path):
@@ -463,7 +513,7 @@ def describe_update_baseline():
             update_baseline(target)
 
             assert _read(target.baseline)["retired"] == []
-            assert placed in _read(target.baseline)["events"]
+            assert {**placed, "live": ["note"]} in _read(target.baseline)["events"]
 
     def when_the_code_is_unchanged():
         def it_rewrites_the_same_bytes(tmp_path: Path):
@@ -505,7 +555,39 @@ def describe_update_baseline():
             with pytest.raises(ValueError, match=r"Ghost\.Gone.*Remove it from"):
                 update_baseline(target)
 
-    def when_a_v4_migration_TRIMMEDis_malformed():
+    def when_a_v4_events_entry_lacks_live_fields():
+        def it_rejects_the_file(tmp_path: Path):
+            target = _target(tmp_path, Shop)
+            target.baseline.write_text(
+                json.dumps({"version": 4, "events": [_ghost(["x"])]})
+            )
+
+            with pytest.raises(ValueError, match=r"no `live`: Ghost\.Gone"):
+                update_baseline(target)
+
+    def when_an_entry_lacks_a_key():
+        def it_rejects_the_file(tmp_path: Path):
+            target = _target(tmp_path, Shop)
+            update_baseline(target)
+            raw = _read(target.baseline)
+            raw["migrations"] = [{"label": _TRIMMED, "hold": {"against": "x"}}]
+            target.baseline.write_text(json.dumps(raw))
+
+            with pytest.raises(ValueError, match="is malformed: KeyError 'reason'"):
+                update_baseline(target)
+
+    def when_a_migration_label_is_listed_twice():
+        def it_rejects_the_file(tmp_path: Path):
+            target = _target(tmp_path, Shop)
+            update_baseline(target)
+            _add(
+                target.baseline, "migrations", {"label": _TRIMMED}, {"label": _TRIMMED}
+            )
+
+            with pytest.raises(ValueError, match=r"lists the migration .* twice"):
+                update_baseline(target)
+
+    def when_a_v4_migration_label_is_malformed():
         def it_rejects_the_file(tmp_path: Path):
             target = _target(tmp_path, Shop)
             update_baseline(target)
@@ -537,6 +619,17 @@ def describe_update_baseline():
                 assert _fields(target.baseline)["Shop.Place.Placed"] == ["note"]
                 assert _read(target.baseline)["migrations"] == []
 
+            def when_the_previous_release_wrote_a_field_the_code_dropped():
+                def it_keeps_the_field(tmp_path: Path):
+                    target, previous = _deleted_transform(tmp_path, TrimmedWide)
+
+                    update_baseline(target, previous=previous)
+
+                    assert _fields(target.baseline)["Shop.Place.Placed"] == [
+                        "legacy_b",
+                        "note",
+                    ]
+
             def it_drops_the_source_of_a_deleted_rename(tmp_path: Path):
                 gone = {"label": f"rename {_MODULE}:Shop.Gone"}
                 target = _target(tmp_path, Shop)
@@ -560,15 +653,27 @@ def describe_update_baseline():
                 assert target.baseline.read_text() == first
 
         def without_previous():
-            def it_keeps_the_history(tmp_path: Path):
+            def it_refuses_naming_the_previous_option(tmp_path: Path):
                 target, _ = _deleted_transform(tmp_path)
+                committed = target.baseline.read_text()
 
-                update_baseline(target)
+                with pytest.raises(ValueError) as raised:
+                    update_baseline(target)
 
-                assert _fields(target.baseline)["Shop.Place.Placed"] == [
-                    "note",
-                    "total",
-                ]
+                assert (
+                    f"Run: {_CLI} baseline update <module:attr of the "
+                    f"MigrationTarget> --previous <baseline file of the previous "
+                    f"release>" in str(raised.value)
+                )
+                assert target.baseline.read_text() == committed
+
+            def when_the_key_only_follows_a_rename():
+                def it_writes_the_baseline(tmp_path: Path):
+                    target = _moved_transform(tmp_path)
+
+                    update_baseline(target)
+
+                    assert check(target).findings == ()
 
         def with_a_previous_baseline_that_predates_v4():
             def it_keeps_the_history(tmp_path: Path):
@@ -666,10 +771,30 @@ def describe_check():
 
                 assert finding == BaselineStale(("~ version 3 -> 4",), ())
 
+        def when_a_recorded_class_transform_follows_a_rename():
+            def it_reports_no_deleted_migration(tmp_path: Path):
+                (finding,) = check(_moved_transform(tmp_path)).findings
+
+                assert isinstance(finding, BaselineStale)
+                assert finding.deleted == ()
+
+        def when_only_the_live_fields_changed():
+            def it_reports_the_live_change(tmp_path: Path):
+                target = _baselined(_target(tmp_path, Shop))
+                raw = _read(target.baseline)
+                raw["events"][1]["live"] = []
+                target.baseline.write_text(json.dumps(raw))
+
+                (finding,) = check(target).findings
+
+                assert finding == BaselineStale(
+                    (f"~ event {_MODULE}:Shop.Place.Placed live [] -> [note]",), ()
+                )
+
         def when_a_class_dropped_out_of_the_graph():
             def it_reports_the_retirement(tmp_path: Path):
                 target = _baselined(_target(tmp_path, Shop))
-                _add(target.baseline, "events", _ghost(["x"]))
+                _add(target.baseline, "events", {**_ghost(["x"]), "live": ["x"]})
 
                 findings = check(target).findings
 
@@ -861,33 +986,31 @@ def describe_check():
         def when_a_transform_reads_a_dropped_field():
             def it_names_the_placeholder_contract(tmp_path: Path):
                 target = _baselined(_target(tmp_path, Shop, scope=(ReadsDropped,)))
-                _record_retired(
-                    target,
-                    ReadsDropped,
-                    "ReadsDropped.Persisted",
-                    ["legacy_flag", "note"],
+                raw = _read(target.baseline)
+                (persisted,) = (
+                    e
+                    for e in raw["events"]
+                    if e["qualname"] == "ReadsDropped.Persisted"
                 )
+                persisted["fields"] = ["legacy_flag", "note"]
+                target.baseline.write_text(json.dumps(raw))
 
                 (finding,) = check(target).findings
 
                 assert isinstance(finding, Unrevivable)
-                assert finding.retired
+                assert finding.identity == (_MODULE, "ReadsDropped.Persisted")
                 assert "TransformFields raised AttributeError" in finding.error
                 assert "None placeholder" in finding.error
 
         def when_a_select_returns_None_on_the_placeholder():
             def it_passes(tmp_path: Path):
                 target = _baselined(_target(tmp_path, Shop, scope=(Splitting,)))
-                _record_retired(target, Splitting, "Splitting.Completed", ["result"])
 
                 assert check(target).findings == ()
 
         def when_a_select_reads_the_placeholder():
             def it_names_the_placeholder_contract(tmp_path: Path):
                 target = _baselined(_target(tmp_path, Shop, scope=(SplittingStrict,)))
-                _record_retired(
-                    target, SplittingStrict, "SplittingStrict.Completed", ["result"]
-                )
 
                 (finding,) = check(target).findings
 
@@ -899,19 +1022,19 @@ def describe_check():
                 target = _baselined(_target(tmp_path, Shop, scope=(FanIn,)))
                 _record_retired(target, FanIn, "FanInOld.Approved", [])
 
-                assert check(target).findings == ()
+                findings = check(target).findings
+
+                assert [f for f in findings if "FanInOld" in f.subject] == []
 
         def when_a_class_fill_supplies_a_validated_field():
             def it_passes(tmp_path: Path):
                 target = _baselined(_target(tmp_path, Shop, scope=(GlobalFill,)))
-                _record_retired(target, GlobalFill, "GlobalFill.Approved", [])
 
                 assert check(target).findings == ()
 
         def when_a_fill_value_fails_validation():
             def it_reports_the_identity(tmp_path: Path):
                 target = _baselined(_target(tmp_path, Shop, scope=(BadFill,)))
-                _record_retired(target, BadFill, "BadFill.Approved", [])
 
                 (finding,) = check(target).findings
 
@@ -1106,6 +1229,16 @@ def describe_check():
                     _key(f"transform {_MODULE}:Shop.Place.Placed via {_DROP_TOTAL}"),
                 )
 
+            def when_the_code_dropped_a_field_the_previous_release_wrote():
+                def it_reports_the_field_after_the_prune_update(tmp_path: Path):
+                    target, previous = _deleted_transform(tmp_path, TrimmedWide)
+                    update_baseline(target, previous=previous)
+
+                    (finding,) = check(target, previous=previous).findings
+
+                    assert isinstance(finding, Unrevivable)
+                    assert "The baseline recorded 'legacy_b'." in finding.error
+
             def without_previous():
                 def it_asks_for_the_prune_update_only(tmp_path: Path):
                     target, _ = _deleted_transform(tmp_path)
@@ -1152,6 +1285,38 @@ def describe_check():
 
                     assert report.findings == ()
                     assert [r.key.label for r in report.held] == [_TRIMMED]
+
+            def when_the_next_release_holds_the_same_migrations():
+                def it_expires(tmp_path: Path):
+                    target = _target(tmp_path, Trimmed)
+                    previous = _previous(tmp_path, target)
+                    hold_migration(
+                        target,
+                        _TRIMMED,
+                        reason="a subgraph needs it",
+                        previous=previous,
+                    )
+                    next_release = tmp_path / "next.json"
+                    next_release.write_text(target.baseline.read_text())
+
+                    (finding,) = check(target, previous=next_release).findings
+
+                    assert isinstance(finding, SurvivedRelease)
+                    assert finding.expired is not None
+
+            def when_the_previous_file_is_formatted_differently():
+                def it_still_applies(tmp_path: Path):
+                    target = _target(tmp_path, Trimmed)
+                    previous = _previous(tmp_path, target)
+                    hold_migration(
+                        target,
+                        _TRIMMED,
+                        reason="a subgraph needs it",
+                        previous=previous,
+                    )
+                    previous.write_text(json.dumps(_read(previous)))
+
+                    assert check(target, previous=previous).findings == ()
 
             def when_it_was_made_against_an_older_release():
                 def it_expires(tmp_path: Path):
@@ -1228,7 +1393,7 @@ def describe_check():
                 )
 
                 assert text.splitlines()[1].startswith(
-                    f"  held  {label}: subgraph (made against lge-m1-"
+                    f"  held  {label}: subgraph (made against lge-b1-"
                 )
 
 
@@ -1257,31 +1422,16 @@ def describe_assert_migration_gate():
 
 def describe_hold_migration():
     def when_the_previous_release_shipped_the_migration():
-        def it_records_the_hold_against_the_previous_fingerprint(tmp_path: Path):
+        def it_records_the_hold_reason(tmp_path: Path):
             target = _baselined(_target(tmp_path, Trimmed))
             previous = tmp_path / "prev.json"
             previous.write_text(target.baseline.read_text())
 
             hold_migration(target, _TRIMMED, reason="subgraph", previous=previous)
 
-            fingerprint = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                [
-                    sys.executable,
-                    "-m",
-                    "langgraph_events.serde.migrations",
-                    "fingerprint",
-                    str(previous),
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            assert _read(target.baseline)["migrations"] == [
-                {
-                    "label": _TRIMMED,
-                    "hold": {"reason": "subgraph", "against": fingerprint},
-                }
-            ]
+            (record,) = _read(target.baseline)["migrations"]
+            assert record["label"] == _TRIMMED
+            assert record["hold"]["reason"] == "subgraph"
 
     def when_the_code_does_not_hold_the_label():
         def it_refuses(tmp_path: Path):
@@ -1362,6 +1512,21 @@ def describe_cli():
 
                 assert main(["baseline", "update", spec]) == 0
                 assert _read(target.baseline)["version"] == 4
+
+        def when_a_shipped_migration_left_the_code():
+            def it_exits_two_and_prints_the_callers_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, _ = _deleted_transform(tmp_path)
+                spec = _install(monkeypatch, target)
+
+                assert main(["baseline", "update", spec]) == 2
+                assert (
+                    f"Run: {_CLI} baseline update {spec} --previous <baseline file "
+                    f"of the previous release>" in capsys.readouterr().err
+                )
 
         def when_the_previous_file_is_missing():
             def it_exits_two(
