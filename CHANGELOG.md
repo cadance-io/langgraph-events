@@ -48,9 +48,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped migration for one more release: the hold records the digest of the previous
   baseline file, so it expires in the next release also when the migrations did not
   change. `MigrationSet` gains `fingerprint`, `shipped_in` and `deleted_since`.
+- **One deploy step rewrites the live set of a store.** `rewrite_live_set(target, expect=...,
+  apply=...)` and the CLI command `rewrite <target> --expect FP [--apply] [--passes N]`
+  compare the migrations of the running code with the fingerprint `expect` before they open
+  the store. A mismatch returns `WrongRelease` and exits 3. With `apply`, each pass rewrites
+  the root threads that the last plan did not read unchanged, then plans every root thread
+  again. So a run that writes old bytes during a pass is rewritten in the next pass. Only the
+  last plan decides the exit code: 0 clean, 1 not clean. Each subgraph checkpoint is read with
+  a plan and never written. A touched one makes the run not clean and names each migration to
+  hold. `LiveSetOutcome` holds each pass, the last plan and each `SubgraphTouched`.
+  `MigrationTarget` gains `store=` and `threads=`, and `ThreadKey` names one checkpoint
+  namespace of one thread. The library lists the threads of a `PostgresSaver` and a
+  `MemorySaver`. The docs section *Lifecycle of a read-time migration* gives each step from
+  release N to release N+1, for a client with release tags and for a continuous-deploy client.
 - **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
-  `check`, `baseline update`, `baseline hold` and `fingerprint`. Exit 0 is a pass, 1 a
-  finding, 2 a usage or target error.
+  `check`, `baseline update`, `baseline hold`, `fingerprint` and `rewrite`. Exit 0 is a
+  pass, 1 a finding or a store that is not clean, 2 a usage or target error, 3 a `rewrite`
+  under the wrong release.
 
 ### Changed
 
