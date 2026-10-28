@@ -1278,6 +1278,14 @@ class EventGraph:
         return frozenset(meta.node_name for meta in self._handler_metas)
 
     @property
+    def resumable_node_names(self) -> frozenset[str]:
+        """Every node name a paused checkpoint can resume at: each name in
+        :attr:`handler_names` and each ``@on(previously=...)`` alias."""
+        return self.handler_names | {
+            alias for meta in self._handler_metas for alias in meta.previous_names
+        }
+
+    @property
     def compiled(self) -> CompiledStateGraph:
         """The underlying LangGraph ``CompiledStateGraph``.
 

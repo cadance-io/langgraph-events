@@ -17,7 +17,9 @@ from langgraph_events.serde.migrations._baseline import (
 )
 from langgraph_events.serde.migrations._gate import (
     PROGRAM,
+    TARGET_PLACEHOLDER,
     Invocation,
+    PreviousRequiredError,
     check,
     hold_migration,
     update_baseline,
@@ -33,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"The form '<module:factory> <baseline>' was removed. Declare a "
             f"MigrationTarget(graph=..., baseline=Path({args[1]!r})) and run:\n"
-            f"{PROGRAM} check <module:attr of the MigrationTarget>",
+            f"{PROGRAM} check {TARGET_PLACEHOLDER}",
             file=sys.stderr,
         )
         return 2
@@ -87,7 +89,11 @@ def _check(options: argparse.Namespace) -> int:
 
 
 def _update(options: argparse.Namespace) -> int:
-    update_baseline(_load(options.target), previous=options.previous)
+    try:
+        update_baseline(_load(options.target), previous=options.previous)
+    except PreviousRequiredError as refusal:
+        print(f"error: {refusal.render(Invocation(options.target))}", file=sys.stderr)
+        return 2
     return 0
 
 

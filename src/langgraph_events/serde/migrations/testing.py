@@ -12,7 +12,12 @@ import uuid
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import Event, Resumed
-from langgraph_events.serde.migrations._gate import GateError, Invocation, check
+from langgraph_events.serde.migrations._gate import (
+    TARGET_PLACEHOLDER,
+    GateError,
+    Invocation,
+    check,
+)
 from langgraph_events.serde.migrations._revive import synthesize_legacy_payload
 
 if TYPE_CHECKING:
@@ -30,8 +35,6 @@ __all__ = [
     "synthesize_legacy_payload",
 ]
 
-_PYTHON_TARGET = "<module:attr of the MigrationTarget>"
-
 
 def assert_migration_gate(
     target: MigrationTarget, *, previous: Path | None = None
@@ -47,7 +50,7 @@ def assert_migration_gate(
     report = check(target, previous=previous)
     if not report.passed:
         invocation = Invocation(
-            _PYTHON_TARGET, str(previous) if previous is not None else None
+            TARGET_PLACEHOLDER, str(previous) if previous is not None else None
         )
         raise GateError(report, invocation)
 

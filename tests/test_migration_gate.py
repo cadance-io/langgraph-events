@@ -379,6 +379,26 @@ def _deleted_transform(
     return target, release.baseline
 
 
+def _moved_transform(tmp_path: Path) -> MigrationTarget:
+    """The committed baseline records the transform of ``_drop_total`` on
+    ``Old.Placed``. The code renamed ``Old.Placed`` to
+    ``Trimmed.Place.Placed``, and the transform followed the class."""
+    target = _target(
+        tmp_path,
+        Trimmed,
+        migrations=(
+            Migration.rename(
+                old_module=_MODULE, old_qualname="Old.Placed", to=Trimmed.Place.Placed
+            ),
+        ),
+    )
+    update_baseline(target)
+    raw = _read(target.baseline)
+    raw["migrations"] = [{"label": f"transform {_MODULE}:Old.Placed via {_DROP_TOTAL}"}]
+    target.baseline.write_text(json.dumps(raw))
+    return target
+
+
 def describe_update_baseline():
     def when_no_baseline_exists_yet():
         def it_writes_a_version_4_file(tmp_path: Path):
@@ -545,6 +565,28 @@ def describe_update_baseline():
             with pytest.raises(ValueError, match=r"no `live`: Ghost\.Gone"):
                 update_baseline(target)
 
+    def when_an_entry_lacks_a_key():
+        def it_rejects_the_file(tmp_path: Path):
+            target = _target(tmp_path, Shop)
+            update_baseline(target)
+            raw = _read(target.baseline)
+            raw["migrations"] = [{"label": _TRIMMED, "hold": {"against": "x"}}]
+            target.baseline.write_text(json.dumps(raw))
+
+            with pytest.raises(ValueError, match="is malformed: KeyError 'reason'"):
+                update_baseline(target)
+
+    def when_a_migration_label_is_listed_twice():
+        def it_rejects_the_file(tmp_path: Path):
+            target = _target(tmp_path, Shop)
+            update_baseline(target)
+            _add(
+                target.baseline, "migrations", {"label": _TRIMMED}, {"label": _TRIMMED}
+            )
+
+            with pytest.raises(ValueError, match=r"lists the migration .* twice"):
+                update_baseline(target)
+
     def when_a_v4_migration_label_is_malformed():
         def it_rejects_the_file(tmp_path: Path):
             target = _target(tmp_path, Shop)
@@ -611,15 +653,27 @@ def describe_update_baseline():
                 assert target.baseline.read_text() == first
 
         def without_previous():
-            def it_keeps_the_history(tmp_path: Path):
+            def it_refuses_naming_the_previous_option(tmp_path: Path):
                 target, _ = _deleted_transform(tmp_path)
+                committed = target.baseline.read_text()
 
-                update_baseline(target)
+                with pytest.raises(ValueError) as raised:
+                    update_baseline(target)
 
-                assert _fields(target.baseline)["Shop.Place.Placed"] == [
-                    "note",
-                    "total",
-                ]
+                assert (
+                    f"Run: {_CLI} baseline update <module:attr of the "
+                    f"MigrationTarget> --previous <baseline file of the previous "
+                    f"release>" in str(raised.value)
+                )
+                assert target.baseline.read_text() == committed
+
+            def when_the_key_only_follows_a_rename():
+                def it_writes_the_baseline(tmp_path: Path):
+                    target = _moved_transform(tmp_path)
+
+                    update_baseline(target)
+
+                    assert check(target).findings == ()
 
         def with_a_previous_baseline_that_predates_v4():
             def it_keeps_the_history(tmp_path: Path):
@@ -716,6 +770,13 @@ def describe_check():
                 (finding,) = check(target).findings
 
                 assert finding == BaselineStale(("~ version 3 -> 4",), ())
+
+        def when_a_recorded_class_transform_follows_a_rename():
+            def it_reports_no_deleted_migration(tmp_path: Path):
+                (finding,) = check(_moved_transform(tmp_path)).findings
+
+                assert isinstance(finding, BaselineStale)
+                assert finding.deleted == ()
 
         def when_only_the_live_fields_changed():
             def it_reports_the_live_change(tmp_path: Path):
@@ -1225,6 +1286,38 @@ def describe_check():
                     assert report.findings == ()
                     assert [r.key.label for r in report.held] == [_TRIMMED]
 
+            def when_the_next_release_holds_the_same_migrations():
+                def it_expires(tmp_path: Path):
+                    target = _target(tmp_path, Trimmed)
+                    previous = _previous(tmp_path, target)
+                    hold_migration(
+                        target,
+                        _TRIMMED,
+                        reason="a subgraph needs it",
+                        previous=previous,
+                    )
+                    next_release = tmp_path / "next.json"
+                    next_release.write_text(target.baseline.read_text())
+
+                    (finding,) = check(target, previous=next_release).findings
+
+                    assert isinstance(finding, SurvivedRelease)
+                    assert finding.expired is not None
+
+            def when_the_previous_file_is_formatted_differently():
+                def it_still_applies(tmp_path: Path):
+                    target = _target(tmp_path, Trimmed)
+                    previous = _previous(tmp_path, target)
+                    hold_migration(
+                        target,
+                        _TRIMMED,
+                        reason="a subgraph needs it",
+                        previous=previous,
+                    )
+                    previous.write_text(json.dumps(_read(previous)))
+
+                    assert check(target, previous=previous).findings == ()
+
             def when_it_was_made_against_an_older_release():
                 def it_expires(tmp_path: Path):
                     target = _target(tmp_path, Trimmed)
@@ -1300,7 +1393,7 @@ def describe_check():
                 )
 
                 assert text.splitlines()[1].startswith(
-                    f"  held  {label}: subgraph (made against lge-m1-"
+                    f"  held  {label}: subgraph (made against lge-b1-"
                 )
 
 
@@ -1329,31 +1422,16 @@ def describe_assert_migration_gate():
 
 def describe_hold_migration():
     def when_the_previous_release_shipped_the_migration():
-        def it_records_the_hold_against_the_previous_fingerprint(tmp_path: Path):
+        def it_records_the_hold_reason(tmp_path: Path):
             target = _baselined(_target(tmp_path, Trimmed))
             previous = tmp_path / "prev.json"
             previous.write_text(target.baseline.read_text())
 
             hold_migration(target, _TRIMMED, reason="subgraph", previous=previous)
 
-            fingerprint = subprocess.run(  # noqa: S603 - fixed argv, no shell
-                [
-                    sys.executable,
-                    "-m",
-                    "langgraph_events.serde.migrations",
-                    "fingerprint",
-                    str(previous),
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-            ).stdout.strip()
-            assert _read(target.baseline)["migrations"] == [
-                {
-                    "label": _TRIMMED,
-                    "hold": {"reason": "subgraph", "against": fingerprint},
-                }
-            ]
+            (record,) = _read(target.baseline)["migrations"]
+            assert record["label"] == _TRIMMED
+            assert record["hold"]["reason"] == "subgraph"
 
     def when_the_code_does_not_hold_the_label():
         def it_refuses(tmp_path: Path):
@@ -1434,6 +1512,21 @@ def describe_cli():
 
                 assert main(["baseline", "update", spec]) == 0
                 assert _read(target.baseline)["version"] == 4
+
+        def when_a_shipped_migration_left_the_code():
+            def it_exits_two_and_prints_the_callers_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, _ = _deleted_transform(tmp_path)
+                spec = _install(monkeypatch, target)
+
+                assert main(["baseline", "update", spec]) == 2
+                assert (
+                    f"Run: {_CLI} baseline update {spec} --previous <baseline file "
+                    f"of the previous release>" in capsys.readouterr().err
+                )
 
         def when_the_previous_file_is_missing():
             def it_exits_two(

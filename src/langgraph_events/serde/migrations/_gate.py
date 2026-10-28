@@ -15,10 +15,11 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     Hold,
+    Identity,
     MigrationRecord,
     MigrationsUnrecorded,
 )
-from langgraph_events.serde.migrations._core import MigrationKey, migration_fingerprint
+from langgraph_events.serde.migrations._core import MigrationKey
 from langgraph_events.serde.migrations._revive import revival_failure
 
 if TYPE_CHECKING:
@@ -26,7 +27,6 @@ if TYPE_CHECKING:
 
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
 
-Identity = tuple[str, str]
 Rule = Literal["baseline", "names", "coverage", "revive", "handlers", "release"]
 _RULE_ORDER: tuple[Rule, ...] = typing.get_args(Rule)
 ReleaseNotRun = Literal[
@@ -34,6 +34,7 @@ ReleaseNotRun = Literal[
     "the previous baseline records no migrations",
 ]
 PROGRAM = "python -m langgraph_events.serde.migrations"
+TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,26 @@ class Invocation:
         if prune:
             return f"{command} --previous <baseline file of the previous release>"
         return command
+
+
+class PreviousRequiredError(ValueError):
+    """Migrations left the code, and the update has no previous baseline.
+
+    Only the previous release's baseline says whether a release shipped
+    them, and so whether the history they covered can go.
+    """
+
+    def __init__(self, deleted: tuple[MigrationKey, ...]) -> None:
+        self.deleted = deleted
+        super().__init__(self.render(Invocation(TARGET_PLACEHOLDER)))
+
+    def render(self, invocation: Invocation) -> str:
+        labels = ", ".join(key.label for key in self.deleted)
+        return (
+            f"These migrations left the code: {labels}. Only the baseline of "
+            f"the previous release says whether a release shipped them. "
+            f"Run: {invocation.baseline_update(prune=True)}"
+        )
 
 
 def _identity_label(identity: Identity, *, retired: bool) -> str:
@@ -300,17 +321,19 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
         AnonymousCallable(k) for k in sorted(code.migrations.keys) if k.anonymous
     )
     findings.extend(_coverage_and_revival(code, judged))
-    findings.extend(HandlerMissing(name) for name in _missing_handlers(code, committed))
-    rules: set[Rule] = {"baseline", "names", "coverage", "revive", "handlers"}
+    findings.extend(
+        HandlerMissing(name)
+        for name in sorted(committed.handlers - code.graph.resumable_node_names)
+    )
+    rules = set(_RULE_ORDER) - {"release"}
     not_run: ReleaseNotRun | None = None
-    previous_keys = prev.recorded_keys if prev is not None else None
-    if previous_keys is None:
+    if prev is None:
         not_run = "no previous baseline was given"
-    elif isinstance(previous_keys, MigrationsUnrecorded):
+    elif isinstance(prev.code, MigrationsUnrecorded):
         not_run = "the previous baseline records no migrations"
     else:
         rules.add("release")
-        findings.extend(_survivors(code, want, previous_keys))
+        findings.extend(_survivors(code, want, prev.code.keys, prev.digest))
     return GateReport(
         findings=tuple(findings),
         rules_run=frozenset(rules),
@@ -324,12 +347,19 @@ def update_baseline(target: MigrationTarget, *, previous: Path | None = None) ->
 
     With *previous*, the baseline of the previous release, the update drops
     the history of each migration that release shipped and the code no
-    longer holds. Without it, the update drops no history.
+    longer holds.
+
+    Raises:
+        PreviousRequiredError: when *previous* is not given and a migration
+            that the committed baseline records left the code.
     """
     code = target.snapshot()
-    Baseline.read(target.baseline).updated(code, _read_previous(previous)).write(
-        target.baseline
-    )
+    committed = Baseline.read(target.baseline)
+    if previous is None:
+        deleted = _deleted(committed, code)
+        if deleted:
+            raise PreviousRequiredError(deleted)
+    committed.updated(code, _read_previous(previous)).write(target.baseline)
 
 
 def hold_migration(
@@ -337,8 +367,8 @@ def hold_migration(
 ) -> None:
     """Keep the shipped migration *label* for one more release.
 
-    The hold records the fingerprint of *previous*. A check against
-    another previous baseline ignores it.
+    The hold records the digest of *previous*. A check against another
+    previous baseline ignores it.
 
     Raises:
         ValueError: when *label* is not a migration the code holds and
@@ -346,7 +376,8 @@ def hold_migration(
     """
     key = MigrationKey.parse(label)
     code = target.snapshot()
-    previous_keys = _read_existing(previous).recorded_keys
+    previous_baseline = _read_existing(previous)
+    previous_keys = previous_baseline.recorded_keys
     if isinstance(previous_keys, MigrationsUnrecorded):
         raise ValueError(
             f"The previous baseline at {previous} is version "
@@ -362,7 +393,7 @@ def hold_migration(
             f"The previous release did not ship {label!r}, so the release rule "
             f"does not ask to delete it. There is nothing to hold."
         )
-    hold = Hold(reason, migration_fingerprint(previous_keys))
+    hold = Hold(reason, previous_baseline.digest)
     Baseline.read(target.baseline).held(key, hold).write(target.baseline)
 
 
@@ -380,7 +411,7 @@ def _deleted(committed: Baseline, code: Snapshot) -> tuple[MigrationKey, ...]:
     keys = committed.recorded_keys
     if isinstance(keys, MigrationsUnrecorded):
         return ()
-    return tuple(sorted(keys - code.migrations.keys))
+    return tuple(sorted(code.migrations.deleted_since(keys)))
 
 
 def _coverage_and_revival(
@@ -413,27 +444,20 @@ def _coverage_and_revival(
     return findings
 
 
-def _missing_handlers(code: Snapshot, committed: Baseline) -> list[str]:
-    metas = code.graph._handler_metas
-    reachable = {meta.node_name for meta in metas}
-    reachable |= {alias for meta in metas for alias in meta.previous_names}
-    return sorted(committed.handlers - reachable)
-
-
 def _survivors(
-    code: Snapshot, want: Baseline, previous: frozenset[MigrationKey]
+    code: Snapshot, want: Baseline, shipped: frozenset[MigrationKey], digest: str
 ) -> list[SurvivedRelease]:
-    """Shipped keys still in the code, except an anonymous key or a held one.
+    """Shipped keys still in the code, except an anonymous key or a key held
+    against the previous baseline of *digest*.
 
     An anonymous key has its own finding: a replacement callable reads as
     the same key, so it must never count as a survivor.
     """
-    fingerprint = migration_fingerprint(previous)
     holds = {record.key: record.hold for record in want.records}
     survivors = []
-    for key in sorted(code.migrations.shipped_in(previous)):
+    for key in sorted(code.migrations.shipped_in(shipped)):
         hold = holds.get(key)
-        if key.anonymous or (hold is not None and hold.against == fingerprint):
+        if key.anonymous or (hold is not None and hold.against == digest):
             continue
         survivors.append(SurvivedRelease(key, expired=hold))
     return survivors

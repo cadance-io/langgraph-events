@@ -7,6 +7,7 @@ Version 4. A read accepts versions 1 to 4. A write always gives version 4.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -37,9 +38,10 @@ _SUPPORTED_BASELINE_VERSIONS = (1, 2, 3, 4)
 class Hold:
     """Why a shipped migration stays one more release.
 
-    ``against`` is the fingerprint of the previous baseline the hold was
-    made against. A check against another previous baseline ignores the
-    hold, so a hold lasts one release.
+    ``against`` is the :attr:`Baseline.digest` of the previous baseline
+    the hold was made against. The next release's baseline holds this hold,
+    so its digest differs, and a check against it ignores the hold. So a
+    hold lasts one release, also when the migrations did not change.
     """
 
     reason: str
@@ -128,6 +130,17 @@ class Baseline:
                 f"Unsupported baseline version {version!r} at {path}. This "
                 f"library reads baseline versions {_SUPPORTED_BASELINE_VERSIONS}."
             )
+        try:
+            return cls._parse(raw, version, path)
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                f"Baseline at {path} is malformed: {type(error).__name__} "
+                f"{error}. Restore the file from version control, then run "
+                f"`baseline update`."
+            ) from error
+
+    @classmethod
+    def _parse(cls, raw: dict[str, Any], version: int, path: Path) -> Baseline:
         if version >= 3:
             _check_v3_shape(raw, path)
         if version >= 4:
@@ -150,7 +163,21 @@ class Baseline:
         )
 
     def write(self, path: Path) -> None:
-        """Write this baseline to *path* as version 4.
+        """Write this baseline to *path* as version 4."""
+        path.write_text(json.dumps(self._payload(), indent=2, sort_keys=True) + "\n")
+
+    @property
+    def digest(self) -> str:
+        """``lge-b1-`` and 16 hex digits of the SHA-256 of the content.
+
+        Two files with the same content give the same digest, whatever
+        their whitespace or key order.
+        """
+        content = json.dumps(self._payload(), sort_keys=True, separators=(",", ":"))
+        return "lge-b1-" + hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    def _payload(self) -> dict[str, Any]:
+        """The version 4 JSON content.
 
         Raises:
             TypeError: when the baseline records no code. Only a read of a
@@ -159,7 +186,7 @@ class Baseline:
         if isinstance(self.code, MigrationsUnrecorded):
             raise TypeError("A baseline of version 1 to 3 is never written.")
         live = self.code.live
-        payload = {
+        return {
             "version": BASELINE_VERSION,
             "events": [
                 {**_entry(i, f), "live": sorted(live[i])}
@@ -172,7 +199,6 @@ class Baseline:
                 for record in sorted(self.records, key=lambda r: r.key)
             ],
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
     @property
     def recorded_keys(self) -> frozenset[MigrationKey] | MigrationsUnrecorded:
@@ -323,9 +349,17 @@ def _read_migrations(
     entries: list[dict[str, Any]], path: Path
 ) -> tuple[MigrationRecord, ...]:
     records = []
+    labels: set[str] = set()
     for entry in entries:
+        label = entry["label"]
+        if label in labels:
+            raise ValueError(
+                f"Baseline at {path} lists the migration {label!r} twice. "
+                f"Delete one entry, then run `baseline update`."
+            )
+        labels.add(label)
         try:
-            key = MigrationKey.parse(entry["label"])
+            key = MigrationKey.parse(label)
         except ValueError as error:
             raise ValueError(f"Baseline at {path}: {error}") from error
         hold = entry.get("hold")
