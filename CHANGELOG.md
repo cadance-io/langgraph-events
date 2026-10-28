@@ -30,17 +30,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises `GateError`, an `AssertionError`, on a finding. The report states which
   rules ran, and why the release rule did not run.
 - **The baseline records each client migration.** The baseline file is version 4. Its
-  `migrations` list holds the label of every client migration and any hold. A file of
-  version 1 to 3 still loads, and the release rule does not run against it.
-  `update_baseline(target, previous=None)` writes the file the code needs.
+  `migrations` list holds the label of every client migration and any hold. Each `events`
+  entry also records `live`, the init fields of the live class. The baseline reads its
+  classes from the serde, so a class that no handler produces, for example a tombstone,
+  is recorded too. A file of version 1 to 3 still loads, and the release rule does not
+  run against it. `update_baseline(target, previous=None)` writes the file the code
+  needs. `NamespaceAwareSerde.live_fields()` returns the init fields of each live event
+  class. `EventGraph.resumable_node_names` returns each handler node name and each
+  `@on(previously=...)` alias.
 - **A read-time migration ships in one release and leaves the code in the next.** With
   `previous`, the baseline of the previous release, `check` reports each shipped
   migration that the code still holds. A previous key follows a current rename. After
-  the deletion, `update_baseline(..., previous=...)` drops the history the migration
-  covered, so the gate never asks to add the migration back. `hold_migration` keeps a
-  shipped migration for one more release: the hold records the fingerprint of the
-  previous baseline. `MigrationSet` gains `fingerprint`, `shipped_in` and
-  `deleted_since`.
+  the deletion, `update_baseline(..., previous=...)` resets the fields of the class to the
+  `live` fields of the previous baseline, so the gate never asks to add the migration
+  back. Without `previous`, the update refuses when a recorded migration left the code:
+  only the previous baseline says whether a release shipped it. `hold_migration` keeps a
+  shipped migration for one more release: the hold records the digest of the previous
+  baseline file, so it expires in the next release also when the migrations did not
+  change. `MigrationSet` gains `fingerprint`, `shipped_in` and `deleted_since`.
 - **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
   `check`, `baseline update`, `baseline hold` and `fingerprint`. Exit 0 is a pass, 1 a
   finding, 2 a usage or target error.

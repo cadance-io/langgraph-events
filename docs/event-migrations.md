@@ -138,7 +138,8 @@ Read-path order: the origin stage (transform, then origin fills), the rename, th
 
 Semantics:
 
-- **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. `transform=lambda kw: {}` discards every stored field.
+- **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. A transform that returns `{}` discards every stored field.
+- **A module-level name.** Give the transform a function name at module level. The [migration gate](#the-rules) reports a lambda or a callable object as `AnonymousCallable`, because a replacement callable would read as the same migration.
 - **Idempotent.** A class-stage transform sees current payloads for ever. Use `kw.pop("x", None)`. Do not use `del kw["x"]` or `kw["x"]`. A transform must accept a payload from every era.
 - **One transform per identity and stage.** Compose the steps in one callable. A second decorator is rejected at decoration. A second hand-authored op is rejected at serde construction.
 - **The target must resolve**, live or as a rename source, the same rule as `AddField`.
@@ -532,10 +533,11 @@ python -m langgraph_events.serde.migrations check myapp.lge_target:target \
     --previous "$RUNNER_TEMP/prev.json"
 ```
 
-- Without `--previous`, the rule does not run. The report says so. A test usually runs without it.
+- Without `--previous`, the rule does not run. The report says so. A test usually runs without it, so `assert_migration_gate` judges the same cases as `check` except this rule. Run `check --previous` in CI.
 - A previous file of version 1 to 3 records no migrations. The rule does not run against it, and the report says so.
 - A previous key follows a rename of the current code onto the live class. A key whose identity was a rename source in the previous file does not move.
-- When you delete a shipped migration, run `baseline update --previous <file>`. The update drops the history that the migration covered. Without `--previous`, the update drops no history.
+- When a migration leaves the code, run `baseline update --previous <file>`. If the previous release shipped the migration, the update drops the history that it covered. The fields of its class reset to the `live` fields of the previous file: the deploy of that release wrote every record in that shape.
+- Without `--previous`, `baseline update` refuses with exit 2 when a recorded migration left the code. Only the previous file says whether a release shipped it. The error names the command with `--previous`.
 
 If the store cannot be made clean in time, keep the migration one more release:
 
@@ -545,7 +547,7 @@ python -m langgraph_events.serde.migrations baseline hold myapp.lge_target:targe
     --reason "a subgraph checkpoint still needs it" --previous "$RUNNER_TEMP/prev.json"
 ```
 
-The hold records the fingerprint of the previous file. A check against another previous file ignores it, so a hold lasts one release. Every check lists every hold.
+The hold records the digest of the whole previous file. The baseline of the next release holds the hold record, so its digest is different. A check against that file ignores the hold. So a hold lasts one release, also when the migrations did not change. To keep the migration one more release, hold it again. Every check lists every hold.
 
 `python -m langgraph_events.serde.migrations fingerprint <baseline file>` prints the fingerprint of the migrations a file records. It reads the JSON only.
 
@@ -579,7 +581,8 @@ Commit the baseline **alongside** the change that needs it, never after. Run `ba
 {
   "version": 4,
   "events": [
-    {"module": "myapp.orders", "qualname": "Order.Place.Placed", "fields": ["order_id", "tracking"]}
+    {"module": "myapp.orders", "qualname": "Order.Place.Placed",
+     "fields": ["legacy_total", "order_id", "tracking"], "live": ["order_id", "tracking"]}
   ],
   "retired": [
     {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}
@@ -588,13 +591,14 @@ Commit the baseline **alongside** the change that needs it, never after. Run `ba
   "migrations": [
     {"label": "rename myapp.orders:Order.ApprovalRequired"},
     {"label": "fill myapp.orders:Order.Place.Placed[tracking]",
-     "hold": {"reason": "a subgraph checkpoint needs it", "against": "lge-m1-3f0c2a9e41b7d655"}}
+     "hold": {"reason": "a subgraph checkpoint needs it", "against": "lge-b1-3f0c2a9e41b7d655"}}
   ]
 }
 ```
 
-- **`events`** lists every identity the graph reaches. Each entry records the init fields of its class, the same set the serde writes.
+- **`events`** lists every live event class that the serde of the graph speaks for: the classes of its namespaces and its loose events. A class that no handler produces, for example a tombstone, is in it too.
 - **`fields` is cumulative.** A field that was ever recorded can sit in a checkpoint, so the `revive` rule keeps sending it. An update keeps it. Only an update with `--previous` after a shipped migration left the code resets the fields of the identity that the migration covered.
+- **`live`** lists the init fields of the live class when the file was written, the same set the serde writes. An update with `--previous` reads `live` from the previous file to reset the fields of a class.
 - **`retired`** lists every identity an update dropped from `events`, with the fields last recorded for it. The entry has no `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone.
 - **`handlers`** lists the handler node names. An update rebuilds it.
 - **`migrations`** lists the label of every client migration the code holds, and any hold. lge's own framework migrations are not in it.
@@ -899,7 +903,7 @@ assert graph.unrevivable_threads(thread_ids=thread_ids) == {}
 
 ### What the baseline write records
 
-Deleting the class drops an identity from the graph's topology. `baseline update` moves it to the baseline's `retired` list, with the fields last recorded for it. The [migration gate](#the-migration-gate) keeps checking a retired identity. Its `coverage` and `revive` rules fail on it until a migration covers it. That is the gate doing its job. Once `unrevivable_threads()` reports nothing and every paused thread is settled, delete the `retired` entry by hand. From then on, the gate does not check the retired identity.
+Deleting the class drops an identity from the graph's topology. `baseline update` moves it to the baseline's `retired` list, with the fields last recorded for it. The [migration gate](#the-migration-gate) keeps checking a retired identity. Its `coverage` and `revive` rules fail on it until a migration covers it. That is the gate doing its job. Once `unrevivable_threads()` reports nothing and every paused thread is settled, delete the `retired` entry by hand. From then on, the gate does not check the retired identity. No command removes the entry of a deleted class: the gate reads no store, so it cannot know that the store holds no record of the class. `baseline update --previous` removes a retired entry only for the source of a deleted shipped rename.
 
 !!! warning "After the hand edit, the gate cannot see a remaining breakage"
     The gate reads the baseline. Once the `retired` entry is gone, every rule passes whether or not a settled thread out there still cannot revive. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 7 above, and run it against the real store before the hand edit.
@@ -911,11 +915,17 @@ Deleting the class drops an identity from the graph's topology. `baseline update
 
 If the class was deleted before every paused thread was settled, `threads_paused_on()` and `abandon()` already recover the **paused** case on their own — see the two-deletions note above. A thread that had already **answered** the interrupt (the #159 case) needs the fix below too.
 
-Map the dead identity onto a tombstone class, in a follow-up release. The tombstone does not need the retired fields: `transform=lambda kw: {}` discards every stored field before the rename, so an empty tombstone revives whatever `Order.ApprovalRequired` carried. **Keep the tombstone an `Interrupted` when the retired class was one.** `threads_paused_on()` and `abandon()` rely on it. **Nest the tombstone inside the same `Namespace`.** A domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
+Map the dead identity onto a tombstone class, in a follow-up release. The tombstone does not need the retired fields: `transform=discard_fields` returns `{}`, so it discards every stored field before the rename, and an empty tombstone revives whatever `Order.ApprovalRequired` carried. Give the transform a module-level name. The gate reports a lambda. **Keep the tombstone an `Interrupted` when the retired class was one.** `threads_paused_on()` and `abandon()` rely on it. **Nest the tombstone inside the same `Namespace`.** A domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
 
 ```python
+from typing import Any
+
 from langgraph_events import Command, DomainEvent, Interrupted, Namespace, on
 from langgraph_events.serde import migrate_from
+
+
+def discard_fields(kw: dict[str, Any]) -> dict[str, Any]:
+    return {}
 
 
 class Order(Namespace):
@@ -926,7 +936,7 @@ class Order(Namespace):
         def handle(self) -> "Order.Approve.Approved":
             return Order.Approve.Approved()
 
-    @migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+    @migrate_from("Order.ApprovalRequired", transform=discard_fields)
     class RetiredApprovalGate(Interrupted):
         pass
 
@@ -945,13 +955,13 @@ Run this against a store that still holds a thread paused on `Order.ApprovalRequ
 
 `in_module=` defaults to the decorated class's `__module__`. Pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does.
 
-**Deleting the tombstone.** The tombstone is a live class, so `drop=` reaches it. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify `graph.unrevivable_threads() == {}`. Then delete the tombstone, its `@migrate_from` and the baseline's `retired` entry in the next release.
+**Deleting the tombstone.** The `@migrate_from` of the tombstone ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. The tombstone is a live class, so `drop=` reaches it. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify `graph.unrevivable_threads() == {}`. In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired`. The tombstone class moves to `retired`, like any deleted class. Delete that entry by hand, as [What the baseline write records](#what-the-baseline-write-records) says.
 
 **Onto a sibling instead of a tombstone.** When a live class already stands for the retired one, and every one of its fields has a default, put the same decorator on the sibling. The stored fields are discarded, and the sibling constructs from its defaults. Do not map a stored field onto a sibling field that means something else, for example a message id onto an order id:
 
 ```python
 class Order(Namespace):
-    @migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+    @migrate_from("Order.ApprovalRequired", transform=discard_fields)
     class ApprovalDismissed(DomainEvent):
         id: str = field(default_factory=lambda: uuid4().hex)
 ```
@@ -969,7 +979,7 @@ from langgraph_events import EventGraph, Interrupted
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
 
 
-@migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+@migrate_from("Order.ApprovalRequired", transform=discard_fields)
 class RetiredApprovalGate(Interrupted):
     pass
 
