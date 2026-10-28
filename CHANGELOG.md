@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Each client read-time migration has a natural key.**
+  `NamespaceAwareSerde.client_migrations()` returns a `MigrationSet`. Its `keys` hold one
+  `MigrationKey` per operation that the client declared, from the decorators and from
+  `migrations=`. lge's own framework migrations are not in it. One
+  `@migrate_from(..., backfill={a, b})` gives one `rename` key and two `fill` keys. A
+  `transform` or `split` key names its callable in `via`. `MigrationKey.label` has one form,
+  `<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]`, and
+  `MigrationKey.parse(label)` reads it back. A key refuses a module, qualname, field or `via`
+  that is not a dotted Python name, so every label reads back to its key. `MigrationKey.anonymous` is true when `via` names a lambda or a
+  callable object (`module:Class()`), because a replacement of such a callable reads as the
+  same key.
+
 ## [0.41.0] - 2026-10-25
 
 ### Added

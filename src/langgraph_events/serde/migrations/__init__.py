@@ -20,6 +20,8 @@ cross-module renames or composite operations flow through the serde's
 from langgraph_events.serde.migrations._core import (
     AddField,
     Migration,
+    MigrationKey,
+    MigrationSet,
     RenameEvent,
     SplitEvent,
     TransformFields,
@@ -49,6 +51,8 @@ __all__ = [
     "HandlerCoverageError",
     "Migration",
     "MigrationCoverageError",
+    "MigrationKey",
+    "MigrationSet",
     "RenameEvent",
     "SplitEvent",
     "TransformFields",

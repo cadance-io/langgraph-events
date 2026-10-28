@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import re
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import ormsgpack
@@ -75,6 +76,7 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # partially-initialized ``_jsonplus`` without a circular import.
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde.migrations._core import (  # noqa: E402
+    MigrationSet,
     SplitError,
     TransformError,
     _CallableError,
@@ -515,6 +517,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         client = _flatten_and_validate((*decorated, *migrations), scope)
         if legacy_write:
             client.refuse_legacy_write()
+        self._client_tables = client
         self._tables = client.with_framework(
             _flatten_and_validate(FRAMEWORK_MIGRATIONS, scope)
         )
@@ -623,6 +626,18 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         rename), it does not make an identity revivable by itself.
         """
         return self._live_identities | frozenset(self._tables.rename_table)
+
+    def client_migrations(self) -> MigrationSet:
+        """The read-time migrations the client declared on this serde.
+
+        It holds the decorated migrations and the ``migrations=`` list.
+        lge's own framework migrations are not in it: lge deletes them on
+        its own release schedule.
+        """
+        return MigrationSet(
+            self._client_tables.keys(),
+            MappingProxyType(self._client_tables.rename_table),
+        )
 
     def dumps_typed(self, obj: object) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):

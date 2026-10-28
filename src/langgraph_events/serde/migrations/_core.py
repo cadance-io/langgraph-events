@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import importlib
 import itertools
+import re
 import sys
 import typing
 from dataclasses import dataclass, fields, is_dataclass
@@ -364,6 +365,141 @@ def _target_identity(
     return module, qualname
 
 
+MigrationKind = typing.Literal["rename", "fill", "transform", "split"]
+_KINDS: tuple[MigrationKind, ...] = typing.get_args(MigrationKind)
+_IDENT = r"[^\W\d]\w*"
+_QUALPART = rf"(?:{_IDENT}|<locals>|<lambda>)"
+_MODULE = rf"{_IDENT}(?:\.{_IDENT})*"
+_QUALNAME = rf"{_QUALPART}(?:\.{_QUALPART})*"
+_VIA = rf"{_MODULE}:{_QUALNAME}(?:\(\))?"
+# One grammar for construction and parse: no part can hold a separator.
+_PARTS = {
+    "module": re.compile(_MODULE),
+    "qualname": re.compile(_QUALNAME),
+    "field": re.compile(_IDENT),
+    "via": re.compile(_VIA),
+}
+_LABEL = re.compile(
+    rf"(?P<kind>\w+) (?P<module>{_MODULE}):(?P<qualname>{_QUALNAME})"
+    rf"(?:\[(?P<field>{_IDENT})\])?(?: via (?P<via>{_VIA}))?"
+)
+
+
+@dataclass(frozen=True, order=True)
+class MigrationKey:
+    """The natural key of one client read-time operation.
+
+    The serde derives it from its tables. An author never writes it. A
+    ``rename`` key names the stored source identity. A ``fill`` key names
+    the identity it fills and the ``field``. A ``transform`` or ``split``
+    key names the identity and ``via``, the ``module:qualname`` of the
+    transform or select callable. The stage is not stored: a key is in the
+    origin stage when its identity is a rename source of the same set.
+    """
+
+    kind: MigrationKind
+    module: str
+    qualname: str
+    field: str | None = None
+    via: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in _KINDS:
+            raise ValueError(
+                f"MigrationKey kind {self.kind!r} is not one of {', '.join(_KINDS)}."
+            )
+        if (self.field is not None) != (self.kind == "fill"):
+            raise ValueError(
+                f"MigrationKey {self.kind} {self.module}:{self.qualname}: a field "
+                f"must be set for a fill and only for a fill."
+            )
+        if (self.via is not None) != (self.kind in ("transform", "split")):
+            raise ValueError(
+                f"MigrationKey {self.kind} {self.module}:{self.qualname}: `via` "
+                f"must be set for a transform or a split and only for those."
+            )
+        for name, pattern in _PARTS.items():
+            value = getattr(self, name)
+            if value is not None and not pattern.fullmatch(value):
+                raise ValueError(
+                    f"MigrationKey {self.kind} {self.module}:{self.qualname}: the "
+                    f"{name} {value!r} is not a dotted Python name, so its label "
+                    f"could not be read back."
+                )
+
+    @property
+    def anonymous(self) -> bool:
+        """True when ``via`` names no stable callable.
+
+        A lambda or a callable object has no name of its own, so a
+        replacement reads as the same key. Name the callable at module level
+        to give it a stable key.
+        """
+        return self.via is not None and (
+            "<lambda>" in self.via or self.via.endswith("()")
+        )
+
+    @property
+    def label(self) -> str:
+        """``<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]``."""
+        label = f"{self.kind} {self.module}:{self.qualname}"
+        if self.field is not None:
+            label += f"[{self.field}]"
+        if self.via is not None:
+            label += f" via {self.via}"
+        return label
+
+    @classmethod
+    def parse(cls, label: str) -> MigrationKey:
+        """The key whose :attr:`label` is *label*.
+
+        Raises:
+            ValueError: when *label* is not a migration label.
+        """
+        match = _LABEL.fullmatch(label)
+        if match is None or match["kind"] not in _KINDS:
+            raise ValueError(_malformed_label(label))
+        try:
+            return cls(
+                typing.cast("MigrationKind", match["kind"]),
+                match["module"],
+                match["qualname"],
+                field=match["field"],
+                via=match["via"],
+            )
+        except ValueError as error:
+            raise ValueError(_malformed_label(label)) from error
+
+
+def _malformed_label(label: str) -> str:
+    return (
+        f"{label!r} is not a migration label. Expected "
+        f"'<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]' "
+        f"with a kind of {', '.join(_KINDS)}."
+    )
+
+
+def _callable_id(fn: Callable[..., Any]) -> str:
+    """``module:qualname`` of *fn*, or ``module:Class()`` for a callable object."""
+    if hasattr(fn, "__qualname__"):
+        return f"{fn.__module__}:{fn.__qualname__}"
+    owner = type(fn)
+    return f"{owner.__module__}:{owner.__qualname__}()"
+
+
+@dataclass(frozen=True)
+class MigrationSet:
+    """The client read-time migrations of one serde.
+
+    ``keys`` holds one :class:`MigrationKey` per operation. ``renames``
+    maps each rename source to its live terminus. lge's own framework
+    migrations are never in it.
+    """
+
+    keys: frozenset[MigrationKey]
+    renames: Mapping[tuple[str, str], tuple[str, str]]
+
+
 @dataclass(frozen=True)
 class MigrationTables:
     """The per-purpose lookup tables one serde reads through.
@@ -387,6 +523,39 @@ class MigrationTables:
             ("TransformFields", self.transform_table),
             ("origin TransformFields", self.origin_transform_table),
             ("SplitEvent", self.split_table),
+        )
+
+    def keys(self) -> frozenset[MigrationKey]:
+        """One :class:`MigrationKey` per table entry, both stages."""
+        fills = itertools.chain(
+            *self.addfield_table.values(), *self.origin_addfield_table.values()
+        )
+        transforms = itertools.chain(
+            self.transform_table.values(), self.origin_transform_table.values()
+        )
+        return frozenset(
+            (
+                *(MigrationKey("rename", *source) for source in self.rename_table),
+                *(
+                    MigrationKey("fill", op.module, op.qualname, field=op.field)
+                    for op in fills
+                ),
+                *(
+                    MigrationKey(
+                        "transform",
+                        op.module,
+                        op.qualname,
+                        via=_callable_id(op.transform),
+                    )
+                    for op in transforms
+                ),
+                *(
+                    MigrationKey(
+                        "split", op.module, op.qualname, via=_callable_id(op.select)
+                    )
+                    for op in self.split_table.values()
+                ),
+            )
         )
 
     def with_framework(self, framework: MigrationTables) -> MigrationTables:
