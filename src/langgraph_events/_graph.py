@@ -2355,9 +2355,13 @@ class EventGraph:
             await self._asettle(config, Abandoned(reason=reason, discarded=discarded))
 
     @staticmethod
-    def _thread_config(thread_id: str) -> RunnableConfig:
-        """The config that addresses *thread_id*'s latest root checkpoint."""
-        return cast("RunnableConfig", {"configurable": {"thread_id": thread_id}})
+    def _thread_config(thread_id: str, checkpoint_ns: str = "") -> RunnableConfig:
+        """The config that addresses the latest checkpoint of *thread_id* in
+        *checkpoint_ns*. ``""`` is the root namespace."""
+        configurable = {"thread_id": thread_id}
+        if checkpoint_ns:
+            configurable["checkpoint_ns"] = checkpoint_ns
+        return cast("RunnableConfig", {"configurable": configurable})
 
     @staticmethod
     def _matches_event_type(
@@ -2657,12 +2661,16 @@ class EventGraph:
         apply: bool,
         drop: Iterable[type[Event]],
         thread_ids: Iterable[str],
+        checkpoint_ns: str = "",
     ) -> RewriteReport:
+        """*checkpoint_ns* other than the root is for a plan only. The write
+        path keeps the parent link of a root checkpoint, and no test proves
+        it for a subgraph checkpoint."""
         ids = _explicit_thread_ids(method, thread_ids)
         serde, plan = self._prepare_rewrite(method, drop)
         results: list[ThreadRewrite] = []
         for tid in ids:
-            cfg = self._thread_config(tid)
+            cfg = self._thread_config(tid, checkpoint_ns)
             with serde._record_reads() as reads:
                 tup, unresolved = self._read_checkpoint_tuple(cfg, method)
             if tup is None:

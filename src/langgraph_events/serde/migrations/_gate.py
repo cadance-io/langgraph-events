@@ -35,6 +35,7 @@ ReleaseNotRun = Literal[
 ]
 PROGRAM = "python -m langgraph_events.serde.migrations"
 TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
+_PREVIOUS_PLACEHOLDER = "<baseline file of the previous release>"
 
 
 @dataclass(frozen=True)
@@ -54,8 +55,25 @@ class Invocation:
         if self.previous is not None:
             return f"{command} --previous {shlex.quote(self.previous)}"
         if prune:
-            return f"{command} --previous <baseline file of the previous release>"
+            return f"{command} --previous {_PREVIOUS_PLACEHOLDER}"
         return command
+
+    def baseline_hold(self, label: str) -> str:
+        """The ``baseline hold`` command for the migration *label*."""
+        previous = (
+            _PREVIOUS_PLACEHOLDER
+            if self.previous is None
+            else shlex.quote(self.previous)
+        )
+        return (
+            f"{PROGRAM} baseline hold {self.target} {shlex.quote(label)} "
+            f"--reason <why> --previous {previous}"
+        )
+
+    def rewrite(self, expect: str, *, apply: bool = False) -> str:
+        """The ``rewrite`` command. *apply* asks for ``--apply``."""
+        flag = " --apply" if apply else ""
+        return f"{PROGRAM} rewrite {self.target}{flag} --expect {expect}"
 
 
 class PreviousRequiredError(ValueError):

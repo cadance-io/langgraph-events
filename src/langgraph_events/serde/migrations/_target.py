@@ -74,14 +74,9 @@ class MigrationTarget:
                     if checkpoints
                 )
             )
-        postgres = _postgres_saver_class()
-        if postgres is not None and isinstance(saver, postgres):
-            with saver._cursor() as cursor:
-                cursor.execute(_THREAD_KEYS_QUERY)
-                rows = cursor.fetchall()
-            return tuple(
-                sorted(ThreadKey(r["thread_id"], r["checkpoint_ns"]) for r in rows)
-            )
+        postgres = _postgres_thread_keys(saver)
+        if postgres is not None:
+            return postgres
         raise TargetError(
             f"The target cannot list the threads of a {type(saver).__name__}. "
             f"Set threads= on the MigrationTarget to a function that takes the "
@@ -114,14 +109,26 @@ class MigrationTarget:
         return Snapshot(graph, serde, migrations)
 
 
-def _postgres_saver_class() -> type | None:
+def _postgres_thread_keys(
+    saver: BaseCheckpointSaver[Any],
+) -> tuple[ThreadKey, ...] | None:
+    """The keys of a ``PostgresSaver``, or ``None`` for another saver.
+
+    The import is local because the Postgres saver is an optional
+    dependency.
+    """
     try:
         from langgraph.checkpoint.postgres import (  # noqa: PLC0415
             PostgresSaver,
         )
     except ImportError:
         return None
-    return PostgresSaver
+    if not isinstance(saver, PostgresSaver):
+        return None
+    with saver._cursor() as cursor:
+        cursor.execute(_THREAD_KEYS_QUERY)
+        rows = cursor.fetchall()
+    return tuple(sorted(ThreadKey(r["thread_id"], r["checkpoint_ns"]) for r in rows))
 
 
 @dataclass(frozen=True)

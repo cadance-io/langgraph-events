@@ -1,7 +1,8 @@
-"""The migration gate CLI: ``python -m langgraph_events.serde.migrations``.
+"""The migration CLI: ``python -m langgraph_events.serde.migrations``.
 
 ``<target>`` is the ``module:attr`` of a ``MigrationTarget``. Exit 0 is a
-pass or a done write, 1 is a finding, 2 is a usage or target error.
+pass or a done write, 1 is a finding or a store that is not clean, 2 is a
+usage or target error, 3 is a ``rewrite`` under the wrong release.
 """
 
 from __future__ import annotations
@@ -24,9 +25,11 @@ from langgraph_events.serde.migrations._gate import (
     hold_migration,
     update_baseline,
 )
+from langgraph_events.serde.migrations._live_set import WrongRelease, rewrite_live_set
 from langgraph_events.serde.migrations._target import MigrationTarget, TargetError
 
-_SUBCOMMANDS = ("check", "baseline", "fingerprint")
+_SUBCOMMANDS = ("check", "baseline", "fingerprint", "rewrite")
+_WRONG_RELEASE = 3
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,6 +81,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     fingerprint.add_argument("baseline", type=Path)
     fingerprint.set_defaults(run=_fingerprint)
+
+    rewrite = commands.add_parser(
+        "rewrite", help="rewrite the live set of the store until it reads clean"
+    )
+    rewrite.add_argument("target")
+    rewrite.add_argument("--expect", required=True)
+    rewrite.add_argument("--apply", action="store_true")
+    rewrite.add_argument("--passes", type=int, default=3)
+    rewrite.set_defaults(run=_rewrite)
     return parser
 
 
@@ -119,6 +131,21 @@ def _fingerprint(options: argparse.Namespace) -> int:
         )
     print(fingerprint)
     return 0
+
+
+def _rewrite(options: argparse.Namespace) -> int:
+    outcome = rewrite_live_set(
+        _load(options.target),
+        expect=options.expect,
+        apply=options.apply,
+        passes=options.passes,
+    )
+    invocation = Invocation(options.target)
+    if isinstance(outcome, WrongRelease):
+        print(outcome.render(invocation), file=sys.stderr)
+        return _WRONG_RELEASE
+    print(outcome.render(invocation, options.expect))
+    return 0 if outcome.clean else 1
 
 
 def _load(spec: str) -> MigrationTarget:

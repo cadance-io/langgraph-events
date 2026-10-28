@@ -1,7 +1,8 @@
 """Shared fixtures and event classes for the test suite."""
 
 import sys
-from collections.abc import Awaitable
+import uuid
+from collections.abc import Awaitable, Iterator
 from typing import Any, TypeVar
 
 import pytest
@@ -119,6 +120,39 @@ class Order(Namespace):
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def postgres_server() -> Iterator[str]:
+    """The URL of a Postgres server in a container, shared by the session.
+
+    Each test that needs it skips when no Docker daemon answers.
+    """
+    import docker  # a dependency of testcontainers
+
+    try:
+        docker.from_env().ping()
+    except docker.errors.DockerException as error:
+        pytest.skip(f"the Postgres tests need a Docker daemon: {error}")
+    from testcontainers.community.postgres import PostgresContainer
+
+    with PostgresContainer("postgres:16-alpine", driver=None) as container:
+        yield container.get_connection_url()
+
+
+@pytest.fixture
+def postgres_url(postgres_server: str) -> str:
+    """The URL of a new empty database that holds the checkpoint tables."""
+    import psycopg
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    name = f"lge_{uuid.uuid4().hex}"
+    with psycopg.connect(postgres_server, autocommit=True) as conn:
+        conn.execute(f"CREATE DATABASE {name}")  # type: ignore[arg-type]
+    url = f"{postgres_server.rsplit('/', 1)[0]}/{name}"
+    with PostgresSaver.from_conn_string(url) as saver:
+        saver.setup()
+    return url
 
 
 @pytest.fixture

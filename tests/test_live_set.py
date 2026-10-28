@@ -8,6 +8,8 @@ releases against real bytes.
 
 import contextlib
 import io
+import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -27,6 +29,9 @@ from langgraph_events.serde.migrations import (
     WrongRelease,
     rewrite_live_set,
 )
+from langgraph_events.serde.migrations.__main__ import main
+
+_CLI = "python -m langgraph_events.serde.migrations"
 
 
 def _graph(saver):
@@ -67,6 +72,23 @@ def describe_MigrationTarget():
                     ThreadKey("b", ""),
                 )
 
+        def when_the_saver_is_a_postgres_saver():
+            def it_lists_each_thread_and_namespace(tmp_path: Path, postgres_url: str):
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                with PostgresSaver.from_conn_string(postgres_url) as saver:
+                    graph = _graph(saver)
+                    graph.invoke(Started(), config=_cfg("b"))
+                    graph.invoke(Started(), config=_cfg("a"))
+                    _copy_to_namespace(saver, "a", "child:1")
+                    target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
+
+                    assert target.thread_keys(saver) == (
+                        ThreadKey("a", ""),
+                        ThreadKey("a", "child:1"),
+                        ThreadKey("b", ""),
+                    )
+
         def when_the_target_names_its_threads():
             def it_uses_the_target_function(tmp_path: Path):
                 target = MigrationTarget(
@@ -94,7 +116,7 @@ class _Releases(NamedTuple):
 
     previous: MigrationTarget
     current: MigrationTarget
-    saver: MemorySaver
+    saver: BaseCheckpointSaver
 
     @property
     def expect(self) -> str:
@@ -111,7 +133,7 @@ class _Releases(NamedTuple):
         return [thread.status for thread in report.threads]
 
 
-def _releases(tmp_path: Path, saver: MemorySaver | None = None) -> _Releases:
+def _releases(tmp_path: Path, saver: BaseCheckpointSaver | None = None) -> _Releases:
     store = saver if saver is not None else MemorySaver()
 
     class _OldPlaced(IntegrationEvent):
@@ -148,7 +170,7 @@ def _releases(tmp_path: Path, saver: MemorySaver | None = None) -> _Releases:
     )
 
 
-def _copy_to_namespace(saver: MemorySaver, tid: str, ns: str) -> None:
+def _copy_to_namespace(saver: BaseCheckpointSaver, tid: str, ns: str) -> None:
     """Store the latest root checkpoint of *tid* again under *ns*, through
     the serde the saver holds now."""
     tup = saver.get_tuple(_cfg(tid))
@@ -158,33 +180,50 @@ def _copy_to_namespace(saver: MemorySaver, tid: str, ns: str) -> None:
     )
 
 
-class _StaleRunSaver(MemorySaver):
+class _StaleRun:
     """A run loaded the checkpoint before the rewrite and commits its next
     checkpoint after the rewrite proved that the thread did not move.
 
     The child keeps the parent's channel versions, so it points at the
-    old blobs, which the rewrite does not delete.
+    old blobs, which the rewrite does not delete. Mix it into a saver.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.stale_runs = 0
-        self._loaded = None
+    stale_runs = 0
+    _loaded = None
 
-    def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[override]
+    def put(self, config, checkpoint, metadata, new_versions):
         if self.stale_runs and self._loaded is None:
             self.stale_runs -= 1
             tid = config["configurable"]["thread_id"]
-            self._loaded = super().get_tuple(_cfg(tid))
-        return super().put(config, checkpoint, metadata, new_versions)
+            self._loaded = super().get_tuple(_cfg(tid))  # type: ignore[misc]
+        return super().put(config, checkpoint, metadata, new_versions)  # type: ignore[misc]
 
-    def get_tuple(self, config):  # type: ignore[override]
-        result = super().get_tuple(config)
+    def get_tuple(self, config):
+        result = super().get_tuple(config)  # type: ignore[misc]
         loaded, self._loaded = self._loaded, None
         if loaded is not None:
             child = {**loaded.checkpoint, "id": str(uuid6())}
-            super().put(loaded.config, child, loaded.metadata, {})
+            super().put(loaded.config, child, loaded.metadata, {})  # type: ignore[misc]
         return result
+
+
+class _StaleRunSaver(_StaleRun, MemorySaver):
+    pass
+
+
+@contextlib.contextmanager
+def _stale_postgres_saver(url: str) -> Iterator[BaseCheckpointSaver]:
+    from langgraph.checkpoint.postgres import PostgresSaver
+    from psycopg import Connection
+    from psycopg.rows import dict_row
+
+    class _StalePostgresSaver(_StaleRun, PostgresSaver):
+        pass
+
+    with Connection.connect(
+        url, autocommit=True, prepare_threshold=0, row_factory=dict_row
+    ) as conn:
+        yield _StalePostgresSaver(conn)
 
 
 def describe_rewrite_live_set():
@@ -275,7 +314,7 @@ def describe_rewrite_live_set():
             )
 
     def when_a_run_writes_old_bytes_after_the_rewrite():
-        def describe_and_one_pass_is_allowed():
+        def when_one_pass_is_allowed():
             def it_reports_the_thread_as_not_clean(tmp_path: Path):
                 saver = _StaleRunSaver()
                 releases = _releases(tmp_path, saver)
@@ -291,7 +330,7 @@ def describe_rewrite_live_set():
                 assert [t.status for t in outcome.final.threads] == ["rewrite"]
                 assert not outcome.clean
 
-        def describe_and_a_second_pass_is_allowed():
+        def when_a_second_pass_is_allowed():
             def it_rewrites_the_new_checkpoint_in_the_next_pass(tmp_path: Path):
                 saver = _StaleRunSaver()
                 releases = _releases(tmp_path, saver)
@@ -306,6 +345,26 @@ def describe_rewrite_live_set():
                 assert len(outcome.passes) == 2
                 assert outcome.clean
                 assert releases.plan("t1") == ["unchanged"]
+
+        def when_the_store_is_postgres():
+            def it_rewrites_the_new_checkpoint_in_the_next_pass(
+                tmp_path: Path, postgres_url: str
+            ):
+                with _stale_postgres_saver(postgres_url) as saver:
+                    releases = _releases(tmp_path, saver)
+                    releases.seed("t1")
+                    saver.stale_runs = 1
+
+                    outcome = rewrite_live_set(
+                        releases.current, expect=releases.expect, apply=True
+                    )
+
+                    assert isinstance(outcome, LiveSetOutcome)
+                    assert [
+                        [t.status for t in report.threads] for report in outcome.passes
+                    ] == [["rewrite"], ["rewrite"]]
+                    assert outcome.clean
+                    assert releases.plan("t1") == ["unchanged"]
 
     def when_a_subgraph_checkpoint_holds_an_old_shape():
         def it_reads_it_and_reports_the_run_as_not_clean(tmp_path: Path):
@@ -332,3 +391,162 @@ def describe_rewrite_live_set():
             rewrite_live_set(releases.current, expect=releases.expect, apply=True)
 
             assert releases.saver.storage["t1"]["child:1"] == before
+
+
+CLI_TARGET: MigrationTarget | None = None
+
+
+def describe_cli():
+    def _install(monkeypatch: pytest.MonkeyPatch, target: MigrationTarget) -> str:
+        monkeypatch.setattr(sys.modules[__name__], "CLI_TARGET", target)
+        return f"{__name__}:CLI_TARGET"
+
+    def describe_rewrite():
+        def when_the_apply_reads_clean():
+            def it_exits_zero_and_logs_each_pass(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                spec = _install(monkeypatch, releases.current)
+
+                code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+                out, err = capsys.readouterr()
+                assert code == 0
+                assert out == (
+                    "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
+                    "1 unchanged, 0 refused)\n"
+                )
+                assert err == (
+                    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
+                )
+
+        def when_a_plan_finds_a_thread_to_rewrite():
+            def it_exits_one_and_names_the_apply_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                spec = _install(monkeypatch, releases.current)
+
+                code = main(["rewrite", spec, "--expect", releases.expect])
+
+                assert code == 1
+                assert capsys.readouterr().out == (
+                    "lge rewrite: not clean (last plan: plan: 1 thread, 1 rewrite, "
+                    "0 unchanged, 0 refused)\n"
+                    "  t1: needs a rewrite\n"
+                    f"  Run: {_CLI} rewrite {spec} --apply --expect {releases.expect}\n"
+                )
+
+        def when_the_last_plan_refuses_a_thread():
+            def it_prints_the_reason_and_the_apply_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                target = MigrationTarget(
+                    graph=releases.current.graph,
+                    baseline=releases.current.baseline,
+                    store=releases.current.store,
+                    threads=lambda saver: [ThreadKey("ghost", "")],
+                )
+                spec = _install(monkeypatch, target)
+
+                code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+                out = capsys.readouterr().out
+                assert code == 1
+                assert "  ghost: refused, no checkpoint for this thread id\n" in out
+                assert out.endswith(
+                    f"  Run: {_CLI} rewrite {spec} --apply --expect {releases.expect}\n"
+                )
+
+        def when_a_subgraph_checkpoint_holds_an_old_shape():
+            def it_exits_one_and_names_the_hold_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                _copy_to_namespace(releases.saver, "t1", "child:1")
+                spec = _install(monkeypatch, releases.current)
+                (label,) = [
+                    key.label for key in releases.current.snapshot().migrations.keys
+                ]
+
+                code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+                assert code == 1
+                assert capsys.readouterr().out == (
+                    "lge rewrite: not clean (last plan: plan: 1 thread, 0 rewrite, "
+                    "1 unchanged, 0 refused)\n"
+                    f"  t1 in subgraph namespace 'child:1': rewrite, read by: {label}\n"
+                    "  The rewrite never writes a subgraph checkpoint. Keep the "
+                    f"migration one more release: {_CLI} baseline hold {spec} "
+                    f"'{label}' --reason <why> "
+                    "--previous <baseline file of the previous release>\n"
+                )
+
+        def when_the_running_release_is_not_the_expected_one():
+            def it_exits_three_and_names_both_fingerprints(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                spec = _install(monkeypatch, releases.previous)
+                running = releases.previous.snapshot().migrations.fingerprint
+
+                code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+                assert code == 3
+                assert capsys.readouterr().err == (
+                    f"lge rewrite: wrong release. The running code holds the "
+                    f"migrations {running}, not {releases.expect}.\n"
+                    "  running migrations: none\n"
+                    f"  Run the command in the release whose baseline gives "
+                    f"{releases.expect}: {_CLI} rewrite {spec} --expect "
+                    f"{releases.expect}\n"
+                )
+
+        def when_the_target_has_no_store():
+            def it_exits_two(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                spec = _install(
+                    monkeypatch,
+                    MigrationTarget(
+                        graph=releases.current.graph,
+                        baseline=releases.current.baseline,
+                    ),
+                )
+
+                assert main(["rewrite", spec, "--expect", releases.expect]) == 2
+                assert "store=" in capsys.readouterr().err
+
+        def when_passes_is_below_one():
+            def it_exits_two(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                spec = _install(monkeypatch, releases.current)
+
+                code = main(
+                    ["rewrite", spec, "--expect", releases.expect, "--passes", "0"]
+                )
+
+                assert code == 2
+                assert "passes" in capsys.readouterr().err
