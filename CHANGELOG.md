@@ -51,20 +51,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **One deploy step rewrites the live set of a store.** `rewrite_live_set(target, expect=...,
   apply=...)` and the CLI command `rewrite <target> --expect FP [--apply] [--passes N]`
   compare the migrations of the running code with the fingerprint `expect` before they open
-  the store. A mismatch returns `WrongRelease` and exits 3. With `apply`, each pass rewrites
-  the root threads that the last plan did not read unchanged, then plans every root thread
-  again. So a run that writes old bytes during a pass is rewritten in the next pass. Only the
-  last plan decides the exit code: 0 clean, 1 not clean. Each subgraph checkpoint is read with
-  a plan and never written. A touched one makes the run not clean and names each migration to
-  hold. `LiveSetOutcome` holds each pass, the last plan and each `SubgraphTouched`.
-  `MigrationTarget` gains `store=` and `threads=`, and `ThreadKey` names one checkpoint
-  namespace of one thread. The library lists the threads of a `PostgresSaver` and a
+  the store. A mismatch returns `WrongRelease` and exits 3. When the saver that `store` opens
+  already holds a serde with other migrations, the command raises `TargetError` before it
+  reads a thread. With `apply`, each pass rewrites each checkpoint that the last plan did not
+  read unchanged, root or subgraph, then plans every checkpoint again. So a run that writes
+  old bytes during a pass is rewritten in the next pass. Only the last plan decides the exit
+  code: 0 clean, 1 not clean. `LiveSetOutcome` holds each pass and the last plan.
+  `MigrationTarget` gains `store=`, `threads=` and `build(saver)`, and `ThreadKey` names one
+  checkpoint namespace of one thread. The library lists the threads of a `PostgresSaver` and a
   `MemorySaver`. The docs section *Lifecycle of a read-time migration* gives each step from
   release N to release N+1, for a client with release tags and for a continuous-deploy client.
+- **`plan_rewrite()` and `rewrite_store()` read a subgraph namespace.** Pass
+  `checkpoint_ns=` to plan or rewrite the latest checkpoint under a child namespace. The
+  default `""` is the root namespace. `ThreadRewrite` gains `checkpoint_ns` and `location`.
+  The async twins read the root namespace only.
 - **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
   `check`, `baseline update`, `baseline hold`, `fingerprint` and `rewrite`. Exit 0 is a
-  pass, 1 a finding or a store that is not clean, 2 a usage or target error, 3 a `rewrite`
-  under the wrong release.
+  pass, 1 a finding or a store that is not clean, 2 a usage, target or store error, 3 a
+  `rewrite` under the wrong release. An error that lge did not raise, for example from the
+  graph factory or the store, prints its type and message on one line and exits 2.
+- **New public names in `langgraph_events.serde.migrations`.** `MigrationTarget`,
+  `ThreadKey`, `TargetError`, `MigrationKey`, `MigrationSet`, `check`, `GateReport`,
+  `GateError`, `Invocation`, `Finding` and its finding classes (`BaselineStale`,
+  `AnonymousCallable`, `Uncovered`, `Unrevivable`, `HandlerMissing`, `SurvivedRelease`),
+  `assert_migration_gate`, `update_baseline`, `hold_migration`, `rewrite_live_set`,
+  `LiveSetOutcome` and `WrongRelease`.
+
+### Upgrade from 0.41
+
+1. Write the graph factory as `def build(checkpointer) -> EventGraph`, and build the graph
+   on that checkpointer. A factory with no parameter exits 2 with this request. Set the
+   serde in the factory, not in the saver that `store=` opens.
+2. Declare one `MigrationTarget(graph=build, baseline=Path(...), store=...)`, then run
+   `baseline update <target>`. The file becomes version 4.
+3. The first release after the upgrade ships every migration the code holds. Run
+   `rewrite <target> --apply --expect <fingerprint>` at that deploy. In the next release,
+   delete each migration, or keep it one release with `baseline hold`.
+4. Replace each removed gate:
+
+| 0.41 | This release |
+|---|---|
+| `assert_all_baselined_cover(...)` | `assert_migration_gate(target)` |
+| `assert_all_baselined_resolve(...)` | `assert_migration_gate(target)` |
+| `assert_all_baselined_revive(...)` | `assert_migration_gate(target)` |
+| `assert_all_baselined_handlers_cover(...)` | `assert_migration_gate(target)` |
+| `detect_changes(...)` | `check(target)` |
+| `write_baseline(...)` | `update_baseline(target)` |
+| `python -m langgraph_events.serde.migrations <module:factory> <baseline>` | `python -m langgraph_events.serde.migrations check <module:attr> --previous <file>` |
 
 ### Changed
 

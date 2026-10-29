@@ -544,10 +544,10 @@ If the store cannot be made clean in time, keep the migration one more release:
 ```bash
 python -m langgraph_events.serde.migrations baseline hold myapp.lge_target:target \
     "transform myapp.events:Order via myapp.events:drop_total" \
-    --reason "a subgraph checkpoint still needs it" --previous "$RUNNER_TEMP/prev.json"
+    --reason "a paused thread refuses the rewrite" --previous "$RUNNER_TEMP/prev.json"
 ```
 
-The hold records the digest of the whole previous file. The baseline of the next release holds the hold record, so its digest is different. A check against that file ignores the hold. So a hold lasts one release, also when the migrations did not change. To keep the migration one more release, hold it again. Every check lists every hold.
+The hold records the digest of the whole previous file. The baseline of the next release holds the hold record, so its digest is different. A check against that file ignores the hold. So a hold lasts one release, also when the migrations did not change. To keep the migration one more release, hold it again. Every check lists each hold that applies. An expired hold shows in the `survived-release` finding of its migration, with the command to hold it again.
 
 `python -m langgraph_events.serde.migrations fingerprint <baseline file>` prints the fingerprint of the migrations a file records. It reads the JSON only.
 
@@ -591,7 +591,7 @@ Commit the baseline **alongside** the change that needs it, never after. Run `ba
   "migrations": [
     {"label": "rename myapp.orders:Order.ApprovalRequired"},
     {"label": "fill myapp.orders:Order.Place.Placed[tracking]",
-     "hold": {"reason": "a subgraph checkpoint needs it", "against": "lge-b1-3f0c2a9e41b7d655"}}
+     "hold": {"reason": "a paused thread refuses the rewrite", "against": "lge-b1-3f0c2a9e41b7d655"}}
   ]
 }
 ```
@@ -648,7 +648,7 @@ Each command is `python -m langgraph_events.serde.migrations <command>`.
 
 `prev.json` is the baseline file of the release that runs in production. `<fingerprint of N>` is the output of `fingerprint <baseline file of N>`. The `fingerprint` command reads the JSON only.
 
-Step 5 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 5 exits 1, do not deploy release N+1. Run step 3 again, or keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
+Step 5 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 5 exits 1, do not deploy release N+1. Run step 3 again. If a refused thread cannot converge, keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
 
 ### The previous baseline: two client styles
 
@@ -691,16 +691,16 @@ your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp
 ### What `rewrite` does
 
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
-2. It plans every root thread of the store.
-3. With `--apply`, it rewrites each root thread that the last plan did not read unchanged. Then it plans every root thread again. It repeats this step up to `--passes` times, 3 by default. It logs one line per pass to stderr.
-4. It reads each subgraph checkpoint with a plan. It never writes a subgraph checkpoint.
+2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the fence judge the serde of step 1, so the serde that writes must be the same.
+3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root namespace and each subgraph namespace.
+4. With `--apply`, it rewrites each checkpoint that the last plan did not read unchanged. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default. It logs one line per pass to stderr.
 5. The last plan decides the exit code.
 
 | Code | Meaning | The output names |
 |---|---|---|
-| 0 | The last plan reads every root thread unchanged, and no subgraph checkpoint needs a migration | The counts of each pass and of the last plan |
-| 1 | The store is not clean | Each thread and its reason, then the next command: `rewrite --apply`, or `baseline hold` for a subgraph checkpoint |
-| 2 | A usage or target error. Examples: the target has no `store`, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True` | The error |
+| 0 | The last plan reads every checkpoint unchanged | The counts of each pass and of the last plan |
+| 1 | The store is not clean | Each checkpoint and its reason, then the next command: `rewrite --apply` |
+| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, the store does not open | The error, on one line, with its type when lge did not raise it |
 | 3 | Wrong release: the running code does not hold the expected migrations | Both fingerprints, the running migrations and the command |
 
 The Python form is `rewrite_live_set(target, expect=..., apply=...)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the fence refuses. `LiveSetOutcome.passes` holds the report of each pass, `final` holds the last plan, and `clean` gives the verdict.
@@ -725,7 +725,9 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 ### Subgraph checkpoints
 
-The command reads each subgraph checkpoint and never writes one. When a running migration still changes a subgraph checkpoint, the command exits 1. The output names each migration that reads the checkpoint. Keep those migrations one more release with `baseline hold`. The checkpoint keeps the old shape until a run of the subgraph writes a new checkpoint.
+A graph that a handler invokes on the same checkpointer writes its checkpoints under a subgraph namespace. The command plans and rewrites the latest checkpoint of each subgraph namespace, the same as a root thread. So a completed subgraph run does not keep a migration in the code. A refused subgraph checkpoint prints its namespace and its reason.
+
+The Python form is `graph.plan_rewrite(thread_ids=..., checkpoint_ns=...)` and `graph.rewrite_store(thread_ids=..., checkpoint_ns=...)`. The default `checkpoint_ns=""` is the root namespace.
 
 ## Testing your migrations
 
@@ -892,7 +894,7 @@ What the rewrite does not do:
 - A historic checkpoint keeps the old bytes. After the class is deleted, `get_state_history()` cannot read it.
 - `drop=` removes the stored event only. Reducer state is not recomputed. Use [`replay_reducer`](#recovering-with-replay_reducer).
 - An event inside a non-Event container field, a dataclass or a pydantic model, has no migratable identity ([#160](https://github.com/cadance-io/langgraph-events/issues/160)). The rewrite does not reach it.
-- A checkpoint under a subgraph namespace is not read, the same as `unrevivable_threads()`. The `rewrite` command reads it with a plan and reports it. See [Subgraph checkpoints](#subgraph-checkpoints).
+- A call reads one checkpoint namespace, by default the root namespace. Pass `checkpoint_ns=` to read a subgraph namespace. The `rewrite` command walks every namespace. See [Subgraph checkpoints](#subgraph-checkpoints).
 - `legacy_write=True` is refused with `ValueError`. Under `legacy_write` the rewrite stores the historic identity again.
 
 ## Retiring an Interrupted subclass
