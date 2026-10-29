@@ -27,7 +27,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from langgraph_events.serde.migrations._core import Migration, MigrationTables
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.serde.jsonplus import (
+    EXT_CONSTRUCTOR_KW_ARGS,
+    JsonPlusSerializer,
+)
 
 try:
     from langgraph.checkpoint.serde.jsonplus import (
@@ -387,12 +390,36 @@ def _make_ext_hook(
                     f"new fields."
                 )
                 raise
+        if code == EXT_CONSTRUCTOR_KW_ARGS and _library_event_record(
+            data, tables, scope
+        ):
+            # LangGraph's own serializer wrote this lge event, before 0.6.0
+            # added this serde. The record takes lge's migrations, and a
+            # rewrite stores it in this serde's form.
+            return _revive(
+                *ormsgpack.unpackb(
+                    data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+                ),
+                reformat=True,
+            )
         if code != EXT_NAMESPACE_AWARE_EVENT:
             return fallback(code, data)
-        tup = ormsgpack.unpackb(
-            data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+        return _revive(
+            *ormsgpack.unpackb(
+                data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+            ),
+            reformat=False,
         )
-        module_name, qualname, kwargs = tup
+
+    def _revive(
+        module_name: str,
+        qualname: str,
+        kwargs: dict[str, Any],
+        *,
+        reformat: bool,
+    ) -> object:
+        """Migrate and construct one stored event record. *reformat* says
+        that a rewrite stores the record in another form, so it is touched."""
         try:
             # Rewrite historic identity to current, run any TransformFields
             # and inject any AddField defaults — shared with the baseline
@@ -415,7 +442,9 @@ def _make_ext_hook(
                 # store different bytes. A table entry that changed
                 # nothing (a fill whose field the payload already held)
                 # is untouched, so a second rewrite converges.
-                touched = stored != (module_name, qualname) or kwargs != before
+                touched = (
+                    reformat or stored != (module_name, qualname) or kwargs != before
+                )
                 reads.append((stored, (module_name, qualname), touched))
             return instance
         except (ImportError, AttributeError, TypeError, _CallableError) as exc:
@@ -446,6 +475,35 @@ def _make_ext_hook(
             raise
 
     return _ext_hook
+
+
+def _library_event_record(
+    data: bytes, tables: MigrationTables, scope: dict[tuple[str, str], type]
+) -> bool:
+    """*data*, a LangGraph constructor record, holds an event of this library.
+
+    The record is ``(module, name, kwargs)``. Its identity is an lge event
+    when a migration renames it, or when it resolves to an ``Event``. Any
+    other record, a client class or an lge value that is not an event,
+    stays with LangGraph's own reader.
+    """
+    record = ormsgpack.unpackb(
+        data, ext_hook=lambda _code, _payload: None, option=ormsgpack.OPT_NON_STR_KEYS
+    )
+    if not (isinstance(record, list) and len(record) == 3):
+        return False
+    module, name = record[0], record[1]
+    if not (isinstance(module, str) and isinstance(name, str)):
+        return False
+    if not Identity(module, name).owned_by_library:
+        return False
+    if (module, name) in tables.rename_table:
+        return True
+    try:
+        cls = _resolve_identity(module, name, scope=scope)
+    except (ImportError, AttributeError):
+        return False
+    return isinstance(cls, type) and issubclass(cls, Event)
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)

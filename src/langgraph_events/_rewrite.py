@@ -12,7 +12,7 @@ checkpoint the graph will store. It never touches a store.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._causes import dropped, resolve
@@ -243,12 +243,9 @@ def plan_thread(
             thread_id, "refused", migrated=pairs, dropped=dropped, reason=reason
         )
 
-    if unresolved:
-        names = ", ".join(dict.fromkeys(u.qualname for u in unresolved))
-        return refused(
-            f"history names {names}, which the serde cannot revive; add a "
-            f"tombstone first"
-        )
+    reason = _history_refusal(unresolved, values)
+    if reason is not None:
+        return refused(reason)
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged")
 
@@ -271,6 +268,50 @@ def plan_thread(
         new_versions=new_versions,
         interrupt_writes=interrupt_writes,
     )
+
+
+def _history_refusal(
+    unresolved: Sequence[UnrevivedIdentity], values: dict[str, Any]
+) -> str | None:
+    """Why the stored history stops this rewrite, or ``None``."""
+    if unresolved:
+        names = ", ".join(dict.fromkeys(u.qualname for u in unresolved))
+        return (
+            f"history names {names}, which the serde cannot revive; add a "
+            f"tombstone first"
+        )
+    return _entries_not_events(values)
+
+
+def _entries_not_events(values: dict[str, Any]) -> str | None:
+    """Why a log channel holds an entry that is not an event, or ``None``.
+
+    LangGraph's own serializer revives a record whose class no longer
+    imports, or no longer takes the stored fields, as a ``dict`` or
+    ``None``, with no error. No migration reaches such a record.
+    """
+    for channel in _LOG_CHANNELS:
+        entries = [
+            e for e in _log_entries(values, channel) or () if not isinstance(e, Event)
+        ]
+        if not entries:
+            continue
+        kinds = " or ".join(sorted({type(e).__name__ for e in entries}))
+        count = (
+            "1 entry that revives"
+            if len(entries) == 1
+            else f"{len(entries)} entries that revive"
+        )
+        noun = "an event" if len(entries) == 1 else "events"
+        return (
+            f"channel {channel!r} holds {count} as {kinds}, not as {noun}. "
+            f"A serializer other than NamespaceAwareSerde wrote them, and their "
+            f"class no longer imports or no longer takes the stored fields, so "
+            f"no migration reaches them. Restore each class under its stored "
+            f"module and name, or delete the thread with the checkpointer's "
+            f"delete_thread() if nobody needs it, then rerun"
+        )
+    return None
 
 
 _RESUME_THE_ROOT = (
@@ -524,8 +565,60 @@ def _verify_value(
                 f"the re-encode still names historic identity {identity[1]} in {where}",
                 [],
             )
+    return _revival_problem(serde, data, where), identities
+
+
+def _revival_problem(
+    serde: NamespaceAwareSerde, data: tuple[str, bytes], where: str
+) -> str | None:
+    """Why the bytes *data* of the value in *where* do not revive valid, or
+    ``None``."""
     try:
-        serde.loads_typed(data)
+        revived = serde.loads_typed(data)
     except ValueError as exc:
-        return f"the rewritten value in {where} does not revive ({exc})", identities
-    return None, identities
+        return f"the rewritten value in {where} does not revive ({exc})"
+    invalid = _invalid_model(revived, "")
+    if invalid is None:
+        return None
+    return (
+        f"the rewritten value in {where} holds an invalid {invalid}. Fix the "
+        f"migration that builds the value so that the value validates, then "
+        f"rerun"
+    )
+
+
+def _invalid_model(value: object, path: str) -> str | None:
+    """The first pydantic model inside an event of *value* that fails the
+    validation of its class, as ``<model> in <event>.<field>: <error>``.
+
+    LangGraph's serializer revives a stored model with its constructor, and
+    on a validation error with ``model_construct``, which validates nothing.
+    So a rewrite must not store an invalid model: once the migration that
+    built it leaves the code, every read accepts it with no warning. *path*
+    is the event field that holds *value*. A model outside every event is
+    not checked.
+    """
+    dump = getattr(value, "model_dump", None)
+    if path and not isinstance(value, type) and callable(dump):
+        try:
+            type(value)(**dump())
+        except (ValueError, TypeError) as exc:
+            error = " ".join(str(exc).split())
+            return f"{type(value).__name__} in {path}: {error}"
+        return None
+    if isinstance(value, Event) and is_dataclass(value):
+        children: Iterable[tuple[object, str]] = (
+            (getattr(value, f.name), f"{type(value).__qualname__}.{f.name}")
+            for f in fields(value)
+        )
+    elif isinstance(value, dict):
+        children = ((item, path) for item in value.values())
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        children = ((item, path) for item in value)
+    else:
+        return None
+    for child, child_path in children:
+        problem = _invalid_model(child, child_path)
+        if problem is not None:
+            return problem
+    return None

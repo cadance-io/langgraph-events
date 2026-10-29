@@ -80,11 +80,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   library clears it. Its reason says so, and names the `delete_thread()` method of the
   checkpointer for a thread that nobody needs. The limit stays until the refusal rule changes
   ([#217](https://github.com/cadance-io/langgraph-events/issues/217)).
+- **Two framework migrations for lge's own old shapes.** `lge-0.42-halted-transform` drops
+  the `reason` that 0.1.x stored on `Halted`. `lge-0.42-frontend-tool-call-requested-rename`
+  reads a `FrontendToolCallRequested` that 0.5.x and earlier stored in
+  `langgraph_events._event`. The rename exists only when the `agui` extra is installed.
+  Before 0.6.0, LangGraph's own `JsonPlusSerializer` wrote each event in its constructor
+  record form. `NamespaceAwareSerde` now reads such a record of an lge event through lge's
+  migrations, and a plan reads it as a rewrite until a rewrite stores it in the form of
+  `NamespaceAwareSerde`. Such a record that does not revive now raises `Cannot revive`,
+  as every other event record does. Before, it revived as `None` or a `dict` with no
+  error. `NamespaceAwareSerde.revivable_identities()` includes each identity that lge
+  renames.
 - **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
   `check`, `baseline update`, `baseline hold`, `fingerprint` and `rewrite`. Exit 0 is a
   pass, 1 a finding or a store that is not clean, 2 a usage, target or store error, 3 a
   `rewrite` under the wrong release. An error that lge did not raise, for example from the
   graph factory or the store, prints its type and message on one line and exits 2.
+- **The docs give a prune of old blob versions.** A rewrite stores each changed channel under
+  a new version, and the old version stays in the store. The command does not delete it,
+  because a run that read the checkpoint before the rewrite can still name it. The section
+  *Old blob versions* gives the Postgres statement to run after the pre-deploy plan exits 0.
 - **New public names in `langgraph_events.serde.migrations`.** `MigrationTarget`,
   `ThreadKey`, `TargetError`, `MigrationKey`, `MigrationSet`, `check`, `GateReport`,
   `GateError`, `Invocation`, `Finding` and its finding classes (`BaselineStale`,
@@ -96,7 +111,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 1. Write the graph factory as `def build(checkpointer) -> EventGraph`, and build the graph
    on that checkpointer. A factory with no parameter exits 2 with this request. Set the
-   serde in the factory, not in the saver that `store=` opens.
+   serde in the factory, not in the saver that `store=` opens. The factory runs your full
+   app setup, so run each command in an environment that has the configuration of your
+   app. `PostgresSaver.from_conn_string` takes the plain URL form `postgresql://...`, not
+   the SQLAlchemy form `postgresql+psycopg://...`.
 2. Declare one `MigrationTarget(graph=build, baseline=Path(...), store=...)`, then run
    `baseline update <target>`. The file becomes version 4.
 3. The first release after the upgrade ships every migration the code holds. Run
@@ -112,6 +130,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | `assert_all_baselined_handlers_cover(...)` | `assert_migration_gate(target)` |
 | `detect_changes(...)` | `check(target)` |
 | `write_baseline(...)` | `update_baseline(target)` |
+| A test of your own that every namespace of the graph is in `namespaces=` of the serde | The `MigrationOutOfScope` finding of `assert_migration_gate(target)` |
 | `python -m langgraph_events.serde.migrations <module:factory> <baseline>` | `python -m langgraph_events.serde.migrations check <module:attr> --previous <file>` |
 
 ### Changed
@@ -126,6 +145,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A plan reads a thread as refused when a log entry is not an event.** LangGraph's own
+  reader revives a record whose class no longer imports, or no longer takes the stored
+  fields, as a `dict` or `None`, with no error. A plan read such a thread as unchanged, so
+  `rewrite` could exit 0 on history that no release reads. The reason names the channel,
+  and says to restore the class or delete the thread.
+- **A rewrite does not store an invalid pydantic model.** A migration that builds a model
+  that fails the validation of its class now refuses the thread. The reason names the
+  model, the event field and the error. Before, the rewrite stored the value, and once the
+  migration left the code, every read accepted it with no warning.
+- **`rewrite --apply` stops when no pass can change the store.** A pass rewrites only the
+  checkpoints that the last plan reads as a rewrite. A refused checkpoint changes only when
+  a person acts, so the loop no longer plans it again on each pass.
 - **A mixin that a handler subscribes to is not a loose event of the graph.**
   `EventGraph.from_namespaces` passed such a mixin to `events=` of the serde it builds. A
   plain mixin then made `update_baseline` raise `TypeError`, and a dataclass mixin gave a

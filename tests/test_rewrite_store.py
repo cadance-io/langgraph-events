@@ -17,6 +17,8 @@ import pytest
 from conftest import Ended, Started
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from pydantic import BaseModel
 from test_event_graph import _AsyncOnlySaver
 
 from langgraph_events import (
@@ -37,6 +39,18 @@ from langgraph_events.serde._jsonplus import _scan_identities
 
 class _Go(IntegrationEvent):
     pass
+
+
+class _Spec(BaseModel):
+    """A field model whose ``kind`` has no default."""
+
+    kind: typing.Literal["a", "b"]
+
+
+def _unvalidated_spec(kw: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Builds the field model with no validation, so ``kind`` stays ``None``."""
+    kw.setdefault("spec", _Spec.model_construct(kind=None))
+    return kw
 
 
 class _Again(IntegrationEvent):
@@ -706,6 +720,82 @@ def describe_rewrite_store_refusals():
         [thread] = report.threads
         assert thread.status == "refused", thread
         return thread
+
+    def when_the_log_holds_an_entry_that_is_not_an_event():
+        def _langgraph_written(saver: MemorySaver) -> EventGraph:
+            """A thread that LangGraph's own serializer wrote. Its class is
+            defined inside this helper, so it never imports again."""
+
+            class _Gone(IntegrationEvent):
+                note: str = ""
+
+            @on(Started)
+            def make(event: Started) -> _Gone:
+                return _Gone(note="x")
+
+            saver.serde = JsonPlusSerializer()
+            EventGraph([make], checkpointer=saver).invoke(
+                Started(data="x"), config=_cfg("t1")
+            )
+            saver.serde = NamespaceAwareSerde(events=(Started,))
+            return EventGraph([_completes], checkpointer=saver)
+
+        def it_refuses_the_thread_and_names_the_channel():
+            graph = _langgraph_written(MemorySaver())
+
+            thread = _only(graph.plan_rewrite(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                "channel 'events' holds 1 entry that revives as NoneType, not as "
+                "an event."
+            )
+            assert "delete_thread()" in thread.reason
+
+        def it_writes_nothing():
+            saver = MemorySaver()
+            graph = _langgraph_written(saver)
+            blobs = dict(saver.blobs)
+
+            graph.rewrite_store(thread_ids=["t1"])
+
+            assert saver.blobs == blobs
+
+    def when_a_migration_builds_a_value_that_fails_validation():
+        def it_refuses_the_thread_and_names_the_class_and_field():
+            saver = MemorySaver()
+
+            class _Old(IntegrationEvent):
+                note: str = ""
+
+            @on(Started)
+            def make(event: Started) -> _Old:
+                return _Old(note="x")
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _Old))
+            EventGraph([make], checkpointer=saver).invoke(
+                Started(data="x"), config=_cfg("t1")
+            )
+
+            @migrate_from(
+                _Old.__qualname__,
+                in_module=_Old.__module__,
+                transform=_unvalidated_spec,
+            )
+            class _New(IntegrationEvent):
+                note: str = ""
+                spec: _Spec | None = None
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _New))
+            graph = EventGraph([_completes], checkpointer=saver)
+            blobs = dict(saver.blobs)
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                "the rewritten value in channel 'events' holds an invalid _Spec in "
+                f"{_New.__qualname__}.spec: 1 validation error for _Spec kind"
+            )
+            assert saver.blobs == blobs
 
     def when_the_history_cannot_revive():
         def it_asks_for_a_tombstone_first():

@@ -376,6 +376,12 @@ lge owns the read migrations for its own framework events, such as `HandlerRaise
 | `lge-0.41-handler-raised-split` | `HandlerRaised` with `abandoned_for_deadline=False` | `HandlerRaised`, without the key |
 | `lge-0.41-handler-raised-split` | `HandlerRaised` without the key | `HandlerRaised`, unchanged |
 | `lge-0.41-run-paused-split` | `RunPaused` | `RunPausedOnDeadline` |
+| `lge-0.42-halted-transform` | `Halted` with `reason`, from 0.1.x | `Halted`, without the key |
+| `lge-0.42-frontend-tool-call-requested-rename` | `FrontendToolCallRequested` in `langgraph_events._event`, from 0.5.x and earlier | `FrontendToolCallRequested` in `langgraph_events.agui._events` |
+
+The `FrontendToolCallRequested` rename exists only when the `agui` extra is installed. Its class needs the extra.
+
+Before 0.6.0, LangGraph's own `JsonPlusSerializer` wrote each event, in its constructor record form. `NamespaceAwareSerde` reads such a record of an lge event through these migrations, and a rewrite stores the record in the form of `NamespaceAwareSerde`. A plan reads such a record as a rewrite until then. A record of your own class in that form stays with LangGraph's reader. See [A checkpoint that a plan refuses](#a-checkpoint-that-a-plan-refuses).
 
 lge's framework migrations are not relabelled on write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
 
@@ -642,6 +648,8 @@ target = MigrationTarget(
 ```
 
 - `store` returns a context manager of a sync checkpointer.
+- `PostgresSaver.from_conn_string` takes the plain libpq form, `postgresql://...`. The SQLAlchemy form with a driver, `postgresql+psycopg://...`, fails in psycopg with `missing "=" after ...`. If your app keeps its URL in the SQLAlchemy form, remove `+psycopg` before you give the URL to the saver.
+- The commands import the target and call `graph`, so the graph factory runs your full app setup. Run each command in an environment that has the configuration of your app, for example its environment variables. If the app setup opens a SQLAlchemy engine, it needs the driver form `postgresql+psycopg://...`. A plain `postgresql://...` there selects psycopg2, and the setup fails with `No module named 'psycopg2'` when only psycopg 3 is installed.
 - The command lists the threads of a `PostgresSaver` or a `MemorySaver`. For another saver, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and namespace.
 - If one store holds more than one graph, set `threads=` and return the threads of this graph only.
 
@@ -704,7 +712,7 @@ your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
 2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the fence judge the serde of step 1, so the serde that writes must be the same.
 3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root namespace and each subgraph namespace.
-4. With `--apply`, it rewrites each checkpoint that the last plan did not read unchanged. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default. It logs one line per pass to stderr.
+4. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stderr.
 5. The last plan decides the exit code.
 
 | Code | Meaning | The output names |
@@ -716,6 +724,20 @@ your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp
 
 The Python form is `rewrite_live_set(target, expect=..., apply=...)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the fence refuses. `LiveSetOutcome.passes` holds the report of each pass, `final` holds the last plan, and `clean` gives the verdict.
 
+### A checkpoint that a plan refuses
+
+A refused checkpoint keeps the command from exit 0. The output names its reason. The table gives the cases that a migration change causes.
+
+| Reason starts with | Cause | What to do |
+|---|---|---|
+| `history names ...` | A stored identity has no live class and no migration | Add a tombstone with `@migrate_from`, then run `rewrite --apply` |
+| `channel 'events' holds ... not as an event` | A serializer other than `NamespaceAwareSerde` wrote the entry, and its class no longer imports or no longer takes the stored fields. LangGraph's reader returns it as a `dict` or `None`, with no error, so no migration reaches it | Restore the class under its stored module and name. If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` |
+| `the rewritten value ... holds an invalid ...` | A migration builds a pydantic model that fails the validation of its class. The message names the model, the event field and the error | Fix the migration so that the value validates, then run `rewrite --apply` |
+
+A plan reads a thread with such an entry as refused, never as unchanged. So a store with history that no release can read does not pass as clean.
+
+The rewrite never stores an invalid pydantic model. LangGraph's reader revives a stored model with its constructor, and on a validation error with `model_construct`, which validates nothing. So once the migration that built the value leaves the code, every read accepts the invalid value with no warning.
+
 ### Live traffic
 
 The command can run while the graph serves runs. It builds its own graph and serde, so it shares no serde state with the app. Release N writes only live shapes, but a run can still bring old bytes back:
@@ -725,6 +747,34 @@ The command can run while the graph serves runs. It builds its own graph and ser
 3. Those versions point at the old blobs. The rewrite does not delete the old blobs.
 
 The next plan reads that thread as not clean, and the next pass rewrites it. Only the last plan decides exit 0. A run that holds C for longer than all passes can still write after exit 0. The plan of step 5 then reads the thread and exits 1, so release N+1 does not deploy.
+
+### Old blob versions
+
+The rewrite stores each changed channel under a new version and keeps the checkpoint id. The store grows by the size of each rewritten channel. An earlier checkpoint of the thread can still name the old blob version. Otherwise no checkpoint names it.
+
+The command does not delete the old versions. A run that read checkpoint C before the rewrite writes its next checkpoint with the old version of each channel that it did not update. If that blob were gone, the channel would read as empty, and no plan could see the loss. With the blob kept, the run brings old bytes back, and the next plan sees them.
+
+On Postgres, delete the old versions after step 5 exits 0. Then no run that started before the rewrite still runs:
+
+```sql
+DELETE FROM checkpoint_blobs AS b
+WHERE NOT EXISTS (
+    SELECT 1 FROM checkpoints AS c
+    WHERE c.thread_id = b.thread_id
+      AND c.checkpoint_ns = b.checkpoint_ns
+      AND c.checkpoint -> 'channel_versions' ->> b.channel = b.version
+)
+AND EXISTS (
+    SELECT 1 FROM checkpoints AS c
+    WHERE c.thread_id = b.thread_id
+      AND c.checkpoint_ns = b.checkpoint_ns
+      AND c.checkpoint -> 'channel_versions' ->> b.channel > b.version
+);
+```
+
+The statement deletes a blob version only when no checkpoint names it and a checkpoint names a newer version of the same channel. A running graph writes a blob before the checkpoint that names it, and that blob is newer than each version that a checkpoint names, so the statement keeps it. The versions of `PostgresSaver` are zero-padded, so a text comparison orders them. A checkpoint that a prune of your own deleted also leaves blob versions that no checkpoint names. The statement deletes them too.
+
+WARNING: Do not run the statement while a run that started before the rewrite can still write. That run names an old version, and its checkpoint would lose the channel.
 
 WARNING: Do not let an older release serve runs while the command runs. An older release writes the old shape again. The fence stops the command under an older release, but it cannot stop an older release that still serves traffic. Finish the rolling deploy first.
 

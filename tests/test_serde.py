@@ -27,6 +27,7 @@ from langgraph_events import (
     on,
 )
 from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payload
+from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
 
 # ``_legacy_interrupted_payload`` and the inline Scatter-union test below
 # still assemble Interrupt-wrapped / list payloads by hand, which the
@@ -40,6 +41,7 @@ from langgraph_events.serde._jsonplus import (
     _scan_identities,
 )
 from langgraph_events.serde.migrations import (
+    RenameEvent,
     backfill,
     migrate_from,
     split_event,
@@ -631,6 +633,15 @@ class _SiblingRefPayloadNs(Namespace):
     class Placed(DomainEvent):
         other: Sibling | None = None  # noqa: F821 - resolved by the check's localns
         cfg: _ModelHolder.Cfg | None = None
+
+
+_FRAMEWORK_RENAME_SOURCES = frozenset(
+    (op.old_module, op.old_qualname)
+    for migration in FRAMEWORK_MIGRATIONS
+    for op in migration.operations
+    if isinstance(op, RenameEvent)
+)
+"""lge's own renamed identities. Every serde revives them."""
 
 
 def describe_NamespaceAwareSerde():
@@ -1323,7 +1334,7 @@ def describe_NamespaceAwareSerde():
                 # marker and produced a second entry, triggering
                 # "Duplicate rename source" at serde construction.
                 serde = NamespaceAwareSerde(namespaces=[SubLeak])
-                sources = [old_qn for (_, old_qn) in serde._tables.rename_table]
+                sources = [old_qn for (_, old_qn) in serde._client_tables.rename_table]
                 assert sources == ["SubLeak.OldParent"]
 
             def it_encodes_subclass_instances_under_their_own_qualname():
@@ -2099,8 +2110,8 @@ def describe_NamespaceAwareSerde():
                 # authored ``migrations=`` entries (none here) would apply.
                 serde = NamespaceAwareSerde()
 
-                assert serde._tables.rename_table == {}
-                assert serde._tables.addfield_table == {}
+                assert serde._client_tables.rename_table == {}
+                assert serde._client_tables.addfield_table == {}
 
         def when_class_is_decorated_but_out_of_scope():
             def with_legacy_write_enabled():
@@ -2215,7 +2226,7 @@ def describe_NamespaceAwareSerde():
 
             ids = NamespaceAwareSerde(namespaces=[WalkShapes]).revivable_identities()
 
-            assert ids == {
+            assert ids - _FRAMEWORK_RENAME_SOURCES == {
                 # DomainEvent nested directly in the Namespace.
                 (module, "WalkShapes.Recorded"),
                 # Non-DomainEvent nested in the Namespace for locality.
@@ -2274,6 +2285,7 @@ def describe_NamespaceAwareSerde():
             ids = serde.revivable_identities()
 
             assert ids == {
+                *_FRAMEWORK_RENAME_SOURCES,
                 # Live classes reached by the namespace walk.
                 (DecoReorg.__module__, "DecoReorg.Persist"),
                 (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),

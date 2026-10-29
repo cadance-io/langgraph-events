@@ -31,3 +31,11 @@ class Identity(NamedTuple):
     def label(self) -> str:
         """``<module>:<qualname>``, the form every message and report uses."""
         return f"{self.module}:{self.qualname}"
+
+    @property
+    def owned_by_library(self) -> bool:
+        """The module is ``langgraph_events`` or one of its submodules."""
+        return self.module == _LIBRARY or self.module.startswith(f"{_LIBRARY}.")
+
+
+_LIBRARY = "langgraph_events"

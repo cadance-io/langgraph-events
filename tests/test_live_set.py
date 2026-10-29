@@ -139,6 +139,13 @@ def _stale_postgres_saver(url: str) -> Iterator[BaseCheckpointSaver]:
         yield _StalePostgresSaver(conn)
 
 
+def _documented_prune_sql() -> str:
+    """The SQL that *Old blob versions* in docs/event-migrations.md gives."""
+    docs = Path(__file__).resolve().parents[1] / "docs" / "event-migrations.md"
+    section = docs.read_text().split("### Old blob versions", 1)[1]
+    return section.split("```sql\n", 1)[1].split("```", 1)[0]
+
+
 def describe_rewrite_live_set():
     def when_the_running_release_is_not_the_expected_one():
         def it_refuses_before_it_opens_the_store(tmp_path: Path):
@@ -225,6 +232,46 @@ def describe_rewrite_live_set():
             assert log.getvalue() == (
                 "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
             )
+
+    def when_the_plan_refuses_a_checkpoint():
+        def _fail_the_task(saver: BaseCheckpointSaver, tid: str) -> None:
+            tup = saver.get_tuple(_cfg(tid))
+            assert tup is not None
+            saver.put_writes(tup.config, [("__error__", "boom")], "task-1")
+
+        def it_stops_after_the_last_pass_that_can_rewrite(tmp_path: Path):
+            releases = _releases(tmp_path)
+            releases.seed("t1", "t2")
+            _fail_the_task(releases.saver, "t2")
+            log = io.StringIO()
+
+            outcome = rewrite_live_set(
+                releases.current, expect=releases.expect, apply=True, log=log
+            )
+
+            assert isinstance(outcome, LiveSetOutcome)
+            assert log.getvalue() == (
+                "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
+            )
+            assert [t.status for t in outcome.final.threads] == [
+                "unchanged",
+                "refused",
+            ]
+            assert not outcome.clean
+
+        def when_it_refuses_every_checkpoint():
+            def it_runs_no_pass(tmp_path: Path):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                _fail_the_task(releases.saver, "t1")
+
+                outcome = rewrite_live_set(
+                    releases.current, expect=releases.expect, apply=True
+                )
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.passes == ()
+                assert [t.status for t in outcome.final.threads] == ["refused"]
 
     def when_a_run_writes_old_bytes_after_the_rewrite():
         def when_one_pass_is_allowed():
@@ -445,3 +492,78 @@ def _keep(kw: dict) -> dict:
 
 def _no_read(saver: BaseCheckpointSaver) -> list[ThreadKey]:
     raise AssertionError("the rewrite read the store")
+
+
+def describe_the_documented_prune_of_old_blob_versions():
+    def _blob_count(url: str) -> int:
+        import psycopg
+
+        with psycopg.connect(url) as conn:
+            row = conn.execute("SELECT count(*) FROM checkpoint_blobs").fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def _unnamed_blob_count(url: str) -> int:
+        import psycopg
+
+        with psycopg.connect(url) as conn:
+            row = conn.execute(
+                "SELECT count(*) FROM checkpoint_blobs AS b WHERE NOT EXISTS ("
+                "SELECT 1 FROM checkpoints AS c WHERE c.thread_id = b.thread_id"
+                " AND c.checkpoint_ns = b.checkpoint_ns AND "
+                "c.checkpoint -> 'channel_versions' ->> b.channel = b.version)"
+            ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def _prune(url: str) -> None:
+        import psycopg
+
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute(_documented_prune_sql())  # type: ignore[arg-type]
+
+    def it_deletes_each_blob_version_the_rewrite_left_unnamed(
+        tmp_path: Path, postgres_url: str
+    ):
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        with PostgresSaver.from_conn_string(postgres_url) as saver:
+            releases = _releases(tmp_path, saver)
+            releases.seed("t1", "t2")
+            assert _unnamed_blob_count(postgres_url) == 0
+            rewrite_live_set(releases.current, expect=releases.expect, apply=True)
+            assert _unnamed_blob_count(postgres_url) == 2
+
+            _prune(postgres_url)
+
+            assert _unnamed_blob_count(postgres_url) == 0
+            assert releases.plan("t1", "t2") == ["unchanged", "unchanged"]
+            graph = releases.current.graph(saver)
+            notes = [e.note for e in graph.get_state(_cfg("t1")).events[1:]]
+            assert notes == ["t1"]
+
+    def it_keeps_a_blob_newer_than_each_version_a_checkpoint_names(
+        tmp_path: Path, postgres_url: str
+    ):
+        import psycopg
+        from langgraph.checkpoint.postgres import PostgresSaver
+
+        with PostgresSaver.from_conn_string(postgres_url) as saver:
+            releases = _releases(tmp_path, saver)
+            releases.seed("t1")
+            newer = saver.get_next_version(
+                saver.get_tuple(_cfg("t1")).checkpoint["channel_versions"]["events"],
+                None,
+            )
+        with psycopg.connect(postgres_url, autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO checkpoint_blobs (thread_id, checkpoint_ns, "
+                "channel, version, type, blob) VALUES "
+                "('t1', '', 'events', %s, 'empty', NULL)",
+                (newer,),
+            )
+        before = _blob_count(postgres_url)
+
+        _prune(postgres_url)
+
+        assert _blob_count(postgres_url) == before

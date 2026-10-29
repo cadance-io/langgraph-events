@@ -20,6 +20,7 @@ import ormsgpack
 from langgraph.checkpoint.serde.jsonplus import _option
 
 from langgraph_events._event import Event
+from langgraph_events._identity import Identity
 from langgraph_events.serde._jsonplus import (
     _UNEXPECTED_KWARG_RE,
     EXT_NAMESPACE_AWARE_EVENT,
@@ -33,8 +34,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
-
-_LIBRARY_PACKAGE = "langgraph_events"
 
 
 def synthesize_legacy_payload(
@@ -70,8 +69,7 @@ def revival_failure(
     its own suite, and a placeholder cannot satisfy a library class that
     validates a value in ``__post_init__``.
     """
-    module, _ = identity
-    if module == _LIBRARY_PACKAGE or module.startswith(f"{_LIBRARY_PACKAGE}."):
+    if Identity(*identity).owned_by_library:
         return _resolve_failure(serde, identity)
     return _revive_failure(serde, identity, recorded)
 

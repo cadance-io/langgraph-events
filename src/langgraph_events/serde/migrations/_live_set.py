@@ -103,7 +103,10 @@ def rewrite_live_set(
     unchanged, and logs one line to *log*, by default ``sys.stderr``. A
     run that writes during a pass can leave a checkpoint with old bytes,
     so the next plan reads it as not clean and the next pass rewrites it.
-    Without *apply*, the function only plans.
+    A pass rewrites only the checkpoints that the last plan reads as a
+    rewrite. The loop stops when no such checkpoint is left, because a
+    refused checkpoint changes only when a person acts. Without *apply*,
+    the function only plans.
 
     Raises:
         ValueError: when *passes* is below 1, or when the graph cannot be
@@ -136,8 +139,8 @@ def rewrite_live_set(
 
         reports: list[RewriteReport] = []
         final = plan()
-        while apply and _not_clean(final) and len(reports) < passes:
-            report = _walk(graph.rewrite_store, _not_clean(final), applied=True)
+        while apply and _to_rewrite(final) and len(reports) < passes:
+            report = _walk(graph.rewrite_store, _to_rewrite(final), applied=True)
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()
@@ -181,4 +184,14 @@ def _not_clean(report: RewriteReport) -> list[ThreadKey]:
         ThreadKey(t.thread_id, t.checkpoint_ns)
         for t in report.threads
         if t.status != "unchanged"
+    ]
+
+
+def _to_rewrite(report: RewriteReport) -> list[ThreadKey]:
+    """The checkpoints that a pass can change. A plan refuses a checkpoint
+    that only a person can clear, so a pass leaves it out."""
+    return [
+        ThreadKey(t.thread_id, t.checkpoint_ns)
+        for t in report.threads
+        if t.status == "rewrite"
     ]
