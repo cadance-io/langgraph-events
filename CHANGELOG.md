@@ -54,11 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration that the code still holds. A previous key follows a current rename. After
   the deletion, `update_baseline(..., previous=...)` resets the fields of the class to the
   `live` fields of the previous baseline, so the gate never asks to add the migration
-  back. Without `previous`, the update refuses when a recorded migration left the code:
-  only the previous baseline says whether a release shipped it. `hold_migration` keeps a
-  shipped migration for one more release: the hold records the digest of the previous
-  baseline file, so it expires in the next release also when the migrations did not
-  change. `MigrationSet` gains `fingerprint`, `shipped_in` and `deleted_since`.
+  back. A class that keeps another migration in the code keeps its fields, because that
+  migration can need them. A deleted key and a new key of the same kind on the same class
+  can be one migration whose key changed, and the `baseline-stale` finding says so. Without
+  `previous`, the update refuses when a recorded migration left the code: only the previous
+  baseline says whether a release shipped it. `hold_migration` keeps a shipped migration
+  for one more release: the hold records the digest of the previous baseline file, so it
+  expires in the next release also when the migrations did not change. A hold on a
+  migration that the committed baseline does not record yet adds its record. Each
+  `survived-release` finding gives the hold command. `MigrationSet` gains `fingerprint`,
+  `shipped_in` and `deleted_since`.
 - **One deploy step rewrites the live set of a store.** `rewrite_live_set(target, expect=...,
   apply=...)` and the CLI command `rewrite <target> --expect FP [--apply] [--passes N]`
   compare the migrations of the running code with the fingerprint `expect` before they open
@@ -149,11 +154,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reader revives a record whose class no longer imports, or no longer takes the stored
   fields, as a `dict` or `None`, with no error. A plan read such a thread as unchanged, so
   `rewrite` could exit 0 on history that no release reads. The reason names the channel,
-  and says to restore the class or delete the thread.
-- **A rewrite does not store an invalid pydantic model.** A migration that builds a model
-  that fails the validation of its class now refuses the thread. The reason names the
-  model, the event field and the error. Before, the rewrite stored the value, and once the
-  migration left the code, every read accepted it with no warning.
+  and says to restore the class or delete the thread. When an entry is a `dict`, the reason
+  also names `allowed_msgpack_modules`: a class that imports but that the allow-list of the
+  serde blocks also revives as a `dict`.
+- **A rewrite does not store an invalid pydantic model.** A migration that builds or
+  replaces a model that fails the validation of its class now refuses the thread. The
+  reason names the model, the event field and the error. Before, the rewrite stored the
+  value, and once the migration left the code, every read accepted it with no warning. A
+  model that the store already held is not checked, so a valid model that does not rebuild
+  from its own dump, for example through a field alias, does not refuse the thread.
 - **`rewrite --apply` stops when no pass can change the store.** A pass rewrites only the
   checkpoints that the last plan reads as a rewrite. A refused checkpoint changes only when
   a person acts, so the loop no longer plans it again on each pass.

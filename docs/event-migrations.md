@@ -554,6 +554,7 @@ python -m langgraph_events.serde.migrations check myapp.lge_target:target \
 - A previous file of version 1 to 3 records no migrations. The rule does not run against it, and the report says so.
 - A previous key follows a rename of the current code onto the live class. A key whose identity was a rename source in the previous file does not move.
 - When a migration leaves the code, run `baseline update --previous <file>`. If the previous release shipped the migration, the update drops the history that it covered. The fields of its class reset to the `live` fields of the previous file: the deploy of that release wrote every record in that shape.
+- A class that keeps another migration in the code keeps its fields. A changed key looks like a deletion and an addition, for example when a factory argument or the name of a callable changed. The `baseline-stale` finding names each deleted key and each new key of the same kind on the same class.
 - Without `--previous`, `baseline update` refuses with exit 2 when a recorded migration left the code. Only the previous file says whether a release shipped it. The error names the command with `--previous`.
 
 If the store cannot be made clean in time, keep the migration one more release:
@@ -564,7 +565,7 @@ python -m langgraph_events.serde.migrations baseline hold myapp.lge_target:targe
     --reason "a paused thread refuses the rewrite" --previous "$RUNNER_TEMP/prev.json"
 ```
 
-The hold records the digest of the whole previous file. The baseline of the next release holds the hold record, so its digest is different. A check against that file ignores the hold. So a hold lasts one release, also when the migrations did not change. To keep the migration one more release, hold it again. Every check lists each hold that applies. An expired hold shows in the `survived-release` finding of its migration, with the command to hold it again.
+The hold records the digest of the whole previous file. The baseline of the next release holds the hold record, so its digest is different. A check against that file ignores the hold. So a hold lasts one release, also when the migrations did not change. To keep the migration one more release, hold it again. Every check lists each hold that applies. Each `survived-release` finding gives the command to hold its migration, and an expired hold shows in it. A hold on a migration that the committed baseline does not record yet adds its record.
 
 `python -m langgraph_events.serde.migrations fingerprint <baseline file>` prints the fingerprint of the migrations a file records. It reads the JSON only.
 
@@ -614,7 +615,7 @@ Commit the baseline **alongside** the change that needs it, never after. Run `ba
 ```
 
 - **`events`** lists every live event class that the gate judges: the classes that the serde reads, and the classes that the graph can store. A class that no handler produces, for example a tombstone in a namespace of the serde, is in it too.
-- **`fields` is cumulative.** A field that was ever recorded can sit in a checkpoint, so the `revive` rule keeps sending it. An update keeps it. Only an update with `--previous` after a shipped migration left the code resets the fields of the identity that the migration covered.
+- **`fields` is cumulative.** A field that was ever recorded can sit in a checkpoint, so the `revive` rule keeps sending it. An update keeps it. Only an update with `--previous` after a shipped migration left the code resets the fields of the identity that the migration covered. An identity that keeps another migration in the code keeps its fields, because that migration can need them.
 - **`live`** lists the init fields of the live class when the file was written, the same set the serde writes. An update with `--previous` reads `live` from the previous file to reset the fields of a class.
 - **`retired`** lists every identity an update dropped from `events`, with the fields last recorded for it. The entry has no `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone.
 - **`handlers`** lists the handler node names. An update rebuilds it.
@@ -731,12 +732,12 @@ A refused checkpoint keeps the command from exit 0. The output names its reason.
 | Reason starts with | Cause | What to do |
 |---|---|---|
 | `history names ...` | A stored identity has no live class and no migration | Add a tombstone with `@migrate_from`, then run `rewrite --apply` |
-| `channel 'events' holds ... not as an event` | A serializer other than `NamespaceAwareSerde` wrote the entry, and its class no longer imports or no longer takes the stored fields. LangGraph's reader returns it as a `dict` or `None`, with no error, so no migration reaches it | Restore the class under its stored module and name. If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` |
-| `the rewritten value ... holds an invalid ...` | A migration builds a pydantic model that fails the validation of its class. The message names the model, the event field and the error | Fix the migration so that the value validates, then run `rewrite --apply` |
+| `channel 'events' holds ... not as an event` | A serializer other than `NamespaceAwareSerde` wrote the entry, and its class no longer imports or no longer takes the stored fields. LangGraph's reader returns it as a `dict` or `None`, with no error, so no migration reaches it. A class that imports but that `allowed_msgpack_modules` of the serde does not list also gives a `dict`, for example under `LANGGRAPH_STRICT_MSGPACK=true` | Restore the class under its stored module and name. If the class imports, add it to `allowed_msgpack_modules`. If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` |
+| `the rewritten value ... holds an invalid ...` | A migration builds or replaces a pydantic model that fails the validation of its class. The message names the model, the event field and the error | Fix the migration so that the value validates, then run `rewrite --apply` |
 
 A plan reads a thread with such an entry as refused, never as unchanged. So a store with history that no release can read does not pass as clean.
 
-The rewrite never stores an invalid pydantic model. LangGraph's reader revives a stored model with its constructor, and on a validation error with `model_construct`, which validates nothing. So once the migration that built the value leaves the code, every read accepts the invalid value with no warning.
+The rewrite never stores an invalid pydantic model. LangGraph's reader revives a stored model with its constructor, and on a validation error with `model_construct`, which validates nothing. So once the migration that built the value leaves the code, every read accepts the invalid value with no warning. The check reads only a model that a migration built or replaced, and calls `type(model)(**model.model_dump())`, the call of LangGraph's reader. A model that the store already held is stored unchanged. So a valid model that does not rebuild from its own dump, for example through a field alias, does not refuse the thread.
 
 ### Live traffic
 

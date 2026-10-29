@@ -104,11 +104,17 @@ def _identity_label(identity: Identity, *, retired: bool) -> str:
 
 @dataclass(frozen=True)
 class BaselineStale:
-    """The committed baseline differs from the baseline the code needs."""
+    """The committed baseline differs from the baseline the code needs.
+
+    ``changed`` pairs each deleted key with a new key of the code of the
+    same kind on the same identity: the key of one migration can have
+    changed, for example when a factory argument changed.
+    """
 
     code: ClassVar[str] = "baseline-stale"
     changes: tuple[str, ...]
     deleted: tuple[MigrationKey, ...]
+    changed: tuple[tuple[MigrationKey, MigrationKey], ...] = ()
 
     @property
     def subject(self) -> str:
@@ -120,9 +126,16 @@ class BaselineStale:
         changes = tuple(f"  {change}" for change in self.changes)
         if not self.deleted:
             return (*explanation, *changes, f"Run: {invocation.baseline_update()}")
+        changed = tuple(
+            f"{old.label} and {new.label} are of the same kind on the same "
+            f"event, so the key of one migration can have changed. The history "
+            f"of an event that keeps a migration stays."
+            for old, new in self.changed
+        )
         return (
             *explanation,
             *changes,
+            *changed,
             "A migration left the code. When the previous release shipped it, "
             "the update with --previous drops the history it covered.",
             f"Run: {invocation.baseline_update(prune=True)}",
@@ -267,14 +280,17 @@ class SurvivedRelease:
     def lines(self, invocation: Invocation) -> tuple[str, ...]:
         """The explanation, any expired hold, then the next command."""
         delete = "Delete it, then run: " + invocation.baseline_update(prune=True)
+        keep = "Or keep it one more release: " + invocation.baseline_hold(
+            self.key.label
+        )
         if self.expired is None:
-            return ("The previous release shipped this migration.", delete)
+            return ("The previous release shipped this migration.", delete, keep)
         return (
             "The previous release shipped this migration.",
             f"Its hold ({self.expired.reason}) was made against "
             f"{self.expired.against}, an older release, so it expired.",
             delete,
-            "Or keep it one more release: " + invocation.baseline_hold(self.key.label),
+            keep,
         )
 
 
@@ -357,8 +373,11 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
     judged = want if prev is not None else committed.updated(code, committed)
     findings: list[Finding] = []
     if want != committed:
+        deleted = _deleted(committed, code)
         findings.append(
-            BaselineStale(committed.changes_to(want), _deleted(committed, code))
+            BaselineStale(
+                committed.changes_to(want), deleted, _changed(deleted, committed, code)
+            )
         )
     findings.extend(
         AnonymousCallable(k) for k in sorted(code.migrations.keys) if k.anonymous
@@ -465,6 +484,22 @@ def _deleted(committed: Baseline, code: Snapshot) -> tuple[MigrationKey, ...]:
     if isinstance(keys, MigrationsUnrecorded):
         return ()
     return tuple(sorted(code.migrations.deleted_since(keys)))
+
+
+def _changed(
+    deleted: tuple[MigrationKey, ...], committed: Baseline, code: Snapshot
+) -> tuple[tuple[MigrationKey, MigrationKey], ...]:
+    """Each deleted key with each new key of the same kind and identity."""
+    keys = committed.recorded_keys
+    if isinstance(keys, MigrationsUnrecorded):
+        return ()
+    added = sorted(code.migrations.keys - keys)
+    return tuple(
+        (old, new)
+        for old in deleted
+        for new in added
+        if (new.kind, new.identity) == (old.kind, old.identity)
+    )
 
 
 def _coverage_and_revival(

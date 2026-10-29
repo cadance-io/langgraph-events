@@ -11,6 +11,7 @@ from _migration_fixtures import (
     _CLI,
     _DROP_TOTAL,
     _MODULE,
+    _OLD_TRIMMED,
     _TRIMMED,
     Asking,
     BadFill,
@@ -33,6 +34,7 @@ from _migration_fixtures import (
     ValidatedDefault,
     _add,
     _baselined,
+    _changed_key,
     _deleted_transform,
     _entry,
     _ghost,
@@ -878,8 +880,26 @@ def describe_check():
                     f"via {_MODULE}:_drop_total\n"
                     "    The previous release shipped this migration.\n"
                     f"    Delete it, then run: {_CLI} baseline update "
-                    "app.lge:target --previous ci/prev.json"
+                    "app.lge:target --previous ci/prev.json\n"
+                    f"    Or keep it one more release: {_CLI} baseline hold "
+                    f"app.lge:target '{_TRIMMED}' --reason <why> --previous "
+                    "ci/prev.json"
                 )
+
+        def when_a_migration_key_changed():
+            def it_names_the_new_key_of_the_same_kind_and_identity(tmp_path: Path):
+                target, previous = _changed_key(tmp_path)
+
+                text = check(target, previous=previous).render(
+                    Invocation("app.lge:target", "prev.json")
+                )
+
+                assert (
+                    f"    {_OLD_TRIMMED} and {_TRIMMED} are of the same kind on "
+                    "the same event, so the key of one migration can have "
+                    "changed. The history of an event that keeps a migration "
+                    "stays.\n"
+                ) in text
 
         def when_a_deletion_needs_a_previous_baseline():
             def it_prints_a_placeholder_for_it(tmp_path: Path):

@@ -18,7 +18,15 @@ from conftest import Ended, Started
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-from pydantic import BaseModel
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    computed_field,
+    field_serializer,
+    field_validator,
+)
 from test_event_graph import _AsyncOnlySaver
 
 from langgraph_events import (
@@ -51,6 +59,47 @@ def _unvalidated_spec(kw: dict[str, typing.Any]) -> dict[str, typing.Any]:
     """Builds the field model with no validation, so ``kind`` stays ``None``."""
     kw.setdefault("spec", _Spec.model_construct(kind=None))
     return kw
+
+
+class _Aliased(BaseModel):
+    """Valid, but its dump uses the field name and its constructor the alias."""
+
+    x: int = Field(alias="X")
+
+
+class _ForbidComputed(BaseModel):
+    """Valid, but its dump holds a computed field that ``extra`` forbids."""
+
+    model_config = ConfigDict(extra="forbid")
+    a: int
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def b(self) -> int:
+        return self.a
+
+
+class _Serialized(BaseModel):
+    """Valid, but its serializer dumps a value its validator refuses."""
+
+    when: int
+
+    @field_serializer("when")
+    def _text(self, value: int) -> str:
+        return f"{value}s"
+
+
+class _NeedsContext(BaseModel):
+    """Valid, but its validator reads a context the constructor cannot give."""
+
+    a: int
+
+    @field_validator("a")
+    @classmethod
+    def _context(cls, value: int, info: ValidationInfo) -> int:
+        if info.context is None:
+            raise ValueError("needs context")
+        return value
 
 
 class _Again(IntegrationEvent):
@@ -751,6 +800,32 @@ def describe_rewrite_store_refusals():
             )
             assert "delete_thread()" in thread.reason
 
+        def when_the_allow_list_of_the_serde_blocks_its_class():
+            def it_names_the_allow_list():
+                saver = MemorySaver(serde=JsonPlusSerializer())
+
+                @on(Started)
+                def make(event: Started) -> _Go:
+                    return _Go()
+
+                EventGraph([make], checkpointer=saver).invoke(
+                    Started(data="x"), config=_cfg("t1")
+                )
+                saver.serde = NamespaceAwareSerde(
+                    events=(Started, _Go), allowed_msgpack_modules=None
+                )
+                graph = EventGraph([_completes], checkpointer=saver)
+
+                thread = _only(graph.plan_rewrite(thread_ids=["t1"]))
+
+                assert thread.reason.startswith(
+                    "channel 'events' holds 2 entries that revive as dict, not as "
+                    "events."
+                )
+                assert thread.reason.endswith(
+                    "Then add each class to allowed_msgpack_modules, then rerun"
+                )
+
         def it_writes_nothing():
             saver = MemorySaver()
             graph = _langgraph_written(saver)
@@ -796,6 +871,83 @@ def describe_rewrite_store_refusals():
                 f"{_New.__qualname__}.spec: 1 validation error for _Spec kind"
             )
             assert saver.blobs == blobs
+
+    def when_a_migration_replaces_a_stored_model():
+        def with_a_model_that_fails_validation():
+            def it_refuses_the_thread_and_names_the_class_and_field():
+                saver = MemorySaver()
+
+                class _Old(IntegrationEvent):
+                    spec: object = None
+
+                @on(Started)
+                def make(event: Started) -> _Old:
+                    return _Old(spec=_Spec(kind="a"))
+
+                saver.serde = NamespaceAwareSerde(events=(Started, _Old))
+                EventGraph([make], checkpointer=saver).invoke(
+                    Started(data="x"), config=_cfg("t1")
+                )
+
+                @migrate_from(
+                    _Old.__qualname__,
+                    in_module=_Old.__module__,
+                    transform=lambda kw: {
+                        **kw,
+                        "spec": _Spec.model_construct(kind=None),
+                    },
+                )
+                class _New(IntegrationEvent):
+                    spec: object = None
+
+                saver.serde = NamespaceAwareSerde(events=(Started, _New))
+                graph = EventGraph([_completes], checkpointer=saver)
+
+                thread = _only(graph.plan_rewrite(thread_ids=["t1"]))
+
+                assert thread.reason.startswith(
+                    "the rewritten value in channel 'events' holds an invalid _Spec in "
+                    f"{_New.__qualname__}.spec: 1 validation error for _Spec kind"
+                )
+
+    def when_a_stored_model_does_not_rebuild_from_its_dump():
+        # LangGraph revives such a model with ``model_construct``. No
+        # migration built it, so the rewrite stores what the store holds.
+        @pytest.mark.parametrize(
+            "model",
+            [
+                _Aliased(X=1),
+                _ForbidComputed(a=1),
+                _Serialized(when=1),
+                _NeedsContext.model_validate({"a": 1}, context={"k": 1}),
+            ],
+            ids=type,
+        )
+        def it_rewrites_the_thread(model: BaseModel):
+            saver = MemorySaver()
+
+            class _Old(IntegrationEvent):
+                held: object = None
+
+            @on(Started)
+            def make(event: Started) -> _Old:
+                return _Old(held=model)
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _Old))
+            EventGraph([make], checkpointer=saver).invoke(
+                Started(data="x"), config=_cfg("t1")
+            )
+
+            @migrate_from(_Old.__qualname__, in_module=_Old.__module__)
+            class _New(IntegrationEvent):
+                held: object = None
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _New))
+            graph = EventGraph([_completes], checkpointer=saver)
+
+            report = graph.rewrite_store(thread_ids=["t1"])
+
+            assert [(t.status, t.reason) for t in report.threads] == [("rewrite", "")]
 
     def when_the_history_cannot_revive():
         def it_asks_for_a_tombstone_first():
@@ -1070,7 +1222,7 @@ def describe_rewrite_store_refusals():
             serde = NamespaceAwareSerde(events=(Started,))
 
             problem, _identities = _verify_value(
-                serde, [Started(), object()], "events", set(), set()
+                serde, [Started(), object()], "events", set(), set(), frozenset()
             )
 
             assert problem is not None

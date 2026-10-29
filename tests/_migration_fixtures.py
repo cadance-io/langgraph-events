@@ -361,6 +361,26 @@ def _deleted_transform(
     return target, release.baseline
 
 
+_OLD_TRIMMED = f"transform {_MODULE}:Trimmed.Place.Placed via {_MODULE}:_old_drop"
+
+
+def _changed_key(tmp_path: Path) -> tuple[MigrationTarget, Path]:
+    """Release N records ``Trimmed.Place.Placed`` with ``total`` and a
+    transform keyed ``_old_drop``. The code keeps a transform on the same
+    identity under the key ``_drop_total``. Returns the N+1 target, whose
+    committed baseline is still N's, and N's baseline."""
+    target = _target(tmp_path, Trimmed)
+    update_baseline(target)
+    raw = _read(target.baseline)
+    raw["migrations"] = [{"label": _OLD_TRIMMED}]
+    placed = raw["events"][1]
+    placed["fields"] = sorted({*placed["fields"], "total"})
+    target.baseline.write_text(json.dumps(raw))
+    previous = tmp_path / "previous.json"
+    previous.write_text(target.baseline.read_text())
+    return target, previous
+
+
 def _moved_transform(tmp_path: Path) -> MigrationTarget:
     """The committed baseline records the transform of ``_drop_total`` on
     ``Old.Placed``. The code renamed ``Old.Placed`` to

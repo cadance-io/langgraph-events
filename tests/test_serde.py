@@ -3896,7 +3896,7 @@ def describe_scan_identities():
 
 def describe_record_reads():
     # A collector, shaped like ``tolerate_unresolved()``: every stored
-    # record this read met, as (stored, resolved, touched) entries.
+    # record this read met, as (stored, resolved, touched, built) entries.
 
     def it_records_a_renamed_identity_as_touched_per_stored_record():
         serde = NamespaceAwareSerde(namespaces=[_Rec])
@@ -3907,8 +3907,8 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
 
         assert reads == [
-            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
-            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
         ]
 
     def it_records_a_same_identity_transform_as_touched():
@@ -3918,7 +3918,14 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed(_RecSameIdentity()))
 
-        assert reads == [((mod, "_RecSameIdentity"), (mod, "_RecSameIdentity"), True)]
+        assert reads == [
+            (
+                (mod, "_RecSameIdentity"),
+                (mod, "_RecSameIdentity"),
+                True,
+                ("transformed",),
+            )
+        ]
 
     def it_records_an_identity_transform_as_untouched():
         # The table ran, the kwargs did not change: a rewrite would store
@@ -3931,7 +3938,7 @@ def describe_record_reads():
             serde.loads_typed(serde.dumps_typed(_RecIdentityTransform()))
 
         assert reads == [
-            ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False)
+            ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False, ())
         ]
 
     def it_records_a_fill_as_touched_only_for_a_payload_that_lacked_the_field():
@@ -3943,8 +3950,8 @@ def describe_record_reads():
             serde.loads_typed(serde.dumps_typed(_RecFilled(flag=False)))
 
         assert reads == [
-            ((mod, "_RecFilled"), (mod, "_RecFilled"), True),
-            ((mod, "_RecFilled"), (mod, "_RecFilled"), False),
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), True, (True,)),
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), False, ()),
         ]
 
     def it_records_nothing_for_a_record_that_does_not_revive():
@@ -3964,7 +3971,7 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed([_RecUntouched()]))
 
-        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False)]
+        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False, ())]
 
     def it_stays_off_outside_the_block():
         serde = NamespaceAwareSerde(namespaces=[_Rec])

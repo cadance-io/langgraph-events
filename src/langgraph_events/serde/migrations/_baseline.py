@@ -93,11 +93,17 @@ class CodeRecord:
         Each migration of this code that *current* no longer holds resets
         the identity it keyed. A rename source, or an identity a rename of
         this code read away, has no record left: it leaves the history.
-        Any other identity keeps the live fields of this code.
+        Any other identity keeps the live fields of this code. An identity
+        that keeps a migration in *current* keeps its history: that
+        migration can need a recorded field, for example when only the key
+        of a migration changed.
         """
         pruned = dict(history)
         sources = _rename_sources(self.keys)
+        kept = {key.identity for key in current.keys}
         for key in current.deleted_since(self.keys):
+            if key.identity in kept:
+                continue
             if key.kind == "rename" or key.identity in sources:
                 pruned.pop(key.identity, None)
             elif key.identity in self.live:
@@ -262,25 +268,24 @@ class Baseline:
         )
 
     def held(self, key: MigrationKey, hold: Hold) -> Baseline:
-        """This baseline with *hold* on the record of *key*.
+        """This baseline with *hold* on the record of *key*. A key the
+        baseline does not record yet gets a record.
 
         Raises:
-            ValueError: when the baseline does not record *key*.
+            ValueError: when the baseline records no migrations.
         """
         code = self.code
-        if isinstance(code, MigrationsUnrecorded) or key not in code.keys:
+        if isinstance(code, MigrationsUnrecorded):
             raise ValueError(
-                f"The baseline does not record {key.label!r}. Hold only a "
-                f"migration the code holds, and run `baseline update` first."
+                f"The baseline is version {code.version} and records no "
+                f"migrations. Run `baseline update` first."
             )
+        others = tuple(record for record in code.migrations if record.key != key)
         return dataclasses.replace(
             self,
             code=CodeRecord(
                 tuple(
-                    MigrationRecord(
-                        record.key, hold if record.key == key else record.hold
-                    )
-                    for record in code.migrations
+                    sorted((*others, MigrationRecord(key, hold)), key=lambda r: r.key)
                 ),
                 code.live,
             ),

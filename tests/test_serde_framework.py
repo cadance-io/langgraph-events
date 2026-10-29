@@ -333,8 +333,8 @@ def describe_framework_migrations():
                 event = client_serde.loads_typed(_stored("v0_40_0")["RunPaused"])
             with client_serde._record_reads() as second:
                 client_serde.loads_typed(client_serde.dumps_typed(event))
-            assert [touched for *_, touched in first] == [True]
-            assert [touched for *_, touched in second] == [False]
+            assert [touched for _, _, touched, _ in first] == [True]
+            assert [touched for _, _, touched, _ in second] == [False]
 
     def describe_a_record_that_the_langgraph_serializer_wrote():
         def when_its_class_is_an_event():
@@ -348,8 +348,8 @@ def describe_framework_migrations():
                 written = client_serde.dumps_typed(event)
                 with client_serde._record_reads() as second:
                     client_serde.loads_typed(written)
-                assert [touched for *_, touched in first] == [True]
-                assert [touched for *_, touched in second] == [False]
+                assert [touched for _, _, touched, _ in first] == [True]
+                assert [touched for _, _, touched, _ in second] == [False]
                 assert _scan_identities(written[1]) == [
                     ("langgraph_events._event", "Halted")
                 ]

@@ -154,7 +154,7 @@ def _migrated_pairs(reads: Sequence[ReadRecord]) -> tuple[tuple[str, str], ...]:
     """The touched records as ``(stored, live)`` labels, deduped in read
     order."""
     pairs: list[tuple[str, str]] = []
-    for stored, live, touched in reads:
+    for stored, live, touched, _built in reads:
         pair = (Identity(*stored).label, Identity(*live).label)
         if touched and pair not in pairs:
             pairs.append(pair)
@@ -236,7 +236,7 @@ def plan_thread(
     values: dict[str, Any] = tup.checkpoint["channel_values"]
     dropped = _count_drops(values, drop)
     drop_identities = {(cls.__module__, cls.__qualname__) for cls in drop}
-    present = any(live in drop_identities for _stored, live, _touched in reads)
+    present = any(live in drop_identities for _stored, live, *_ in reads)
 
     def refused(reason: str) -> ThreadRewrite:
         return ThreadRewrite(
@@ -257,8 +257,15 @@ def plan_thread(
     interrupt_writes = tuple(w for w in pending if w[1] == _INTERRUPT_CHANNEL)
     new_values, changed = _drop_from_log(values, drop)
     checkpoint = _copy_checkpoint(tup.checkpoint, new_values)
+    built = frozenset(id(value) for *_, values in reads for value in values)
     reason, new_versions = _verify_and_bump(
-        serde, checkpoint, changed, interrupt_writes, drop_identities, next_version
+        serde,
+        checkpoint,
+        changed,
+        interrupt_writes,
+        drop_identities,
+        built,
+        next_version,
     )
     if reason is not None:
         return refused(reason)
@@ -288,7 +295,8 @@ def _entries_not_events(values: dict[str, Any]) -> str | None:
 
     LangGraph's own serializer revives a record whose class no longer
     imports, or no longer takes the stored fields, as a ``dict`` or
-    ``None``, with no error. No migration reaches such a record.
+    ``None``, with no error. No migration reaches such a record. A class
+    that its allow-list blocks also revives as a ``dict``.
     """
     for channel in _LOG_CHANNELS:
         entries = [
@@ -303,13 +311,21 @@ def _entries_not_events(values: dict[str, Any]) -> str | None:
             else f"{len(entries)} entries that revive"
         )
         noun = "an event" if len(entries) == 1 else "events"
+        blocked = (
+            ". A dict also comes from a class that imports but that the "
+            "allowed_msgpack_modules of the serde does not list, for example "
+            "under LANGGRAPH_STRICT_MSGPACK=true. Then add each class to "
+            "allowed_msgpack_modules, then rerun"
+            if any(isinstance(e, dict) for e in entries)
+            else ""
+        )
         return (
             f"channel {channel!r} holds {count} as {kinds}, not as {noun}. "
             f"A serializer other than NamespaceAwareSerde wrote them, and their "
             f"class no longer imports or no longer takes the stored fields, so "
             f"no migration reaches them. Restore each class under its stored "
             f"module and name, or delete the thread with the checkpointer's "
-            f"delete_thread() if nobody needs it, then rerun"
+            f"delete_thread() if nobody needs it, then rerun{blocked}"
         )
     return None
 
@@ -380,17 +396,21 @@ def _verify_and_bump(
     changed: set[str],
     interrupt_writes: Sequence[tuple[str, str, Any]],
     forbidden: set[tuple[str, str]],
+    built: frozenset[int],
     next_version: Callable[[Any, None], Any],
 ) -> tuple[str | None, dict[str, Any]]:
     """Verify every value ``put`` will encode, and bump the version of
-    each channel whose value changed or carries an event. Returns the
+    each channel whose value changed or carries an event. *built* holds
+    the ``id()`` of each field value a migration built. Returns the
     refusal reason, or ``None`` and the ``new_versions`` for ``put``."""
     historic = set(serde._tables.rename_table)
     versions: dict[str, Any] = checkpoint["channel_versions"]
     new_versions: dict[str, Any] = {}
     for channel, value in checkpoint["channel_values"].items():
         where = f"channel {channel!r}"
-        problem, identities = _verify_value(serde, value, where, forbidden, historic)
+        problem, identities = _verify_value(
+            serde, value, where, forbidden, historic, built
+        )
         if problem is not None:
             return problem, {}
         if channel in changed or identities:
@@ -401,7 +421,9 @@ def _verify_and_bump(
             _mirror_seen(checkpoint["versions_seen"], channel, old, new)
     for _task_id, channel, value in interrupt_writes:
         where = f"the pending {channel} write"
-        problem, _identities = _verify_value(serde, value, where, forbidden, historic)
+        problem, _identities = _verify_value(
+            serde, value, where, forbidden, historic, built
+        )
         if problem is not None:
             return problem, {}
     return None, new_versions
@@ -530,9 +552,11 @@ def _verify_value(
     where: str,
     forbidden: set[tuple[str, str]],
     historic: set[tuple[str, str]],
+    built: frozenset[int],
 ) -> tuple[str | None, list[tuple[str, str]]]:
     """Encode *value* the way ``put`` will, then prove the bytes name no
-    dropped or historic identity and revive under the strict serde.
+    dropped or historic identity and revive under the strict serde, and
+    that each pydantic model a migration built in *value* validates.
 
     *where* names the value in a refusal, ``"channel 'events'"`` or
     ``"the pending __interrupt__ write"``. Returns ``(problem,
@@ -565,19 +589,23 @@ def _verify_value(
                 f"the re-encode still names historic identity {identity[1]} in {where}",
                 [],
             )
-    return _revival_problem(serde, data, where), identities
+    return _revival_problem(serde, data, value, where, built), identities
 
 
 def _revival_problem(
-    serde: NamespaceAwareSerde, data: tuple[str, bytes], where: str
+    serde: NamespaceAwareSerde,
+    data: tuple[str, bytes],
+    value: object,
+    where: str,
+    built: frozenset[int],
 ) -> str | None:
-    """Why the bytes *data* of the value in *where* do not revive valid, or
-    ``None``."""
+    """Why the bytes *data* of *value* in *where* do not revive, or why a
+    model a migration built in *value* is invalid, or ``None``."""
     try:
-        revived = serde.loads_typed(data)
+        serde.loads_typed(data)
     except ValueError as exc:
         return f"the rewritten value in {where} does not revive ({exc})"
-    invalid = _invalid_model(revived, "")
+    invalid = _invalid_model(value, "", built, inside=False)
     if invalid is None:
         return None
     return (
@@ -587,19 +615,27 @@ def _revival_problem(
     )
 
 
-def _invalid_model(value: object, path: str) -> str | None:
-    """The first pydantic model inside an event of *value* that fails the
-    validation of its class, as ``<model> in <event>.<field>: <error>``.
+def _invalid_model(
+    value: object, path: str, built: frozenset[int], *, inside: bool
+) -> str | None:
+    """The first pydantic model that a migration built inside an event of
+    *value* and that fails the validation of its class, as
+    ``<model> in <event>.<field>: <error>``.
 
     LangGraph's serializer revives a stored model with its constructor, and
     on a validation error with ``model_construct``, which validates nothing.
     So a rewrite must not store an invalid model: once the migration that
-    built it leaves the code, every read accepts it with no warning. *path*
-    is the event field that holds *value*. A model outside every event is
-    not checked.
+    built it leaves the code, every read accepts it with no warning. A model
+    that the store already held is not checked: a valid model can fail the
+    rebuild from its dump, for example through an alias, and the rewrite
+    stores it unchanged. *path* is the event field that holds *value*.
+    *inside* is ``True`` below a value whose ``id()`` is in *built*.
     """
+    inside = inside or id(value) in built
     dump = getattr(value, "model_dump", None)
     if path and not isinstance(value, type) and callable(dump):
+        if not inside:
+            return None
         try:
             type(value)(**dump())
         except (ValueError, TypeError) as exc:
@@ -618,7 +654,7 @@ def _invalid_model(value: object, path: str) -> str | None:
     else:
         return None
     for child, child_path in children:
-        problem = _invalid_model(child, child_path)
+        problem = _invalid_model(child, child_path, built, inside=inside)
         if problem is not None:
             return problem
     return None

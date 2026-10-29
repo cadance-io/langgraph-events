@@ -116,10 +116,12 @@ class UnrevivedIdentity(NamedTuple):
     qualname: str
 
 
-ReadRecord = tuple[tuple[str, str], tuple[str, str], bool]
-"""One stored event record: ``(stored, resolved, touched)``. *stored* and
-*resolved* are ``(module, qualname)`` identities. *touched* is ``True``
-when the migration table rewrote the record."""
+ReadRecord = tuple[tuple[str, str], tuple[str, str], bool, tuple[object, ...]]
+"""One stored event record: ``(stored, resolved, touched, built)``. *stored*
+and *resolved* are ``(module, qualname)`` identities. *touched* is ``True``
+when the migration table rewrote the record. *built* holds each field value
+that the migration added or replaced, as the object the event holds. A
+stored value that the migration kept is not in it."""
 
 
 def _scan_identities(data: bytes) -> list[tuple[str, str]]:
@@ -430,7 +432,7 @@ def _make_ext_hook(
             # stays the STORED one when the migration itself fails.
             stored = (module_name, qualname)
             # A fill mutates ``kwargs`` in place: snapshot it first.
-            before = dict(kwargs) if reads is not None else None
+            before = dict(kwargs) if reads is not None else {}
             module_name, qualname, kwargs = tables.migrate(
                 module_name, qualname, kwargs
             )
@@ -445,7 +447,12 @@ def _make_ext_hook(
                 touched = (
                     reformat or stored != (module_name, qualname) or kwargs != before
                 )
-                reads.append((stored, (module_name, qualname), touched))
+                built = tuple(
+                    value
+                    for name, value in kwargs.items()
+                    if name not in before or before[name] is not value
+                )
+                reads.append((stored, (module_name, qualname), touched, built))
             return instance
         except (ImportError, AttributeError, TypeError, _CallableError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity

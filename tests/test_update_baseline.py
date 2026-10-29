@@ -9,6 +9,7 @@ import pytest
 from _migration_fixtures import (
     _CLI,
     _MODULE,
+    _OLD_TRIMMED,
     _TRIMMED,
     Derived,
     Renamed,
@@ -18,6 +19,7 @@ from _migration_fixtures import (
     TrimmedWide,
     _add,
     _baselined,
+    _changed_key,
     _deleted_transform,
     _entry,
     _fields,
@@ -286,6 +288,18 @@ def describe_update_baseline():
                         "note",
                     ]
 
+            def when_another_migration_on_the_identity_stays():
+                def it_keeps_the_fields(tmp_path: Path):
+                    target, previous = _changed_key(tmp_path)
+
+                    update_baseline(target, previous=previous)
+
+                    assert _fields(target.baseline)["Trimmed.Place.Placed"] == [
+                        "note",
+                        "total",
+                    ]
+                    assert check(target, previous=previous).findings == ()
+
             def it_drops_the_source_of_a_deleted_rename(tmp_path: Path):
                 gone = {"label": f"rename {_MODULE}:Shop.Gone"}
                 target = _target(tmp_path, Shop)
@@ -367,6 +381,25 @@ def describe_hold_migration():
             (record,) = _read(target.baseline)["migrations"]
             assert record["label"] == _TRIMMED
             assert record["hold"]["reason"] == "subgraph"
+
+    def when_the_committed_baseline_does_not_record_the_label_yet():
+        def it_records_the_hold_and_keeps_the_fields(tmp_path: Path):
+            target, older = _changed_key(tmp_path)
+            shipped = _target(tmp_path, Trimmed, name="shipped.json")
+            update_baseline(shipped, previous=older)
+
+            hold_migration(target, _TRIMMED, reason="x", previous=shipped.baseline)
+            update_baseline(target, previous=shipped.baseline)
+
+            raw = _read(target.baseline)
+            assert [r["label"] for r in raw["migrations"]] == [_TRIMMED]
+            assert raw["migrations"][0]["hold"]["reason"] == "x"
+            assert _fields(target.baseline)["Trimmed.Place.Placed"] == [
+                "note",
+                "total",
+            ]
+            assert _OLD_TRIMMED not in target.baseline.read_text()
+            assert check(target, previous=shipped.baseline).findings == ()
 
     def when_the_code_does_not_hold_the_label():
         def it_refuses(tmp_path: Path):
