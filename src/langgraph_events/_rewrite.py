@@ -298,43 +298,48 @@ def _history_refusal(
 
 
 def _entries_not_events(values: dict[str, Any]) -> str | None:
-    """Why a log channel holds an entry that is not an event, or ``None``.
+    """Why a log channel holds an entry that is not an event, or ``None``."""
+    for channel in _LOG_CHANNELS:
+        problem = _not_events(_log_entries(values, channel) or [])
+        if problem is not None:
+            return f"channel {channel!r} {problem}"
+    return None
+
+
+def _not_events(log: list[Any]) -> str | None:
+    """Why *log* holds an entry that is not an event, or ``None``.
 
     LangGraph's own serializer revives a record whose class no longer
     imports, or no longer takes the stored fields, as a ``dict`` or
     ``None``, with no error. No migration reaches such a record. A class
     that its allow-list blocks also revives as a ``dict``.
     """
-    for channel in _LOG_CHANNELS:
-        entries = [
-            e for e in _log_entries(values, channel) or () if not isinstance(e, Event)
-        ]
-        if not entries:
-            continue
-        kinds = " or ".join(sorted({type(e).__name__ for e in entries}))
-        count = (
-            "1 entry that revives"
-            if len(entries) == 1
-            else f"{len(entries)} entries that revive"
-        )
-        noun = "an event" if len(entries) == 1 else "events"
-        blocked = (
-            ". A dict also comes from a class that imports but that the "
-            "allowed_msgpack_modules of the serde does not list, for example "
-            "under LANGGRAPH_STRICT_MSGPACK=true. Then add each class to "
-            "allowed_msgpack_modules, then rerun"
-            if any(isinstance(e, dict) for e in entries)
-            else ""
-        )
-        return (
-            f"channel {channel!r} holds {count} as {kinds}, not as {noun}. "
-            f"A serializer other than NamespaceAwareSerde wrote them, and their "
-            f"class no longer imports or no longer takes the stored fields, so "
-            f"no migration reaches them. Restore each class under its stored "
-            f"module and name, or delete the thread with the checkpointer's "
-            f"delete_thread() if nobody needs it, then rerun{blocked}"
-        )
-    return None
+    entries = [e for e in log if not isinstance(e, Event)]
+    if not entries:
+        return None
+    kinds = " or ".join(sorted({type(e).__name__ for e in entries}))
+    count = (
+        "1 entry that revives"
+        if len(entries) == 1
+        else f"{len(entries)} entries that revive"
+    )
+    noun = "an event" if len(entries) == 1 else "events"
+    blocked = (
+        ". A dict also comes from a class that imports but that the "
+        "allowed_msgpack_modules of the serde does not list, for example "
+        "under LANGGRAPH_STRICT_MSGPACK=true. Then add each class to "
+        "allowed_msgpack_modules, then rerun"
+        if any(isinstance(e, dict) for e in entries)
+        else ""
+    )
+    return (
+        f"holds {count} as {kinds}, not as {noun}. "
+        f"A serializer other than NamespaceAwareSerde wrote them, and their "
+        f"class no longer imports or no longer takes the stored fields, so "
+        f"no migration reaches them. Restore each class under its stored "
+        f"module and name, or delete the thread with the checkpointer's "
+        f"delete_thread() if nobody needs it, then rerun{blocked}"
+    )
 
 
 _RESUME_THE_ROOT = (
@@ -390,12 +395,21 @@ def _pending_refusal(
             )
         if channel == _INTERRUPT_CHANNEL:
             continue
+        where = f"thread has a completed task write on task {task_id!r} in"
+        problem = (
+            _not_events(value)
+            if channel in _LOG_CHANNELS and isinstance(value, list)
+            else None
+        )
+        if problem is not None:
+            # A resume would append the entry to the log, so its remedy
+            # is the remedy of the entry.
+            return f"{where} channel {channel!r} that {problem}"
         problem = _write_problem(channel, value, decoded, drop, shifts=shifts)
         if problem is not None:
             remedy = "resume or abandon it, then rerun"
             return (
-                f"thread has a completed task write on task {task_id!r} in "
-                f"channel {channel!r} that {problem}; "
+                f"{where} channel {channel!r} that {problem}; "
                 f"{_NO_CALL_CLEARS if subgraph else remedy}"
             )
     return None
@@ -412,12 +426,12 @@ def _write_problem(
     """What a completed task write holds that the rewrite would change, or
     ``None``.
 
-    ``PostgresSaver`` and ``MemorySaver`` store a completed task write once
-    and never replace it, so the rewrite keeps the write as it is. A resume
-    applies the write and does not run its task again. So the decode of the
-    write must read no touched record and no class in *drop*. *shifts* is
-    ``True`` when *drop* removes an ``events`` entry. A position in the
-    write then names another event.
+    ``PostgresSaver``, ``SqliteSaver`` and ``MemorySaver`` store a completed
+    task write once and never replace it, so the rewrite keeps the write as
+    it is. A resume applies the write and does not run its task again. So
+    the decode of the write must read no touched record and no class in
+    *drop*. *shifts* is ``True`` when *drop* removes an ``events`` entry. A
+    position in the write then names another event.
     """
     records = next((r for result, r in decoded if result is value), None)
     if records is None:

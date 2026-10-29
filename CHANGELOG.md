@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on every pass. Its old shape stayed. Now the rewrite keeps such a write as it is, and a
   resume applies it without a new run of its task. A completed task write is still refused
   when its stored value holds a record that a migration rewrites, or a class in `drop=`.
-  It is also refused when it holds a log position and `drop=` removes an event from the log.
+  It is also refused when it holds a log position and `drop=` removes an event from the log,
+  or when it writes an entry that is not an event to `events` or `_pending`.
   The reason names the task, the channel, and the identity or the position. The rule is the
   rule of the checkpoint values: a record is touched when the migration changes its identity,
   or changes its fields to values that encode to other bytes. A pending `__error__` write

@@ -140,6 +140,10 @@ class _AdvancingSaver(MemorySaver):
         return result
 
 
+class _Hold(Interrupted):
+    pass
+
+
 class _CopyingSaver(MemorySaver):
     """Returns a copy of each pending write value, not the value that the
     serde decoded."""
@@ -1128,6 +1132,44 @@ def describe_rewrite_store_refusals():
                 "an event."
             )
             assert "delete_thread()" in thread.reason
+
+        def when_a_completed_sibling_write_holds_the_entry():
+            def it_names_the_task_and_the_channel():
+                saver = MemorySaver()
+
+                class _Gone(IntegrationEvent):
+                    pass
+
+                @on(Started)
+                def wait(event: Started) -> _Hold:
+                    return _Hold()
+
+                @on(_Go)
+                def hold(event: _Go) -> _Hold:
+                    return _Hold()
+
+                @on(_Go)
+                def make(event: _Go) -> _Gone:
+                    return _Gone()
+
+                cfg = _cfg("t1")
+                saver.serde = JsonPlusSerializer()
+                graph = EventGraph([wait, hold, make], checkpointer=saver)
+                graph.invoke(Started(data="x"), config=cfg)
+                graph.resume(_Go(), config=cfg)
+                saver.serde = NamespaceAwareSerde(events=(Started, _Go, _Hold))
+
+                thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+                assert thread.reason.startswith(
+                    f"thread has a completed task write on task "
+                    f"{_task_writing(saver, cfg, 'events')!r} in channel 'events' "
+                    f"that holds 1 entry that revives as NoneType, not as an "
+                    f"event. "
+                )
+                assert thread.reason.endswith(
+                    "delete_thread() if nobody needs it, then rerun"
+                )
 
         def when_the_allow_list_of_the_serde_blocks_its_class():
             def it_names_the_allow_list():

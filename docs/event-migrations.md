@@ -1002,6 +1002,8 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
     - an instance of a class in `drop=`
     - a log position, when `drop=` removes an event from the log
 
+    A completed write to `events` or `_pending` that holds an entry that is not an event is also refused. Restore the class of the entry, or delete the thread. A resume would append the entry to the log.
+
     The rewrite keeps every other completed write as it is. A resume applies the write and does not run its task again.
 - It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
