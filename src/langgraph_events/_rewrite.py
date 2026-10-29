@@ -378,6 +378,13 @@ A new run of the root thread writes under a new namespace and leaves this
 checkpoint."""
 
 
+_ABANDON_UNPAUSED = (
+    "abandon it with abandon(config, require_interrupt=False), then rerun"
+)
+"""The remedy for a root thread that a resume cannot clear. On a thread with no
+pending interrupt, ``resume()`` and a plain ``abandon()`` refuse."""
+
+
 def _pending_refusal(
     pending: Sequence[tuple[str, str, Any]],
     values: dict[str, Any],
@@ -407,14 +414,18 @@ def _pending_refusal(
         )
     shifts = any(type(entry) in drop for entry in _log_entries(values, "events") or ())
     if not subgraph:
-        remedy = "resume or abandon it, then rerun"
+        remedy = (
+            "resume or abandon it, then rerun"
+            if interrupt_writes
+            else _ABANDON_UNPAUSED
+        )
     else:
         # A resume of the root thread reruns the paused subgraph task under
         # the same namespace, and that run applies the completed write.
         remedy = _RESUME_THE_ROOT if interrupt_writes else _NO_CALL_CLEARS
     for task_id, channel, value in pending:
         if channel == _ERROR_CHANNEL:
-            rerun = "run it again or abandon it, then rerun"
+            rerun = f"run it again, or {_ABANDON_UNPAUSED}"
             return (
                 f"thread has a pending __error__ write from a failed task; "
                 f"{_NO_CALL_CLEARS if subgraph else rerun}"

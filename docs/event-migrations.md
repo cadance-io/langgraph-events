@@ -1002,7 +1002,7 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 - Its history names an identity the serde cannot revive. Add a [tombstone](#recovering-a-delete-first-deployment) first.
 - It is paused on a dropped class. `abandon()` it first.
 - A dropped event is pending dispatch on a paused thread. After the drop, the resumed task finds no event to handle and ends the thread with the answer lost. Resume or abandon the thread first.
-- It holds a completed task write from a fanned-out sibling, and the rewrite would change that write. The checkpointer API cannot rewrite the write. Resume or abandon the thread first. The reason names the task, the channel, and the identity or the index that the write holds. A write changes when it holds one of these:
+- It holds a completed task write from a fanned-out sibling, and the rewrite would change that write. The checkpointer API cannot rewrite the write. Resume or abandon the thread first. When the thread has no pending interrupt, `resume()` and a plain `abandon()` refuse it. Call `abandon(config, require_interrupt=False)` instead. The reason names the task, the channel, and the identity or the index that the write holds. A write changes when it holds one of these:
     - a record that a migration rewrites
     - an instance of a class in `drop=`
     - an index into `events`, when `drop=` removes an event from `events`
@@ -1011,7 +1011,7 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 
     The rewrite keeps every other completed write as it is. A resume applies the write and does not run its task again.
 - `get_tuple()` of the checkpointer returns a completed task write as another object than the one that the serde decoded. See [Checkpointers](#checkpointers).
-- It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
+- It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it with `abandon(config, require_interrupt=False)`.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
 - A run advanced the thread between the read and the write. Rerun.
 - The saver did not overwrite the checkpoint or its `__interrupt__` write. See [Checkpointers](#checkpointers).

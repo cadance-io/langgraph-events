@@ -156,6 +156,16 @@ class _CopyingSaver(MemorySaver):
         return tup._replace(pending_writes=writes)
 
 
+class _CrashingSaver(MemorySaver):
+    """Stores no ``__error__`` write, like a process that stopped before it
+    saved the error of a failed task."""
+
+    def put_writes(self, config, writes, task_id, task_path=""):  # type: ignore[override]
+        kept = [w for w in writes if w[0] != "__error__"]
+        if kept:
+            super().put_writes(config, kept, task_id, task_path)
+
+
 @on(_Go)
 def _go_ends(event: _Go) -> Ended:
     return Ended(result="went")
@@ -514,6 +524,38 @@ def _paused_renamed_pair(saver: MemorySaver, tid: str):
 
     saver.serde = NamespaceAwareSerde(events=(Started, _NewGate, _LivePause))
     return EventGraph([wait_old, wait_live, finish], checkpointer=saver), cfg, fired
+
+
+def _failed_beside_a_sibling(saver: MemorySaver, tid: str):
+    """A root thread whose run failed and left no pending interrupt. A
+    sibling task completed in the superstep that failed. Its write holds an
+    event whose class release N+1 renamed with ``@migrate_from``. Returns
+    the release N+1 graph, the config and the old class."""
+
+    class _OldSide(IntegrationEvent):
+        pass
+
+    @on(Started)
+    def side(event: Started) -> _OldSide:
+        return _OldSide()
+
+    @on(Started)
+    def explode(event: Started) -> None:
+        raise RuntimeError("boom")
+
+    cfg = _cfg(tid)
+    saver.serde = NamespaceAwareSerde(events=(Started, _OldSide))
+    with pytest.raises(RuntimeError, match="boom"):
+        EventGraph([side, explode], checkpointer=saver).invoke(
+            Started(data="x"), config=cfg
+        )
+
+    @migrate_from(_OldSide.__qualname__, in_module=_OldSide.__module__)
+    class _NewSide(IntegrationEvent):
+        pass
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _NewSide))
+    return EventGraph([_completes], checkpointer=saver), cfg, _OldSide
 
 
 def _paused_beside_a_sibling(saver: BaseCheckpointSaver, tid: str, *, emits: bool):
@@ -1476,6 +1518,31 @@ def describe_rewrite_store_refusals():
                 f"resume or abandon it, then rerun"
             )
 
+    def when_an_unpaused_thread_holds_a_completed_write_to_migrate():
+        def it_names_the_abandon_call_that_clears_it():
+            saver = _CrashingSaver()
+            graph, cfg, old = _failed_beside_a_sibling(saver, "t1")
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason == (
+                f"thread has a completed task write on task "
+                f"{_task_writing(saver, cfg, 'events')!r} in channel 'events' "
+                f"that holds {_identity(old)}, which a migration rewrites; "
+                f"abandon it with abandon(config, require_interrupt=False), "
+                f"then rerun"
+            )
+
+        def when_the_thread_is_abandoned_as_the_reason_says():
+            def it_leaves_nothing_to_refuse():
+                saver = _CrashingSaver()
+                graph, cfg, _old = _failed_beside_a_sibling(saver, "t1")
+                graph.abandon(cfg, require_interrupt=False)
+
+                [thread] = graph.rewrite_store(thread_ids=["t1"]).threads
+
+                assert thread.status == "unchanged"
+
     def when_the_saver_returns_a_write_that_the_serde_did_not_decode():
         def it_refuses_the_write_it_cannot_read():
             saver = _CopyingSaver()
@@ -1680,8 +1747,21 @@ def describe_rewrite_store_refusals():
 
             assert thread.reason == (
                 "thread has a pending __error__ write from a failed task; run "
-                "it again or abandon it, then rerun"
+                "it again, or abandon it with abandon(config, "
+                "require_interrupt=False), then rerun"
             )
+
+        def when_the_thread_is_abandoned_as_the_reason_says():
+            def it_leaves_nothing_to_refuse():
+                saver = MemorySaver()
+                graph, cfg, _old = _failed_beside_a_sibling(saver, "t1")
+                channels = {c for _t, c, _v in saver.get_tuple(cfg).pending_writes}
+                assert "__error__" in channels
+                graph.abandon(cfg, require_interrupt=False)
+
+                [thread] = graph.rewrite_store(thread_ids=["t1"]).threads
+
+                assert thread.status == "unchanged"
 
     def when_a_failed_task_left_an_error_write_in_a_subgraph():
         def it_names_the_one_call_that_clears_it():

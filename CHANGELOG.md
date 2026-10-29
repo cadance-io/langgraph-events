@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PreviousRequiredError` is public.** Import it from `langgraph_events.serde.migrations`.
+  `update_baseline()` raises it when migrations left the code and `previous` is not given.
+  It is a `ValueError`. `.deleted` holds the `MigrationKey` of each migration that left the
+  code. Before, a client could catch it only from a private module.
+
 ### Fixed
 
 - **`rewrite_store()` accepts a completed task write that holds no old shape.** Before, a
@@ -25,6 +32,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   migration changes its identity, or changes its fields to values that encode to other
   bytes. A pending `__error__` write from a failed task is still refused
   ([#217](https://github.com/cadance-io/langgraph-events/issues/217)).
+- **A refused root thread with no pending interrupt names a call that clears it.** Before,
+  the reason for a completed task write asked you to resume or abandon the thread, and the
+  reason for an `__error__` write asked you to abandon it. `resume()` and a plain `abandon()`
+  refuse a thread with no pending interrupt. Now both reasons name
+  `abandon(config, require_interrupt=False)`.
 
 ## [0.42.0] - 2026-10-29
 
