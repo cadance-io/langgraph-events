@@ -648,11 +648,47 @@ target = MigrationTarget(
 )
 ```
 
-- `store` returns a context manager of a sync checkpointer.
+- `store` returns a context manager of a sync checkpointer. An async context manager, for example from `AsyncPostgresSaver.from_conn_string`, stops the command with exit 2. If your app uses an async saver, give `store` the sync saver of the same database, for example `PostgresSaver.from_conn_string(url)` or `SqliteSaver.from_conn_string(path)`.
 - `PostgresSaver.from_conn_string` takes the plain libpq form, `postgresql://...`. The SQLAlchemy form with a driver, `postgresql+psycopg://...`, fails in psycopg with `missing "=" after ...`. If your app keeps its URL in the SQLAlchemy form, remove `+psycopg` before you give the URL to the saver.
 - The commands import the target and call `graph`, so the graph factory runs your full app setup. Run each command in an environment that has the configuration of your app, for example its environment variables. If the app setup opens a SQLAlchemy engine, it needs the driver form `postgresql+psycopg://...`. A plain `postgresql://...` there selects psycopg2, and the setup fails with `No module named 'psycopg2'` when only psycopg 3 is installed.
-- The command lists the threads of a `PostgresSaver` or a `MemorySaver`. For another saver, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and namespace.
+- The command lists the threads of a `PostgresSaver`, a `SqliteSaver` or a `MemorySaver`. For another saver, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and namespace. See [Checkpointers](#checkpointers).
 - If one store holds more than one graph, set `threads=` and return the threads of this graph only.
+
+### Checkpointers
+
+The table gives what each checkpointer supports. A plan writes nothing. An apply writes each checkpoint again under its own id.
+
+| Checkpointer | Plan and apply | Thread listing of the command | Prune of old blob versions |
+|---|---|---|---|
+| `PostgresSaver` | Yes | Built in, with one SQL query | Needed. See [Old blob versions](#old-blob-versions) |
+| `SqliteSaver` | Yes | Built in, with one SQL query | Not needed. `put()` replaces the whole checkpoint row |
+| `MemorySaver` | Yes | Built in, from its storage | No prune. The old versions stay in memory |
+| A custom saver | Yes, when it obeys the two rules below | Set `threads=list_thread_keys` for a small store, or your own function | It depends on the saver |
+| `AsyncPostgresSaver`, `AsyncSqliteSaver` | Through `aplan_rewrite()` and `arewrite_store()` only | None. Pass `thread_ids=` and `checkpoint_ns=` | The same as the sync saver of the same database |
+
+The `rewrite` command takes a sync checkpointer only. For a store that the app reads through an async saver, give `store` the sync saver of the same database.
+
+A custom saver must obey two rules, or the rewrite cannot store a thread:
+
+1. `put()` of a checkpoint whose id is in the store replaces the stored checkpoint.
+2. `put_writes()` of an `__interrupt__` write replaces the stored `__interrupt__` write of the same task.
+
+The base class `BaseCheckpointSaver` does not promise either rule. So after each write, the rewrite reads the checkpoint and plans it again. If the checkpoint still needs a rewrite, the thread is refused with `the saver did not overwrite checkpoint <id>`. Fix the saver, then run `rewrite --apply` again.
+
+`list_thread_keys` lists the threads of any saver through its public `list(None)`:
+
+```python
+from langgraph_events.serde.migrations import MigrationTarget, list_thread_keys
+
+target = MigrationTarget(
+    graph=build_graph,
+    baseline=Path(__file__).parent / "lge-baseline.json",
+    store=open_my_saver,
+    threads=list_thread_keys,
+)
+```
+
+WARNING: `list(None)` reads and decodes every checkpoint of the store, older checkpoints included. On a large store, `list_thread_keys` costs time in proportion to the whole store, and memory when the saver loads all rows at once. For a large store, write a `threads` function that asks the store for each distinct thread id and checkpoint namespace.
 
 ### The steps
 
@@ -720,7 +756,7 @@ your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp
 |---|---|---|
 | 0 | The last plan reads every checkpoint unchanged | The counts of each pass and of the last plan |
 | 1 | The store is not clean | Each checkpoint and its reason, then the next command: `rewrite --apply` |
-| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, the store does not open | The error, on one line, with its type when lge did not raise it |
+| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open | The error, on one line, with its type when lge did not raise it |
 | 3 | Wrong release: the running code does not hold the expected migrations | Both fingerprints, the running migrations and the command |
 
 The Python form is `rewrite_live_set(target, expect=..., apply=...)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the fence refuses. `LiveSetOutcome.passes` holds the report of each pass, `final` holds the last plan, and `clean` gives the verdict.
@@ -751,7 +787,9 @@ The next plan reads that thread as not clean, and the next pass rewrites it. Onl
 
 ### Old blob versions
 
-The rewrite stores each changed channel under a new version and keeps the checkpoint id. The store grows by the size of each rewritten channel. An earlier checkpoint of the thread can still name the old blob version. Otherwise no checkpoint names it.
+This step applies to `PostgresSaver` only. `PostgresSaver` stores each channel value as a blob row under its version, apart from the checkpoint row. `SqliteSaver` stores the channel values in the checkpoint row, and `put()` replaces the whole row. So it keeps no old version and needs no prune. `MemorySaver` keeps each old version in memory, with no prune.
+
+The rewrite stores each changed channel under a new version and keeps the checkpoint id. On Postgres, the store grows by the size of each rewritten channel. An earlier checkpoint of the thread can still name the old blob version. Otherwise no checkpoint names it.
 
 The command does not delete the old versions. A run that read checkpoint C before the rewrite writes its next checkpoint with the old version of each channel that it did not update. If that blob were gone, the channel would read as empty, and no plan could see the loss. With the blob kept, the run brings old bytes back, and the next plan sees them.
 
@@ -798,7 +836,7 @@ WARNING: `delete_thread()` deletes every checkpoint of the thread, the root name
 
 A subgraph checkpoint that is paused on a class in `drop` clears when the root thread resumes. `abandon()` on the root thread does not clear it.
 
-The Python form is `graph.plan_rewrite(thread_ids=..., checkpoint_ns=...)` and `graph.rewrite_store(thread_ids=..., checkpoint_ns=...)`. The default `checkpoint_ns=""` is the root namespace.
+The Python form is `graph.plan_rewrite(thread_ids=..., checkpoint_ns=...)` and `graph.rewrite_store(thread_ids=..., checkpoint_ns=...)`. The default `checkpoint_ns=""` is the root namespace. The async twins `aplan_rewrite()` and `arewrite_store()` take the same `checkpoint_ns=`.
 
 ## Testing your migrations
 
@@ -941,7 +979,7 @@ report = graph.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_i
 assert not report.refused
 ```
 
-Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran: `"rewrite"` in a plan means the thread needs a write, in an applied report it means the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the log entries `drop=` removed, per identity. `reason` says what to do with a refused thread. `str(report)` prints one summary line, then one line per refused thread. The async twins are `aplan_rewrite()` and `arewrite_store()`.
+Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran: `"rewrite"` in a plan means the thread needs a write, in an applied report it means the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the log entries `drop=` removed, per identity. `reason` says what to do with a refused thread. `str(report)` prints one summary line, then one line per refused thread. The async twins are `aplan_rewrite()` and `arewrite_store()`. They take the same arguments, `checkpoint_ns=` included.
 
 Before the write, each rewritten value is encoded the way `put()` encodes it, scanned for a dropped or historic identity, and revived under the strict serde. One failure refuses the thread, and nothing is written for it. A thread is also refused when:
 
@@ -952,6 +990,7 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 - It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
 - A run advanced the thread between the read and the write. Rerun.
+- The saver did not overwrite the checkpoint or its `__interrupt__` write. See [Checkpointers](#checkpointers).
 
 An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is dropped, the rewrite sets the field to `None`. The `Resumed` event stays, and `dropped` does not count the cleared field. `drop=` matches the stored identity exactly. A subclass instance stays in place.
 

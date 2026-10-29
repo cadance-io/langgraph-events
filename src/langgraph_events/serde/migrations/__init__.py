@@ -56,6 +56,7 @@ from langgraph_events.serde.migrations._target import (
     MigrationTarget,
     TargetError,
     ThreadKey,
+    list_thread_keys,
 )
 from langgraph_events.serde.migrations.testing import (
     assert_migration_gate,
@@ -92,6 +93,7 @@ __all__ = [
     "backfill",
     "check",
     "hold_migration",
+    "list_thread_keys",
     "migrate_from",
     "replay_reducer",
     "rewrite_live_set",

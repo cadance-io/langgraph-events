@@ -14,7 +14,9 @@ import contextlib
 import typing
 
 import pytest
+from _dict_saver import DictSaver
 from conftest import Ended, Started
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -375,6 +377,49 @@ def _paused_renamed_pair(saver: MemorySaver, tid: str):
 
     saver.serde = NamespaceAwareSerde(events=(Started, _NewGate, _LivePause))
     return EventGraph([wait_old, wait_live, finish], checkpointer=saver), cfg, fired
+
+
+def _paused_on_renamed_interrupt(saver: BaseCheckpointSaver, tid: str):
+    """A thread paused on an interrupt whose class release N+1 renamed.
+
+    Returns the release N+1 graph and the config.
+    """
+
+    class _OldGate(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _OldGate:
+        return _OldGate()
+
+    cfg = _cfg(tid)
+    saver.serde = NamespaceAwareSerde(events=(Started, _OldGate))
+    EventGraph([wait], checkpointer=saver).invoke(Started(data="x"), config=cfg)
+
+    @migrate_from(_OldGate.__qualname__, in_module=_OldGate.__module__)
+    class _NewGate(Interrupted):
+        pass
+
+    @on(Started)
+    def wait_new(event: Started) -> _NewGate:
+        return _NewGate()
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
+    return EventGraph([wait_new], checkpointer=saver), cfg
+
+
+def _checkpoint_id(saver: BaseCheckpointSaver, cfg: dict[str, typing.Any]) -> str:
+    tup = saver.get_tuple(cfg)
+    assert tup is not None
+    return tup.config["configurable"]["checkpoint_id"]
+
+
+def _dict_identities(saver: DictSaver, cfg: dict[str, typing.Any]) -> set:
+    """Every event identity in the stored bytes of the latest checkpoint."""
+    thread = cfg["configurable"]["thread_id"]
+    rows = saver.rows[(thread, "")]
+    checkpoint, _metadata, _parent = rows[max(rows)]
+    return set(_scan_identities(checkpoint[1]))
 
 
 async def _arenamed_history_pair(saver: MemorySaver, tid: str):
@@ -760,6 +805,18 @@ def describe_rewrite_store():
                 assert list(saver.storage["t1"]) == [ns]
                 stored = _stored_identities(saver, "t1", ns)
                 assert (new.__module__, new.__qualname__) in stored
+
+    def when_a_custom_saver_overwrites_a_checkpoint():
+        def it_stores_the_live_identity():
+            saver = DictSaver()
+            graph, cfg, old, new = _renamed_history_pair(saver, "t1")
+
+            report = graph.rewrite_store(thread_ids=["t1"])
+
+            assert [t.status for t in report.threads] == ["rewrite"]
+            stored = _dict_identities(saver, cfg)
+            assert (old.__module__, old.__qualname__) not in stored
+            assert (new.__module__, new.__qualname__) in stored
 
 
 def describe_rewrite_store_refusals():
@@ -1237,6 +1294,42 @@ def describe_rewrite_store_refusals():
 
             assert thread.reason == "thread advanced during the rewrite; rerun"
 
+    def when_the_saver_does_not_overwrite_a_checkpoint():
+        def it_refuses_the_thread_and_names_the_saver_behaviour():
+            saver = DictSaver(put_overwrites=False)
+            graph, cfg, old, _new = _renamed_history_pair(saver, "t1")
+            checkpoint_id = _checkpoint_id(saver, cfg)
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                f"the saver did not overwrite checkpoint {checkpoint_id}; "
+            )
+            assert (old.__module__, old.__qualname__) in _dict_identities(saver, cfg)
+
+        async def it_refuses_the_thread_through_the_async_saver():
+            saver = DictSaver(put_overwrites=False)
+            graph, cfg, _old, _new = await _arenamed_history_pair(saver, "t1")
+            checkpoint_id = _checkpoint_id(saver, cfg)
+
+            thread = _only(await graph.arewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                f"the saver did not overwrite checkpoint {checkpoint_id}; "
+            )
+
+    def when_the_saver_does_not_overwrite_an_interrupt_write():
+        def it_refuses_the_paused_thread():
+            saver = DictSaver(writes_overwrite=False)
+            graph, cfg = _paused_on_renamed_interrupt(saver, "t1")
+            checkpoint_id = _checkpoint_id(saver, cfg)
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                f"the saver did not overwrite checkpoint {checkpoint_id}; "
+            )
+
 
 def describe_rewrite_report():
     def it_is_exported_at_the_top_level():
@@ -1299,30 +1392,61 @@ def describe_async_twins():
     # from the running loop. Every read and write must go through the
     # async API.
 
-    async def it_plans_through_the_async_saver():
-        saver = _AsyncOnlySaver()
-        graph, _config, old, new = await _arenamed_history_pair(saver, "t1")
+    def when_a_root_thread_holds_a_renamed_identity():
+        async def it_plans_through_the_async_saver():
+            saver = _AsyncOnlySaver()
+            graph, _config, old, new = await _arenamed_history_pair(saver, "t1")
 
-        report = await graph.aplan_rewrite(thread_ids=["t1"])
+            report = await graph.aplan_rewrite(thread_ids=["t1"])
 
-        assert report.applied is False
-        [thread] = report.threads
-        assert thread.migrated == ((_identity(old), _identity(new)),)
+            assert report.applied is False
+            [thread] = report.threads
+            assert thread.migrated == ((_identity(old), _identity(new)),)
 
-    async def it_rewrites_through_the_async_saver():
-        saver = _AsyncOnlySaver()
-        graph, _config, old, new = await _arenamed_history_pair(saver, "t1")
+        async def it_rewrites_through_the_async_saver():
+            saver = _AsyncOnlySaver()
+            graph, _config, old, new = await _arenamed_history_pair(saver, "t1")
 
-        report = await graph.arewrite_store(thread_ids=["t1"])
+            report = await graph.arewrite_store(thread_ids=["t1"])
 
-        assert report.applied is True
-        [thread] = report.threads
-        assert thread.status == "rewrite"
-        stored = await _astored_identities(saver, "t1")
-        assert (old.__module__, old.__qualname__) not in stored
-        assert (new.__module__, new.__qualname__) in stored
-        [again] = (await graph.aplan_rewrite(thread_ids=["t1"])).threads
-        assert again.status == "unchanged"
+            assert report.applied is True
+            [thread] = report.threads
+            assert thread.status == "rewrite"
+            stored = await _astored_identities(saver, "t1")
+            assert (old.__module__, old.__qualname__) not in stored
+            assert (new.__module__, new.__qualname__) in stored
+            [again] = (await graph.aplan_rewrite(thread_ids=["t1"])).threads
+            assert again.status == "unchanged"
+
+    def when_a_subgraph_checkpoint_holds_a_renamed_identity():
+        async def it_plans_the_namespace_and_writes_nothing():
+            saver = MemorySaver()
+            graph, ns, old, _new = _subgraph_pair(saver, "t1")
+
+            report = await graph.aplan_rewrite(thread_ids=["t1"], checkpoint_ns=ns)
+
+            [thread] = report.threads
+            assert (thread.status, thread.checkpoint_ns) == ("rewrite", ns)
+            assert (old.__module__, old.__qualname__) in _stored_identities(
+                saver, "t1", ns
+            )
+
+        async def it_rewrites_in_place_and_keeps_the_parent_link():
+            saver = MemorySaver()
+            graph, ns, old, new = _subgraph_pair(saver, "t1")
+            before = saver.get_tuple(_cfg("t1", ns))
+            assert before is not None
+
+            report = await graph.arewrite_store(thread_ids=["t1"], checkpoint_ns=ns)
+
+            assert [t.status for t in report.threads] == ["rewrite"]
+            stored = _stored_identities(saver, "t1", ns)
+            assert (old.__module__, old.__qualname__) not in stored
+            assert (new.__module__, new.__qualname__) in stored
+            after = saver.get_tuple(_cfg("t1", ns))
+            assert after is not None
+            assert after.checkpoint["id"] == before.checkpoint["id"]
+            assert after.parent_config == before.parent_config
 
 
 def describe_documented_retirement_sequence():

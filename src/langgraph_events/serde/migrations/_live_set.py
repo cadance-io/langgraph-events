@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from langgraph_events._rewrite import RewriteReport
+from langgraph_events._rewrite import RewriteReport, ThreadRewrite
 from langgraph_events.serde.migrations._target import TargetError, ThreadKey
 
 if TYPE_CHECKING:
@@ -72,14 +72,22 @@ class LiveSetOutcome:
         return not _not_clean(self.final)
 
     def render(self, invocation: Invocation, expect: str) -> str:
-        """The verdict, each checkpoint that is not clean, then the next command."""
+        """The verdict, each checkpoint that is not clean, then the next command.
+
+        A checkpoint that the last plan reads as a rewrite also names the
+        reason when the last pass refused to write it.
+        """
         head = str(self.final).splitlines()[0]
         if self.clean:
             return f"lge rewrite: clean (last plan: {head})"
         lines = [f"lge rewrite: not clean (last plan: {head})"]
+        last_pass = self.passes[-1].threads if self.passes else ()
+        pass_refusals = {_key(t): t.reason for t in last_pass if t.status == "refused"}
         for thread in self.final.threads:
             if thread.status == "rewrite":
-                lines.append(f"  {thread.location}: needs a rewrite")
+                refusal = pass_refusals.get(_key(thread))
+                suffix = f", the last pass refused it: {refusal}" if refusal else ""
+                lines.append(f"  {thread.location}: needs a rewrite{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.location}: refused, {thread.reason}")
         lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
@@ -112,17 +120,12 @@ def rewrite_live_set(
         ValueError: when *passes* is below 1, or when the graph cannot be
             rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
-            ``NamespaceAwareSerde``, or when the saver that ``store``
-            opens holds a serde with other migrations than the code.
+            ``NamespaceAwareSerde``, when ``store`` returns an async context
+            manager, or when the saver that ``store`` opens holds a serde
+            with other migrations than the code.
     """
     if passes < 1:
         raise ValueError(f"passes must be 1 or more, got {passes}.")
-    if target.store is None:
-        raise TargetError(
-            "The target has no store. Set store= on the MigrationTarget to a "
-            "function that opens the checkpointer, for example "
-            "lambda: PostgresSaver.from_conn_string(url)."
-        )
     running = target.snapshot().migrations
     if running.fingerprint != expect:
         return WrongRelease(
@@ -131,7 +134,7 @@ def rewrite_live_set(
             running_labels=tuple(sorted(key.label for key in running.keys)),
         )
     out = sys.stderr if log is None else log
-    with target.store() as saver:
+    with target.open_store() as saver:
         graph = _same_serde(target.build(saver), running)
 
         def plan() -> RewriteReport:
@@ -179,19 +182,15 @@ def _walk(
     )
 
 
+def _key(thread: ThreadRewrite) -> ThreadKey:
+    return ThreadKey(thread.thread_id, thread.checkpoint_ns)
+
+
 def _not_clean(report: RewriteReport) -> list[ThreadKey]:
-    return [
-        ThreadKey(t.thread_id, t.checkpoint_ns)
-        for t in report.threads
-        if t.status != "unchanged"
-    ]
+    return [_key(t) for t in report.threads if t.status != "unchanged"]
 
 
 def _to_rewrite(report: RewriteReport) -> list[ThreadKey]:
     """The checkpoints that a pass can change. A plan refuses a checkpoint
     that only a person can clear, so a pass leaves it out."""
-    return [
-        ThreadKey(t.thread_id, t.checkpoint_ns)
-        for t in report.threads
-        if t.status == "rewrite"
-    ]
+    return [_key(t) for t in report.threads if t.status == "rewrite"]

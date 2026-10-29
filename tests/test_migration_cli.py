@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from _live_set_fixtures import _copy_to_namespace, _graph, _releases
+from _dict_saver import DictSaver
+from _live_set_fixtures import _cfg, _copy_to_namespace, _graph, _releases
 from _migration_fixtures import (
     _CLI,
     _TRIMMED,
@@ -19,7 +21,11 @@ from _migration_fixtures import (
     _target,
 )
 
-from langgraph_events.serde.migrations import MigrationTarget, ThreadKey
+from langgraph_events.serde.migrations import (
+    MigrationTarget,
+    ThreadKey,
+    list_thread_keys,
+)
 from langgraph_events.serde.migrations.__main__ import main
 
 if TYPE_CHECKING:
@@ -298,6 +304,86 @@ def describe_rewrite_command():
                     f"  Run: {_CLI} rewrite {spec} --apply --expect {expect}"
                 ]
 
+        def when_the_store_is_a_sqlite_saver():
+            def it_rewrites_each_namespace_and_exits_zero(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                from langgraph.checkpoint.sqlite import SqliteSaver
+
+                path = str(tmp_path / "store.db")
+                with SqliteSaver.from_conn_string(path) as saver:
+                    releases = _releases(tmp_path, saver)
+                    releases.seed("t1", "t2")
+                    _copy_to_namespace(saver, "t1", "child:1")
+                target = dataclasses.replace(
+                    releases.current, store=lambda: SqliteSaver.from_conn_string(path)
+                )
+                spec = _install(monkeypatch, target)
+
+                code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+                out, err = capsys.readouterr()
+                assert code == 0
+                assert err == (
+                    "pass 1: applied: 3 threads, 3 rewrite, 0 unchanged, 0 refused\n"
+                )
+                assert out.startswith("lge rewrite: clean")
+
+        def when_the_store_is_a_custom_saver():
+            def when_the_target_lists_its_threads():
+                def with_list_thread_keys():
+                    def it_rewrites_each_namespace_and_exits_zero(
+                        tmp_path: Path,
+                        monkeypatch: pytest.MonkeyPatch,
+                        capsys: pytest.CaptureFixture[str],
+                    ):
+                        releases = _releases(tmp_path, DictSaver())
+                        releases.seed("t1")
+                        _copy_to_namespace(releases.saver, "t1", "child:1")
+                        target = dataclasses.replace(
+                            releases.current, threads=list_thread_keys
+                        )
+                        spec = _install(monkeypatch, target)
+
+                        code = main(
+                            ["rewrite", spec, "--expect", releases.expect, "--apply"]
+                        )
+
+                        assert code == 0
+                        assert capsys.readouterr().err == (
+                            "pass 1: applied: 2 threads, 2 rewrite, 0 unchanged, "
+                            "0 refused\n"
+                        )
+
+            def when_the_saver_does_not_overwrite_a_checkpoint():
+                def it_exits_one_and_names_the_saver_behaviour(
+                    tmp_path: Path,
+                    monkeypatch: pytest.MonkeyPatch,
+                    capsys: pytest.CaptureFixture[str],
+                ):
+                    releases = _releases(tmp_path, DictSaver(put_overwrites=False))
+                    releases.seed("t1")
+                    tup = releases.saver.get_tuple(_cfg("t1"))
+                    assert tup is not None
+                    checkpoint_id = tup.config["configurable"]["checkpoint_id"]
+                    target = dataclasses.replace(
+                        releases.current, threads=list_thread_keys
+                    )
+                    spec = _install(monkeypatch, target)
+
+                    code = main(
+                        ["rewrite", spec, "--expect", releases.expect, "--apply"]
+                    )
+
+                    out = capsys.readouterr().out.splitlines()
+                    assert code == 1
+                    assert out[1].startswith(
+                        f"  t1: needs a rewrite, the last pass refused it: the "
+                        f"saver did not overwrite checkpoint {checkpoint_id}; "
+                    )
+
         def when_the_running_release_is_not_the_expected_one():
             def it_exits_three_and_names_both_fingerprints(
                 tmp_path: Path,
@@ -356,6 +442,32 @@ def describe_target_errors():
                 "checkpointer: too many positional arguments. Write it as "
                 "def build(checkpointer) -> EventGraph, and build the graph on "
                 "that checkpointer.\n"
+            )
+
+    def when_the_store_opens_an_async_saver():
+        def it_exits_two_and_names_the_sync_saver(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(
+                releases.current,
+                store=lambda: AsyncSqliteSaver.from_conn_string(str(tmp_path / "s.db")),
+            )
+            spec = _install(monkeypatch, target)
+
+            code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+            assert code == 2
+            assert capsys.readouterr().err == (
+                "error: The store= function of the target returned an async "
+                "context manager. The rewrite command needs a sync checkpointer. "
+                "Return the sync saver of the same database, for example "
+                "SqliteSaver.from_conn_string(path) for an AsyncSqliteSaver, or "
+                "PostgresSaver.from_conn_string(url) for an AsyncPostgresSaver.\n"
             )
 
     def when_the_store_does_not_open():

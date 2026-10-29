@@ -74,13 +74,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   old bytes during a pass is rewritten in the next pass. Only the last plan decides the exit
   code: 0 clean, 1 not clean. `LiveSetOutcome` holds each pass and the last plan.
   `MigrationTarget` gains `store=`, `threads=` and `build(saver)`, and `ThreadKey` names one
-  checkpoint namespace of one thread. The library lists the threads of a `PostgresSaver` and a
-  `MemorySaver`. The docs section *Lifecycle of a read-time migration* gives each step from
+  checkpoint namespace of one thread. The library lists the threads of a `PostgresSaver`, a
+  `SqliteSaver` and a `MemorySaver`. For another saver, `threads=list_thread_keys` lists the
+  threads through the public `saver.list(None)`. It reads every checkpoint, so it suits a
+  small store only. `store` must return a sync checkpointer: an async context manager, for
+  example from `AsyncPostgresSaver.from_conn_string`, raises `TargetError` that names the
+  sync saver of the same database. The docs section *Lifecycle of a read-time migration* gives each step from
   release N to release N+1, for a client with release tags and for a continuous-deploy client.
 - **`plan_rewrite()` and `rewrite_store()` read a subgraph namespace.** Pass
   `checkpoint_ns=` to plan or rewrite the latest checkpoint under a child namespace. The
   default `""` is the root namespace. `ThreadRewrite` gains `checkpoint_ns` and `location`.
-  The async twins read the root namespace only. Known limit: a subgraph checkpoint that holds
+  The async twins `aplan_rewrite()` and `arewrite_store()` take the same `checkpoint_ns=`.
+  Known limit: a subgraph checkpoint that holds
   a task write from a failed or completed task is refused on every pass, and no call of this
   library clears it. Its reason says so, and names the `delete_thread()` method of the
   checkpointer for a thread that nobody needs. The limit stays until the refusal rule changes
@@ -105,12 +110,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a new version, and the old version stays in the store. The command does not delete it,
   because a run that read the checkpoint before the rewrite can still name it. The section
   *Old blob versions* gives the Postgres statement to run after the pre-deploy plan exits 0.
+  Only `PostgresSaver` needs it. `SqliteSaver` replaces the whole checkpoint row, so it keeps
+  no old version. `MemorySaver` keeps the old versions in memory, with no prune. The
+  section *Checkpointers* gives what each saver supports, and what a custom saver must do.
 - **New public names in `langgraph_events.serde.migrations`.** `MigrationTarget`,
   `ThreadKey`, `TargetError`, `MigrationKey`, `MigrationSet`, `check`, `GateReport`,
   `GateError`, `Invocation`, `Finding` and its finding classes (`BaselineStale`,
   `AnonymousCallable`, `MigrationOutOfScope`, `Uncovered`, `Unrevivable`, `HandlerMissing`, `SurvivedRelease`),
   `assert_migration_gate`, `update_baseline`, `hold_migration`, `rewrite_live_set`,
-  `LiveSetOutcome` and `WrongRelease`.
+  `list_thread_keys`, `LiveSetOutcome` and `WrongRelease`.
 
 ### Upgrade from 0.41
 
@@ -150,6 +158,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A rewrite refuses a thread that the saver did not store.** The base class of a
+  checkpointer does not promise that `put()` replaces a stored checkpoint of the same id, or
+  that `put_writes()` replaces an `__interrupt__` write. With a saver that keeps the old row,
+  `rewrite_store()` reported a rewrite and stored nothing. Now `rewrite_store()` and
+  `arewrite_store()` plan each written thread again after the write. When it still needs a
+  rewrite, the thread is refused with `the saver did not overwrite checkpoint <id>`. The
+  `rewrite` command prints that reason next to the checkpoint that the last plan reads as a
+  rewrite.
 - **A plan reads a thread as refused when a log entry is not an event.** LangGraph's own
   reader revives a record whose class no longer imports, or no longer takes the stored
   fields, as a `dict` or `None`, with no error. A plan read such a thread as unchanged, so

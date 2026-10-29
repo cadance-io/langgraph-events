@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -49,10 +50,12 @@ class MigrationTarget:
     ``graph`` builds the graph on the checkpointer it receives. The gate
     passes an empty in-memory saver, so building reads no store.
     ``baseline`` is the path of the committed baseline file. ``store``
-    opens the real checkpointer. Only ``rewrite`` uses it. ``threads``
-    lists the checkpoint namespaces of the store. It is needed only for a
-    saver other than ``PostgresSaver`` or ``MemorySaver``, or for a store
-    that more than one graph shares.
+    returns a context manager that opens the real sync checkpointer. Only
+    ``rewrite`` uses it. ``threads`` lists the checkpoint namespaces of
+    the store. It is needed only for a saver other than ``PostgresSaver``,
+    ``SqliteSaver`` or ``MemorySaver``, or for a store that more than one
+    graph shares. :func:`list_thread_keys` lists the threads of any saver
+    through its public ``list()``, for a small store.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph]
@@ -65,7 +68,8 @@ class MigrationTarget:
 
         Raises:
             TargetError: when the target has no ``threads`` and the saver
-                is not a ``PostgresSaver`` or a ``MemorySaver``.
+                is not a ``PostgresSaver``, a ``SqliteSaver`` or a
+                ``MemorySaver``.
         """
         if self.threads is not None:
             return tuple(sorted(set(self.threads(saver))))
@@ -78,15 +82,41 @@ class MigrationTarget:
                     if checkpoints
                 )
             )
-        postgres = _postgres_thread_keys(saver)
-        if postgres is not None:
-            return postgres
+        rows = _sql_thread_rows(saver)
+        if rows is not None:
+            return tuple(sorted(ThreadKey(tid, ns) for tid, ns in rows))
         raise TargetError(
             f"The target cannot list the threads of a {type(saver).__name__}. "
             f"Set threads= on the MigrationTarget to a function that takes the "
             f"saver and returns a ThreadKey for each thread and checkpoint "
-            f"namespace, for example from: {_THREAD_KEYS_QUERY}."
+            f"namespace. For a small store, set threads=list_thread_keys. It "
+            f"reads every checkpoint through saver.list(None), so its time "
+            f"grows with the whole store."
         )
+
+    def open_store(self) -> AbstractContextManager[BaseCheckpointSaver[Any]]:
+        """The context manager that ``store`` returns.
+
+        Raises:
+            TargetError: when the target has no ``store``, or when
+                ``store`` returns an async context manager.
+        """
+        if self.store is None:
+            raise TargetError(
+                "The target has no store. Set store= on the MigrationTarget to "
+                "a function that opens the checkpointer, for example "
+                "lambda: PostgresSaver.from_conn_string(url)."
+            )
+        opened = self.store()
+        if not hasattr(opened, "__enter__") and hasattr(opened, "__aenter__"):
+            raise TargetError(
+                "The store= function of the target returned an async context "
+                "manager. The rewrite command needs a sync checkpointer. Return "
+                "the sync saver of the same database, for example "
+                "SqliteSaver.from_conn_string(path) for an AsyncSqliteSaver, or "
+                "PostgresSaver.from_conn_string(url) for an AsyncPostgresSaver."
+            )
+        return opened
 
     def snapshot(self) -> Snapshot:
         """What the code holds, built once for every rule on an empty
@@ -127,26 +157,71 @@ class MigrationTarget:
         return Snapshot(graph, serde, migrations)
 
 
-def _postgres_thread_keys(
-    saver: BaseCheckpointSaver[Any],
-) -> tuple[ThreadKey, ...] | None:
-    """The keys of a ``PostgresSaver``, or ``None`` for another saver.
+def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
+    """Every checkpoint namespace of every thread in *saver*, sorted, read
+    through the public ``saver.list(None)``.
 
-    The import is local because the Postgres saver is an optional
-    dependency.
+    Set ``threads=list_thread_keys`` on a :class:`MigrationTarget` whose
+    saver the target cannot list. A checkpoint that names a class the
+    serde cannot revive still lists its thread, so the plan can report it.
+
+    WARNING: ``list(None)`` reads and decodes every checkpoint of the
+    store, older checkpoints included. On a large store this costs time in
+    proportion to the whole store, and memory when the saver loads all
+    rows at once. For a large store, write a ``threads`` function that
+    asks the store for each distinct thread id and checkpoint namespace.
+    """
+    from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
+        NamespaceAwareSerde,
+    )
+
+    serde = getattr(saver, "serde", None)
+    tolerant = (
+        serde.tolerate_unresolved()
+        if isinstance(serde, NamespaceAwareSerde)
+        else contextlib.nullcontext()
+    )
+    with tolerant:
+        keys = {
+            ThreadKey(
+                tup.config["configurable"]["thread_id"],
+                tup.config["configurable"].get("checkpoint_ns", ""),
+            )
+            for tup in saver.list(None)
+        }
+    return sorted(keys)
+
+
+def _sql_thread_rows(
+    saver: BaseCheckpointSaver[Any],
+) -> list[tuple[str, str]] | None:
+    """The thread id and checkpoint namespace of each checkpoint row of a
+    ``PostgresSaver`` or a ``SqliteSaver``, or ``None`` for another saver.
+
+    Both savers keep their checkpoints in a ``checkpoints`` table. Each
+    saver is an optional dependency, so its import is local.
     """
     try:
         from langgraph.checkpoint.postgres import (  # noqa: PLC0415
             PostgresSaver,
         )
     except ImportError:
+        pass
+    else:
+        if isinstance(saver, PostgresSaver):
+            with saver._cursor() as cursor:
+                cursor.execute(_THREAD_KEYS_QUERY)
+                rows = cursor.fetchall()
+            return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: PLC0415
+    except ImportError:
         return None
-    if not isinstance(saver, PostgresSaver):
-        return None
-    with saver._cursor() as cursor:
-        cursor.execute(_THREAD_KEYS_QUERY)
-        rows = cursor.fetchall()
-    return tuple(sorted(ThreadKey(r["thread_id"], r["checkpoint_ns"]) for r in rows))
+    if isinstance(saver, SqliteSaver):
+        with saver.cursor(transaction=False) as cursor:
+            cursor.execute(_THREAD_KEYS_QUERY)
+            return [(tid, ns) for tid, ns in cursor.fetchall()]
+    return None
 
 
 @dataclass(frozen=True)

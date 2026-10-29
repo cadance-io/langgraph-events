@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from _dict_saver import DictSaver
 from _live_set_fixtures import (
     _cfg,
     _copy_to_namespace,
@@ -30,6 +31,7 @@ from langgraph_events.serde.migrations import (
     ThreadKey,
     TransformFields,
     WrongRelease,
+    list_thread_keys,
     rewrite_live_set,
 )
 
@@ -85,12 +87,62 @@ def describe_MigrationTarget():
 
                 assert target.thread_keys(MemorySaver()) == (ThreadKey("x", ""),)
 
+        def when_the_saver_is_a_sqlite_saver():
+            def it_lists_each_thread_and_namespace(tmp_path: Path):
+                from langgraph.checkpoint.sqlite import SqliteSaver
+
+                with SqliteSaver.from_conn_string(str(tmp_path / "s.db")) as saver:
+                    graph = _graph(saver)
+                    graph.invoke(Started(), config=_cfg("b"))
+                    graph.invoke(Started(), config=_cfg("a"))
+                    _copy_to_namespace(saver, "a", "child:1")
+                    target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
+
+                    assert target.thread_keys(saver) == (
+                        ThreadKey("a", ""),
+                        ThreadKey("a", "child:1"),
+                        ThreadKey("b", ""),
+                    )
+
         def when_the_saver_has_no_built_in_enumeration():
-            def it_raises_a_target_error_naming_threads(tmp_path: Path):
+            def it_names_list_thread_keys_and_no_sql(tmp_path: Path):
                 target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
-                with pytest.raises(TargetError, match=r"threads="):
-                    target.thread_keys(BaseCheckpointSaver())
+                with pytest.raises(TargetError) as raised:
+                    target.thread_keys(DictSaver())
+
+                message = str(raised.value)
+                assert message.startswith(
+                    "The target cannot list the threads of a DictSaver. Set threads= "
+                )
+                assert "threads=list_thread_keys" in message
+                assert "SELECT" not in message
+
+
+def describe_list_thread_keys():
+    def when_a_custom_saver_holds_threads_and_namespaces():
+        def it_lists_each_one_once():
+            saver = DictSaver()
+            graph = _graph(saver)
+            graph.invoke(Started(), config=_cfg("b"))
+            graph.invoke(Started(), config=_cfg("a"))
+            graph.invoke(Started(), config=_cfg("a"))
+            _copy_to_namespace(saver, "a", "child:1")
+
+            assert sorted(list_thread_keys(saver)) == [
+                ThreadKey("a", ""),
+                ThreadKey("a", "child:1"),
+                ThreadKey("b", ""),
+            ]
+
+    def when_a_checkpoint_names_a_class_the_serde_cannot_revive():
+        def it_still_lists_the_thread(tmp_path: Path):
+            saver = DictSaver()
+            releases = _releases(tmp_path, saver)
+            releases.seed("t1")
+            _graph(saver)
+
+            assert list(list_thread_keys(saver)) == [ThreadKey("t1", "")]
 
 
 class _StaleRun:
