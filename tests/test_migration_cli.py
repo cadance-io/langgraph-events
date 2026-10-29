@@ -9,7 +9,14 @@ import sys
 from typing import TYPE_CHECKING
 
 from _dict_saver import DictSaver
-from _live_set_fixtures import _cfg, _copy_to_namespace, _graph, _releases
+from _live_set_fixtures import (
+    _cfg,
+    _copy_to_namespace,
+    _Counted,
+    _graph,
+    _releases,
+    _unsettling,
+)
 from _migration_fixtures import (
     _CLI,
     _TRIMMED,
@@ -383,6 +390,28 @@ def describe_rewrite_command():
                         f"  t1: needs a rewrite, the last pass refused it: the "
                         f"saver did not overwrite checkpoint {checkpoint_id}; "
                     )
+
+        def when_a_class_stage_transform_does_not_settle():
+            def it_exits_one_and_names_the_migration(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target = _unsettling(tmp_path)
+                expect = target.snapshot().migrations.fingerprint
+                spec = _install(monkeypatch, target)
+
+                code = main(["rewrite", spec, "--expect", expect, "--apply"])
+
+                out = capsys.readouterr().out.splitlines()
+                assert code == 1
+                assert out[1] == (
+                    f"  t1: refused, a migration of {_Counted.__module__}:"
+                    f"{_Counted.__qualname__} does not settle: a read of the "
+                    f"rewritten value in channel 'events' changes it again. "
+                    f"Make each class-stage transform return its own output "
+                    f"unchanged, then rerun"
+                )
 
         def when_the_running_release_is_not_the_expected_one():
             def it_exits_three_and_names_both_fingerprints(

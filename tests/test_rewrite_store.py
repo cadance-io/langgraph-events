@@ -45,6 +45,7 @@ from langgraph_events import (
 )
 from langgraph_events.serde import NamespaceAwareSerde, backfill, migrate_from
 from langgraph_events.serde._jsonplus import _scan_identities
+from langgraph_events.serde.migrations import Migration, TransformFields
 
 
 class _Go(IntegrationEvent):
@@ -146,6 +147,84 @@ def _go_ends(event: _Go) -> Ended:
 @on(Started)
 def _completes(event: Started) -> None:
     return None
+
+
+class _StrayEntrySaver(MemorySaver):
+    """Once ``armed``, stores each put with one more ``events`` entry that
+    is not an event. The checkpoint id and the channel versions are the
+    ones put received."""
+
+    armed = False
+
+    def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[override]
+        if not self.armed:
+            return super().put(config, checkpoint, metadata, new_versions)
+        values = dict(checkpoint["channel_values"])
+        values["events"] = [*values["events"], {"stray": 1}]
+        stray = {**checkpoint, "channel_values": values}
+        return super().put(config, stray, metadata, new_versions)
+
+
+class _StaleBlobSaver(MemorySaver):
+    """Once ``armed``, put() stores the new channel versions, but keeps the
+    bytes of the stored checkpoint under each new version."""
+
+    armed = False
+
+    def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[override]
+        if not self.armed:
+            return super().put(config, checkpoint, metadata, new_versions)
+        thread = config["configurable"]["thread_id"]
+        ns = config["configurable"].get("checkpoint_ns", "")
+        stored, _metadata, _parent = self.storage[thread][ns][checkpoint["id"]]
+        old = self.serde.loads_typed(stored)["channel_versions"]
+        result = super().put(config, checkpoint, metadata, new_versions)
+        for channel, version in new_versions.items():
+            self.blobs[(thread, ns, channel, version)] = self.blobs[
+                (thread, ns, channel, old[channel])
+            ]
+        return result
+
+
+def _class_stage_transform(saver: MemorySaver, transform, value):
+    """A settled thread whose ``_Held`` event holds *value*, read back by a
+    release whose class-stage transform of ``_Held`` is *transform*.
+
+    Returns that release's graph and the ``_Held`` class.
+    """
+
+    class _Held(IntegrationEvent):
+        value: typing.Any = None
+
+    @on(Started)
+    def make(event: Started) -> _Held:
+        return _Held(value=value)
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _Held))
+    EventGraph([make], checkpointer=saver).invoke(Started(data="x"), config=_cfg("t1"))
+    operation = TransformFields(_Held.__module__, _Held.__qualname__, transform)
+    saver.serde = NamespaceAwareSerde(
+        events=(Started, _Held), migrations=[Migration(operations=(operation,))]
+    )
+    return EventGraph([_completes], checkpointer=saver), _Held
+
+
+def _bump(kw: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Not idempotent: each read adds one again."""
+    kw["value"] += 1
+    return kw
+
+
+def _opaque(kw: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Builds a value that msgpack cannot encode."""
+    kw["value"] = object()
+    return kw
+
+
+def _as_tuple(kw: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    """Idempotent: a stored list and a tuple encode as the same bytes."""
+    kw["value"] = tuple(kw["value"])
+    return kw
 
 
 def _cfg(tid: str, ns: str = "") -> dict[str, typing.Any]:
@@ -806,6 +885,45 @@ def describe_rewrite_store():
                 stored = _stored_identities(saver, "t1", ns)
                 assert (new.__module__, new.__qualname__) in stored
 
+    def when_a_class_stage_transform_returns_bytes_equal_to_the_stored_ones():
+        def it_reads_the_thread_as_unchanged():
+            saver = MemorySaver()
+            graph, _held = _class_stage_transform(saver, _as_tuple, ("a",))
+
+            [thread] = graph.rewrite_store(thread_ids=["t1"]).threads
+
+            assert thread.status == "unchanged"
+
+        def it_rewrites_a_renamed_thread_once():
+            saver = MemorySaver()
+
+            class _OldHeld(IntegrationEvent):
+                value: typing.Any = None
+
+            @on(Started)
+            def make(event: Started) -> _OldHeld:
+                return _OldHeld(value=("a",))
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _OldHeld))
+            EventGraph([make], checkpointer=saver).invoke(
+                Started(data="x"), config=_cfg("t1")
+            )
+
+            @migrate_from(_OldHeld.__qualname__, in_module=_OldHeld.__module__)
+            class _Held(IntegrationEvent):
+                value: typing.Any = None
+
+            operation = TransformFields(_Held.__module__, _Held.__qualname__, _as_tuple)
+            saver.serde = NamespaceAwareSerde(
+                events=(Started, _Held), migrations=[Migration(operations=(operation,))]
+            )
+            graph = EventGraph([_completes], checkpointer=saver)
+
+            [first] = graph.rewrite_store(thread_ids=["t1"]).threads
+            [second] = graph.plan_rewrite(thread_ids=["t1"]).threads
+
+            assert (first.status, second.status) == ("rewrite", "unchanged")
+
     def when_a_custom_saver_overwrites_a_checkpoint():
         def it_stores_the_live_identity():
             saver = DictSaver()
@@ -1005,6 +1123,42 @@ def describe_rewrite_store_refusals():
             report = graph.rewrite_store(thread_ids=["t1"])
 
             assert [(t.status, t.reason) for t in report.threads] == [("rewrite", "")]
+
+    def when_a_class_stage_transform_does_not_settle():
+        def it_refuses_the_thread_before_the_write():
+            saver = MemorySaver()
+            graph, held = _class_stage_transform(saver, _bump, 1)
+            blobs = dict(saver.blobs)
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason == (
+                f"a migration of {_identity(held)} does not settle: a read of the "
+                f"rewritten value in channel 'events' changes it again. Make each "
+                f"class-stage transform return its own output unchanged, then rerun"
+            )
+            assert saver.blobs == blobs
+
+        async def it_refuses_the_thread_through_the_async_saver():
+            saver = MemorySaver()
+            graph, held = _class_stage_transform(saver, _bump, 1)
+
+            thread = _only(await graph.arewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                f"a migration of {_identity(held)} does not settle: "
+            )
+
+    def when_a_class_stage_transform_builds_a_value_that_cannot_be_encoded():
+        def it_refuses_the_thread_and_names_the_encode_error():
+            saver = MemorySaver()
+            graph, _held = _class_stage_transform(saver, _opaque, 1)
+
+            thread = _only(graph.plan_rewrite(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                "cannot encode the value in channel 'events' ("
+            )
 
     def when_the_history_cannot_revive():
         def it_asks_for_a_tombstone_first():
@@ -1326,8 +1480,56 @@ def describe_rewrite_store_refusals():
 
             thread = _only(graph.rewrite_store(thread_ids=["t1"]))
 
+            assert thread.reason == (
+                f"the saver did not store the bytes written to checkpoint "
+                f"{checkpoint_id}: they read unchanged before the write, but a "
+                f"read of the store still migrates them. put_writes() of the "
+                f"saver must replace an __interrupt__ write of the same task. "
+                f"Fix the saver, then rerun. See 'Checkpointers' in "
+                f"docs/event-migrations.md"
+            )
+
+    def when_the_saver_keeps_the_old_bytes_under_the_new_versions():
+        def it_names_the_put_rule():
+            saver = _StaleBlobSaver()
+            graph, cfg, _old, _new = _renamed_history_pair(saver, "t1")
+            saver.armed = True
+            checkpoint_id = _checkpoint_id(saver, cfg)
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason == (
+                f"the saver did not store the bytes written to checkpoint "
+                f"{checkpoint_id}: they read unchanged before the write, but a "
+                f"read of the store still migrates them. put() of the saver "
+                f"must store each channel value it receives under its new "
+                f"version. Fix the saver, then rerun. See 'Checkpointers' in "
+                f"docs/event-migrations.md"
+            )
+
+    def when_the_read_after_the_write_refuses_the_thread():
+        def it_reports_the_reason_of_that_read():
+            saver = _StrayEntrySaver()
+            graph, _config, _old, _new = _renamed_history_pair(saver, "t1")
+            saver.armed = True
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
             assert thread.reason.startswith(
-                f"the saver did not overwrite checkpoint {checkpoint_id}; "
+                "the rewrite is stored, but the read after the write refuses the "
+                "thread: channel 'events' holds 1 entry that revives as dict, "
+            )
+
+        async def it_reports_the_reason_through_the_async_saver():
+            saver = _StrayEntrySaver()
+            graph, _config, _old, _new = await _arenamed_history_pair(saver, "t1")
+            saver.armed = True
+
+            thread = _only(await graph.arewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                "the rewrite is stored, but the read after the write refuses the "
+                "thread: channel 'events' holds 1 entry that revives as dict, "
             )
 
 

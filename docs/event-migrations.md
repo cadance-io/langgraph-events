@@ -673,7 +673,18 @@ A custom saver must obey two rules, or the rewrite cannot store a thread:
 1. `put()` of a checkpoint whose id is in the store replaces the stored checkpoint.
 2. `put_writes()` of an `__interrupt__` write replaces the stored `__interrupt__` write of the same task.
 
-The base class `BaseCheckpointSaver` does not promise either rule. So after each write, the rewrite reads the checkpoint and plans it again. If the checkpoint still needs a rewrite, the thread is refused with `the saver did not overwrite checkpoint <id>`. Fix the saver, then run `rewrite --apply` again.
+The base class `BaseCheckpointSaver` does not promise either rule. So after each write, the rewrite reads the checkpoint and plans it again. Each fact gets its own reason:
+
+| What the read after the write finds | Reason |
+|---|---|
+| A newer checkpoint id | `thread advanced during the rewrite; rerun` |
+| The old channel versions | `the saver did not overwrite checkpoint <id>`. Rule 1 is broken |
+| The written versions, and a refusal of its own | `the rewrite is stored, but the read after the write refuses the thread: <reason>` |
+| The written versions, and a record that still migrates | `the saver did not store the bytes written to checkpoint <id>`. The reason names the rule that the saver broke |
+
+Fix the saver, then run `rewrite --apply` again.
+
+The plan proves before the write that the rewritten bytes settle: a read of them migrates no record. A class-stage transform that changes its own output again, for example one that adds 1 to a field, does not settle. The plan refuses that thread with `a migration of <module>:<qualname> does not settle`, and writes nothing. A transform that builds a tuple from a stored list settles: a tuple and a list store the same bytes.
 
 `list_thread_keys` lists the threads of any saver through its public `list(None)`:
 

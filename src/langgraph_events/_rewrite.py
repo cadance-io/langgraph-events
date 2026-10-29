@@ -599,12 +599,27 @@ def _revival_problem(
     where: str,
     built: frozenset[int],
 ) -> str | None:
-    """Why the bytes *data* of *value* in *where* do not revive, or why a
-    model a migration built in *value* is invalid, or ``None``."""
-    try:
-        serde.loads_typed(data)
-    except ValueError as exc:
-        return f"the rewritten value in {where} does not revive ({exc})"
+    """Why the bytes *data* of *value* in *where* do not revive, or do not
+    settle, or why a model a migration built in *value* is invalid, or
+    ``None``.
+
+    The bytes settle when a read of them migrates no record. Then a read
+    of the store after the write migrates nothing, unless the saver did
+    not store these bytes.
+    """
+    with serde._record_reads() as reads:
+        start = len(reads)
+        try:
+            serde.loads_typed(data)
+        except ValueError as exc:
+            return f"the rewritten value in {where} does not revive ({exc})"
+    unsettled = dict.fromkeys(live for _stored, live in _migrated_pairs(reads[start:]))
+    if unsettled:
+        return (
+            f"a migration of {', '.join(unsettled)} does not settle: a read of "
+            f"the rewritten value in {where} changes it again. Make each "
+            f"class-stage transform return its own output unchanged, then rerun"
+        )
     invalid = _invalid_model(value, "", built, inside=False)
     if invalid is None:
         return None

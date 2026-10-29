@@ -104,6 +104,31 @@ def describe_MigrationTarget():
                         ThreadKey("b", ""),
                     )
 
+            def when_its_internal_cursor_fails():
+                def it_names_list_thread_keys(
+                    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+                ):
+                    from langgraph.checkpoint.sqlite import SqliteSaver
+
+                    def gone(*_args: object, **_kwargs: object) -> None:
+                        raise AttributeError("cursor")
+
+                    with SqliteSaver.from_conn_string(str(tmp_path / "s.db")) as saver:
+                        monkeypatch.setattr(saver, "cursor", gone)
+                        target = MigrationTarget(
+                            graph=_graph, baseline=tmp_path / "b.json"
+                        )
+
+                        with pytest.raises(TargetError) as raised:
+                            target.thread_keys(saver)
+
+                    message = str(raised.value)
+                    assert message.startswith(
+                        "The target cannot list the threads of a SqliteSaver "
+                        "(AttributeError: cursor). Set threads= "
+                    )
+                    assert "threads=list_thread_keys" in message
+
         def when_the_saver_has_no_built_in_enumeration():
             def it_names_list_thread_keys_and_no_sql(tmp_path: Path):
                 target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")

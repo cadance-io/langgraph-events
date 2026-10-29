@@ -323,6 +323,22 @@ def _make_default(
     return _default
 
 
+def _same_bytes(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Whether two kwargs encode to the same bytes. A tuple and a list
+    differ in Python, but both encode as one msgpack array.
+
+    A value that does not encode makes the kwargs differ. The rewrite
+    then refuses the record when it encodes the value.
+    """
+    default = _make_default(False, {}, [])
+    try:
+        return ormsgpack.packb(
+            left, default=default, option=_option
+        ) == ormsgpack.packb(right, default=default, option=_option)
+    except TypeError:
+        return False
+
+
 def _make_ext_hook(
     errors: list[str],
     fallback: Callable[[int, bytes], Any],
@@ -442,10 +458,13 @@ def _make_ext_hook(
                 # lands in *unresolved* only. Touched means the table
                 # changed the identity or the kwargs: a rewrite would
                 # store different bytes. A table entry that changed
-                # nothing (a fill whose field the payload already held)
-                # is untouched, so a second rewrite converges.
+                # nothing (a fill whose field the payload already held,
+                # or a tuple built from a stored list) is untouched, so a
+                # second rewrite converges.
                 touched = (
-                    reformat or stored != (module_name, qualname) or kwargs != before
+                    reformat
+                    or stored != (module_name, qualname)
+                    or (kwargs != before and not _same_bytes(kwargs, before))
                 )
                 built = tuple(
                     value
@@ -667,8 +686,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         ``EXT_NAMESPACE_AWARE_EVENT`` record that revived, in read order,
         wherever the record sat in the blob. A record that degraded to an
         :class:`UnrevivedIdentity` is not collected. The ``touched`` flag
-        is ``True`` when the migration table changed the identity or the
-        kwargs, so a re-encode would store different bytes. A class that
+        is ``True`` when the migration table changed the identity, or
+        changed the kwargs to values that encode to other bytes. Then a
+        re-encode would store different bytes. A class that
         gained a dataclass default with no ``AddField`` is untouched: the
         table never saw the missing field.
 

@@ -129,31 +129,54 @@ def _planned_outcome(planned: ThreadRewrite | RewritePlan) -> ThreadRewrite:
     return planned.result if isinstance(planned, RewritePlan) else planned
 
 
+_SEE_CHECKPOINTERS = (
+    "Fix the saver, then rerun. See 'Checkpointers' in docs/event-migrations.md"
+)
+
+
 def _written_outcome(
     tup: CheckpointTuple,
     planned: RewritePlan,
     after: CheckpointTuple | None,
     again: ThreadRewrite | RewritePlan,
 ) -> ThreadRewrite:
-    """What one write of *planned* did, from the read after the write.
+    """What one write of *planned* did, from the read *after* the write and
+    the plan *again* of that read.
 
     A run between the read and the write lands a newer checkpoint, so the
     latest id is not the written id. The base class of a saver does not
     promise that ``put()`` replaces a stored checkpoint of the same id, or
-    that ``put_writes()`` replaces an ``__interrupt__`` write. A saver that
-    keeps the old row or write leaves bytes that the plan *again* still
-    reads as not clean.
+    that ``put_writes()`` replaces an ``__interrupt__`` write. The plan
+    proved that the written bytes settle: a read of them migrates no
+    record. So a plan *again* that still finds a rewrite reads bytes that
+    the saver did not store.
     """
     written = tup.config["configurable"].get("checkpoint_id")
-    latest = after.config["configurable"].get("checkpoint_id") if after else None
-    if latest != written:
+    if after is None or after.config["configurable"].get("checkpoint_id") != written:
         reason = "thread advanced during the rewrite; rerun"
-    elif _planned_outcome(again).status != "unchanged":
+    elif after.checkpoint["channel_versions"] != planned.checkpoint["channel_versions"]:
         reason = (
             f"the saver did not overwrite checkpoint {written}; put() of the "
-            f"saver must replace a stored checkpoint of the same id, and "
-            f"put_writes() must replace an __interrupt__ write. Fix the saver, "
-            f"then rerun. See 'Checkpointers' in docs/event-migrations.md"
+            f"saver must replace a stored checkpoint of the same id. "
+            f"{_SEE_CHECKPOINTERS}"
+        )
+    elif isinstance(again, ThreadRewrite) and again.status == "refused":
+        reason = (
+            f"the rewrite is stored, but the read after the write refuses the "
+            f"thread: {again.reason}"
+        )
+    elif isinstance(again, RewritePlan):
+        rule = (
+            "put_writes() of the saver must replace an __interrupt__ write of "
+            "the same task"
+            if planned.interrupt_writes
+            else "put() of the saver must store each channel value it receives "
+            "under its new version"
+        )
+        reason = (
+            f"the saver did not store the bytes written to checkpoint "
+            f"{written}: they read unchanged before the write, but a read of "
+            f"the store still migrates them. {rule}. {_SEE_CHECKPOINTERS}"
         )
     else:
         return planned.result
@@ -2677,10 +2700,11 @@ class EventGraph:
         new version for each channel the rewrite touched, and its
         ``__interrupt__`` pending write is rewritten in place. A thread
         that advanced between the read and the write is reported as
-        refused and is not rewritten. A thread whose stored bytes still
-        need a rewrite after the write is reported as refused: the
-        saver did not overwrite the checkpoint or its ``__interrupt__``
-        write.
+        refused and is not rewritten. The plan refuses a thread whose
+        rewritten bytes do not settle: a read of them migrates a record
+        again. A thread whose stored bytes still need a rewrite after the
+        write is reported as refused: the saver did not overwrite the
+        checkpoint, or did not store the bytes it was given.
 
         WARNING: run it while the graph is idle, never inside a rolling
         deploy window. An old pod cannot read the new bytes. Take a

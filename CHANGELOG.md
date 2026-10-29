@@ -162,10 +162,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpointer does not promise that `put()` replaces a stored checkpoint of the same id, or
   that `put_writes()` replaces an `__interrupt__` write. With a saver that keeps the old row,
   `rewrite_store()` reported a rewrite and stored nothing. Now `rewrite_store()` and
-  `arewrite_store()` plan each written thread again after the write. When it still needs a
-  rewrite, the thread is refused with `the saver did not overwrite checkpoint <id>`. The
-  `rewrite` command prints that reason next to the checkpoint that the last plan reads as a
-  rewrite.
+  `arewrite_store()` read each written thread again after the write. When the stored channel
+  versions are not the written ones, the thread is refused with `the saver did not overwrite
+  checkpoint <id>`. When the versions match but a record still migrates, the reason is `the
+  saver did not store the bytes written to checkpoint <id>`, with the `put()` or
+  `put_writes()` rule that the saver broke. When the read after the write refuses the thread
+  for its own reason, the report gives that reason. The `rewrite` command prints the reason
+  next to the checkpoint that the last plan reads as a rewrite.
+- **A rewrite refuses a migration that does not settle, before it writes.** A class-stage
+  transform that changes its own output again, for example one that adds 1 to a field,
+  changed the stored value on each rewrite. Before, the rewrite stored the changed value.
+  Now the plan reads the rewritten bytes back first. When a record still migrates,
+  the plan refuses the thread with `a migration of <module>:<qualname> does not settle`, and
+  nothing is written.
+- **A transform whose output stores the same bytes does not mark a record as migrated.** A
+  class-stage transform that builds a tuple from a stored list returns a value that differs
+  in Python but stores the same msgpack bytes. Each plan read such a thread as a rewrite, so
+  the rewrite never converged. Now the plan compares the two values as the bytes they store, so
+  the thread reads as unchanged.
+- **A failed built-in thread listing names `threads=list_thread_keys`.** The listing of a
+  `PostgresSaver` or a `SqliteSaver` calls a cursor method that is internal to the saver
+  package. When that call fails, `MigrationTarget.thread_keys()` raises `TargetError` with the
+  error and the `threads=list_thread_keys` remedy.
 - **A plan reads a thread as refused when a log entry is not an event.** LangGraph's own
   reader revives a record whose class no longer imports, or no longer takes the stored
   fields, as a `dict` or `None`, with no error. A plan read such a thread as unchanged, so

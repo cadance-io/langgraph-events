@@ -17,7 +17,11 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import EventGraph, IntegrationEvent, on
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
-from langgraph_events.serde.migrations import MigrationTarget
+from langgraph_events.serde.migrations import (
+    Migration,
+    MigrationTarget,
+    TransformFields,
+)
 
 
 def _graph(saver):
@@ -104,4 +108,42 @@ def _copy_to_namespace(saver: BaseCheckpointSaver, tid: str, ns: str) -> None:
     assert tup is not None
     saver.put(
         _cfg(tid, ns), tup.checkpoint, tup.metadata, tup.checkpoint["channel_versions"]
+    )
+
+
+class _Counted(IntegrationEvent):
+    count: int = 0
+
+
+@on(Started)
+def _count(event: Started) -> _Counted:
+    return _Counted(count=1)
+
+
+def _bump(kw: dict) -> dict:
+    """Not idempotent: each read adds one again."""
+    kw["count"] += 1
+    return kw
+
+
+def _unsettling(tmp_path: Path) -> MigrationTarget:
+    """A target whose class-stage transform of ``_Counted`` adds one on each
+    read, over a store whose thread ``t1`` was written with no transform."""
+    store = MemorySaver()
+    store.serde = NamespaceAwareSerde(events=(Started, _Counted))
+    EventGraph([_count], checkpointer=store).invoke(
+        Started(data="t1"), config=_cfg("t1")
+    )
+
+    def current(s):
+        bump = TransformFields(_Counted.__module__, _Counted.__qualname__, _bump)
+        s.serde = NamespaceAwareSerde(
+            events=(Started, _Counted), migrations=[Migration(operations=(bump,))]
+        )
+        return EventGraph([_count], checkpointer=s)
+
+    return MigrationTarget(
+        graph=current,
+        baseline=tmp_path / "baseline.json",
+        store=lambda: contextlib.nullcontext(store),
     )

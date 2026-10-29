@@ -69,7 +69,8 @@ class MigrationTarget:
         Raises:
             TargetError: when the target has no ``threads`` and the saver
                 is not a ``PostgresSaver``, a ``SqliteSaver`` or a
-                ``MemorySaver``.
+                ``MemorySaver``, or when the built-in listing of the saver
+                fails.
         """
         if self.threads is not None:
             return tuple(sorted(set(self.threads(saver))))
@@ -82,17 +83,16 @@ class MigrationTarget:
                     if checkpoints
                 )
             )
-        rows = _sql_thread_rows(saver)
+        try:
+            rows = _sql_thread_rows(saver)
+        except Exception as error:
+            # The listing reads an internal method of the saver package,
+            # which a release of that package can change.
+            failure = f" ({type(error).__name__}: {error})"
+            raise TargetError(_no_thread_listing(saver, failure)) from error
         if rows is not None:
             return tuple(sorted(ThreadKey(tid, ns) for tid, ns in rows))
-        raise TargetError(
-            f"The target cannot list the threads of a {type(saver).__name__}. "
-            f"Set threads= on the MigrationTarget to a function that takes the "
-            f"saver and returns a ThreadKey for each thread and checkpoint "
-            f"namespace. For a small store, set threads=list_thread_keys. It "
-            f"reads every checkpoint through saver.list(None), so its time "
-            f"grows with the whole store."
-        )
+        raise TargetError(_no_thread_listing(saver, ""))
 
     def open_store(self) -> AbstractContextManager[BaseCheckpointSaver[Any]]:
         """The context manager that ``store`` returns.
@@ -192,6 +192,19 @@ def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
     return sorted(keys)
 
 
+def _no_thread_listing(saver: BaseCheckpointSaver[Any], failure: str) -> str:
+    """The message of a target that cannot list the threads of *saver*.
+    *failure* names the error of the built-in listing, or is empty."""
+    return (
+        f"The target cannot list the threads of a {type(saver).__name__}"
+        f"{failure}. Set threads= on the MigrationTarget to a function that "
+        f"takes the saver and returns a ThreadKey for each thread and "
+        f"checkpoint namespace. For a small store, set threads=list_thread_keys. "
+        f"It reads every checkpoint through saver.list(None), so its time "
+        f"grows with the whole store."
+    )
+
+
 def _sql_thread_rows(
     saver: BaseCheckpointSaver[Any],
 ) -> list[tuple[str, str]] | None:
@@ -199,7 +212,10 @@ def _sql_thread_rows(
     ``PostgresSaver`` or a ``SqliteSaver``, or ``None`` for another saver.
 
     Both savers keep their checkpoints in a ``checkpoints`` table. Each
-    saver is an optional dependency, so its import is local.
+    saver is an optional dependency, so its import is local. The cursor
+    methods are internal to each saver package: ``PostgresSaver._cursor()``
+    is private, and the docstring of ``SqliteSaver.cursor()`` says that a
+    user must not call it.
     """
     try:
         from langgraph.checkpoint.postgres import (  # noqa: PLC0415
