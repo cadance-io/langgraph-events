@@ -86,6 +86,7 @@ from langgraph_events.serde.migrations._core import (  # noqa: E402
     _CallableError,
     _collect_decorated_migrations,
     _flatten_and_validate,
+    _init_fields,
     _resolve_identity,
     _unimportable_payload_models,
     _unreachable_migrate_from_siblings,
@@ -646,9 +647,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         those, and the constructor rebuilds an ``init=False`` field.
         """
         return {
-            Identity(*identity): frozenset(
-                f.name for f in dataclasses.fields(cls) if f.init
-            )
+            Identity(*identity): _init_fields(cls)
             for identity, cls in self._scope.items()
         }
 

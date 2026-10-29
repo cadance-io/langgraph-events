@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -47,9 +48,13 @@ from conftest import Started
 from langgraph_events import (
     Command,
     DomainEvent,
+    EventGraph,
+    HandlerRaised,
+    IntegrationEvent,
     Namespace,
     on,
 )
+from langgraph_events.serde import NamespaceAwareSerde
 from langgraph_events.serde.migrations import (
     AnonymousCallable,
     BaselineStale,
@@ -57,6 +62,7 @@ from langgraph_events.serde.migrations import (
     HandlerMissing,
     Invocation,
     Migration,
+    MigrationOutOfScope,
     MigrationTarget,
     SurvivedRelease,
     Uncovered,
@@ -68,7 +74,75 @@ from langgraph_events.serde.migrations import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
+
+class _Problem:
+    """A plain mixin that a failure event composes."""
+
+    _event_mixin: ClassVar[bool] = True
+
+
+@dataclasses.dataclass(frozen=True)
+class _Diagnosed:
+    """A dataclass mixin that a failure event composes."""
+
+    _event_mixin: ClassVar[bool] = True
+
+    diagnostic: str | None = None
+
+
+class Faulty(Namespace):
+    class Place(Command):
+        def handle(self) -> Faulty.Place.Failed:
+            return Faulty.Place.Failed()
+
+        class Failed(DomainEvent, _Problem, _Diagnosed):
+            pass
+
+
+@on(_Problem)
+def _log_problem(event: _Problem) -> None:
+    return None
+
+
+@on(_Diagnosed)
+def _log_diagnosed(event: _Diagnosed) -> None:
+    return None
+
+
+class _Notified(IntegrationEvent):
+    note: str = ""
+
+
+@on(Shop.Place.Placed)
+def _notify(event: Shop.Place.Placed) -> _Notified:
+    return _Notified(note=event.note)
+
+
+@on(HandlerRaised)
+def _on_raised(event: HandlerRaised) -> None:
+    return None
+
+
+def _scoped_target(
+    tmp_path: Path,
+    *namespaces: type[Namespace],
+    serde_namespaces: tuple[type[Namespace], ...],
+    handlers: tuple[Callable[..., object], ...] = (),
+) -> MigrationTarget:
+    """A target whose serde reads *serde_namespaces* only, and no loose event."""
+
+    def build(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+        saver.serde = NamespaceAwareSerde(namespaces=serde_namespaces)
+        return EventGraph.from_namespaces(
+            *namespaces, handlers=list(handlers) or None, checkpointer=saver
+        )
+
+    return MigrationTarget(graph=build, baseline=tmp_path / "baseline.json")
 
 
 def describe_check():
@@ -242,6 +316,78 @@ def describe_check():
                 _add(target.baseline, "retired", _entry("legacy.mod", "Old.Placed", []))
 
                 assert check(target).findings == ()
+
+    def describe_the_event_scope():
+        def when_a_handler_subscribes_to_a_mixin():
+            def it_records_the_events_and_no_mixin(tmp_path: Path):
+                target = _target(
+                    tmp_path, Faulty, handlers=(_log_problem, _log_diagnosed)
+                )
+
+                update_baseline(target)
+
+                recorded = {e["qualname"] for e in _read(target.baseline)["events"]}
+                assert recorded == {"Faulty.Place", "Faulty.Place.Failed"}
+
+            def it_passes(tmp_path: Path):
+                target = _target(
+                    tmp_path, Faulty, handlers=(_log_problem, _log_diagnosed)
+                )
+
+                assert check(_baselined(target)).findings == ()
+
+        def when_the_serde_reads_no_loose_event():
+            def it_records_the_loose_events_of_the_graph(tmp_path: Path):
+                target = _scoped_target(
+                    tmp_path,
+                    Shop,
+                    serde_namespaces=(Shop,),
+                    handlers=(_notify, _on_raised),
+                )
+
+                update_baseline(target)
+
+                recorded = {e["qualname"] for e in _read(target.baseline)["events"]}
+                assert {"_Notified", "HandlerRaised"} <= recorded
+                assert _read(target.baseline)["retired"] == []
+
+            def it_passes_against_a_baseline_that_records_them(tmp_path: Path):
+                handlers = (_notify, _on_raised)
+                update_baseline(_target(tmp_path, Shop, handlers=handlers))
+                target = _scoped_target(
+                    tmp_path, Shop, serde_namespaces=(Shop,), handlers=handlers
+                )
+
+                assert check(target).findings == ()
+
+        def when_a_graph_namespace_is_outside_the_serde():
+            def it_reports_each_class_whose_migration_the_serde_misses(
+                tmp_path: Path,
+            ):
+                target = _baselined(
+                    _scoped_target(tmp_path, Trimmed, Shop, serde_namespaces=(Shop,))
+                )
+
+                assert check(target).findings == (
+                    MigrationOutOfScope((_MODULE, "Trimmed.Place.Placed")),
+                )
+
+            def it_names_the_fix_and_the_next_command(tmp_path: Path):
+                target = _baselined(
+                    _scoped_target(tmp_path, Trimmed, Shop, serde_namespaces=(Shop,))
+                )
+
+                text = check(target).render(Invocation("app.lge:target"))
+
+                assert (
+                    "  migration-out-of-scope  "
+                    f"{_MODULE}:Trimmed.Place.Placed\n"
+                    "    The class declares a read-time migration, but the serde "
+                    "does not read the class, so the migration does nothing.\n"
+                    "    Pass its namespace in namespaces= of the serde, or the "
+                    "class in events=, then run: "
+                    f"{_CLI} baseline update app.lge:target"
+                ) in text
 
     def describe_the_revive_rule():
         def _record_retired(

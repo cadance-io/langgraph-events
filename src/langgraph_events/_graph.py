@@ -658,7 +658,8 @@ def _register_produced_types(
                 (*subscribed, *produced),
                 key=lambda c: (c.__module__, c.__qualname__),
             )
-            if getattr(t, "__namespace_cls__", None) is None
+            # A mixin that a handler subscribes to is not a stored class.
+            if issubclass(t, Event) and getattr(t, "__namespace_cls__", None) is None
         )
     )
 
@@ -1231,6 +1232,14 @@ class EventGraph:
         enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_error_handling()
 
+    def _serde_scope(
+        self,
+    ) -> tuple[tuple[type[Namespace], ...], tuple[type[Event], ...]]:
+        """The ``namespaces=`` and ``events=`` of a serde that reads every
+        event class this graph can store: its namespaces, and the events
+        outside every namespace that its handlers subscribe to or return."""
+        return tuple(self._namespaces.values()), self._loose_events
+
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.
 
@@ -1653,9 +1662,9 @@ class EventGraph:
                 # ``handlers=`` alone, and its events would then keep
                 # resolving by import — the bleed #155 exists to close.
                 # ``graph._namespaces`` is the full set.
+                namespaces, events = graph._serde_scope()
                 checkpointer.serde = NamespaceAwareSerde(
-                    namespaces=tuple(graph._namespaces.values()),
-                    events=graph._loose_events,
+                    namespaces=namespaces, events=events
                 )
 
         return graph

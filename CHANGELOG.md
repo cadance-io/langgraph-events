@@ -17,9 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `transform` or `split` key names its callable in `via`. `MigrationKey.label` has one form,
   `<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]`, and
   `MigrationKey.parse(label)` reads it back. A key refuses a module, qualname, field or `via`
-  that is not a dotted Python name, so every label reads back to its key. `MigrationKey.anonymous` is true when `via` names a lambda or a
-  callable object (`module:Class()`), because a replacement of such a callable reads as the
-  same key.
+  that is not a dotted Python name, so every label reads back to its key. A local function
+  that a factory returns has a `via` that ends in `#` and a 12-digit digest of the values
+  that it captures, and a `functools.partial` has the name of its function and a digest of
+  its arguments. So a new factory argument gives a new key and a new fingerprint.
+  `MigrationKey.anonymous` is true when `via` names a lambda, a callable object
+  (`module:Class()`), or a local function that captures a value with no stable form,
+  because a replacement of such a callable reads as the same key.
 
 - **One migration gate replaces the four baseline gates.** Declare a `MigrationTarget`
   with a graph factory and the committed baseline file. `check(target, previous=None)`
@@ -29,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prints one next command with the caller's own arguments. `assert_migration_gate`
   raises `GateError`, an `AssertionError`, on a finding. The report states which
   rules ran, and why the release rule did not run.
+- **The gate judges every event class that the graph can store.** That is each class that
+  the serde reads, each class of a namespace of the graph, and each event outside every
+  namespace that a handler subscribes to or returns. A class outside the serde revives by
+  import, so a serde built with `namespaces=` only needs no `events=` for the gate. A new
+  `coverage` finding, `MigrationOutOfScope`, names a class of the graph that declares a
+  read-time migration that the serde does not collect. It replaces a client test that every
+  namespace of the graph is in `namespaces=` of the serde.
 - **The baseline records each client migration.** The baseline file is version 4. Its
   `migrations` list holds the label of every client migration and any hold. Each `events`
   entry also records `live`, the init fields of the live class. The baseline reads its
@@ -77,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **New public names in `langgraph_events.serde.migrations`.** `MigrationTarget`,
   `ThreadKey`, `TargetError`, `MigrationKey`, `MigrationSet`, `check`, `GateReport`,
   `GateError`, `Invocation`, `Finding` and its finding classes (`BaselineStale`,
-  `AnonymousCallable`, `Uncovered`, `Unrevivable`, `HandlerMissing`, `SurvivedRelease`),
+  `AnonymousCallable`, `MigrationOutOfScope`, `Uncovered`, `Unrevivable`, `HandlerMissing`, `SurvivedRelease`),
   `assert_migration_gate`, `update_baseline`, `hold_migration`, `rewrite_live_set`,
   `LiveSetOutcome` and `WrongRelease`.
 
@@ -112,6 +123,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `revive` rule only resolves an identity of this library.** A `None` placeholder
   cannot satisfy a library class that validates a required field, for example
   `FrontendToolCallRequested`. A client identity still revives through the read path.
+
+### Fixed
+
+- **A mixin that a handler subscribes to is not a loose event of the graph.**
+  `EventGraph.from_namespaces` passed such a mixin to `events=` of the serde it builds. A
+  plain mixin then made `update_baseline` raise `TypeError`, and a dataclass mixin gave a
+  false `unrevivable` finding.
 
 ### Removed
 

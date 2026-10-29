@@ -240,7 +240,7 @@ class Baseline:
         is exactly the code's keys, and a hold stays on a key the code
         still holds.
         """
-        live = code.serde.live_fields()
+        live = code.live_fields()
         history = self.history
         if previous is not None and isinstance(previous.code, CodeRecord):
             history = previous.code.prune(history, code.migrations)

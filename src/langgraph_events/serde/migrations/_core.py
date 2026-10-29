@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import enum
+import functools
 import hashlib
 import importlib
 import itertools
@@ -384,7 +386,8 @@ _IDENT = r"[^\W\d]\w*"
 _QUALPART = rf"(?:{_IDENT}|<locals>|<lambda>)"
 _MODULE = rf"{_IDENT}(?:\.{_IDENT})*"
 _QUALNAME = rf"{_QUALPART}(?:\.{_QUALPART})*"
-_VIA = rf"{_MODULE}:{_QUALNAME}(?:\(\))?"
+_DIGEST = r"#[0-9a-f]{12}"
+_VIA = rf"{_MODULE}:{_QUALNAME}(?:\(\)|{_DIGEST})?"
 # One grammar for construction and parse: no part can hold a separator.
 _PARTS = {
     "module": re.compile(_MODULE),
@@ -445,12 +448,12 @@ class MigrationKey:
         """True when ``via`` names no stable callable.
 
         A lambda or a callable object has no name of its own, so a
-        replacement reads as the same key. Name the callable at module level
+        replacement reads as the same key. A local function is stable only
+        with the digest of the values it captures. Without a digest, a
+        captured value has no stable form. Name the callable at module level
         to give it a stable key.
         """
-        return self.via is not None and (
-            "<lambda>" in self.via or self.via.endswith("()")
-        )
+        return self.via is not None and _anonymous_via(self.via)
 
     @property
     def identity(self) -> Identity:
@@ -497,12 +500,98 @@ def _malformed_label(label: str) -> str:
     )
 
 
-def _callable_id(fn: Callable[..., Any]) -> str:
-    """``module:qualname`` of *fn*, or ``module:Class()`` for a callable object."""
-    if hasattr(fn, "__qualname__"):
-        return f"{fn.__module__}:{fn.__qualname__}"
-    owner = type(fn)
-    return f"{owner.__module__}:{owner.__qualname__}()"
+def _anonymous_via(via: str) -> bool:
+    """See :attr:`MigrationKey.anonymous`."""
+    return (
+        "<lambda>" in via
+        or via.endswith("()")
+        or ("<locals>" in via and "#" not in via)
+    )
+
+
+def _callable_id(fn: Callable[..., Any], _seen: frozenset[int] = frozenset()) -> str:
+    """``module:qualname`` of *fn*, with ``#`` and a digest of the values it binds.
+
+    A local function, such as the one a factory returns, gets the digest of
+    the values it captures. A ``functools.partial`` gets the digest of its
+    function and its arguments, under the name of its function. So a new
+    factory argument gives a new key. A bound value with no stable form
+    leaves the local function without a digest, which makes its key
+    anonymous, and leaves a partial as ``functools:partial()``. A callable
+    object is ``module:Class()``.
+    """
+    seen = _seen | {id(fn)}
+    if isinstance(fn, functools.partial):
+        inner = _callable_id(fn.func, seen)
+        bound = _stable_form((inner, fn.args, fn.keywords), seen)
+        if bound is None or _anonymous_via(inner):
+            return "functools:partial()"
+        return f"{inner.partition('#')[0]}{_digest(bound)}"
+    if not hasattr(fn, "__qualname__"):
+        owner = type(fn)
+        return f"{owner.__module__}:{owner.__qualname__}()"
+    via = f"{fn.__module__}:{fn.__qualname__}"
+    if "<locals>" not in fn.__qualname__ or "<lambda>" in fn.__qualname__:
+        return via
+    try:
+        captured = tuple(cell.cell_contents for cell in fn.__closure__ or ())
+    except ValueError:  # an empty cell: the factory has not bound it yet
+        return via
+    bound = _stable_form(captured, seen)
+    return via if bound is None else f"{via}{_digest(bound)}"
+
+
+def _digest(form: str) -> str:
+    return "#" + hashlib.sha256(form.encode()).hexdigest()[:12]
+
+
+def _stable_form(value: object, seen: frozenset[int]) -> str | None:
+    """A text that is equal for equal *value* in every process, or ``None``.
+
+    Scalars give their ``repr``. A tuple, list, set or dict gives the form
+    of each item, sorted for a set and a dict. A class or an enum member
+    gives its name. A callable gives :func:`_callable_id`, and is ``None``
+    when that id is anonymous. A callable in *seen* captures itself. Any
+    other value has no stable form.
+    """
+    if isinstance(value, (tuple, list, set, frozenset, dict)):
+        return _container_form(value, seen)
+    if isinstance(value, enum.Enum):
+        return f"{_type_name(type(value))}.{value.name}"
+    if isinstance(value, type):
+        return None if "<locals>" in value.__qualname__ else _type_name(value)
+    if callable(value):
+        via = None if id(value) in seen else _callable_id(value, seen)
+        return None if via is None or _anonymous_via(via) else via
+    scalar = value is None or isinstance(value, (bool, int, float, str, bytes))
+    return repr(value) if scalar else None
+
+
+def _container_form(
+    value: tuple[Any, ...] | list[Any] | set[Any] | frozenset[Any] | dict[Any, Any],
+    seen: frozenset[int],
+) -> str | None:
+    if isinstance(value, dict):
+        items = [_pair_form(k, v, seen) for k, v in value.items()]
+    else:
+        items = [_stable_form(item, seen) for item in value]
+    known = [item for item in items if item is not None]
+    if len(known) != len(items):
+        return None
+    if not isinstance(value, (tuple, list)):
+        known.sort()
+    return f"{type(value).__name__}({','.join(known)})"
+
+
+def _pair_form(key: object, value: object, seen: frozenset[int]) -> str | None:
+    key_form, value_form = _stable_form(key, seen), _stable_form(value, seen)
+    if key_form is None or value_form is None:
+        return None
+    return f"{key_form}={value_form}"
+
+
+def _type_name(cls: type) -> str:
+    return f"{cls.__module__}:{cls.__qualname__}"
 
 
 @dataclass(frozen=True)
@@ -1715,6 +1804,33 @@ def _unimportable_payload_models(
     return out
 
 
+def _init_fields(cls: type) -> frozenset[str]:
+    """The init fields of the event class *cls*: the fields a serde writes.
+
+    The constructor rebuilds an ``init=False`` field.
+    """
+    return frozenset(f.name for f in fields(cls) if f.init)
+
+
+def _declares_migration(cls: type) -> bool:
+    """*cls* itself carries a read-time migration decorator.
+
+    ``__dict__``, not ``getattr``: a subclass of a decorated class
+    inherits no migration.
+    """
+    return any(
+        cls.__dict__.get(attr)
+        for attr in (
+            _MIGRATE_FROM_ATTR,
+            _BACKFILL_ATTR,
+            _ORIGIN_BACKFILL_ATTR,
+            _TRANSFORM_ATTR,
+            _ORIGIN_TRANSFORM_ATTR,
+            _SPLIT_ATTR,
+        )
+    )
+
+
 def _collect_decorated_migrations(
     namespaces: Sequence[type],
     events: Sequence[type] = (),
@@ -1775,14 +1891,14 @@ def _collect_decorated_migrations(
             )
         # ``__dict__.get`` (not ``getattr``) — neither marker may leak
         # through MRO when a subclass inherits from a decorated parent.
+        if not _declares_migration(cls):
+            continue
         history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
         backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
         transform = cls.__dict__.get(_TRANSFORM_ATTR)
         origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
         split = cls.__dict__.get(_SPLIT_ATTR)
-        if not (history or backfills or origin_backfills or transform or split):
-            continue
         ops: list[Operation] = []
         if history:
             oldest_historic[current] = history[0]

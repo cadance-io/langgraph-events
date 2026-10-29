@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import functools
-from typing import Any
+import re
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -21,6 +22,9 @@ from langgraph_events.serde.migrations import (
     transform_fields,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 def _drop_total(kw: dict[str, Any]) -> dict[str, Any]:
     kw.pop("total", None)
@@ -29,6 +33,46 @@ def _drop_total(kw: dict[str, Any]) -> dict[str, Any]:
 
 def _keep(kw: dict[str, Any]) -> dict[str, Any]:
     return kw
+
+
+def _drop_field(name: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def _drop(kw: dict[str, Any]) -> dict[str, Any]:
+        kw.pop(name, None)
+        return kw
+
+    return _drop
+
+
+def _chained(
+    *steps: Callable[[dict[str, Any]], dict[str, Any]],
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def _all(kw: dict[str, Any]) -> dict[str, Any]:
+        for step in steps:
+            kw = step(kw)
+        return kw
+
+    return _all
+
+
+def _marked() -> Callable[[dict[str, Any]], dict[str, Any]]:
+    marker = object()
+
+    def _mark(kw: dict[str, Any]) -> dict[str, Any]:
+        kw["marker"] = id(marker)
+        return kw
+
+    return _mark
+
+
+def _transform_label(transform: Callable[[dict[str, Any]], dict[str, Any]]) -> str:
+    """The label of a transform on ``Hand.Ordered``."""
+    (label,) = _labels(
+        Hand,
+        migrations=(
+            Migration.transform_fields(target=Hand.Ordered, transform=transform),
+        ),
+    )
+    return label
 
 
 class Chain(Namespace):
@@ -72,6 +116,11 @@ class Partial(Namespace):
     @transform_fields(functools.partial(_drop_total))
     class Ordered(DomainEvent):
         note: str = ""
+
+
+class _Keep:
+    def __call__(self, kw: dict[str, Any]) -> dict[str, Any]:
+        return kw
 
 
 def _pick_side(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
@@ -172,11 +221,74 @@ def describe_client_migrations():
                 " via test_migration_keys:Anonymous.<lambda>"
             }
 
+    def when_the_transform_is_a_partial():
+        def it_names_the_function_and_a_digest_of_the_bound_arguments():
+            assert re.fullmatch(
+                r"transform test_migration_keys:Partial.Ordered"
+                r" via test_migration_keys:_drop_total#[0-9a-f]{12}",
+                *_labels(Partial),
+            )
+
+        def when_the_bound_arguments_differ():
+            def it_gives_another_key():
+                first = _transform_label(functools.partial(_drop_total))
+                second = _transform_label(functools.partial(_drop_total, {}))
+
+                assert first != second
+
+    def when_the_transform_is_a_local_function_of_a_factory():
+        def it_names_the_function_and_a_digest_of_the_captured_values():
+            label = _transform_label(_drop_field("reason"))
+
+            assert re.fullmatch(
+                r"transform test_migration_keys:Hand.Ordered via "
+                r"test_migration_keys:_drop_field.<locals>._drop#[0-9a-f]{12}",
+                label,
+            )
+
+        def it_gives_the_same_key_for_the_same_factory_argument():
+            assert _transform_label(_drop_field("reason")) == _transform_label(
+                _drop_field("reason")
+            )
+
+        def it_gives_another_fingerprint_for_another_factory_argument():
+            def fingerprint(
+                transform: Callable[[dict[str, Any]], dict[str, Any]],
+            ) -> str:
+                migration = Migration.transform_fields(
+                    target=Hand.Ordered, transform=transform
+                )
+                serde = NamespaceAwareSerde((migration,), namespaces=(Hand,))
+                return serde.client_migrations().fingerprint
+
+            assert fingerprint(_drop_field("reason")) != fingerprint(
+                _drop_field("status")
+            )
+
+        def when_it_captures_other_local_functions():
+            def it_digests_their_captured_values_too():
+                first = _transform_label(_chained(_drop_field("a"), _drop_field("b")))
+                second = _transform_label(_chained(_drop_field("a"), _drop_field("c")))
+
+                assert first != second
+                assert first == _transform_label(
+                    _chained(_drop_field("a"), _drop_field("b"))
+                )
+
+        def when_it_captures_a_value():
+            def without_a_stable_form():
+                def it_gives_an_anonymous_key():
+                    key = MigrationKey.parse(_transform_label(_marked()))
+
+                    assert key.anonymous
+                    assert key.via == "test_migration_keys:_marked.<locals>._mark"
+
     def when_the_transform_is_a_callable_object():
         def it_names_an_instance_of_its_class():
-            assert _labels(Partial) == {
-                "transform test_migration_keys:Partial.Ordered via functools:partial()"
-            }
+            assert _transform_label(_Keep()) == (
+                "transform test_migration_keys:Hand.Ordered"
+                " via test_migration_keys:_Keep()"
+            )
 
     def when_split_event_decorates_a_class():
         def it_gives_a_split_via_the_select_function():
@@ -204,6 +316,8 @@ def describe_MigrationKey():
                 " via test_migration_keys:_drop_total",
                 "split test_migration_keys:Split.Left"
                 " via test_migration_keys:outer.<locals>.<lambda>",
+                "transform app.events:Order"
+                " via app.fix:factory.<locals>._step#0123456789ab",
             ],
         )
         def it_inverts_the_label(label: str):
@@ -232,6 +346,7 @@ def describe_MigrationKey():
                 "transform app.events:Order",
                 "rename app.events:Order via app.fix:_drop",
                 "split app.events:Order[status] via app.fix:_pick",
+                "transform app.events:Order via app.fix:_drop#0123",
             ],
         )
         def it_refuses_a_malformed_label(label: str):
@@ -282,7 +397,12 @@ def describe_MigrationKey():
         def when_via_names_no_stable_callable():
             @pytest.mark.parametrize(
                 "via",
-                ["app.fix:<lambda>", "app.fix:Order.<lambda>", "functools:partial()"],
+                [
+                    "app.fix:<lambda>",
+                    "app.fix:Order.<lambda>",
+                    "app.fix:Keep()",
+                    "app.fix:factory.<locals>._step",
+                ],
             )
             def it_is_anonymous(via: str):
                 key = MigrationKey("transform", "app.events", "Order", via=via)
@@ -292,6 +412,13 @@ def describe_MigrationKey():
             def it_is_not_anonymous():
                 key = MigrationKey("split", "app.events", "Order", via="app.fix:_pick")
                 assert not key.anonymous
+
+        def when_via_names_a_local_function():
+            def with_a_digest():
+                def it_is_not_anonymous():
+                    via = "app.fix:factory.<locals>._step#0123456789ab"
+                    key = MigrationKey("transform", "app.events", "Order", via=via)
+                    assert not key.anonymous
 
         def when_the_key_has_no_via():
             def it_is_not_anonymous():

@@ -131,7 +131,7 @@ class BaselineStale:
 
 @dataclass(frozen=True)
 class AnonymousCallable:
-    """A transform or a split whose callable has no module-level name."""
+    """A transform or a split whose callable has no stable name."""
 
     code: ClassVar[str] = "anonymous-callable"
     key: MigrationKey
@@ -143,8 +143,9 @@ class AnonymousCallable:
     def lines(self, invocation: Invocation) -> tuple[str, ...]:
         """The explanation, then the next command."""
         return (
-            "A lambda or a callable object has no name of its own, so a "
-            "replacement callable reads as the same migration.",
+            "A lambda, a callable object, or a local function that captures a "
+            "value with no stable form has no stable name, so a replacement "
+            "callable reads as the same migration.",
             "Give the callable a module-level name, then run: "
             f"{invocation.baseline_update()}",
         )
@@ -180,6 +181,28 @@ class Uncovered:
             f"Add @migrate_from({self.identity.qualname!r}) to the class that "
             f"replaces it, or a Migration to migrations=, then run: "
             f"{invocation.baseline_update()}",
+        )
+
+
+@dataclass(frozen=True)
+class MigrationOutOfScope:
+    """A class of the graph declares a read-time migration that the serde
+    does not collect, because the serde does not read the class."""
+
+    code: ClassVar[str] = "migration-out-of-scope"
+    identity: Identity
+
+    @property
+    def subject(self) -> str:
+        return self.identity.label
+
+    def lines(self, invocation: Invocation) -> tuple[str, ...]:
+        """The explanation, then the fix and the next command."""
+        return (
+            "The class declares a read-time migration, but the serde does not "
+            "read the class, so the migration does nothing.",
+            "Pass its namespace in namespaces= of the serde, or the class in "
+            f"events=, then run: {invocation.baseline_update()}",
         )
 
 
@@ -258,6 +281,7 @@ class SurvivedRelease:
 Finding = (
     BaselineStale
     | AnonymousCallable
+    | MigrationOutOfScope
     | Uncovered
     | Unrevivable
     | HandlerMissing
@@ -339,6 +363,7 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
     findings.extend(
         AnonymousCallable(k) for k in sorted(code.migrations.keys) if k.anonymous
     )
+    findings.extend(MigrationOutOfScope(i) for i in code.migrations_out_of_scope())
     findings.extend(_coverage_and_revival(code, judged))
     findings.extend(
         HandlerMissing(name)
@@ -446,7 +471,7 @@ def _coverage_and_revival(
     code: Snapshot, judged: Baseline
 ) -> list[Uncovered | Unrevivable]:
     recorded = judged.history
-    revivable = code.serde.revivable_identities()
+    revivable = code.revivable_identities()
     findings: list[Uncovered | Unrevivable] = []
     for identity in sorted(recorded.keys() - revivable):
         leaf = identity.qualname.rsplit(".", 1)[-1]

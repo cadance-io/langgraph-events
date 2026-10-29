@@ -139,7 +139,7 @@ Read-path order: the origin stage (transform, then origin fills), the rename, th
 Semantics:
 
 - **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. A transform that returns `{}` discards every stored field.
-- **A module-level name.** Give the transform a function name at module level. The [migration gate](#the-rules) reports a lambda or a callable object as `AnonymousCallable`, because a replacement callable would read as the same migration.
+- **A stable name.** Give the transform a function name at module level, or build it with a factory or `functools.partial`. The key of a local function, for example `drop_field.<locals>._drop`, ends in `#` and a digest of the values that it captures. The key of a partial holds a digest of its arguments. So a new factory argument gives a new key. A captured value must be a scalar, a tuple, a list, a set, a dict, a class, an enum member or another callable with a stable name. The [migration gate](#the-rules) reports a lambda, a callable object, or a local function that captures any other value as `AnonymousCallable`, because a replacement callable would read as the same migration.
 - **Idempotent.** A class-stage transform sees current payloads for ever. Use `kw.pop("x", None)`. Do not use `del kw["x"]` or `kw["x"]`. A transform must accept a payload from every era.
 - **One transform per identity and stage.** Compose the steps in one callable. A second decorator is rejected at decoration. A second hand-authored op is rejected at serde construction.
 - **The target must resolve**, live or as a rename source, the same rule as `AddField`.
@@ -478,6 +478,16 @@ target = MigrationTarget(
 
 `graph` receives a checkpointer and returns the graph. The gate passes an empty `MemorySaver`, so it reads no store. The graph must carry a `NamespaceAwareSerde`. `from_namespaces(..., checkpointer=...)` wires one. A hand-built serde with `migrations=` also works: set it on the checkpointer before you build the graph.
 
+The gate judges every event class that the graph can store:
+
+- each class that the serde reads, from its `namespaces=` and its `events=`,
+- each class of a namespace that the graph uses,
+- each event outside every namespace that a handler subscribes to or returns, for example `HandlerRaised` or an `IntegrationEvent`.
+
+A class outside the serde revives by import, so the gate records it as live. A serde built with `namespaces=` only needs no `events=` for the gate. A mixin that a handler subscribes to is not a stored class, and the gate does not record it.
+
+A class of the graph that declares a read-time migration must be in the serde. The serde collects a migration only from a class that it reads. Otherwise the gate reports `MigrationOutOfScope`. This rule replaces a test of your own that every namespace of the graph is in `namespaces=` of the serde.
+
 Run the gate in CI, and in a test:
 
 ```bash
@@ -508,7 +518,8 @@ python -m langgraph_events.serde.migrations baseline update myapp.lge_target:tar
 | Rule | Finding | It means | Next command |
 |---|---|---|---|
 | `baseline` | `BaselineStale` | The committed file differs from the file the code needs. The finding lists each difference. | `baseline update` |
-| `names` | `AnonymousCallable` | A transform or a split uses a lambda or a callable object. A replacement callable would read as the same migration. | Give the callable a module-level name, then `baseline update` |
+| `names` | `AnonymousCallable` | A transform or a split uses a lambda, a callable object, or a local function that captures a value with no stable form. A replacement callable would read as the same migration. | Give the callable a module-level name, then `baseline update` |
+| `coverage` | `MigrationOutOfScope` | A class of the graph declares a read-time migration, and the serde does not read the class. The migration does nothing. | Pass its namespace in `namespaces=` of the serde, or the class in `events=`, then `baseline update` |
 | `coverage` | `Uncovered` | A recorded identity has no live class and no migration. The finding names live classes with the same last name, a likely rename. | Add the migration, then `baseline update` |
 | `revive` | `Unrevivable` | A synthesized payload of the recorded shape fails the real read path. | Add or fix the migration, then `baseline update` |
 | `handlers` | `HandlerMissing` | A recorded handler node name has no live handler and no `@on(previously=...)` alias. | Declare the alias, then `baseline update` |
@@ -521,7 +532,7 @@ The `revive` rule sends a `None` placeholder for every required field of the liv
 !!! warning "A required field that `__post_init__` validates"
     A `None` placeholder trips a validator on a required field with no fill. The rule then reports `Unrevivable`. Give the field a `@backfill` with a valid value, or a default.
 
-Resolution is scope-first, like the read path. The rule finds a class in the namespaces of the serde first, then by import. So a namespace defined inside a function passes. `NamespaceAwareSerde.revivable_identities()` returns the identities the `coverage` rule accepts.
+Resolution is scope-first, like the read path. The rule finds a class in the namespaces of the serde first, then by import. So a namespace defined inside a function passes. The `coverage` rule accepts each identity in `NamespaceAwareSerde.revivable_identities()` and each event class that the graph can store.
 
 ### The release rule
 
@@ -556,10 +567,10 @@ The hold records the digest of the whole previous file. The baseline of the next
 One label form names a migration everywhere: in the baseline, in a finding, in a hold and in a read error.
 
 ```
-<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]
+<kind> <module>:<qualname>[<field>] [via <module>:<qualname>[#<digest>]]
 ```
 
-`rename myapp.events:Order.Old`, `fill myapp.events:Order[status]` and `transform myapp.events:Order via myapp.events:drop_total` are examples. A read error names a stored identity as `<module>:<qualname>`.
+`rename myapp.events:Order.Old`, `fill myapp.events:Order[status]` and `transform myapp.events:Order via myapp.events:drop_total` are examples. A transform that a factory builds has a `via` such as `myapp.events:drop_field.<locals>._drop#3f0c2a9e41b7`. The 12 hex digits are the digest of the captured values. A read error names a stored identity as `<module>:<qualname>`.
 
 ### Exit codes
 
@@ -596,7 +607,7 @@ Commit the baseline **alongside** the change that needs it, never after. Run `ba
 }
 ```
 
-- **`events`** lists every live event class that the serde of the graph speaks for: the classes of its namespaces and its loose events. A class that no handler produces, for example a tombstone, is in it too.
+- **`events`** lists every live event class that the gate judges: the classes that the serde reads, and the classes that the graph can store. A class that no handler produces, for example a tombstone in a namespace of the serde, is in it too.
 - **`fields` is cumulative.** A field that was ever recorded can sit in a checkpoint, so the `revive` rule keeps sending it. An update keeps it. Only an update with `--previous` after a shipped migration left the code resets the fields of the identity that the migration covered.
 - **`live`** lists the init fields of the live class when the file was written, the same set the serde writes. An update with `--previous` reads `live` from the previous file to reset the fields of a class.
 - **`retired`** lists every identity an update dropped from `events`, with the fields last recorded for it. The entry has no `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone.

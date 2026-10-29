@@ -8,6 +8,13 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from langgraph_events._identity import Identity
+from langgraph_events.serde.migrations._core import (
+    _declares_migration,
+    _init_fields,
+    _serde_event_classes,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from contextlib import AbstractContextManager
@@ -144,8 +151,42 @@ def _postgres_thread_keys(
 
 @dataclass(frozen=True)
 class Snapshot:
-    """The graph, its serde and its client migrations."""
+    """The graph, its serde and its client migrations.
+
+    The event classes of the snapshot are the classes the serde reads and
+    the classes the graph can store. A graph class outside the serde
+    revives by import, so it is live too.
+    """
 
     graph: EventGraph
     serde: NamespaceAwareSerde
     migrations: MigrationSet
+
+    def live_fields(self) -> dict[Identity, frozenset[str]]:
+        """The init fields of every live event class of the snapshot."""
+        fields = self.serde.live_fields()
+        for cls in self._graph_classes():
+            fields.setdefault(
+                Identity(cls.__module__, cls.__qualname__), _init_fields(cls)
+            )
+        return fields
+
+    def revivable_identities(self) -> frozenset[Identity]:
+        """Every identity the serde revives, by a live class or a rename."""
+        return self.serde.revivable_identities() | self.live_fields().keys()
+
+    def migrations_out_of_scope(self) -> tuple[Identity, ...]:
+        """Each graph class with a read-time migration that the serde does
+        not read, so that the serde never collects the migration."""
+        read = self.serde.live_fields().keys()
+        return tuple(
+            sorted(
+                identity
+                for cls in self._graph_classes()
+                if _declares_migration(cls)
+                and (identity := Identity(cls.__module__, cls.__qualname__)) not in read
+            )
+        )
+
+    def _graph_classes(self) -> list[type]:
+        return _serde_event_classes(*self.graph._serde_scope())
