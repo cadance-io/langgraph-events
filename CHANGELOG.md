@@ -64,7 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`plan_rewrite()` and `rewrite_store()` read a subgraph namespace.** Pass
   `checkpoint_ns=` to plan or rewrite the latest checkpoint under a child namespace. The
   default `""` is the root namespace. `ThreadRewrite` gains `checkpoint_ns` and `location`.
-  The async twins read the root namespace only.
+  The async twins read the root namespace only. Known limit: a subgraph checkpoint that holds
+  a task write from a failed or completed task is refused on every pass, and no call of this
+  library clears it. Its reason says so, and names the `delete_thread()` method of the
+  checkpointer for a thread that nobody needs. The limit stays until the refusal rule changes
+  ([#217](https://github.com/cadance-io/langgraph-events/issues/217)).
 - **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
   `check`, `baseline update`, `baseline hold`, `fingerprint` and `rewrite`. Exit 0 is a
   pass, 1 a finding or a store that is not clean, 2 a usage, target or store error, 3 a

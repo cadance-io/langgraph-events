@@ -10,6 +10,7 @@ a helper never imports, so a serde swap on the saver simulates "the
 class was renamed" or "the class was deleted" against real bytes.
 """
 
+import contextlib
 import typing
 
 import pytest
@@ -181,6 +182,68 @@ def _subgraph_pair(saver: MemorySaver, tid: str):
 
     saver.serde = NamespaceAwareSerde(events=(Started, _NewStep))
     return EventGraph([_completes], checkpointer=saver), ns, _OldStep, _NewStep
+
+
+def _failed_subgraph(saver: MemorySaver, tid: str):
+    """A thread whose handler caught the failure of an inner graph.
+
+    The root run completed. The latest checkpoint of the inner graph keeps
+    the ``__error__`` write, and its history holds an event that release
+    N+1 renamed. Returns the release N+1 graph and the namespace.
+    """
+
+    class _OldStep(IntegrationEvent):
+        pass
+
+    @on(Started)
+    def emit(event: Started) -> _OldStep:
+        return _OldStep()
+
+    @on(_OldStep)
+    def fail(event: _OldStep) -> None:
+        raise RuntimeError("inner failed")
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _OldStep))
+    inner = EventGraph([emit, fail], checkpointer=saver)
+
+    @on(Started)
+    def run_inner(event: Started) -> None:
+        with contextlib.suppress(RuntimeError):
+            inner.invoke(Started())
+
+    EventGraph([run_inner], checkpointer=saver).invoke(Started(), config=_cfg(tid))
+    [ns] = [ns for ns in saver.storage[tid] if ns]
+
+    @migrate_from(_OldStep.__qualname__, in_module=_OldStep.__module__)
+    class _NewStep(IntegrationEvent):
+        pass
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _NewStep))
+    return EventGraph([_completes], checkpointer=saver), ns
+
+
+def _paused_subgraph(saver: MemorySaver, tid: str):
+    """A root thread paused because its inner graph paused on a class about
+    to be retired. Returns the graph, the namespace and the class."""
+
+    class _Retiring(Interrupted):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _Retiring:
+        return _Retiring()
+
+    saver.serde = NamespaceAwareSerde(events=(Started, Ended, _Go, _Retiring))
+    inner = EventGraph([wait, _go_ends], checkpointer=saver)
+
+    @on(Started)
+    def run_inner(event: Started) -> None:
+        inner.invoke(Started())
+
+    graph = EventGraph([run_inner], checkpointer=saver)
+    graph.invoke(Started(), config=_cfg(tid))
+    [ns] = [ns for ns in saver.storage[tid] if ns]
+    return graph, ns, _Retiring
 
 
 def _settled_drop_pair(saver: MemorySaver, tid: str):
@@ -864,6 +927,51 @@ def describe_rewrite_store_refusals():
                 "thread has a pending __error__ write from a failed task; run "
                 "it again or abandon it, then rerun"
             )
+
+    def when_a_failed_task_left_an_error_write_in_a_subgraph():
+        def it_names_the_one_call_that_clears_it():
+            saver = MemorySaver()
+            graph, ns = _failed_subgraph(saver, "t1")
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"], checkpoint_ns=ns))
+
+            assert thread.reason == (
+                "thread has a pending __error__ write from a failed task; "
+                "abandon() and resume() reach only the root namespace, so no "
+                "call clears this write. If nobody needs the thread, delete "
+                "every checkpoint of it with the checkpointer's "
+                "delete_thread(), then rerun. Otherwise keep the migrations "
+                "and the classes that this checkpoint needs"
+            )
+
+    def when_the_pending_interrupt_in_a_subgraph_is_a_dropped_class():
+        def it_asks_to_resume_the_root_thread():
+            saver = MemorySaver()
+            graph, ns, retiring = _paused_subgraph(saver, "t1")
+
+            thread = _only(
+                graph.plan_rewrite(
+                    drop=(retiring,), thread_ids=["t1"], checkpoint_ns=ns
+                )
+            )
+
+            assert thread.reason == (
+                f"thread is paused on {retiring.__qualname__}, a dropped class; "
+                f"resume the root thread, then rerun. abandon() does not clear "
+                f"a subgraph checkpoint"
+            )
+
+        def when_the_root_thread_resumes():
+            def it_rewrites_the_subgraph_checkpoint():
+                saver = MemorySaver()
+                graph, ns, retiring = _paused_subgraph(saver, "t1")
+                graph.resume(_Go(), config=_cfg("t1"))
+
+                [thread] = graph.rewrite_store(
+                    drop=(retiring,), thread_ids=["t1"], checkpoint_ns=ns
+                ).threads
+
+                assert thread.status == "rewrite"
 
     def when_a_value_cannot_be_encoded():
         def it_refuses_the_thread_instead_of_aborting_the_walk():

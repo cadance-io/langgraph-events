@@ -219,6 +219,19 @@ def describe_update_baseline():
             with pytest.raises(ValueError, match="is malformed: KeyError 'reason'"):
                 update_baseline(target)
 
+    def when_the_file_is_json_but_not_an_object():
+        def it_names_the_file(tmp_path: Path):
+            target = _target(tmp_path, Shop)
+            target.baseline.write_text("[]")
+
+            with pytest.raises(ValueError) as raised:
+                update_baseline(target)
+
+            assert str(raised.value).startswith(
+                f"Baseline at {target.baseline} is malformed: the file holds a "
+                f"JSON list, not an object."
+            )
+
     def when_a_migration_label_is_listed_twice():
         def it_rejects_the_file(tmp_path: Path):
             target = _target(tmp_path, Shop)

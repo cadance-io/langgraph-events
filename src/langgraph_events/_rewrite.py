@@ -213,6 +213,7 @@ def _clear_resumed(entry: object, drop: tuple[type[Event], ...]) -> object:
 def plan_thread(
     *,
     thread_id: str,
+    checkpoint_ns: str,
     tup: CheckpointTuple,
     unresolved: Sequence[UnrevivedIdentity],
     reads: Sequence[ReadRecord],
@@ -228,7 +229,8 @@ def plan_thread(
     collectors. This function runs after both blocks closed, so its
     verification reads are strict. ``drop`` matches the stored identity
     exactly, not the class hierarchy: the rule ``validate_drop`` and the
-    byte scan apply.
+    byte scan apply. A non-root *checkpoint_ns* changes only the remedy of
+    a refusal, because ``abandon()`` and ``resume()`` reach the root only.
     """
     pairs = _migrated_pairs(reads)
     values: dict[str, Any] = tup.checkpoint["channel_values"]
@@ -251,7 +253,7 @@ def plan_thread(
         return ThreadRewrite(thread_id, "unchanged")
 
     pending = list(tup.pending_writes or ())
-    reason = _pending_refusal(pending, values, drop)
+    reason = _pending_refusal(pending, values, drop, subgraph=bool(checkpoint_ns))
     if reason is not None:
         return refused(reason)
 
@@ -271,40 +273,62 @@ def plan_thread(
     )
 
 
+_RESUME_THE_ROOT = (
+    "resume the root thread, then rerun. abandon() does not clear a subgraph checkpoint"
+)
+"""The remedy for a paused subgraph checkpoint. A resume of the root thread
+continues the subgraph run."""
+
+_NO_CALL_CLEARS = (
+    "abandon() and resume() reach only the root namespace, so no call clears "
+    "this write. If nobody needs the thread, delete every checkpoint of it "
+    "with the checkpointer's delete_thread(), then rerun. Otherwise keep the "
+    "migrations and the classes that this checkpoint needs"
+)
+"""The remedy for a task write in a subgraph checkpoint. A new run of the
+root thread writes under a new namespace and leaves this checkpoint."""
+
+
 def _pending_refusal(
     pending: Sequence[tuple[str, str, Any]],
     values: dict[str, Any],
     drop: tuple[type[Event], ...],
+    *,
+    subgraph: bool,
 ) -> str | None:
-    """Why the pending writes stop this rewrite, or ``None``."""
+    """Why the pending writes stop this rewrite, or ``None``. A *subgraph*
+    checkpoint gets the remedy that reaches it."""
     interrupt_writes = [w for w in pending if w[1] == _INTERRUPT_CHANNEL]
     for payload in _interrupt_payloads(interrupt_writes):
         if type(payload) in drop:
             return (
                 f"thread is paused on {type(payload).__qualname__}, a dropped "
-                f"class; abandon it first"
+                f"class; {_RESUME_THE_ROOT if subgraph else 'abandon it first'}"
             )
     if interrupt_writes and any(
         type(entry) in drop for entry in _log_entries(values, "_pending") or ()
     ):
         # The resumed task would find no matching event, return nothing,
         # and end the thread unpaused with the resume payload lost.
+        remedy = "resume or abandon the thread first"
         return (
-            "a dropped event is pending dispatch on a paused thread; resume "
-            "or abandon the thread first"
+            f"a dropped event is pending dispatch on a paused thread; "
+            f"{_RESUME_THE_ROOT if subgraph else remedy}"
         )
     for task_id, channel, _value in pending:
         if channel == _ERROR_CHANNEL:
+            remedy = "run it again or abandon it, then rerun"
             return (
-                "thread has a pending __error__ write from a failed task; run "
-                "it again or abandon it, then rerun"
+                f"thread has a pending __error__ write from a failed task; "
+                f"{_NO_CALL_CLEARS if subgraph else remedy}"
             )
         if channel != _INTERRUPT_CHANNEL:
             # A completed task write is insert-only in both savers: the
             # API cannot rewrite it.
+            remedy = "resume or abandon it, then rerun"
             return (
                 f"thread has a completed task write on task {task_id!r}; "
-                f"resume or abandon it, then rerun"
+                f"{_NO_CALL_CLEARS if subgraph else remedy}"
             )
     return None
 

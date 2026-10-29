@@ -2691,7 +2691,11 @@ class EventGraph:
                 result = _no_checkpoint(tid)
             else:
                 planned = plan(
-                    thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
+                    thread_id=tid,
+                    checkpoint_ns=checkpoint_ns,
+                    tup=tup,
+                    unresolved=unresolved,
+                    reads=list(reads),
                 )
                 if isinstance(planned, ThreadRewrite):
                     result = planned
@@ -2767,7 +2771,11 @@ class EventGraph:
                 results.append(_no_checkpoint(tid))
                 continue
             planned = plan(
-                thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
+                thread_id=tid,
+                checkpoint_ns="",
+                tup=tup,
+                unresolved=unresolved,
+                reads=list(reads),
             )
             if isinstance(planned, ThreadRewrite):
                 result = planned

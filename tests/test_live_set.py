@@ -362,6 +362,42 @@ def describe_rewrite_live_set():
                     ).threads
                     assert child.status == "unchanged"
 
+    def when_a_subgraph_checkpoint_holds_a_failed_task_write():
+        def _stuck(tmp_path: Path):
+            releases = _releases(tmp_path)
+            releases.seed("t1", "t2")
+            _copy_to_namespace(releases.saver, "t1", "child:1")
+            child = releases.saver.get_tuple(_cfg("t1", "child:1"))
+            assert child is not None
+            releases.saver.put_writes(child.config, [("__error__", "boom")], "task-1")
+            return releases
+
+        def it_reports_the_run_as_not_clean_after_every_pass(tmp_path: Path):
+            releases = _stuck(tmp_path)
+
+            outcome = rewrite_live_set(
+                releases.current, expect=releases.expect, apply=True
+            )
+
+            assert isinstance(outcome, LiveSetOutcome)
+            assert [t.location for t in outcome.final.refused] == [
+                "t1 in subgraph namespace 'child:1'"
+            ]
+            assert "delete_thread()" in outcome.final.refused[0].reason
+
+        def when_the_thread_is_deleted():
+            def it_reports_the_run_as_clean(tmp_path: Path):
+                releases = _stuck(tmp_path)
+                rewrite_live_set(releases.current, expect=releases.expect, apply=True)
+                releases.saver.delete_thread("t1")
+
+                outcome = rewrite_live_set(
+                    releases.current, expect=releases.expect, apply=True
+                )
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.clean
+
     def when_the_store_saver_holds_its_own_serde():
         def it_raises_a_target_error_before_it_reads_a_thread(tmp_path: Path):
             releases = _releases(tmp_path)

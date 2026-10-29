@@ -727,6 +727,15 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 A graph that a handler invokes on the same checkpointer writes its checkpoints under a subgraph namespace. The command plans and rewrites the latest checkpoint of each subgraph namespace, the same as a root thread. So a completed subgraph run does not keep a migration in the code. A refused subgraph checkpoint prints its namespace and its reason.
 
+A subgraph checkpoint that holds a task write from a failed or completed task is refused on every pass. `abandon()` and `resume()` reach only the root namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule changes ([#217](https://github.com/cadance-io/langgraph-events/issues/217)). The operator has two choices:
+
+- If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` again.
+- Otherwise keep the migrations that the checkpoint needs. Hold them with `baseline hold`, one release at a time.
+
+WARNING: `delete_thread()` deletes every checkpoint of the thread, the root namespace included. Delete only a thread that nobody needs.
+
+A subgraph checkpoint that is paused on a class in `drop` clears when the root thread resumes. `abandon()` on the root thread does not clear it.
+
 The Python form is `graph.plan_rewrite(thread_ids=..., checkpoint_ns=...)` and `graph.rewrite_store(thread_ids=..., checkpoint_ns=...)`. The default `checkpoint_ns=""` is the root namespace.
 
 ## Testing your migrations

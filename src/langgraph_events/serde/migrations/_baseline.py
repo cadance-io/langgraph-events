@@ -124,13 +124,19 @@ class Baseline:
         if not path.exists():
             return cls({}, {}, frozenset(), CodeRecord((), {}))
         try:
-            raw: dict[str, Any] = json.loads(path.read_text())
+            raw: object = json.loads(path.read_text())
         except json.JSONDecodeError as error:
             raise ValueError(
                 f"Baseline at {path} is not valid JSON: {error}. Restore the "
                 f"file from version control, or give the baseline file of the "
                 f"release."
             ) from error
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"Baseline at {path} is malformed: the file holds a JSON "
+                f"{type(raw).__name__}, not an object. Restore the file from "
+                f"version control, then run `baseline update`."
+            )
         version = raw.get("version")
         if version not in _SUPPORTED_BASELINE_VERSIONS:
             raise ValueError(
