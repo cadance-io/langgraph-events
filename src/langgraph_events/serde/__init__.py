@@ -26,14 +26,10 @@ from langgraph_events.serde._jsonplus import (
     UnreachableMigrationWarning,
 )
 from langgraph_events.serde.migrations import (
-    CoverageError,
-    HandlerCoverageError,
+    GateError,
     Migration,
-    MigrationCoverageError,
-    assert_all_baselined_cover,
-    assert_all_baselined_handlers_cover,
-    assert_all_baselined_resolve,
-    assert_all_baselined_revive,
+    MigrationTarget,
+    assert_migration_gate,
     assert_resume_recovers,
     backfill,
     migrate_from,
@@ -51,16 +47,12 @@ from langgraph_events.serde.migrations import (
 # ``langgraph_events.serde.migrations`` for the rare composite multi-op
 # Migration — keeping the top-level surface small.
 __all__ = [
-    "CoverageError",
-    "HandlerCoverageError",
+    "GateError",
     "Migration",
-    "MigrationCoverageError",
+    "MigrationTarget",
     "NamespaceAwareSerde",
     "UnreachableMigrationWarning",
-    "assert_all_baselined_cover",
-    "assert_all_baselined_handlers_cover",
-    "assert_all_baselined_resolve",
-    "assert_all_baselined_revive",
+    "assert_migration_gate",
     "assert_resume_recovers",
     "backfill",
     "migrate_from",

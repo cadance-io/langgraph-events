@@ -12,12 +12,12 @@ Renaming an **event class** and renaming a **handler** are the same problem at t
 |---|---|---|
 | **Declare** (recover after the fact) | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` |
 | **Prevent** (up front) | (qualname *is* the identity) | `@on(node_name="stable_id")` — then rename the function freely |
-| **Catch** in CI | `assert_all_baselined_cover` / `_resolve` / `_revive` | `assert_all_baselined_handlers_cover` |
+| **Catch** in CI | [the migration gate](#the-migration-gate): rules `coverage` and `revive` | [the migration gate](#the-migration-gate): rule `handlers` |
 
-Event-class migrations come first below; the [handler track](#handler-renames) is at the end. **Mind the gate signatures: the event gates take the `serde`; the handler gate takes the `graph` — don't transpose them.**
+Event-class migrations come first below; the [handler track](#handler-renames) is at the end. One gate checks both tracks, from one `MigrationTarget`.
 
 !!! note "The one invariant"
-    **Every rename = decorator *and* `write_baseline` regen in the same PR.** Adding the decorator without regenerating the baseline (or vice-versa) is a latent bug the gate won't catch until later.
+    **Every rename = decorator *and* `baseline update` in the same PR.** The gate reports a decorator without a baseline update as `BaselineStale`.
 
 ## The minimum case: rename inside a namespace
 
@@ -138,7 +138,8 @@ Read-path order: the origin stage (transform, then origin fills), the rename, th
 
 Semantics:
 
-- **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. `transform=lambda kw: {}` discards every stored field.
+- **Replace, not merge.** The return value is the full kwargs the constructor receives. Return `kw` after editing it in place, or return a new dict. A transform that returns `{}` discards every stored field.
+- **A stable name.** Give the transform a function name at module level, or build it with a factory or `functools.partial`. The key of a local function, for example `drop_field.<locals>._drop`, ends in `#` and a digest of the values that it captures. The key of a partial holds a digest of its arguments. So a new factory argument gives a new key. A captured value must be a scalar, a tuple, a list, a set, a dict, a class, an enum member or another callable with a stable name. The [migration gate](#the-rules) reports a lambda, a callable object, or a local function that captures any other value as `AnonymousCallable`, because a replacement callable would read as the same migration.
 - **Idempotent.** A class-stage transform sees current payloads for ever. Use `kw.pop("x", None)`. Do not use `del kw["x"]` or `kw["x"]`. A transform must accept a payload from every era.
 - **One transform per identity and stage.** Compose the steps in one callable. A second decorator is rejected at decoration. A second hand-authored op is rejected at serde construction.
 - **The target must resolve**, live or as a rename source, the same rule as `AddField`.
@@ -148,8 +149,8 @@ Semantics:
 !!! warning "Transforms cannot ride `legacy_write` (enforced)"
     A transform runs on read and has no inverse. A write relabelled under the oldest historic identity would carry the current shape, which the old release's class does not accept. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when you declare any transform, in either stage. lge's own [framework migrations](#framework-events) do not count. Drain in-flight threads before the cutover, or accept read-only compatibility.
 
-!!! note "The revive gate sends `None` placeholders"
-    A v3 baseline records the fields a class dropped. `assert_all_baselined_revive` sends `None` for each of them, so the transform runs through the real read path. A transform that reads a dropped value, for example `kw.pop("legacy_flag").upper()`, raises on `None` and fails the gate. The failure line says so. Guard the value in the transform, or pin a real payload with `synthesize_legacy_payload`.
+!!! note "The revive rule sends `None` placeholders"
+    The baseline records the fields a class dropped. The gate's `revive` rule sends `None` for each of them, so the transform runs through the real read path. A transform that reads a dropped value, for example `kw.pop("legacy_flag").upper()`, raises on `None` and fails the gate. The failure line says so. Guard the value in the transform, or pin a real payload with `synthesize_legacy_payload`.
 
 ## Splitting one stored event into two on a payload value
 
@@ -223,8 +224,8 @@ Semantics:
 !!! warning "Splits cannot ride `legacy_write` (enforced)"
     A split runs on read and has no inverse. An old release has no class for the target. `NamespaceAwareSerde(..., legacy_write=True)` raises at construction when you declare any split. lge's own [framework migrations](#framework-events) do not count. Drain in-flight threads before the cutover, or accept read-only compatibility.
 
-!!! note "The revive gate sends `None` placeholders"
-    `assert_all_baselined_revive` sends `None` for every required field of the source, and for every recorded field it dropped. Return `None` from `select` when the discriminating value is absent or `None`. The gate then proves the source still constructs. A `select` that reads the placeholder, for example `kw["result"]["status"]`, raises and fails the gate. The failure line says so. Pin each branch with real values through `synthesize_legacy_payload`, as above.
+!!! note "The revive rule sends `None` placeholders"
+    The gate's `revive` rule sends `None` for every required field of the source, and for every recorded field it dropped. Return `None` from `select` when the discriminating value is absent or `None`. The gate then proves the source still constructs. A `select` that reads the placeholder, for example `kw["result"]["status"]`, raises and fails the gate. The failure line says so. Pin each branch with real values through `synthesize_legacy_payload`, as above.
 
 ## Consolidating N classes into one
 
@@ -248,12 +249,12 @@ Shipping a consolidation is three moves in one PR:
 
 1. **Delete the old class definitions** — a `@migrate_from` whose historic identity still resolves to a live class is rejected at serde construction ("resolves to a currently-live class"); that error is the library telling you step 1 isn't done, not that the migration is wrong.
 2. **Decorate the surviving class** as above.
-3. **Regenerate the baseline** (`write_baseline`) in the same PR — the [one invariant](#two-tracks-one-model).
+3. **Update the baseline** (`baseline update`) in the same PR — the [one invariant](#two-tracks-one-model).
 
 Semantics:
 
 - **Precedence:** explicit payload value > origin-scoped fill > class-global `@backfill` (which acts as the fallback for origins without a scoped entry).
-- **Exact-origin contract:** a fill applies only to payloads written under *that* qualname. On a temporal chain (`@migrate_from("A", "B")`) a fill keyed on `B` does **not** apply to `A`-era payloads — "every era" is class-global `@backfill`'s job. Accordingly, `backfill=` requires exactly one qualname per decorator; the multi-arg chain form rejects it. Note the [revive gate](#coverage-gates) cannot catch a mid-chain fill that should have been class-global: earlier eras get placeholder-filled and pass, while a real payload from that era fails at read.
+- **Exact-origin contract:** a fill applies only to payloads written under *that* qualname. On a temporal chain (`@migrate_from("A", "B")`) a fill keyed on `B` does **not** apply to `A`-era payloads — "every era" is class-global `@backfill`'s job. Accordingly, `backfill=` requires exactly one qualname per decorator; the multi-arg chain form rejects it. Note the gate's [`revive` rule](#the-rules) cannot catch a mid-chain fill that should have been class-global: earlier eras get placeholder-filled and pass, while a real payload from that era fails at read.
 - **Mutable values** are rejected at decoration. For a per-origin `default_factory`, hand-author `Migration.add_field(module=..., qualname="<historic>", field=..., default_factory=...)` — an `AddField` keyed on a historic identity is applied *before* the rename, only to that origin.
 - Two fills for the same `(origin, field)` raise at serde construction (reachable when a decorator fill collides with a hand-authored one; a duplicated origin *qualname* is caught even earlier, at decoration).
 
@@ -307,7 +308,7 @@ Pass the live class for refactor safety; strings only for cross-module cases whe
     New pods encode events under the oldest historic qualname (recorded by `@migrate_from`). Old pods (release N) read those via existing class defs. Both pod versions can resume each other's threads.
 
     **Release N+2: `legacy_write=False` (default)**
-    Once release N is fully drained, flip writes to current qualname. Keep `@migrate_from` — it covers remaining old-format payloads in storage. Drop the decorator after `graph.rewrite_store()` has rewritten every live checkpoint under the new qualname. See [Rewriting the live set](#rewriting-the-live-set).
+    Once release N is fully drained, flip writes to current qualname. Keep `@migrate_from` — it covers remaining old-format payloads in storage. Delete the decorator in the next release, after the `rewrite` step has read the store clean. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
     `legacy_write` is scope-symmetric: decorated classes outside `namespaces=` are encoded under their current qualname (otherwise the read path of the same serde could not migrate them). Keep `namespaces=` consistent between encode and decode pods.
 
@@ -321,7 +322,7 @@ No locks or transactions in the serde/migration layer. Safe by **idempotency** a
 - **Required-field addition is a two-release operation, like a rename** — pair with `@backfill` and ship over the N → N+1 cadence.
 - **Thread-level concurrency on a single `thread_id` is the checkpointer's job** (`MemorySaver` provides none; SQLite/Postgres savers bring their own).
 - **Recovery replay is idempotent** — `replay_reducer` overwrites with the same correct value from any number of concurrent runners.
-- **One unprotected spot: `write_baseline` is non-atomic.** A write never erases a recorded identity, so a second divergent writer moves the first writer's additions to `retired` and the coverage gates report them. A true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, never in parallel.
+- **One unprotected spot: `baseline update` is non-atomic.** An update never erases a recorded identity, so a second divergent writer moves the first writer's additions to `retired` and the gate reports them. A true within-call read→write interleave between two CI processes is a TOCTOU the library does not guard. It is a dev/CI tool, not a runtime path — generate and commit the baseline from a **single** CI job, never in parallel.
 
 ## Reducer state migration
 
@@ -375,6 +376,12 @@ lge owns the read migrations for its own framework events, such as `HandlerRaise
 | `lge-0.41-handler-raised-split` | `HandlerRaised` with `abandoned_for_deadline=False` | `HandlerRaised`, without the key |
 | `lge-0.41-handler-raised-split` | `HandlerRaised` without the key | `HandlerRaised`, unchanged |
 | `lge-0.41-run-paused-split` | `RunPaused` | `RunPausedOnDeadline` |
+| `lge-0.42-halted-transform` | `Halted` with `reason`, from 0.1.x | `Halted`, without the key |
+| `lge-0.42-frontend-tool-call-requested-rename` | `FrontendToolCallRequested` in `langgraph_events._event`, from 0.5.x and earlier | `FrontendToolCallRequested` in `langgraph_events.agui._events` |
+
+The `FrontendToolCallRequested` rename exists only when the `agui` extra is installed. Its class needs the extra.
+
+Before 0.6.0, LangGraph's own `JsonPlusSerializer` wrote each event, in its constructor record form. `NamespaceAwareSerde` reads such a record of an lge event through these migrations, and a rewrite stores the record in the form of `NamespaceAwareSerde`. A plan reads such a record as a rewrite until then. A record of your own class in that form stays with LangGraph's reader. See [A checkpoint that a plan refuses](#a-checkpoint-that-a-plan-refuses).
 
 lge's framework migrations are not relabelled on write. A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only, so a framework split does not make `legacy_write=True` raise.
 
@@ -451,138 +458,400 @@ On 0.40.0, a `HandlerAbandonedOnDeadline` then revives as `HandlerRaised(abandon
 - **Payloads `ormsgpack` refuses to encode** — error propagates at the source, no fallback. Subclass `NamespaceAwareSerde` and override `_make_default` to extend encoding.
 - **Non-reducer channel values** — no analogous rebuild path. Recovery is custom (read → transform → write back through the saver's put API).
 
-## Detection tooling
+## The migration gate
 
-`detect_changes` diffs current graph topology against a stored baseline:
+The gate compares the code with a committed baseline file. It fails in CI before a stored payload fails in production. Declare one `MigrationTarget` for your graph. Every command and every test reads it.
 
 ```python
-from langgraph_events.serde.migrations.detect import detect_changes, write_baseline
+# myapp/lge_target.py
+from pathlib import Path
 
-# After authoring the initial migrations, snapshot:
-write_baseline(graph, Path("migrations/baseline.json"))
+from langgraph_events import EventGraph
+from langgraph_events.serde.migrations import MigrationTarget
 
-# In a pre-commit hook:
-report = detect_changes(graph, Path("migrations/baseline.json"))
-if report.has_changes():
-    for rename in report.confident_renames:
-        print(f"Likely rename: {rename.old_qualname} → {rename.new_qualname}")
-    for ambiguous in report.ambiguous:
-        print(f"Ambiguous removal {ambiguous.removed}: {ambiguous.candidates}")
-    for removed in report.unmatched_removed:
-        print(f"Removed (no candidate match): {removed}")
-    raise SystemExit(1)
+from myapp.namespaces import Order, Persona
+
+
+def build_graph(checkpointer):
+    return EventGraph.from_namespaces(Order, Persona, checkpointer=checkpointer)
+
+
+target = MigrationTarget(
+    graph=build_graph,
+    baseline=Path(__file__).parent / "lge-baseline.json",
+)
 ```
 
-- **Suggestion engine, not applicator** — matches removals to additions by leaf name; multi-match → `ambiguous`; pure deletes → `unmatched_removed`. Never auto-edits.
-- **One-line CI gate** for the common case:
-  ```bash
-  python -m langgraph_events.serde.migrations myapp.graph:build migrations/baseline.json
-  ```
-  Exits `0` (match), `1` (diverge), `2` (usage error). Drop to the programmatic form only for custom reporters.
+`graph` receives a checkpointer and returns the graph. The gate passes an empty `MemorySaver`, so it reads no store. The graph must carry a `NamespaceAwareSerde`. `from_namespaces(..., checkpointer=...)` wires one. A hand-built serde with `migrations=` also works: set it on the checkpointer before you build the graph.
+
+The gate judges every event class that the graph can store:
+
+- each class that the serde reads, from its `namespaces=` and its `events=`,
+- each class of a namespace that the graph uses,
+- each event outside every namespace that a handler subscribes to or returns, for example `HandlerRaised` or an `IntegrationEvent`.
+
+A class outside the serde revives by import, so the gate records it as live. A serde built with `namespaces=` only needs no `events=` for the gate. A mixin that a handler subscribes to is not a stored class, and the gate does not record it.
+
+A class of the graph that declares a read-time migration must be in the serde. The serde collects a migration only from a class that it reads. Otherwise the gate reports `MigrationOutOfScope`. This rule replaces a test of your own that every namespace of the graph is in `namespaces=` of the serde.
+
+Run the gate in CI, and in a test:
+
+```bash
+python -m langgraph_events.serde.migrations check myapp.lge_target:target
+```
+
+```python
+from langgraph_events.serde.migrations import assert_migration_gate
+from myapp.lge_target import target
+
+
+def test_migration_gate() -> None:
+    assert_migration_gate(target)
+```
+
+`assert_migration_gate` raises `GateError`, an `AssertionError`. Its `report` holds the typed findings.
+
+Write the baseline the code needs with one command. Commit the file in the same PR as the change:
+
+```bash
+python -m langgraph_events.serde.migrations baseline update myapp.lge_target:target
+```
+
+### The rules
+
+`check()` runs the rules in this order. Each finding names one next command, with your own arguments.
+
+| Rule | Finding | It means | Next command |
+|---|---|---|---|
+| `baseline` | `BaselineStale` | The committed file differs from the file the code needs. The finding lists each difference. | `baseline update` |
+| `names` | `AnonymousCallable` | A transform or a split uses a lambda, a callable object, or a local function that captures a value with no stable form. A replacement callable would read as the same migration. | Give the callable a module-level name, then `baseline update` |
+| `coverage` | `MigrationOutOfScope` | A class of the graph declares a read-time migration, and the serde does not read the class. The migration does nothing. | Pass its namespace in `namespaces=` of the serde, or the class in `events=`, then `baseline update` |
+| `coverage` | `Uncovered` | A recorded identity has no live class and no migration. The finding names live classes with the same last name, a likely rename. | Add the migration, then `baseline update` |
+| `revive` | `Unrevivable` | A synthesized payload of the recorded shape fails the real read path. | Add or fix the migration, then `baseline update` |
+| `handlers` | `HandlerMissing` | A recorded handler node name has no live handler and no `@on(previously=...)` alias. | Declare the alias, then `baseline update` |
+| `release` | `SurvivedRelease` | The previous release shipped this migration, and the code still holds it. | Delete the migration, then `baseline update --previous` |
+
+The baseline rule runs first. The other rules judge the baseline the code needs, not the committed file. So a deleted shipped migration gives one `BaselineStale` finding, and never a request to add the migration back.
+
+The `revive` rule sends a `None` placeholder for every required field of the live class. It also sends one for every recorded field that the live class no longer accepts. A field that a fill supplies gets the real fill value. So a broken fill fails the rule, and a dropped field fails the rule the way a stored payload fails at read. An identity of this library only has to resolve to a live `Event`. The library proves its own shapes in its own tests.
+
+!!! warning "A required field that `__post_init__` validates"
+    A `None` placeholder trips a validator on a required field with no fill. The rule then reports `Unrevivable`. Give the field a `@backfill` with a valid value, or a default.
+
+Resolution is scope-first, like the read path. The rule finds a class in the namespaces of the serde first, then by import. So a namespace defined inside a function passes. The `coverage` rule accepts each identity in `NamespaceAwareSerde.revivable_identities()` and each event class that the graph can store.
+
+### The release rule
+
+A read-time migration ships in release N and leaves the code in release N+1. The `release` rule needs the baseline of the previous release. The library does not run git. Give the file with `--previous`:
+
+```bash
+git show "$PREV_TAG:myapp/lge-baseline.json" > "$RUNNER_TEMP/prev.json"
+python -m langgraph_events.serde.migrations check myapp.lge_target:target \
+    --previous "$RUNNER_TEMP/prev.json"
+```
+
+- Without `--previous`, the rule does not run. The report says so. A test usually runs without it, so `assert_migration_gate` judges the same cases as `check` except this rule. Run `check --previous` in CI.
+- A previous file of version 1 to 3 records no migrations. The rule does not run against it, and the report says so.
+- A previous key follows a rename of the current code onto the live class. A key whose identity was a rename source in the previous file does not move.
+- When a migration leaves the code, run `baseline update --previous <file>`. If the previous release shipped the migration, the update drops the history that it covered. The fields of its class reset to the `live` fields of the previous file: the deploy of that release wrote every record in that shape.
+- A class that keeps another migration in the code keeps its fields. A changed key looks like a deletion and an addition, for example when a factory argument or the name of a callable changed. The `baseline-stale` finding names each deleted key and each new key of the same kind on the same class.
+- Without `--previous`, `baseline update` refuses with exit 2 when a recorded migration left the code. Only the previous file says whether a release shipped it. The error names the command with `--previous`.
+
+If the store cannot be made clean in time, keep the migration one more release:
+
+```bash
+python -m langgraph_events.serde.migrations baseline hold myapp.lge_target:target \
+    "transform myapp.events:Order via myapp.events:drop_total" \
+    --reason "a paused thread refuses the rewrite" --previous "$RUNNER_TEMP/prev.json"
+```
+
+The hold records the digest of the whole previous file. The baseline of the next release holds the hold record, so its digest is different. A check against that file ignores the hold. So a hold lasts one release, also when the migrations did not change. To keep the migration one more release, hold it again. Every check lists each hold that applies. Each `survived-release` finding gives the command to hold its migration, and an expired hold shows in it. A hold on a migration that the committed baseline does not record yet adds its record.
+
+`python -m langgraph_events.serde.migrations fingerprint <baseline file>` prints the fingerprint of the migrations a file records. It reads the JSON only.
+
+### Labels
+
+One label form names a migration everywhere: in the baseline, in a finding, in a hold and in a read error.
+
+```
+<kind> <module>:<qualname>[<field>] [via <module>:<qualname>[#<digest>]]
+```
+
+`rename myapp.events:Order.Old`, `fill myapp.events:Order[status]` and `transform myapp.events:Order via myapp.events:drop_total` are examples. A transform that a factory builds has a `via` such as `myapp.events:drop_field.<locals>._drop#3f0c2a9e41b7`. The 12 hex digits are the digest of the captured values. A read error names a stored identity as `<module>:<qualname>`.
+
+### Exit codes
+
+| Code | `check` | `baseline update`, `baseline hold`, `fingerprint` |
+|---|---|---|
+| 0 | No finding | The command is done |
+| 1 | One or more findings | Not used |
+| 2 | A usage or target error, for example a target that does not import, a graph with no `NamespaceAwareSerde`, or a bad baseline file | The same |
+
+The removed form `python -m langgraph_events.serde.migrations <module:factory> <baseline>` exits 2 and prints the new command line. For the exit codes of `rewrite`, see [What `rewrite` does](#what-rewrite-does).
 
 ### When to commit the baseline
 
-Commit the baseline **alongside** the migration that covers the change — never after. A write never erases. An identity the old baseline recorded and the graph no longer reaches moves to the `retired` list. The [coverage gates](#coverage-gates) keep walking it until a migration covers it or a hand edit removes it.
-
-Workflow:
-
-1. Open the branch that contains the rename.
-2. Author the migration (`@migrate_from` / `@backfill` on the surviving class, or hand-authored `Migration`).
-3. Run `write_baseline(graph, Path("migrations/baseline.json"))` and commit the regenerated JSON in the same PR.
+Commit the baseline **alongside** the change that needs it, never after. Run `baseline update` in the same PR as a new migration, a renamed handler or a new field.
 
 #### What the file records
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "events": [
-    {"module": "myapp.orders", "qualname": "Order.Place.Placed", "fields": ["order_id", "tracking"]}
+    {"module": "myapp.orders", "qualname": "Order.Place.Placed",
+     "fields": ["legacy_total", "order_id", "tracking"], "live": ["order_id", "tracking"]}
   ],
-  "handlers": [{"name": "handle_approval"}],
   "retired": [
     {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}
+  ],
+  "handlers": [{"name": "handle_approval"}],
+  "migrations": [
+    {"label": "rename myapp.orders:Order.ApprovalRequired"},
+    {"label": "fill myapp.orders:Order.Place.Placed[tracking]",
+     "hold": {"reason": "a paused thread refuses the rewrite", "against": "lge-b1-3f0c2a9e41b7d655"}}
   ]
 }
 ```
 
-- **`events`** lists every identity the graph reaches. Each entry records the `fields` of its class: the init fields only, the same set the serde writes. An `init=False` field never sits in a payload, so it is not recorded. `fields` is mandatory on a v3 file. The reader rejects an entry without it and asks for a regenerate.
-- **`fields` is cumulative.** It holds every field ever recorded for the identity, not only the fields the live class declares today. A field that was ever recorded can sit in a checkpoint, so `assert_all_baselined_revive` must keep sending it. A plain rewrite never removes a field. Removing one is a hand edit, done when no checkpoint carries it.
-- **`retired`** lists every identity a write has dropped from `events`, with the `fields` last recorded for it. The entry has no `fields` key when the last record predates v3. An identity that is live again leaves `retired` on the next write. The gates walk `retired` too. A retired identity must revive through a migration onto a surviving class or a tombstone. Delete the entry by hand once every thread that names it is settled, verified with `graph.unrevivable_threads()`.
-- `events` and `retired` never share an identity. The reader raises `ValueError` on an overlap. Only a hand edit can produce one.
-- The file is versioned. A v1 or v2 file still loads. Its `fields` are unknown and its `retired` list is empty. A file with an unknown version raises `ValueError`.
+- **`events`** lists every live event class that the gate judges: the classes that the serde reads, and the classes that the graph can store. A class that no handler produces, for example a tombstone in a namespace of the serde, is in it too.
+- **`fields` is cumulative.** A field that was ever recorded can sit in a checkpoint, so the `revive` rule keeps sending it. An update keeps it. Only an update with `--previous` after a shipped migration left the code resets the fields of the identity that the migration covered. An identity that keeps another migration in the code keeps its fields, because that migration can need them.
+- **`live`** lists the init fields of the live class when the file was written, the same set the serde writes. An update with `--previous` reads `live` from the previous file to reset the fields of a class.
+- **`retired`** lists every identity an update dropped from `events`, with the fields last recorded for it. The entry has no `fields` key when the last record predates version 3. An identity that is live again leaves `retired`. A retired identity must revive through a migration onto a surviving class or a tombstone.
+- **`handlers`** lists the handler node names. An update rebuilds it.
+- **`migrations`** lists the label of every client migration the code holds, and any hold. lge's own framework migrations are not in it.
+- `events` and `retired` never share an identity. The reader raises `ValueError` on an overlap.
+- A file of version 1, 2 or 3 still loads. A file with an unknown version raises `ValueError`. The next `baseline update` writes version 4.
 
-!!! note "Upgrading a baseline recorded before v3"
-    A v1 or v2 baseline records no fields, so `assert_all_baselined_revive` sends required placeholders only and cannot see a dropped field. **Regenerate the baseline once** with `write_baseline(graph, BASELINE)` to record the fields. An identity that an earlier `allow_removed=True` write erased is not in the file, so no write can retire it. Add its `retired` entry by hand. If you know the fields the class had, give them. If you do not, omit `fields`:
+## Lifecycle of a read-time migration
 
-    ```json
-    {"module": "myapp.orders", "qualname": "Order.ApprovalRequired", "fields": ["order_id"]}
-    {"module": "myapp.orders", "qualname": "Order.ApprovalRequired"}
-    ```
+A read-time migration is `@migrate_from`, `@backfill`, `@transform_fields`, `@split_event` or a `Migration` in `migrations=`. It ships in release N and leaves the code in release N+1. The [migration gate](#the-migration-gate) keeps the release clock in the baseline file. The `rewrite` command makes the store match the code of release N. Release N+1 then reads the store with no migration.
 
-    A hand-added `events` entry needs `fields` too. A test that appends `{"module", "qualname"}` to `events` and expects an `AssertionError` from a gate gets a `ValueError` from the reader instead. Give the entry `"fields": []`.
+### The target
 
-`allow_removed` is deprecated and does nothing. Passing `allow_removed=True` emits a `DeprecationWarning`. The write compares baseline ↔ topology only; *coverage* (does a migration exist?) is the [coverage gates](#coverage-gates)' job.
+Give the target a `store`. Only `rewrite` opens it.
+
+```python
+# myapp/lge_target.py
+import os
+from pathlib import Path
+
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph_events.serde.migrations import MigrationTarget
+
+from myapp.graph import build_graph
+
+target = MigrationTarget(
+    graph=build_graph,
+    baseline=Path(__file__).parent / "lge-baseline.json",
+    store=lambda: PostgresSaver.from_conn_string(os.environ["DATABASE_URL"]),
+)
+```
+
+- `store` returns a context manager of a sync checkpointer. An async context manager, for example from `AsyncPostgresSaver.from_conn_string`, stops the command with exit 2. If your app uses an async saver, give `store` the sync saver of the same database, for example `PostgresSaver.from_conn_string(url)` or `SqliteSaver.from_conn_string(path)`.
+- `PostgresSaver.from_conn_string` takes the plain libpq form, `postgresql://...`. The SQLAlchemy form with a driver, `postgresql+psycopg://...`, fails in psycopg with `missing "=" after ...`. If your app keeps its URL in the SQLAlchemy form, remove `+psycopg` before you give the URL to the saver.
+- The commands import the target and call `graph`, so the graph factory runs your full app setup. Run each command in an environment that has the configuration of your app, for example its environment variables. If the app setup opens a SQLAlchemy engine, it needs the driver form `postgresql+psycopg://...`. A plain `postgresql://...` there selects psycopg2, and the setup fails with `No module named 'psycopg2'` when only psycopg 3 is installed.
+- The command lists the threads of a `PostgresSaver`, a `SqliteSaver` or a `MemorySaver`. For another saver, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and namespace. See [Checkpointers](#checkpointers).
+- If one store holds more than one graph, set `threads=` and return the threads of this graph only.
+
+### Checkpointers
+
+The table gives what each checkpointer supports. A plan writes nothing. An apply writes each checkpoint again under its own id.
+
+| Checkpointer | Plan and apply | Thread listing of the command | Prune of old blob versions |
+|---|---|---|---|
+| `PostgresSaver` | Yes | Built in, with one SQL query | Needed. See [Old blob versions](#old-blob-versions) |
+| `SqliteSaver` | Yes | Built in, with one SQL query | Not needed. `put()` replaces the whole checkpoint row |
+| `MemorySaver` | Yes | Built in, from its storage | No prune. The old versions stay in memory |
+| A custom saver | Yes, when it obeys the two rules below | Set `threads=list_thread_keys` for a small store, or your own function | It depends on the saver |
+| `AsyncPostgresSaver`, `AsyncSqliteSaver` | Through `aplan_rewrite()` and `arewrite_store()` only | None. Pass `thread_ids=` and `checkpoint_ns=` | The same as the sync saver of the same database |
+
+The `rewrite` command takes a sync checkpointer only. For a store that the app reads through an async saver, give `store` the sync saver of the same database.
+
+A custom saver must obey two rules, or the rewrite cannot store a thread:
+
+1. `put()` of a checkpoint whose id is in the store replaces the stored checkpoint.
+2. `put_writes()` of an `__interrupt__` write replaces the stored `__interrupt__` write of the same task.
+
+The base class `BaseCheckpointSaver` does not promise either rule. So after each write, the rewrite reads the checkpoint and plans it again. Each fact gets its own reason:
+
+| What the read after the write finds | Reason |
+|---|---|
+| A newer checkpoint id | `thread advanced during the rewrite; rerun` |
+| The old channel versions | `the saver did not overwrite checkpoint <id>`. Rule 1 is broken |
+| The written versions, and a refusal of its own | `the rewrite is stored, but the read after the write refuses the thread: <reason>` |
+| The written versions, and a record that still migrates | `the saver did not store the bytes written to checkpoint <id>`. The reason names the rule that the saver broke |
+
+Fix the saver, then run `rewrite --apply` again.
+
+The plan proves before the write that the rewritten bytes settle: a read of them migrates no record. A class-stage transform that changes its own output again, for example one that adds 1 to a field, does not settle. The plan refuses that thread with `a migration of <module>:<qualname> does not settle`, and writes nothing. A transform that builds a tuple from a stored list settles: a tuple and a list store the same bytes.
+
+`list_thread_keys` lists the threads of any saver through its public `list(None)`:
+
+```python
+from langgraph_events.serde.migrations import MigrationTarget, list_thread_keys
+
+target = MigrationTarget(
+    graph=build_graph,
+    baseline=Path(__file__).parent / "lge-baseline.json",
+    store=open_my_saver,
+    threads=list_thread_keys,
+)
+```
+
+WARNING: `list(None)` reads and decodes every checkpoint of the store, older checkpoints included. On a large store, `list_thread_keys` costs time in proportion to the whole store, and memory when the saver loads all rows at once. For a large store, write a `threads` function that asks the store for each distinct thread id and checkpoint namespace.
+
+### The steps
+
+Each command is `python -m langgraph_events.serde.migrations <command>`.
+
+| Step | Where | Command | It passes when |
+|---|---|---|---|
+| 1. Add the migration | Development | `baseline update <target>` | The baseline records the new migration |
+| 2. Gate each change | CI | `check <target> --previous prev.json` | No shipped migration survives, and the baseline matches the code |
+| 3. Deploy release N | After the deploy, in release N | `rewrite <target> --apply --expect <fingerprint of N>` | Exit 0: the last plan reads every thread unchanged |
+| 4. Delete the migration | Development of release N+1 | Delete it, then `baseline update <target> --previous prev.json` | The baseline drops the history that the migration covered |
+| 5. Deploy release N+1 | Before the deploy, in release N | `rewrite <target> --expect <fingerprint of N>` | Exit 0: release N reads the store clean |
+
+`prev.json` is the baseline file of the release that runs in production. `<fingerprint of N>` is the output of `fingerprint <baseline file of N>`. The `fingerprint` command reads the JSON only.
+
+Step 5 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 5 exits 1, do not deploy release N+1. Run step 3 again. If a refused thread cannot converge, keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
+
+### The previous baseline: two client styles
+
+The library does not run git. Each client gets the previous file in its own way.
+
+A client that tags each release reads the file at the last tag:
+
+```bash
+PREV_TAG=$(git describe --tags --abbrev=0 HEAD^)
+git show "$PREV_TAG:myapp/lge-baseline.json" > "$RUNNER_TEMP/prev.json"
+```
+
+A client that deploys continuously has no release tags. Its previous release is the commit that runs in production. Get that commit from the deploy tool, for example from the version that the tool reports:
+
+```bash
+PROD_SHA=$(your-deploy-tool version --running)   # prints the deployed commit
+git show "$PROD_SHA:myapp/lge-baseline.json" > "$RUNNER_TEMP/prev.json"
+```
+
+For a continuous-deploy client, one release is one deploy. So the first change merged after a deploy must delete each migration that the deploy shipped, or hold it. Write this rule into the merge policy of the client.
+
+### The deploy steps
+
+Run `fingerprint` in the checkout of the deploying commit, then pass the value into the container.
+
+WARNING: Do not compute the fingerprint inside the container. Inside the container, the baseline file is the file of the image, so the fence always passes.
+
+```bash
+# After the deploy of release N, in a container of release N.
+FP=$(python -m langgraph_events.serde.migrations fingerprint myapp/lge-baseline.json)
+your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp.lge_target:target --apply --expect $FP"
+
+# Before the deploy of release N+1, in a container of release N.
+FP=$(python -m langgraph_events.serde.migrations fingerprint "$RUNNER_TEMP/prev.json")
+your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp.lge_target:target --expect $FP"
+```
+
+`--expect` is a fence. The command compares the migrations of the running code with the fingerprint before it opens the store. A mismatch exits 3. So the step cannot run under the wrong release, for example after a rollback.
+
+### What `rewrite` does
+
+1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
+2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the fence judge the serde of step 1, so the serde that writes must be the same.
+3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root namespace and each subgraph namespace.
+4. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stderr.
+5. The last plan decides the exit code.
+
+| Code | Meaning | The output names |
+|---|---|---|
+| 0 | The last plan reads every checkpoint unchanged | The counts of each pass and of the last plan |
+| 1 | The store is not clean | Each checkpoint and its reason, then the next command: `rewrite --apply` |
+| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open | The error, on one line, with its type when lge did not raise it |
+| 3 | Wrong release: the running code does not hold the expected migrations | Both fingerprints, the running migrations and the command |
+
+The Python form is `rewrite_live_set(target, expect=..., apply=...)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the fence refuses. `LiveSetOutcome.passes` holds the report of each pass, `final` holds the last plan, and `clean` gives the verdict.
+
+### A checkpoint that a plan refuses
+
+A refused checkpoint keeps the command from exit 0. The output names its reason. The table gives the cases that a migration change causes.
+
+| Reason starts with | Cause | What to do |
+|---|---|---|
+| `history names ...` | A stored identity has no live class and no migration | Add a tombstone with `@migrate_from`, then run `rewrite --apply` |
+| `channel 'events' holds ... not as an event` | A serializer other than `NamespaceAwareSerde` wrote the entry, and its class no longer imports or no longer takes the stored fields. LangGraph's reader returns it as a `dict` or `None`, with no error, so no migration reaches it. A class that imports but that `allowed_msgpack_modules` of the serde does not list also gives a `dict`, for example under `LANGGRAPH_STRICT_MSGPACK=true` | Restore the class under its stored module and name. If the class imports, add it to `allowed_msgpack_modules`. If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` |
+| `the rewritten value ... holds an invalid ...` | A migration builds or replaces a pydantic model that fails the validation of its class. The message names the model, the event field and the error | Fix the migration so that the value validates, then run `rewrite --apply` |
+
+A plan reads a thread with such an entry as refused, never as unchanged. So a store with history that no release can read does not pass as clean.
+
+The rewrite never stores an invalid pydantic model. LangGraph's reader revives a stored model with its constructor, and on a validation error with `model_construct`, which validates nothing. So once the migration that built the value leaves the code, every read accepts the invalid value with no warning. The check reads only a model that a migration built or replaced, and calls `type(model)(**model.model_dump())`, the call of LangGraph's reader. A model that the store already held is stored unchanged. So a valid model that does not rebuild from its own dump, for example through a field alias, does not refuse the thread.
+
+### Live traffic
+
+The command can run while the graph serves runs. It builds its own graph and serde, so it shares no serde state with the app. Release N writes only live shapes, but a run can still bring old bytes back:
+
+1. A run reads checkpoint C before the rewrite, and writes its next checkpoint after the rewrite.
+2. The new checkpoint keeps the channel versions of C for each channel that the run did not update.
+3. Those versions point at the old blobs. The rewrite does not delete the old blobs.
+
+The next plan reads that thread as not clean, and the next pass rewrites it. Only the last plan decides exit 0. A run that holds C for longer than all passes can still write after exit 0. The plan of step 5 then reads the thread and exits 1, so release N+1 does not deploy.
+
+### Old blob versions
+
+This step applies to `PostgresSaver` only. `PostgresSaver` stores each channel value as a blob row under its version, apart from the checkpoint row. `SqliteSaver` stores the channel values in the checkpoint row, and `put()` replaces the whole row. So it keeps no old version and needs no prune. `MemorySaver` keeps each old version in memory, with no prune.
+
+The rewrite stores each changed channel under a new version and keeps the checkpoint id. On Postgres, the store grows by the size of each rewritten channel. An earlier checkpoint of the thread can still name the old blob version. Otherwise no checkpoint names it.
+
+The command does not delete the old versions. A run that read checkpoint C before the rewrite writes its next checkpoint with the old version of each channel that it did not update. If that blob were gone, the channel would read as empty, and no plan could see the loss. With the blob kept, the run brings old bytes back, and the next plan sees them.
+
+On Postgres, delete the old versions after step 5 exits 0. Then no run that started before the rewrite still runs:
+
+```sql
+DELETE FROM checkpoint_blobs AS b
+WHERE NOT EXISTS (
+    SELECT 1 FROM checkpoints AS c
+    WHERE c.thread_id = b.thread_id
+      AND c.checkpoint_ns = b.checkpoint_ns
+      AND c.checkpoint -> 'channel_versions' ->> b.channel = b.version
+)
+AND EXISTS (
+    SELECT 1 FROM checkpoints AS c
+    WHERE c.thread_id = b.thread_id
+      AND c.checkpoint_ns = b.checkpoint_ns
+      AND c.checkpoint -> 'channel_versions' ->> b.channel > b.version
+);
+```
+
+The statement deletes a blob version only when no checkpoint names it and a checkpoint names a newer version of the same channel. A running graph writes a blob before the checkpoint that names it, and that blob is newer than each version that a checkpoint names, so the statement keeps it. The versions of `PostgresSaver` are zero-padded, so a text comparison orders them. A checkpoint that a prune of your own deleted also leaves blob versions that no checkpoint names. The statement deletes them too.
+
+WARNING: Do not run the statement while a run that started before the rewrite can still write. That run names an old version, and its checkpoint would lose the channel.
+
+WARNING: Do not let an older release serve runs while the command runs. An older release writes the old shape again. The fence stops the command under an older release, but it cannot stop an older release that still serves traffic. Finish the rolling deploy first.
+
+### What only a plan sees
+
+- A migration counts only when the running code holds it. An older release does not hold the new migration, so its plan reads a thread that only the new migration changes as clean. The fence prevents this case.
+- A plain dataclass default never makes a thread need a rewrite. The read fills the default, and the stored payload stays without the field. Only a `@backfill` makes a thread need a rewrite.
+- `unrevivable_threads()` finds a stored identity that does not revive. It cannot see a retype, a split or a changed meaning. Only a plan under the release that holds the migration sees them.
+
+### Subgraph checkpoints
+
+A graph that a handler invokes on the same checkpointer writes its checkpoints under a subgraph namespace. The command plans and rewrites the latest checkpoint of each subgraph namespace, the same as a root thread. So a completed subgraph run does not keep a migration in the code. A refused subgraph checkpoint prints its namespace and its reason.
+
+A subgraph checkpoint that holds a task write from a failed or completed task is refused on every pass. `abandon()` and `resume()` reach only the root namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule changes ([#217](https://github.com/cadance-io/langgraph-events/issues/217)). The operator has two choices:
+
+- If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` again.
+- Otherwise keep the migrations that the checkpoint needs. Hold them with `baseline hold`, one release at a time.
+
+WARNING: `delete_thread()` deletes every checkpoint of the thread, the root namespace included. Delete only a thread that nobody needs.
+
+A subgraph checkpoint that is paused on a class in `drop` clears when the root thread resumes. `abandon()` on the root thread does not clear it.
+
+The Python form is `graph.plan_rewrite(thread_ids=..., checkpoint_ns=...)` and `graph.rewrite_store(thread_ids=..., checkpoint_ns=...)`. The default `checkpoint_ns=""` is the root namespace. The async twins `aplan_rewrite()` and `arewrite_store()` take the same `checkpoint_ns=`.
 
 ## Testing your migrations
 
-### Coverage gates
-
-Three free functions assert that every identity in a committed baseline still holds up, at increasing strictness. All share one signature — `gate(serde, baseline_path)` — and raise `AssertionError`:
-
-| Gate | Per identity it… | Constructs? | Scope |
-|---|---|---|---|
-| `assert_all_baselined_cover` | is in `revivable_identities()` (set membership) | no | namespace-walk ∪ `events=` ∪ rename table |
-| `assert_all_baselined_resolve` | resolves to a live `Event` (rename-aware) | no | every identity in the baseline |
-| `assert_all_baselined_revive` | revives through the real read path | yes | every identity in the baseline |
-
-Every gate walks the baseline's `events` and `retired` lists both. A retired identity has no live class, so it must revive through a migration. A failure on one says it is retired and names the remedy: add a migration, or delete the `retired` entry by hand once every thread that names it is settled.
-
-```python
-from pathlib import Path
-from langgraph_events.serde import (
-    NamespaceAwareSerde,
-    assert_all_baselined_cover,
-    assert_all_baselined_resolve,
-    assert_all_baselined_revive,
-)
-from cadance.namespaces import Persona
-
-BASELINE = Path(__file__).parent / "migrations" / "baseline.json"
-
-
-def test_baseline_coverage():
-    serde = NamespaceAwareSerde(namespaces=(Persona,))
-    assert_all_baselined_revive(serde, BASELINE)  # or _resolve / _cover
-```
-
-**Which one?**
-
-- **`revive`** — the default, strongest gate. Proves reachability *and* constructability; fills required fields with placeholders — except fields the migration table back-fills, which get the *real* injected value so a broken fill fails the gate. A v3 baseline records the fields of each identity. A recorded field the live class no longer accepts is sent too, so a dropped field fails the gate the way a stored payload fails at read. The failure line names the field. A pre-v3 baseline sends required placeholders only. A new `@migrate_from`/`@backfill` + regenerated baseline is covered with no new test code.
-- **`resolve`** — when the baseline contains events `revive` can't placeholder-construct: construction-time validation (`__post_init__`) on non-back-filled fields, framework `SystemEvents`, or module-level `IntegrationEvents`. Proves the identity still resolves without ever calling `__init__`/`__post_init__`, so a full-graph baseline passes with no filtering and still fails loudly on an uncovered rename/removal.
-- **`cover`** — the fast set-membership smoke check. Namespace-walk-scoped, so it misses module-level identities a full-graph baseline emits — use `resolve` for those. Raises `MigrationCoverageError` (an `AssertionError`) whose `.uncovered` lists the offending identities.
-
-`resolve` and `revive` answer the same question the read path answers, and answer it the same way. Identity resolution is **scope-first**: the serde looks the `(module, qualname)` up in the namespaces it was constructed with, then falls back to importing the module and walking the qualname. So `resolve` and `revive` pass for a namespace defined inside a function (whose `<locals>` qualname no import reaches) and stay pinned to the serde's own classes when a second engine lifetime redefines them. `cover` is unaffected — it never resolved anything, being a set-membership check against the namespace walk, which is why it still misses module-level identities that `resolve` and the read path handle fine.
-
-`NamespaceAwareSerde.revivable_identities()` returns the read-only `frozenset` of revivable `(module, qualname)` for custom coverage rules (`AddField` targets add no extra identities — post-rename fills key on live classes, origin-scoped fills on rename sources already in the set).
-
-!!! tip "Which serde / graph do I pass the gate?"
-    In tests, construct a **standalone** `NamespaceAwareSerde(namespaces=(...), events=(...))` for the event gates — it mirrors what `from_namespaces(..., checkpointer=...)` auto-wires; the gate does **not** need the graph's internal serde instance. The **handler** gate is different: it takes the `graph` (`assert_all_baselined_handlers_cover(graph, BASELINE)`), because handler identity is a graph-topology concern, not a serde one. Pass `events=` too: the auto-wired serde now carries the graph's `IntegrationEvent`s and `SystemEvent`s, so a hand-built one that omits them will fail `cover` on a baseline that includes those identities.
-
-### Handler coverage gate
-
-[Handler migrations](#handler-renames) have their own gate, here alongside the event gates — same job, one layer up (the graph *nodes* a checkpoint pauses at):
-
-```python
-from langgraph_events.serde import assert_all_baselined_handlers_cover
-
-
-def test_handler_coverage():
-    assert_all_baselined_handlers_cover(build_graph(), BASELINE)
-```
-
-- Asserts every handler node name in the baseline is still a **live node** or covered by an `@on(previously=...)` alias — the static analog of event `cover`. Raises `HandlerCoverageError` (a `CoverageError`/`AssertionError`; `except CoverageError` catches the event gates too).
-- **Signature:** event gates take the `serde`; the handler gate (and `assert_resume_recovers` below) take the **graph**. Don't transpose them.
-- **One baseline covers both tracks.** A single `write_baseline(graph, BASELINE)` records event identities *and* handler node names (baseline v3; a pre-v2 baseline still loads with an empty handler set) — regenerate once, run both gates against it.
+Run [the migration gate](#the-migration-gate) in a test with `assert_migration_gate`. The helpers below prove a specific shape or a specific resume.
 
 ### Testing handler recovery
 
@@ -606,11 +875,11 @@ def test_rename_keeps_checkpoints_resumable():
 
 That one call replaces the hand-rolled dance — *build a checkpointer → invoke `before` to interrupt → assert it paused → rebuild `after` → resume → assert it recovered*. It invokes `before` with `seed` (which must pause via `Interrupted`), resumes `after` with `resume_with` on the same checkpoint, and asserts a `Resumed` was emitted (a silent drop or a `halt` would not), returning the log for further assertions. `before` and `after` must share **one** checkpointer instance.
 
-**When to use which:** `assert_all_baselined_handlers_cover` is the zero-maintenance CI sweep (covers every baselined handler, no per-rename test code); `assert_resume_recovers` is the focused behavioral spot-check for a specific rename you want to prove end-to-end.
+**When to use which:** the gate's `handlers` rule is the zero-maintenance CI sweep (covers every recorded handler, no per-rename test code); `assert_resume_recovers` is the focused behavioral spot-check for a specific rename you want to prove end-to-end.
 
 ### `synthesize_legacy_payload` — pin a specific old field shape
 
-The gates above don't assert specific *old field values*. Reach for this only when a field's shape drifted — it builds the bytes a prior release would have written:
+The gate does not assert specific *old field values*. Reach for this only when a field's shape drifted — it builds the bytes a prior release would have written:
 
 ```python
 import pytest
@@ -635,10 +904,9 @@ A failing test = dataclass `TypeError` on the missing field — exactly where yo
 
 ### Release N → N+1 walkthrough
 
-1. **At release N**, run `write_baseline(graph, BASELINE)` once and commit the JSON.
-2. **On the feature branch**, rename the event and add `@migrate_from("Persona.Persisted")` (plus `@backfill` if it gained a required field). The loop gate already covers the historic identity.
-3. **In CI**, the loop gate runs on every PR — catches accidentally-dropped migrations and classes that no longer construct. Add `synthesize_legacy_payload` entries only if a field's shape changed.
-4. **At release N+1 cutover**, re-run `write_baseline(graph, BASELINE)` in the same PR as the rename. Next removals are measured against the new baseline.
+1. **At release N**, run `baseline update` and commit the JSON.
+2. **On the feature branch**, rename the event and add `@migrate_from("Persona.Persisted")` (plus `@backfill` if it gained a required field). Run `baseline update` and commit the JSON in the same PR.
+3. **In CI**, `check` runs on every PR. It catches a dropped migration and a class that no longer constructs. With `--previous`, it also catches a shipped migration that release N+1 must delete. Add `synthesize_legacy_payload` entries only if a field's shape changed.
 
 ## Handler renames
 
@@ -648,7 +916,7 @@ Handlers evolve under the **same model as events**. A handler becomes a graph *n
 |---|---|---|
 | Declare prior identity → auto-recover | `@migrate_from("Old.Qualname")` | `@on(previously="old_node")` / `previously: ClassVar = (...)` on a `Command` |
 | Prevent the break up front | (qualname *is* the identity) | `@on(node_name="stable_id")` — then rename the function freely |
-| Catch the undeclared case in CI | `assert_all_baselined_*` | `assert_all_baselined_handlers_cover(graph, BASELINE)` |
+| Catch the undeclared case in CI | the gate's `coverage` and `revive` rules | the gate's `handlers` rule |
 
 ```python
 # Renamed handler — declare the old node name so paused checkpoints resume:
@@ -663,14 +931,14 @@ class Persist(Command):
 ```
 
 - `@on(node_name=...)` pins a **stable node identity** decoupled from the Python function name — rename/move the function with zero checkpoint impact. `@on(previously=...)` registers an **alias node** for each historic name so an in-flight interrupted checkpoint re-enters the renamed handler.
-- **Testing:** prove coverage and recovery with `assert_all_baselined_handlers_cover` and `assert_resume_recovers` — see [Testing your migrations](#handler-coverage-gate).
+- **Testing:** prove coverage with [the migration gate](#the-migration-gate) and recovery with `assert_resume_recovers` — see [Testing handler recovery](#testing-handler-recovery).
 - **Deploy order:** alias nodes are purely **additive**, so a handler rename is safe to ship in a **single release** — unlike an event rename, which needs the two-release `legacy_write` dance (below). The new release's graph carries both the new node and the alias, so old in-flight checkpoints resume against it.
 - **Runtime safety net.** If a handler is *removed* (or renamed without `previously=`) and a thread is still paused inside it, `resume()` would otherwise be a silent no-op. `EventGraph(on_unresumable=...)` governs this — it fires on any `resume()` of a thread that isn't awaiting input (also catching resume of an already-finished thread or a double-resume):
     - **`raise`** (default) — `UnresumableError`. Use in dev/CI to fail fast on an undeclared rename.
     - **`halt`** — emit a terminal `Unresumable(Halted)` and finalize the thread. Use in production for graceful, *observable* degradation (the thread ends in the log rather than hanging).
     - **`warn`** — `UserWarning` + no-op (thread untouched). Use when you want a signal but to handle the thread yourself.
 
-    The CI handler gate catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
+    The gate's `handlers` rule catches undeclared renames *before* deploy; `on_unresumable` is the runtime last-resort net for anything that slips through.
 
     Retiring an `Interrupted` subclass is a related but separate move — see [Retiring an Interrupted subclass](#retiring-an-interrupted-subclass) below.
 
@@ -686,20 +954,20 @@ class Persist(Command):
     ...
 ```
 
-The lists often rhyme with a `@migrate_from` stack on the same class, but they answer different questions: `@migrate_from` revives the old payload **bytes**; `previously` revives the old checkpoint **pointer** (the node name in `snapshot.next`). Each may carry entries the other can't — a node-only era (a reactor the command replaced, a pre-#97 `handle_N`) has no serde identity, and a module-only move has no node rename. The handler gate catches a missing `previously`; the event gates catch a missing `@migrate_from`.
+The lists often rhyme with a `@migrate_from` stack on the same class, but they answer different questions: `@migrate_from` revives the old payload **bytes**; `previously` revives the old checkpoint **pointer** (the node name in `snapshot.next`). Each may carry entries the other can't — a node-only era (a reactor the command replaced, a pre-#97 `handle_N`) has no serde identity, and a module-only move has no node rename. The gate's `handlers` rule catches a missing `previously`. Its `coverage` and `revive` rules catch a missing `@migrate_from`.
 
 A historic node name identifies exactly one class, and it stays that way: a concrete `Command` may not be subclassed (`class Child(Persist)` is a `TypeError`), so `previously` — like `raises`, `invariants` and `retry` — is always read off the command class that declares it. A second command that took over some of the old node names declares its own list.
 
 !!! note "Upgrading a baseline recorded before this fix (#97)"
-    Earlier releases recorded inline command handlers by positional names (`handle`, `handle_2`, …). After upgrading, those names no longer resolve, so `assert_all_baselined_handlers_cover` will raise `HandlerCoverageError` until you **regenerate the baseline once** with `write_baseline(graph, BASELINE)`. This firing is expected — it is the gate doing its job. A checkpoint paused inside an inline command handler *before* the upgrade cannot resume afterward (the old positional name was order-dependent and can't be reconstructed); recover a specific one with `previously: ClassVar = ("handle_N",)` on that command class, or set `on_unresumable="halt"/"warn"`.
+    Earlier releases recorded inline command handlers by positional names (`handle`, `handle_2`, …). After upgrading, those names no longer resolve, so the gate reports `HandlerMissing` until you **run `baseline update` once**. This firing is expected — it is the gate doing its job. A checkpoint paused inside an inline command handler *before* the upgrade cannot resume afterward (the old positional name was order-dependent and can't be reconstructed); recover a specific one with `previously: ClassVar = ("handle_N",)` on that command class, or set `on_unresumable="halt"/"warn"`.
 
 ### Renaming an event *and* a handler together
 
 The two tracks are independent — do both, in one PR:
 
 1. **Decorate both** — `@migrate_from("Old.Qualname")` on the renamed event class; `@on(previously="old_node")` on the renamed handler.
-2. **Regenerate the baseline once** — a single `write_baseline(graph, BASELINE)` captures both the event identities *and* the handler node names (baseline v2). Commit it in the same PR.
-3. **Run both gates in CI** — they're independent and both required: an event gate (`assert_all_baselined_revive(serde, BASELINE)`) **and** the handler gate (`assert_all_baselined_handlers_cover(graph, BASELINE)`). One does not cover the other.
+2. **Update the baseline once** — a single `baseline update` records both the event identities *and* the handler node names. Commit it in the same PR.
+3. **Run the gate in CI** — its `coverage`, `revive` and `handlers` rules check both tracks. One rule does not cover the other.
 4. **Deploy** — the handler alias is single-release safe; the event rename follows the two-release `legacy_write` cadence, so the *event* side gates the rollout.
 
 !!! warning "Renaming an inline Command is always both renames at once"
@@ -722,7 +990,7 @@ report = graph.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_i
 assert not report.refused
 ```
 
-Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran: `"rewrite"` in a plan means the thread needs a write, in an applied report it means the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the log entries `drop=` removed, per identity. `reason` says what to do with a refused thread. `str(report)` prints one summary line, then one line per refused thread. The async twins are `aplan_rewrite()` and `arewrite_store()`.
+Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran: `"rewrite"` in a plan means the thread needs a write, in an applied report it means the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the log entries `drop=` removed, per identity. `reason` says what to do with a refused thread. `str(report)` prints one summary line, then one line per refused thread. The async twins are `aplan_rewrite()` and `arewrite_store()`. They take the same arguments, `checkpoint_ns=` included.
 
 Before the write, each rewritten value is encoded the way `put()` encodes it, scanned for a dropped or historic identity, and revived under the strict serde. One failure refuses the thread, and nothing is written for it. A thread is also refused when:
 
@@ -733,10 +1001,13 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 - It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
 - A run advanced the thread between the read and the write. Rerun.
+- The saver did not overwrite the checkpoint or its `__interrupt__` write. See [Checkpointers](#checkpointers).
 
 An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is dropped, the rewrite sets the field to `None`. The `Resumed` event stays, and `dropped` does not count the cleared field. `drop=` matches the stored identity exactly. A subclass instance stays in place.
 
 !!! warning "Run it while the graph is idle, never inside a rolling deploy window"
+    For a deploy step, use the `rewrite` command. It plans again after each pass, and only its last plan decides the exit code. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
+
     An old pod cannot read the new bytes. The rewrite also toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Take a store-level backup first. The previous blob versions stay in the store, but the checkpoint row is overwritten in place.
 
 What the rewrite does not do:
@@ -744,7 +1015,7 @@ What the rewrite does not do:
 - A historic checkpoint keeps the old bytes. After the class is deleted, `get_state_history()` cannot read it.
 - `drop=` removes the stored event only. Reducer state is not recomputed. Use [`replay_reducer`](#recovering-with-replay_reducer).
 - An event inside a non-Event container field, a dataclass or a pydantic model, has no migratable identity ([#160](https://github.com/cadance-io/langgraph-events/issues/160)). The rewrite does not reach it.
-- A checkpoint under a subgraph namespace is not read, the same as `unrevivable_threads()`.
+- A call reads one checkpoint namespace, by default the root namespace. Pass `checkpoint_ns=` to read a subgraph namespace. The `rewrite` command walks every namespace. See [Subgraph checkpoints](#subgraph-checkpoints).
 - `legacy_write=True` is refused with `ValueError`. Under `legacy_write` the rewrite stores the historic identity again.
 
 ## Retiring an Interrupted subclass
@@ -841,7 +1112,7 @@ To check one thread, pass its id alone: `graph.threads_paused_on(Order.ApprovalR
 3. Verify: `graph.threads_paused_on(EventClass, thread_ids=thread_ids) == []`.
 4. Plan the rewrite: `report = graph.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)`. Review it. Verify: `not report.refused`. An *answered* thread holds the class in its settled history. `threads_paused_on()` and `abandon()` never reach such a thread. The plan does.
 5. Take a store backup. Outside a rolling deploy window, while the graph is idle: `report = graph.rewrite_store(drop=(EventClass,), thread_ids=thread_ids)`. Verify: `not report.refused`. See [Rewriting the live set](#rewriting-the-live-set).
-6. Delete the class from the codebase. Re-baseline: `write_baseline(graph, BASELINE)`. The retired identity moves to the baseline's `retired` list. Deploy.
+6. Delete the class from the codebase. Run `baseline update`. The retired identity moves to the baseline's `retired` list. Deploy.
 7. After the deploy, query the thread ids again, then verify against the real store: `graph.unrevivable_threads(thread_ids=thread_ids) == {}`. Then delete the `retired` entry from the baseline file.
 
 ```python
@@ -879,23 +1150,29 @@ assert graph.unrevivable_threads(thread_ids=thread_ids) == {}
 
 ### What the baseline write records
 
-Deleting the class drops an identity from the graph's topology. `write_baseline` moves it to the baseline's `retired` list, with the fields last recorded for it. The [coverage gates](#coverage-gates) keep walking a retired identity. `assert_all_baselined_cover` and `assert_all_baselined_revive` fail on it until a migration covers it. That is the gate doing its job. Once `unrevivable_threads()` reports nothing and every paused thread is settled, delete the `retired` entry by hand. From then on, no coverage gate checks the retired identity.
+Deleting the class drops an identity from the graph's topology. `baseline update` moves it to the baseline's `retired` list, with the fields last recorded for it. The [migration gate](#the-migration-gate) keeps checking a retired identity. Its `coverage` and `revive` rules fail on it until a migration covers it. That is the gate doing its job. Once `unrevivable_threads()` reports nothing and every paused thread is settled, delete the `retired` entry by hand. From then on, the gate does not check the retired identity. No command removes the entry of a deleted class: the gate reads no store, so it cannot know that the store holds no record of the class. `baseline update --previous` removes a retired entry only for the source of a deleted shipped rename.
 
-!!! warning "After the hand edit, no coverage gate can see a remaining breakage"
-    The coverage gates read the baseline. Once the `retired` entry is gone, `assert_all_baselined_cover`/`assert_all_baselined_revive` and the handler gate all pass whether or not a settled thread out there still cannot revive. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 7 above, and run it against the real store before the hand edit.
+!!! warning "After the hand edit, the gate cannot see a remaining breakage"
+    The gate reads the baseline. Once the `retired` entry is gone, every rule passes whether or not a settled thread out there still cannot revive. `graph.unrevivable_threads()` is the only gate that still sees it, because it reads the store and not the baseline. Keep it in the retirement checklist, step 7 above, and run it against the real store before the hand edit.
 
-!!! warning "Expect `assert_all_baselined_handlers_cover` to fail first"
-    Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the handler gate (`HandlerCoverageError`) in the same way the event gate trips: this is the gate doing its job, not a new problem. The same `write_baseline(graph, BASELINE)` re-baselines both the event identity and the handler node in one write, so no separate step is needed. A handler name is not retired. The write drops it from `handlers` at once.
+!!! warning "Expect the `handlers` rule to fail first"
+    Retiring an `Interrupted` usually retires the handler that produced it too. Deleting both together trips the `handlers` rule (`HandlerMissing`) in the same way the `coverage` rule trips: this is the gate doing its job, not a new problem. The same `baseline update` records both the event identity and the handler node in one write, so no separate step is needed. A handler name is not retired. The update drops it from `handlers` at once.
 
 ### Recovering a delete-first deployment
 
 If the class was deleted before every paused thread was settled, `threads_paused_on()` and `abandon()` already recover the **paused** case on their own — see the two-deletions note above. A thread that had already **answered** the interrupt (the #159 case) needs the fix below too.
 
-Map the dead identity onto a tombstone class, in a follow-up release. The tombstone does not need the retired fields: `transform=lambda kw: {}` discards every stored field before the rename, so an empty tombstone revives whatever `Order.ApprovalRequired` carried. **Keep the tombstone an `Interrupted` when the retired class was one.** `threads_paused_on()` and `abandon()` rely on it. **Nest the tombstone inside the same `Namespace`.** A domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
+Map the dead identity onto a tombstone class, in a follow-up release. The tombstone does not need the retired fields: `transform=discard_fields` returns `{}`, so it discards every stored field before the rename, and an empty tombstone revives whatever `Order.ApprovalRequired` carried. Give the transform a module-level name. The gate reports a lambda. **Keep the tombstone an `Interrupted` when the retired class was one.** `threads_paused_on()` and `abandon()` rely on it. **Nest the tombstone inside the same `Namespace`.** A domain still has other live members `EventGraph.from_namespaces(...)` wires up, and the namespace walk that collects those also collects the tombstone nested beside them:
 
 ```python
+from typing import Any
+
 from langgraph_events import Command, DomainEvent, Interrupted, Namespace, on
 from langgraph_events.serde import migrate_from
+
+
+def discard_fields(kw: dict[str, Any]) -> dict[str, Any]:
+    return {}
 
 
 class Order(Namespace):
@@ -906,7 +1183,7 @@ class Order(Namespace):
         def handle(self) -> "Order.Approve.Approved":
             return Order.Approve.Approved()
 
-    @migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+    @migrate_from("Order.ApprovalRequired", transform=discard_fields)
     class RetiredApprovalGate(Interrupted):
         pass
 
@@ -925,13 +1202,13 @@ Run this against a store that still holds a thread paused on `Order.ApprovalRequ
 
 `in_module=` defaults to the decorated class's `__module__`. Pass it explicitly if `Order.ApprovalRequired` lived in a different module than `RetiredApprovalGate` does.
 
-**Deleting the tombstone.** The tombstone is a live class, so `drop=` reaches it. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify `graph.unrevivable_threads() == {}`. Then delete the tombstone, its `@migrate_from` and the baseline's `retired` entry in the next release.
+**Deleting the tombstone.** The `@migrate_from` of the tombstone ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. The tombstone is a live class, so `drop=` reaches it. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify `graph.unrevivable_threads() == {}`. In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired`. The tombstone class moves to `retired`, like any deleted class. Delete that entry by hand, as [What the baseline write records](#what-the-baseline-write-records) says.
 
 **Onto a sibling instead of a tombstone.** When a live class already stands for the retired one, and every one of its fields has a default, put the same decorator on the sibling. The stored fields are discarded, and the sibling constructs from its defaults. Do not map a stored field onto a sibling field that means something else, for example a message id onto an order id:
 
 ```python
 class Order(Namespace):
-    @migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+    @migrate_from("Order.ApprovalRequired", transform=discard_fields)
     class ApprovalDismissed(DomainEvent):
         id: str = field(default_factory=lambda: uuid4().hex)
 ```
@@ -949,7 +1226,7 @@ from langgraph_events import EventGraph, Interrupted
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
 
 
-@migrate_from("Order.ApprovalRequired", transform=lambda kw: {})
+@migrate_from("Order.ApprovalRequired", transform=discard_fields)
 class RetiredApprovalGate(Interrupted):
     pass
 

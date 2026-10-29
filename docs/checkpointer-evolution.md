@@ -2,7 +2,7 @@
 
 > *This documents current behavior. Details may change between versions — there are no stability guarantees yet.*
 
-See also: [Event migrations](event-migrations.md) — the full migration story for renamed / relocated event classes and added required fields, including the coverage gates that fail CI when a baselined event identity is no longer covered.
+See also: [Event migrations](event-migrations.md) — the full migration story for renamed / relocated event classes and added required fields, including the migration gate that fails CI when a recorded event identity is no longer covered.
 
 Existing threads survive graph modifications via graceful degradation — no crashes, but some changes have silent side effects.
 
@@ -22,13 +22,13 @@ Existing threads survive graph modifications via graceful degradation — no cra
 | **Remove a handler** (interrupted checkpoint) | If the graph was paused inside the removed handler via `Interrupted`, `graph.resume(value)` raises `UnresumableError` by default (set `EventGraph(on_unresumable="halt"\|"warn")` to handle it non-fatally). Declare `@on(previously=...)` to keep it resumable. To retire the `Interrupted` subclass itself, call `graph.abandon(config)` or `.aabandon()`. It settles the paused thread without ever answering it. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon). See [Handler renames](event-migrations.md#handler-renames). |
 | **Remove an `Interrupted` subclass** | A thread paused on it still holds a pending `__interrupt__` write naming the class. Deleting the class without a migration breaks revival on that write, not just dispatch. Call `graph.abandon(config)` (or `.aabandon()`) on every thread paused on it first, then delete the class. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) and [Retiring an Interrupted subclass](event-migrations.md#retiring-an-interrupted-subclass). |
 | **Rename a handler** | An `Interrupted` checkpoint targeting the old node is lost — unless you declare `@on(previously="old_name")`, which keeps it resumable. See [Handler renames](event-migrations.md#handler-renames). |
-| **Rename / relocate an Event class** | Old checkpoints fail revival under the default serde — author a migration; the [coverage gates](event-migrations.md#coverage-gates) catch an uncovered rename in CI before deploy. A renamed `Interrupted` subclass stays resumable under `@migrate_from`. Removing it is different: it needs `abandon()` first (see above). |
+| **Rename / relocate an Event class** | Old checkpoints fail revival under the default serde — author a migration; the [migration gate](event-migrations.md#the-migration-gate) catches an uncovered rename in CI before deploy. A renamed `Interrupted` subclass stays resumable under `@migrate_from`. Removing it is different: it needs `abandon()` first (see above). |
 | **Add a reducer** | New reducer starts cold — misses default values and all historical projections. Only post-resume events contribute. |
 | **Remove a reducer** | Channel data is silently dropped from the checkpoint. |
 
 ## Best Practices
 
-- Renaming a handler with active interrupted threads is safe **if** you declare `@on(previously=...)` — for an inline `Command`, the `previously: ClassVar = (...)` class attribute — (or pin `@on(node_name=...)` up front); the handler coverage gate flags an undeclared rename in CI.
+- Renaming a handler with active interrupted threads is safe **if** you declare `@on(previously=...)` — for an inline `Command`, the `previously: ClassVar = (...)` class attribute — (or pin `@on(node_name=...)` up front); the `handlers` rule of the migration gate flags an undeclared rename in CI.
 - Treat reducer addition as a fresh start; for full history, use a new thread.
 - Prefer additive changes (add handlers/events; removal is safe only with no in-flight threads). For an `Interrupted` subclass, `abandon(config)` on each paused thread produces exactly that state.
 - Use a new `thread_id` after structural changes to avoid all edge cases.

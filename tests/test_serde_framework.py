@@ -1,7 +1,9 @@
 """lge owns the read migrations for its own framework events.
 
 The fixtures hold bytes that real old releases wrote. Regenerate them with
-``scripts/generate_framework_fixtures.py``.
+``scripts/generate_framework_fixtures.py``. Releases before 0.6.0 had no
+``NamespaceAwareSerde``: LangGraph's ``JsonPlusSerializer`` wrote the bytes
+of ``v0_1_1`` and ``v0_5_0`` from the source tree of that release.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 import dataclasses
 import re
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import ormsgpack
 import pytest
@@ -27,13 +29,19 @@ from langgraph_events import (
     Namespace,
     RunPausedOnDeadline,
     RunPausedOnSignal,
+    SourceDropped,
     SystemEvent,
     SystemPromptSet,
 )
 from langgraph_events._event import is_abstract_event
+from langgraph_events.agui import FrontendToolCallRequested
 from langgraph_events.serde import Migration, NamespaceAwareSerde
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
-from langgraph_events.serde._jsonplus import EXT_INTERRUPT
+from langgraph_events.serde._jsonplus import EXT_INTERRUPT, _scan_identities
+from langgraph_events.serde.migrations import RenameEvent
+
+if TYPE_CHECKING:
+    from langgraph_events.serde.migrations._core import Operation
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -62,6 +70,13 @@ def _exported_framework_classes() -> set[str]:
         and (issubclass(cls, SystemEvent) or cls is SystemPromptSet)
         and not is_abstract_event(cls)
     }
+
+
+def _source(operation: Operation) -> tuple[str, str]:
+    """The stored identity that *operation* reads."""
+    if isinstance(operation, RenameEvent):
+        return operation.old_module, operation.old_qualname
+    return operation.module, operation.qualname
 
 
 def _kebab(qualname: str) -> str:
@@ -122,6 +137,8 @@ def _escalation_split() -> Migration:
 
 
 EXCEPTION = "ValueError('boom')"
+
+_DROPPED = {"via": "work", "source_type": "Gone"}
 
 RAISED = {"handler": "work", "source_event": Cancelled(), "exception": EXCEPTION}
 
@@ -189,7 +206,24 @@ V0_41_0 = {
     "RunPausedOnSignal": ("RunPausedOnSignal", {"elapsed_seconds": 2.5}),
 }
 
-EXPECTED = {"v0_41_0": V0_41_0, "v0_40_0": V0_40_0, "v0_24_0": V0_24_0}
+# Before 0.2.0, Halted carried a free-text reason.
+V0_1_1 = {"Halted": ("Halted", {})}
+
+# Before 0.6.0, FrontendToolCallRequested lived in langgraph_events._event.
+V0_5_0 = {
+    "FrontendToolCallRequested": (
+        "FrontendToolCallRequested",
+        {"name": "confirm", "args": {"x": 1}, "tool_call_id": "call-1"},
+    )
+}
+
+EXPECTED = {
+    "v0_41_0": V0_41_0,
+    "v0_40_0": V0_40_0,
+    "v0_24_0": V0_24_0,
+    "v0_5_0": V0_5_0,
+    "v0_1_1": V0_1_1,
+}
 
 STORED = [(release, label) for release in EXPECTED for label in EXPECTED[release]]
 
@@ -299,8 +333,41 @@ def describe_framework_migrations():
                 event = client_serde.loads_typed(_stored("v0_40_0")["RunPaused"])
             with client_serde._record_reads() as second:
                 client_serde.loads_typed(client_serde.dumps_typed(event))
-            assert [touched for *_, touched in first] == [True]
-            assert [touched for *_, touched in second] == [False]
+            assert [touched for _, _, touched, _ in first] == [True]
+            assert [touched for _, _, touched, _ in second] == [False]
+
+    def describe_a_record_that_the_langgraph_serializer_wrote():
+        def when_its_class_is_an_event():
+            def it_revives_the_old_class_under_its_new_module(client_serde):
+                revived = _revived(client_serde, "v0_5_0", "FrontendToolCallRequested")
+                assert type(revived) is FrontendToolCallRequested
+
+            def it_counts_the_record_as_touched_until_rewritten(client_serde):
+                with client_serde._record_reads() as first:
+                    event = client_serde.loads_typed(_stored("v0_1_1")["Halted"])
+                written = client_serde.dumps_typed(event)
+                with client_serde._record_reads() as second:
+                    client_serde.loads_typed(written)
+                assert [touched for _, _, touched, _ in first] == [True]
+                assert [touched for _, _, touched, _ in second] == [False]
+                assert _scan_identities(written[1]) == [
+                    ("langgraph_events._event", "Halted")
+                ]
+
+        def when_its_class_is_not_an_event():
+            def it_revives_through_langgraph(client_serde):
+                stored = ormsgpack.packb(
+                    ormsgpack.Ext(
+                        2,
+                        ormsgpack.packb(
+                            ("langgraph_events._event_log", "SourceDropped", _DROPPED)
+                        ),
+                    )
+                )
+                with client_serde._record_reads() as reads:
+                    revived = client_serde.loads_typed(("msgpack", stored))
+                assert revived == SourceDropped(**_DROPPED)
+                assert reads == []
 
     def describe_inside_an_interrupt():
         def it_revives_an_old_HandlerRaised_in_the_value(client_serde):
@@ -356,7 +423,7 @@ def describe_framework_migrations():
         @pytest.mark.parametrize(
             "operation",
             [op for m in FRAMEWORK_MIGRATIONS for op in m.operations],
-            ids=lambda op: op.qualname,
+            ids=lambda op: _source(op)[1],
         )
         def it_stores_the_source_of_each_framework_migration(operation):
             stored = {
@@ -364,7 +431,7 @@ def describe_framework_migrations():
                 for release in _releases()
                 for _, data in _stored(release).values()
             }
-            assert (operation.module, operation.qualname) in stored
+            assert _source(operation) in stored
 
         @pytest.mark.parametrize(
             "migration", FRAMEWORK_MIGRATIONS, ids=lambda m: m.name
@@ -378,5 +445,6 @@ def describe_framework_migrations():
                 "SplitEvent": "split",
             }[type(operation).__name__]
             assert re.fullmatch(
-                rf"lge-\d+\.\d+-{_kebab(operation.qualname)}-{kind}", migration.name
+                rf"lge-\d+\.\d+-{_kebab(_source(operation)[1])}-{kind}",
+                migration.name,
             )

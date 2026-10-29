@@ -7,6 +7,219 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Each client read-time migration has a natural key.**
+  `NamespaceAwareSerde.client_migrations()` returns a `MigrationSet`. Its `keys` hold one
+  `MigrationKey` per operation that the client declared, from the decorators and from
+  `migrations=`. lge's own framework migrations are not in it. One
+  `@migrate_from(..., backfill={a, b})` gives one `rename` key and two `fill` keys. A
+  `transform` or `split` key names its callable in `via`. `MigrationKey.label` has one form,
+  `<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]`, and
+  `MigrationKey.parse(label)` reads it back. A key refuses a module, qualname, field or `via`
+  that is not a dotted Python name, so every label reads back to its key. A local function
+  that a factory returns has a `via` that ends in `#` and a 12-digit digest of the values
+  that it captures, and a `functools.partial` has the name of its function and a digest of
+  its arguments. So a new factory argument gives a new key and a new fingerprint.
+  `MigrationKey.anonymous` is true when `via` names a lambda, a callable object
+  (`module:Class()`), or a local function that captures a value with no stable form,
+  because a replacement of such a callable reads as the same key.
+
+- **One migration gate replaces the four baseline gates.** Declare a `MigrationTarget`
+  with a graph factory and the committed baseline file. `check(target, previous=None)`
+  runs the rules `baseline`, `names`, `coverage`, `revive`, `handlers` and `release`,
+  and returns a `GateReport` of typed findings: `BaselineStale`, `AnonymousCallable`,
+  `Uncovered`, `Unrevivable`, `HandlerMissing` and `SurvivedRelease`. Each finding
+  prints one next command with the caller's own arguments. `assert_migration_gate`
+  raises `GateError`, an `AssertionError`, on a finding. The report states which
+  rules ran, and why the release rule did not run.
+- **The gate judges every event class that the graph can store.** That is each class that
+  the serde reads, each class of a namespace of the graph, and each event outside every
+  namespace that a handler subscribes to or returns. A class outside the serde revives by
+  import, so a serde built with `namespaces=` only needs no `events=` for the gate. A new
+  `coverage` finding, `MigrationOutOfScope`, names a class of the graph that declares a
+  read-time migration that the serde does not collect. It replaces a client test that every
+  namespace of the graph is in `namespaces=` of the serde.
+- **The baseline records each client migration.** The baseline file is version 4. Its
+  `migrations` list holds the label of every client migration and any hold. Each `events`
+  entry also records `live`, the init fields of the live class. The baseline reads its
+  classes from the serde, so a class that no handler produces, for example a tombstone,
+  is recorded too. A file of version 1 to 3 still loads, and the release rule does not
+  run against it. `update_baseline(target, previous=None)` writes the file the code
+  needs. `NamespaceAwareSerde.live_fields()` returns the init fields of each live event
+  class. `EventGraph.resumable_node_names` returns each handler node name and each
+  `@on(previously=...)` alias.
+- **A read-time migration ships in one release and leaves the code in the next.** With
+  `previous`, the baseline of the previous release, `check` reports each shipped
+  migration that the code still holds. A previous key follows a current rename. After
+  the deletion, `update_baseline(..., previous=...)` resets the fields of the class to the
+  `live` fields of the previous baseline, so the gate never asks to add the migration
+  back. A class that keeps another migration in the code keeps its fields, because that
+  migration can need them. A deleted key and a new key of the same kind on the same class
+  can be one migration whose key changed, and the `baseline-stale` finding says so. Without
+  `previous`, the update refuses when a recorded migration left the code: only the previous
+  baseline says whether a release shipped it. `hold_migration` keeps a shipped migration
+  for one more release: the hold records the digest of the previous baseline file, so it
+  expires in the next release also when the migrations did not change. A hold on a
+  migration that the committed baseline does not record yet adds its record. Each
+  `survived-release` finding gives the hold command. `MigrationSet` gains `fingerprint`,
+  `shipped_in` and `deleted_since`.
+- **One deploy step rewrites the live set of a store.** `rewrite_live_set(target, expect=...,
+  apply=...)` and the CLI command `rewrite <target> --expect FP [--apply] [--passes N]`
+  compare the migrations of the running code with the fingerprint `expect` before they open
+  the store. A mismatch returns `WrongRelease` and exits 3. When the saver that `store` opens
+  already holds a serde with other migrations, the command raises `TargetError` before it
+  reads a thread. With `apply`, each pass rewrites each checkpoint that the last plan did not
+  read unchanged, root or subgraph, then plans every checkpoint again. So a run that writes
+  old bytes during a pass is rewritten in the next pass. Only the last plan decides the exit
+  code: 0 clean, 1 not clean. `LiveSetOutcome` holds each pass and the last plan.
+  `MigrationTarget` gains `store=`, `threads=` and `build(saver)`, and `ThreadKey` names one
+  checkpoint namespace of one thread. The library lists the threads of a `PostgresSaver`, a
+  `SqliteSaver` and a `MemorySaver`. For another saver, `threads=list_thread_keys` lists the
+  threads through the public `saver.list(None)`. It reads every checkpoint, so it suits a
+  small store only. `store` must return a sync checkpointer: an async context manager, for
+  example from `AsyncPostgresSaver.from_conn_string`, raises `TargetError` that names the
+  sync saver of the same database. The docs section *Lifecycle of a read-time migration* gives each step from
+  release N to release N+1, for a client with release tags and for a continuous-deploy client.
+- **`plan_rewrite()` and `rewrite_store()` read a subgraph namespace.** Pass
+  `checkpoint_ns=` to plan or rewrite the latest checkpoint under a child namespace. The
+  default `""` is the root namespace. `ThreadRewrite` gains `checkpoint_ns` and `location`.
+  The async twins `aplan_rewrite()` and `arewrite_store()` take the same `checkpoint_ns=`.
+  Known limit: a subgraph checkpoint that holds
+  a task write from a failed or completed task is refused on every pass, and no call of this
+  library clears it. Its reason says so, and names the `delete_thread()` method of the
+  checkpointer for a thread that nobody needs. The limit stays until the refusal rule changes
+  ([#217](https://github.com/cadance-io/langgraph-events/issues/217)).
+- **Two framework migrations for lge's own old shapes.** `lge-0.42-halted-transform` drops
+  the `reason` that 0.1.x stored on `Halted`. `lge-0.42-frontend-tool-call-requested-rename`
+  reads a `FrontendToolCallRequested` that 0.5.x and earlier stored in
+  `langgraph_events._event`. The rename exists only when the `agui` extra is installed.
+  Before 0.6.0, LangGraph's own `JsonPlusSerializer` wrote each event in its constructor
+  record form. `NamespaceAwareSerde` now reads such a record of an lge event through lge's
+  migrations, and a plan reads it as a rewrite until a rewrite stores it in the form of
+  `NamespaceAwareSerde`. Such a record that does not revive now raises `Cannot revive`,
+  as every other event record does. Before, it revived as `None` or a `dict` with no
+  error. `NamespaceAwareSerde.revivable_identities()` includes each identity that lge
+  renames.
+- **The CLI has subcommands.** `python -m langgraph_events.serde.migrations` takes
+  `check`, `baseline update`, `baseline hold`, `fingerprint` and `rewrite`. Exit 0 is a
+  pass, 1 a finding or a store that is not clean, 2 a usage, target or store error, 3 a
+  `rewrite` under the wrong release. An error that lge did not raise, for example from the
+  graph factory or the store, prints its type and message on one line and exits 2.
+- **The docs give a prune of old blob versions.** A rewrite stores each changed channel under
+  a new version, and the old version stays in the store. The command does not delete it,
+  because a run that read the checkpoint before the rewrite can still name it. The section
+  *Old blob versions* gives the Postgres statement to run after the pre-deploy plan exits 0.
+  Only `PostgresSaver` needs it. `SqliteSaver` replaces the whole checkpoint row, so it keeps
+  no old version. `MemorySaver` keeps the old versions in memory, with no prune. The
+  section *Checkpointers* gives what each saver supports, and what a custom saver must do.
+- **New public names in `langgraph_events.serde.migrations`.** `MigrationTarget`,
+  `ThreadKey`, `TargetError`, `MigrationKey`, `MigrationSet`, `check`, `GateReport`,
+  `GateError`, `Invocation`, `Finding` and its finding classes (`BaselineStale`,
+  `AnonymousCallable`, `MigrationOutOfScope`, `Uncovered`, `Unrevivable`, `HandlerMissing`, `SurvivedRelease`),
+  `assert_migration_gate`, `update_baseline`, `hold_migration`, `rewrite_live_set`,
+  `list_thread_keys`, `LiveSetOutcome` and `WrongRelease`.
+
+### Upgrade from 0.41
+
+1. Write the graph factory as `def build(checkpointer) -> EventGraph`, and build the graph
+   on that checkpointer. A factory with no parameter exits 2 with this request. Set the
+   serde in the factory, not in the saver that `store=` opens. The factory runs your full
+   app setup, so run each command in an environment that has the configuration of your
+   app. `PostgresSaver.from_conn_string` takes the plain URL form `postgresql://...`, not
+   the SQLAlchemy form `postgresql+psycopg://...`.
+2. Declare one `MigrationTarget(graph=build, baseline=Path(...), store=...)`, then run
+   `baseline update <target>`. The file becomes version 4.
+3. The first release after the upgrade ships every migration the code holds. Run
+   `rewrite <target> --apply --expect <fingerprint>` at that deploy. In the next release,
+   delete each migration, or keep it one release with `baseline hold`.
+4. Replace each removed gate:
+
+| 0.41 | This release |
+|---|---|
+| `assert_all_baselined_cover(...)` | `assert_migration_gate(target)` |
+| `assert_all_baselined_resolve(...)` | `assert_migration_gate(target)` |
+| `assert_all_baselined_revive(...)` | `assert_migration_gate(target)` |
+| `assert_all_baselined_handlers_cover(...)` | `assert_migration_gate(target)` |
+| `detect_changes(...)` | `check(target)` |
+| `write_baseline(...)` | `update_baseline(target)` |
+| A test of your own that every namespace of the graph is in `namespaces=` of the serde | The `MigrationOutOfScope` finding of `assert_migration_gate(target)` |
+| `python -m langgraph_events.serde.migrations <module:factory> <baseline>` | `python -m langgraph_events.serde.migrations check <module:attr> --previous <file>` |
+
+### Changed
+
+- **BREAKING: the read path names an identity as `module:qualname`.** `Cannot revive`
+  and the write-side placeholder refusal used `module.qualname`. A failed transform or
+  split is named by its migration label, for example
+  `transform myapp.events:Order via myapp.events:drop_total`.
+- **The `revive` rule only resolves an identity of this library.** A `None` placeholder
+  cannot satisfy a library class that validates a required field, for example
+  `FrontendToolCallRequested`. A client identity still revives through the read path.
+
+### Fixed
+
+- **A rewrite refuses a thread that the saver did not store.** The base class of a
+  checkpointer does not promise that `put()` replaces a stored checkpoint of the same id, or
+  that `put_writes()` replaces an `__interrupt__` write. With a saver that keeps the old row,
+  `rewrite_store()` reported a rewrite and stored nothing. Now `rewrite_store()` and
+  `arewrite_store()` read each written thread again after the write. When the stored channel
+  versions are not the written ones, the thread is refused with `the saver did not overwrite
+  checkpoint <id>`. When the versions match but a record still migrates, the reason is `the
+  saver did not store the bytes written to checkpoint <id>`, with the `put()` or
+  `put_writes()` rule that the saver broke. When the read after the write refuses the thread
+  for its own reason, the report gives that reason. The `rewrite` command prints the reason
+  next to the checkpoint that the last plan reads as a rewrite.
+- **A rewrite refuses a migration that does not settle, before it writes.** A class-stage
+  transform that changes its own output again, for example one that adds 1 to a field,
+  changed the stored value on each rewrite. Before, the rewrite stored the changed value.
+  Now the plan reads the rewritten bytes back first. When a record still migrates,
+  the plan refuses the thread with `a migration of <module>:<qualname> does not settle`, and
+  nothing is written.
+- **A transform whose output stores the same bytes does not mark a record as migrated.** A
+  class-stage transform that builds a tuple from a stored list returns a value that differs
+  in Python but stores the same msgpack bytes. Each plan read such a thread as a rewrite, so
+  the rewrite never converged. Now the plan compares the two values as the bytes they store, so
+  the thread reads as unchanged.
+- **A failed built-in thread listing names `threads=list_thread_keys`.** The listing of a
+  `PostgresSaver` or a `SqliteSaver` calls a cursor method that is internal to the saver
+  package. When that call fails, `MigrationTarget.thread_keys()` raises `TargetError` with the
+  error and the `threads=list_thread_keys` remedy.
+- **A plan reads a thread as refused when a log entry is not an event.** LangGraph's own
+  reader revives a record whose class no longer imports, or no longer takes the stored
+  fields, as a `dict` or `None`, with no error. A plan read such a thread as unchanged, so
+  `rewrite` could exit 0 on history that no release reads. The reason names the channel,
+  and says to restore the class or delete the thread. When an entry is a `dict`, the reason
+  also names `allowed_msgpack_modules`: a class that imports but that the allow-list of the
+  serde blocks also revives as a `dict`.
+- **A rewrite does not store an invalid pydantic model.** A migration that builds or
+  replaces a model that fails the validation of its class now refuses the thread. The
+  reason names the model, the event field and the error. Before, the rewrite stored the
+  value, and once the migration left the code, every read accepted it with no warning. A
+  model that the store already held is not checked, so a valid model that does not rebuild
+  from its own dump, for example through a field alias, does not refuse the thread.
+- **`rewrite --apply` stops when no pass can change the store.** A pass rewrites only the
+  checkpoints that the last plan reads as a rewrite. A refused checkpoint changes only when
+  a person acts, so the loop no longer plans it again on each pass.
+- **A mixin that a handler subscribes to is not a loose event of the graph.**
+  `EventGraph.from_namespaces` passed such a mixin to `events=` of the serde it builds. A
+  plain mixin then made `update_baseline` raise `TypeError`, and a dataclass mixin gave a
+  false `unrevivable` finding.
+
+### Removed
+
+- **BREAKING: the old baseline gates and the detect module are removed.**
+  `assert_all_baselined_cover`, `assert_all_baselined_resolve`,
+  `assert_all_baselined_revive`, `assert_all_baselined_handlers_cover`, `CoverageError`,
+  `MigrationCoverageError`, `HandlerCoverageError` and the module
+  `langgraph_events.serde.migrations.detect` (`detect_changes`, `write_baseline`,
+  `BaselineRegressionError`) are gone. Use `check` or `assert_migration_gate`, and
+  `update_baseline`. A client class whose `__post_init__` rejects a `None` placeholder
+  on a required field has no resolve-only gate now. Give the field a `@backfill` or a
+  default.
+- **BREAKING: the positional CLI form is removed.**
+  `python -m langgraph_events.serde.migrations <module:factory> <baseline>` exits 2 and
+  prints the new command line.
+
 ## [0.41.0] - 2026-10-25
 
 ### Added

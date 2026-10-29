@@ -15,13 +15,19 @@ Each migration holds one operation. Its name is
 
 ``tests/test_serde_framework.py`` enforces the rule. It also requires a
 stored fixture for the source identity of each operation.
+
+Before 0.6.0, LangGraph's own serializer wrote each event as a constructor
+record. ``NamespaceAwareSerde`` reads such a record of an lge event through
+these migrations too.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from typing import Any
 
 from langgraph_events._event import (
+    Halted,
     HandlerAbandonedOnDeadline,
     HandlerRaised,
     RunPaused,
@@ -48,7 +54,35 @@ def _split_run_paused(kw: dict[str, Any]) -> tuple[type, dict[str, Any]]:
     return RunPausedOnDeadline, kw
 
 
+def _drop_halted_reason(kw: dict[str, Any]) -> dict[str, Any]:
+    # 0.1.x wrote a free-text reason on Halted. 0.2.0 replaced it with typed
+    # subclasses, and LangGraph's own serializer wrote those payloads.
+    kw.pop("reason", None)
+    return kw
+
+
+# 0.5.x and earlier defined FrontendToolCallRequested in this module. Its
+# class needs the agui extra, so the rename exists only when the extra does:
+# a rename must end on a class that imports.
+_AGUI_RENAMES: tuple[Migration, ...] = (
+    (
+        Migration.rename(
+            "lge-0.42-frontend-tool-call-requested-rename",
+            old_module="langgraph_events._event",
+            old_qualname="FrontendToolCallRequested",
+            new_module="langgraph_events.agui._events",
+            new_qualname="FrontendToolCallRequested",
+        ),
+    )
+    if importlib.util.find_spec("ag_ui") is not None
+    else ()
+)
+
 FRAMEWORK_MIGRATIONS: tuple[Migration, ...] = (
+    *_AGUI_RENAMES,
+    Migration.transform_fields(
+        "lge-0.42-halted-transform", target=Halted, transform=_drop_halted_reason
+    ),
     Migration.split_event(
         "lge-0.41-handler-raised-split",
         source=HandlerRaised,

@@ -27,6 +27,7 @@ from langgraph_events import (
     on,
 )
 from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payload
+from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
 
 # ``_legacy_interrupted_payload`` and the inline Scatter-union test below
 # still assemble Interrupt-wrapped / list payloads by hand, which the
@@ -40,67 +41,12 @@ from langgraph_events.serde._jsonplus import (
     _scan_identities,
 )
 from langgraph_events.serde.migrations import (
+    RenameEvent,
     backfill,
     migrate_from,
     split_event,
     transform_fields,
 )
-
-
-def _baseline_file(tmp_path: Any, *identities: tuple[str, str]) -> Any:
-    """Write a v1 baseline JSON listing *identities* and return its path."""
-    import json
-
-    target = tmp_path / "baseline.json"
-    target.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "events": [
-                    {"module": module, "qualname": qualname}
-                    for module, qualname in identities
-                ],
-            }
-        )
-    )
-    return target
-
-
-def _baseline_v3_file(
-    tmp_path: Any,
-    *,
-    events: tuple[tuple[str, str, list[str] | None], ...] = (),
-    retired: tuple[tuple[str, str, list[str] | None], ...] = (),
-) -> Any:
-    """Write a v3 baseline JSON and return its path.
-
-    Each entry is ``(module, qualname, fields)``. ``fields`` is ``None`` for
-    a retired entry whose record predates v3.
-    """
-    import json
-
-    def entry(module: str, qualname: str, fields: list[str] | None) -> dict[str, Any]:
-        record: dict[str, Any] = {"module": module, "qualname": qualname}
-        if fields is not None:
-            record["fields"] = fields
-        return record
-
-    target = tmp_path / "baseline.json"
-    target.write_text(
-        json.dumps(
-            {
-                "version": 3,
-                "events": [entry(*e) for e in events],
-                "retired": [entry(*r) for r in retired],
-            }
-        )
-    )
-    return target
-
-
-def _build_decoreorg_graph() -> Any:
-    """Factory referenced by the detect-CLI tests via ``module:attr``."""
-    return EventGraph.from_namespaces(DecoReorg)
 
 
 def _legacy_interrupted_payload(
@@ -166,19 +112,6 @@ class DerivedField(Namespace):
             object.__setattr__(self, "derived", self.total * 2)
 
 
-# Fixture for the revive gate under #172. ``derived`` is ``init=False`` with
-# no default. The placeholder helper must not fill it: it is not a kwarg.
-# ``__post_init__`` does not read ``total``, so the ``None`` placeholder for
-# ``total`` is accepted, as the revive gate documents.
-class DerivedNoDefault(Namespace):
-    class Placed(DomainEvent):
-        total: int
-        derived: int = dataclasses.field(init=False)
-
-        def __post_init__(self) -> None:
-            object.__setattr__(self, "derived", 2)
-
-
 # Fixtures for the decorator-driven migration tests. Module-level so their
 # qualnames resolve through ``importlib.import_module`` + dotted ``getattr``
 # at serde-construction validation time. Function-local classes acquire
@@ -194,80 +127,6 @@ class DecoReorg(Namespace):
 
         def handle(self) -> DecoReorg.Persist.Persisted:
             return DecoReorg.Persist.Persisted(note=self.note)
-
-
-# Fixture for the resolution-only gate. ``name`` is required and
-# ``__post_init__`` rejects an empty/None value — mirrors agui's
-# ``FrontendToolCallRequested``. ``assert_all_baselined_revive`` constructs the
-# live class with a ``None`` placeholder and trips this validation, whereas
-# ``assert_all_baselined_resolve`` only resolves the identity and passes.
-class ValidatedReorg(Namespace):
-    class Persist(Command):
-        name: str = "x"
-
-        @migrate_from("ValidatedReorg.Persisted")
-        class Persisted(DomainEvent):
-            name: str
-
-            def __post_init__(self) -> None:
-                if not self.name:
-                    raise ValueError("name must be non-empty")
-
-        def handle(self) -> ValidatedReorg.Persist.Persisted:
-            return ValidatedReorg.Persist.Persisted(name=self.name)
-
-
-# Fixture for the v3 revive gate. ``name`` has a default and
-# ``__post_init__`` rejects an empty/None value. The baseline records
-# ``name``, the live class still accepts it, so the gate must send no
-# placeholder for it: a ``None`` there trips the validator that a real
-# payload never trips.
-class ValidatedDefault(Namespace):
-    class Persist(Command):
-        name: str = "x"
-
-        class Persisted(DomainEvent):
-            name: str = "x"
-
-            def __post_init__(self) -> None:
-                if not self.name:
-                    raise ValueError("name must be non-empty")
-
-        def handle(self) -> ValidatedDefault.Persist.Persisted:
-            return ValidatedDefault.Persist.Persisted(name=self.name)
-
-
-# Fixture for an ``init=False`` field. The serde writes init fields only,
-# so the baseline must record the same set. A recorded ``length`` would
-# reach the constructor as a placeholder, and the constructor rejects it.
-class Derived(Namespace):
-    class Persist(Command):
-        note: str = ""
-
-        class Persisted(DomainEvent):
-            note: str = ""
-            length: int = dataclasses.field(init=False)
-
-            def __post_init__(self) -> None:
-                object.__setattr__(self, "length", len(self.note))
-
-        def handle(self) -> Derived.Persist.Persisted:
-            return Derived.Persist.Persisted(note=self.note)
-
-
-# Tombstones for identities a baseline lists under ``retired``. The
-# retired ``Retiring.ApprovalRequired`` recorded ``order_id``, so its
-# tombstone declares the same field. ``Retiring.ReviewRequired`` predates
-# v3 (no field record), and its tombstone has a required field the gate
-# must placeholder.
-class Retiring(Namespace):
-    @migrate_from("Retiring.ApprovalRequired")
-    class RetiredApprovalGate(Interrupted):
-        order_id: str = ""
-
-    @migrate_from("Retiring.ReviewRequired")
-    class RetiredReviewGate(Interrupted):
-        order_id: str
 
 
 class DecoMulti(Namespace):
@@ -498,46 +357,6 @@ class DecoBackfillInitFalse(Namespace):
         derived: int = dataclasses.field(init=False, default=0)
 
 
-# Fixture proving the revive gate exercises origin fills instead of
-# masking them with ``None`` placeholders: ``__post_init__`` rejects
-# anything but a real discriminator, so the gate only passes if the
-# origin-scoped value actually flows through the read path.
-class ValidatedFanIn(Namespace):
-    @migrate_from("ValidatedFanInOld.Approved", backfill={"entity_type": "persona"})
-    class Approved(DomainEvent):
-        entity_type: str
-
-        def __post_init__(self) -> None:
-            if self.entity_type not in ("persona", "story", "scenario"):
-                raise ValueError(f"bad entity_type: {self.entity_type!r}")
-
-
-# Class-global analog of ValidatedFanIn: __post_init__ validation on a
-# class-globally back-filled field must pass the revive gate (the fill's
-# real value is injected, not a None placeholder).
-class ValidatedGlobalBackfill(Namespace):
-    @backfill("entity_type", default="persona")
-    class Approved(DomainEvent):
-        entity_type: str
-
-        def __post_init__(self) -> None:
-            if self.entity_type not in ("persona", "story", "scenario"):
-                raise ValueError(f"bad entity_type: {self.entity_type!r}")
-
-
-# Negative twin: a fill whose value violates construction-time validation
-# must FAIL the gate — the placeholder skip exists precisely so a broken
-# fill cannot hide behind a None placeholder.
-class ValidatedBadFill(Namespace):
-    @backfill("entity_type", default="bogus")
-    class Approved(DomainEvent):
-        entity_type: str
-
-        def __post_init__(self) -> None:
-            if self.entity_type not in ("persona", "story", "scenario"):
-                raise ValueError(f"bad entity_type: {self.entity_type!r}")
-
-
 # Fixture for the raw-form tests: a temporal chain whose NEWER historic
 # identity carries a hand-authored origin-keyed AddField. Payloads from
 # the OLDER era must not pick it up — origin scoping is an exact match,
@@ -562,7 +381,7 @@ class FactoryScoped(Namespace):
 # hold, so ``revivable_identities`` can be pinned as an exact set rather
 # than by membership. Set membership is what makes an OVER-BROAD identity
 # set invisible, and an over-broad set is the direction that silently
-# weakens ``assert_all_baselined_cover`` (#154). Deliberately carries no
+# weakens the coverage rule of the migration gate (#154). Deliberately carries no
 # ``@migrate_from``: the walk and the rename table are pinned separately.
 class WalkShapes(Namespace):
     # Not a class at all — the walk must step over it.
@@ -816,6 +635,15 @@ class _SiblingRefPayloadNs(Namespace):
         cfg: _ModelHolder.Cfg | None = None
 
 
+_FRAMEWORK_RENAME_SOURCES = frozenset(
+    (op.old_module, op.old_qualname)
+    for migration in FRAMEWORK_MIGRATIONS
+    for op in migration.operations
+    if isinstance(op, RenameEvent)
+)
+"""lge's own renamed identities. Every serde revives them."""
+
+
 def describe_NamespaceAwareSerde():
     def describe_dumps_typed_loads_typed_roundtrip():
         def when_two_namespaces_share_a_leaf_event_name():
@@ -944,6 +772,27 @@ def describe_NamespaceAwareSerde():
                 assert "'note'" in message
                 assert "@migrate_from" not in message
 
+            def it_says_a_deleted_migration_needs_a_rewrite_of_the_store():
+                serde = NamespaceAwareSerde()
+
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept", "note": "dropped"},
+                )
+
+                with pytest.raises(ValueError) as excinfo:
+                    serde.loads_typed(payload)
+
+                assert str(excinfo.value).endswith(
+                    "If a release deleted the migration that dropped 'note', the "
+                    "store was not rewritten. Roll back to the release that holds "
+                    "the migration, then run: python -m "
+                    "langgraph_events.serde.migrations rewrite <module:attr of the "
+                    "MigrationTarget> --apply --expect <fingerprint of that "
+                    "release>"
+                )
+
         def when_a_required_field_was_added_to_the_class():
             def without_a_migration():
                 def it_names_the_identity_and_the_missing_field():
@@ -1060,7 +909,7 @@ def describe_NamespaceAwareSerde():
                 with pytest.raises(
                     ValueError,
                     match=(
-                        r"app\.events\.Gone.*placeholder.*never.*stored.*"
+                        r"app\.events:Gone.*placeholder.*never.*stored.*"
                         r"tombstone.*Recovering a delete-first deployment"
                     ),
                 ):
@@ -1485,7 +1334,7 @@ def describe_NamespaceAwareSerde():
                 # marker and produced a second entry, triggering
                 # "Duplicate rename source" at serde construction.
                 serde = NamespaceAwareSerde(namespaces=[SubLeak])
-                sources = [old_qn for (_, old_qn) in serde._tables.rename_table]
+                sources = [old_qn for (_, old_qn) in serde._client_tables.rename_table]
                 assert sources == ["SubLeak.OldParent"]
 
             def it_encodes_subclass_instances_under_their_own_qualname():
@@ -2261,8 +2110,8 @@ def describe_NamespaceAwareSerde():
                 # authored ``migrations=`` entries (none here) would apply.
                 serde = NamespaceAwareSerde()
 
-                assert serde._tables.rename_table == {}
-                assert serde._tables.addfield_table == {}
+                assert serde._client_tables.rename_table == {}
+                assert serde._client_tables.addfield_table == {}
 
         def when_class_is_decorated_but_out_of_scope():
             def with_legacy_write_enabled():
@@ -2369,7 +2218,7 @@ def describe_NamespaceAwareSerde():
 
         def it_equals_the_identities_the_namespace_walk_reaches():
             # Exact equality, not membership: the gate that consumes this
-            # set (``assert_all_baselined_cover``) only asks whether a
+            # set (the gate's coverage rule) only asks whether a
             # baselined identity is present, so an identity the walk never
             # reached would make the gate pass on a checkpoint the read
             # path cannot actually revive (#154).
@@ -2377,7 +2226,7 @@ def describe_NamespaceAwareSerde():
 
             ids = NamespaceAwareSerde(namespaces=[WalkShapes]).revivable_identities()
 
-            assert ids == {
+            assert ids - _FRAMEWORK_RENAME_SOURCES == {
                 # DomainEvent nested directly in the Namespace.
                 (module, "WalkShapes.Recorded"),
                 # Non-DomainEvent nested in the Namespace for locality.
@@ -2436,6 +2285,7 @@ def describe_NamespaceAwareSerde():
             ids = serde.revivable_identities()
 
             assert ids == {
+                *_FRAMEWORK_RENAME_SOURCES,
                 # Live classes reached by the namespace walk.
                 (DecoReorg.__module__, "DecoReorg.Persist"),
                 (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
@@ -2470,508 +2320,6 @@ def describe_NamespaceAwareSerde():
 
             assert isinstance(revived, DecoReorg.Persist.Persisted)
             assert revived.note == "from-legacy"
-
-    def describe_assert_all_baselined_cover():
-        # The CI gate: every identity the previous release wrote must be
-        # either still live in this serde's namespaces or covered by a
-        # rename migration, else the next production read of that payload
-        # would fail. Weakest of the three gates — a set-membership check
-        # that neither resolves nor constructs.
-
-        def when_baseline_identity_has_no_migration():
-            def it_raises_naming_the_uncovered_identity(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    MigrationCoverageError,
-                    assert_all_baselined_cover,
-                )
-
-                serde = NamespaceAwareSerde()
-                baseline = _baseline_file(tmp_path, ("ghost.mod", "Ghost.Gone"))
-
-                with pytest.raises(MigrationCoverageError) as excinfo:
-                    assert_all_baselined_cover(serde, baseline)
-
-                assert "Ghost.Gone" in str(excinfo.value)
-                assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
-                # Grammar must agree with the count: one identity, not "are".
-                assert "1 identity in the baseline is neither" in str(excinfo.value)
-                assert "add @migrate_from" in str(excinfo.value)
-
-        def when_the_baseline_lists_an_unmigrated_retired_identity():
-            def it_raises_naming_the_retired_remedy(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    MigrationCoverageError,
-                    assert_all_baselined_cover,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[Retiring])
-                baseline = _baseline_v3_file(
-                    tmp_path, retired=(("ghost.mod", "Ghost.Gone", ["x"]),)
-                )
-
-                with pytest.raises(MigrationCoverageError) as excinfo:
-                    assert_all_baselined_cover(serde, baseline)
-
-                message = str(excinfo.value)
-                assert excinfo.value.uncovered == (("ghost.mod", "Ghost.Gone"),)
-                assert message.count("Ghost.Gone") == 1
-                assert "regenerate" not in message
-                assert (
-                    "To check, pass every thread id in the store: "
-                    "graph.unrevivable_threads(thread_ids=ids) == {}."
-                ) in message
-                assert "delete its `retired` entry" in message
-
-        def when_unifying_the_gate_error_base():
-            def it_is_an_assertion_error_subclass():
-                # Unified error base: every gate raises AssertionError so
-                # callers catch them uniformly, while cover keeps its
-                # structured ``.uncovered`` tuple.
-                from langgraph_events.serde.migrations import (
-                    MigrationCoverageError,
-                )
-
-                assert issubclass(MigrationCoverageError, AssertionError)
-
-        def when_baseline_identity_has_a_decorator_migration():
-            def it_passes_silently(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_cover,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path, (DecoReorg.__module__, "DecoReorg.Persisted")
-                )
-
-                assert_all_baselined_cover(serde, baseline)
-
-        def when_baseline_identity_is_still_live():
-            def it_passes_silently(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_cover,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
-                )
-
-                assert_all_baselined_cover(serde, baseline)
-
-        def when_baseline_identity_has_a_hand_authored_migration():
-            def it_passes_silently(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_cover,
-                )
-
-                serde = NamespaceAwareSerde(
-                    migrations=[
-                        _persona_rename("legacy-rename"),
-                    ],
-                )
-                baseline = _baseline_file(
-                    tmp_path, ("legacy.persona", "Legacy.Approved")
-                )
-
-                assert_all_baselined_cover(serde, baseline)
-
-    def describe_assert_all_baselined_revive():
-        # Stronger than assert_all_baselined_cover: instead of a set-membership
-        # check, it pushes a synthesized legacy payload for every baselined
-        # identity through the real ext-hook and asserts it revives to an
-        # Event. Zero per-event maintenance — a new @migrate_from plus a
-        # regenerated baseline is covered with no new test code.
-
-        def when_every_baselined_identity_is_renamed_or_live():
-            def it_revives_them_all_through_the_read_path(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DecoReorg.__module__, "DecoReorg.Persisted"),
-                    (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
-                )
-
-                assert_all_baselined_revive(serde, baseline)
-
-        def when_an_init_false_field_has_no_default():
-            def it_gives_that_field_no_placeholder(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DerivedNoDefault])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DerivedNoDefault.__module__, "DerivedNoDefault.Placed"),
-                )
-
-                assert_all_baselined_revive(serde, baseline)
-
-        def when_a_baselined_identity_is_neither_live_nor_migrated():
-            def it_raises_naming_the_uncovered_identity(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DecoReorg.__module__, "DecoReorg.Persisted"),
-                    ("ghost.mod", "Ghost.Gone"),
-                )
-
-                with pytest.raises(AssertionError) as excinfo:
-                    assert_all_baselined_revive(serde, baseline)
-
-                assert "Ghost.Gone" in str(excinfo.value)
-                assert "DecoReorg.Persisted" not in str(excinfo.value)
-                assert "add @migrate_from" in str(excinfo.value)
-
-        def when_a_baselined_identity_is_only_reachable_in_scope():
-            def it_revives_through_the_scope(tmp_path: Any):
-                # ``loads_typed`` already resolves scope-first, but the
-                # required-field placeholders the gate synthesizes must be
-                # read off the same class the reader will build — otherwise
-                # a function-local ``Placed(sym=...)`` is constructed with
-                # no kwargs and the gate reports a synthetic TypeError.
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                trading = _local_trading()
-                serde = NamespaceAwareSerde(namespaces=[trading])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (
-                        trading.Place.Placed.__module__,
-                        trading.Place.Placed.__qualname__,
-                    ),
-                )
-
-                assert_all_baselined_revive(serde, baseline)
-
-        def when_the_live_class_dropped_a_recorded_field():
-            # The stored blob still carries the field. A v3 baseline records
-            # it, so the gate sends it and the live class rejects it: the
-            # failure a real checkpoint would raise.
-            def it_fails_naming_the_recorded_field(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_v3_file(
-                    tmp_path,
-                    events=(
-                        (
-                            DecoReorg.__module__,
-                            "DecoReorg.Persist.Persisted",
-                            ["legacy_flag", "note"],
-                        ),
-                    ),
-                )
-
-                with pytest.raises(AssertionError) as excinfo:
-                    assert_all_baselined_revive(serde, baseline)
-
-                message = str(excinfo.value)
-                assert "DecoReorg.Persist.Persisted" in message
-                assert "recorded 'legacy_flag'" in message
-                # One remedy, from the read path: the gate adds the cause
-                # sentence and does not repeat it.
-                assert "drop it from the payload with @transform_fields" in message
-                assert message.count("from the payload") == 1
-
-            def with_a_baseline_that_predates_v3():
-                def it_passes(tmp_path: Any):
-                    # No field record, so nothing to send: the documented
-                    # degrade until the project re-baselines.
-                    from langgraph_events.serde.migrations import (
-                        assert_all_baselined_revive,
-                    )
-
-                    serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                    baseline = _baseline_file(
-                        tmp_path,
-                        (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
-                    )
-
-                    assert_all_baselined_revive(serde, baseline)
-
-        def when_a_field_is_dropped_and_the_baseline_rewritten():
-            def it_still_fails(tmp_path: Any):
-                # The write keeps every field ever recorded, so a plain
-                # re-baseline after the drop cannot blind the gate.
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-                from langgraph_events.serde.migrations.detect import write_baseline
-
-                baseline = _baseline_v3_file(
-                    tmp_path,
-                    events=(
-                        (
-                            DecoReorg.__module__,
-                            "DecoReorg.Persist.Persisted",
-                            ["legacy_flag", "note"],
-                        ),
-                    ),
-                )
-                write_baseline(EventGraph.from_namespaces(DecoReorg), baseline)
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-
-                with pytest.raises(AssertionError, match="legacy_flag"):
-                    assert_all_baselined_revive(serde, baseline)
-
-        def when_a_defaulted_field_is_validated_in_post_init():
-            def it_passes_after_a_v3_write(tmp_path: Any):
-                # The record names ``name``. The live class still accepts
-                # it, so no ``None`` placeholder reaches the validator.
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-                from langgraph_events.serde.migrations.detect import write_baseline
-
-                baseline = tmp_path / "baseline.json"
-                write_baseline(EventGraph.from_namespaces(ValidatedDefault), baseline)
-                serde = NamespaceAwareSerde(namespaces=[ValidatedDefault])
-
-                assert_all_baselined_revive(serde, baseline)
-
-        def when_the_live_class_has_an_init_false_field():
-            def it_stays_green_after_a_v3_write(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-                from langgraph_events.serde.migrations.detect import write_baseline
-
-                baseline = tmp_path / "baseline.json"
-                write_baseline(EventGraph.from_namespaces(Derived), baseline)
-                serde = NamespaceAwareSerde(namespaces=[Derived])
-
-                assert_all_baselined_revive(serde, baseline)
-
-        def when_the_live_class_gained_a_backfilled_required_field():
-            def it_passes_against_the_v3_record_of_the_old_shape(tmp_path: Any):
-                # The record predates ``command_id``. The back-fill injects
-                # it, so the gate sends no placeholder and still revives.
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoBackfill])
-                baseline = _baseline_v3_file(
-                    tmp_path,
-                    events=(
-                        (
-                            DecoBackfill.__module__,
-                            "DecoBackfill.Persist.Persisted",
-                            ["note"],
-                        ),
-                    ),
-                )
-
-                assert_all_baselined_revive(serde, baseline)
-
-        def when_the_baseline_lists_a_retired_identity():
-            def without_a_migration():
-                def it_fails_naming_the_retired_remedy(tmp_path: Any):
-                    from langgraph_events.serde.migrations import (
-                        assert_all_baselined_revive,
-                    )
-
-                    serde = NamespaceAwareSerde(namespaces=[Retiring])
-                    baseline = _baseline_v3_file(
-                        tmp_path,
-                        retired=(("ghost.mod", "Ghost.Gone", ["x"]),),
-                    )
-
-                    with pytest.raises(AssertionError) as excinfo:
-                        assert_all_baselined_revive(serde, baseline)
-
-                    message = str(excinfo.value)
-                    assert "ghost.mod:Ghost.Gone (retired) -> " in message
-                    assert "delete its `retired` entry" in message
-
-            def with_a_tombstone_declaring_the_recorded_fields():
-                def it_passes(tmp_path: Any):
-                    from langgraph_events.serde.migrations import (
-                        assert_all_baselined_revive,
-                    )
-
-                    serde = NamespaceAwareSerde(namespaces=[Retiring])
-                    baseline = _baseline_v3_file(
-                        tmp_path,
-                        retired=(
-                            (
-                                Retiring.__module__,
-                                "Retiring.ApprovalRequired",
-                                ["order_id"],
-                            ),
-                        ),
-                    )
-
-                    assert_all_baselined_revive(serde, baseline)
-
-            def without_a_field_record():
-                def it_sends_required_placeholders_only(tmp_path: Any):
-                    # A retired entry hand-added for an identity erased
-                    # before v3 has no ``fields``. The tombstone's required
-                    # ``order_id`` still gets its placeholder.
-                    from langgraph_events.serde.migrations import (
-                        assert_all_baselined_revive,
-                    )
-
-                    serde = NamespaceAwareSerde(namespaces=[Retiring])
-                    baseline = _baseline_v3_file(
-                        tmp_path,
-                        retired=(
-                            (Retiring.__module__, "Retiring.ReviewRequired", None),
-                        ),
-                    )
-
-                    assert_all_baselined_revive(serde, baseline)
-
-        def when_the_live_class_has_required_fields():
-            def it_does_not_spuriously_fail(tmp_path: Any):
-                # NestedPersist.Persist.Persisted has a required
-                # ``command_id`` (no default). The helper must synthesize
-                # placeholder kwargs for required fields so a perfectly
-                # healthy migration table is not flagged as a failure.
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[NestedPersist])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (NestedPersist.__module__, "NestedPersist.Persist.Persisted"),
-                )
-
-                assert_all_baselined_revive(serde, baseline)
-
-    def describe_assert_all_baselined_resolve():
-        # Resolution-only gate: proves every baselined identity still resolves
-        # to a live Event class (rename-aware import walk) without constructing
-        # it. Catches renames/removals that ``cover`` (namespace-walk-scoped)
-        # misses, with none of the construction-time validation false positives
-        # that trip ``revive``.
-
-        def when_baseline_identity_is_still_live():
-            def it_passes_silently(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_resolve,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
-                )
-
-                assert_all_baselined_resolve(serde, baseline)
-
-        def when_a_rename_is_covered_by_migrate_from():
-            def it_resolves_through_the_rename(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_resolve,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DecoReorg.__module__, "DecoReorg.Persisted"),
-                )
-
-                assert_all_baselined_resolve(serde, baseline)
-
-        def when_a_baselined_identity_is_only_reachable_in_scope():
-            def it_resolves_through_the_scope(tmp_path: Any):
-                # The gate answers "would the read path reach a live Event"
-                # — so it has to resolve the way the read path does, scope
-                # first. Import-only, a function-local namespace fails a
-                # gate its own serde revives perfectly well (#150).
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_resolve,
-                )
-
-                trading = _local_trading()
-                serde = NamespaceAwareSerde(namespaces=[trading])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (
-                        trading.Place.Placed.__module__,
-                        trading.Place.Placed.__qualname__,
-                    ),
-                )
-
-                assert_all_baselined_resolve(serde, baseline)
-
-        def when_a_live_event_has_construction_time_validation():
-            def it_passes_where_revive_trips(tmp_path: Any):
-                # ValidatedReorg.Persist.Persisted rejects an empty/None
-                # ``name`` in __post_init__. ``revive`` builds it with a None
-                # placeholder and raises; ``resolve`` never constructs, so the
-                # identity is proven reachable with no false positive.
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_resolve,
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[ValidatedReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (ValidatedReorg.__module__, "ValidatedReorg.Persist.Persisted"),
-                )
-
-                with pytest.raises(AssertionError):
-                    assert_all_baselined_revive(serde, baseline)
-
-                assert_all_baselined_resolve(serde, baseline)
-
-        def when_the_baseline_lists_an_unmigrated_retired_identity():
-            def it_fails_naming_the_retired_remedy(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_resolve,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[Retiring])
-                baseline = _baseline_v3_file(
-                    tmp_path, retired=(("ghost.mod", "Ghost.Gone", ["x"]),)
-                )
-
-                with pytest.raises(AssertionError) as excinfo:
-                    assert_all_baselined_resolve(serde, baseline)
-
-                message = str(excinfo.value)
-                assert "ghost.mod:Ghost.Gone (retired) -> " in message
-                assert "delete its `retired` entry" in message
-
-        def when_a_baselined_identity_no_longer_resolves():
-            def it_raises_naming_the_missing_identity(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_resolve,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoReorg])
-                baseline = _baseline_file(
-                    tmp_path,
-                    (DecoReorg.__module__, "DecoReorg.Persist.Persisted"),
-                    ("ghost.mod", "Ghost.Gone"),
-                )
-
-                with pytest.raises(AssertionError) as excinfo:
-                    assert_all_baselined_resolve(serde, baseline)
-
-                assert "Ghost.Gone" in str(excinfo.value)
-                assert "DecoReorg.Persist.Persisted" not in str(excinfo.value)
-                assert "add @migrate_from" in str(excinfo.value)
 
 
 def describe_UnreachableMigrationWarning():
@@ -3037,7 +2385,7 @@ def describe_public_serde_surface():
                 "transform_fields",
                 "split_event",
                 "synthesize_legacy_payload",
-                "assert_all_baselined_revive",
+                "assert_migration_gate",
             ):
                 assert hasattr(serde_pkg, name), name
 
@@ -3054,62 +2402,6 @@ def describe_public_serde_surface():
             assert AddField is not None
             assert TransformFields is not None
             assert SplitEvent is not None
-
-
-def describe_detect_cli():
-    # `python -m langgraph_events.serde.migrations <module:factory>
-    # <baseline>` — makes "forgot a migration" a non-zero exit (a build
-    # failure) outside pytest, not just a prod incident.
-
-    def when_the_graph_matches_the_baseline():
-        def it_exits_zero(tmp_path: Any):
-            from langgraph_events.serde.migrations.__main__ import main
-            from langgraph_events.serde.migrations.detect import write_baseline
-
-            graph = _build_decoreorg_graph()
-            baseline = tmp_path / "baseline.json"
-            write_baseline(graph, baseline)
-
-            code = main(["test_serde:_build_decoreorg_graph", str(baseline)])
-
-            assert code == 0
-
-    def when_the_baseline_diverges_from_the_graph():
-        def it_exits_nonzero(tmp_path: Any):
-            from langgraph_events.serde.migrations.__main__ import main
-
-            baseline = _baseline_file(tmp_path, ("ghost.mod", "Ghost.Gone"))
-
-            code = main(["test_serde:_build_decoreorg_graph", str(baseline)])
-
-            assert code == 1
-
-    def when_arguments_are_missing():
-        def it_returns_a_usage_code(tmp_path: Any):
-            from langgraph_events.serde.migrations.__main__ import main
-
-            assert main(["only-one-arg"]) == 2
-
-    def when_invoked_as_a_module():
-        # The other tests call main() directly and so cannot catch a wrong
-        # `python -m ...` target. `__main__.py` lives in the `migrations`
-        # package, so the working entrypoint is
-        # `python -m langgraph_events.serde.migrations`; the program's own
-        # usage message must advertise that, not the inert
-        # `...migrations.detect` (a module with no __main__ guard).
-        def it_advertises_the_working_entrypoint():
-            import subprocess
-            import sys
-
-            result = subprocess.run(  # noqa: S603 — fixed argv, no shell
-                [sys.executable, "-m", "langgraph_events.serde.migrations"],
-                capture_output=True,
-                check=False,  # asserting the non-zero usage exit ourselves
-            )
-
-            assert result.returncode == 2
-            assert b"usage:" in result.stderr
-            assert b"migrations.detect" not in result.stderr
 
 
 def describe_replay_reducer():
@@ -3486,79 +2778,6 @@ def describe_origin_scoped_backfill():
             assert first.tags == ["legacy"]
             assert first.tags is not second.tags
 
-    def when_a_baseline_contains_collapsed_origins():
-        def it_passes_the_resolve_and_revive_gates(tmp_path: Any):
-            # The acceptance sketch from #101: a prior release's baseline
-            # still lists the three per-entity identities; both gates must
-            # pass with zero per-event test code.
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_resolve,
-                assert_all_baselined_revive,
-            )
-
-            serde = NamespaceAwareSerde(namespaces=[DecoFanIn])
-            baseline = _baseline_file(
-                tmp_path,
-                (DecoFanIn.__module__, "PersonaOld.Approve.Approved"),
-                (DecoFanIn.__module__, "StoryOld.Approve.Approved"),
-                (DecoFanIn.__module__, "ScenarioOld.Approve.Approved"),
-            )
-
-            assert_all_baselined_resolve(serde, baseline)
-            assert_all_baselined_revive(serde, baseline)
-
-        def it_exercises_the_origin_fill_instead_of_a_placeholder(tmp_path: Any):
-            # ValidatedFanIn's __post_init__ rejects a None discriminator —
-            # the gate must let the origin-scoped fill supply the value
-            # rather than masking it with a required-field placeholder
-            # (which would both hide a broken fill and spuriously fail
-            # validated classes whose backfill is perfectly healthy).
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_revive,
-            )
-
-            serde = NamespaceAwareSerde(namespaces=[ValidatedFanIn])
-            baseline = _baseline_file(
-                tmp_path,
-                (ValidatedFanIn.__module__, "ValidatedFanInOld.Approved"),
-            )
-
-            assert_all_baselined_revive(serde, baseline)
-
-        def it_exercises_class_global_fills_the_same_way(tmp_path: Any):
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_revive,
-            )
-
-            serde = NamespaceAwareSerde(namespaces=[ValidatedGlobalBackfill])
-            baseline = _baseline_file(
-                tmp_path,
-                (
-                    ValidatedGlobalBackfill.__module__,
-                    "ValidatedGlobalBackfill.Approved",
-                ),
-            )
-
-            assert_all_baselined_revive(serde, baseline)
-
-    def when_the_fill_value_is_broken():
-        def it_fails_the_revive_gate_loudly(tmp_path: Any):
-            from langgraph_events.serde.migrations import (
-                assert_all_baselined_revive,
-            )
-
-            serde = NamespaceAwareSerde(namespaces=[ValidatedBadFill])
-            baseline = _baseline_file(
-                tmp_path,
-                (ValidatedBadFill.__module__, "ValidatedBadFill.Approved"),
-            )
-
-            # The sweep names the offending identity; the inner
-            # ``__post_init__`` text is swallowed by ormsgpack's generic
-            # "ext_hook failed" (pre-existing diagnostic limitation).
-            with pytest.raises(AssertionError, match=r"ValidatedBadFill\.Approved"):
-                assert_all_baselined_revive(serde, baseline)
-
     def when_two_fills_target_the_same_origin_field():
         def it_is_rejected_at_serde_construction():
             # Without a guard the first op silently wins. Reachable via a
@@ -3658,155 +2877,6 @@ def describe_renamed_inline_command_resume():
                     assert log.has(Locker.Persist)
                 finally:
                     mod.OldLocker = old_ns
-
-
-def describe_assert_all_baselined_handlers_cover():
-    # The handler analog of the event coverage gates: every handler node name
-    # the previous release wrote must still be live or covered by an
-    # @on(previously=...) alias, else an interrupted checkpoint paused at the
-    # old node would silently drop on resume.
-    # Aliased under ``_`` so pytest-describe does not collect the imported
-    # callables as tests of this block.
-    from langgraph_events.serde.migrations import (
-        assert_all_baselined_handlers_cover as _assert_handlers_cover,
-    )
-    from langgraph_events.serde.migrations.detect import (
-        CoverageError,
-        HandlerCoverageError,
-    )
-    from langgraph_events.serde.migrations.detect import (
-        write_baseline as _write_baseline,
-    )
-
-    def _baseline_for(graph: EventGraph, tmp_path: Any) -> Any:
-        """Write ``graph``'s handler baseline under *tmp_path* and return it."""
-        baseline = tmp_path / "b.json"
-        _write_baseline(graph, baseline)
-        return baseline
-
-    def when_every_baselined_handler_is_live():
-        def it_passes_silently(tmp_path: Any):
-            @on(Started)
-            def place(event: Started) -> None:
-                return None
-
-            graph = EventGraph([place])
-            baseline = _baseline_for(graph, tmp_path)
-
-            _assert_handlers_cover(graph, baseline)
-
-    def when_a_handler_is_renamed():
-        def with_previously_declared():
-            def it_passes(tmp_path: Any):
-                @on(Started)
-                def place(event: Started) -> None:
-                    return None
-
-                baseline = _baseline_for(EventGraph([place]), tmp_path)
-
-                @on(Started, previously="place")
-                def submit(event: Started) -> None:
-                    return None
-
-                _assert_handlers_cover(EventGraph([submit]), baseline)
-
-        def without_previously_declared():
-            def it_raises_naming_the_lost_handler(tmp_path: Any):
-                @on(Started)
-                def place(event: Started) -> None:
-                    return None
-
-                baseline = _baseline_for(EventGraph([place]), tmp_path)
-
-                @on(Started)
-                def submit(event: Started) -> None:
-                    return None
-
-                with pytest.raises(HandlerCoverageError, match="place") as excinfo:
-                    _assert_handlers_cover(EventGraph([submit]), baseline)
-                # sibling of MigrationCoverageError under the shared base
-                assert isinstance(excinfo.value, CoverageError)
-                assert excinfo.value.uncovered == ("place",)
-                # Grammar must agree with the count: one handler, not "resolve".
-                assert "1 baselined handler no longer resolves to" in str(excinfo.value)
-
-    def when_a_reactor_is_replaced_by_an_inline_command():
-        # The command's ``previously`` class attribute feeds the same
-        # HandlerMeta.previous_names the gate unions into its reachable set.
-        def with_previously_declared():
-            def it_passes(tmp_path: Any):
-                class _Replat(Namespace):
-                    class Persist(Command):
-                        previously: ClassVar = ("persist",)
-
-                        def handle(self) -> None:
-                            return None
-
-                @on(Started, node_name="persist")
-                def persist_reactor(event: Started) -> None:
-                    return None
-
-                baseline = _baseline_for(EventGraph([persist_reactor]), tmp_path)
-
-                _assert_handlers_cover(EventGraph([_Replat.Persist]), baseline)
-
-        def without_previously_declared():
-            def it_raises_naming_the_lost_handler(tmp_path: Any):
-                class _Replat2(Namespace):
-                    class Persist(Command):
-                        def handle(self) -> None:
-                            return None
-
-                @on(Started, node_name="persist")
-                def persist_reactor(event: Started) -> None:
-                    return None
-
-                baseline = _baseline_for(EventGraph([persist_reactor]), tmp_path)
-
-                with pytest.raises(HandlerCoverageError, match="persist"):
-                    _assert_handlers_cover(EventGraph([_Replat2.Persist]), baseline)
-
-    def when_baseline_recorded_old_positional_inline_command_names():
-        # Pre-#97 baselines recorded inline command handlers by their
-        # positional ``handle``/``handle_2`` names. After the fix those nodes
-        # are keyed by the command qualname, so the old names no longer
-        # resolve — the gate must fire, forcing a one-time baseline rebuild.
-
-        def it_raises_until_the_baseline_is_regenerated(tmp_path: Any):
-            import json
-
-            graph = EventGraph([Persona.Approve, Story.Approve])
-            baseline = tmp_path / "b.json"
-            baseline.write_text(
-                json.dumps(
-                    {
-                        "version": 2,
-                        "events": [],
-                        "handlers": [{"name": "handle"}, {"name": "handle_2"}],
-                    }
-                )
-            )
-
-            with pytest.raises(HandlerCoverageError) as excinfo:
-                _assert_handlers_cover(graph, baseline)
-            assert excinfo.value.uncovered == ("handle", "handle_2")
-
-            # The documented one-time migration: regenerate the baseline.
-            _write_baseline(graph, baseline)
-            _assert_handlers_cover(graph, baseline)
-
-    def when_baseline_predates_handler_tracking():
-        def it_loads_a_v1_baseline_and_passes(tmp_path: Any):
-            import json
-
-            @on(Started)
-            def place(event: Started) -> None:
-                return None
-
-            baseline = tmp_path / "v1.json"
-            baseline.write_text(json.dumps({"version": 1, "events": []}))
-
-            _assert_handlers_cover(EventGraph([place]), baseline)
 
 
 # Fixtures for ``TransformFields``. Each class dropped, merged or retyped a
@@ -4154,12 +3224,16 @@ def describe_TransformFields():
 
             message = str(excinfo.value)
             assert message.startswith(
-                f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
+                f"Cannot revive {Reshaped.__module__}:Reshaped.Trimmed: "
                 f"TransformFields raised KeyError: 'legacy_flag'."
             )
             # The gate sends None for a dropped field, so the remedy must
             # cover a key that is present but None, not only an absent one.
             assert "kw.pop('x', None) and a None check" in message
+            assert (
+                f"The migration transform {Reshaped.__module__}:Reshaped.Trimmed "
+                f"via {Reshaped.__module__}:describe_TransformFields."
+            ) in message
 
         def with_tolerate_unresolved():
             def it_degrades_and_collects_the_identity():
@@ -4192,7 +3266,7 @@ def describe_TransformFields():
                 )
 
             assert str(excinfo.value).startswith(
-                f"Cannot revive {Reshaped.__module__}.Reshaped.Trimmed: "
+                f"Cannot revive {Reshaped.__module__}:Reshaped.Trimmed: "
                 f"TransformFields raised TypeError: transform returned list"
             )
 
@@ -4332,93 +3406,6 @@ def describe_TransformFields():
                     )
 
 
-def _upper_legacy_flag(kw: dict[str, Any]) -> dict[str, Any]:
-    """Raises ``AttributeError`` on the gate's ``None`` placeholder."""
-    kw["note"] = kw.pop("legacy_flag").upper()
-    return kw
-
-
-class GateTrimmed(Namespace):
-    """Dropped ``legacy_flag``, with a transform that reads its value."""
-
-    @transform_fields(_upper_legacy_flag)
-    class Persisted(DomainEvent):
-        note: str = ""
-
-
-def describe_TransformFields_revive_gate():
-    # A v3 baseline records a field the live class dropped. The gate sends
-    # a ``None`` placeholder for it, so the transform is exercised through
-    # the real read path.
-
-    def _baseline(tmp_path: Any, namespace: type) -> Any:
-        return _baseline_v3_file(
-            tmp_path,
-            events=(
-                (
-                    namespace.__module__,
-                    f"{namespace.__name__}.Persisted",
-                    ["legacy_flag", "note"],
-                ),
-            ),
-        )
-
-    def when_the_baseline_records_a_dropped_field():
-        def without_a_transform():
-            def it_fails_pointing_at_TransformFields(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[DecoOriginTransform])
-
-                with pytest.raises(AssertionError) as excinfo:
-                    assert_all_baselined_revive(
-                        serde, _baseline(tmp_path, DecoOriginTransform)
-                    )
-
-                message = str(excinfo.value)
-                assert "The baseline recorded 'legacy_flag'." in message
-                assert "@transform_fields" in message
-
-        def with_a_transform_that_drops_it():
-            def it_passes(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    Migration,
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(
-                    namespaces=[DecoOriginTransform],
-                    migrations=[
-                        Migration.transform_fields(
-                            target=DecoOriginTransform.Persisted,
-                            transform=_drop_legacy_flag,
-                        )
-                    ],
-                )
-
-                assert_all_baselined_revive(
-                    serde, _baseline(tmp_path, DecoOriginTransform)
-                )
-
-        def with_a_transform_that_rejects_the_placeholder():
-            def it_fails_naming_the_placeholder_contract(tmp_path: Any):
-                from langgraph_events.serde.migrations import (
-                    assert_all_baselined_revive,
-                )
-
-                serde = NamespaceAwareSerde(namespaces=[GateTrimmed])
-
-                with pytest.raises(AssertionError) as excinfo:
-                    assert_all_baselined_revive(serde, _baseline(tmp_path, GateTrimmed))
-
-                message = str(excinfo.value)
-                assert "TransformFields raised AttributeError" in message
-                assert "None placeholder" in message
-                assert "synthesize_legacy_payload" in message
-
-
 # Fixtures for ``SplitEvent``. ``Work.Completed`` stays live and keeps its
 # stored identity. A payload whose ``result`` says error builds
 # ``Work.Failed`` instead (#125). ``result`` is a plain dict, so the
@@ -4493,38 +3480,6 @@ class Job(Namespace):
     @split_event(select_failed, targets=(Failed,))
     class Completed(DomainEvent):
         result: dict[str, Any] = dataclasses.field(default_factory=dict)
-
-
-def _select_gate_failed(kw: dict[str, Any]) -> tuple[type, dict[str, Any]] | None:
-    result = kw.get("result")
-    if result is None or result.get("status") != "error":
-        return None
-    return GateSplit.Failed, {"reason": result["message"]}
-
-
-def _select_reading_placeholder(kw: dict[str, Any]) -> tuple[type, dict[str, Any]]:
-    """Raises ``TypeError`` on the gate's ``None`` placeholder."""
-    return GateSplitStrict.Failed, {"reason": kw["result"]["message"]}
-
-
-# ``result`` is required, so the revive gate sends a ``None`` placeholder
-# for it and the select sees it.
-class GateSplit(Namespace):
-    class Failed(DomainEvent):
-        reason: str = ""
-
-    @split_event(_select_gate_failed, targets=(Failed,))
-    class Completed(DomainEvent):
-        result: dict[str, Any]
-
-
-class GateSplitStrict(Namespace):
-    class Failed(DomainEvent):
-        reason: str = ""
-
-    @split_event(_select_reading_placeholder, targets=(Failed,))
-    class Completed(DomainEvent):
-        result: dict[str, Any]
 
 
 def describe_SplitEvent():
@@ -4638,7 +3593,7 @@ def describe_SplitEvent():
     _stored = synthesize_legacy_payload(
         Work.__module__, "Work.Completed", {"result": _ERROR}
     )
-    _prefix = f"Cannot revive {Work.__module__}.Work.Completed: SplitEvent raised "
+    _prefix = f"Cannot revive {Work.__module__}:Work.Completed: SplitEvent raised "
 
     def when_select_raises():
         # ormsgpack swallows an exception raised inside the ext-hook and
@@ -4656,6 +3611,9 @@ def describe_SplitEvent():
             message = str(excinfo.value)
             assert message.startswith(_prefix + "KeyError: 'missing'.")
             assert "return None" in message
+            assert (
+                f"The migration split {Work.__module__}:Work.Completed via " in message
+            )
 
         def with_tolerate_unresolved():
             def it_degrades_and_collects_the_stored_identity():
@@ -4851,51 +3809,6 @@ def describe_SplitEvent():
             )
 
 
-def describe_SplitEvent_revive_gate():
-    # The gate sends a ``None`` placeholder for a required field. A select
-    # must return None on it, so the gate proves the source still
-    # constructs. Each branch is pinned with real values through
-    # ``synthesize_legacy_payload`` instead.
-
-    def when_select_returns_None_on_the_placeholder():
-        def it_passes(tmp_path: Any):
-            from langgraph_events.serde.migrations import assert_all_baselined_revive
-
-            baseline = _baseline_v3_file(
-                tmp_path,
-                events=((GateSplit.__module__, "GateSplit.Completed", ["result"]),),
-            )
-
-            assert_all_baselined_revive(
-                NamespaceAwareSerde(namespaces=[GateSplit]), baseline
-            )
-
-    def when_select_reads_the_placeholder():
-        def it_fails_naming_the_placeholder_contract(tmp_path: Any):
-            from langgraph_events.serde.migrations import assert_all_baselined_revive
-
-            baseline = _baseline_v3_file(
-                tmp_path,
-                events=(
-                    (
-                        GateSplitStrict.__module__,
-                        "GateSplitStrict.Completed",
-                        ["result"],
-                    ),
-                ),
-            )
-
-            with pytest.raises(AssertionError) as excinfo:
-                assert_all_baselined_revive(
-                    NamespaceAwareSerde(namespaces=[GateSplitStrict]), baseline
-                )
-
-            message = str(excinfo.value)
-            assert "SplitEvent raised TypeError" in message
-            assert "None placeholder" in message
-            assert "synthesize_legacy_payload" in message
-
-
 def describe_SplitEvent_docs_example():
     # The snippet under "Splitting one stored event into two on a payload
     # value" in docs/event-migrations.md, verbatim.
@@ -4983,7 +3896,7 @@ def describe_scan_identities():
 
 def describe_record_reads():
     # A collector, shaped like ``tolerate_unresolved()``: every stored
-    # record this read met, as (stored, resolved, touched) entries.
+    # record this read met, as (stored, resolved, touched, built) entries.
 
     def it_records_a_renamed_identity_as_touched_per_stored_record():
         serde = NamespaceAwareSerde(namespaces=[_Rec])
@@ -4994,8 +3907,8 @@ def describe_record_reads():
             serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
 
         assert reads == [
-            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
-            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True),
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
+            ((mod, "_Rec.Old"), (mod, "_Rec.New"), True, ()),
         ]
 
     def it_records_a_same_identity_transform_as_touched():
@@ -5005,7 +3918,14 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed(_RecSameIdentity()))
 
-        assert reads == [((mod, "_RecSameIdentity"), (mod, "_RecSameIdentity"), True)]
+        assert reads == [
+            (
+                (mod, "_RecSameIdentity"),
+                (mod, "_RecSameIdentity"),
+                True,
+                ("transformed",),
+            )
+        ]
 
     def it_records_an_identity_transform_as_untouched():
         # The table ran, the kwargs did not change: a rewrite would store
@@ -5018,7 +3938,7 @@ def describe_record_reads():
             serde.loads_typed(serde.dumps_typed(_RecIdentityTransform()))
 
         assert reads == [
-            ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False)
+            ((mod, "_RecIdentityTransform"), (mod, "_RecIdentityTransform"), False, ())
         ]
 
     def it_records_a_fill_as_touched_only_for_a_payload_that_lacked_the_field():
@@ -5030,8 +3950,8 @@ def describe_record_reads():
             serde.loads_typed(serde.dumps_typed(_RecFilled(flag=False)))
 
         assert reads == [
-            ((mod, "_RecFilled"), (mod, "_RecFilled"), True),
-            ((mod, "_RecFilled"), (mod, "_RecFilled"), False),
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), True, (True,)),
+            ((mod, "_RecFilled"), (mod, "_RecFilled"), False, ()),
         ]
 
     def it_records_nothing_for_a_record_that_does_not_revive():
@@ -5051,7 +3971,7 @@ def describe_record_reads():
         with serde._record_reads() as reads:
             serde.loads_typed(serde.dumps_typed([_RecUntouched()]))
 
-        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False)]
+        assert reads == [((mod, "_RecUntouched"), (mod, "_RecUntouched"), False, ())]
 
     def it_stays_off_outside_the_block():
         serde = NamespaceAwareSerde(namespaces=[_Rec])

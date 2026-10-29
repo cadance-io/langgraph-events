@@ -1,175 +1,58 @@
 """User-facing test helpers for migration verification.
 
-Public surface for the kind of "would a prior release's bytes revive"
-check users want in CI. Sits on top of the read path — no logic of its
-own beyond the wire-format byte assembly the serde already speaks, so
-users never import ``_option`` / ``EXT_NAMESPACE_AWARE_EVENT`` themselves.
+:func:`assert_migration_gate` runs the one gate in a test.
+:func:`assert_resume_recovers` proves a renamed handler resumes a paused
+thread. :func:`synthesize_legacy_payload` builds the bytes a prior release
+wrote.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import uuid
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-import ormsgpack
+from langgraph_events._event import Event, Resumed
+from langgraph_events.serde.migrations._core import TARGET_PLACEHOLDER
+from langgraph_events.serde.migrations._gate import (
+    GateError,
+    Invocation,
+    check,
+)
+from langgraph_events.serde.migrations._revive import synthesize_legacy_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from pathlib import Path
 
     from langchain_core.runnables import RunnableConfig
 
     from langgraph_events import EventGraph
     from langgraph_events._event_log import EventLog
-    from langgraph_events.serde._jsonplus import NamespaceAwareSerde
+    from langgraph_events.serde.migrations._target import MigrationTarget
 
-# ``_option`` comes straight from its langgraph source (mypy treats
-# ``langgraph.*`` as untyped, so no strict ``no_implicit_reexport``
-# tripwire). ``EXT_NAMESPACE_AWARE_EVENT`` is defined in ``_jsonplus`` and
-# importing that module first means its LangGraph-drift smoke fence runs
-# before the line below, so the actionable error is still preserved.
-from langgraph.checkpoint.serde.jsonplus import _option
-
-from langgraph_events._event import Event, Resumed
-from langgraph_events.serde._jsonplus import (
-    _UNEXPECTED_KWARG_RE,
-    EXT_NAMESPACE_AWARE_EVENT,
-)
-from langgraph_events.serde.migrations._core import (
-    _resolve_identity,
-    _resolve_rename,
-)
-from langgraph_events.serde.migrations.detect import (
-    MIGRATION_REMEDY,
-    RETIRED_REMEDY,
-    HandlerCoverageError,
-    MigrationCoverageError,
-    _load_baseline,
-    _load_baseline_fields,
-    _load_baseline_handlers,
-    _load_baseline_retired,
-)
+__all__ = [
+    "assert_migration_gate",
+    "assert_resume_recovers",
+    "synthesize_legacy_payload",
+]
 
 
-def synthesize_legacy_payload(
-    module: str,
-    qualname: str,
-    kwargs: dict[str, Any],
-) -> tuple[str, bytes]:
-    """Synthesize the ``(format, bytes)`` tuple a prior release would have
-    written for an Event at ``(module, qualname)`` with these ``kwargs``.
-
-    The wire format hasn't changed across releases — these bytes are what
-    :class:`~langgraph_events.serde.NamespaceAwareSerde` would emit today
-    if the legacy class still existed. Pair with ``serde.loads_typed(...)``
-    to assert revival succeeds under the current migration table.
-    """
-    inner = ormsgpack.packb((module, qualname, kwargs), option=_option)
-    outer = ormsgpack.packb(
-        ormsgpack.Ext(EXT_NAMESPACE_AWARE_EVENT, inner), option=_option
-    )
-    return ("msgpack", outer)
-
-
-def _placeholder_kwargs(
-    module: str,
-    qualname: str,
-    recorded: frozenset[str] | None,
-    *,
-    skip: frozenset[str] = frozenset(),
-    scope: Mapping[tuple[str, str], type] | None = None,
-) -> dict[str, Any]:
-    """``{name: None}`` for every field the gate must send to the live class
-    at ``(module, qualname)``, except those in *skip*.
-
-    Two kinds of field get a placeholder. A required (no-default) init
-    field of the live class, so a healthy class constructs. A field in
-    *recorded*,
-    the baseline's record, that the live class no longer accepts as an init
-    kwarg: a stored payload still carries it, so the gate must send it too.
-    A recorded field the live class still accepts gets no placeholder. A
-    ``None`` there would reach a defaulted field and trip a
-    ``__post_init__`` validator that a real payload never trips.
-
-    Reads the fields off whichever class the read path would build — hence
-    *scope*, the serde's ``namespaces=`` map, ahead of the import walk.
-
-    The helper only proves the identity reaches a constructible live
-    class, not field semantics — ``None`` placeholders suffice unless the
-    class validates in ``__post_init__`` (those need the resolve gate, or
-    a back-fill covering the validated field). An unresolvable target
-    yields ``{}`` so ``loads_typed`` surfaces the real coverage failure
-    rather than a synthetic ``TypeError``. *skip* names fields the
-    migration table back-fills itself: a placeholder there would mask the
-    fill (``setdefault`` never overwrites), so the gate leaves them to the
-    read path and actually exercises the injection.
-    """
-    try:
-        obj = _resolve_identity(module, qualname, scope=scope)
-    except (ImportError, AttributeError):
-        return {}
-    if not dataclasses.is_dataclass(obj):
-        return {}
-    fields = dataclasses.fields(obj)
-    accepted = {f.name for f in fields if f.init}
-    required = {
-        f.name
-        for f in fields
-        if f.init
-        and f.default is dataclasses.MISSING
-        and f.default_factory is dataclasses.MISSING
-    }
-    dropped = (recorded or frozenset()) - accepted
-    return dict.fromkeys(sorted((required | dropped) - skip))
-
-
-def assert_all_baselined_cover(
-    serde: NamespaceAwareSerde, baseline_path: Path | str
+def assert_migration_gate(
+    target: MigrationTarget, *, previous: Path | None = None
 ) -> None:
-    """Assert every identity in *baseline_path* is reachable by *serde*.
+    """Run :func:`~langgraph_events.serde.migrations.check` and raise on a finding.
 
-    Weakest of the three gates: a set-membership check over
-    :meth:`NamespaceAwareSerde.revivable_identities` — every baselined
-    identity must be either still live in this serde's ``namespaces=`` or
-    covered by a rename migration. Neither resolves nor constructs the class.
-    Walks the baseline's ``retired`` list too: a retired identity must be
-    covered by a migration. Raises :class:`MigrationCoverageError` (an
-    ``AssertionError``) whose ``uncovered`` attribute lists the offending
-    identities and whose ``retired`` attribute lists the retired subset.
+    A test has no previous release, so without *previous* the release rule
+    does not run, and the report says so.
+
+    Raises:
+        GateError: an ``AssertionError`` whose ``report`` holds the findings.
     """
-    baseline = _load_baseline(Path(baseline_path))
-    retired = set(_load_baseline_retired(Path(baseline_path)))
-    missing = tuple(sorted((baseline | retired) - serde.revivable_identities()))
-    if missing:
-        raise MigrationCoverageError(
-            missing, tuple(identity for identity in missing if identity in retired)
+    report = check(target, previous=previous)
+    if not report.passed:
+        invocation = Invocation(
+            TARGET_PLACEHOLDER, str(previous) if previous is not None else None
         )
-
-
-def assert_all_baselined_handlers_cover(
-    graph: EventGraph, baseline_path: Path | str
-) -> None:
-    """Assert every baselined handler node name is still reachable on *graph*.
-
-    The handler analog of :func:`assert_all_baselined_cover`: a static
-    set-membership check that every handler node name in *baseline_path* is
-    either a live handler node or covered by an ``@on(previously=...)`` alias.
-    A name that is neither means an interrupted checkpoint paused at that node
-    would silently drop on resume after a rename/removal — so this raises
-    :class:`HandlerCoverageError` (a :class:`CoverageError`/``AssertionError``)
-    naming the lost handler(s). Takes the ``EventGraph`` (handler identity is a
-    graph concern), not the serde. A pre-v2 baseline records no handlers and
-    passes trivially.
-    """
-    baselined = _load_baseline_handlers(Path(baseline_path))
-    reachable = {meta.node_name for meta in graph._handler_metas}
-    reachable |= {
-        alias for meta in graph._handler_metas for alias in meta.previous_names
-    }
-    missing = tuple(sorted(baselined - reachable))
-    if missing:
-        raise HandlerCoverageError(missing)
+        raise GateError(report, invocation)
 
 
 def assert_resume_recovers(
@@ -182,8 +65,8 @@ def assert_resume_recovers(
 ) -> EventLog:
     """Assert a thread paused inside a handler on *before* resumes on *after*.
 
-    The behavioral handler analog of :func:`assert_all_baselined_revive`:
-    instead of a static name check it exercises the real interrupt→resume path.
+    The behavioral twin of the gate's ``handlers`` rule: instead of a
+    static name check it exercises the real interrupt→resume path.
     Invokes *before* with *seed* (which must pause via an ``Interrupted``),
     then resumes *after* with *resume_with* on the same checkpoint and asserts
     recovery actually happened — a ``Resumed`` is emitted, which a silent drop
@@ -216,204 +99,3 @@ def assert_resume_recovers(
             "@on(previously=...)."
         )
     return log
-
-
-def _assert_baselined(
-    serde: NamespaceAwareSerde,
-    baseline_path: Path | str,
-    header: str,
-    check: Callable[[NamespaceAwareSerde, str, str, frozenset[str] | None], str | None],
-) -> None:
-    """Sweep *check* over every baselined identity; raise ``AssertionError``.
-
-    Shared spine of :func:`assert_all_baselined_resolve` and
-    :func:`assert_all_baselined_revive`: load → sweep (collecting *every*
-    failure, never aborting early) → raise *header* plus one indented line
-    per failure. *check* receives the fields the baseline recorded for the
-    identity, or ``None`` for a pre-v3 record, and returns the failure
-    detail. The driver prefixes it with the identity. The sweep covers
-    ``events`` and ``retired`` both. A retired identity's line carries a
-    ``(retired)`` marker after the identity, and the remedy then adds
-    :data:`RETIRED_REMEDY`, because a write never clears the entry.
-    ``cover`` is a set-diff rather than a per-identity sweep, so it stays
-    separate.
-    """
-    recorded = _load_baseline_fields(Path(baseline_path))
-    retired = _load_baseline_retired(Path(baseline_path))
-    failures: list[str] = []
-    any_retired = False
-    for (module, qualname), fields in sorted((recorded | retired).items()):
-        detail = check(serde, module, qualname, fields)
-        if detail is None:
-            continue
-        marker = " (retired)" if (module, qualname) in retired else ""
-        any_retired = any_retired or bool(marker)
-        failures.append(f"{module}:{qualname}{marker} {detail}")
-    if failures:
-        remedy = MIGRATION_REMEDY
-        if any_retired:
-            remedy += " " + RETIRED_REMEDY
-        raise AssertionError(header + "\n  " + "\n  ".join(failures) + "\n" + remedy)
-
-
-def _resolve_check(
-    serde: NamespaceAwareSerde,
-    module: str,
-    qualname: str,
-    recorded_fields: frozenset[str] | None,
-) -> str | None:
-    """Failure detail if ``(module, qualname)`` no longer resolves (rename-
-    aware) to a live ``Event`` subclass, else ``None``. Never constructs.
-
-    Resolves through *serde*'s own scope first, exactly as its read path
-    does — the gate asks "would a checkpoint revive", and answering it with
-    a different resolution rule than the reader uses makes it wrong in both
-    directions. *recorded_fields* is unused: resolution never looks at a
-    field."""
-    target_module, target_qualname = _resolve_rename(
-        module, qualname, serde._tables.rename_table
-    )
-    try:
-        obj = _resolve_identity(target_module, target_qualname, scope=serde._scope)
-    except (ImportError, AttributeError) as exc:
-        return f"-> {type(exc).__name__}: {exc}"
-    if not (isinstance(obj, type) and issubclass(obj, Event)):
-        return f"resolved to non-Event {obj!r}"
-    return None
-
-
-def _revive_check(
-    serde: NamespaceAwareSerde,
-    module: str,
-    qualname: str,
-    recorded_fields: frozenset[str] | None,
-) -> str | None:
-    """Failure detail if a synthesized legacy payload for ``(module,
-    qualname)`` does not revive to an ``Event`` through *serde*, else ``None``.
-
-    Resolve the historic identity to its live target via the same rule the
-    read path uses, so placeholder kwargs match the class actually built.
-    The payload carries a placeholder for every required field of the live
-    class, plus one for every field in *recorded_fields* the live class no
-    longer accepts. Fields the migration table back-fills — origin-scoped
-    (keyed on the baselined identity) or class-global (keyed on the
-    resolved target) — get no placeholder, so the gate proves the fills
-    actually inject.
-    """
-    target_module, target_qualname = _resolve_rename(
-        module, qualname, serde._tables.rename_table
-    )
-    backfilled = frozenset(
-        op.field
-        for op in (
-            *serde._tables.origin_addfield_table.get((module, qualname), ()),
-            *serde._tables.addfield_table.get((target_module, target_qualname), ()),
-        )
-    )
-    kwargs = _placeholder_kwargs(
-        target_module,
-        target_qualname,
-        recorded_fields,
-        skip=backfilled,
-        scope=serde._scope,
-    )
-    try:
-        revived = serde.loads_typed(synthesize_legacy_payload(module, qualname, kwargs))
-    except Exception as exc:  # report every failure, don't abort the sweep
-        return f"-> {type(exc).__name__}: {exc}" + _failure_hint(exc)
-    if not isinstance(revived, Event):
-        return f"revived as non-Event {revived!r}"
-    return None
-
-
-def _failure_hint(exc: Exception) -> str:
-    """The cause that ties *exc* back to what the gate sent.
-
-    A kwarg the live class rejected: the baseline recorded it, the class
-    dropped it, and a stored payload still carries it. The remedy is
-    already in *exc*, so the sentence states the cause only. A transform
-    or a select that raised: the gate sent a ``None`` placeholder for
-    each required or dropped field, and the callable may need a real
-    value. Empty for every other failure.
-    """
-    text = str(exc)
-    if "TransformFields raised" in text or "SplitEvent raised" in text:
-        return (
-            " The gate sent a None placeholder for every required field and "
-            "every recorded field the live class no longer accepts. Pin real "
-            "values with synthesize_legacy_payload if the transform or the "
-            "select reads them."
-        )
-    match = _UNEXPECTED_KWARG_RE.search(text)
-    if match is None:
-        return ""
-    field = match.group(1)
-    return f" The baseline recorded {field!r}."
-
-
-def assert_all_baselined_revive(
-    serde: NamespaceAwareSerde, baseline_path: Path | str
-) -> None:
-    """Assert every identity in *baseline_path* revives through *serde*.
-
-    Strongest of the three gates: pushes a synthesized legacy payload for
-    each baselined identity through the real ext-hook and asserts it revives
-    to an ``Event``. Required fields of the resolved live class are filled
-    with placeholders so a healthy migration table is never flagged for
-    normal required-field classes — except fields the table itself
-    back-fills (origin-scoped or class-global), which get no placeholder so
-    the gate proves the injection actually happens. Explicit kwargs are only
-    needed for genuine field-shape-drift checks (use
-    :func:`synthesize_legacy_payload` directly there). Events whose
-    ``__post_init__`` rejects placeholders on NON-back-filled fields need
-    :func:`assert_all_baselined_resolve` instead; validation on a
-    back-filled field sees the real injected value and passes here.
-
-    A v3 baseline records the fields of each identity. A recorded field
-    the live class no longer accepts gets a placeholder too, so a dropped
-    field fails here the way a stored payload fails at read. A pre-v3
-    baseline records no fields, and the gate sends required placeholders
-    only. The sweep covers the baseline's ``retired`` list as well: a
-    retired identity must revive through a migration, and its failure line
-    says so.
-
-    Blind spot: an origin-scoped fill keyed mid-chain leaves EARLIER eras
-    placeholder-masked — their baselined identities have no applicable
-    fill, so the field falls back to a ``None`` placeholder and the gate
-    passes, while a real payload from that era (which never carried the
-    field) raises at read. Cover "every era" with class-global
-    :func:`~langgraph_events.serde.migrations.backfill`, or pin the
-    specific era with :func:`synthesize_legacy_payload`.
-
-    Zero per-event maintenance: a new ``@migrate_from`` plus a regenerated
-    baseline is covered with no new test code. Raises ``AssertionError``
-    naming every identity that failed to revive.
-    """
-    _assert_baselined(
-        serde,
-        baseline_path,
-        "Baselined identities failed to revive through the serde:",
-        _revive_check,
-    )
-
-
-def assert_all_baselined_resolve(
-    serde: NamespaceAwareSerde, baseline_path: Path | str
-) -> None:
-    """Assert every identity in *baseline_path* resolves to a live Event class.
-
-    Rename-aware reachability check that never constructs the class — unlike
-    :func:`assert_all_baselined_revive` it synthesizes no payload and invokes
-    no ``__init__``/``__post_init__``. Use when the baseline includes events
-    with construction-time validation, framework ``SystemEvents``, or
-    module-level ``IntegrationEvents`` that ``revive`` would trip or ``cover``
-    would miss. The sweep covers the baseline's ``retired`` list as well.
-    Raises ``AssertionError`` naming every identity that no longer resolves
-    to an ``Event`` subclass.
-    """
-    _assert_baselined(
-        serde,
-        baseline_path,
-        "Baselined identities no longer resolve to a live Event:",
-        _resolve_check,
-    )

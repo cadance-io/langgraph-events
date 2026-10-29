@@ -1,4 +1,4 @@
-"""Stable identity strings derived from a class's ``__qualname__``.
+"""Stable identities of a class: the command identity and the stored identity.
 
 A single source of truth so the command identity used for the graph-node /
 checkpoint name (``_handler``), command-privacy diagnostics, and smell messages
@@ -7,6 +7,8 @@ it is safe to import from any layer without a cycle.
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 
 def command_identity(cls: type) -> str:
@@ -17,3 +19,23 @@ def command_identity(cls: type) -> str:
     the bare nesting path (``Order.Place``) wherever it is surfaced to users.
     """
     return cls.__qualname__.replace("<locals>.", "")
+
+
+class Identity(NamedTuple):
+    """The stored name of an event class: its module and its qualname."""
+
+    module: str
+    qualname: str
+
+    @property
+    def label(self) -> str:
+        """``<module>:<qualname>``, the form every message and report uses."""
+        return f"{self.module}:{self.qualname}"
+
+    @property
+    def owned_by_library(self) -> bool:
+        """The module is ``langgraph_events`` or one of its submodules."""
+        return self.module == _LIBRARY or self.module.startswith(f"{_LIBRARY}.")
+
+
+_LIBRARY = "langgraph_events"

@@ -9,18 +9,34 @@ prior library versions — this is a read-side affordance only. See #70.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import enum
+import functools
+import hashlib
 import importlib
 import itertools
+import re
 import sys
 import typing
 from dataclasses import dataclass, fields, is_dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeGuard, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Protocol,
+    TypeGuard,
+    TypeVar,
+)
 
 from langgraph_events._event import Event, _iter_nested_events
+from langgraph_events._identity import Identity
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+
+PROGRAM = "python -m langgraph_events.serde.migrations"
+TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
 
 # Local sentinel for "no ``default`` supplied". ``dataclasses.MISSING`` looks
 # like the canonical choice but it's special-cased by ``@dataclass`` itself
@@ -364,6 +380,281 @@ def _target_identity(
     return module, qualname
 
 
+MigrationKind = typing.Literal["rename", "fill", "transform", "split"]
+_KINDS: tuple[MigrationKind, ...] = typing.get_args(MigrationKind)
+_IDENT = r"[^\W\d]\w*"
+_QUALPART = rf"(?:{_IDENT}|<locals>|<lambda>)"
+_MODULE = rf"{_IDENT}(?:\.{_IDENT})*"
+_QUALNAME = rf"{_QUALPART}(?:\.{_QUALPART})*"
+_DIGEST = r"#[0-9a-f]{12}"
+_VIA = rf"{_MODULE}:{_QUALNAME}(?:\(\)|{_DIGEST})?"
+# One grammar for construction and parse: no part can hold a separator.
+_PARTS = {
+    "module": re.compile(_MODULE),
+    "qualname": re.compile(_QUALNAME),
+    "field": re.compile(_IDENT),
+    "via": re.compile(_VIA),
+}
+_LABEL = re.compile(
+    rf"(?P<kind>\w+) (?P<module>{_MODULE}):(?P<qualname>{_QUALNAME})"
+    rf"(?:\[(?P<field>{_IDENT})\])?(?: via (?P<via>{_VIA}))?"
+)
+
+
+@dataclass(frozen=True, order=True)
+class MigrationKey:
+    """The natural key of one client read-time operation.
+
+    The serde derives it from its tables. An author never writes it. A
+    ``rename`` key names the stored source identity. A ``fill`` key names
+    the identity it fills and the ``field``. A ``transform`` or ``split``
+    key names the identity and ``via``, the ``module:qualname`` of the
+    transform or select callable. The stage is not stored: a key is in the
+    origin stage when its identity is a rename source of the same set.
+    """
+
+    kind: MigrationKind
+    module: str
+    qualname: str
+    field: str | None = None
+    via: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in _KINDS:
+            raise ValueError(
+                f"MigrationKey kind {self.kind!r} is not one of {', '.join(_KINDS)}."
+            )
+        if (self.field is not None) != (self.kind == "fill"):
+            raise ValueError(
+                f"MigrationKey {self.kind} {self.module}:{self.qualname}: a field "
+                f"must be set for a fill and only for a fill."
+            )
+        if (self.via is not None) != (self.kind in ("transform", "split")):
+            raise ValueError(
+                f"MigrationKey {self.kind} {self.module}:{self.qualname}: `via` "
+                f"must be set for a transform or a split and only for those."
+            )
+        for name, pattern in _PARTS.items():
+            value = getattr(self, name)
+            if value is not None and not pattern.fullmatch(value):
+                raise ValueError(
+                    f"MigrationKey {self.kind} {self.module}:{self.qualname}: the "
+                    f"{name} {value!r} is not a dotted Python name, so its label "
+                    f"could not be read back."
+                )
+
+    @property
+    def anonymous(self) -> bool:
+        """True when ``via`` names no stable callable.
+
+        A lambda or a callable object has no name of its own, so a
+        replacement reads as the same key. A local function is stable only
+        with the digest of the values it captures. Without a digest, a
+        captured value has no stable form. Name the callable at module level
+        to give it a stable key.
+        """
+        return self.via is not None and _anonymous_via(self.via)
+
+    @property
+    def identity(self) -> Identity:
+        """The identity the key is keyed on."""
+        return Identity(self.module, self.qualname)
+
+    @property
+    def label(self) -> str:
+        """``<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]``."""
+        label = f"{self.kind} {self.module}:{self.qualname}"
+        if self.field is not None:
+            label += f"[{self.field}]"
+        if self.via is not None:
+            label += f" via {self.via}"
+        return label
+
+    @classmethod
+    def parse(cls, label: str) -> MigrationKey:
+        """The key whose :attr:`label` is *label*.
+
+        Raises:
+            ValueError: when *label* is not a migration label.
+        """
+        match = _LABEL.fullmatch(label)
+        if match is None or match["kind"] not in _KINDS:
+            raise ValueError(_malformed_label(label))
+        try:
+            return cls(
+                typing.cast("MigrationKind", match["kind"]),
+                match["module"],
+                match["qualname"],
+                field=match["field"],
+                via=match["via"],
+            )
+        except ValueError as error:
+            raise ValueError(_malformed_label(label)) from error
+
+
+def _malformed_label(label: str) -> str:
+    return (
+        f"{label!r} is not a migration label. Expected "
+        f"'<kind> <module>:<qualname>[<field>] [via <module>:<qualname>]' "
+        f"with a kind of {', '.join(_KINDS)}."
+    )
+
+
+def _anonymous_via(via: str) -> bool:
+    """See :attr:`MigrationKey.anonymous`."""
+    return (
+        "<lambda>" in via
+        or via.endswith("()")
+        or ("<locals>" in via and "#" not in via)
+    )
+
+
+def _callable_id(fn: Callable[..., Any], _seen: frozenset[int] = frozenset()) -> str:
+    """``module:qualname`` of *fn*, with ``#`` and a digest of the values it binds.
+
+    A local function, such as the one a factory returns, gets the digest of
+    the values it captures. A ``functools.partial`` gets the digest of its
+    function and its arguments, under the name of its function. So a new
+    factory argument gives a new key. A bound value with no stable form
+    leaves the local function without a digest, which makes its key
+    anonymous, and leaves a partial as ``functools:partial()``. A callable
+    object is ``module:Class()``.
+    """
+    seen = _seen | {id(fn)}
+    if isinstance(fn, functools.partial):
+        inner = _callable_id(fn.func, seen)
+        bound = _stable_form((inner, fn.args, fn.keywords), seen)
+        if bound is None or _anonymous_via(inner):
+            return "functools:partial()"
+        return f"{inner.partition('#')[0]}{_digest(bound)}"
+    if not hasattr(fn, "__qualname__"):
+        owner = type(fn)
+        return f"{owner.__module__}:{owner.__qualname__}()"
+    via = f"{fn.__module__}:{fn.__qualname__}"
+    if "<locals>" not in fn.__qualname__ or "<lambda>" in fn.__qualname__:
+        return via
+    try:
+        captured = tuple(cell.cell_contents for cell in fn.__closure__ or ())
+    except ValueError:  # an empty cell: the factory has not bound it yet
+        return via
+    bound = _stable_form(captured, seen)
+    return via if bound is None else f"{via}{_digest(bound)}"
+
+
+def _digest(form: str) -> str:
+    return "#" + hashlib.sha256(form.encode()).hexdigest()[:12]
+
+
+def _stable_form(value: object, seen: frozenset[int]) -> str | None:
+    """A text that is equal for equal *value* in every process, or ``None``.
+
+    Scalars give their ``repr``. A tuple, list, set or dict gives the form
+    of each item, sorted for a set and a dict. A class or an enum member
+    gives its name. A callable gives :func:`_callable_id`, and is ``None``
+    when that id is anonymous. A callable in *seen* captures itself. Any
+    other value has no stable form.
+    """
+    if isinstance(value, (tuple, list, set, frozenset, dict)):
+        return _container_form(value, seen)
+    if isinstance(value, enum.Enum):
+        return f"{_type_name(type(value))}.{value.name}"
+    if isinstance(value, type):
+        return None if "<locals>" in value.__qualname__ else _type_name(value)
+    if callable(value):
+        via = None if id(value) in seen else _callable_id(value, seen)
+        return None if via is None or _anonymous_via(via) else via
+    scalar = value is None or isinstance(value, (bool, int, float, str, bytes))
+    return repr(value) if scalar else None
+
+
+def _container_form(
+    value: tuple[Any, ...] | list[Any] | set[Any] | frozenset[Any] | dict[Any, Any],
+    seen: frozenset[int],
+) -> str | None:
+    if isinstance(value, dict):
+        items = [_pair_form(k, v, seen) for k, v in value.items()]
+    else:
+        items = [_stable_form(item, seen) for item in value]
+    known = [item for item in items if item is not None]
+    if len(known) != len(items):
+        return None
+    if not isinstance(value, (tuple, list)):
+        known.sort()
+    return f"{type(value).__name__}({','.join(known)})"
+
+
+def _pair_form(key: object, value: object, seen: frozenset[int]) -> str | None:
+    key_form, value_form = _stable_form(key, seen), _stable_form(value, seen)
+    if key_form is None or value_form is None:
+        return None
+    return f"{key_form}={value_form}"
+
+
+def _type_name(cls: type) -> str:
+    return f"{cls.__module__}:{cls.__qualname__}"
+
+
+@dataclass(frozen=True)
+class MigrationSet:
+    """The client read-time migrations of one serde.
+
+    ``keys`` holds one :class:`MigrationKey` per operation. ``renames``
+    maps each rename source to its live terminus. lge's own framework
+    migrations are never in it.
+    """
+
+    keys: frozenset[MigrationKey]
+    renames: Mapping[tuple[str, str], tuple[str, str]]
+
+    @property
+    def fingerprint(self) -> str:
+        """A short name of :attr:`keys`. Equal sets give equal fingerprints."""
+        return migration_fingerprint(self.keys)
+
+    def shipped_in(self, previous: frozenset[MigrationKey]) -> frozenset[MigrationKey]:
+        """The keys of this set that *previous* also holds.
+
+        A previous key matches as recorded, or moved through :attr:`renames`
+        onto the live class. A key whose identity is a rename source in
+        *previous* never moves: it names a stored identity on purpose.
+        """
+        sources = _rename_sources(previous)
+        return frozenset(
+            match for key in previous for match in self._matches(key, sources)
+        )
+
+    def deleted_since(
+        self, previous: frozenset[MigrationKey]
+    ) -> frozenset[MigrationKey]:
+        """The keys of *previous* that no key of this set matches.
+
+        The match rule is the rule of :meth:`shipped_in`.
+        """
+        sources = _rename_sources(previous)
+        return frozenset(key for key in previous if not self._matches(key, sources))
+
+    def _matches(
+        self, key: MigrationKey, sources: frozenset[tuple[str, str]]
+    ) -> frozenset[MigrationKey]:
+        candidates = {key}
+        terminus = self.renames.get(key.identity)
+        if terminus is not None and key.identity not in sources:
+            candidates.add(
+                dataclasses.replace(key, module=terminus[0], qualname=terminus[1])
+            )
+        return frozenset(candidates & self.keys)
+
+
+def migration_fingerprint(keys: Iterable[MigrationKey]) -> str:
+    """``lge-m1-`` and 16 hex digits of the SHA-256 of the sorted labels."""
+    labels = "\n".join(sorted(key.label for key in keys))
+    return "lge-m1-" + hashlib.sha256(labels.encode()).hexdigest()[:16]
+
+
+def _rename_sources(keys: frozenset[MigrationKey]) -> frozenset[tuple[str, str]]:
+    return frozenset(key.identity for key in keys if key.kind == "rename")
+
+
 @dataclass(frozen=True)
 class MigrationTables:
     """The per-purpose lookup tables one serde reads through.
@@ -387,6 +678,39 @@ class MigrationTables:
             ("TransformFields", self.transform_table),
             ("origin TransformFields", self.origin_transform_table),
             ("SplitEvent", self.split_table),
+        )
+
+    def keys(self) -> frozenset[MigrationKey]:
+        """One :class:`MigrationKey` per table entry, both stages."""
+        fills = itertools.chain(
+            *self.addfield_table.values(), *self.origin_addfield_table.values()
+        )
+        transforms = itertools.chain(
+            self.transform_table.values(), self.origin_transform_table.values()
+        )
+        return frozenset(
+            (
+                *(MigrationKey("rename", *source) for source in self.rename_table),
+                *(
+                    MigrationKey("fill", op.module, op.qualname, field=op.field)
+                    for op in fills
+                ),
+                *(
+                    MigrationKey(
+                        "transform",
+                        op.module,
+                        op.qualname,
+                        via=_callable_id(op.transform),
+                    )
+                    for op in transforms
+                ),
+                *(
+                    MigrationKey(
+                        "split", op.module, op.qualname, via=_callable_id(op.select)
+                    )
+                    for op in self.split_table.values()
+                ),
+            )
         )
 
     def with_framework(self, framework: MigrationTables) -> MigrationTables:
@@ -1480,6 +1804,33 @@ def _unimportable_payload_models(
     return out
 
 
+def _init_fields(cls: type) -> frozenset[str]:
+    """The init fields of the event class *cls*: the fields a serde writes.
+
+    The constructor rebuilds an ``init=False`` field.
+    """
+    return frozenset(f.name for f in fields(cls) if f.init)
+
+
+def _declares_migration(cls: type) -> bool:
+    """*cls* itself carries a read-time migration decorator.
+
+    ``__dict__``, not ``getattr``: a subclass of a decorated class
+    inherits no migration.
+    """
+    return any(
+        cls.__dict__.get(attr)
+        for attr in (
+            _MIGRATE_FROM_ATTR,
+            _BACKFILL_ATTR,
+            _ORIGIN_BACKFILL_ATTR,
+            _TRANSFORM_ATTR,
+            _ORIGIN_TRANSFORM_ATTR,
+            _SPLIT_ATTR,
+        )
+    )
+
+
 def _collect_decorated_migrations(
     namespaces: Sequence[type],
     events: Sequence[type] = (),
@@ -1513,7 +1864,7 @@ def _collect_decorated_migrations(
     itself. Events in it revive directly with no migration.
     ``NamespaceAwareSerde`` stores it as the read path's first port of call
     (:func:`_resolve_identity`) and derives its ``revivable_identities`` /
-    ``assert_all_baselined_cover`` key set from it; the walk already
+    the gate's coverage key set from it; the walk already
     happens here so the map is free.
     """
     out: list[Migration] = []
@@ -1540,14 +1891,14 @@ def _collect_decorated_migrations(
             )
         # ``__dict__.get`` (not ``getattr``) — neither marker may leak
         # through MRO when a subclass inherits from a decorated parent.
+        if not _declares_migration(cls):
+            continue
         history = cls.__dict__.get(_MIGRATE_FROM_ATTR, ())
         backfills = cls.__dict__.get(_BACKFILL_ATTR, ())
         origin_backfills = cls.__dict__.get(_ORIGIN_BACKFILL_ATTR, ())
         transform = cls.__dict__.get(_TRANSFORM_ATTR)
         origin_transforms = cls.__dict__.get(_ORIGIN_TRANSFORM_ATTR, ())
         split = cls.__dict__.get(_SPLIT_ATTR)
-        if not (history or backfills or origin_backfills or transform or split):
-            continue
         ops: list[Operation] = []
         if history:
             oldest_historic[current] = history[0]

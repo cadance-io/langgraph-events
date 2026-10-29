@@ -6370,7 +6370,7 @@ def describe_aunrevivable_threads():
 def describe_assert_resume_recovers():
     # Convenience helper: collapses the interrupt -> rebuild -> resume recovery
     # proof for an @on(previously=) rename into one assertion — the handler
-    # analog of assert_all_baselined_revive.
+    # twin of the migration gate's handlers rule.
 
     def _recovers(before: EventGraph, after: EventGraph):
         from langgraph_events.serde import assert_resume_recovers

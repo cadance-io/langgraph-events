@@ -17,6 +17,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import re
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import ormsgpack
@@ -26,7 +27,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
     from langgraph_events.serde.migrations._core import Migration, MigrationTables
-from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.checkpoint.serde.jsonplus import (
+    EXT_CONSTRUCTOR_KW_ARGS,
+    JsonPlusSerializer,
+)
 
 try:
     from langgraph.checkpoint.serde.jsonplus import (
@@ -73,13 +77,19 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # ``__init__`` re-exports ``testing``, which imports those names back from
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
+from langgraph_events._identity import Identity  # noqa: E402
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde.migrations._core import (  # noqa: E402
-    SplitError,
-    TransformError,
+    PROGRAM,
+    TARGET_PLACEHOLDER,
+    MigrationSet,
+    SplitEvent,
+    TransformFields,
+    _callable_id,
     _CallableError,
     _collect_decorated_migrations,
     _flatten_and_validate,
+    _init_fields,
     _resolve_identity,
     _unimportable_payload_models,
     _unreachable_migrate_from_siblings,
@@ -106,10 +116,12 @@ class UnrevivedIdentity(NamedTuple):
     qualname: str
 
 
-ReadRecord = tuple[tuple[str, str], tuple[str, str], bool]
-"""One stored event record: ``(stored, resolved, touched)``. *stored* and
-*resolved* are ``(module, qualname)`` identities. *touched* is ``True``
-when the migration table rewrote the record."""
+ReadRecord = tuple[tuple[str, str], tuple[str, str], bool, tuple[object, ...]]
+"""One stored event record: ``(stored, resolved, touched, built)``. *stored*
+and *resolved* are ``(module, qualname)`` identities. *touched* is ``True``
+when the migration table rewrote the record. *built* holds each field value
+that the migration added or replaced, as the object the event holds. A
+stored value that the migration kept is not in it."""
 
 
 def _scan_identities(data: bytes) -> list[tuple[str, str]]:
@@ -163,19 +175,20 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
     **be** the tombstone: redecorating it with the decorator it already
     carries fixes nothing.
     """
-    if isinstance(exc, SplitError):
-        op = exc.op
+    op = exc.op if isinstance(exc, _CallableError) else None
+    if isinstance(op, SplitEvent):
         return (
-            f"The select keyed on {op.module}.{op.qualname} must accept a "
+            f"The migration split {op.module}:{op.qualname} via "
+            f"{_callable_id(op.select)} must accept a "
             f"payload of every era. It must return None when the "
             f"discriminating value is absent or None, or a (target, kwargs) "
             f"tuple whose target is in targets=. See 'Splitting one stored "
             f"event into two on a payload value' in docs/event-migrations.md."
         )
-    if isinstance(exc, TransformError):
-        op = exc.op
+    if isinstance(op, TransformFields):
         return (
-            f"The transform keyed on {op.module}.{op.qualname} must accept a "
+            f"The migration transform {op.module}:{op.qualname} via "
+            f"{_callable_id(op.transform)} must accept a "
             f"payload from every era and return a dict. Guard a key that can "
             f"be absent or None: kw.pop('x', None) and a None check. See "
             f"'Dropping, merging or retyping a field' in "
@@ -202,7 +215,10 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
         f"{qualname} does not declare the field {field!r} the stored "
         f"payload carries. Add {field!r} to the class, matching the "
         f"old class's shape, or drop it from the payload with "
-        f"@transform_fields."
+        f"@transform_fields. If a release deleted the migration that dropped "
+        f"{field!r}, the store was not rewritten. Roll back to the release "
+        f"that holds the migration, then run: {PROGRAM} rewrite "
+        f"{TARGET_PLACEHOLDER} --apply --expect <fingerprint of that release>"
     )
 
 
@@ -240,7 +256,7 @@ def _make_default(
             # class name, so it would round-trip and a strict read could
             # not tell it from a real event.
             refusals.append(
-                f"Refusing to store {obj.module}.{obj.qualname}: it is an "
+                f"Refusing to store {obj.module}:{obj.qualname}: it is an "
                 f"UnrevivedIdentity placeholder, and a placeholder must never "
                 f"be stored. Recover the class with a tombstone, see "
                 f"'Recovering a delete-first deployment' in "
@@ -305,6 +321,22 @@ def _make_default(
         return _msgpack_default(obj)
 
     return _default
+
+
+def _same_bytes(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    """Whether two kwargs encode to the same bytes. A tuple and a list
+    differ in Python, but both encode as one msgpack array.
+
+    A value that does not encode makes the kwargs differ. The rewrite
+    then refuses the record when it encodes the value.
+    """
+    default = _make_default(False, {}, [])
+    try:
+        return ormsgpack.packb(
+            left, default=default, option=_option
+        ) == ormsgpack.packb(right, default=default, option=_option)
+    except TypeError:
+        return False
 
 
 def _make_ext_hook(
@@ -376,12 +408,36 @@ def _make_ext_hook(
                     f"new fields."
                 )
                 raise
+        if code == EXT_CONSTRUCTOR_KW_ARGS and _library_event_record(
+            data, tables, scope
+        ):
+            # LangGraph's own serializer wrote this lge event, before 0.6.0
+            # added this serde. The record takes lge's migrations, and a
+            # rewrite stores it in this serde's form.
+            return _revive(
+                *ormsgpack.unpackb(
+                    data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+                ),
+                reformat=True,
+            )
         if code != EXT_NAMESPACE_AWARE_EVENT:
             return fallback(code, data)
-        tup = ormsgpack.unpackb(
-            data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+        return _revive(
+            *ormsgpack.unpackb(
+                data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+            ),
+            reformat=False,
         )
-        module_name, qualname, kwargs = tup
+
+    def _revive(
+        module_name: str,
+        qualname: str,
+        kwargs: dict[str, Any],
+        *,
+        reformat: bool,
+    ) -> object:
+        """Migrate and construct one stored event record. *reformat* says
+        that a rewrite stores the record in another form, so it is touched."""
         try:
             # Rewrite historic identity to current, run any TransformFields
             # and inject any AddField defaults — shared with the baseline
@@ -392,7 +448,7 @@ def _make_ext_hook(
             # stays the STORED one when the migration itself fails.
             stored = (module_name, qualname)
             # A fill mutates ``kwargs`` in place: snapshot it first.
-            before = dict(kwargs) if reads is not None else None
+            before = dict(kwargs) if reads is not None else {}
             module_name, qualname, kwargs = tables.migrate(
                 module_name, qualname, kwargs
             )
@@ -402,10 +458,20 @@ def _make_ext_hook(
                 # lands in *unresolved* only. Touched means the table
                 # changed the identity or the kwargs: a rewrite would
                 # store different bytes. A table entry that changed
-                # nothing (a fill whose field the payload already held)
-                # is untouched, so a second rewrite converges.
-                touched = stored != (module_name, qualname) or kwargs != before
-                reads.append((stored, (module_name, qualname), touched))
+                # nothing (a fill whose field the payload already held,
+                # or a tuple built from a stored list) is untouched, so a
+                # second rewrite converges.
+                touched = (
+                    reformat
+                    or stored != (module_name, qualname)
+                    or (kwargs != before and not _same_bytes(kwargs, before))
+                )
+                built = tuple(
+                    value
+                    for name, value in kwargs.items()
+                    if name not in before or before[name] is not value
+                )
+                reads.append((stored, (module_name, qualname), touched, built))
             return instance
         except (ImportError, AttributeError, TypeError, _CallableError) as exc:
             # ``TypeError`` is the field-shape mismatch: the identity
@@ -429,12 +495,41 @@ def _make_ext_hook(
                 else f"{type(exc).__name__}: {exc}"
             )
             errors.append(
-                f"Cannot revive {module_name}.{qualname}: {failure}. "
+                f"Cannot revive {module_name}:{qualname}: {failure}. "
                 f"{_revival_remedy(qualname, exc)}"
             )
             raise
 
     return _ext_hook
+
+
+def _library_event_record(
+    data: bytes, tables: MigrationTables, scope: dict[tuple[str, str], type]
+) -> bool:
+    """*data*, a LangGraph constructor record, holds an event of this library.
+
+    The record is ``(module, name, kwargs)``. Its identity is an lge event
+    when a migration renames it, or when it resolves to an ``Event``. Any
+    other record, a client class or an lge value that is not an event,
+    stays with LangGraph's own reader.
+    """
+    record = ormsgpack.unpackb(
+        data, ext_hook=lambda _code, _payload: None, option=ormsgpack.OPT_NON_STR_KEYS
+    )
+    if not (isinstance(record, list) and len(record) == 3):
+        return False
+    module, name = record[0], record[1]
+    if not (isinstance(module, str) and isinstance(name, str)):
+        return False
+    if not Identity(module, name).owned_by_library:
+        return False
+    if (module, name) in tables.rename_table:
+        return True
+    try:
+        cls = _resolve_identity(module, name, scope=scope)
+    except (ImportError, AttributeError):
+        return False
+    return isinstance(cls, type) and issubclass(cls, Event)
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)
@@ -515,6 +610,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         client = _flatten_and_validate((*decorated, *migrations), scope)
         if legacy_write:
             client.refuse_legacy_write()
+        self._client_tables = client
         self._tables = client.with_framework(
             _flatten_and_validate(FRAMEWORK_MIGRATIONS, scope)
         )
@@ -590,8 +686,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         ``EXT_NAMESPACE_AWARE_EVENT`` record that revived, in read order,
         wherever the record sat in the blob. A record that degraded to an
         :class:`UnrevivedIdentity` is not collected. The ``touched`` flag
-        is ``True`` when the migration table changed the identity or the
-        kwargs, so a re-encode would store different bytes. A class that
+        is ``True`` when the migration table changed the identity, or
+        changed the kwargs to values that encode to other bytes. Then a
+        re-encode would store different bytes. A class that
         gained a dataclass default with no ``AddField`` is untouched: the
         table never saw the missing field.
 
@@ -611,7 +708,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             if self._record_depth == 0:
                 self._reads = None
 
-    def revivable_identities(self) -> frozenset[tuple[str, str]]:
+    def revivable_identities(self) -> frozenset[Identity]:
         """Every ``(module, qualname)`` this serde can revive — either still
         live in the namespaces and loose events it was constructed with
         (``namespaces=`` / ``events=``), or covered by a rename
@@ -622,7 +719,34 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         kwargs for an identity revived by other means (a live class or a
         rename), it does not make an identity revivable by itself.
         """
-        return self._live_identities | frozenset(self._tables.rename_table)
+        return frozenset(
+            Identity(*identity)
+            for identity in self._live_identities | self._tables.rename_table.keys()
+        )
+
+    def live_fields(self) -> dict[Identity, frozenset[str]]:
+        """The init fields of every live event class this serde speaks for.
+
+        The keys are the identities that :meth:`revivable_identities`
+        revives with no migration. Init fields only: the serde writes
+        those, and the constructor rebuilds an ``init=False`` field.
+        """
+        return {
+            Identity(*identity): _init_fields(cls)
+            for identity, cls in self._scope.items()
+        }
+
+    def client_migrations(self) -> MigrationSet:
+        """The read-time migrations the client declared on this serde.
+
+        It holds the decorated migrations and the ``migrations=`` list.
+        lge's own framework migrations are not in it: lge deletes them on
+        its own release schedule.
+        """
+        return MigrationSet(
+            self._client_tables.keys(),
+            MappingProxyType(self._client_tables.rename_table),
+        )
 
     def dumps_typed(self, obj: object) -> tuple[str, bytes]:
         if obj is None or isinstance(obj, (bytes, bytearray)):
