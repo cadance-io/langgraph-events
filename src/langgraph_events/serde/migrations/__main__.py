@@ -2,7 +2,7 @@
 
 ``<target>`` is the ``module:attr`` of a ``MigrationTarget``. Exit 0 is a
 pass or a done write, 1 is a finding or a store that is not clean, 2 is a
-usage or target error, 3 is a ``rewrite`` under the wrong release.
+usage, target or store error, 3 is a ``rewrite`` under the wrong release.
 """
 
 from __future__ import annotations
@@ -16,9 +16,8 @@ from langgraph_events.serde.migrations._baseline import (
     Baseline,
     MigrationsUnrecorded,
 )
+from langgraph_events.serde.migrations._core import PROGRAM, TARGET_PLACEHOLDER
 from langgraph_events.serde.migrations._gate import (
-    PROGRAM,
-    TARGET_PLACEHOLDER,
     Invocation,
     PreviousRequiredError,
     check,
@@ -49,8 +48,14 @@ def main(argv: list[str] | None = None) -> int:
         return exit_.code if isinstance(exit_.code, int) else 2
     try:
         return int(options.run(options))
-    except (TargetError, ValueError) as error:
+    except TargetError as error:
         print(f"error: {error}", file=sys.stderr)
+        return 2
+    except Exception as error:
+        # The target, its store or an input raised. Without this handler,
+        # Python exits 1, and exit 1 tells a deploy step to run --apply.
+        message = " ".join(str(error).split())
+        print(f"error: {type(error).__name__}: {message}", file=sys.stderr)
         return 2
 
 
@@ -142,7 +147,7 @@ def _rewrite(options: argparse.Namespace) -> int:
     )
     invocation = Invocation(options.target)
     if isinstance(outcome, WrongRelease):
-        print(outcome.render(invocation), file=sys.stderr)
+        print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE
     print(outcome.render(invocation, options.expect))
     return 0 if outcome.clean else 1

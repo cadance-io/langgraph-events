@@ -12,8 +12,8 @@ import uuid
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import Event, Resumed
+from langgraph_events.serde.migrations._core import TARGET_PLACEHOLDER
 from langgraph_events.serde.migrations._gate import (
-    TARGET_PLACEHOLDER,
     GateError,
     Invocation,
     check,

@@ -17,13 +17,24 @@ import re
 import sys
 import typing
 from dataclasses import dataclass, fields, is_dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol, TypeGuard, TypeVar
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Protocol,
+    TypeGuard,
+    TypeVar,
+)
 
 from langgraph_events._event import Event, _iter_nested_events
+from langgraph_events._identity import Identity
 from langgraph_events._labels import distinct_labels
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+
+PROGRAM = "python -m langgraph_events.serde.migrations"
+TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
 
 # Local sentinel for "no ``default`` supplied". ``dataclasses.MISSING`` looks
 # like the canonical choice but it's special-cased by ``@dataclass`` itself
@@ -442,9 +453,9 @@ class MigrationKey:
         )
 
     @property
-    def identity(self) -> tuple[str, str]:
-        """``(module, qualname)``, the identity the key is keyed on."""
-        return self.module, self.qualname
+    def identity(self) -> Identity:
+        """The identity the key is keyed on."""
+        return Identity(self.module, self.qualname)
 
     @property
     def label(self) -> str:

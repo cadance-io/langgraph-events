@@ -74,8 +74,11 @@ _UNEXPECTED_KWARG_RE = re.compile(r"unexpected keyword argument '(\w+)'")
 # ``__init__`` re-exports ``testing``, which imports those names back from
 # this module. Defining them first lets that re-entry resolve against a
 # partially-initialized ``_jsonplus`` without a circular import.
+from langgraph_events._identity import Identity  # noqa: E402
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS  # noqa: E402
 from langgraph_events.serde.migrations._core import (  # noqa: E402
+    PROGRAM,
+    TARGET_PLACEHOLDER,
     MigrationSet,
     SplitEvent,
     TransformFields,
@@ -206,7 +209,10 @@ def _revival_remedy(qualname: str, exc: Exception) -> str:
         f"{qualname} does not declare the field {field!r} the stored "
         f"payload carries. Add {field!r} to the class, matching the "
         f"old class's shape, or drop it from the payload with "
-        f"@transform_fields."
+        f"@transform_fields. If a release deleted the migration that dropped "
+        f"{field!r}, the store was not rewritten. Roll back to the release "
+        f"that holds the migration, then run: {PROGRAM} rewrite "
+        f"{TARGET_PLACEHOLDER} --apply --expect <fingerprint of that release>"
     )
 
 
@@ -616,7 +622,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             if self._record_depth == 0:
                 self._reads = None
 
-    def revivable_identities(self) -> frozenset[tuple[str, str]]:
+    def revivable_identities(self) -> frozenset[Identity]:
         """Every ``(module, qualname)`` this serde can revive — either still
         live in the namespaces and loose events it was constructed with
         (``namespaces=`` / ``events=``), or covered by a rename
@@ -627,9 +633,12 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         kwargs for an identity revived by other means (a live class or a
         rename), it does not make an identity revivable by itself.
         """
-        return self._live_identities | frozenset(self._tables.rename_table)
+        return frozenset(
+            Identity(*identity)
+            for identity in self._live_identities | self._tables.rename_table.keys()
+        )
 
-    def live_fields(self) -> dict[tuple[str, str], frozenset[str]]:
+    def live_fields(self) -> dict[Identity, frozenset[str]]:
         """The init fields of every live event class this serde speaks for.
 
         The keys are the identities that :meth:`revivable_identities`
@@ -637,7 +646,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         those, and the constructor rebuilds an ``init=False`` field.
         """
         return {
-            identity: frozenset(f.name for f in dataclasses.fields(cls) if f.init)
+            Identity(*identity): frozenset(
+                f.name for f in dataclasses.fields(cls) if f.init
+            )
             for identity, cls in self._scope.items()
         }
 

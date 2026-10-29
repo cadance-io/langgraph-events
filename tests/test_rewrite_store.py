@@ -82,22 +82,24 @@ def _completes(event: Started) -> None:
     return None
 
 
-def _cfg(tid: str) -> dict[str, typing.Any]:
-    return {"configurable": {"thread_id": tid}}
+def _cfg(tid: str, ns: str = "") -> dict[str, typing.Any]:
+    return {"configurable": {"thread_id": tid, "checkpoint_ns": ns}}
 
 
 def _identity(cls: type) -> str:
     return f"{cls.__module__}:{cls.__qualname__}"
 
 
-def _stored_identities(saver: MemorySaver, tid: str) -> set[tuple[str, str]]:
-    """Every event identity in the thread's latest checkpoint blobs, read
-    from the bytes, not through the serde."""
-    tup = saver.get_tuple(_cfg(tid))
+def _stored_identities(
+    saver: MemorySaver, tid: str, ns: str = ""
+) -> set[tuple[str, str]]:
+    """Every event identity in the latest checkpoint blobs of the thread
+    under *ns*, read from the bytes, not through the serde."""
+    tup = saver.get_tuple(_cfg(tid, ns))
     assert tup is not None
     found: set[tuple[str, str]] = set()
     for channel, version in tup.checkpoint["channel_versions"].items():
-        blob = saver.blobs.get((tid, "", channel, version))
+        blob = saver.blobs.get((tid, ns, channel, version))
         if blob is None or blob[0] != "msgpack":
             continue
         found.update(_scan_identities(blob[1]))
@@ -145,6 +147,40 @@ def _renamed_history_pair(saver: MemorySaver, tid: str):
 
     saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
     return EventGraph([_completes], checkpointer=saver), cfg, _OldGate, _NewGate
+
+
+def _subgraph_pair(saver: MemorySaver, tid: str):
+    """A thread whose handler ran an inner graph on the same saver.
+
+    The inner graph left its checkpoints under a subgraph namespace. They
+    hold an event whose class release N+1 renamed with ``@migrate_from``.
+    Returns the release N+1 graph, the namespace, the old class and the
+    new class.
+    """
+
+    class _OldStep(IntegrationEvent):
+        pass
+
+    @on(_OldStep)
+    def step(event: _OldStep) -> None:
+        return None
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _OldStep))
+    inner = EventGraph([step], checkpointer=saver)
+
+    @on(Started)
+    def run_inner(event: Started) -> None:
+        inner.invoke(_OldStep())
+
+    EventGraph([run_inner], checkpointer=saver).invoke(Started(), config=_cfg(tid))
+    [ns] = [ns for ns in saver.storage[tid] if ns]
+
+    @migrate_from(_OldStep.__qualname__, in_module=_OldStep.__module__)
+    class _NewStep(IntegrationEvent):
+        pass
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _NewStep))
+    return EventGraph([_completes], checkpointer=saver), ns, _OldStep, _NewStep
 
 
 def _settled_drop_pair(saver: MemorySaver, tid: str):
@@ -296,6 +332,18 @@ def describe_plan_rewrite():
             assert set(saver.blobs) == blobs_before
             after = saver.get_tuple(cfg).checkpoint["channel_versions"]
             assert after == versions_before
+
+    def when_a_subgraph_checkpoint_holds_a_renamed_identity():
+        def it_reads_the_checkpoint_under_that_namespace():
+            saver = MemorySaver()
+            graph, ns, old, new = _subgraph_pair(saver, "t1")
+
+            report = graph.plan_rewrite(thread_ids=["t1"], checkpoint_ns=ns)
+
+            [thread] = report.threads
+            assert thread.checkpoint_ns == ns
+            assert thread.status == "rewrite"
+            assert thread.migrated == ((_identity(old), _identity(new)),)
 
     def when_a_thread_holds_no_migrated_identity():
         def it_reports_unchanged():
@@ -542,6 +590,50 @@ def describe_rewrite_store():
             assert saver.get_tuple(cfg).checkpoint["id"] == checkpoint_id
             [thread] = graph.plan_rewrite(thread_ids=["t1"]).threads
             assert thread.status == "unchanged"
+
+    def when_a_subgraph_checkpoint_holds_a_renamed_identity():
+        def it_stores_the_live_identity_and_keeps_the_parent_link():
+            saver = MemorySaver()
+            graph, ns, old, new = _subgraph_pair(saver, "t1")
+            before = saver.get_tuple(_cfg("t1", ns))
+            assert before is not None
+
+            report = graph.rewrite_store(thread_ids=["t1"], checkpoint_ns=ns)
+
+            assert [t.status for t in report.threads] == ["rewrite"]
+            stored = _stored_identities(saver, "t1", ns)
+            assert (old.__module__, old.__qualname__) not in stored
+            assert (new.__module__, new.__qualname__) in stored
+            after = saver.get_tuple(_cfg("t1", ns))
+            assert after is not None
+            assert after.checkpoint["id"] == before.checkpoint["id"]
+            assert after.parent_config == before.parent_config
+            [thread] = graph.plan_rewrite(thread_ids=["t1"], checkpoint_ns=ns).threads
+            assert thread.status == "unchanged"
+
+        def when_the_namespace_has_one_checkpoint():
+            def it_writes_under_that_namespace_only():
+                source = MemorySaver()
+                _graph, ns, _old, new = _subgraph_pair(source, "t1")
+                tup = source.get_tuple(_cfg("t1", ns))
+                assert tup is not None
+                latest = tup.config["configurable"]["checkpoint_id"]
+                saver = MemorySaver(serde=source.serde)
+                checkpoint, metadata, _parent = source.storage["t1"][ns][latest]
+                saver.storage["t1"][ns][latest] = (checkpoint, metadata, None)
+                saver.blobs.update(
+                    (key, blob)
+                    for key, blob in source.blobs.items()
+                    if key[:2] == ("t1", ns)
+                )
+                graph = EventGraph([_completes], checkpointer=saver)
+
+                report = graph.rewrite_store(thread_ids=["t1"], checkpoint_ns=ns)
+
+                assert [t.status for t in report.threads] == ["rewrite"]
+                assert list(saver.storage["t1"]) == [ns]
+                stored = _stored_identities(saver, "t1", ns)
+                assert (new.__module__, new.__qualname__) in stored
 
 
 def describe_rewrite_store_refusals():
@@ -830,6 +922,18 @@ def describe_rewrite_report():
         assert [t.thread_id for t in report.refused] == ["gone-a", "gone-b"]
         assert lines[1].startswith("  gone-a: refused, history names")
         assert lines[2].startswith("  gone-b: refused, history names")
+
+    def it_names_the_namespace_of_a_refused_subgraph_checkpoint():
+        saver = MemorySaver()
+        saver.serde = NamespaceAwareSerde(events=(Started,))
+        graph = EventGraph([_completes], checkpointer=saver)
+
+        report = graph.plan_rewrite(thread_ids=["ghost"], checkpoint_ns="child:1")
+
+        assert str(report).splitlines()[1] == (
+            "  ghost in subgraph namespace 'child:1': refused, no checkpoint "
+            "for this thread id"
+        )
 
     def it_says_rewritten_once_applied():
         saver = MemorySaver()

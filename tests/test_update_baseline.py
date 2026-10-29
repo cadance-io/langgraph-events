@@ -364,6 +364,29 @@ def describe_hold_migration():
             with pytest.raises(ValueError, match="A hold needs a live migration"):
                 hold_migration(target, _TRIMMED, reason="x", previous=previous)
 
+        def it_lists_the_labels_it_can_hold(tmp_path: Path):
+            target = _baselined(_target(tmp_path, Trimmed))
+            previous = tmp_path / "prev.json"
+            previous.write_text(target.baseline.read_text())
+
+            with pytest.raises(ValueError) as raised:
+                hold_migration(target, _TRIMMED + "x", reason="x", previous=previous)
+
+            assert str(raised.value).endswith(f"Labels you can hold: {_TRIMMED}.")
+
+    def when_the_previous_file_is_not_json():
+        def it_names_the_file(tmp_path: Path):
+            target = _baselined(_target(tmp_path, Trimmed))
+            previous = tmp_path / "prev.json"
+            previous.write_text("")
+
+            with pytest.raises(ValueError) as raised:
+                hold_migration(target, _TRIMMED, reason="x", previous=previous)
+
+            assert str(raised.value).startswith(
+                f"Baseline at {previous} is not valid JSON: Expecting value"
+            )
+
     def when_the_previous_release_did_not_ship_it():
         def it_refuses(tmp_path: Path):
             target = _baselined(_target(tmp_path, Trimmed))

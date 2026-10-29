@@ -761,6 +761,27 @@ def describe_NamespaceAwareSerde():
                 assert "'note'" in message
                 assert "@migrate_from" not in message
 
+            def it_says_a_deleted_migration_needs_a_rewrite_of_the_store():
+                serde = NamespaceAwareSerde()
+
+                payload = synthesize_legacy_payload(
+                    FieldShape.__module__,
+                    "FieldShape.Persisted",
+                    {"reason": "kept", "note": "dropped"},
+                )
+
+                with pytest.raises(ValueError) as excinfo:
+                    serde.loads_typed(payload)
+
+                assert str(excinfo.value).endswith(
+                    "If a release deleted the migration that dropped 'note', the "
+                    "store was not rewritten. Roll back to the release that holds "
+                    "the migration, then run: python -m "
+                    "langgraph_events.serde.migrations rewrite <module:attr of the "
+                    "MigrationTarget> --apply --expect <fingerprint of that "
+                    "release>"
+                )
+
         def when_a_required_field_was_added_to_the_class():
             def without_a_migration():
                 def it_names_the_identity_and_the_missing_field():

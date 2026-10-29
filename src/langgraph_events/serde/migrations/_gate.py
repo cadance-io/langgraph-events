@@ -15,16 +15,20 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     Hold,
-    Identity,
     MigrationRecord,
     MigrationsUnrecorded,
 )
-from langgraph_events.serde.migrations._core import MigrationKey
+from langgraph_events.serde.migrations._core import (
+    PROGRAM,
+    TARGET_PLACEHOLDER,
+    MigrationKey,
+)
 from langgraph_events.serde.migrations._revive import revival_failure
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from langgraph_events._identity import Identity
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
 
 Rule = Literal["baseline", "names", "coverage", "revive", "handlers", "release"]
@@ -33,8 +37,6 @@ ReleaseNotRun = Literal[
     "no previous baseline was given",
     "the previous baseline records no migrations",
 ]
-PROGRAM = "python -m langgraph_events.serde.migrations"
-TARGET_PLACEHOLDER = "<module:attr of the MigrationTarget>"
 _PREVIOUS_PLACEHOLDER = "<baseline file of the previous release>"
 
 
@@ -97,8 +99,7 @@ class PreviousRequiredError(ValueError):
 
 
 def _identity_label(identity: Identity, *, retired: bool) -> str:
-    label = f"{identity[0]}:{identity[1]}"
-    return f"{label} (retired)" if retired else label
+    return f"{identity.label} (retired)" if retired else identity.label
 
 
 @dataclass(frozen=True)
@@ -170,13 +171,13 @@ class Uncovered:
         """The explanation, any rename hint, then the next command."""
         hint: tuple[str, ...] = ()
         if self.renamed_to:
-            joined = ", ".join(f"{m}:{q}" for m, q in self.renamed_to)
+            joined = ", ".join(identity.label for identity in self.renamed_to)
             hint = (f"Live classes with the same name: {joined}.",)
         return (
             "No live class and no migration covers this recorded identity, "
             "so a stored payload of it cannot revive.",
             *hint,
-            f"Add @migrate_from({self.identity[1]!r}) to the class that "
+            f"Add @migrate_from({self.identity.qualname!r}) to the class that "
             f"replaces it, or a Migration to migrations=, then run: "
             f"{invocation.baseline_update()}",
         )
@@ -242,16 +243,15 @@ class SurvivedRelease:
 
     def lines(self, invocation: Invocation) -> tuple[str, ...]:
         """The explanation, any expired hold, then the next command."""
-        expired: tuple[str, ...] = ()
-        if self.expired is not None:
-            expired = (
-                f"Its hold ({self.expired.reason}) was made against "
-                f"{self.expired.against}, an older release, so it expired.",
-            )
+        delete = "Delete it, then run: " + invocation.baseline_update(prune=True)
+        if self.expired is None:
+            return ("The previous release shipped this migration.", delete)
         return (
             "The previous release shipped this migration.",
-            *expired,
-            "Delete it, then run: " + invocation.baseline_update(prune=True),
+            f"Its hold ({self.expired.reason}) was made against "
+            f"{self.expired.against}, an older release, so it expired.",
+            delete,
+            "Or keep it one more release: " + invocation.baseline_hold(self.key.label),
         )
 
 
@@ -270,7 +270,8 @@ class GateReport:
     """The findings of one :func:`check`, and the rules it ran.
 
     ``release_not_run`` says why the release rule did not run. ``held``
-    lists every migration the baseline holds, applied or expired.
+    lists each migration whose hold applies. An expired hold is in the
+    ``SurvivedRelease`` finding of its migration.
     """
 
     findings: tuple[Finding, ...]
@@ -352,11 +353,14 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
     else:
         rules.add("release")
         findings.extend(_survivors(code, want, prev.code.keys, prev.digest))
+    expired = {f.key for f in findings if isinstance(f, SurvivedRelease)}
     return GateReport(
         findings=tuple(findings),
         rules_run=frozenset(rules),
         release_not_run=not_run,
-        held=tuple(r for r in want.records if r.hold is not None),
+        held=tuple(
+            r for r in want.records if r.hold is not None and r.key not in expired
+        ),
     )
 
 
@@ -392,7 +396,6 @@ def hold_migration(
         ValueError: when *label* is not a migration the code holds and
             *previous* shipped.
     """
-    key = MigrationKey.parse(label)
     code = target.snapshot()
     previous_baseline = _read_existing(previous)
     previous_keys = previous_baseline.recorded_keys
@@ -402,11 +405,18 @@ def hold_migration(
             f"{previous_keys.version} and records no migrations, so no "
             f"migration in it can be held."
         )
+    holdable = code.migrations.shipped_in(previous_keys)
+    choices = ", ".join(key.label for key in sorted(holdable)) or "none"
+    try:
+        key = MigrationKey.parse(label)
+    except ValueError as error:
+        raise ValueError(f"{error} Labels you can hold: {choices}.") from error
     if key not in code.migrations.keys:
         raise ValueError(
-            f"The code does not hold {label!r}. A hold needs a live migration."
+            f"The code does not hold {label!r}. A hold needs a live migration. "
+            f"Labels you can hold: {choices}."
         )
-    if key not in code.migrations.shipped_in(previous_keys):
+    if key not in holdable:
         raise ValueError(
             f"The previous release did not ship {label!r}, so the release rule "
             f"does not ask to delete it. There is nothing to hold."
@@ -435,11 +445,11 @@ def _deleted(committed: Baseline, code: Snapshot) -> tuple[MigrationKey, ...]:
 def _coverage_and_revival(
     code: Snapshot, judged: Baseline
 ) -> list[Uncovered | Unrevivable]:
-    recorded = {**judged.retired, **judged.events}
+    recorded = judged.history
     revivable = code.serde.revivable_identities()
     findings: list[Uncovered | Unrevivable] = []
     for identity in sorted(recorded.keys() - revivable):
-        leaf = identity[1].rsplit(".", 1)[-1]
+        leaf = identity.qualname.rsplit(".", 1)[-1]
         findings.append(
             Uncovered(
                 identity,
@@ -447,7 +457,7 @@ def _coverage_and_revival(
                 renamed_to=tuple(
                     live
                     for live in sorted(judged.events)
-                    if live != identity and live[1].rsplit(".", 1)[-1] == leaf
+                    if live != identity and live.qualname.rsplit(".", 1)[-1] == leaf
                 ),
             )
         )

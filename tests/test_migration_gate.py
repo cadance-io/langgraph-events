@@ -763,6 +763,27 @@ def describe_check():
                     f"  held  {label}: subgraph (made against lge-b1-"
                 )
 
+        def when_a_hold_expired():
+            def it_offers_a_new_hold_and_does_not_list_it_as_held(tmp_path: Path):
+                target = _target(tmp_path, Trimmed)
+                update_baseline(target)
+                previous = tmp_path / "prev.json"
+                previous.write_text(target.baseline.read_text())
+                hold_migration(target, _TRIMMED, reason="subgraph", previous=previous)
+                next_release = tmp_path / "next.json"
+                next_release.write_text(target.baseline.read_text())
+
+                report = check(target, previous=next_release)
+                lines = report.render(Invocation("app.lge:target", "next.json"))
+
+                assert report.held == ()
+                assert lines.splitlines()[-2:] == [
+                    f"    Delete it, then run: {_CLI} baseline update app.lge:target "
+                    "--previous next.json",
+                    f"    Or keep it one more release: {_CLI} baseline hold "
+                    f"app.lge:target '{_TRIMMED}' --reason <why> --previous next.json",
+                ]
+
 
 def describe_assert_migration_gate():
     def when_the_gate_passes():

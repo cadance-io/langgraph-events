@@ -12,6 +12,7 @@ from _live_set_fixtures import (
     _cfg,
     _copy_to_namespace,
     _graph,
+    _noop,
     _releases,
 )
 from conftest import Started
@@ -19,16 +20,18 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
 
+from langgraph_events import EventGraph
+from langgraph_events.serde import NamespaceAwareSerde
 from langgraph_events.serde.migrations import (
     LiveSetOutcome,
+    Migration,
     MigrationTarget,
     TargetError,
     ThreadKey,
+    TransformFields,
     WrongRelease,
     rewrite_live_set,
 )
-
-_CLI = "python -m langgraph_events.serde.migrations"
 
 
 def describe_MigrationTarget():
@@ -288,31 +291,121 @@ def describe_rewrite_live_set():
             )
 
             assert isinstance(outcome, LiveSetOutcome)
-            assert outcome.subgraphs == ()
+            assert outcome.passes == ()
+            assert [t.location for t in outcome.final.threads] == [
+                "t1",
+                "t1 in subgraph namespace 'child:1'",
+            ]
             assert outcome.clean
 
     def when_a_subgraph_checkpoint_holds_an_old_shape():
-        def it_reads_it_and_reports_the_run_as_not_clean(tmp_path: Path):
+        def when_apply_is_false():
+            def it_reports_the_run_as_not_clean(tmp_path: Path):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                _copy_to_namespace(releases.saver, "t1", "child:1")
+
+                outcome = rewrite_live_set(
+                    releases.current, expect=releases.expect, apply=False
+                )
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert [(t.checkpoint_ns, t.status) for t in outcome.final.threads] == [
+                    ("", "rewrite"),
+                    ("child:1", "rewrite"),
+                ]
+                assert not outcome.clean
+
+        def when_apply_is_true():
+            def it_rewrites_it_until_a_plan_reads_clean(tmp_path: Path):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                _copy_to_namespace(releases.saver, "t1", "child:1")
+
+                outcome = rewrite_live_set(
+                    releases.current, expect=releases.expect, apply=True
+                )
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.clean
+                assert [
+                    (t.checkpoint_ns, t.status) for t in outcome.passes[0].threads
+                ] == [("", "rewrite"), ("child:1", "rewrite")]
+                graph = releases.current.graph(releases.saver)
+                [child] = graph.plan_rewrite(
+                    thread_ids=["t1"], checkpoint_ns="child:1"
+                ).threads
+                assert child.status == "unchanged"
+
+        def when_the_store_is_postgres():
+            def it_rewrites_it_until_a_plan_reads_clean(
+                tmp_path: Path, postgres_url: str
+            ):
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                with PostgresSaver.from_conn_string(postgres_url) as saver:
+                    releases = _releases(tmp_path, saver)
+                    releases.seed("t1")
+                    _copy_to_namespace(saver, "t1", "child:1")
+
+                    outcome = rewrite_live_set(
+                        releases.current, expect=releases.expect, apply=True
+                    )
+
+                    assert isinstance(outcome, LiveSetOutcome)
+                    assert outcome.clean
+                    assert len(outcome.passes) == 1
+                    assert releases.plan("t1") == ["unchanged"]
+                    graph = releases.current.graph(saver)
+                    [child] = graph.plan_rewrite(
+                        thread_ids=["t1"], checkpoint_ns="child:1"
+                    ).threads
+                    assert child.status == "unchanged"
+
+    def when_the_store_saver_holds_its_own_serde():
+        def it_raises_a_target_error_before_it_reads_a_thread(tmp_path: Path):
             releases = _releases(tmp_path)
             releases.seed("t1")
-            _copy_to_namespace(releases.saver, "t1", "child:1")
+            own = NamespaceAwareSerde(
+                [
+                    Migration(
+                        operations=(
+                            TransformFields(
+                                Started.__module__, Started.__qualname__, _keep
+                            ),
+                        )
+                    )
+                ],
+                events=(Started,),
+            )
+            store = MemorySaver(serde=own)
 
-            outcome = rewrite_live_set(
-                releases.current, expect=releases.expect, apply=True
+            def from_namespaces(saver):
+                return EventGraph.from_namespaces(handlers=[_noop], checkpointer=saver)
+
+            target = MigrationTarget(
+                graph=from_namespaces,
+                baseline=tmp_path / "b.json",
+                store=lambda: contextlib.nullcontext(store),
+                threads=_no_read,
+            )
+            expect = target.snapshot().migrations.fingerprint
+
+            with pytest.raises(TargetError) as raised:
+                rewrite_live_set(target, expect=expect, apply=True)
+
+            assert str(raised.value) == (
+                f"The saver that store= opens holds its own serde, with the "
+                f"migrations {own.client_migrations().fingerprint}. The graph "
+                f"built on an empty saver holds {expect}, and the gate and the "
+                f"--expect fence judge those. Set the serde in the graph "
+                f"factory, not in the store."
             )
 
-            assert isinstance(outcome, LiveSetOutcome)
-            assert [t.status for t in outcome.final.threads] == ["unchanged"]
-            assert [s.key for s in outcome.subgraphs] == [ThreadKey("t1", "child:1")]
-            assert outcome.subgraphs[0].thread.status == "rewrite"
-            assert not outcome.clean
 
-        def it_writes_nothing_under_the_subgraph_namespace(tmp_path: Path):
-            releases = _releases(tmp_path)
-            releases.seed("t1")
-            _copy_to_namespace(releases.saver, "t1", "child:1")
-            before = dict(releases.saver.storage["t1"]["child:1"])
+def _keep(kw: dict) -> dict:
+    return kw
 
-            rewrite_live_set(releases.current, expect=releases.expect, apply=True)
 
-            assert releases.saver.storage["t1"]["child:1"] == before
+def _no_read(saver: BaseCheckpointSaver) -> list[ThreadKey]:
+    raise AssertionError("the rewrite read the store")

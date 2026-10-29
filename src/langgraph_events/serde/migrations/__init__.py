@@ -48,7 +48,6 @@ from langgraph_events.serde.migrations._gate import (
 )
 from langgraph_events.serde.migrations._live_set import (
     LiveSetOutcome,
-    SubgraphTouched,
     WrongRelease,
     rewrite_live_set,
 )
@@ -79,7 +78,6 @@ __all__ = [
     "MigrationTarget",
     "RenameEvent",
     "SplitEvent",
-    "SubgraphTouched",
     "SurvivedRelease",
     "TargetError",
     "ThreadKey",

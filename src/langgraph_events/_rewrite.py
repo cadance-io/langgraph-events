@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._causes import dropped, resolve
 from langgraph_events._event import Event, Resumed
+from langgraph_events._identity import Identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -53,7 +54,8 @@ class ThreadRewrite:
     table rewrote, as ``"module:qualname"`` strings, deduped in read
     order. ``dropped`` counts the stored events ``drop`` removed, per
     identity. ``reason`` says what to do when the status is
-    ``"refused"``.
+    ``"refused"``. ``checkpoint_ns`` is the checkpoint namespace the walk
+    read. ``""`` is the root namespace.
     """
 
     thread_id: str
@@ -61,6 +63,15 @@ class ThreadRewrite:
     migrated: tuple[tuple[str, str], ...] = ()
     dropped: dict[str, int] = field(default_factory=dict)
     reason: str = ""
+    checkpoint_ns: str = ""
+
+    @property
+    def location(self) -> str:
+        """The thread id, and the checkpoint namespace when it is not the
+        root namespace."""
+        if not self.checkpoint_ns:
+            return self.thread_id
+        return f"{self.thread_id} in subgraph namespace {self.checkpoint_ns!r}"
 
 
 @dataclass(frozen=True)
@@ -92,7 +103,7 @@ class RewriteReport:
             f"{mode}: {total} {noun}, {counts['rewrite']} rewrite, "
             f"{counts['unchanged']} unchanged, {counts['refused']} refused"
         ]
-        lines.extend(f"  {t.thread_id}: refused, {t.reason}" for t in self.refused)
+        lines.extend(f"  {t.location}: refused, {t.reason}" for t in self.refused)
         return "\n".join(lines)
 
 
@@ -104,10 +115,6 @@ class RewritePlan:
     checkpoint: Checkpoint
     new_versions: dict[str, Any]
     interrupt_writes: tuple[tuple[str, str, Any], ...]
-
-
-def identity_label(module: str, qualname: str) -> str:
-    return f"{module}:{qualname}"
 
 
 def validate_drop(
@@ -148,7 +155,7 @@ def _migrated_pairs(reads: Sequence[ReadRecord]) -> tuple[tuple[str, str], ...]:
     order."""
     pairs: list[tuple[str, str]] = []
     for stored, live, touched in reads:
-        pair = (identity_label(*stored), identity_label(*live))
+        pair = (Identity(*stored).label, Identity(*live).label)
         if touched and pair not in pairs:
             pairs.append(pair)
     return tuple(pairs)
@@ -183,7 +190,7 @@ def _count_drops(
     for channel in _LOG_CHANNELS:
         for entry in _log_entries(values, channel) or ():
             if type(entry) in drop:
-                label = identity_label(type(entry).__module__, type(entry).__qualname__)
+                label = Identity(type(entry).__module__, type(entry).__qualname__).label
                 counts[label] = counts.get(label, 0) + 1
     return counts
 

@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from langgraph_events._identity import Identity
 from langgraph_events.serde.migrations._core import (
     MigrationKey,
     MigrationSet,
@@ -25,7 +26,6 @@ if TYPE_CHECKING:
 
     from langgraph_events.serde.migrations._target import Snapshot
 
-Identity = tuple[str, str]
 Fields = frozenset[str] | None
 """The init fields recorded for one identity. ``None`` when the record
 predates version 3, which recorded no fields."""
@@ -123,7 +123,14 @@ class Baseline:
         """
         if not path.exists():
             return cls({}, {}, frozenset(), CodeRecord((), {}))
-        raw: dict[str, Any] = json.loads(path.read_text())
+        try:
+            raw: dict[str, Any] = json.loads(path.read_text())
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"Baseline at {path} is not valid JSON: {error}. Restore the "
+                f"file from version control, or give the baseline file of the "
+                f"release."
+            ) from error
         version = raw.get("version")
         if version not in _SUPPORTED_BASELINE_VERSIONS:
             raise ValueError(
@@ -153,7 +160,7 @@ class Baseline:
                 CodeRecord(
                     _read_migrations(raw.get("migrations", []), path),
                     {
-                        (e["module"], e["qualname"]): frozenset(e["live"])
+                        Identity(e["module"], e["qualname"]): frozenset(e["live"])
                         for e in raw["events"]
                     },
                 )
@@ -228,7 +235,7 @@ class Baseline:
         still holds.
         """
         live = code.serde.live_fields()
-        history: Mapping[Identity, Fields] = {**self.retired, **self.events}
+        history = self.history
         if previous is not None and isinstance(previous.code, CodeRecord):
             history = previous.code.prune(history, code.migrations)
         holds = {record.key: record.hold for record in self.records}
@@ -281,7 +288,7 @@ class Baseline:
             ("retired", self.retired, other.retired),
         ):
             for identity in sorted(mine.keys() | theirs.keys()):
-                label = f"{name} {identity[0]}:{identity[1]}"
+                label = f"{name} {identity.label}"
                 if identity not in theirs:
                     lines.append(f"- {label}")
                 elif identity not in mine:
@@ -299,7 +306,7 @@ class Baseline:
                 )
                 if mine_live != their_live:
                     lines.append(
-                        f"~ event {identity[0]}:{identity[1]} live "
+                        f"~ event {identity.label} live "
                         f"{_listed(mine_live)} -> {_listed(their_live)}"
                     )
         for handler in sorted(self.handlers - other.handlers):
@@ -320,6 +327,11 @@ class Baseline:
         return tuple(lines)
 
     @property
+    def history(self) -> Mapping[Identity, Fields]:
+        """Every recorded identity, live or retired, with its fields."""
+        return {**self.retired, **self.events}
+
+    @property
     def records(self) -> tuple[MigrationRecord, ...]:
         """The migration records. Empty for a baseline that records none."""
         if isinstance(self.code, MigrationsUnrecorded):
@@ -332,7 +344,7 @@ def _listed(fields: Fields) -> str:
 
 
 def _entry(identity: Identity, fields: Fields) -> dict[str, Any]:
-    entry: dict[str, Any] = {"module": identity[0], "qualname": identity[1]}
+    entry: dict[str, Any] = {"module": identity.module, "qualname": identity.qualname}
     if fields is not None:
         entry["fields"] = sorted(fields)
     return entry
@@ -373,7 +385,7 @@ def _read_migrations(
 
 def _fields_by_identity(entries: list[dict[str, Any]]) -> dict[Identity, Fields]:
     return {
-        (entry["module"], entry["qualname"]): (
+        Identity(entry["module"], entry["qualname"]): (
             frozenset(entry["fields"]) if "fields" in entry else None
         )
         for entry in entries
@@ -409,11 +421,11 @@ def _check_v3_shape(raw: dict[str, Any], path: Path) -> None:
             f'entry "fields": [] and run `baseline update`. The update fills '
             f"the list from the live class."
         )
-    live = {(e["module"], e["qualname"]) for e in events}
-    retired = {(e["module"], e["qualname"]) for e in raw.get("retired", [])}
+    live = {Identity(e["module"], e["qualname"]) for e in events}
+    retired = {Identity(e["module"], e["qualname"]) for e in raw.get("retired", [])}
     overlap = sorted(live & retired)
     if overlap:
-        joined = ", ".join(f"{m}:{q}" for m, q in overlap)
+        joined = ", ".join(identity.label for identity in overlap)
         raise ValueError(
             f"Baseline at {path} lists these identities under both `events` "
             f"and `retired`: {joined}. Remove it from `retired` when the class "

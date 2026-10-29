@@ -7,7 +7,7 @@ import subprocess
 import sys
 from typing import TYPE_CHECKING
 
-from _live_set_fixtures import _copy_to_namespace, _releases
+from _live_set_fixtures import _copy_to_namespace, _graph, _releases
 from _migration_fixtures import (
     _CLI,
     _TRIMMED,
@@ -23,19 +23,24 @@ from langgraph_events.serde.migrations import MigrationTarget, ThreadKey
 from langgraph_events.serde.migrations.__main__ import main
 
 if TYPE_CHECKING:
+    import contextlib
     from pathlib import Path
 
     import pytest
+    from langgraph.checkpoint.memory import MemorySaver
+
+    from langgraph_events import EventGraph
 
 
 CLI_TARGET: MigrationTarget | None = None
 
 
-def describe_gate_commands():
-    def _install(monkeypatch: pytest.MonkeyPatch, target: MigrationTarget) -> str:
-        monkeypatch.setattr(sys.modules[__name__], "CLI_TARGET", target)
-        return f"{__name__}:CLI_TARGET"
+def _install(monkeypatch: pytest.MonkeyPatch, target: MigrationTarget) -> str:
+    monkeypatch.setattr(sys.modules[__name__], "CLI_TARGET", target)
+    return f"{__name__}:CLI_TARGET"
 
+
+def describe_gate_commands():
     def describe_check():
         def when_the_gate_passes():
             def it_exits_zero(
@@ -194,10 +199,6 @@ def describe_gate_commands():
 
 
 def describe_rewrite_command():
-    def _install(monkeypatch: pytest.MonkeyPatch, target: MigrationTarget) -> str:
-        monkeypatch.setattr(sys.modules[__name__], "CLI_TARGET", target)
-        return f"{__name__}:CLI_TARGET"
-
     def describe_rewrite():
         def when_the_apply_reads_clean():
             def it_exits_zero_and_logs_each_pass(
@@ -265,8 +266,8 @@ def describe_rewrite_command():
                     f"  Run: {_CLI} rewrite {spec} --apply --expect {releases.expect}\n"
                 )
 
-        def when_a_subgraph_checkpoint_holds_an_old_shape():
-            def it_exits_one_and_names_the_hold_command(
+        def when_the_last_plan_refuses_a_subgraph_checkpoint():
+            def it_prints_the_reason_and_the_apply_command(
                 tmp_path: Path,
                 monkeypatch: pytest.MonkeyPatch,
                 capsys: pytest.CaptureFixture[str],
@@ -274,23 +275,28 @@ def describe_rewrite_command():
                 releases = _releases(tmp_path)
                 releases.seed("t1")
                 _copy_to_namespace(releases.saver, "t1", "child:1")
-                spec = _install(monkeypatch, releases.current)
-                (label,) = [
-                    key.label for key in releases.current.snapshot().migrations.keys
-                ]
-
-                code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
-
-                assert code == 1
-                assert capsys.readouterr().out == (
-                    "lge rewrite: not clean (last plan: plan: 1 thread, 0 rewrite, "
-                    "1 unchanged, 0 refused)\n"
-                    f"  t1 in subgraph namespace 'child:1': rewrite, read by: {label}\n"
-                    "  The rewrite never writes a subgraph checkpoint. Keep the "
-                    f"migration one more release: {_CLI} baseline hold {spec} "
-                    f"'{label}' --reason <why> "
-                    "--previous <baseline file of the previous release>\n"
+                del releases.saver.storage["t1"][""]
+                target = MigrationTarget(
+                    graph=_graph,
+                    baseline=tmp_path / "b.json",
+                    store=releases.current.store,
                 )
+                spec = _install(monkeypatch, target)
+                expect = target.snapshot().migrations.fingerprint
+
+                code = main(["rewrite", spec, "--expect", expect, "--apply"])
+
+                out = capsys.readouterr().out.splitlines()
+                assert code == 1
+                assert out[1].startswith(
+                    "  t1 in subgraph namespace 'child:1': refused, history names "
+                )
+                assert out[1].endswith(
+                    "which the serde cannot revive; add a tombstone first"
+                )
+                assert out[2:] == [
+                    f"  Run: {_CLI} rewrite {spec} --apply --expect {expect}"
+                ]
 
         def when_the_running_release_is_not_the_expected_one():
             def it_exits_three_and_names_both_fingerprints(
@@ -310,6 +316,69 @@ def describe_rewrite_command():
                     f"migrations {running}, not {releases.expect}.\n"
                     "  running migrations: none\n"
                     f"  Run the command in the release whose baseline gives "
-                    f"{releases.expect}: {_CLI} rewrite {spec} --expect "
+                    f"{releases.expect}: {_CLI} rewrite {spec} --apply --expect "
                     f"{releases.expect}\n"
                 )
+
+
+def describe_target_errors():
+    def when_the_graph_factory_raises():
+        def it_exits_two_and_names_the_error(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            def build(saver: object) -> EventGraph:
+                raise KeyError("DATABASE_URL")
+
+            spec = _install(
+                monkeypatch, MigrationTarget(graph=build, baseline=tmp_path / "b.json")
+            )
+
+            assert main(["check", spec]) == 2
+            assert capsys.readouterr().err == "error: KeyError: 'DATABASE_URL'\n"
+
+    def when_the_graph_factory_takes_no_checkpointer():
+        def it_exits_two_and_names_the_factory_signature(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            def build() -> EventGraph:
+                raise AssertionError("the factory ran")
+
+            target = MigrationTarget(graph=build, baseline=tmp_path / "b.json")  # type: ignore[arg-type]
+            spec = _install(monkeypatch, target)
+
+            assert main(["check", spec]) == 2
+            assert capsys.readouterr().err == (
+                "error: The graph factory of the target cannot take a "
+                "checkpointer: too many positional arguments. Write it as "
+                "def build(checkpointer) -> EventGraph, and build the graph on "
+                "that checkpointer.\n"
+            )
+
+    def when_the_store_does_not_open():
+        def it_exits_two_and_prints_the_error_on_one_line(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            releases = _releases(tmp_path)
+
+            def no_store() -> contextlib.AbstractContextManager[MemorySaver]:
+                raise ConnectionError("connection refused\n\tIs the server running?")
+
+            target = MigrationTarget(
+                graph=releases.current.graph,
+                baseline=releases.current.baseline,
+                store=no_store,
+            )
+            spec = _install(monkeypatch, target)
+
+            code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
+
+            assert code == 2
+            assert capsys.readouterr().err == (
+                "error: ConnectionError: connection refused Is the server running?\n"
+            )

@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.memory import MemorySaver
-
-# The module, not the class: this module loads while ``_jsonplus`` is still
-# importing ``serde.migrations``, so the class is read at call time.
-from langgraph_events.serde import _jsonplus
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -85,21 +82,35 @@ class MigrationTarget:
         )
 
     def snapshot(self) -> Snapshot:
-        """What the code holds, built once for every rule.
+        """What the code holds, built once for every rule on an empty
+        in-memory saver.
 
         Raises:
-            TargetError: when the graph has no ``NamespaceAwareSerde``, or
-                when a client migration has no valid key.
+            TargetError: see :meth:`build`.
         """
-        graph = self.graph(MemorySaver())
-        serde = getattr(graph._checkpointer, "serde", None)
-        if not isinstance(serde, _jsonplus.NamespaceAwareSerde):
+        return self.build(MemorySaver())
+
+    def build(self, saver: BaseCheckpointSaver[Any]) -> Snapshot:
+        """The graph on *saver*, its serde and its client migrations.
+
+        Raises:
+            TargetError: when ``graph`` cannot take a checkpointer, when the
+                graph has no ``NamespaceAwareSerde``, or when a client
+                migration has no valid key.
+        """
+        try:
+            inspect.signature(self.graph).bind(saver)
+        except TypeError as error:
             raise TargetError(
-                f"The graph of the target has the serde {type(serde).__name__}, "
-                f"not a NamespaceAwareSerde. Build it with "
-                f"EventGraph.from_namespaces(..., checkpointer=saver), or set "
-                f"saver.serde to a NamespaceAwareSerde before you build it."
-            )
+                f"The graph factory of the target cannot take a checkpointer: "
+                f"{error}. Write it as def build(checkpointer) -> EventGraph, "
+                f"and build the graph on that checkpointer."
+            ) from error
+        graph = self.graph(saver)
+        try:
+            serde = graph._require_namespace_aware_serde("MigrationTarget.graph")
+        except ValueError as error:
+            raise TargetError(str(error)) from error
         try:
             migrations = serde.client_migrations()
         except ValueError as error:

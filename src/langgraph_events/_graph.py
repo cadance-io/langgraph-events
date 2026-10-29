@@ -2549,6 +2549,7 @@ class EventGraph:
         *,
         drop: Iterable[type[Event]] = (),
         thread_ids: Iterable[str],
+        checkpoint_ns: str = "",
     ) -> RewriteReport:
         """Report what :meth:`rewrite_store` would do. Writes nothing.
 
@@ -2568,6 +2569,11 @@ class EventGraph:
         thread ids of this graph. A listed id with no checkpoint is
         reported as refused, so a typo stays visible.
 
+        *checkpoint_ns* names the checkpoint namespace to read. The default
+        ``""`` is the root namespace. A subgraph checkpoint lives under a
+        child namespace, for example the checkpoints of a graph that a
+        handler invokes on the same checkpointer.
+
         Raises ``ValueError`` without a checkpointer, without a
         :class:`~langgraph_events.serde.NamespaceAwareSerde`, under
         ``legacy_write=True``, or for a ``drop`` class the serde cannot
@@ -2575,7 +2581,11 @@ class EventGraph:
         ``docs/event-migrations.md``.
         """
         return self._rewrite_walk(
-            "plan_rewrite", apply=False, drop=drop, thread_ids=thread_ids
+            "plan_rewrite",
+            apply=False,
+            drop=drop,
+            thread_ids=thread_ids,
+            checkpoint_ns=checkpoint_ns,
         )
 
     def rewrite_store(
@@ -2583,12 +2593,14 @@ class EventGraph:
         *,
         drop: Iterable[type[Event]] = (),
         thread_ids: Iterable[str],
+        checkpoint_ns: str = "",
     ) -> RewriteReport:
         """Rewrite the latest checkpoint of each thread in *thread_ids*
         under the live migration table, and drop the stored events
         ``drop`` names.
 
-        Same threads and same report as :meth:`plan_rewrite`. Each thread
+        Same threads, same *checkpoint_ns* and same report as
+        :meth:`plan_rewrite`. Each thread
         the plan marks as a rewrite is written back through the
         checkpointer's ``put()`` under its existing checkpoint id, with a
         new version for each channel the rewrite touched, and its
@@ -2608,7 +2620,11 @@ class EventGraph:
         write to prove the thread did not move.
         """
         return self._rewrite_walk(
-            "rewrite_store", apply=True, drop=drop, thread_ids=thread_ids
+            "rewrite_store",
+            apply=True,
+            drop=drop,
+            thread_ids=thread_ids,
+            checkpoint_ns=checkpoint_ns,
         )
 
     def _apply_thread_plan(
@@ -2628,12 +2644,13 @@ class EventGraph:
         cfg: RunnableConfig, tup: CheckpointTuple
     ) -> RunnableConfig:
         """The config ``put`` takes: the parent, so the parent link stays,
-        or a bare thread config on a thread with one checkpoint.
-        ``MemorySaver.put`` reads ``checkpoint_ns`` with no default."""
+        or a bare config of the thread and namespace on a thread with one
+        checkpoint. ``MemorySaver.put`` reads ``checkpoint_ns`` with no
+        default."""
         return tup.parent_config or {
             "configurable": {
                 "thread_id": cfg["configurable"]["thread_id"],
-                "checkpoint_ns": "",
+                "checkpoint_ns": cfg["configurable"].get("checkpoint_ns", ""),
             }
         }
 
@@ -2663,9 +2680,6 @@ class EventGraph:
         thread_ids: Iterable[str],
         checkpoint_ns: str = "",
     ) -> RewriteReport:
-        """*checkpoint_ns* other than the root is for a plan only. The write
-        path keeps the parent link of a root checkpoint, and no test proves
-        it for a subgraph checkpoint."""
         ids = _explicit_thread_ids(method, thread_ids)
         serde, plan = self._prepare_rewrite(method, drop)
         results: list[ThreadRewrite] = []
@@ -2674,18 +2688,18 @@ class EventGraph:
             with serde._record_reads() as reads:
                 tup, unresolved = self._read_checkpoint_tuple(cfg, method)
             if tup is None:
-                results.append(_no_checkpoint(tid))
-                continue
-            planned = plan(
-                thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
-            )
-            if isinstance(planned, ThreadRewrite):
-                result = planned
-            elif apply:
-                result = self._apply_thread_plan(cfg, tup, planned, method)
+                result = _no_checkpoint(tid)
             else:
-                result = planned.result
-            results.append(result)
+                planned = plan(
+                    thread_id=tid, tup=tup, unresolved=unresolved, reads=list(reads)
+                )
+                if isinstance(planned, ThreadRewrite):
+                    result = planned
+                elif apply:
+                    result = self._apply_thread_plan(cfg, tup, planned, method)
+                else:
+                    result = planned.result
+            results.append(replace(result, checkpoint_ns=checkpoint_ns))
         return RewriteReport(applied=apply, threads=tuple(results))
 
     def _prepare_rewrite(

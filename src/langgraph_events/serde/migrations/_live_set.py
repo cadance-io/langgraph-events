@@ -1,10 +1,10 @@
 """The deploy step: rewrite the live set of a target's store until it reads clean.
 
 :func:`rewrite_live_set` refuses before it opens the store when the running
-code does not hold the expected migrations. It then rewrites each root thread
-and plans again, until a plan reads every root thread unchanged or the passes
-run out. Only that last plan decides the outcome. It reads each subgraph
-checkpoint and never writes one.
+code does not hold the expected migrations. It then rewrites the latest
+checkpoint of each thread in each checkpoint namespace and plans again,
+until a plan reads every checkpoint unchanged or the passes run out. Only
+that last plan decides the outcome.
 """
 
 from __future__ import annotations
@@ -13,19 +13,17 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from langgraph_events._rewrite import RewriteReport
 from langgraph_events.serde.migrations._target import TargetError, ThreadKey
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Iterable
     from typing import TextIO
 
     from langgraph_events import EventGraph
-    from langgraph_events._rewrite import RewriteReport, ThreadRewrite
-    from langgraph_events.serde.migrations._core import MigrationKey, MigrationSet
+    from langgraph_events.serde.migrations._core import MigrationSet
     from langgraph_events.serde.migrations._gate import Invocation
-    from langgraph_events.serde.migrations._target import MigrationTarget
-
-_METHOD = "rewrite_live_set"
+    from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
 
 
 @dataclass(frozen=True)
@@ -40,8 +38,11 @@ class WrongRelease:
     running: str
     running_labels: tuple[str, ...]
 
-    def render(self, invocation: Invocation) -> str:
-        """The two fingerprints, the running migrations, then the next command."""
+    def render(self, invocation: Invocation, *, apply: bool) -> str:
+        """The two fingerprints, the running migrations, then the next command.
+
+        *apply* keeps the caller's ``--apply`` in the command.
+        """
         labels = ", ".join(self.running_labels) or "none"
         return "\n".join(
             (
@@ -49,66 +50,39 @@ class WrongRelease:
                 f"migrations {self.running}, not {self.expected}.",
                 f"  running migrations: {labels}",
                 f"  Run the command in the release whose baseline gives "
-                f"{self.expected}: {invocation.rewrite(self.expected)}",
+                f"{self.expected}: {invocation.rewrite(self.expected, apply=apply)}",
             )
         )
 
 
 @dataclass(frozen=True)
-class SubgraphTouched:
-    """A subgraph checkpoint that the running migrations still change.
-
-    ``thread`` is the read-only plan of the checkpoint. ``migrations`` holds
-    each running migration keyed on an identity that the plan migrated:
-    those migrations must stay while the checkpoint exists.
-    """
-
-    key: ThreadKey
-    thread: ThreadRewrite
-    migrations: tuple[MigrationKey, ...]
-
-
-@dataclass(frozen=True)
 class LiveSetOutcome:
-    """Every apply pass, the last plan, and each subgraph checkpoint it touched."""
+    """Every apply pass and the last plan.
+
+    Each report holds one ``ThreadRewrite`` per checkpoint namespace of
+    each thread, the root namespace first.
+    """
 
     passes: tuple[RewriteReport, ...]
     final: RewriteReport
-    subgraphs: tuple[SubgraphTouched, ...]
 
     @property
     def clean(self) -> bool:
-        """The last plan reads every root thread unchanged, and no subgraph
-        checkpoint is touched."""
-        return not self.subgraphs and all(
-            thread.status == "unchanged" for thread in self.final.threads
-        )
+        """The last plan reads every checkpoint unchanged."""
+        return not _not_clean(self.final)
 
     def render(self, invocation: Invocation, expect: str) -> str:
-        """The verdict, each checkpoint that is not clean, then the next commands."""
+        """The verdict, each checkpoint that is not clean, then the next command."""
         head = str(self.final).splitlines()[0]
         if self.clean:
             return f"lge rewrite: clean (last plan: {head})"
         lines = [f"lge rewrite: not clean (last plan: {head})"]
         for thread in self.final.threads:
             if thread.status == "rewrite":
-                lines.append(f"  {thread.thread_id}: needs a rewrite")
+                lines.append(f"  {thread.location}: needs a rewrite")
             elif thread.status == "refused":
-                lines.append(f"  {thread.thread_id}: refused, {thread.reason}")
-        for touched in self.subgraphs:
-            labels = ", ".join(key.label for key in touched.migrations) or "none"
-            lines.append(
-                f"  {touched.key.thread_id} in subgraph namespace "
-                f"{touched.key.checkpoint_ns!r}: {touched.thread.status}, "
-                f"read by: {labels}"
-            )
-        if _not_clean(self.final):
-            lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
-        lines.extend(
-            "  The rewrite never writes a subgraph checkpoint. Keep the migration "
-            f"one more release: {invocation.baseline_hold(key.label)}"
-            for key in dict.fromkeys(k for t in self.subgraphs for k in t.migrations)
-        )
+                lines.append(f"  {thread.location}: refused, {thread.reason}")
+        lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
         return "\n".join(lines)
 
 
@@ -120,21 +94,23 @@ def rewrite_live_set(
     passes: int = 3,
     log: TextIO | None = None,
 ) -> LiveSetOutcome | WrongRelease:
-    """Rewrite every root thread of the store of *target*, then plan again.
+    """Rewrite every checkpoint namespace of every thread in the store of
+    *target*, then plan again.
 
     *expect* is the migration fingerprint of the release that must run.
     The code is compared before the store is opened. With *apply*, each
-    pass rewrites the root threads that the last plan did not read
+    pass rewrites the checkpoints that the last plan did not read
     unchanged, and logs one line to *log*, by default ``sys.stderr``. A
-    run that writes during a pass can leave a thread with old bytes, so
-    the next plan reads it as not clean and the next pass rewrites it.
+    run that writes during a pass can leave a checkpoint with old bytes,
+    so the next plan reads it as not clean and the next pass rewrites it.
     Without *apply*, the function only plans.
 
     Raises:
         ValueError: when *passes* is below 1, or when the graph cannot be
             rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
-            ``NamespaceAwareSerde``.
+            ``NamespaceAwareSerde``, or when the saver that ``store``
+            opens holds a serde with other migrations than the code.
     """
     if passes < 1:
         raise ValueError(f"passes must be 1 or more, got {passes}.")
@@ -153,62 +129,56 @@ def rewrite_live_set(
         )
     out = sys.stderr if log is None else log
     with target.store() as saver:
-        graph = target.graph(saver)
+        graph = _same_serde(target.build(saver), running)
 
         def plan() -> RewriteReport:
-            roots = [
-                k.thread_id for k in target.thread_keys(saver) if not k.checkpoint_ns
-            ]
-            return graph.plan_rewrite(thread_ids=roots)
+            return _walk(graph.plan_rewrite, target.thread_keys(saver), applied=False)
 
         reports: list[RewriteReport] = []
         final = plan()
         while apply and _not_clean(final) and len(reports) < passes:
-            report = graph.rewrite_store(thread_ids=_not_clean(final))
+            report = _walk(graph.rewrite_store, _not_clean(final), applied=True)
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()
-        subgraphs = _plan_subgraphs(graph, target.thread_keys(saver), running)
-    return LiveSetOutcome(tuple(reports), final, subgraphs)
+    return LiveSetOutcome(tuple(reports), final)
 
 
-def _not_clean(report: RewriteReport) -> list[str]:
-    return [t.thread_id for t in report.threads if t.status != "unchanged"]
+def _same_serde(live: Snapshot, code: MigrationSet) -> EventGraph:
+    """The graph on the real store, when its serde holds the migrations of
+    the code. A saver that already holds a ``NamespaceAwareSerde`` keeps
+    it, so the graph factory does not decide the serde that writes."""
+    if live.migrations.fingerprint != code.fingerprint:
+        raise TargetError(
+            f"The saver that store= opens holds its own serde, with the "
+            f"migrations {live.migrations.fingerprint}. The graph built on an "
+            f"empty saver holds {code.fingerprint}, and the gate and the "
+            f"--expect fence judge those. Set the serde in the graph factory, "
+            f"not in the store."
+        )
+    return live.graph
 
 
-def _plan_subgraphs(
-    graph: EventGraph, keys: Sequence[ThreadKey], running: MigrationSet
-) -> tuple[SubgraphTouched, ...]:
-    """A read-only plan of each subgraph checkpoint. Keeps each one that is
-    not unchanged."""
+def _walk(
+    method: Callable[..., RewriteReport], keys: Iterable[ThreadKey], *, applied: bool
+) -> RewriteReport:
+    """One call of *method* per checkpoint namespace, in one report."""
     by_namespace: dict[str, list[str]] = {}
     for key in keys:
-        if key.checkpoint_ns:
-            by_namespace.setdefault(key.checkpoint_ns, []).append(key.thread_id)
-    touched: list[SubgraphTouched] = []
-    for namespace, thread_ids in sorted(by_namespace.items()):
-        report = graph._rewrite_walk(
-            _METHOD,
-            apply=False,
-            drop=(),
-            thread_ids=thread_ids,
-            checkpoint_ns=namespace,
-        )
-        for thread in report.threads:
-            if thread.status == "unchanged":
-                continue
-            identities = {label for pair in thread.migrated for label in pair}
-            touched.append(
-                SubgraphTouched(
-                    ThreadKey(thread.thread_id, namespace),
-                    thread,
-                    tuple(
-                        sorted(
-                            key
-                            for key in running.keys
-                            if f"{key.module}:{key.qualname}" in identities
-                        )
-                    ),
-                )
-            )
-    return tuple(sorted(touched, key=lambda t: t.key))
+        by_namespace.setdefault(key.checkpoint_ns, []).append(key.thread_id)
+    return RewriteReport(
+        applied,
+        tuple(
+            thread
+            for namespace, thread_ids in sorted(by_namespace.items())
+            for thread in method(thread_ids=thread_ids, checkpoint_ns=namespace).threads
+        ),
+    )
+
+
+def _not_clean(report: RewriteReport) -> list[ThreadKey]:
+    return [
+        ThreadKey(t.thread_id, t.checkpoint_ns)
+        for t in report.threads
+        if t.status != "unchanged"
+    ]
