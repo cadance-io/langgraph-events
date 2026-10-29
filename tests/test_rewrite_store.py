@@ -11,6 +11,7 @@ class was renamed" or "the class was deleted" against real bytes.
 """
 
 import contextlib
+import copy
 import typing
 
 import pytest
@@ -137,6 +138,18 @@ class _AdvancingSaver(MemorySaver):
         newer = {**checkpoint, "id": str(uuid6())}
         super().put(result, newer, metadata, {})
         return result
+
+
+class _CopyingSaver(MemorySaver):
+    """Returns a copy of each pending write value, not the value that the
+    serde decoded."""
+
+    def get_tuple(self, config):  # type: ignore[override]
+        tup = super().get_tuple(config)
+        if tup is None:
+            return None
+        writes = [(t, c, copy.deepcopy(v)) for t, c, v in tup.pending_writes or ()]
+        return tup._replace(pending_writes=writes)
 
 
 @on(_Go)
@@ -458,6 +471,75 @@ def _paused_renamed_pair(saver: MemorySaver, tid: str):
     return EventGraph([wait_old, wait_live, finish], checkpointer=saver), cfg, fired
 
 
+def _paused_beside_a_sibling(saver: BaseCheckpointSaver, tid: str, *, emits: bool):
+    """A thread paused on a live interrupt, whose settled history holds an
+    interrupt written under an identity that release N+1 renamed. A sibling
+    task completed in the superstep that paused. It returns ``_SideDone``
+    when *emits* is true. Otherwise its write holds only empty values.
+
+    Returns the release N+1 graph, the config, and a dict of handler fire
+    counts that the graph's handlers update.
+    """
+
+    class _OldGate(Interrupted):
+        pass
+
+    class _LivePause(Interrupted):
+        pass
+
+    fired: dict[str, int] = {"sibling": 0, "finish": 0}
+
+    @on(Started)
+    def wait_old(event: Started) -> _OldGate:
+        return _OldGate()
+
+    @on(_Go)
+    def wait_live(event: _Go) -> _LivePause:
+        return _LivePause()
+
+    @on(_Go)
+    def sibling(event: _Go) -> _SideDone | None:
+        fired["sibling"] += 1
+        return _SideDone() if emits else None
+
+    @on(_Again)
+    def finish(event: _Again) -> Ended:
+        fired["finish"] += 1
+        return Ended(result="finished")
+
+    handlers = [wait_old, wait_live, sibling, finish]
+    cfg = _cfg(tid)
+    saver.serde = NamespaceAwareSerde(events=(Started, _OldGate, _LivePause))
+    graph = EventGraph(handlers, checkpointer=saver)
+    graph.invoke(Started(data="x"), config=cfg)
+    graph.resume(_Go(), config=cfg)
+    tup = saver.get_tuple(cfg)
+    assert tup is not None
+    assert {c for _t, c, _v in tup.pending_writes} > {"__interrupt__", "events"}
+    fired.update(sibling=0, finish=0)
+
+    @migrate_from(_OldGate.__qualname__, in_module=_OldGate.__module__)
+    class _NewGate(Interrupted):
+        pass
+
+    saver.serde = NamespaceAwareSerde(events=(Started, _NewGate, _LivePause))
+    return EventGraph(handlers, checkpointer=saver), cfg, fired
+
+
+@pytest.fixture(params=["memory", "postgres"])
+def any_saver(request: pytest.FixtureRequest):
+    """A ``MemorySaver``, then a ``PostgresSaver`` on a new database."""
+    if request.param == "memory":
+        yield MemorySaver()
+        return
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(
+        request.getfixturevalue("postgres_url")
+    ) as saver:
+        yield saver
+
+
 def _paused_on_renamed_interrupt(saver: BaseCheckpointSaver, tid: str):
     """A thread paused on an interrupt whose class release N+1 renamed.
 
@@ -485,6 +567,16 @@ def _paused_on_renamed_interrupt(saver: BaseCheckpointSaver, tid: str):
 
     saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
     return EventGraph([wait_new], checkpointer=saver), cfg
+
+
+def _task_writing(
+    saver: BaseCheckpointSaver, cfg: dict[str, typing.Any], channel: str
+) -> str:
+    """The id of the one task whose pending write is on *channel*."""
+    tup = saver.get_tuple(cfg)
+    assert tup is not None
+    [task] = {t for t, c, _v in tup.pending_writes if c == channel}
+    return task
 
 
 def _checkpoint_id(saver: BaseCheckpointSaver, cfg: dict[str, typing.Any]) -> str:
@@ -802,6 +894,35 @@ def describe_rewrite_store():
             # The paused handler re-runs once on resume by LangGraph design.
             assert fired == {"wait_old": 0, "wait_live": 1, "finish": 1}
 
+    def when_a_paused_thread_holds_a_completed_sibling_write():
+        @pytest.mark.parametrize("emits", [False, True])
+        def it_rewrites_the_thread_and_the_resume_applies_the_write(
+            any_saver: BaseCheckpointSaver, emits: bool
+        ):
+            graph, cfg, fired = _paused_beside_a_sibling(any_saver, "t1", emits=emits)
+
+            [thread] = graph.rewrite_store(thread_ids=["t1"]).threads
+            log = graph.resume(_Again(), config=cfg)
+
+            assert thread.status == "rewrite"
+            assert log.latest(Ended) == Ended(result="finished")
+            assert log.count(_SideDone) == (1 if emits else 0)
+            assert fired == {"sibling": 0, "finish": 1}
+            assert graph.plan_rewrite(thread_ids=["t1"]).threads[0].status == (
+                "unchanged"
+            )
+
+        async def it_rewrites_the_thread_through_the_async_path():
+            saver = MemorySaver()
+            graph, cfg, fired = _paused_beside_a_sibling(saver, "t1", emits=True)
+
+            [thread] = (await graph.arewrite_store(thread_ids=["t1"])).threads
+            log = await graph.aresume(_Again(), config=cfg)
+
+            assert thread.status == "rewrite"
+            assert log.count(_SideDone) == 1
+            assert fired == {"sibling": 0, "finish": 1}
+
     def when_a_thread_has_one_checkpoint():
         def it_rewrites_the_thread():
             saver = MemorySaver()
@@ -840,6 +961,39 @@ def describe_rewrite_store():
             assert saver.get_tuple(cfg).checkpoint["id"] == checkpoint_id
             [thread] = graph.plan_rewrite(thread_ids=["t1"]).threads
             assert thread.status == "unchanged"
+
+    def when_a_paused_subgraph_checkpoint_holds_a_completed_sibling_write():
+        def it_rewrites_the_subgraph_checkpoint():
+            saver = MemorySaver()
+
+            class _OldGate(Interrupted):
+                pass
+
+            @on(Started)
+            def wait(event: Started) -> _OldGate:
+                return _OldGate()
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _OldGate))
+            inner = EventGraph([wait, _side_effect], checkpointer=saver)
+
+            @on(Started)
+            def run_inner(event: Started) -> None:
+                inner.invoke(Started())
+
+            graph = EventGraph([run_inner], checkpointer=saver)
+            graph.invoke(Started(), config=_cfg("t1"))
+            [ns] = [ns for ns in saver.storage["t1"] if ns]
+            assert _task_writing(saver, _cfg("t1", ns), "events")
+
+            @migrate_from(_OldGate.__qualname__, in_module=_OldGate.__module__)
+            class _NewGate(Interrupted):
+                pass
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
+
+            report = graph.rewrite_store(thread_ids=["t1"], checkpoint_ns=ns)
+
+            assert [t.status for t in report.threads] == ["rewrite"]
 
     def when_a_subgraph_checkpoint_holds_a_renamed_identity():
         def it_stores_the_live_identity_and_keeps_the_parent_link():
@@ -1191,36 +1345,89 @@ def describe_rewrite_store_refusals():
             with saver.serde.tolerate_unresolved():
                 assert saver.get_tuple(cfg).checkpoint["channel_versions"] == before
 
-    def when_a_completed_sibling_write_is_pending():
-        def it_asks_to_resume_or_abandon_first():
+    def when_a_completed_sibling_write_holds_a_migrated_record():
+        def it_names_the_task_the_channel_and_the_record():
             saver = MemorySaver()
 
-            class _OldGate(Interrupted):
+            class _Pause(Interrupted):
+                pass
+
+            class _OldSide(IntegrationEvent):
                 pass
 
             @on(Started)
-            def wait(event: Started) -> _OldGate:
-                return _OldGate()
+            def wait(event: Started) -> _Pause:
+                return _Pause()
+
+            @on(Started)
+            def side(event: Started) -> _OldSide:
+                return _OldSide()
 
             cfg = _cfg("t1")
-            saver.serde = NamespaceAwareSerde(events=(Started, _OldGate))
-            EventGraph([wait, _side_effect], checkpointer=saver).invoke(
+            saver.serde = NamespaceAwareSerde(events=(Started, _Pause, _OldSide))
+            EventGraph([wait, side], checkpointer=saver).invoke(
                 Started(data="x"), config=cfg
             )
-            channels = {c for _t, c, _v in saver.get_tuple(cfg).pending_writes}
-            assert "__interrupt__" in channels and len(channels) > 1
 
-            @migrate_from(_OldGate.__qualname__, in_module=_OldGate.__module__)
-            class _NewGate(Interrupted):
+            @migrate_from(_OldSide.__qualname__, in_module=_OldSide.__module__)
+            class _NewSide(IntegrationEvent):
                 pass
 
-            saver.serde = NamespaceAwareSerde(events=(Started, _NewGate))
-            graph = EventGraph([wait, _side_effect], checkpointer=saver)
+            saver.serde = NamespaceAwareSerde(events=(Started, _Pause, _NewSide))
+            graph = EventGraph([wait], checkpointer=saver)
 
             thread = _only(graph.rewrite_store(thread_ids=["t1"]))
 
-            assert "completed task write" in thread.reason
-            assert "resume or abandon" in thread.reason
+            assert thread.reason == (
+                f"thread has a completed task write on task "
+                f"{_task_writing(saver, cfg, 'events')!r} in channel 'events' "
+                f"that holds {_identity(_OldSide)}, which a migration rewrites; "
+                f"resume or abandon it, then rerun"
+            )
+
+    def when_the_saver_returns_a_write_that_the_serde_did_not_decode():
+        def it_refuses_the_write_it_cannot_read():
+            saver = _CopyingSaver()
+            graph, cfg, _fired = _paused_beside_a_sibling(saver, "t1", emits=False)
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"]))
+
+            assert thread.reason.startswith(
+                f"thread has a completed task write on task "
+                f"{_task_writing(saver, cfg, 'events')!r} in channel "
+            )
+            assert thread.reason.endswith(
+                " that this serde did not decode, so the rewrite cannot read it; "
+                "resume or abandon it, then rerun"
+            )
+
+    def when_a_completed_sibling_write_holds_a_dropped_class():
+        def it_names_the_task_the_channel_and_the_class():
+            saver = MemorySaver()
+            graph, cfg, _fired = _paused_beside_a_sibling(saver, "t1", emits=True)
+
+            thread = _only(graph.rewrite_store(drop=(_SideDone,), thread_ids=["t1"]))
+
+            assert thread.reason == (
+                f"thread has a completed task write on task "
+                f"{_task_writing(saver, cfg, 'events')!r} in channel 'events' "
+                f"that holds {_identity(_SideDone)}, a class in drop; resume or "
+                f"abandon it, then rerun"
+            )
+
+    def when_a_completed_sibling_write_holds_a_position_that_the_drop_moves():
+        def it_names_the_task_and_the_channel():
+            saver = MemorySaver()
+            graph, cfg, _fired = _paused_beside_a_sibling(saver, "t1", emits=True)
+
+            thread = _only(graph.rewrite_store(drop=(Started,), thread_ids=["t1"]))
+
+            assert thread.reason == (
+                f"thread has a completed task write on task "
+                f"{_task_writing(saver, cfg, 'causes')!r} in channel 'causes' "
+                f"that holds a log position, and drop removes an event from the "
+                f"log; resume or abandon it, then rerun"
+            )
 
     def when_the_pending_interrupt_is_a_dropped_class():
         def it_asks_to_abandon_first():

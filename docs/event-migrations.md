@@ -838,7 +838,7 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 A graph that a handler invokes on the same checkpointer writes its checkpoints under a subgraph namespace. The command plans and rewrites the latest checkpoint of each subgraph namespace, the same as a root thread. So a completed subgraph run does not keep a migration in the code. A refused subgraph checkpoint prints its namespace and its reason.
 
-A subgraph checkpoint that holds a task write from a failed or completed task is refused on every pass. `abandon()` and `resume()` reach only the root namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule changes ([#217](https://github.com/cadance-io/langgraph-events/issues/217)). The operator has two choices:
+A subgraph checkpoint that holds a pending `__error__` write from a failed task is refused on every pass. A completed task write that the rewrite would change also refuses it on every pass. The rewrite accepts any other completed task write and keeps it as it is. `abandon()` and `resume()` reach only the root namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule for an `__error__` write changes ([#217](https://github.com/cadance-io/langgraph-events/issues/217)). The operator has two choices:
 
 - If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` again.
 - Otherwise keep the migrations that the checkpoint needs. Hold them with `baseline hold`, one release at a time.
@@ -997,7 +997,12 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 - Its history names an identity the serde cannot revive. Add a [tombstone](#recovering-a-delete-first-deployment) first.
 - It is paused on a dropped class. `abandon()` it first.
 - A dropped event is pending dispatch on a paused thread. After the drop, the resumed task finds no event to handle and ends the thread with the answer lost. Resume or abandon the thread first.
-- It holds a completed task write from a fanned-out sibling. The checkpointer API cannot rewrite that write. Resume or abandon the thread first.
+- It holds a completed task write from a fanned-out sibling, and the rewrite would change that write. The checkpointer API cannot rewrite the write. Resume or abandon the thread first. The reason names the task, the channel, and the identity or the log position that the write holds. A write changes when it holds one of these:
+    - a record that a migration rewrites
+    - an instance of a class in `drop=`
+    - a log position, when `drop=` removes an event from the log
+
+    The rewrite keeps every other completed write as it is. A resume applies the write and does not run its task again.
 - It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
 - A run advanced the thread between the read and the write. Rerun.

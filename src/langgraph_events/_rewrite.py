@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from langgraph_events._causes import CauseEntry
     from langgraph_events.serde._jsonplus import (
+        DecodedValue,
         NamespaceAwareSerde,
         ReadRecord,
         UnrevivedIdentity,
@@ -42,6 +43,9 @@ _LOG_CHANNELS = ("events", "_pending")
 
 _POSITION_CHANNELS = ("_cursor",)
 """The channels that hold a position in ``events``."""
+
+_POSITION_WRITES = ("causes", *_POSITION_CHANNELS)
+"""The channels whose task write can hold a position in ``events``."""
 
 RewriteStatus = Literal["rewrite", "unchanged", "refused"]
 
@@ -216,7 +220,7 @@ def plan_thread(
     checkpoint_ns: str,
     tup: CheckpointTuple,
     unresolved: Sequence[UnrevivedIdentity],
-    reads: Sequence[ReadRecord],
+    decoded: Sequence[DecodedValue],
     serde: NamespaceAwareSerde,
     drop: tuple[type[Event], ...],
     next_version: Callable[[Any, None], Any],
@@ -225,13 +229,14 @@ def plan_thread(
     store when the answer is ``"rewrite"``.
 
     *tup* was read inside ``serde.tolerate_unresolved()`` and
-    ``serde._record_reads()``; *unresolved* and *reads* are those two
-    collectors. This function runs after both blocks closed, so its
+    ``serde._record_reads(decoded)``; *unresolved* and *decoded* are those
+    two collectors. This function runs after both blocks closed, so its
     verification reads are strict. ``drop`` matches the stored identity
     exactly, not the class hierarchy: the rule ``validate_drop`` and the
     byte scan apply. A non-root *checkpoint_ns* changes only the remedy of
     a refusal, because ``abandon()`` and ``resume()`` reach the root only.
     """
+    reads = [record for _value, records in decoded for record in records]
     pairs = _migrated_pairs(reads)
     values: dict[str, Any] = tup.checkpoint["channel_values"]
     dropped = _count_drops(values, drop)
@@ -250,7 +255,9 @@ def plan_thread(
         return ThreadRewrite(thread_id, "unchanged")
 
     pending = list(tup.pending_writes or ())
-    reason = _pending_refusal(pending, values, drop, subgraph=bool(checkpoint_ns))
+    reason = _pending_refusal(
+        pending, values, drop, decoded, subgraph=bool(checkpoint_ns)
+    )
     if reason is not None:
         return refused(reason)
 
@@ -350,6 +357,7 @@ def _pending_refusal(
     pending: Sequence[tuple[str, str, Any]],
     values: dict[str, Any],
     drop: tuple[type[Event], ...],
+    decoded: Sequence[DecodedValue],
     *,
     subgraph: bool,
 ) -> str | None:
@@ -372,21 +380,56 @@ def _pending_refusal(
             f"a dropped event is pending dispatch on a paused thread; "
             f"{_RESUME_THE_ROOT if subgraph else remedy}"
         )
-    for task_id, channel, _value in pending:
+    shifts = any(type(entry) in drop for entry in _log_entries(values, "events") or ())
+    for task_id, channel, value in pending:
         if channel == _ERROR_CHANNEL:
             remedy = "run it again or abandon it, then rerun"
             return (
                 f"thread has a pending __error__ write from a failed task; "
                 f"{_NO_CALL_CLEARS if subgraph else remedy}"
             )
-        if channel != _INTERRUPT_CHANNEL:
-            # A completed task write is insert-only in both savers: the
-            # API cannot rewrite it.
+        if channel == _INTERRUPT_CHANNEL:
+            continue
+        problem = _write_problem(channel, value, decoded, drop, shifts=shifts)
+        if problem is not None:
             remedy = "resume or abandon it, then rerun"
             return (
-                f"thread has a completed task write on task {task_id!r}; "
+                f"thread has a completed task write on task {task_id!r} in "
+                f"channel {channel!r} that {problem}; "
                 f"{_NO_CALL_CLEARS if subgraph else remedy}"
             )
+    return None
+
+
+def _write_problem(
+    channel: str,
+    value: object,
+    decoded: Sequence[DecodedValue],
+    drop: tuple[type[Event], ...],
+    *,
+    shifts: bool,
+) -> str | None:
+    """What a completed task write holds that the rewrite would change, or
+    ``None``.
+
+    ``PostgresSaver`` and ``MemorySaver`` store a completed task write once
+    and never replace it, so the rewrite keeps the write as it is. A resume
+    applies the write and does not run its task again. So the decode of the
+    write must read no touched record and no class in *drop*. *shifts* is
+    ``True`` when *drop* removes an ``events`` entry. A position in the
+    write then names another event.
+    """
+    records = next((r for result, r in decoded if result is value), None)
+    if records is None:
+        return "this serde did not decode, so the rewrite cannot read it"
+    dropped = {(cls.__module__, cls.__qualname__) for cls in drop}
+    for stored, live, touched, _built in records:
+        if live in dropped:
+            return f"holds {Identity(*live).label}, a class in drop"
+        if touched:
+            return f"holds {Identity(*stored).label}, which a migration rewrites"
+    if shifts and channel in _POSITION_WRITES and value not in (None, []):
+        return "holds a log position, and drop removes an event from the log"
     return None
 
 
