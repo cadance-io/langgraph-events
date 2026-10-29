@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.1] - 2026-10-29
+
 ### Added
 
 - **`PreviousRequiredError` is public.** Import it from `langgraph_events.serde.migrations`.
@@ -1915,7 +1917,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.42.1...HEAD
+[0.42.1]: https://github.com/cadance-io/langgraph-events/compare/v0.42.0...v0.42.1
 [0.42.0]: https://github.com/cadance-io/langgraph-events/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/cadance-io/langgraph-events/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/cadance-io/langgraph-events/compare/v0.39.0...v0.40.0
