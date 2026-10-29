@@ -407,6 +407,47 @@ def _paused_subgraph(saver: MemorySaver, tid: str):
     return graph, ns, _Retiring
 
 
+def _paused_subgraph_beside_a_sibling(saver: MemorySaver, tid: str):
+    """A root thread paused because its inner graph paused. A sibling task
+    of the inner graph completed in the superstep that paused. Its write
+    holds an event whose class release N+1 renamed with ``@migrate_from``.
+    Returns the release N+1 graph, the namespace and the old class."""
+
+    class _Gate(Interrupted):
+        pass
+
+    class _OldSide(IntegrationEvent):
+        pass
+
+    @on(Started)
+    def wait(event: Started) -> _Gate:
+        return _Gate()
+
+    @on(Started)
+    def side(event: Started) -> _OldSide:
+        return _OldSide()
+
+    def root(inner: EventGraph) -> EventGraph:
+        @on(Started)
+        def run_inner(event: Started) -> None:
+            inner.invoke(Started())
+
+        return EventGraph([run_inner], checkpointer=saver)
+
+    saver.serde = NamespaceAwareSerde(events=(Started, Ended, _Go, _Gate, _OldSide))
+    root(EventGraph([wait, side, _go_ends], checkpointer=saver)).invoke(
+        Started(), config=_cfg(tid)
+    )
+    [ns] = [ns for ns in saver.storage[tid] if ns]
+
+    @migrate_from(_OldSide.__qualname__, in_module=_OldSide.__module__)
+    class _NewSide(IntegrationEvent):
+        pass
+
+    saver.serde = NamespaceAwareSerde(events=(Started, Ended, _Go, _Gate, _NewSide))
+    return root(EventGraph([wait, _go_ends], checkpointer=saver)), ns, _OldSide
+
+
 def _settled_drop_pair(saver: MemorySaver, tid: str):
     """A settled thread whose history holds an interrupt on a class that is
     still live and about to be retired. Returns the graph, the config and
@@ -1134,9 +1175,9 @@ def describe_rewrite_store_refusals():
             assert "delete_thread()" in thread.reason
 
         def when_a_completed_sibling_write_holds_the_entry():
-            def it_names_the_task_and_the_channel():
-                saver = MemorySaver()
-
+            # The thread paused in its first superstep, so its history
+            # holds no record that a migration rewrites.
+            def _paused_beside_the_entry(saver: MemorySaver) -> EventGraph:
                 class _Gone(IntegrationEvent):
                     pass
 
@@ -1144,31 +1185,39 @@ def describe_rewrite_store_refusals():
                 def wait(event: Started) -> _Hold:
                     return _Hold()
 
-                @on(_Go)
-                def hold(event: _Go) -> _Hold:
-                    return _Hold()
-
-                @on(_Go)
-                def make(event: _Go) -> _Gone:
+                @on(Started)
+                def make(event: Started) -> _Gone:
                     return _Gone()
 
-                cfg = _cfg("t1")
                 saver.serde = JsonPlusSerializer()
-                graph = EventGraph([wait, hold, make], checkpointer=saver)
-                graph.invoke(Started(data="x"), config=cfg)
-                graph.resume(_Go(), config=cfg)
-                saver.serde = NamespaceAwareSerde(events=(Started, _Go, _Hold))
+                graph = EventGraph([wait, make], checkpointer=saver)
+                graph.invoke(Started(data="x"), config=_cfg("t1"))
+                saver.serde = NamespaceAwareSerde(events=(Started, _Hold))
+                return graph
+
+            def it_names_the_task_and_the_channel():
+                saver = MemorySaver()
+                graph = _paused_beside_the_entry(saver)
 
                 thread = _only(graph.rewrite_store(thread_ids=["t1"]))
 
                 assert thread.reason.startswith(
                     f"thread has a completed task write on task "
-                    f"{_task_writing(saver, cfg, 'events')!r} in channel 'events' "
-                    f"that holds 1 entry that revives as NoneType, not as an "
-                    f"event. "
+                    f"{_task_writing(saver, _cfg('t1'), 'events')!r} in channel "
+                    f"'events' that holds 1 entry that revives as NoneType, not "
+                    f"as an event. "
                 )
                 assert thread.reason.endswith(
                     "delete_thread() if nobody needs it, then rerun"
+                )
+
+            async def it_refuses_the_thread_through_the_async_saver():
+                graph = _paused_beside_the_entry(MemorySaver())
+
+                thread = _only(await graph.arewrite_store(thread_ids=["t1"]))
+
+                assert thread.reason.startswith(
+                    "thread has a completed task write on task "
                 )
 
         def when_the_allow_list_of_the_serde_blocks_its_class():
@@ -1439,8 +1488,11 @@ def describe_rewrite_store_refusals():
                 f"{_task_writing(saver, cfg, 'events')!r} in channel "
             )
             assert thread.reason.endswith(
-                " that this serde did not decode, so the rewrite cannot read it; "
-                "resume or abandon it, then rerun"
+                " that get_tuple() of the checkpointer returns as another object "
+                "than the one that its serde decoded, for example as a copy, so "
+                "the rewrite cannot read it; resume or abandon it, then rerun. "
+                "To let the rewrite read such a write, make get_tuple() return "
+                "the write values that the serde decoded"
             )
 
     def when_a_completed_sibling_write_holds_a_dropped_class():
@@ -1467,8 +1519,9 @@ def describe_rewrite_store_refusals():
             assert thread.reason == (
                 f"thread has a completed task write on task "
                 f"{_task_writing(saver, cfg, 'causes')!r} in channel 'causes' "
-                f"that holds a log position, and drop removes an event from the "
-                f"log; resume or abandon it, then rerun"
+                f"that holds an index into channel 'events', and drop removes an "
+                f"event from that channel, so the index would point to another "
+                f"event; resume or abandon it, then rerun"
             )
 
     def when_the_pending_interrupt_is_a_dropped_class():
@@ -1639,6 +1692,76 @@ def describe_rewrite_store_refusals():
 
             assert thread.reason == (
                 "thread has a pending __error__ write from a failed task; "
+                "abandon() and resume() reach only the root namespace, so no "
+                "call clears this write. If nobody needs the thread, delete "
+                "every checkpoint of it with the checkpointer's "
+                "delete_thread(), then rerun. Otherwise keep the migrations "
+                "and the classes that this checkpoint needs"
+            )
+
+    def when_a_paused_subgraph_checkpoint_holds_a_sibling_write_to_migrate():
+        def it_asks_to_resume_the_root_thread():
+            saver = MemorySaver()
+            graph, ns, old = _paused_subgraph_beside_a_sibling(saver, "t1")
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"], checkpoint_ns=ns))
+
+            task = _task_writing(saver, _cfg("t1", ns), "events")
+            assert thread.reason == (
+                f"thread has a completed task write on task {task!r} in channel "
+                f"'events' that holds {_identity(old)}, which a migration "
+                f"rewrites; resume the root thread, then rerun. abandon() does "
+                f"not clear a subgraph checkpoint"
+            )
+
+        def when_the_root_thread_resumes():
+            def it_leaves_nothing_to_refuse():
+                saver = MemorySaver()
+                graph, ns, _old = _paused_subgraph_beside_a_sibling(saver, "t1")
+                graph.resume(_Go(), config=_cfg("t1"))
+
+                [thread] = graph.rewrite_store(
+                    thread_ids=["t1"], checkpoint_ns=ns
+                ).threads
+
+                assert thread.status == "unchanged"
+
+    def when_a_failed_sibling_left_a_completed_write_in_a_subgraph():
+        def it_names_no_call_that_clears_it():
+            saver = MemorySaver()
+
+            class _OldSide(IntegrationEvent):
+                pass
+
+            @on(Started)
+            def side(event: Started) -> _OldSide:
+                return _OldSide()
+
+            @on(Started)
+            def fail(event: Started) -> None:
+                raise RuntimeError("inner failed")
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _OldSide))
+            inner = EventGraph([side, fail], checkpointer=saver)
+
+            @on(Started)
+            def run_inner(event: Started) -> None:
+                with contextlib.suppress(RuntimeError):
+                    inner.invoke(Started())
+
+            graph = EventGraph([run_inner], checkpointer=saver)
+            graph.invoke(Started(), config=_cfg("t1"))
+            [ns] = [ns for ns in saver.storage["t1"] if ns]
+
+            @migrate_from(_OldSide.__qualname__, in_module=_OldSide.__module__)
+            class _NewSide(IntegrationEvent):
+                pass
+
+            saver.serde = NamespaceAwareSerde(events=(Started, _NewSide))
+
+            thread = _only(graph.rewrite_store(thread_ids=["t1"], checkpoint_ns=ns))
+
+            assert thread.reason.endswith(
                 "abandon() and resume() reach only the root namespace, so no "
                 "call clears this write. If nobody needs the thread, delete "
                 "every checkpoint of it with the checkpointer's "

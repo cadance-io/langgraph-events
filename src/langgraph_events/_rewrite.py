@@ -248,13 +248,13 @@ def plan_thread(
             thread_id, "refused", migrated=pairs, dropped=dropped, reason=reason
         )
 
-    reason = _history_refusal(unresolved, values)
+    pending = list(tup.pending_writes or ())
+    reason = _history_refusal(unresolved, values, pending)
     if reason is not None:
         return refused(reason)
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged")
 
-    pending = list(tup.pending_writes or ())
     reason = _pending_refusal(
         pending, values, drop, decoded, subgraph=bool(checkpoint_ns)
     )
@@ -285,16 +285,20 @@ def plan_thread(
 
 
 def _history_refusal(
-    unresolved: Sequence[UnrevivedIdentity], values: dict[str, Any]
+    unresolved: Sequence[UnrevivedIdentity],
+    values: dict[str, Any],
+    pending: Sequence[tuple[str, str, Any]],
 ) -> str | None:
-    """Why the stored history stops this rewrite, or ``None``."""
+    """Why the stored history stops this rewrite, or ``None``. A resume
+    appends a completed write to ``events`` or ``_pending`` to the log, so
+    that write counts as history."""
     if unresolved:
         names = ", ".join(dict.fromkeys(u.qualname for u in unresolved))
         return (
             f"history names {names}, which the serde cannot revive; add a "
             f"tombstone first"
         )
-    return _entries_not_events(values)
+    return _entries_not_events(values) or _writes_not_events(pending)
 
 
 def _entries_not_events(values: dict[str, Any]) -> str | None:
@@ -303,6 +307,21 @@ def _entries_not_events(values: dict[str, Any]) -> str | None:
         problem = _not_events(_log_entries(values, channel) or [])
         if problem is not None:
             return f"channel {channel!r} {problem}"
+    return None
+
+
+def _writes_not_events(pending: Sequence[tuple[str, str, Any]]) -> str | None:
+    """Why a completed task write to a log channel holds an entry that is
+    not an event, or ``None``. The remedy is the remedy of the entry."""
+    for task_id, channel, value in pending:
+        if channel not in _LOG_CHANNELS or not isinstance(value, list):
+            continue
+        problem = _not_events(value)
+        if problem is not None:
+            return (
+                f"thread has a completed task write on task {task_id!r} in "
+                f"channel {channel!r} that {problem}"
+            )
     return None
 
 
@@ -354,8 +373,9 @@ _NO_CALL_CLEARS = (
     "with the checkpointer's delete_thread(), then rerun. Otherwise keep the "
     "migrations and the classes that this checkpoint needs"
 )
-"""The remedy for a task write in a subgraph checkpoint. A new run of the
-root thread writes under a new namespace and leaves this checkpoint."""
+"""The remedy for a task write in a subgraph checkpoint that is not paused.
+A new run of the root thread writes under a new namespace and leaves this
+checkpoint."""
 
 
 def _pending_refusal(
@@ -386,39 +406,41 @@ def _pending_refusal(
             f"{_RESUME_THE_ROOT if subgraph else remedy}"
         )
     shifts = any(type(entry) in drop for entry in _log_entries(values, "events") or ())
+    if not subgraph:
+        remedy = "resume or abandon it, then rerun"
+    else:
+        # A resume of the root thread reruns the paused subgraph task under
+        # the same namespace, and that run applies the completed write.
+        remedy = _RESUME_THE_ROOT if interrupt_writes else _NO_CALL_CLEARS
     for task_id, channel, value in pending:
         if channel == _ERROR_CHANNEL:
-            remedy = "run it again or abandon it, then rerun"
+            rerun = "run it again or abandon it, then rerun"
             return (
                 f"thread has a pending __error__ write from a failed task; "
-                f"{_NO_CALL_CLEARS if subgraph else remedy}"
+                f"{_NO_CALL_CLEARS if subgraph else rerun}"
             )
         if channel == _INTERRUPT_CHANNEL:
             continue
         where = f"thread has a completed task write on task {task_id!r} in"
-        problem = (
-            _not_events(value)
-            if channel in _LOG_CHANNELS and isinstance(value, list)
-            else None
-        )
-        if problem is not None:
-            # A resume would append the entry to the log, so its remedy
-            # is the remedy of the entry.
-            return f"{where} channel {channel!r} that {problem}"
-        problem = _write_problem(channel, value, decoded, drop, shifts=shifts)
-        if problem is not None:
-            remedy = "resume or abandon it, then rerun"
+        records = next((r for result, r in decoded if result is value), None)
+        if records is None:
             return (
-                f"{where} channel {channel!r} that {problem}; "
-                f"{_NO_CALL_CLEARS if subgraph else remedy}"
+                f"{where} channel {channel!r} that get_tuple() of the "
+                f"checkpointer returns as another object than the one that its "
+                f"serde decoded, for example as a copy, so the rewrite cannot "
+                f"read it; {remedy}. To let the rewrite read such a write, make "
+                f"get_tuple() return the write values that the serde decoded"
             )
+        problem = _write_problem(channel, value, records, drop, shifts=shifts)
+        if problem is not None:
+            return f"{where} channel {channel!r} that {problem}; {remedy}"
     return None
 
 
 def _write_problem(
     channel: str,
     value: object,
-    decoded: Sequence[DecodedValue],
+    records: Sequence[ReadRecord],
     drop: tuple[type[Event], ...],
     *,
     shifts: bool,
@@ -429,13 +451,10 @@ def _write_problem(
     ``PostgresSaver``, ``SqliteSaver`` and ``MemorySaver`` store a completed
     task write once and never replace it, so the rewrite keeps the write as
     it is. A resume applies the write and does not run its task again. So
-    the decode of the write must read no touched record and no class in
-    *drop*. *shifts* is ``True`` when *drop* removes an ``events`` entry. A
-    position in the write then names another event.
+    *records*, which the decode of the write read, must hold no touched
+    record and no class in *drop*. *shifts* is ``True`` when *drop* removes
+    an ``events`` entry. A position in the write then names another event.
     """
-    records = next((r for result, r in decoded if result is value), None)
-    if records is None:
-        return "this serde did not decode, so the rewrite cannot read it"
     dropped = {(cls.__module__, cls.__qualname__) for cls in drop}
     for stored, live, touched, _built in records:
         if live in dropped:
@@ -443,7 +462,10 @@ def _write_problem(
         if touched:
             return f"holds {Identity(*stored).label}, which a migration rewrites"
     if shifts and channel in _POSITION_WRITES and value not in (None, []):
-        return "holds a log position, and drop removes an event from the log"
+        return (
+            "holds an index into channel 'events', and drop removes an event "
+            "from that channel, so the index would point to another event"
+        )
     return None
 
 
