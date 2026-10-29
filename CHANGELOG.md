@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`PreviousRequiredError` is public.** Import it from `langgraph_events.serde.migrations`.
+  `update_baseline()` raises it when migrations left the code and `previous` is not given.
+  It is a `ValueError`. `.deleted` holds the `MigrationKey` of each migration that left the
+  code. Before, a client could catch it only from a private module.
+
+### Fixed
+
+- **`rewrite_store()` accepts a completed task write that holds no old shape.** Before, a
+  thread that paused beside a sibling task that completed in the same superstep was refused
+  on every pass. Its old shape stayed. Now the rewrite keeps such a write as it is, and a
+  resume applies it without a new run of its task. A completed task write is still refused
+  when its stored value holds a record that a migration rewrites, or a class in `drop=`. It
+  is also refused when it holds an index into `events` and `drop=` removes an event from
+  `events`, or when it writes an entry that is not an event to `events` or `_pending`. The
+  last case is refused even when the thread holds nothing else to rewrite. The reason names
+  the task, the channel, and the identity or the index. In a paused subgraph checkpoint, the
+  reason asks you to resume the root thread, because that resume applies the write. A custom
+  checkpointer must return from `get_tuple()` each write value that its serde decoded, not a
+  copy. Otherwise the rewrite cannot read a completed write, and the reason names
+  `get_tuple()`. The rule is the rule of the checkpoint values: a record is touched when the
+  migration changes its identity, or changes its fields to values that encode to other
+  bytes. A pending `__error__` write from a failed task is still refused
+  ([#217](https://github.com/cadance-io/langgraph-events/issues/217)).
+- **A refused root thread with no pending interrupt names a call that clears it.** Before,
+  the reason for a completed task write asked you to resume or abandon the thread, and the
+  reason for an `__error__` write asked you to abandon it. `resume()` and a plain `abandon()`
+  refuse a thread with no pending interrupt. Now both reasons name
+  `abandon(config, require_interrupt=False)`.
+
 ## [0.42.0] - 2026-10-29
 
 ### Added

@@ -123,6 +123,10 @@ when the migration table rewrote the record. *built* holds each field value
 that the migration added or replaced, as the object the event holds. A
 stored value that the migration kept is not in it."""
 
+DecodedValue = tuple[object, tuple[ReadRecord, ...]]
+"""One value that ``loads_typed`` returned, and the :data:`ReadRecord` of
+each stored event record that its decode read, in read order."""
+
 
 def _scan_identities(data: bytes) -> list[tuple[str, str]]:
     """Every ``(module, qualname)`` event identity stored in *data*, in
@@ -625,6 +629,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         self._unresolved: list[UnrevivedIdentity] | None = None
         self._record_depth = 0
         self._reads: list[ReadRecord] | None = None
+        self._decoded: list[DecodedValue] | None = None
         for cls in _unreachable_migrate_from_siblings(scope):
             warn_user(
                 f"{cls.__qualname__} is decorated with @migrate_from, but "
@@ -678,7 +683,9 @@ class NamespaceAwareSerde(JsonPlusSerializer):
                 self._unresolved = None
 
     @contextlib.contextmanager
-    def _record_reads(self) -> Iterator[list[ReadRecord]]:
+    def _record_reads(
+        self, decoded: list[DecodedValue] | None = None
+    ) -> Iterator[list[ReadRecord]]:
         """Collect every stored event record this serde reads, for the
         duration of the ``with`` block.
 
@@ -692,6 +699,10 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         gained a dataclass default with no ``AddField`` is untouched: the
         table never saw the missing field.
 
+        *decoded*, when given, collects one :data:`DecodedValue` per
+        ``loads_typed`` call inside the block. So the caller knows which
+        records each returned value holds.
+
         For ``EventGraph.plan_rewrite()`` and ``rewrite_store()`` only.
         Reentrant like :meth:`tolerate_unresolved`, and with the same
         per-instance-state caveat: do not read through this serde from
@@ -700,11 +711,15 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         collector = self._reads
         if collector is None:
             collector = self._reads = []
+        outer = self._decoded
+        if decoded is not None:
+            self._decoded = decoded
         self._record_depth += 1
         try:
             yield collector
         finally:
             self._record_depth -= 1
+            self._decoded = outer
             if self._record_depth == 0:
                 self._reads = None
 
@@ -775,6 +790,14 @@ class NamespaceAwareSerde(JsonPlusSerializer):
             raise
 
     def loads_typed(self, data: tuple[str, bytes]) -> Any:  # noqa: ANN401 - returns any value LangGraph stored, as SerializerProtocol declares
+        reads, decoded = self._reads, self._decoded
+        start = len(reads) if reads is not None else 0
+        value = self._decode(data)
+        if decoded is not None and reads is not None:
+            decoded.append((value, tuple(reads[start:])))
+        return value
+
+    def _decode(self, data: tuple[str, bytes]) -> Any:  # noqa: ANN401 - see loads_typed
         type_, data_ = data
         if type_ != "msgpack":
             return super().loads_typed(data)

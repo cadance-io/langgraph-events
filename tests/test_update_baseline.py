@@ -34,6 +34,7 @@ from langgraph_events import (
 )
 from langgraph_events.serde.migrations import (
     MigrationTarget,
+    PreviousRequiredError,
     TargetError,
     check,
     hold_migration,
@@ -327,7 +328,7 @@ def describe_update_baseline():
                 target, _ = _deleted_transform(tmp_path)
                 committed = target.baseline.read_text()
 
-                with pytest.raises(ValueError) as raised:
+                with pytest.raises(PreviousRequiredError) as raised:
                     update_baseline(target)
 
                 assert (

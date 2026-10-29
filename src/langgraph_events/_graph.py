@@ -92,8 +92,8 @@ if TYPE_CHECKING:
     from langgraph_events._reflection import Reflection
     from langgraph_events._types import PauseSignal, StateDict
     from langgraph_events.serde._jsonplus import (
+        DecodedValue,
         NamespaceAwareSerde,
-        ReadRecord,
         UnrevivedIdentity,
     )
 
@@ -116,13 +116,13 @@ def _plan_read(
     cfg: RunnableConfig,
     tup: CheckpointTuple | None,
     unresolved: list[UnrevivedIdentity],
-    reads: list[ReadRecord],
+    decoded: list[DecodedValue],
 ) -> ThreadRewrite | RewritePlan:
     """The plan of one read checkpoint, or a refusal when the store has none."""
     thread_id = cfg["configurable"]["thread_id"]
     if tup is None:
         return _no_checkpoint(thread_id)
-    return plan(thread_id=thread_id, tup=tup, unresolved=unresolved, reads=list(reads))
+    return plan(thread_id=thread_id, tup=tup, unresolved=unresolved, decoded=decoded)
 
 
 def _planned_outcome(planned: ThreadRewrite | RewritePlan) -> ThreadRewrite:
@@ -2748,9 +2748,10 @@ class EventGraph:
         method: str,
     ) -> tuple[CheckpointTuple | None, ThreadRewrite | RewritePlan]:
         """The latest checkpoint at *cfg*, and the plan of it."""
-        with serde._record_reads() as reads:
+        decoded: list[DecodedValue] = []
+        with serde._record_reads(decoded):
             tup, unresolved = self._read_checkpoint_tuple(cfg, method)
-        return tup, _plan_read(plan, cfg, tup, unresolved, reads)
+        return tup, _plan_read(plan, cfg, tup, unresolved, decoded)
 
     @staticmethod
     def _rewrite_base_config(
@@ -2894,9 +2895,10 @@ class EventGraph:
         method: str,
     ) -> tuple[CheckpointTuple | None, ThreadRewrite | RewritePlan]:
         """Async sibling of :meth:`_read_and_plan`."""
-        with serde._record_reads() as reads:
+        decoded: list[DecodedValue] = []
+        with serde._record_reads(decoded):
             tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
-        return tup, _plan_read(plan, cfg, tup, unresolved, reads)
+        return tup, _plan_read(plan, cfg, tup, unresolved, decoded)
 
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.

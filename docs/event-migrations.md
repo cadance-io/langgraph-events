@@ -663,17 +663,20 @@ The table gives what each checkpointer supports. A plan writes nothing. An apply
 | `PostgresSaver` | Yes | Built in, with one SQL query | Needed. See [Old blob versions](#old-blob-versions) |
 | `SqliteSaver` | Yes | Built in, with one SQL query | Not needed. `put()` replaces the whole checkpoint row |
 | `MemorySaver` | Yes | Built in, from its storage | No prune. The old versions stay in memory |
-| A custom saver | Yes, when it obeys the two rules below | Set `threads=list_thread_keys` for a small store, or your own function | It depends on the saver |
+| A custom saver | Yes, when it obeys the three rules below | Set `threads=list_thread_keys` for a small store, or your own function | It depends on the saver |
 | `AsyncPostgresSaver`, `AsyncSqliteSaver` | Through `aplan_rewrite()` and `arewrite_store()` only | None. Pass `thread_ids=` and `checkpoint_ns=` | The same as the sync saver of the same database |
 
 The `rewrite` command takes a sync checkpointer only. For a store that the app reads through an async saver, give `store` the sync saver of the same database.
 
-A custom saver must obey two rules, or the rewrite cannot store a thread:
+A custom saver must obey three rules, or the rewrite cannot store a thread:
 
 1. `put()` of a checkpoint whose id is in the store replaces the stored checkpoint.
 2. `put_writes()` of an `__interrupt__` write replaces the stored `__interrupt__` write of the same task.
+3. `get_tuple()` returns each pending write value as the object that the serde decoded. A copy does not obey this rule.
 
-The base class `BaseCheckpointSaver` does not promise either rule. So after each write, the rewrite reads the checkpoint and plans it again. Each fact gets its own reason:
+The rewrite reads which records a completed task write holds from the decode of its serde. So under a saver that breaks rule 3, a thread that needs a rewrite and holds a completed task write is refused. The reason names `get_tuple()`.
+
+The base class `BaseCheckpointSaver` does not promise any of the three rules. So after each write, the rewrite reads the checkpoint and plans it again. Each fact gets its own reason:
 
 | What the read after the write finds | Reason |
 |---|---|
@@ -766,7 +769,7 @@ your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp
 | Code | Meaning | The output names |
 |---|---|---|
 | 0 | The last plan reads every checkpoint unchanged | The counts of each pass and of the last plan |
-| 1 | The store is not clean | Each checkpoint and its reason, then the next command: `rewrite --apply` |
+| 1 | The store is not clean | Each checkpoint and its reason. When the last plan reads a checkpoint as a rewrite, the output also names the next command: `rewrite --apply` |
 | 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open | The error, on one line, with its type when lge did not raise it |
 | 3 | Wrong release: the running code does not hold the expected migrations | Both fingerprints, the running migrations and the command |
 
@@ -838,7 +841,9 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 A graph that a handler invokes on the same checkpointer writes its checkpoints under a subgraph namespace. The command plans and rewrites the latest checkpoint of each subgraph namespace, the same as a root thread. So a completed subgraph run does not keep a migration in the code. A refused subgraph checkpoint prints its namespace and its reason.
 
-A subgraph checkpoint that holds a task write from a failed or completed task is refused on every pass. `abandon()` and `resume()` reach only the root namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule changes ([#217](https://github.com/cadance-io/langgraph-events/issues/217)). The operator has two choices:
+A completed task write that the rewrite would change refuses a subgraph checkpoint. The rewrite accepts any other completed task write and keeps it as it is. When the subgraph checkpoint is paused on an interrupt, resume the root thread, then run `rewrite --apply` again. The resume runs the paused subgraph task again under the same namespace, and that run applies the write. `abandon()` does not clear a subgraph checkpoint.
+
+A subgraph checkpoint that holds a pending `__error__` write from a failed task is refused on every pass. When the subgraph checkpoint is not paused, a completed task write that the rewrite would change also refuses it on every pass. `abandon()` and `resume()` reach only the root namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule for an `__error__` write changes ([#217](https://github.com/cadance-io/langgraph-events/issues/217)). The operator has two choices:
 
 - If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` again.
 - Otherwise keep the migrations that the checkpoint needs. Hold them with `baseline hold`, one release at a time.
@@ -997,8 +1002,16 @@ Before the write, each rewritten value is encoded the way `put()` encodes it, sc
 - Its history names an identity the serde cannot revive. Add a [tombstone](#recovering-a-delete-first-deployment) first.
 - It is paused on a dropped class. `abandon()` it first.
 - A dropped event is pending dispatch on a paused thread. After the drop, the resumed task finds no event to handle and ends the thread with the answer lost. Resume or abandon the thread first.
-- It holds a completed task write from a fanned-out sibling. The checkpointer API cannot rewrite that write. Resume or abandon the thread first.
-- It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it.
+- It holds a completed task write from a fanned-out sibling, and the rewrite would change that write. The checkpointer API cannot rewrite the write. Resume or abandon the thread first. When the thread has no pending interrupt, `resume()` and a plain `abandon()` refuse it. Call `abandon(config, require_interrupt=False)` instead. The reason names the task, the channel, and the identity or the index that the write holds. A write changes when it holds one of these:
+    - a record that a migration rewrites
+    - an instance of a class in `drop=`
+    - an index into `events`, when `drop=` removes an event from `events`
+
+    A completed write to `events` or `_pending` that holds an entry that is not an event is also refused. Restore the class of the entry, or delete the thread. A resume would append the entry to the log.
+
+    The rewrite keeps every other completed write as it is. A resume applies the write and does not run its task again.
+- `get_tuple()` of the checkpointer returns a completed task write as another object than the one that the serde decoded. See [Checkpointers](#checkpointers).
+- It holds a pending `__error__` write from a failed task. Run the thread again, or abandon it with `abandon(config, require_interrupt=False)`.
 - A dropped instance sits inside a field of another event, or in a reducer value. Leave the class in place, or settle the thread.
 - A run advanced the thread between the read and the write. Rerun.
 - The saver did not overwrite the checkpoint or its `__interrupt__` write. See [Checkpointers](#checkpointers).

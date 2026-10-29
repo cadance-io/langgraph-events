@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from langgraph_events._causes import CauseEntry
     from langgraph_events.serde._jsonplus import (
+        DecodedValue,
         NamespaceAwareSerde,
         ReadRecord,
         UnrevivedIdentity,
@@ -42,6 +43,9 @@ _LOG_CHANNELS = ("events", "_pending")
 
 _POSITION_CHANNELS = ("_cursor",)
 """The channels that hold a position in ``events``."""
+
+_POSITION_WRITES = ("causes", *_POSITION_CHANNELS)
+"""The channels whose task write can hold a position in ``events``."""
 
 RewriteStatus = Literal["rewrite", "unchanged", "refused"]
 
@@ -216,7 +220,7 @@ def plan_thread(
     checkpoint_ns: str,
     tup: CheckpointTuple,
     unresolved: Sequence[UnrevivedIdentity],
-    reads: Sequence[ReadRecord],
+    decoded: Sequence[DecodedValue],
     serde: NamespaceAwareSerde,
     drop: tuple[type[Event], ...],
     next_version: Callable[[Any, None], Any],
@@ -225,13 +229,14 @@ def plan_thread(
     store when the answer is ``"rewrite"``.
 
     *tup* was read inside ``serde.tolerate_unresolved()`` and
-    ``serde._record_reads()``; *unresolved* and *reads* are those two
-    collectors. This function runs after both blocks closed, so its
+    ``serde._record_reads(decoded)``; *unresolved* and *decoded* are those
+    two collectors. This function runs after both blocks closed, so its
     verification reads are strict. ``drop`` matches the stored identity
     exactly, not the class hierarchy: the rule ``validate_drop`` and the
     byte scan apply. A non-root *checkpoint_ns* changes only the remedy of
     a refusal, because ``abandon()`` and ``resume()`` reach the root only.
     """
+    reads = [record for _value, records in decoded for record in records]
     pairs = _migrated_pairs(reads)
     values: dict[str, Any] = tup.checkpoint["channel_values"]
     dropped = _count_drops(values, drop)
@@ -243,14 +248,16 @@ def plan_thread(
             thread_id, "refused", migrated=pairs, dropped=dropped, reason=reason
         )
 
-    reason = _history_refusal(unresolved, values)
+    pending = list(tup.pending_writes or ())
+    reason = _history_refusal(unresolved, values, pending)
     if reason is not None:
         return refused(reason)
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged")
 
-    pending = list(tup.pending_writes or ())
-    reason = _pending_refusal(pending, values, drop, subgraph=bool(checkpoint_ns))
+    reason = _pending_refusal(
+        pending, values, drop, decoded, subgraph=bool(checkpoint_ns)
+    )
     if reason is not None:
         return refused(reason)
 
@@ -278,56 +285,80 @@ def plan_thread(
 
 
 def _history_refusal(
-    unresolved: Sequence[UnrevivedIdentity], values: dict[str, Any]
+    unresolved: Sequence[UnrevivedIdentity],
+    values: dict[str, Any],
+    pending: Sequence[tuple[str, str, Any]],
 ) -> str | None:
-    """Why the stored history stops this rewrite, or ``None``."""
+    """Why the stored history stops this rewrite, or ``None``. A resume
+    appends a completed write to ``events`` or ``_pending`` to the log, so
+    that write counts as history."""
     if unresolved:
         names = ", ".join(dict.fromkeys(u.qualname for u in unresolved))
         return (
             f"history names {names}, which the serde cannot revive; add a "
             f"tombstone first"
         )
-    return _entries_not_events(values)
+    return _entries_not_events(values) or _writes_not_events(pending)
 
 
 def _entries_not_events(values: dict[str, Any]) -> str | None:
-    """Why a log channel holds an entry that is not an event, or ``None``.
+    """Why a log channel holds an entry that is not an event, or ``None``."""
+    for channel in _LOG_CHANNELS:
+        problem = _not_events(_log_entries(values, channel) or [])
+        if problem is not None:
+            return f"channel {channel!r} {problem}"
+    return None
+
+
+def _writes_not_events(pending: Sequence[tuple[str, str, Any]]) -> str | None:
+    """Why a completed task write to a log channel holds an entry that is
+    not an event, or ``None``. The remedy is the remedy of the entry."""
+    for task_id, channel, value in pending:
+        if channel not in _LOG_CHANNELS or not isinstance(value, list):
+            continue
+        problem = _not_events(value)
+        if problem is not None:
+            return (
+                f"thread has a completed task write on task {task_id!r} in "
+                f"channel {channel!r} that {problem}"
+            )
+    return None
+
+
+def _not_events(log: list[Any]) -> str | None:
+    """Why *log* holds an entry that is not an event, or ``None``.
 
     LangGraph's own serializer revives a record whose class no longer
     imports, or no longer takes the stored fields, as a ``dict`` or
     ``None``, with no error. No migration reaches such a record. A class
     that its allow-list blocks also revives as a ``dict``.
     """
-    for channel in _LOG_CHANNELS:
-        entries = [
-            e for e in _log_entries(values, channel) or () if not isinstance(e, Event)
-        ]
-        if not entries:
-            continue
-        kinds = " or ".join(sorted({type(e).__name__ for e in entries}))
-        count = (
-            "1 entry that revives"
-            if len(entries) == 1
-            else f"{len(entries)} entries that revive"
-        )
-        noun = "an event" if len(entries) == 1 else "events"
-        blocked = (
-            ". A dict also comes from a class that imports but that the "
-            "allowed_msgpack_modules of the serde does not list, for example "
-            "under LANGGRAPH_STRICT_MSGPACK=true. Then add each class to "
-            "allowed_msgpack_modules, then rerun"
-            if any(isinstance(e, dict) for e in entries)
-            else ""
-        )
-        return (
-            f"channel {channel!r} holds {count} as {kinds}, not as {noun}. "
-            f"A serializer other than NamespaceAwareSerde wrote them, and their "
-            f"class no longer imports or no longer takes the stored fields, so "
-            f"no migration reaches them. Restore each class under its stored "
-            f"module and name, or delete the thread with the checkpointer's "
-            f"delete_thread() if nobody needs it, then rerun{blocked}"
-        )
-    return None
+    entries = [e for e in log if not isinstance(e, Event)]
+    if not entries:
+        return None
+    kinds = " or ".join(sorted({type(e).__name__ for e in entries}))
+    count = (
+        "1 entry that revives"
+        if len(entries) == 1
+        else f"{len(entries)} entries that revive"
+    )
+    noun = "an event" if len(entries) == 1 else "events"
+    blocked = (
+        ". A dict also comes from a class that imports but that the "
+        "allowed_msgpack_modules of the serde does not list, for example "
+        "under LANGGRAPH_STRICT_MSGPACK=true. Then add each class to "
+        "allowed_msgpack_modules, then rerun"
+        if any(isinstance(e, dict) for e in entries)
+        else ""
+    )
+    return (
+        f"holds {count} as {kinds}, not as {noun}. "
+        f"A serializer other than NamespaceAwareSerde wrote them, and their "
+        f"class no longer imports or no longer takes the stored fields, so "
+        f"no migration reaches them. Restore each class under its stored "
+        f"module and name, or delete the thread with the checkpointer's "
+        f"delete_thread() if nobody needs it, then rerun{blocked}"
+    )
 
 
 _RESUME_THE_ROOT = (
@@ -342,14 +373,23 @@ _NO_CALL_CLEARS = (
     "with the checkpointer's delete_thread(), then rerun. Otherwise keep the "
     "migrations and the classes that this checkpoint needs"
 )
-"""The remedy for a task write in a subgraph checkpoint. A new run of the
-root thread writes under a new namespace and leaves this checkpoint."""
+"""The remedy for a task write in a subgraph checkpoint that is not paused.
+A new run of the root thread writes under a new namespace and leaves this
+checkpoint."""
+
+
+_ABANDON_UNPAUSED = (
+    "abandon it with abandon(config, require_interrupt=False), then rerun"
+)
+"""The remedy for a root thread that a resume cannot clear. On a thread with no
+pending interrupt, ``resume()`` and a plain ``abandon()`` refuse."""
 
 
 def _pending_refusal(
     pending: Sequence[tuple[str, str, Any]],
     values: dict[str, Any],
     drop: tuple[type[Event], ...],
+    decoded: Sequence[DecodedValue],
     *,
     subgraph: bool,
 ) -> str | None:
@@ -372,21 +412,71 @@ def _pending_refusal(
             f"a dropped event is pending dispatch on a paused thread; "
             f"{_RESUME_THE_ROOT if subgraph else remedy}"
         )
-    for task_id, channel, _value in pending:
+    shifts = any(type(entry) in drop for entry in _log_entries(values, "events") or ())
+    if not subgraph:
+        remedy = (
+            "resume or abandon it, then rerun"
+            if interrupt_writes
+            else _ABANDON_UNPAUSED
+        )
+    else:
+        # A resume of the root thread reruns the paused subgraph task under
+        # the same namespace, and that run applies the completed write.
+        remedy = _RESUME_THE_ROOT if interrupt_writes else _NO_CALL_CLEARS
+    for task_id, channel, value in pending:
         if channel == _ERROR_CHANNEL:
-            remedy = "run it again or abandon it, then rerun"
+            rerun = f"run it again, or {_ABANDON_UNPAUSED}"
             return (
                 f"thread has a pending __error__ write from a failed task; "
-                f"{_NO_CALL_CLEARS if subgraph else remedy}"
+                f"{_NO_CALL_CLEARS if subgraph else rerun}"
             )
-        if channel != _INTERRUPT_CHANNEL:
-            # A completed task write is insert-only in both savers: the
-            # API cannot rewrite it.
-            remedy = "resume or abandon it, then rerun"
+        if channel == _INTERRUPT_CHANNEL:
+            continue
+        where = f"thread has a completed task write on task {task_id!r} in"
+        records = next((r for result, r in decoded if result is value), None)
+        if records is None:
             return (
-                f"thread has a completed task write on task {task_id!r}; "
-                f"{_NO_CALL_CLEARS if subgraph else remedy}"
+                f"{where} channel {channel!r} that get_tuple() of the "
+                f"checkpointer returns as another object than the one that its "
+                f"serde decoded, for example as a copy, so the rewrite cannot "
+                f"read it; {remedy}. To let the rewrite read such a write, make "
+                f"get_tuple() return the write values that the serde decoded"
             )
+        problem = _write_problem(channel, value, records, drop, shifts=shifts)
+        if problem is not None:
+            return f"{where} channel {channel!r} that {problem}; {remedy}"
+    return None
+
+
+def _write_problem(
+    channel: str,
+    value: object,
+    records: Sequence[ReadRecord],
+    drop: tuple[type[Event], ...],
+    *,
+    shifts: bool,
+) -> str | None:
+    """What a completed task write holds that the rewrite would change, or
+    ``None``.
+
+    ``PostgresSaver``, ``SqliteSaver`` and ``MemorySaver`` store a completed
+    task write once and never replace it, so the rewrite keeps the write as
+    it is. A resume applies the write and does not run its task again. So
+    *records*, which the decode of the write read, must hold no touched
+    record and no class in *drop*. *shifts* is ``True`` when *drop* removes
+    an ``events`` entry. A position in the write then names another event.
+    """
+    dropped = {(cls.__module__, cls.__qualname__) for cls in drop}
+    for stored, live, touched, _built in records:
+        if live in dropped:
+            return f"holds {Identity(*live).label}, a class in drop"
+        if touched:
+            return f"holds {Identity(*stored).label}, which a migration rewrites"
+    if shifts and channel in _POSITION_WRITES and value not in (None, []):
+        return (
+            "holds an index into channel 'events', and drop removes an event "
+            "from that channel, so the index would point to another event"
+        )
     return None
 
 

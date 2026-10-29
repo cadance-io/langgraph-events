@@ -75,7 +75,9 @@ class LiveSetOutcome:
         """The verdict, each checkpoint that is not clean, then the next command.
 
         A checkpoint that the last plan reads as a rewrite also names the
-        reason when the last pass refused to write it.
+        reason when the last pass refused to write it. The next command is
+        printed only when the last plan reads a checkpoint as a rewrite. A
+        refused checkpoint needs the action that its reason names first.
         """
         head = str(self.final).splitlines()[0]
         if self.clean:
@@ -90,7 +92,8 @@ class LiveSetOutcome:
                 lines.append(f"  {thread.location}: needs a rewrite{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.location}: refused, {thread.reason}")
-        lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
+        if any(thread.status == "rewrite" for thread in self.final.threads):
+            lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
         return "\n".join(lines)
 
 

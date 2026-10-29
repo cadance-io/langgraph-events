@@ -256,7 +256,7 @@ def describe_rewrite_command():
                 )
 
         def when_the_last_plan_refuses_a_thread():
-            def it_prints_the_reason_and_the_apply_command(
+            def it_prints_the_reason_and_no_apply_command(
                 tmp_path: Path,
                 monkeypatch: pytest.MonkeyPatch,
                 capsys: pytest.CaptureFixture[str],
@@ -274,13 +274,12 @@ def describe_rewrite_command():
 
                 out = capsys.readouterr().out
                 assert code == 1
-                assert "  ghost: refused, no checkpoint for this thread id\n" in out
                 assert out.endswith(
-                    f"  Run: {_CLI} rewrite {spec} --apply --expect {releases.expect}\n"
+                    "  ghost: refused, no checkpoint for this thread id\n"
                 )
 
         def when_the_last_plan_refuses_a_subgraph_checkpoint():
-            def it_prints_the_reason_and_the_apply_command(
+            def it_prints_the_reason_and_no_apply_command(
                 tmp_path: Path,
                 monkeypatch: pytest.MonkeyPatch,
                 capsys: pytest.CaptureFixture[str],
@@ -307,9 +306,7 @@ def describe_rewrite_command():
                 assert out[1].endswith(
                     "which the serde cannot revive; add a tombstone first"
                 )
-                assert out[2:] == [
-                    f"  Run: {_CLI} rewrite {spec} --apply --expect {expect}"
-                ]
+                assert len(out) == 2
 
         def when_the_store_is_a_sqlite_saver():
             def it_rewrites_each_namespace_and_exits_zero(
