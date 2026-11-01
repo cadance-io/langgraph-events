@@ -526,6 +526,37 @@ def describe_rewrite_accept():
                     "  ghost: refused, no checkpoint for this thread id\n"
                 )
 
+    def when_accept_is_refused():
+        def when_the_store_does_not_settle_after_every_pass():
+            def it_exits_zero_and_names_the_next_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path, DictSaver(put_overwrites=False))
+                releases.seed("t1")
+                target = dataclasses.replace(releases.current, threads=list_thread_keys)
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    [
+                        "rewrite",
+                        spec,
+                        "--expect",
+                        releases.expect,
+                        "--apply",
+                        "--accept",
+                        "refused",
+                    ]
+                )
+
+                out = capsys.readouterr().out.splitlines()
+                assert code == 0
+                assert out[-2:] == [
+                    "  The store did not settle after 3 passes.",
+                    f"  Run: {_CLI} rewrite {spec} --apply --expect {releases.expect}",
+                ]
+
     def when_accept_is_not_a_state():
         def it_exits_two(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
             code = main(["rewrite", "m:t", "--expect", "x", "--accept", "dirty"])
@@ -552,8 +583,8 @@ def describe_rewrite_backup():
             out, err = capsys.readouterr()
             assert code == 0
             assert out == (
-                "backup r1: 1 checkpoint and 1 write in checkpoints_bak_r1 and "
-                "checkpoint_writes_bak_r1\n"
+                "backup r1: kept 0 checkpoints and 0 writes, added 1 checkpoint "
+                "and 1 write, in checkpoints_bak_r1 and checkpoint_writes_bak_r1\n"
                 "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
                 "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
                 "1 unchanged, 0 refused)\n"
@@ -614,30 +645,86 @@ def describe_rewrite_backup():
             )
 
     def when_apply_is_missing():
-        def it_exits_two_before_it_loads_the_target(
+        def it_takes_the_backup_and_writes_no_checkpoint(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_url: str,
+        ):
+            target, expect = _postgres_target(tmp_path, postgres_url)
+            rows = _PostgresRows(postgres_url)
+            before = rows.checkpoint("t1")
+            spec = _install(monkeypatch, target)
+
+            code = main(
+                [
+                    "rewrite",
+                    spec,
+                    "--expect",
+                    expect,
+                    "--accept",
+                    "rewrite",
+                    "--backup",
+                    "r1",
+                ]
+            )
+
+            assert code == 0
+            assert capsys.readouterr().out == (
+                "backup r1: kept 0 checkpoints and 0 writes, added 1 checkpoint "
+                "and 1 write, in checkpoints_bak_r1 and checkpoint_writes_bak_r1\n"
+                "lge rewrite: accepted, rewrite (--accept rewrite; last plan: "
+                "plan: 1 thread, 1 rewrite, 0 unchanged, 0 refused)\n"
+                "  t1: needs a rewrite\n"
+            )
+            assert rows.checkpoint("t1", "checkpoints_bak_r1") == before
+            assert rows.checkpoint("t1") == before
+
+    def when_the_tag_is_not_valid():
+        def it_exits_two_before_it_opens_the_store(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
         ):
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(releases.current, store=_no_store)
+            spec = _install(monkeypatch, target)
+
             code = main(
-                ["rewrite", "no.such:target", "--expect", "x", "--backup", "r1"]
+                ["rewrite", spec, "--expect", releases.expect, "--backup", "Rel-1"]
             )
 
             assert code == 2
             assert capsys.readouterr().err == (
-                "error: --backup needs --apply. A plan writes nothing, so it "
-                "needs no backup.\n"
+                "error: ValueError: The backup tag 'Rel-1' is not valid. Give 1 "
+                "to 32 characters of a-z, 0-9 and _.\n"
             )
 
-    def when_the_tag_is_not_valid():
-        def it_exits_two(capsys: pytest.CaptureFixture[str]):
+    def when_the_target_sets_threads():
+        def it_exits_two_before_it_opens_the_store(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(
+                releases.current, store=_no_store, threads=list_thread_keys
+            )
+            spec = _install(monkeypatch, target)
+
             code = main(
-                ["rewrite", "m:t", "--expect", "x", "--apply", "--backup", "Rel-1"]
+                ["rewrite", spec, "--expect", releases.expect, "--backup", "r1"]
             )
 
             assert code == 2
-            assert (
-                "argument --backup: The backup tag 'Rel-1' is not valid. Give 1 to "
-                "32 characters of a-z, 0-9 and _." in capsys.readouterr().err
+            assert capsys.readouterr().err.startswith(
+                "error: The backup acts on the whole store, and the target sets "
+                "threads=, "
             )
+
+
+def _no_store() -> contextlib.AbstractContextManager[MemorySaver]:
+    raise AssertionError("the command opened the store")
 
 
 def describe_restore_command():
@@ -664,7 +751,7 @@ def describe_restore_command():
             assert rows.checkpoint("t1") == before
 
     def when_the_store_holds_no_backup_of_the_tag():
-        def it_exits_one_and_changes_nothing(
+        def it_exits_two_and_changes_nothing(
             tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
@@ -677,10 +764,13 @@ def describe_restore_command():
 
             code = main(["restore", spec, "r1"])
 
-            assert code == 1
-            assert capsys.readouterr().out == (
-                "lge restore: not restored. The store holds no backup r1: no "
-                "checkpoints_bak_r1 and checkpoint_writes_bak_r1. Nothing changed.\n"
+            out, err = capsys.readouterr()
+            assert code == 2
+            assert out == ""
+            assert err == (
+                "error: The store holds no backup r1: no checkpoints_bak_r1 and "
+                "checkpoint_writes_bak_r1. The store holds no backup. Nothing "
+                "changed.\n"
             )
             assert rows.checkpoint("t1") == before
 

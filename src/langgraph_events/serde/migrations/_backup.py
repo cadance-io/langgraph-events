@@ -15,9 +15,9 @@ from __future__ import annotations
 import contextlib
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
-from langgraph_events.serde.migrations._target import TargetError
+from langgraph_events.serde.migrations._target import TargetError, _postgres_saver
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 _TAG = re.compile(r"[a-z0-9_]{1,32}")
 
-_OTHER_BACKUPS = """
+_BACKUP_TABLES = """
 SELECT relname FROM pg_class
 WHERE relkind = 'r'
   AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())
@@ -39,9 +39,18 @@ WHERE relkind = 'r'
   AND relname <> ALL(%(keep)s)
 """
 
+_SHARED_COLUMNS = """
+SELECT b.attname FROM pg_attribute AS b
+JOIN pg_attribute AS l
+  ON l.attrelid = %(live)s::regclass AND l.attname = b.attname
+  AND l.attnum > 0 AND NOT l.attisdropped
+WHERE b.attrelid = %(backup)s::regclass AND b.attnum > 0 AND NOT b.attisdropped
+ORDER BY b.attnum
+"""
+
 _COPY_CHECKPOINTS = """
-INSERT INTO {checkpoints}
-SELECT * FROM (
+INSERT INTO {checkpoints} ({columns})
+SELECT {columns} FROM (
     SELECT DISTINCT ON (thread_id, checkpoint_ns) * FROM checkpoints
     ORDER BY thread_id, checkpoint_ns, checkpoint_id DESC
 ) AS latest
@@ -49,8 +58,8 @@ ON CONFLICT DO NOTHING
 """
 
 _COPY_WRITES = """
-INSERT INTO {writes}
-SELECT w.* FROM checkpoint_writes AS w
+INSERT INTO {writes} ({columns})
+SELECT {w_columns} FROM checkpoint_writes AS w
 JOIN {checkpoints} USING (thread_id, checkpoint_ns, checkpoint_id)
 ON CONFLICT DO NOTHING
 """
@@ -78,9 +87,11 @@ SELECT (SELECT count(*) FROM restored_checkpoints) AS checkpoints,
        (SELECT count(*) FROM restored_writes) AS writes
 """
 
-
-class NoBackupError(TargetError):
-    """The store holds no backup tables for the tag that the restore names."""
+_BACKUP_REMEDY = (
+    "Back up the store with the tools of its database, then run rewrite "
+    "without --backup."
+)
+_RESTORE_REMEDY = "Restore the store with the tools of its database."
 
 
 @dataclass(frozen=True)
@@ -98,21 +109,36 @@ class BackupCounts:
 
 
 @dataclass(frozen=True)
+class _Taken:
+    """The rows that a backup held before this run, and after it."""
+
+    kept: BackupCounts
+    total: BackupCounts
+
+    @property
+    def added(self) -> BackupCounts:
+        return BackupCounts(
+            self.total.checkpoints - self.kept.checkpoints,
+            self.total.writes - self.kept.writes,
+        )
+
+
+@dataclass(frozen=True)
 class _Backup:
-    """The two backup tables of one tag, in the current schema of the store."""
+    """The two backup tables of one tag, in the current schema of the store.
+
+    Raises ``ValueError`` unless the tag is 1 to 32 characters of ``a-z``,
+    ``0-9`` and ``_``.
+    """
 
     tag: str
 
-    @classmethod
-    def of(cls, tag: str) -> _Backup:
-        """Raises ``ValueError`` unless *tag* is 1 to 32 characters of
-        ``a-z``, ``0-9`` and ``_``."""
-        if not _TAG.fullmatch(tag):
+    def __post_init__(self) -> None:
+        if not _TAG.fullmatch(self.tag):
             raise ValueError(
-                f"The backup tag {tag!r} is not valid. Give 1 to 32 characters "
-                f"of a-z, 0-9 and _."
+                f"The backup tag {self.tag!r} is not valid. Give 1 to 32 "
+                f"characters of a-z, 0-9 and _."
             )
-        return cls(tag)
 
     @property
     def checkpoints(self) -> str:
@@ -122,21 +148,21 @@ class _Backup:
     def writes(self) -> str:
         return f"checkpoint_writes_bak_{self.tag}"
 
-    def take(self, saver: BaseCheckpointSaver[Any]) -> BackupCounts:
+    def take(self, saver: BaseCheckpointSaver[Any]) -> _Taken:
         """Copy the live set into the two tables, in one transaction, and
         drop the backup tables of every other tag.
 
         A second backup with the same tag keeps each row it holds, and adds
         each new latest row. On an error, the transaction writes nothing.
         """
-        postgres = _postgres_saver(saver, "backup")
+        postgres = _require_postgres(saver, "backup", _BACKUP_REMEDY)
         import psycopg  # noqa: PLC0415
         from psycopg import sql  # noqa: PLC0415
 
         try:
             with _transaction(postgres) as cursor:
                 cursor.execute(
-                    _OTHER_BACKUPS, {"keep": [self.checkpoints, self.writes]}
+                    _BACKUP_TABLES, {"keep": [self.checkpoints, self.writes]}
                 )
                 for row in cursor.fetchall():
                     cursor.execute(
@@ -154,27 +180,28 @@ class _Backup:
                         "(LIKE checkpoint_writes INCLUDING ALL)"
                     )
                 )
-                cursor.execute(self._sql(_COPY_CHECKPOINTS))
-                cursor.execute(self._sql(_COPY_WRITES))
-                cursor.execute(self._sql(_COUNT))
-                counts = cursor.fetchone()
+                kept = _counts(cursor, self._sql(_COUNT))
+                columns = _shared_columns(cursor, "checkpoints", self.checkpoints)
+                cursor.execute(self._sql(_COPY_CHECKPOINTS, columns))
+                columns = _shared_columns(cursor, "checkpoint_writes", self.writes)
+                cursor.execute(self._sql(_COPY_WRITES, columns))
+                total = _counts(cursor, self._sql(_COUNT))
         except psycopg.Error as error:
             raise TargetError(
                 f"The backup {self.tag} failed, so the rewrite did not run and "
                 f"the store is unchanged: {_one_line(error)}"
             ) from error
-        assert counts is not None  # noqa: S101 - a SELECT of two counts returns one row
-        return BackupCounts(counts["checkpoints"], counts["writes"])
+        return _Taken(kept, total)
 
     def restore(self, saver: BaseCheckpointSaver[Any]) -> BackupCounts:
         """Put back each backed-up row whose key the store still holds, in
         one transaction.
 
         Raises:
-            NoBackupError: when the store holds no backup tables of the tag.
-            TargetError: when the restore fails. It then changes nothing.
+            TargetError: when the store holds no backup tables of the tag,
+                or when the restore fails. It then changes nothing.
         """
-        postgres = _postgres_saver(saver, "restore")
+        postgres = _require_postgres(saver, "restore", _RESTORE_REMEDY)
         import psycopg  # noqa: PLC0415
 
         try:
@@ -186,26 +213,44 @@ class _Backup:
                 )
                 found = cursor.fetchone()
                 if found is None or not found["found"]:
-                    raise NoBackupError(
-                        f"The store holds no backup {self.tag}: no {self.checkpoints} "
-                        f"and {self.writes}. Nothing changed."
-                    )
-                cursor.execute(self._sql(_RESTORE))
-                counts = cursor.fetchone()
+                    raise TargetError(self._missing(cursor))
+                restored = _counts(cursor, self._sql(_RESTORE))
         except psycopg.Error as error:
             raise TargetError(
                 f"The restore of the backup {self.tag} failed and changed "
                 f"nothing: {_one_line(error)}"
             ) from error
-        assert counts is not None  # noqa: S101 - a SELECT of two counts returns one row
-        return BackupCounts(counts["checkpoints"], counts["writes"])
+        return restored
 
-    def _sql(self, template: str) -> sql.Composed:
+    def _missing(self, cursor: Cursor[DictRow]) -> str:
+        """The message of a restore that finds no backup of the tag. It
+        names the tag of each backup that the store holds."""
+        cursor.execute(_BACKUP_TABLES, {"keep": []})
+        tags = sorted(
+            {row["relname"].split("_bak_", 1)[1] for row in cursor.fetchall()}
+        )
+        held = (
+            f"The store holds the backup {', '.join(tags)}"
+            if tags
+            else "The store holds no backup"
+        )
+        return (
+            f"The store holds no backup {self.tag}: no {self.checkpoints} and "
+            f"{self.writes}. {held}. Nothing changed."
+        )
+
+    def _sql(self, template: str, columns: list[str] | None = None) -> sql.Composed:
+        """*template* with the two table names, with *columns* as
+        ``{columns}``, and with *columns* qualified by ``w`` as
+        ``{w_columns}``."""
         from psycopg import sql  # noqa: PLC0415
 
+        names = columns or []
         return sql.SQL(template).format(
             checkpoints=sql.Identifier(self.checkpoints),
             writes=sql.Identifier(self.writes),
+            columns=sql.SQL(", ").join(map(sql.Identifier, names)),
+            w_columns=sql.SQL(", ").join(sql.Identifier("w", n) for n in names),
         )
 
 
@@ -221,52 +266,62 @@ def restore_live_set(target: MigrationTarget, tag: str) -> BackupCounts:
     Raises:
         ValueError: when *tag* is not 1 to 32 characters of ``a-z``,
             ``0-9`` and ``_``.
-        NoBackupError: when the store holds no backup of *tag*.
-        TargetError: when the store is not a ``PostgresSaver``, or when the
-            restore fails. A failed restore changes nothing.
+        TargetError: when *target* sets ``threads``, when the store is not
+            a ``PostgresSaver``, when the store holds no backup of *tag*,
+            or when the restore fails. The message of a missing backup
+            names each backup that the store holds. A failed restore
+            changes nothing.
     """
-    backup = _Backup.of(tag)
+    backup = _Backup(tag)
+    _require_whole_store(target, "restore", _RESTORE_REMEDY)
     with target.open_store() as saver:
         return backup.restore(saver)
 
 
+def _require_whole_store(target: MigrationTarget, action: str, remedy: str) -> None:
+    """Refuse a target that sets ``threads``. That target declares a store
+    that other graphs can share, and a backup or a restore acts on every
+    row of the store."""
+    if target.threads is not None:
+        raise TargetError(
+            f"The {action} acts on the whole store, and the target sets "
+            f"threads=, so other graphs can share the store. The {action} "
+            f"needs a store that one graph owns. {remedy}"
+        )
+
+
 @contextlib.contextmanager
 def _transaction(saver: PostgresSaver) -> Iterator[Cursor[DictRow]]:
-    """A cursor of *saver* inside one transaction.
-
-    ``PostgresSaver._cursor()`` is private to the saver package. It takes
-    the lock of the saver, and a connection of its pool when the saver
-    holds a pool.
-    """
+    """A cursor of *saver* inside one transaction."""
     with saver._cursor() as cursor, cursor.connection.transaction():
         yield cursor
 
 
-_OTHER_SAVER_REMEDY = {
-    "backup": (
-        "Back up the store with the tools of its database, then run "
-        "rewrite --apply without --backup."
-    ),
-    "restore": "Restore the store with the tools of its database.",
-}
+def _shared_columns(cursor: Cursor[DictRow], live: str, backup: str) -> list[str]:
+    """The columns that the table *backup* and the table *live* share, in
+    the order of *backup*. A copy that names them still runs after an
+    upgrade of the saver adds a column to *live*."""
+    cursor.execute(_SHARED_COLUMNS, {"live": live, "backup": backup})
+    return [row["attname"] for row in cursor.fetchall()]
 
 
-def _postgres_saver(
-    saver: BaseCheckpointSaver[Any], action: Literal["backup", "restore"]
+def _counts(cursor: Cursor[DictRow], query: sql.Composed) -> BackupCounts:
+    cursor.execute(query)
+    row = cursor.fetchone()
+    assert row is not None  # noqa: S101 - a SELECT of two counts returns one row
+    return BackupCounts(row["checkpoints"], row["writes"])
+
+
+def _require_postgres(
+    saver: BaseCheckpointSaver[Any], action: str, remedy: str
 ) -> PostgresSaver:
-    """*saver*, when it is a ``PostgresSaver``. The saver is an optional
-    dependency, so its import is local."""
-    try:
-        from langgraph.checkpoint.postgres import PostgresSaver  # noqa: PLC0415
-    except ImportError:
-        pass
-    else:
-        if isinstance(saver, PostgresSaver):
-            return saver
-    raise TargetError(
-        f"The {action} needs a PostgresSaver, and the saver of the store is "
-        f"{type(saver).__name__}. {_OTHER_SAVER_REMEDY[action]}"
-    )
+    postgres = _postgres_saver(saver)
+    if postgres is None:
+        raise TargetError(
+            f"The {action} needs a PostgresSaver, and the saver of the store "
+            f"is {type(saver).__name__}. {remedy}"
+        )
+    return postgres
 
 
 def _one_line(error: BaseException) -> str:

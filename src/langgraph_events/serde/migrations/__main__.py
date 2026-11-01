@@ -1,10 +1,10 @@
 """The migration CLI: ``python -m langgraph_events.serde.migrations``.
 
 ``<target>`` is the ``module:attr`` of a ``MigrationTarget``. Exit 0 is a
-pass or a done write, 1 is a finding, a store worse than ``rewrite
---accept`` or a ``restore`` with no backup, 2 is a usage, target or store
-error, 3 is a ``rewrite`` under the wrong release. A report goes to
-stdout, and an error to stderr.
+pass or a done write, 1 is a finding or a store worse than ``rewrite
+--accept``, 2 is a usage, target or store error, a ``restore`` with no
+backup included, 3 is a ``rewrite`` under the wrong release. A report goes
+to stdout, and an error to stderr.
 """
 
 from __future__ import annotations
@@ -14,11 +14,7 @@ import importlib
 import sys
 from pathlib import Path
 
-from langgraph_events.serde.migrations._backup import (
-    NoBackupError,
-    _Backup,
-    restore_live_set,
-)
+from langgraph_events.serde.migrations._backup import restore_live_set
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     MigrationsUnrecorded,
@@ -32,7 +28,7 @@ from langgraph_events.serde.migrations._gate import (
     update_baseline,
 )
 from langgraph_events.serde.migrations._live_set import (
-    _STATES,
+    LiveSetState,
     WrongRelease,
     rewrite_live_set,
 )
@@ -117,13 +113,12 @@ def _parser() -> argparse.ArgumentParser:
     rewrite.add_argument(
         "--backup",
         metavar="TAG",
-        type=_tag,
-        help="with --apply, back up the live set of a PostgresSaver store first",
+        help="back up the live set of a PostgresSaver store before the first plan",
     )
     rewrite.add_argument(
         "--accept",
-        choices=_STATES,
-        default="clean",
+        choices=[str(state) for state in LiveSetState],
+        default=str(LiveSetState.CLEAN),
         help="the worst state of the last plan that still exits 0 (default: clean)",
     )
     rewrite.set_defaults(run=_rewrite)
@@ -133,17 +128,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     restore.add_argument("target", help="the module:attr of the MigrationTarget")
     restore.add_argument(
-        "tag", metavar="TAG", type=_tag, help="the tag that rewrite --backup was given"
+        "tag", metavar="TAG", help="the tag that rewrite --backup was given"
     )
     restore.set_defaults(run=_restore)
     return parser
-
-
-def _tag(text: str) -> str:
-    try:
-        return _Backup.of(text).tag
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _check(options: argparse.Namespace) -> int:
@@ -187,35 +175,25 @@ def _fingerprint(options: argparse.Namespace) -> int:
 
 
 def _rewrite(options: argparse.Namespace) -> int:
-    if options.backup is not None and not options.apply:
-        print(
-            "error: --backup needs --apply. A plan writes nothing, so it needs "
-            "no backup.",
-            file=sys.stderr,
-        )
-        return 2
     outcome = rewrite_live_set(
         _load(options.target),
         expect=options.expect,
         apply=options.apply,
         passes=options.passes,
         log=sys.stdout,
-        backup=options.backup,
+        backup_tag=options.backup,
     )
     invocation = Invocation(options.target)
     if isinstance(outcome, WrongRelease):
         print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE
-    print(outcome.render(invocation, options.expect, options.accept))
-    return 0 if outcome.within(options.accept) else 1
+    accept = LiveSetState(options.accept)
+    print(outcome.render(invocation, options.expect, accept))
+    return 0 if outcome.state <= accept else 1
 
 
 def _restore(options: argparse.Namespace) -> int:
-    try:
-        counts = restore_live_set(_load(options.target), options.tag)
-    except NoBackupError as missing:
-        print(f"lge restore: not restored. {missing}")
-        return 1
+    counts = restore_live_set(_load(options.target), options.tag)
     print(f"lge restore: put back {counts} from the backup {options.tag}.")
     return 0
 

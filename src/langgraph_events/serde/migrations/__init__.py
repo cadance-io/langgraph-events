@@ -19,7 +19,6 @@ cross-module renames or composite operations flow through the serde's
 
 from langgraph_events.serde.migrations._backup import (
     BackupCounts,
-    NoBackupError,
     restore_live_set,
 )
 from langgraph_events.serde.migrations._core import (
@@ -88,7 +87,6 @@ __all__ = [
     "MigrationOutOfScope",
     "MigrationSet",
     "MigrationTarget",
-    "NoBackupError",
     "PreviousRequiredError",
     "RenameEvent",
     "SplitEvent",

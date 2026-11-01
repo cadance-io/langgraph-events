@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
+    from langgraph.checkpoint.postgres import PostgresSaver
 
     from langgraph_events import EventGraph
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
@@ -55,7 +56,9 @@ class MigrationTarget:
     the store. It is needed only for a saver other than ``PostgresSaver``,
     ``SqliteSaver`` or ``MemorySaver``, or for a store that more than one
     graph shares. :func:`list_thread_keys` lists the threads of any saver
-    through its public ``list()``, for a small store.
+    through its public ``list()``, for a small store. A target with
+    ``threads`` declares a store that other graphs can share, so the backup
+    and the restore, which act on the whole store, refuse it.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph]
@@ -211,24 +214,16 @@ def _sql_thread_rows(
     """The thread id and checkpoint namespace of each checkpoint row of a
     ``PostgresSaver`` or a ``SqliteSaver``, or ``None`` for another saver.
 
-    Both savers keep their checkpoints in a ``checkpoints`` table. Each
-    saver is an optional dependency, so its import is local. The cursor
-    methods are internal to each saver package: ``PostgresSaver._cursor()``
-    is private, and the docstring of ``SqliteSaver.cursor()`` says that a
-    user must not call it.
+    Both savers keep their checkpoints in a ``checkpoints`` table. The
+    docstring of ``SqliteSaver.cursor()`` says that a user must not call
+    it. See :func:`_postgres_saver` for ``PostgresSaver._cursor()``.
     """
-    try:
-        from langgraph.checkpoint.postgres import (  # noqa: PLC0415
-            PostgresSaver,
-        )
-    except ImportError:
-        pass
-    else:
-        if isinstance(saver, PostgresSaver):
-            with saver._cursor() as cursor:
-                cursor.execute(_THREAD_KEYS_QUERY)
-                rows = cursor.fetchall()
-            return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
+    postgres = _postgres_saver(saver)
+    if postgres is not None:
+        with postgres._cursor() as cursor:
+            cursor.execute(_THREAD_KEYS_QUERY)
+            rows = cursor.fetchall()
+        return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
     try:
         from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: PLC0415
     except ImportError:
@@ -238,6 +233,22 @@ def _sql_thread_rows(
             cursor.execute(_THREAD_KEYS_QUERY)
             return [(tid, ns) for tid, ns in cursor.fetchall()]
     return None
+
+
+def _postgres_saver(saver: BaseCheckpointSaver[Any]) -> PostgresSaver | None:
+    """*saver* when it is a ``PostgresSaver``, else ``None``.
+
+    The saver is an optional dependency, so its import is local. Each
+    caller reads the store through ``PostgresSaver._cursor()``, which is
+    private to the saver package, so a release of that package can change
+    it. It takes the lock of the saver, and a connection of its pool when
+    the saver holds a pool.
+    """
+    try:
+        from langgraph.checkpoint.postgres import PostgresSaver  # noqa: PLC0415
+    except ImportError:
+        return None
+    return saver if isinstance(saver, PostgresSaver) else None
 
 
 @dataclass(frozen=True)

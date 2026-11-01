@@ -31,9 +31,9 @@ from langgraph_events.serde import NamespaceAwareSerde
 from langgraph_events.serde.migrations import (
     BackupCounts,
     LiveSetOutcome,
+    LiveSetState,
     Migration,
     MigrationTarget,
-    NoBackupError,
     TargetError,
     ThreadKey,
     TransformFields,
@@ -577,13 +577,19 @@ class _PostgresStore(NamedTuple):
     releases: _Releases
     rows: _PostgresRows
 
-    def rewrite(self, *, backup: str | None) -> LiveSetOutcome:
+    def rewrite(
+        self,
+        *,
+        backup_tag: str | None,
+        apply: bool = True,
+        log: io.StringIO | None = None,
+    ) -> LiveSetOutcome:
         outcome = rewrite_live_set(
             self.releases.current,
             expect=self.releases.expect,
-            apply=True,
-            backup=backup,
-            log=io.StringIO(),
+            apply=apply,
+            backup_tag=backup_tag,
+            log=io.StringIO() if log is None else log,
         )
         assert isinstance(outcome, LiveSetOutcome)
         return outcome
@@ -603,22 +609,55 @@ def postgres_store(tmp_path: Path, postgres_url: str) -> Iterator[_PostgresStore
         yield _PostgresStore(releases, _PostgresRows(postgres_url))
 
 
+def describe_LiveSetState():
+    def it_orders_the_states_from_best_to_worst():
+        assert sorted(LiveSetState, reverse=True) == [
+            LiveSetState.REFUSED,
+            LiveSetState.REWRITE,
+            LiveSetState.CLEAN,
+        ]
+        assert LiveSetState.REWRITE <= LiveSetState.REFUSED
+        assert not LiveSetState.REWRITE <= LiveSetState.CLEAN
+
+
 def describe_LiveSetOutcome():
-    def describe_within():
-        def when_accept_is_not_a_state():
-            def it_raises_a_value_error(tmp_path: Path):
+    def describe_state():
+        def when_the_last_plan_reads_a_thread_as_a_rewrite():
+            def it_is_rewrite(tmp_path: Path):
                 releases = _releases(tmp_path)
+                releases.seed("t1", "t2")
+
                 outcome = rewrite_live_set(
                     releases.current, expect=releases.expect, apply=False
                 )
+
                 assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.state is LiveSetState.REWRITE
 
-                with pytest.raises(ValueError) as raised:
-                    outcome.within("refuse")  # type: ignore[arg-type]
-
-                assert str(raised.value) == (
-                    "accept must be one of clean, rewrite, refused, got 'refuse'."
+        def when_the_last_plan_also_refuses_a_thread():
+            def it_is_refused(tmp_path: Path):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                target = dataclasses.replace(
+                    releases.current,
+                    threads=lambda saver: [ThreadKey("t1", ""), ThreadKey("ghost", "")],
                 )
+
+                outcome = rewrite_live_set(target, expect=releases.expect, apply=False)
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.state is LiveSetState.REFUSED
+
+        def when_the_store_holds_no_thread():
+            def it_is_clean(tmp_path: Path):
+                releases = _releases(tmp_path)
+
+                outcome = rewrite_live_set(
+                    releases.current, expect=releases.expect, apply=False
+                )
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.state is LiveSetState.CLEAN
 
 
 def describe_rewrite_live_set_with_a_backup():
@@ -629,7 +668,7 @@ def describe_rewrite_live_set_with_a_backup():
             rows = postgres_store.rows
             before = rows.checkpoint("t1")
 
-            outcome = postgres_store.rewrite(backup="r1")
+            outcome = postgres_store.rewrite(backup_tag="r1")
 
             assert outcome.clean
             assert outcome.backup == BackupCounts(checkpoints=1, writes=1)
@@ -644,13 +683,13 @@ def describe_rewrite_live_set_with_a_backup():
                 releases.current,
                 expect=releases.expect,
                 apply=True,
-                backup="r1",
+                backup_tag="r1",
                 log=log,
             )
 
             assert log.getvalue() == (
-                "backup r1: 1 checkpoint and 1 write in checkpoints_bak_r1 "
-                "and checkpoint_writes_bak_r1\n"
+                "backup r1: kept 0 checkpoints and 0 writes, added 1 checkpoint "
+                "and 1 write, in checkpoints_bak_r1 and checkpoint_writes_bak_r1\n"
                 "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
             )
 
@@ -662,7 +701,7 @@ def describe_rewrite_live_set_with_a_backup():
                 before = rows.checkpoint("t1")
 
                 with pytest.raises(TargetError) as raised:
-                    postgres_store.rewrite(backup="r1")
+                    postgres_store.rewrite(backup_tag="r1")
 
                 assert str(raised.value).startswith(
                     "The backup r1 failed, so the rewrite did not run and the "
@@ -679,19 +718,77 @@ def describe_rewrite_live_set_with_a_backup():
             def it_keeps_each_row_of_the_first_backup(postgres_store: _PostgresStore):
                 rows = postgres_store.rows
                 before = rows.checkpoint("t1")
-                postgres_store.rewrite(backup="r1")
+                postgres_store.rewrite(backup_tag="r1")
                 rows.execute("UPDATE checkpoints SET metadata = '{}'::jsonb")
 
-                outcome = postgres_store.rewrite(backup="r1")
+                outcome = postgres_store.rewrite(backup_tag="r1")
 
                 assert outcome.backup == BackupCounts(checkpoints=1, writes=1)
                 assert rows.checkpoint("t1", "checkpoints_bak_r1") == before
 
+            def when_a_thread_appeared_since():
+                def it_adds_the_latest_row_of_that_thread(
+                    postgres_store: _PostgresStore,
+                ):
+                    releases = postgres_store.releases
+                    postgres_store.rewrite(backup_tag="r1", apply=False)
+                    releases.seed("t2")
+                    log = io.StringIO()
+
+                    outcome = postgres_store.rewrite(backup_tag="r1", log=log)
+
+                    assert outcome.backup == BackupCounts(checkpoints=2, writes=1)
+                    assert log.getvalue().splitlines()[0] == (
+                        "backup r1: kept 1 checkpoint and 1 write, added 1 "
+                        "checkpoint and 0 writes, in checkpoints_bak_r1 and "
+                        "checkpoint_writes_bak_r1"
+                    )
+                    assert postgres_store.rows.checkpoint("t2", "checkpoints_bak_r1")
+
+            def when_the_saver_added_a_column_since():
+                def it_copies_the_columns_that_both_tables_hold(
+                    postgres_store: _PostgresStore,
+                ):
+                    rows = postgres_store.rows
+                    postgres_store.rewrite(backup_tag="r1", apply=False)
+                    rows.execute("ALTER TABLE checkpoints ADD COLUMN extra int")
+                    postgres_store.releases.seed("t2")
+
+                    outcome = postgres_store.rewrite(backup_tag="r1")
+
+                    assert outcome.backup == BackupCounts(checkpoints=2, writes=1)
+
+        def when_the_saver_runs_in_pipeline_mode():
+            def it_counts_the_rows_it_added(postgres_store: _PostgresStore):
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                url = postgres_store.rows.url
+                target = dataclasses.replace(
+                    postgres_store.releases.current,
+                    store=lambda: PostgresSaver.from_conn_string(url, pipeline=True),
+                )
+                log = io.StringIO()
+
+                outcome = rewrite_live_set(
+                    target,
+                    expect=postgres_store.releases.expect,
+                    apply=False,
+                    backup_tag="r1",
+                    log=log,
+                )
+
+                assert isinstance(outcome, LiveSetOutcome)
+                assert outcome.backup == BackupCounts(checkpoints=1, writes=1)
+                assert log.getvalue().startswith(
+                    "backup r1: kept 0 checkpoints and 0 writes, added 1 "
+                    "checkpoint and 1 write, "
+                )
+
         def when_a_backup_of_another_tag_exists():
             def it_drops_it(postgres_store: _PostgresStore):
-                postgres_store.rewrite(backup="r0")
+                postgres_store.rewrite(backup_tag="r0")
 
-                postgres_store.rewrite(backup="r1")
+                postgres_store.rewrite(backup_tag="r1")
 
                 assert postgres_store.rows.backup_tables() == [
                     "checkpoint_writes_bak_r1",
@@ -705,24 +802,49 @@ def describe_rewrite_live_set_with_a_backup():
 
             with pytest.raises(TargetError) as raised:
                 rewrite_live_set(
-                    releases.current, expect=releases.expect, apply=True, backup="r1"
+                    releases.current,
+                    expect=releases.expect,
+                    apply=True,
+                    backup_tag="r1",
                 )
 
             assert str(raised.value) == (
                 "The backup needs a PostgresSaver, and the saver of the store "
                 "is InMemorySaver. Back up the store with the tools of its "
-                "database, then run rewrite --apply without --backup."
+                "database, then run rewrite without --backup."
             )
             assert releases.plan("t1") == ["rewrite"]
 
     def when_apply_is_false():
-        def it_raises_a_value_error_before_it_opens_the_store(tmp_path: Path):
-            releases = _releases(tmp_path)
+        def it_takes_the_backup_and_writes_no_checkpoint(
+            postgres_store: _PostgresStore,
+        ):
+            rows = postgres_store.rows
+            before = rows.checkpoint("t1")
 
-            with pytest.raises(ValueError, match=r"^backup= needs apply=True\."):
+            outcome = postgres_store.rewrite(backup_tag="r1", apply=False)
+
+            assert outcome.backup == BackupCounts(checkpoints=1, writes=1)
+            assert outcome.passes == ()
+            assert rows.checkpoint("t1", "checkpoints_bak_r1") == before
+            assert rows.checkpoint("t1") == before
+
+    def when_the_target_sets_threads():
+        def it_raises_a_target_error(tmp_path: Path):
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(releases.current, threads=_no_read)
+
+            with pytest.raises(TargetError) as raised:
                 rewrite_live_set(
-                    releases.current, expect=releases.expect, apply=False, backup="r1"
+                    target, expect=releases.expect, apply=False, backup_tag="r1"
                 )
+
+            assert str(raised.value) == (
+                "The backup acts on the whole store, and the target sets "
+                "threads=, so other graphs can share the store. The backup "
+                "needs a store that one graph owns. Back up the store with the "
+                "tools of its database, then run rewrite without --backup."
+            )
 
     def when_the_tag_is_not_valid():
         @pytest.mark.parametrize("tag", ["", "R1", "r-1", "a" * 33, "x; drop"])
@@ -731,7 +853,10 @@ def describe_rewrite_live_set_with_a_backup():
 
             with pytest.raises(ValueError, match=r"Give 1 to 32 characters"):
                 rewrite_live_set(
-                    releases.current, expect=releases.expect, apply=True, backup=tag
+                    releases.current,
+                    expect=releases.expect,
+                    apply=True,
+                    backup_tag=tag,
                 )
 
 
@@ -742,7 +867,7 @@ def describe_restore_live_set():
         ):
             rows = postgres_store.rows
             checkpoint, writes = rows.checkpoint("t1"), rows.writes("t1")
-            postgres_store.rewrite(backup="r1")
+            postgres_store.rewrite(backup_tag="r1")
             rows.execute("UPDATE checkpoint_writes SET blob = '\\x00'::bytea")
 
             counts = restore_live_set(postgres_store.releases.current, "r1")
@@ -754,7 +879,7 @@ def describe_restore_live_set():
         def when_a_run_wrote_a_checkpoint_after_the_backup():
             def it_leaves_the_new_checkpoint(postgres_store: _PostgresStore):
                 releases = postgres_store.releases
-                postgres_store.rewrite(backup="r1")
+                postgres_store.rewrite(backup_tag="r1")
                 releases.current.graph(releases.saver).invoke(
                     Started(data="t1"), config=_cfg("t1")
                 )
@@ -768,7 +893,7 @@ def describe_restore_live_set():
             def it_counts_the_rows_it_put_back(postgres_store: _PostgresStore):
                 from langgraph.checkpoint.postgres import PostgresSaver
 
-                postgres_store.rewrite(backup="r1")
+                postgres_store.rewrite(backup_tag="r1")
                 url = postgres_store.rows.url
                 target = dataclasses.replace(
                     postgres_store.releases.current,
@@ -784,14 +909,43 @@ def describe_restore_live_set():
             rows = postgres_store.rows
             before = rows.checkpoint("t1")
 
-            with pytest.raises(NoBackupError) as raised:
+            with pytest.raises(TargetError) as raised:
                 restore_live_set(postgres_store.releases.current, "r1")
 
             assert str(raised.value) == (
                 "The store holds no backup r1: no checkpoints_bak_r1 and "
-                "checkpoint_writes_bak_r1. Nothing changed."
+                "checkpoint_writes_bak_r1. The store holds no backup. Nothing "
+                "changed."
             )
             assert rows.checkpoint("t1") == before
+
+        def when_the_store_holds_a_backup_of_another_tag():
+            def it_names_that_tag(postgres_store: _PostgresStore):
+                postgres_store.rewrite(backup_tag="r0", apply=False)
+
+                with pytest.raises(TargetError) as raised:
+                    restore_live_set(postgres_store.releases.current, "r1")
+
+                assert str(raised.value) == (
+                    "The store holds no backup r1: no checkpoints_bak_r1 and "
+                    "checkpoint_writes_bak_r1. The store holds the backup r0. "
+                    "Nothing changed."
+                )
+
+    def when_the_target_sets_threads():
+        def it_raises_a_target_error(tmp_path: Path):
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(releases.current, threads=_no_read)
+
+            with pytest.raises(TargetError) as raised:
+                restore_live_set(target, "r1")
+
+            assert str(raised.value) == (
+                "The restore acts on the whole store, and the target sets "
+                "threads=, so other graphs can share the store. The restore "
+                "needs a store that one graph owns. Restore the store with the "
+                "tools of its database."
+            )
 
     def when_the_store_is_not_postgres():
         def it_raises_a_target_error(tmp_path: Path):
@@ -873,7 +1027,7 @@ def describe_the_documented_prune_of_old_blob_versions():
                 return set(tup.checkpoint["channel_values"])
 
             before = channels()
-            postgres_store.rewrite(backup="r1")
+            postgres_store.rewrite(backup_tag="r1")
             _prune(postgres_store.rows.url)
 
             restore_live_set(postgres_store.releases.current, "r1")

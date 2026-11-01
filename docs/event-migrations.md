@@ -652,7 +652,7 @@ target = MigrationTarget(
 - `PostgresSaver.from_conn_string` takes the plain libpq form, `postgresql://...`. The SQLAlchemy form with a driver, `postgresql+psycopg://...`, fails in psycopg with `missing "=" after ...`. If your app keeps its URL in the SQLAlchemy form, remove `+psycopg` before you give the URL to the saver.
 - The commands import the target and call `graph`, so the graph factory runs your full app setup. Run each command in an environment that has the configuration of your app, for example its environment variables. If the app setup opens a SQLAlchemy engine, it needs the driver form `postgresql+psycopg://...`. A plain `postgresql://...` there selects psycopg2, and the setup fails with `No module named 'psycopg2'` when only psycopg 3 is installed.
 - The command lists the threads of a `PostgresSaver`, a `SqliteSaver` or a `MemorySaver`. For another saver, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and namespace. See [Checkpointers](#checkpointers).
-- If one store holds more than one graph, set `threads=` and return the threads of this graph only.
+- If one store holds more than one graph, set `threads=` and return the threads of this graph only. A target with `threads=` declares a store that other graphs can share. `rewrite --backup` and `restore` act on the whole store, so they exit 2 for such a target. See [Backup and restore](#backup-and-restore).
 
 ### Checkpointers
 
@@ -712,19 +712,19 @@ Each command is `python -m langgraph_events.serde.migrations <command>`.
 |---|---|---|---|
 | 1. Add the migration | Development | `baseline update <target>` | The baseline records the new migration |
 | 2. Gate each change | CI | `check <target> --previous prev.json` | No shipped migration survives, and the baseline matches the code |
-| 3. Plan under release N | Before release N serves, in a one-off container of release N | `rewrite <target> --expect <fingerprint of N> --accept rewrite` | Exit 0: release N reads each checkpoint, or can rewrite it. No checkpoint is refused |
-| 4. Deploy release N | After the deploy, in release N | `rewrite <target> --apply --expect <fingerprint of N> --backup <tag> --accept refused` | The backup is taken, and every pass ran. Exit 0 also when a checkpoint stays refused. The output names each one |
+| 3. Plan under release N | Before release N serves, in a one-off container of release N | `rewrite <target> --expect <fingerprint of N> --accept rewrite --backup <tag of N>` | The backup is taken. Exit 0: release N reads each checkpoint, or can rewrite it. No checkpoint is refused |
+| 4. Deploy release N | After the deploy, in release N | `rewrite <target> --apply --expect <fingerprint of N> --backup <tag of N> --accept refused` | The backup keeps its rows and adds new threads, and every pass ran. Exit 0 also when a checkpoint stays refused. The output names each one |
 | 5. Delete the migration | Development of release N+1 | Delete it, then `baseline update <target> --previous prev.json` | The baseline drops the history that the migration covered |
 | 6. Deploy release N+1 | Before the deploy, in release N | `rewrite <target> --expect <fingerprint of N>` | Exit 0: release N reads the store clean |
 | Roll back release N | Before the rollback, in release N | `restore <target> <tag of N>` | Exit 0: the rows of the backup are back |
 
+`<tag of N>` names the backup. Derive it from the fingerprint of N, for example `lge-m1-dbc7afada42b30d1` gives `lge_m1_dbc7afada42b30d1`. A redeploy with the same migrations, for example a hotfix, then gives the same tag, and the backup keeps the rows from before the first rewrite. A tag from the commit is different for each deploy. Then a hotfix drops the backup of release N and backs up the rows that the rewrite already changed. See [Backup and restore](#backup-and-restore).
+
 `prev.json` is the baseline file of the release that runs in production. `<fingerprint of N>` is the output of `fingerprint <baseline file of N>`. The `fingerprint` command reads the JSON only.
 
-`<tag>` names the backup. Derive it from the fingerprint, for example `lge-m1-dbc7afada42b30d1` gives `lge_m1_dbc7afada42b30d1`. A redeploy with the same migrations, for example a hotfix, then gives the same tag, and the backup keeps the rows from before the first rewrite. A tag from the commit is different for each deploy. Then a hotfix drops the backup of release N and backs up the rows that the rewrite already changed. See [Backup and restore](#backup-and-restore).
+Step 3 stops a release that cannot read the store before that release serves. A checkpoint that needs a rewrite is the expected result of a new migration, so `--accept rewrite` lets the deploy go on. A refused checkpoint exits 1, and the deploy stops. Step 3 writes no checkpoint. With `--backup`, it takes the backup before release N serves. So the backup holds each thread before release N can write to it.
 
-Step 3 stops a release that cannot read the store before that release serves. A checkpoint that needs a rewrite is the expected result of a new migration, so `--accept rewrite` lets the deploy go on. A refused checkpoint exits 1, and the deploy stops. Step 3 reads the store only.
-
-Step 4 runs after release N serves. The deploy cannot stop there, so `--accept refused` exits 0 when a checkpoint stays refused. Read the output, and settle each refused checkpoint before step 6. A failed backup still exits 2, and no pass runs. `--backup` needs a `PostgresSaver`. For another saver, back up the store with the tools of its database, and leave out `--backup`.
+Step 4 runs after release N serves. Give it the same tag as step 3. The backup then keeps each row of step 3, and adds the latest row of each thread that appeared since. The deploy cannot stop there, so `--accept refused` exits 0 when a checkpoint stays refused. Read the output, and settle each refused checkpoint before step 6. When the store did not settle after the last pass, the output also names the next command. A failed backup still exits 2, and no plan runs. `--backup` needs a `PostgresSaver`, and a target without `threads=`. For another store, back up the store with the tools of its database, and leave out `--backup`.
 
 Step 6 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 6 exits 1, do not deploy release N+1. Run step 4 again, with the fingerprint and the tag of release N. If a refused thread cannot converge, keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
 
@@ -759,18 +759,27 @@ FP=$(python -m langgraph_events.serde.migrations fingerprint myapp/lge-baseline.
 TAG=$(echo "$FP" | tr - _)
 
 # Before release N serves, in a one-off container of release N.
-your-deploy-tool run --version N "python -m langgraph_events.serde.migrations rewrite myapp.lge_target:target --expect $FP --accept rewrite"
+your-deploy-tool run --version N "python -m langgraph_events.serde.migrations rewrite myapp.lge_target:target --expect $FP --accept rewrite --backup $TAG"
 
 # After the deploy of release N, in a container of release N.
 your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp.lge_target:target --apply --expect $FP --backup $TAG --accept refused"
-
-# Before a rollback of release N, in a container of release N.
-your-deploy-tool exec "python -m langgraph_events.serde.migrations restore myapp.lge_target:target $TAG"
 
 # Before the deploy of release N+1, in a container of release N.
 FP=$(python -m langgraph_events.serde.migrations fingerprint "$RUNNER_TEMP/prev.json")
 your-deploy-tool exec "python -m langgraph_events.serde.migrations rewrite myapp.lge_target:target --expect $FP"
 ```
+
+A rollback starts from another commit: the release that you roll back to. So compute the tag from the baseline of the release that runs, which is the release that took the backup:
+
+```bash
+# Before a rollback of release N, in a container of release N.
+PROD_SHA=$(your-deploy-tool version --running)   # prints the commit of release N
+git show "$PROD_SHA:myapp/lge-baseline.json" > "$RUNNER_TEMP/running.json"
+TAG=$(python -m langgraph_events.serde.migrations fingerprint "$RUNNER_TEMP/running.json" | tr - _)
+your-deploy-tool exec "python -m langgraph_events.serde.migrations restore myapp.lge_target:target $TAG"
+```
+
+WARNING: Do not compute the tag of a restore from the commit that you roll back to. That commit has the baseline of the older release, so the tag names no backup, and the restore exits 2.
 
 `--expect` is a fence. The command compares the migrations of the running code with the fingerprint before it opens the store. A mismatch exits 3. So the step cannot run under the wrong release, for example after a rollback.
 
@@ -780,7 +789,7 @@ The command writes each pass line and its report to stdout, and an error to stde
 
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
 2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the fence judge the serde of step 1, so the serde that writes must be the same.
-3. With `--backup TAG`, it backs up the live set of the store in one transaction. See [Backup and restore](#backup-and-restore). `--backup` needs `--apply`.
+3. With `--backup TAG`, it backs up the live set of the store in one transaction. A plan takes the backup too, and writes no checkpoint. See [Backup and restore](#backup-and-restore).
 4. It plans the latest checkpoint of each thread in each checkpoint namespace: the root namespace and each subgraph namespace.
 5. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stdout.
 6. The worst state of the last plan and `--accept` decide the exit code.
@@ -797,12 +806,12 @@ The last plan has one of three states. They are in order, from best to worst:
 
 | Code | Meaning | The output names |
 |---|---|---|
-| 0 | The state of the last plan is `--accept` or better | The backup, the counts of each pass and of the last plan. When the state is not `clean`, the verdict `accepted` and each checkpoint that is not clean, with no next command |
+| 0 | The state of the last plan is `--accept` or better | The backup, the counts of each pass and of the last plan. When the state is not `clean`, the verdict `accepted` and each checkpoint that is not clean. When the passes ran out and the last plan still reads a checkpoint as a rewrite, the output says that the store did not settle, and names the next command: `rewrite --apply` |
 | 1 | The state of the last plan is worse than `--accept` | Each checkpoint and its reason. When the last plan reads a checkpoint as a rewrite, the output also names the next command: `rewrite --apply` |
-| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open, `--backup` without `--apply`, a tag that is not valid, a saver other than `PostgresSaver` under `--backup`, a failed backup | The error, on one line, with its type when lge did not raise it |
+| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open, a tag that is not valid, `--backup` on a target with `threads=`, a saver other than `PostgresSaver` under `--backup`, a failed backup | The error, on one line, with its type when lge did not raise it |
 | 3 | Wrong release: the running code does not hold the expected migrations | Both fingerprints, the running migrations and the command |
 
-The Python form is `rewrite_live_set(target, expect=..., apply=..., backup=None)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the fence refuses. `LiveSetOutcome.passes` holds the report of each pass, `final` holds the last plan, and `backup` holds the `BackupCounts` of the backup, or `None`. `state` gives the state of the last plan, `within(accept)` compares it with `accept`, and `clean` is `state == "clean"`.
+The Python form is `rewrite_live_set(target, expect=..., apply=..., backup_tag=None)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the fence refuses. `LiveSetOutcome.passes` holds the report of each pass, `final` holds the last plan, and `backup` holds the `BackupCounts` of the backup after the run, or `None`. `state` gives the `LiveSetState` of the last plan. The members of `LiveSetState` compare in the order of the table, so `outcome.state <= LiveSetState.REWRITE` is the check of `--accept rewrite`. `clean` is `state is LiveSetState.CLEAN`.
 
 ### A checkpoint that a plan refuses
 
@@ -866,7 +875,9 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 This section applies to `PostgresSaver` only. Under another saver, `rewrite --backup` and `restore` exit 2 before they write.
 
-`rewrite <target> --apply --expect <fingerprint> --backup <tag>` backs up the live set before the first plan. The live set is the latest checkpoint of each thread in each checkpoint namespace, and its pending writes. `<tag>` is 1 to 32 characters of `a-z`, `0-9` and `_`.
+The backup and the restore act on the whole store. So they need a store that one graph owns. A target with `threads=` declares a store that other graphs can share, and `rewrite --backup` and `restore` exit 2 for it, before they open the store. For a shared store, back up the store with the tools of its database.
+
+`rewrite <target> --expect <fingerprint> --backup <tag>` backs up the live set before the first plan. A plan takes the backup and writes no checkpoint. With `--apply`, the passes run after the backup. The live set is the latest checkpoint of each thread in each checkpoint namespace, and its pending writes. `<tag>` is 1 to 32 characters of `a-z`, `0-9` and `_`.
 
 | Table | It holds |
 |---|---|
@@ -881,25 +892,27 @@ The backup runs in one transaction, through the connection of the saver:
 
 - A failed backup writes nothing. The command exits 2, and no pass runs.
 - It drops the backup tables of each other tag in the current schema of the store. So the store keeps one backup.
-- A rerun with the same tag keeps each row that the backup holds, and adds each new latest row. So a retry of the deploy step keeps the rows from before the first rewrite.
+- A rerun with the same tag keeps each row that the backup holds, and adds the latest row of each thread that appeared since. So the apply after the deploy keeps the rows of the plan before the deploy, and a retry keeps the rows from before the first rewrite. The output line gives the rows that the backup kept and the rows that it added.
+- It copies the columns that the backup table and the live table share. So a rerun after an upgrade of the saver adds a column still runs.
+
+The backup and the restore take locks on the checkpoint tables. To limit the wait, set `lock_timeout` and `statement_timeout` in the connection options of the store, for example `?options=-c%20lock_timeout%3D5s` in the URL.
 
 WARNING: The backup drops each table of the current schema whose name is `checkpoints_bak_<x>` or `checkpoint_writes_bak_<x>`, where `<x>` is 1 to 32 characters of `a-z`, `0-9` and `_`. Do not give your own table such a name.
 
 `python -m langgraph_events.serde.migrations restore <target> <tag>` puts the backup back, in one transaction. It overwrites each row that the backup holds and the store still holds under the same key: `checkpoint` and `metadata` of each checkpoint, and `channel`, `type` and `blob` of each pending write. A run that wrote a checkpoint after the backup gave it a new key, so the restore does not change it.
 
-WARNING: A checkpoint that a run of the new release wrote after the backup holds the shapes of the new release. The restore does not change it, and the output does not count it. After the rollback, the older release cannot read that thread. Stop the runs of the new release before the restore. For each thread that a run changed after the backup, add a tombstone in the older release, or delete the thread.
+WARNING: A restore cannot make a checkpoint readable that the new release wrote after it started to serve. That checkpoint holds the shapes of the new release. The plan before the deploy takes its rows before the new release serves. The apply after the deploy can copy a row that the new release wrote into the backup. The restore then puts back that row, and its count includes the row. After the rollback, the older release cannot read that thread. Before the apply after the deploy, stop each run of the old release. Before the restore, stop each run of the new release. For each thread that the new release changed, add a tombstone in the older release, or delete the thread.
 
 | Code | `restore` |
 |---|---|
 | 0 | The rows are back. The output gives their counts |
-| 1 | The store holds no backup of the tag. Nothing changed |
-| 2 | A usage, target or store error, for example a saver other than `PostgresSaver`. A failed restore changes nothing |
+| 2 | A usage, target or store error. Examples: the store holds no backup of the tag, a target with `threads=`, a saver other than `PostgresSaver`. The message of a missing backup names each backup that the store holds. A failed restore changes nothing |
 
 Restore the backup before a rollback to a release that cannot read the shapes of the new release. That is the case when the new release adds a read-time migration. Restore just before the rollback, because a run of the new release can write the new shapes again. Give the tag of the release that you roll back. Each backup drops the backups of other tags, so the store holds only the backup of the last release that ran step 4.
 
-WARNING: The restored rows name the old blob versions. The prune in [Old blob versions](#old-blob-versions) deletes each version that no checkpoint names. After a rewrite, often no checkpoint names the old version of a rewritten channel. So after a prune, a restored checkpoint can lose a channel, with no error. Do not restore a backup that is older than the last prune.
+WARNING: The restored rows name the old blob versions. The prune in [Old blob versions](#old-blob-versions) deletes each version that no checkpoint names. After a rewrite, often no checkpoint names the old version of a rewritten channel. So after a prune, a restored checkpoint can lose a channel, with no error. Do not restore a backup that is older than the last prune. A backup with a reused tag keeps its old rows, so it can be older than a prune that ran after its first run.
 
-The Python form is `restore_live_set(target, tag)`. It returns the `BackupCounts` of the rows it put back. It raises `NoBackupError`, a `TargetError`, when the store holds no backup of the tag.
+The Python form is `restore_live_set(target, tag)`. It returns the `BackupCounts` of the rows it put back. It raises `TargetError` when the store holds no backup of the tag.
 
 ### What only a plan sees
 
@@ -1091,7 +1104,7 @@ An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is
 !!! warning "Run it while the graph is idle, never inside a rolling deploy window"
     For a deploy step, use the `rewrite` command. It plans again after each pass, and only its last plan decides the exit code. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
-    An old pod cannot read the new bytes. The rewrite also toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Take a store-level backup first. The previous blob versions stay in the store, but the checkpoint row is overwritten in place. For a `PostgresSaver`, `rewrite --apply --backup <tag>` takes the backup. See [Backup and restore](#backup-and-restore).
+    An old pod cannot read the new bytes. The rewrite also toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Take a store-level backup first. The previous blob versions stay in the store, but the checkpoint row is overwritten in place. For a `PostgresSaver`, `rewrite --backup <tag>` takes the backup. See [Backup and restore](#backup-and-restore).
 
 What the rewrite does not do:
 

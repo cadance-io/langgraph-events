@@ -2710,7 +2710,7 @@ class EventGraph:
         deploy window. An old pod cannot read the new bytes. Take a
         store-level backup first: the previous blob versions stay in the
         store, but the checkpoint row is overwritten in place. For a
-        ``PostgresSaver``, ``rewrite_live_set(backup=...)`` and the
+        ``PostgresSaver``, ``rewrite_live_set(backup_tag=...)`` and the
         ``rewrite --backup`` command take it. Review ``plan_rewrite()``
         before this call.
 
