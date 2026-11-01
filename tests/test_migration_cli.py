@@ -758,7 +758,7 @@ def describe_drop_backups_command():
         ):
             target, expect = _postgres_target(tmp_path, postgres_url)
             rows = _PostgresRows(postgres_url)
-            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0123456789abcdef (x int)")
+            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0000000000000000 (x int)")
             spec = _install(monkeypatch, target)
             main(["backup", spec])
             capsys.readouterr()
@@ -767,7 +767,7 @@ def describe_drop_backups_command():
 
             assert code == 0
             assert capsys.readouterr().out == (
-                "lge drop-backups: dropped lge-m1-0123456789abcdef.\n"
+                "lge drop-backups: dropped lge-m1-0000000000000000.\n"
             )
             assert _backup_name(expect) in rows.backup_tables()
 

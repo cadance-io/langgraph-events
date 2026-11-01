@@ -721,11 +721,11 @@ def describe_backup_live_set():
 
         def it_drops_no_table(postgres_store: _PostgresStore):
             rows = postgres_store.rows
-            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0123456789abcdef (x int)")
+            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0000000000000000 (x int)")
 
             backup_live_set(postgres_store.releases.current)
 
-            assert "checkpoints_bak_lge_m1_0123456789abcdef" in rows.backup_tables()
+            assert "checkpoints_bak_lge_m1_0000000000000000" in rows.backup_tables()
 
         def when_a_rewrite_follows():
             def it_keeps_the_row_from_before_the_rewrite(
@@ -1072,13 +1072,13 @@ def describe_drop_backups():
             rows = postgres_store.rows
             backup_live_set(releases.previous)
             backup_live_set(releases.current)
-            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0123456789abcdef (x int)")
+            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0000000000000000 (x int)")
             rows.execute("CREATE TABLE checkpoints_bak_mine (x int)")
             previous = releases.previous.snapshot().migrations.fingerprint
 
             dropped = drop_backups(releases.current)
 
-            assert dropped == tuple(sorted((previous, "lge-m1-0123456789abcdef")))
+            assert dropped == tuple(sorted((previous, "lge-m1-0000000000000000")))
             suffix = postgres_store.fingerprint.replace("-", "_")
             assert set(rows.backup_tables()) == {
                 f"checkpoints_bak_{suffix}",
