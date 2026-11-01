@@ -652,7 +652,7 @@ target = MigrationTarget(
 - `PostgresSaver.from_conn_string` takes the plain libpq form, `postgresql://...`. The SQLAlchemy form with a driver, `postgresql+psycopg://...`, fails in psycopg with `missing "=" after ...`. If your app keeps its URL in the SQLAlchemy form, remove `+psycopg` before you give the URL to the saver.
 - The commands import the target and call `graph`, so the graph factory runs your full app setup. Run each command in an environment that has the configuration of your app, for example its environment variables. If the app setup opens a SQLAlchemy engine, it needs the driver form `postgresql+psycopg://...`. A plain `postgresql://...` there selects psycopg2, and the setup fails with `No module named 'psycopg2'` when only psycopg 3 is installed.
 - The command lists the threads of a `PostgresSaver`, a `SqliteSaver` or a `MemorySaver`. For another saver, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and namespace. See [Checkpointers](#checkpointers).
-- If one store holds more than one graph, set `threads=` and return the threads of this graph only. A target with `threads=` declares a store that other graphs can share. `backup`, `restore` and `drop-backups` act on the whole store, so they exit 2 for such a target. See [Backup and restore](#backup-and-restore).
+- If one store holds more than one graph, set `threads=` and return the threads of this graph only. See [A store that other graphs share](#a-store-that-other-graphs-share).
 
 ### Checkpointers
 
@@ -735,7 +735,7 @@ Step 3 stops a release that cannot read the store before that release serves. `b
 
 Step 4 runs after release N serves. `backup` keeps each row of step 3, and adds the latest row of each thread that appeared or changed since. The deploy cannot stop there, so `--accept refused` exits 0 when a checkpoint stays refused. Read the output, and settle each refused checkpoint before step 6. When the store did not settle after the last pass, the output also names the next command. `drop-backups` then drops the backup of each other release, so the store keeps the backup of release N only.
 
-`backup`, `restore` and `drop-backups` need a `PostgresSaver`, and a target without `threads=`. For another store, back up the store with the tools of its database before step 3, and leave out these three commands.
+`backup`, `restore` and `drop-backups` need a `PostgresSaver` and a store that one graph owns. See [A store that other graphs share](#a-store-that-other-graphs-share). For another store, back up the store with the tools of its database before step 3, and leave out these three commands.
 
 Step 6 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 6 exits 1, do not deploy release N+1. Run step 4 again under release N. If a refused thread cannot converge, keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
 
@@ -786,8 +786,6 @@ your-deploy-tool exec "$LGE restore myapp.lge_target:target"
 ```
 
 `--expect` is a fence. The command compares the migrations of the running code with the fingerprint before it opens the store. A mismatch exits 3. So the step cannot run under the wrong release, for example after a rollback.
-
-`backup`, `restore` and `drop-backups` take no fingerprint. Each reads the fingerprint of the code that runs it. So run each one in a container of the release that the table names.
 
 The command writes each pass line and its report to stdout, and an error to stderr. Some deploy tools show the stderr of a remote command only when it fails, so a successful run still shows what it changed.
 
@@ -882,11 +880,7 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 This section applies to `PostgresSaver` only. Under another saver, `backup`, `restore` and `drop-backups` exit 2 before they write.
 
-The three commands read and write the store through `PostgresSaver._cursor()`, a private method of the saver. Install the saver through the `postgres` extra, which pins the range of the saver that the lge tests cover:
-
-```bash
-pip install "langgraph-events[postgres]"
-```
+The three commands read and write the store through `PostgresSaver._cursor()`, a private method of the saver. Install the saver through the `postgres` extra. See [Checkpointers](#checkpointers).
 
 | Command | What it does |
 |---|---|
@@ -905,11 +899,11 @@ The live set is the latest checkpoint of each thread in each checkpoint namespac
 | `checkpoints_bak_<fp>` | The latest row of `checkpoints` for each thread and checkpoint namespace |
 | `checkpoint_writes_bak_<fp>` | Each row of `checkpoint_writes` of those checkpoints, as of the last run of `backup` |
 
-`<fp>` is the migration fingerprint of the running code, with `_` for each `-`. For example, `lge-m1-dbc7afada42b30d1` gives `checkpoints_bak_lge_m1_dbc7afada42b30d1`. So the operator gives no name, and a restore under the same release finds the backup.
+`<fp>` is the migration fingerprint of the running code, with `_` for each `-`. For example, `lge-m1-dbc7afada42b30d1` gives `checkpoints_bak_lge_m1_dbc7afada42b30d1`.
 
 `PostgresSaver.put()` stores each channel that the rewrite changed under a new version, and an insert into `checkpoint_blobs` never replaces a stored row. So the old blob versions stay in the store, and the backup does not copy them.
 
-The backup copies the stored rows in SQL, at the level of the storage. A copy through `get_tuple()` cannot work, because the serde migrates each record on read. The copy would then hold the new shapes. The copy names the columns that the backup table and the live table share. So a rerun after an upgrade of the saver adds a column still runs.
+The backup copies the stored rows in SQL, at the level of the storage. A copy through `get_tuple()` cannot work, because the serde migrates each record on read. The copy would then hold the new shapes. The copy names the columns that the backup table and the live table share. So the copy still runs after an upgrade of the saver adds a column.
 
 #### A rerun of the backup
 
@@ -918,8 +912,6 @@ A rerun under the same fingerprint keeps each row that the backup holds. It adds
 ```text
 lge backup: lge-m1-dbc7afada42b30d1 kept 1 checkpoint and 1 write, added 1 checkpoint and 0 writes.
 ```
-
-So step 4 keeps the rows of step 3, and a redeploy with the same migrations keeps the rows from before the first rewrite.
 
 #### The restore
 
@@ -937,8 +929,6 @@ Before it writes, the restore checks the blob versions that it puts back. A chec
 
 WARNING: A restore cannot make a checkpoint readable that the new release wrote after it started to serve. That checkpoint holds the shapes of the new release. Step 3 copies the rows before the new release serves. Step 4 can copy a row or a pending write that the new release wrote. The restore then puts back that row or write, and its count includes it. After the rollback, the older release cannot read that thread. Before the restore, stop each run of the new release. For each thread that the new release changed, add a tombstone in the older release, or delete the thread.
 
-Restore the backup before a rollback to a release that cannot read the shapes of the new release. That is the case when the new release adds a read-time migration. Restore just before the rollback, because a run of the new release can write the new shapes again.
-
 #### Retention: `drop-backups`
 
 `backup` and `restore` drop no table. `drop-backups <target>` is the step that drops old backups. It drops the backup tables of each fingerprint except the fingerprint of the running code, in the current schema of the store. It drops only the tables whose name has the form of a backup name: `checkpoints_bak_lge_m<n>_<16 hex digits>` or `checkpoint_writes_bak_lge_m<n>_<16 hex digits>`. It prints one line for each dropped backup, or `nothing to drop`:
@@ -951,13 +941,13 @@ Step 4 runs it after the rewrite. So the store holds the backup of the release t
 
 When release N+1 holds the same migrations as release N, both releases write to one backup, and `drop-backups` keeps it. Each run of `backup` adds the latest row of each thread that changed since the last run. So over a series of releases with the same fingerprint, for example releases with no read-time migration, the backup grows with each deploy. To limit it, drop the two tables of that backup with the tools of the database when no rollback needs them. The next `backup` then starts a new backup.
 
-The prune in [Old blob versions](#old-blob-versions) and the backup need the same blob versions. The prune after step 6 deletes the old versions that the backup of release N names. After that, `restore` under release N exits 2 and names the missing versions, so the prune causes no silent loss. Run the prune only when you no longer need to roll back release N.
+The prune after step 6 deletes the blob versions that the backup of release N needs, as the WARNING in [Old blob versions](#old-blob-versions) says.
 
 #### Locks and timeouts
 
-The three commands take locks on the checkpoint tables. To limit the wait, set `lock_timeout` and `statement_timeout` in the connection options of the store, for example `?options=-c%20lock_timeout%3D5s` in the URL.
+The three commands take locks on the checkpoint tables. To limit the wait, set `lock_timeout` and `statement_timeout` in the connection options of the store, for example `?options=-c%20lock_timeout%3D5s` in the URL. Then, when another session holds a lock on a checkpoint table, the command fails fast and changes nothing.
 
-`restore` takes a `SHARE` lock on `checkpoint_blobs` for its whole transaction. So each checkpoint write of the app that stores a blob waits while the restore runs. For a small live set, the wait is some milliseconds. Set `lock_timeout` in the connection options. Then, when another session holds a lock on a checkpoint table, the command fails fast and changes nothing.
+`restore` takes a `SHARE` lock on `checkpoint_blobs` for its whole transaction. So each checkpoint write of the app that stores a blob waits while the restore runs. For a small live set, the wait is some milliseconds.
 
 #### A store that other graphs share
 

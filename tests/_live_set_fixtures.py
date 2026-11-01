@@ -8,9 +8,12 @@ must keep a return annotation that resolves at run time.
 """
 
 import contextlib
+import io
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
 from conftest import Started
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
@@ -18,9 +21,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph_events import EventGraph, IntegrationEvent, on
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
 from langgraph_events.serde.migrations import (
+    LiveSetOutcome,
     Migration,
     MigrationTarget,
     TransformFields,
+    rewrite_live_set,
 )
 
 
@@ -198,3 +203,53 @@ def _write_pending(
     tup = saver.get_tuple(_cfg(tid))
     assert tup is not None
     saver.put_writes(tup.config, [("audit", "kept")], task_id)
+
+
+class _PostgresStore(NamedTuple):
+    """Two releases over one ``PostgresSaver`` store, and its stored rows."""
+
+    releases: _Releases
+    rows: _PostgresRows
+
+    @property
+    def fingerprint(self) -> str:
+        return self.releases.expect
+
+    def backup_table(self, table: str = "checkpoints") -> str:
+        """The name of the backup table of *table* under the current release."""
+        return f"{table}_bak_" + self.fingerprint.replace("-", "_")
+
+    def rewrite(self, *, apply: bool = True) -> LiveSetOutcome:
+        outcome = rewrite_live_set(
+            self.releases.current,
+            expect=self.releases.expect,
+            apply=apply,
+            log=io.StringIO(),
+        )
+        assert isinstance(outcome, LiveSetOutcome)
+        return outcome
+
+    def live_tables(self) -> list[list[tuple]]:
+        """Every row of the three live tables, in a stable order."""
+        return [
+            self.rows.execute(f"SELECT * FROM {table} ORDER BY 1, 2, 3, 4")  # noqa: S608 - a test-owned table name
+            for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs")
+        ]
+
+
+@pytest.fixture
+def postgres_store(tmp_path: Path, postgres_url: str) -> Iterator[_PostgresStore]:
+    """Thread ``t1``, written by the previous release, with one pending
+    write on its latest checkpoint. The current release reads it as a
+    rewrite."""
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(postgres_url) as saver:
+        releases = _releases(tmp_path, saver)
+        releases.seed("t1")
+        _write_pending(saver, "t1")
+        yield _PostgresStore(releases, _PostgresRows(postgres_url))
+
+
+def _no_store() -> contextlib.AbstractContextManager[MemorySaver]:
+    raise AssertionError("the store opened")

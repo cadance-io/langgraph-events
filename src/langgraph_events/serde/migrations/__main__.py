@@ -47,6 +47,7 @@ _SUBCOMMANDS = (
     "drop-backups",
 )
 _WRONG_RELEASE = 3
+_TARGET_HELP = "the module:attr of the MigrationTarget"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -82,18 +83,18 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(required=True, metavar="command")
 
     check_ = commands.add_parser("check", help="run the migration gate")
-    check_.add_argument("target")
+    check_.add_argument("target", help=_TARGET_HELP)
     check_.add_argument("--previous", type=Path)
     check_.set_defaults(run=_check)
 
     baseline = commands.add_parser("baseline", help="write the baseline")
     actions = baseline.add_subparsers(required=True, metavar="action")
     update = actions.add_parser("update", help="write the baseline the code needs")
-    update.add_argument("target")
+    update.add_argument("target", help=_TARGET_HELP)
     update.add_argument("--previous", type=Path)
     update.set_defaults(run=_update)
     hold = actions.add_parser("hold", help="keep a shipped migration one release")
-    hold.add_argument("target")
+    hold.add_argument("target", help=_TARGET_HELP)
     hold.add_argument("label")
     hold.add_argument("--reason", required=True)
     hold.add_argument("--previous", type=Path, required=True)
@@ -110,13 +111,13 @@ def _parser() -> argparse.ArgumentParser:
         help="back up the live set of a PostgresSaver store, named after the "
         "fingerprint of the running code",
     )
-    backup.add_argument("target", help="the module:attr of the MigrationTarget")
+    backup.add_argument("target", help=_TARGET_HELP)
     backup.set_defaults(run=_backup)
 
     rewrite = commands.add_parser(
         "rewrite", help="rewrite the live set of the store until it reads clean"
     )
-    rewrite.add_argument("target", help="the module:attr of the MigrationTarget")
+    rewrite.add_argument("target", help=_TARGET_HELP)
     rewrite.add_argument(
         "--expect",
         required=True,
@@ -140,13 +141,13 @@ def _parser() -> argparse.ArgumentParser:
     restore = commands.add_parser(
         "restore", help="put back the backup of the running code"
     )
-    restore.add_argument("target", help="the module:attr of the MigrationTarget")
+    restore.add_argument("target", help=_TARGET_HELP)
     restore.set_defaults(run=_restore)
 
     drop = commands.add_parser(
         "drop-backups", help="drop each backup except the backup of the running code"
     )
-    drop.add_argument("target", help="the module:attr of the MigrationTarget")
+    drop.add_argument("target", help=_TARGET_HELP)
     drop.set_defaults(run=_drop_backups)
     return parser
 

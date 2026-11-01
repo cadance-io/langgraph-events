@@ -14,10 +14,10 @@ from _live_set_fixtures import (
     _copy_to_namespace,
     _Counted,
     _graph,
-    _PostgresRows,
+    _no_store,
+    _PostgresStore,
     _releases,
     _unsettling,
-    _write_pending,
 )
 from _migration_fixtures import (
     _CLI,
@@ -383,7 +383,10 @@ def describe_rewrite_command():
                     )
 
                     out = capsys.readouterr().out.splitlines()
-                    report = out[[line[:4] for line in out].index("lge ") :]
+                    start = next(
+                        i for i, line in enumerate(out) if line.startswith("lge ")
+                    )
+                    report = out[start:]
                     assert code == 1
                     assert report[1].startswith(
                         f"  t1: needs a rewrite, the last pass refused it: the "
@@ -433,22 +436,6 @@ def describe_rewrite_command():
                     f"{releases.expect}: {_CLI} rewrite {spec} --apply --expect "
                     f"{releases.expect}\n"
                 )
-
-
-def _postgres_target(tmp_path: Path, url: str) -> tuple[MigrationTarget, str]:
-    """The current release over a ``PostgresSaver`` store whose thread
-    ``t1`` the previous release wrote, with one pending write, and the
-    fingerprint of the current release."""
-    from langgraph.checkpoint.postgres import PostgresSaver
-
-    with PostgresSaver.from_conn_string(url) as saver:
-        releases = _releases(tmp_path, saver)
-        releases.seed("t1")
-        _write_pending(saver, "t1")
-    target = dataclasses.replace(
-        releases.current, store=lambda: PostgresSaver.from_conn_string(url)
-    )
-    return target, releases.expect
 
 
 def describe_rewrite_accept():
@@ -565,39 +552,16 @@ def describe_rewrite_accept():
             assert "invalid choice: 'dirty'" in capsys.readouterr().err
 
 
-def describe_rewrite_without_a_backup_option():
-    def it_exits_two_on_backup(
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
-    ):
-        releases = _releases(tmp_path)
-        spec = _install(monkeypatch, releases.current)
-
-        code = main(["rewrite", spec, "--expect", releases.expect, "--backup", "r1"])
-
-        assert code == 2
-        assert "unrecognized arguments: --backup r1" in capsys.readouterr().err
-
-
-def _no_store() -> contextlib.AbstractContextManager[MemorySaver]:
-    raise AssertionError("the command opened the store")
-
-
-def _backup_name(fingerprint: str) -> str:
-    return "checkpoints_bak_" + fingerprint.replace("-", "_")
-
-
 def describe_backup_command():
     def when_the_store_is_postgres():
         def it_exits_zero_and_prints_the_rows_it_kept_and_added(
-            tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
-            postgres_url: str,
+            postgres_store: _PostgresStore,
         ):
-            target, expect = _postgres_target(tmp_path, postgres_url)
-            rows = _PostgresRows(postgres_url)
+            target = postgres_store.releases.current
+            expect = postgres_store.fingerprint
+            rows = postgres_store.rows
             spec = _install(monkeypatch, target)
 
             code = main(["backup", spec])
@@ -609,16 +573,18 @@ def describe_backup_command():
                 f"checkpoint and 1 write.\n"
             )
             assert err == ""
-            assert rows.checkpoint("t1", _backup_name(expect)) == rows.checkpoint("t1")
+            assert rows.checkpoint(
+                "t1", postgres_store.backup_table()
+            ) == rows.checkpoint("t1")
 
         def when_it_runs_again():
             def it_keeps_the_rows(
-                tmp_path: Path,
                 monkeypatch: pytest.MonkeyPatch,
                 capsys: pytest.CaptureFixture[str],
-                postgres_url: str,
+                postgres_store: _PostgresStore,
             ):
-                target, expect = _postgres_target(tmp_path, postgres_url)
+                target = postgres_store.releases.current
+                expect = postgres_store.fingerprint
                 spec = _install(monkeypatch, target)
                 main(["backup", spec])
                 capsys.readouterr()
@@ -633,14 +599,13 @@ def describe_backup_command():
 
         def when_the_backup_fails():
             def it_exits_two_and_writes_nothing(
-                tmp_path: Path,
                 monkeypatch: pytest.MonkeyPatch,
                 capsys: pytest.CaptureFixture[str],
-                postgres_url: str,
+                postgres_store: _PostgresStore,
             ):
-                target, expect = _postgres_target(tmp_path, postgres_url)
-                rows = _PostgresRows(postgres_url)
-                rows.execute(f"CREATE TABLE {_backup_name(expect)} (x int)")
+                target = postgres_store.releases.current
+                rows = postgres_store.rows
+                rows.execute(f"CREATE TABLE {postgres_store.backup_table()} (x int)")
                 spec = _install(monkeypatch, target)
 
                 code = main(["backup", spec])
@@ -649,7 +614,7 @@ def describe_backup_command():
                 assert code == 2
                 assert out == ""
                 assert err.startswith("error: The backup failed and changed nothing: ")
-                assert rows.backup_tables() == [_backup_name(expect)]
+                assert rows.backup_tables() == [postgres_store.backup_table()]
 
     def when_the_store_is_not_postgres():
         def it_exits_two(
@@ -687,13 +652,13 @@ def describe_backup_command():
 def describe_restore_command():
     def when_the_store_holds_the_backup_of_the_running_code():
         def it_exits_zero_and_prints_the_counts(
-            tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
-            postgres_url: str,
+            postgres_store: _PostgresStore,
         ):
-            target, expect = _postgres_target(tmp_path, postgres_url)
-            rows = _PostgresRows(postgres_url)
+            target = postgres_store.releases.current
+            expect = postgres_store.fingerprint
+            rows = postgres_store.rows
             before = rows.checkpoint("t1")
             spec = _install(monkeypatch, target)
             main(["backup", spec])
@@ -711,13 +676,13 @@ def describe_restore_command():
 
     def when_the_store_holds_no_backup_of_the_running_code():
         def it_exits_two_and_changes_nothing(
-            tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
-            postgres_url: str,
+            postgres_store: _PostgresStore,
         ):
-            target, expect = _postgres_target(tmp_path, postgres_url)
-            rows = _PostgresRows(postgres_url)
+            target = postgres_store.releases.current
+            expect = postgres_store.fingerprint
+            rows = postgres_store.rows
             before = rows.checkpoint("t1")
             spec = _install(monkeypatch, target)
 
@@ -751,13 +716,12 @@ def describe_restore_command():
 def describe_drop_backups_command():
     def when_the_store_holds_a_backup_of_another_release():
         def it_exits_zero_and_names_each_dropped_backup(
-            tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
-            postgres_url: str,
+            postgres_store: _PostgresStore,
         ):
-            target, expect = _postgres_target(tmp_path, postgres_url)
-            rows = _PostgresRows(postgres_url)
+            target = postgres_store.releases.current
+            rows = postgres_store.rows
             rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0000000000000000 (x int)")
             spec = _install(monkeypatch, target)
             main(["backup", spec])
@@ -769,16 +733,15 @@ def describe_drop_backups_command():
             assert capsys.readouterr().out == (
                 "lge drop-backups: dropped lge-m1-0000000000000000.\n"
             )
-            assert _backup_name(expect) in rows.backup_tables()
+            assert postgres_store.backup_table() in rows.backup_tables()
 
     def when_the_store_holds_only_the_backup_of_the_running_code():
         def it_exits_zero_and_says_so(
-            tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
-            postgres_url: str,
+            postgres_store: _PostgresStore,
         ):
-            target, _ = _postgres_target(tmp_path, postgres_url)
+            target = postgres_store.releases.current
             spec = _install(monkeypatch, target)
 
             code = main(["drop-backups", spec])

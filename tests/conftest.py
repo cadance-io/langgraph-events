@@ -19,6 +19,9 @@ from langgraph_events import (
     on,
 )
 
+# Registers the ``postgres_store`` fixture for every test module.
+pytest_plugins = ("_live_set_fixtures",)
+
 _WRAPS_SET_NAME_ERRORS = sys.version_info < (3, 12)
 """CPython wrapped a failing ``__set_name__`` in RuntimeError until 3.12."""
 

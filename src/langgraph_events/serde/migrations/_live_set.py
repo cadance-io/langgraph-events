@@ -110,8 +110,7 @@ class LiveSetOutcome:
 
     @property
     def clean(self) -> bool:
-        """The last plan reads every checkpoint unchanged. It equals
-        ``verdict is Verdict.CLEAN``."""
+        """The last plan reads every checkpoint unchanged."""
         return self.verdict is Verdict.CLEAN
 
     def accepted(self, accept: Verdict) -> bool:

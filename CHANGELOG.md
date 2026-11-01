@@ -9,23 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Four commands now carry a migration deploy, and the operator types no backup name.** The
-  `backup`, `restore` and `drop-backups` commands name the backup after the migration
-  fingerprint of the code that runs them. The documented flow runs `backup` and then
-  `rewrite --expect FP --accept rewrite` before the new release serves. After the deploy, it runs
-  `backup`, then `rewrite --apply --expect FP --accept refused`, then `drop-backups`. For a
-  rollback, it runs `restore` in a container of the release that serves. See *Lifecycle of a
-  read-time migration* and *Backup and restore* in `docs/event-migrations.md`.
+- **Four commands now carry a migration deploy, and the operator types no backup name.** See
+  [Backup and restore](docs/event-migrations.md#backup-and-restore).
 - **`backup <target>` copies the live set of a `PostgresSaver` store.** The live set is the
   latest checkpoint of each thread in each checkpoint namespace, and its pending writes. The copy
   goes to `checkpoints_bak_<fp>` and `checkpoint_writes_bak_<fp>`, where `<fp>` is the
-  fingerprint with `_` for each `-`. It runs in one transaction, in SQL, and names the columns
-  that each backup table and its live table share. A rerun under the same fingerprint keeps each
-  row and adds the latest row of each thread that appeared or changed since. It also copies each
-  pending write that a run added since to a backed-up checkpoint. It drops no table.
-  The output gives the rows that the backup kept and added. The blobs need no copy: the rewrite
-  stores each changed channel under a new version and keeps the old one. The Python form is
-  `backup_live_set(target) -> BackupOutcome`.
+  fingerprint with `_` for each `-`. A rerun under the same fingerprint keeps each row and adds
+  the latest row of each thread that appeared or changed since. It also copies each pending write
+  that a run added since to a backed-up checkpoint. It drops no table. The output gives the rows
+  that the backup kept and added. The Python form is `backup_live_set(target) -> BackupOutcome`.
 - **`restore <target>` puts back the backup of the running code.** In one transaction, it
   overwrites each checkpoint row and each pending write that the backup holds and the store still
   holds. It also deletes each pending write that a run added to a backed-up checkpoint after the
@@ -46,8 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `psycopg>=3.2.0,<4`. `pip install "langgraph-events[sqlite]"` installs
   `langgraph-checkpoint-sqlite>=3.1.1,<4`. The thread listing and the backup commands call an
   internal method of the saver, which a release of the saver package can change.
-- **`rewrite --accept clean|rewrite|refused` names the worst verdict that exits 0.** The verdicts
-  are in order: `clean`, `rewrite`, `refused`. The default `clean` keeps the exit code of 0.42.
+- **`rewrite --accept clean|rewrite|refused` names the worst verdict that exits 0.** The default
+  `clean` keeps the exit code of 0.42.
   `LiveSetOutcome.verdict` gives the `Verdict` of the last plan, an enum whose members `CLEAN`,
   `REWRITE` and `REFUSED` compare in that order. `LiveSetOutcome.accepted(accept)` is the rule of
   `--accept`, and the command exits 0 exactly when it is true. `LiveSetOutcome.clean` stays, and

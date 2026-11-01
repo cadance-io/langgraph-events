@@ -5,9 +5,9 @@
 import contextlib
 import dataclasses
 import io
+import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import NamedTuple
 
 import pytest
 from _dict_saver import DictSaver
@@ -15,9 +15,10 @@ from _live_set_fixtures import (
     _cfg,
     _copy_to_namespace,
     _graph,
+    _no_store,
     _noop,
     _PostgresRows,
-    _Releases,
+    _PostgresStore,
     _releases,
     _write_pending,
 )
@@ -576,52 +577,6 @@ def describe_rewrite_live_set():
             )
 
 
-class _PostgresStore(NamedTuple):
-    """Two releases over one ``PostgresSaver`` store, and its stored rows."""
-
-    releases: _Releases
-    rows: _PostgresRows
-
-    @property
-    def fingerprint(self) -> str:
-        return self.releases.expect
-
-    @property
-    def backup_table(self) -> str:
-        return "checkpoints_bak_" + self.fingerprint.replace("-", "_")
-
-    def rewrite(self, *, apply: bool = True) -> LiveSetOutcome:
-        outcome = rewrite_live_set(
-            self.releases.current,
-            expect=self.releases.expect,
-            apply=apply,
-            log=io.StringIO(),
-        )
-        assert isinstance(outcome, LiveSetOutcome)
-        return outcome
-
-    def live_tables(self) -> list[list[tuple]]:
-        """Every row of the three live tables, in a stable order."""
-        return [
-            self.rows.execute(f"SELECT * FROM {table} ORDER BY 1, 2, 3, 4")  # noqa: S608 - a test-owned table name
-            for table in ("checkpoints", "checkpoint_writes", "checkpoint_blobs")
-        ]
-
-
-@pytest.fixture
-def postgres_store(tmp_path: Path, postgres_url: str) -> Iterator[_PostgresStore]:
-    """Thread ``t1``, written by the previous release, with one pending
-    write on its latest checkpoint. The current release reads it as a
-    rewrite."""
-    from langgraph.checkpoint.postgres import PostgresSaver
-
-    with PostgresSaver.from_conn_string(postgres_url) as saver:
-        releases = _releases(tmp_path, saver)
-        releases.seed("t1")
-        _write_pending(saver, "t1")
-        yield _PostgresStore(releases, _PostgresRows(postgres_url))
-
-
 def describe_Verdict():
     def it_orders_the_verdicts_from_best_to_worst():
         assert sorted(Verdict, reverse=True) == [
@@ -710,7 +665,7 @@ def describe_backup_live_set():
                 kept=BackupRows(checkpoints=0, writes=0),
                 added=BackupRows(checkpoints=1, writes=1),
             )
-            assert rows.checkpoint("t1", postgres_store.backup_table) == before
+            assert rows.checkpoint("t1", postgres_store.backup_table()) == before
 
         def it_writes_nothing_to_the_live_tables(postgres_store: _PostgresStore):
             before = postgres_store.live_tables()
@@ -738,7 +693,7 @@ def describe_backup_live_set():
                 postgres_store.rewrite()
 
                 assert rows.checkpoint("t1") != before
-                assert rows.checkpoint("t1", postgres_store.backup_table) == before
+                assert rows.checkpoint("t1", postgres_store.backup_table()) == before
 
         def when_it_runs_again():
             def it_keeps_each_row_of_the_first_run(postgres_store: _PostgresStore):
@@ -751,7 +706,7 @@ def describe_backup_live_set():
 
                 assert outcome.kept == BackupRows(1, 1)
                 assert outcome.added == BackupRows(0, 0)
-                assert rows.checkpoint("t1", postgres_store.backup_table) == before
+                assert rows.checkpoint("t1", postgres_store.backup_table()) == before
 
             def when_a_thread_appeared_since():
                 def it_adds_the_latest_row_of_that_thread(
@@ -766,7 +721,7 @@ def describe_backup_live_set():
                     assert outcome.kept == BackupRows(1, 1)
                     assert outcome.added == BackupRows(1, 0)
                     assert postgres_store.rows.checkpoint(
-                        "t2", postgres_store.backup_table
+                        "t2", postgres_store.backup_table()
                     )
 
             def when_a_thread_changed_since():
@@ -780,7 +735,7 @@ def describe_backup_live_set():
 
                     outcome = backup_live_set(releases.current)
 
-                    table = postgres_store.backup_table
+                    table = postgres_store.backup_table()
                     assert outcome.added.checkpoints == 1
                     assert postgres_store.rows.checkpoint("t1", table) == latest
 
@@ -805,10 +760,8 @@ def describe_backup_live_set():
                     outcome = backup_live_set(postgres_store.releases.current)
 
                     assert outcome.added == BackupRows(0, 0)
-                    blobs = rows.execute(
-                        f"SELECT blob FROM checkpoint_writes_bak_"  # noqa: S608 - a test-owned table name
-                        f"{postgres_store.fingerprint.replace('-', '_')}"
-                    )
+                    table = postgres_store.backup_table("checkpoint_writes")
+                    blobs = rows.execute(f"SELECT blob FROM {table}")  # noqa: S608 - a test-owned table name
                     assert blobs != [(b"\x00",)]
 
             def when_the_saver_added_a_column_since():
@@ -837,7 +790,7 @@ def describe_backup_live_set():
         def when_the_backup_fails():
             def it_raises_and_writes_nothing(postgres_store: _PostgresStore):
                 rows = postgres_store.rows
-                rows.execute(f"CREATE TABLE {postgres_store.backup_table} (x int)")
+                rows.execute(f"CREATE TABLE {postgres_store.backup_table()} (x int)")
 
                 with pytest.raises(TargetError) as raised:
                     backup_live_set(postgres_store.releases.current)
@@ -845,7 +798,7 @@ def describe_backup_live_set():
                 assert str(raised.value).startswith(
                     "The backup failed and changed nothing: "
                 )
-                assert rows.backup_tables() == [postgres_store.backup_table]
+                assert rows.backup_tables() == [postgres_store.backup_table()]
 
     def when_the_store_is_not_postgres():
         def it_raises_a_target_error(tmp_path: Path):
@@ -857,6 +810,21 @@ def describe_backup_live_set():
                 "is InMemorySaver. Back up the store with the tools of its "
                 "database."
             )
+
+        def without_the_postgres_extra():
+            def it_raises_the_same_target_error(
+                tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+            ):
+                monkeypatch.setitem(sys.modules, "psycopg", None)
+                monkeypatch.setitem(sys.modules, "langgraph.checkpoint.postgres", None)
+
+                with pytest.raises(TargetError) as raised:
+                    backup_live_set(_releases(tmp_path).current)
+
+                assert str(raised.value).startswith(
+                    "The backup needs a PostgresSaver, and the saver of the store "
+                    "is InMemorySaver."
+                )
 
     def when_the_target_sets_threads():
         def it_raises_before_it_opens_the_store(tmp_path: Path):
@@ -1079,10 +1047,9 @@ def describe_drop_backups():
             dropped = drop_backups(releases.current)
 
             assert dropped == tuple(sorted((previous, "lge-m1-0000000000000000")))
-            suffix = postgres_store.fingerprint.replace("-", "_")
             assert set(rows.backup_tables()) == {
-                f"checkpoints_bak_{suffix}",
-                f"checkpoint_writes_bak_{suffix}",
+                postgres_store.backup_table(),
+                postgres_store.backup_table("checkpoint_writes"),
                 "checkpoints_bak_mine",
             }
 
@@ -1117,10 +1084,6 @@ def _pipelined(store: _PostgresStore) -> MigrationTarget:
         store.releases.current,
         store=lambda: PostgresSaver.from_conn_string(url, pipeline=True),
     )
-
-
-def _no_store() -> contextlib.AbstractContextManager[MemorySaver]:
-    raise AssertionError("the function opened the store")
 
 
 def _keep(kw: dict) -> dict:

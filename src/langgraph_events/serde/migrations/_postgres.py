@@ -17,22 +17,17 @@ A backup through ``get_tuple()`` cannot work: the serde migrates each
 record on read. So the backup, the restore and the drop read and write
 the stored rows, in SQL, through the connection of the saver, in one
 transaction.
-
-A backup is named after the migration fingerprint of the running code.
-So the operator gives no name, and a rerun under the same migrations
-adds to the same backup.
 """
 
 from __future__ import annotations
 
-import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from langgraph_events.serde.migrations._target import TargetError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
     from langgraph.checkpoint.postgres import PostgresSaver
@@ -73,7 +68,7 @@ WITH added AS (
     RETURNING thread_id, checkpoint_ns, checkpoint_id
 ), copied AS (
     INSERT INTO {writes} ({w_columns})
-    SELECT {w_qualified} FROM checkpoint_writes AS w
+    SELECT {w_columns} FROM checkpoint_writes AS w
     WHERE EXISTS (
         SELECT 1 FROM added AS a
         WHERE (a.thread_id, a.checkpoint_ns, a.checkpoint_id)
@@ -86,13 +81,10 @@ WITH added AS (
     ON CONFLICT DO NOTHING
     RETURNING 1
 )
-SELECT (SELECT count(*) FROM added) AS checkpoints,
-       (SELECT count(*) FROM copied) AS writes
-"""
-
-_COUNT_SQL = """
-SELECT (SELECT count(*) FROM {checkpoints}) AS checkpoints,
-       (SELECT count(*) FROM {writes}) AS writes
+SELECT (SELECT count(*) FROM {checkpoints}) AS kept_checkpoints,
+       (SELECT count(*) FROM {writes}) AS kept_writes,
+       (SELECT count(*) FROM added) AS added_checkpoints,
+       (SELECT count(*) FROM copied) AS added_writes
 """
 
 # A checkpoint names a version of each channel, but PostgresSaver stores a
@@ -231,9 +223,7 @@ class _Backup:
         return self.fingerprint.replace("-", "_")
 
     def take(self, cursor: Cursor[DictRow]) -> BackupOutcome:
-        """Copy the live set into the two tables. Keep each row that the
-        tables hold, and copy each pending write of a backed-up checkpoint
-        that the tables do not hold."""
+        """Copy the live set into the two tables."""
         cursor.execute(
             self._sql(
                 "CREATE TABLE IF NOT EXISTS {checkpoints} "
@@ -246,16 +236,21 @@ class _Backup:
                 "(LIKE checkpoint_writes INCLUDING ALL)"
             )
         )
-        kept = _rows(cursor, self._sql(_COUNT_SQL))
-        added = _rows(
-            cursor,
+        # Each statement sees one snapshot, so the counts of the backup
+        # tables are the counts from before the copy.
+        cursor.execute(
             self._sql(
                 _COPY_SQL,
                 checkpoints=_shared_columns(cursor, "checkpoints", self.checkpoints),
                 writes=_shared_columns(cursor, "checkpoint_writes", self.writes),
-            ),
+            )
         )
-        return BackupOutcome(self.fingerprint, kept, added)
+        row = _one(cursor)
+        return BackupOutcome(
+            self.fingerprint,
+            kept=BackupRows(row["kept_checkpoints"], row["kept_writes"]),
+            added=BackupRows(row["added_checkpoints"], row["added_writes"]),
+        )
 
     def restore(self, cursor: Cursor[DictRow]) -> RestoreOutcome:
         """Put back the rows of the backup, after the checks that refuse a
@@ -282,6 +277,19 @@ class _Backup:
         restored = BackupRows(row["checkpoints"], row["writes"])
         return RestoreOutcome(self.fingerprint, restored, row["removed_writes"])
 
+    def drop_others(self, cursor: Cursor[DictRow]) -> tuple[str, ...]:
+        """Drop each backup of another fingerprint. Return the fingerprint of
+        each dropped backup, sorted."""
+        from psycopg import sql  # noqa: PLC0415
+
+        dropped: set[str] = set()
+        for name in _backup_tables(cursor):
+            backup = _Backup.of_table(name)
+            if backup != self:
+                cursor.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(name)))
+                dropped.add(backup.fingerprint)
+        return tuple(sorted(dropped))
+
     def _missing(self, held: tuple[_Backup, ...]) -> str:
         """The message of a restore that finds no backup of the running
         code. It names each backup that the store holds."""
@@ -305,18 +313,17 @@ class _Backup:
         writes: list[str] | None = None,
     ) -> sql.Composed:
         """*template* with the two table names, and with the column lists
-        ``{c_columns}``, ``{w_columns}`` and ``{w_qualified}``."""
+        ``{c_columns}`` and ``{w_columns}``."""
         from psycopg import sql  # noqa: PLC0415
 
-        def columns(names: list[str] | None, *table: str) -> sql.Composed:
-            return sql.SQL(", ").join(sql.Identifier(*table, n) for n in names or [])
+        def columns(names: list[str] | None) -> sql.Composed:
+            return sql.SQL(", ").join(sql.Identifier(n) for n in names or [])
 
         return sql.SQL(template).format(
             checkpoints=sql.Identifier(self.checkpoints),
             writes=sql.Identifier(self.writes),
             c_columns=columns(checkpoints),
             w_columns=columns(writes),
-            w_qualified=columns(writes, "w"),
         )
 
 
@@ -352,9 +359,7 @@ def backup_live_set(target: MigrationTarget) -> BackupOutcome:
             a ``PostgresSaver``, or when the backup fails. A failed backup
             writes nothing.
     """
-    _require_whole_store(target, _BACKUP)
-    backup = _Backup(target.snapshot().migrations.fingerprint)
-    return _in_transaction(target, _BACKUP, backup.take)
+    return _on_store(target, _BACKUP, _Backup.take)
 
 
 def restore_live_set(target: MigrationTarget) -> RestoreOutcome:
@@ -382,9 +387,7 @@ def restore_live_set(target: MigrationTarget) -> RestoreOutcome:
             holds), when a blob version that the restore puts back is
             missing, or when the restore fails. Then nothing changed.
     """
-    _require_whole_store(target, _RESTORE)
-    backup = _Backup(target.snapshot().migrations.fingerprint)
-    return _in_transaction(target, _RESTORE, backup.restore)
+    return _on_store(target, _RESTORE, _Backup.restore)
 
 
 def drop_backups(target: MigrationTarget) -> tuple[str, ...]:
@@ -400,65 +403,48 @@ def drop_backups(target: MigrationTarget) -> tuple[str, ...]:
             a ``PostgresSaver``, or when the drop fails. A failed drop
             drops nothing.
     """
-    _require_whole_store(target, _DROP)
-    keep = _Backup(target.snapshot().migrations.fingerprint)
-
-    def drop(cursor: Cursor[DictRow]) -> tuple[str, ...]:
-        from psycopg import sql  # noqa: PLC0415
-
-        dropped: set[str] = set()
-        for name in _backup_tables(cursor):
-            backup = _Backup.of_table(name)
-            if backup != keep:
-                cursor.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(name)))
-                dropped.add(backup.fingerprint)
-        return tuple(sorted(dropped))
-
-    return _in_transaction(target, _DROP, drop)
+    return _on_store(target, _DROP, _Backup.drop_others)
 
 
-def _require_whole_store(target: MigrationTarget, action: _Action) -> None:
-    """Refuse a target that sets ``threads``. That target declares a store
-    that other graphs can share. The action acts on every row of the
-    store, and the backup name does not name the graph."""
+def _on_store(
+    target: MigrationTarget,
+    action: _Action,
+    work: Callable[[_Backup, Cursor[DictRow]], _T],
+) -> _T:
+    """*work* on the backup of the running code and a cursor of the store
+    of *target*, inside one transaction.
+
+    A target that sets ``threads`` declares a store that other graphs can
+    share, so the function refuses it before it opens the store.
+
+    Raises:
+        TargetError: when *target* sets ``threads``, when the saver is not
+            a ``PostgresSaver``, or when the database refuses a statement.
+            The transaction then writes nothing.
+    """
     if target.threads is not None:
         raise TargetError(
             f"The {action.name} acts on the whole store, and the target sets "
             f"threads=, so other graphs can share the store. The {action.name} "
             f"needs a store that one graph owns. {action.remedy}"
         )
-
-
-def _in_transaction(
-    target: MigrationTarget,
-    action: _Action,
-    work: Callable[[Cursor[DictRow]], _T],
-) -> _T:
-    """*work* on a cursor of the store of *target*, inside one transaction.
-
-    Raises:
-        TargetError: when the saver is not a ``PostgresSaver``, or when the
-            database refuses a statement. The transaction then writes
-            nothing.
-    """
-    import psycopg  # noqa: PLC0415
-
+    backup = _Backup(target.snapshot().migrations.fingerprint)
     with target.open_store() as saver:
-        postgres = _require_postgres(saver, action)
+        postgres = _postgres_saver(saver)
+        if postgres is None:
+            raise TargetError(
+                f"The {action.name} needs a PostgresSaver, and the saver of the "
+                f"store is {type(saver).__name__}. {action.remedy}"
+            )
+        import psycopg  # noqa: PLC0415
+
         try:
-            with _transaction(postgres) as cursor:
-                return work(cursor)
+            with postgres._cursor() as cursor, cursor.connection.transaction():
+                return work(backup, cursor)
         except psycopg.Error as error:
             raise TargetError(
                 f"The {action.name} failed and changed nothing: {_one_line(error)}"
             ) from error
-
-
-@contextlib.contextmanager
-def _transaction(saver: PostgresSaver) -> Iterator[Cursor[DictRow]]:
-    """A cursor of *saver* inside one transaction."""
-    with saver._cursor() as cursor, cursor.connection.transaction():
-        yield cursor
 
 
 def _backup_tables(cursor: Cursor[DictRow]) -> list[str]:
@@ -490,24 +476,6 @@ def _one(cursor: Cursor[DictRow]) -> DictRow:
     row = cursor.fetchone()
     assert row is not None  # noqa: S101 - a SELECT of counts returns one row
     return row
-
-
-def _rows(cursor: Cursor[DictRow], query: sql.Composed) -> BackupRows:
-    cursor.execute(query)
-    row = _one(cursor)
-    return BackupRows(row["checkpoints"], row["writes"])
-
-
-def _require_postgres(
-    saver: BaseCheckpointSaver[Any], action: _Action
-) -> PostgresSaver:
-    postgres = _postgres_saver(saver)
-    if postgres is None:
-        raise TargetError(
-            f"The {action.name} needs a PostgresSaver, and the saver of the "
-            f"store is {type(saver).__name__}. {action.remedy}"
-        )
-    return postgres
 
 
 def _postgres_saver(saver: BaseCheckpointSaver[Any]) -> PostgresSaver | None:
