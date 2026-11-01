@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-11-01
+
 ### Added
 
 - **Four commands now carry a migration deploy, and the operator types no backup name.** See
@@ -1964,7 +1966,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.42.1...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/cadance-io/langgraph-events/compare/v0.42.1...v0.43.0
 [0.42.1]: https://github.com/cadance-io/langgraph-events/compare/v0.42.0...v0.42.1
 [0.42.0]: https://github.com/cadance-io/langgraph-events/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/cadance-io/langgraph-events/compare/v0.40.0...v0.41.0
