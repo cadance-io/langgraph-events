@@ -25,6 +25,7 @@ from conftest import Started
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
+from test_rewrite_store import _settled_drop_pair
 
 from langgraph_events import EventGraph
 from langgraph_events.serde import NamespaceAwareSerde
@@ -784,14 +785,31 @@ def describe_backup_live_set():
                     assert postgres_store.rows.checkpoint("t1", table) == latest
 
             def when_a_run_added_a_write_to_a_backed_up_checkpoint():
-                def it_does_not_copy_the_write(postgres_store: _PostgresStore):
+                def it_copies_the_write(postgres_store: _PostgresStore):
                     releases = postgres_store.releases
                     backup_live_set(releases.current)
                     _write_pending(releases.saver, "t1", task_id="task-2")
 
                     outcome = backup_live_set(releases.current)
 
+                    assert outcome.added == BackupRows(0, 1)
+
+            def when_a_rewrite_changed_a_backed_up_write():
+                def it_keeps_the_write_from_before_the_rewrite(
+                    postgres_store: _PostgresStore,
+                ):
+                    rows = postgres_store.rows
+                    backup_live_set(postgres_store.releases.current)
+                    rows.execute("UPDATE checkpoint_writes SET blob = '\\x00'::bytea")
+
+                    outcome = backup_live_set(postgres_store.releases.current)
+
                     assert outcome.added == BackupRows(0, 0)
+                    blobs = rows.execute(
+                        f"SELECT blob FROM checkpoint_writes_bak_"  # noqa: S608 - a test-owned table name
+                        f"{postgres_store.fingerprint.replace('-', '_')}"
+                    )
+                    assert blobs != [(b"\x00",)]
 
             def when_the_saver_added_a_column_since():
                 def it_copies_the_columns_that_both_tables_hold(
@@ -889,6 +907,71 @@ def describe_restore_live_set():
 
                 assert outcome.removed_writes == 1
                 assert postgres_store.rows.writes("t1") == writes
+
+        def when_a_rerun_of_the_backup_copied_a_later_write():
+            def it_keeps_the_write(postgres_store: _PostgresStore):
+                releases = postgres_store.releases
+                backup_live_set(releases.current)
+                _write_pending(releases.saver, "t1", task_id="task-2")
+                writes = postgres_store.rows.writes("t1")
+                backup_live_set(releases.current)
+
+                outcome = restore_live_set(releases.current)
+
+                assert outcome.removed_writes == 0
+                assert postgres_store.rows.writes("t1") == writes
+
+        def when_the_rewrite_dropped_an_event():
+            def it_puts_back_the_inline_position_channel(
+                tmp_path: Path, postgres_url: str
+            ):
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                rows = _PostgresRows(postgres_url)
+                with PostgresSaver.from_conn_string(postgres_url) as saver:
+                    graph, _, retiring = _settled_drop_pair(saver, "t1")
+                    target = MigrationTarget(
+                        graph=lambda s: graph,
+                        baseline=tmp_path / "baseline.json",
+                        store=lambda: contextlib.nullcontext(saver),
+                    )
+                    before = rows.checkpoint("t1")
+                    backup_live_set(target)
+                    graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
+                    assert rows.checkpoint("t1") != before
+
+                    outcome = restore_live_set(target)
+
+                assert outcome.restored.checkpoints == 1
+                assert rows.checkpoint("t1") == before
+
+        def when_a_prune_runs_at_the_same_time():
+            def it_waits_for_the_prune_and_changes_nothing(
+                postgres_store: _PostgresStore,
+            ):
+                import psycopg
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                backup_live_set(postgres_store.releases.current)
+                postgres_store.rewrite()
+                url = postgres_store.rows.url
+                target = dataclasses.replace(
+                    postgres_store.releases.current,
+                    store=lambda: PostgresSaver.from_conn_string(
+                        url + "?options=-c%20lock_timeout%3D200ms"
+                    ),
+                )
+                before = postgres_store.live_tables()
+
+                with psycopg.connect(url) as prune:
+                    prune.execute("DELETE FROM checkpoint_blobs WHERE false")
+                    with pytest.raises(TargetError) as raised:
+                        restore_live_set(target)
+
+                assert str(raised.value).startswith(
+                    "The restore failed and changed nothing: LockNotAvailable: "
+                )
+                assert postgres_store.live_tables() == before
 
         def when_a_run_wrote_a_checkpoint_after_the_backup():
             def it_leaves_the_new_checkpoint(postgres_store: _PostgresStore):

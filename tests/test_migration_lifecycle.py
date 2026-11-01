@@ -202,6 +202,7 @@ def describe_the_lifecycle_of_a_read_time_migration():
             assert "legacy_total" in n_plus_1.app("read", "t1").stderr, (
                 "the restore put back the old shape"
             )
+            assert older.app("read", "t1").returncode == 0, "N-1 reads t1"
             post_deploy()
 
             kept = _Release(tmp_path / "n+1-kept", _MIGRATED, postgres_url, n)

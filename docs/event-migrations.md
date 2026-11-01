@@ -629,7 +629,7 @@ A read-time migration is `@migrate_from`, `@backfill`, `@transform_fields`, `@sp
 
 ### The target
 
-Give the target a `store`. Only `rewrite` opens it.
+Give the target a `store`. The `backup`, `rewrite`, `restore` and `drop-backups` commands open it. The gate does not.
 
 ```python
 # myapp/lge_target.py
@@ -713,10 +713,10 @@ Each command is `python -m langgraph_events.serde.migrations <command>`.
 | 1. Add the migration | Development | `baseline update <target>` | The baseline records the new migration |
 | 2. Gate each change | CI | `check <target> --previous prev.json` | No shipped migration survives, and the baseline matches the code |
 | 3. Before release N serves | In a one-off container of release N | `backup <target>`, then `rewrite <target> --expect <fingerprint of N> --accept rewrite` | Each command exits 0. Release N reads each checkpoint, or can rewrite it. No checkpoint is refused |
-| 4. After release N serves | In a container of release N | `backup <target>`, then `rewrite <target> --apply --expect <fingerprint of N> --accept refused`, then `drop-backups <target>` | Each command exits 0. Every pass ran. The rewrite exits 0 also when a checkpoint stays refused, and the output names each one |
+| 4. After release N serves | In a container of release N | `backup <target>`, then `rewrite <target> --apply --expect <fingerprint of N> --accept refused`, then `drop-backups <target>` | Each command exits 0. The passes ran until the store settled or `--passes` ran out. The rewrite exits 0 also when a checkpoint stays refused, and the output names each one |
 | 5. Delete the migration | Development of release N+1 | Delete it, then `baseline update <target> --previous prev.json` | The baseline drops the history that the migration covered |
 | 6. Before release N+1 deploys | In a container of release N | `rewrite <target> --expect <fingerprint of N>` | Exit 0: release N reads the store clean |
-| Roll back release N | In a container of release N, before the rollback | `restore <target>` | Exit 0: the rows of the backup are back |
+| Roll back release N | In a container of release N, before the rollback, when the older release cannot read the shapes of release N | `restore <target>` | Exit 0: the rows of the backup are back |
 
 `prev.json` is the baseline file of the release that runs in production. `<fingerprint of N>` is the output of `fingerprint <baseline file of N>`. The `fingerprint` command reads the JSON only.
 
@@ -732,7 +732,7 @@ Step 4 runs after release N serves. `backup` keeps each row of step 3, and adds 
 
 Step 6 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 6 exits 1, do not deploy release N+1. Run step 4 again under release N. If a refused thread cannot converge, keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
 
-To roll back release N, run `restore` in a container of release N, before the rollback starts. It puts back the backup of release N. See [Backup and restore](#backup-and-restore).
+To roll back release N to a release that cannot read its shapes, run `restore` in a container of release N, before the rollback starts. It puts back the backup of release N. A rollback to a release with the same migrations needs no restore. See [Backup and restore](#backup-and-restore).
 
 ### The previous baseline: two client styles
 
@@ -890,7 +890,7 @@ The live set is the latest checkpoint of each thread in each checkpoint namespac
 | Table | It holds |
 |---|---|
 | `checkpoints_bak_<fp>` | The latest row of `checkpoints` for each thread and checkpoint namespace |
-| `checkpoint_writes_bak_<fp>` | Each row of `checkpoint_writes` of those checkpoints, at the time of the copy |
+| `checkpoint_writes_bak_<fp>` | Each row of `checkpoint_writes` of those checkpoints, as of the last run of `backup` |
 
 `<fp>` is the migration fingerprint of the running code, with `_` for each `-`. For example, `lge-m1-dbc7afada42b30d1` gives `checkpoints_bak_lge_m1_dbc7afada42b30d1`. So the operator gives no name, and a restore under the same release finds the backup.
 
@@ -900,7 +900,7 @@ The backup copies the stored rows in SQL, at the level of the storage. A copy th
 
 #### A rerun of the backup
 
-A rerun under the same fingerprint keeps each row that the backup holds. It adds the latest row of each thread that appeared or changed since, with the pending writes of that row. It does not copy a write that a run added to a checkpoint that the backup already holds. A thread that changed has two rows in the backup, and the restore puts back both, each under its own key. The backup drops no table. The output gives the rows that the backup kept and the rows that it added:
+A rerun under the same fingerprint keeps each row that the backup holds. It adds the latest row of each thread that appeared or changed since, with the pending writes of that row. It also copies each pending write that a run added since to a checkpoint that the backup holds, for example the interrupt of a run that paused. It keeps each write that the backup holds, also when a rewrite changed the live write since. A thread that changed has two rows in the backup, and the restore puts back both, each under its own key. The backup drops no table. The output gives the rows that the backup kept and the rows that it added:
 
 ```text
 lge backup: lge-m1-dbc7afada42b30d1 kept 1 checkpoint and 1 write, added 1 checkpoint and 0 writes.
@@ -913,16 +913,16 @@ So step 4 keeps the rows of step 3, and a redeploy with the same migrations keep
 `restore <target>` finds the backup of the running code. Run it in a container of the release that serves, before the rollback. It puts the backup back in one transaction:
 
 - It overwrites each row that the backup holds and the store still holds under the same key: `checkpoint` and `metadata` of each checkpoint, and `channel`, `type` and `blob` of each pending write.
-- It deletes each pending write of a backed-up checkpoint when the backup does not hold the key of that write: `thread_id`, `checkpoint_ns`, `checkpoint_id`, `task_id` and `idx`. A run of the new release added that write after the backup.
+- It deletes each pending write of a backed-up checkpoint when the backup does not hold the key of that write: `thread_id`, `checkpoint_ns`, `checkpoint_id`, `task_id` and `idx`. A run added that write after the last run of `backup`.
 - It does not change a checkpoint that a run wrote after the backup. That checkpoint has a new key.
 
 ```text
 lge restore: lge-m1-dbc7afada42b30d1 put back 2 checkpoints and 1 write, and removed 1 write that the backup does not hold.
 ```
 
-Before it writes, the restore checks the blob versions that it puts back. A checkpoint names a version of each channel in `checkpoint -> 'channel_versions'`. `checkpoint_blobs` holds a blob under the key `thread_id`, `checkpoint_ns`, `channel` and `version`. Not every channel has a blob: a primitive value stays in the checkpoint row. So the restore checks only each channel whose version in the backup differs from the version in the live row. These are the channels that the rewrite changed, and each one has a blob. When `checkpoint_blobs` no longer holds such a version, a prune deleted it, and the restored checkpoint would lose the channel. The restore then exits 2, names the count of missing versions, and changes nothing. The restore locks each version that it finds until the end of its transaction, so a concurrent prune cannot delete it.
+Before it writes, the restore checks the blob versions that it puts back. A checkpoint names a version of each channel in `checkpoint -> 'channel_versions'`. `checkpoint_blobs` holds a blob under the key `thread_id`, `checkpoint_ns`, `channel` and `version`. Not every channel has a blob: a primitive value stays in `checkpoint -> 'channel_values'`, and a consumed channel has no value. So the restore checks each channel whose version in the backup differs from the version in the live row, and whose value is not inline. When `checkpoint_blobs` no longer holds such a version, a prune deleted it, and the restored checkpoint would lose the channel. The restore then exits 2, names the count of missing versions, and changes nothing. Before the check, the restore takes a `SHARE` lock on `checkpoint_blobs` until the end of its transaction. A running prune finishes first, and the check sees what it deleted. A new prune waits until the restore commits. The lock also holds back each run that writes a blob, so stop the runs before the restore.
 
-WARNING: A restore cannot make a checkpoint readable that the new release wrote after it started to serve. That checkpoint holds the shapes of the new release. Step 3 copies the rows before the new release serves. Step 4 can copy a row that the new release wrote. The restore then puts back that row, and its count includes the row. After the rollback, the older release cannot read that thread. Before the restore, stop each run of the new release. For each thread that the new release changed, add a tombstone in the older release, or delete the thread.
+WARNING: A restore cannot make a checkpoint readable that the new release wrote after it started to serve. That checkpoint holds the shapes of the new release. Step 3 copies the rows before the new release serves. Step 4 can copy a row or a pending write that the new release wrote. The restore then puts back that row or write, and its count includes it. After the rollback, the older release cannot read that thread. Before the restore, stop each run of the new release. For each thread that the new release changed, add a tombstone in the older release, or delete the thread.
 
 Restore the backup before a rollback to a release that cannot read the shapes of the new release. That is the case when the new release adds a read-time migration. Restore just before the rollback, because a run of the new release can write the new shapes again.
 
@@ -934,7 +934,9 @@ Restore the backup before a rollback to a release that cannot read the shapes of
 lge drop-backups: dropped lge-m1-4d1c8f0e2b7a9356.
 ```
 
-Step 4 runs it after the rewrite. So the store holds the backup of the release that serves, and a rollback of that release can restore it. When release N+1 holds the same migrations as release N, both releases have one backup.
+Step 4 runs it after the rewrite. So the store holds the backup of the release that serves, and a rollback of that release can restore it. A rollback of two releases cannot restore: step 4 of release N+1 drops the backup of release N.
+
+When release N+1 holds the same migrations as release N, both releases write to one backup, and `drop-backups` keeps it. Each run of `backup` adds the latest row of each thread that changed since the last run. So over a series of releases with the same fingerprint, for example releases with no read-time migration, the backup grows with each deploy. To limit it, drop the two tables of that backup with the tools of the database when no rollback needs them. The next `backup` then starts a new backup.
 
 The prune in [Old blob versions](#old-blob-versions) and the backup need the same blob versions. The prune after step 6 deletes the old versions that the backup of release N names. After that, `restore` under release N exits 2 and names the missing versions, so the prune causes no silent loss. Run the prune only when you no longer need to roll back release N.
 

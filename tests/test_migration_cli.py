@@ -857,7 +857,7 @@ def describe_target_errors():
             assert code == 2
             assert capsys.readouterr().err == (
                 "error: The store= function of the target returned an async "
-                "context manager. The rewrite command needs a sync checkpointer. "
+                "context manager. The command needs a sync checkpointer. "
                 "Return the sync saver of the same database, for example "
                 "SqliteSaver.from_conn_string(path) for an AsyncSqliteSaver, or "
                 "PostgresSaver.from_conn_string(url) for an AsyncPostgresSaver.\n"

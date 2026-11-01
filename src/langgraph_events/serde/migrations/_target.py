@@ -51,8 +51,9 @@ class MigrationTarget:
     ``graph`` builds the graph on the checkpointer it receives. The gate
     passes an empty in-memory saver, so building reads no store.
     ``baseline`` is the path of the committed baseline file. ``store``
-    returns a context manager that opens the real sync checkpointer. Only
-    ``rewrite`` uses it. ``threads`` lists the checkpoint namespaces of
+    returns a context manager that opens the real sync checkpointer. The
+    ``backup``, ``rewrite``, ``restore`` and ``drop-backups`` commands use
+    it. ``threads`` lists the checkpoint namespaces of
     the store. It is needed only for a saver other than ``PostgresSaver``,
     ``SqliteSaver`` or ``MemorySaver``, or for a store that more than one
     graph shares. :func:`list_thread_keys` lists the threads of any saver
@@ -115,7 +116,7 @@ class MigrationTarget:
         if not hasattr(opened, "__enter__") and hasattr(opened, "__aenter__"):
             raise TargetError(
                 "The store= function of the target returned an async context "
-                "manager. The rewrite command needs a sync checkpointer. Return "
+                "manager. The command needs a sync checkpointer. Return "
                 "the sync saver of the same database, for example "
                 "SqliteSaver.from_conn_string(path) for an AsyncSqliteSaver, or "
                 "PostgresSaver.from_conn_string(url) for an AsyncPostgresSaver."

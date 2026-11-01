@@ -21,15 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   goes to `checkpoints_bak_<fp>` and `checkpoint_writes_bak_<fp>`, where `<fp>` is the
   fingerprint with `_` for each `-`. It runs in one transaction, in SQL, and names the columns
   that each backup table and its live table share. A rerun under the same fingerprint keeps each
-  row and adds the latest row of each thread that appeared or changed since. It drops no table.
+  row and adds the latest row of each thread that appeared or changed since. It also copies each
+  pending write that a run added since to a backed-up checkpoint. It drops no table.
   The output gives the rows that the backup kept and added. The blobs need no copy: the rewrite
   stores each changed channel under a new version and keeps the old one. The Python form is
   `backup_live_set(target) -> BackupOutcome`.
 - **`restore <target>` puts back the backup of the running code.** In one transaction, it
   overwrites each checkpoint row and each pending write that the backup holds and the store still
   holds. It also deletes each pending write that a run added to a backed-up checkpoint after the
-  backup. Before it writes, it refuses when a blob version that it puts back is missing, for
-  example after a prune of old blob versions. The message names the count of missing versions.
+  last backup. Before it writes, it locks `checkpoint_blobs` against writes, and refuses when a
+  blob version that it puts back is missing, for example after a prune of old blob versions. The
+  message names the count of missing versions.
   When the store holds no backup of the running code, the message names each backup that the
   store holds. The Python form is `restore_live_set(target) -> RestoreOutcome`.
 - **`drop-backups <target>` drops each backup except the backup of the running code.** It drops

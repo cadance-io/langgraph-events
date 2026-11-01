@@ -61,11 +61,23 @@ WITH added AS (
     ) AS latest
     ON CONFLICT DO NOTHING
     RETURNING thread_id, checkpoint_ns, checkpoint_id
+), copied AS (
+    INSERT INTO {writes} ({w_columns})
+    SELECT {w_qualified} FROM checkpoint_writes AS w
+    WHERE EXISTS (
+        SELECT 1 FROM added AS a
+        WHERE (a.thread_id, a.checkpoint_ns, a.checkpoint_id)
+            = (w.thread_id, w.checkpoint_ns, w.checkpoint_id)
+    ) OR EXISTS (
+        SELECT 1 FROM {checkpoints} AS b
+        WHERE (b.thread_id, b.checkpoint_ns, b.checkpoint_id)
+            = (w.thread_id, w.checkpoint_ns, w.checkpoint_id)
+    )
+    ON CONFLICT DO NOTHING
+    RETURNING 1
 )
-INSERT INTO {writes} ({w_columns})
-SELECT {w_qualified} FROM checkpoint_writes AS w
-JOIN added USING (thread_id, checkpoint_ns, checkpoint_id)
-ON CONFLICT DO NOTHING
+SELECT (SELECT count(*) FROM added) AS checkpoints,
+       (SELECT count(*) FROM copied) AS writes
 """
 
 _COUNT_SQL = """
@@ -74,11 +86,12 @@ SELECT (SELECT count(*) FROM {checkpoints}) AS checkpoints,
 """
 
 # A checkpoint names a version of each channel, but PostgresSaver stores a
-# blob only for a value that is not a primitive. So the check covers only
-# the versions that the restore changes: the rewrite bumps only channels
-# that hold events, and each of them has a blob.
+# blob only for a channel that is absent from ``channel_values``, or that
+# holds the ``true`` marker of a delta snapshot. A primitive value stays
+# inline, and a consumed channel has no value. So the check covers each
+# version that the restore changes and that needs a blob.
 _MISSING_BLOBS_SQL = """
-WITH needed AS (
+SELECT count(*) AS missing FROM (
     SELECT DISTINCT b.thread_id, b.checkpoint_ns, v.channel, v.version
     FROM {checkpoints} AS b
     JOIN checkpoints AS t
@@ -87,14 +100,14 @@ WITH needed AS (
     CROSS JOIN LATERAL jsonb_each_text(b.checkpoint -> 'channel_versions')
       AS v(channel, version)
     WHERE v.version IS DISTINCT FROM t.checkpoint -> 'channel_versions' ->> v.channel
-), held AS (
+      AND coalesce(b.checkpoint -> 'channel_values' -> v.channel, 'true'::jsonb)
+        = 'true'::jsonb
+) AS needed
+WHERE NOT EXISTS (
     SELECT 1 FROM checkpoint_blobs AS bl
-    JOIN needed AS n
-      ON (bl.thread_id, bl.checkpoint_ns, bl.channel, bl.version)
-       = (n.thread_id, n.checkpoint_ns, n.channel, n.version)
-    FOR KEY SHARE OF bl
+    WHERE (bl.thread_id, bl.checkpoint_ns, bl.channel, bl.version)
+        = (needed.thread_id, needed.checkpoint_ns, needed.channel, needed.version)
 )
-SELECT (SELECT count(*) FROM needed) - (SELECT count(*) FROM held) AS missing
 """
 
 _RESTORE_SQL = """
@@ -209,8 +222,8 @@ class _Backup:
 
     def take(self, cursor: Cursor[DictRow]) -> BackupOutcome:
         """Copy the live set into the two tables. Keep each row that the
-        tables hold, and copy the pending writes of each checkpoint row
-        that this run adds."""
+        tables hold, and copy each pending write of a backed-up checkpoint
+        that the tables do not hold."""
         cursor.execute(
             self._sql(
                 "CREATE TABLE IF NOT EXISTS {checkpoints} "
@@ -224,16 +237,13 @@ class _Backup:
             )
         )
         kept = _rows(cursor, self._sql(_COUNT_SQL))
-        cursor.execute(
+        added = _rows(
+            cursor,
             self._sql(
                 _COPY_SQL,
                 checkpoints=_shared_columns(cursor, "checkpoints", self.checkpoints),
                 writes=_shared_columns(cursor, "checkpoint_writes", self.writes),
-            )
-        )
-        total = _rows(cursor, self._sql(_COUNT_SQL))
-        added = BackupRows(
-            total.checkpoints - kept.checkpoints, total.writes - kept.writes
+            ),
         )
         return BackupOutcome(self.fingerprint, kept, added)
 
@@ -243,6 +253,10 @@ class _Backup:
         held = _held_backups(cursor)
         if self not in held:
             raise TargetError(self._missing(held))
+        # A row lock on a blob does not stop a prune whose snapshot is older
+        # than the restore. The table lock waits for a running prune, and
+        # holds back a new one until the restore commits.
+        cursor.execute("LOCK TABLE checkpoint_blobs IN SHARE MODE")
         cursor.execute(self._sql(_MISSING_BLOBS_SQL))
         missing = _one(cursor)["missing"]
         if missing:
@@ -308,7 +322,8 @@ def backup_live_set(target: MigrationTarget) -> BackupOutcome:
 
     A rerun under the same fingerprint keeps each row that the backup
     holds. It adds the latest row of each thread that appeared or changed
-    since, with its pending writes. The function drops no table.
+    since, and each pending write of a backed-up checkpoint that a run
+    added since. The function drops no table.
 
     Raises:
         TargetError: when *target* sets ``threads``, when the saver is not
@@ -328,14 +343,15 @@ def restore_live_set(target: MigrationTarget) -> RestoreOutcome:
     checkpoint row and each pending write that the backup holds and the
     store still holds under the same key. It deletes each pending write
     of a backed-up checkpoint that the backup does not hold: a run added
-    it after the backup. A checkpoint that a run wrote after the backup
-    has a new key, so the restore leaves it.
+    it after the last backup. A checkpoint that a run wrote after the
+    backup has a new key, so the restore leaves it.
 
     Before it writes, the restore checks each blob version that it puts
     back: each channel version of a backed-up checkpoint that differs
-    from the version of the live row. The rewrite keeps the old version,
-    but a prune of old blob versions can delete it. The restore locks
-    each version that it finds until the end of the transaction.
+    from the version of the live row and that needs a blob. The rewrite
+    keeps the old version, but a prune of old blob versions can delete
+    it. The restore locks ``checkpoint_blobs`` against writes until the
+    end of the transaction, so a prune waits for it.
 
     Raises:
         TargetError: when *target* sets ``threads``, when the saver is not
