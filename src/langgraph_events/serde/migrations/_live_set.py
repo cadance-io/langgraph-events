@@ -194,7 +194,7 @@ def rewrite_live_set(
     writes no checkpoint. The same transaction drops the backup tables of
     every other tag in the current schema of the store. A rerun with the
     same tag keeps each row the backup holds, and adds the latest row of
-    each thread that appeared since. It logs one line to *log*.
+    each thread that appeared or changed since. It logs one line to *log*.
     :func:`restore_live_set` puts the backup back.
 
     Raises:

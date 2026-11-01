@@ -11,20 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`rewrite --backup TAG` backs up the live set of a `PostgresSaver` store.** The command
   copies the latest checkpoint of each thread in each checkpoint namespace into
-  `checkpoints_bak_<TAG>`, and its pending writes into `checkpoint_writes_bak_<TAG>`, before the
-  first plan. A plan takes the backup too, and writes no checkpoint. So the plan before a
+  `checkpoints_bak_<TAG>`, and its pending writes into `checkpoint_writes_bak_<TAG>`, before
+  the first plan. A plan takes the backup too, and writes no checkpoint. So the plan before a
   deploy, in a one-off container of the new release, takes the backup before the new release
-  serves. The apply after the deploy, with the same tag, keeps each row of the backup and adds
-  the latest row of each thread that appeared since. The output line gives the rows that the
-  backup kept and added. The copy runs in one transaction and names the columns that the
-  backup table and the live table share. A failed backup writes nothing and exits 2, and no
-  plan runs. The same transaction drops the backup tables of each other tag in the current
-  schema, so the store keeps one backup. The blobs need no copy: the rewrite stores each
-  changed channel under a new version and keeps the old one. `TAG` is 1 to 32 characters of
-  `a-z`, `0-9` and `_`. The Python form is `rewrite_live_set(..., backup_tag=TAG)`, and
-  `LiveSetOutcome.backup` holds the `BackupCounts`. Another saver exits 2 with a message.
-  Derive the tag from the migration fingerprint, so that a redeploy of the same migrations
-  keeps the first backup.
+  serves. The apply after the deploy, with the same tag, keeps each row of the backup and
+  adds the latest row of each thread that appeared or changed since. The output line gives
+  the rows that the backup kept and added. The copy runs in one transaction and names the
+  columns that the backup table and the live table share. A failed backup writes nothing and
+  exits 2, and no plan runs. The same transaction drops the backup tables of each other tag
+  in the current schema, a plan included, so the store keeps one backup. The blobs need no
+  copy: the rewrite stores each changed channel under a new version and keeps the old one.
+  `TAG` is 1 to 32 characters of `a-z`, `0-9` and `_`. The Python form is
+  `rewrite_live_set(..., backup_tag=TAG)`, and `LiveSetOutcome.backup` holds the
+  `BackupCounts`. Another saver exits 2 with a message. Derive the tag from the migration
+  fingerprint, so that a redeploy of the same migrations keeps the first backup.
 - **`restore <target> TAG` puts the backup back.** It overwrites, in one transaction, each
   checkpoint row and each pending write that the backup holds and the store still holds
   under the same key. It exits 0 with the counts, and 2 on an error. When the store holds no

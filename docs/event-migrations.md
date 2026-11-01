@@ -713,7 +713,7 @@ Each command is `python -m langgraph_events.serde.migrations <command>`.
 | 1. Add the migration | Development | `baseline update <target>` | The baseline records the new migration |
 | 2. Gate each change | CI | `check <target> --previous prev.json` | No shipped migration survives, and the baseline matches the code |
 | 3. Plan under release N | Before release N serves, in a one-off container of release N | `rewrite <target> --expect <fingerprint of N> --accept rewrite --backup <tag of N>` | The backup is taken. Exit 0: release N reads each checkpoint, or can rewrite it. No checkpoint is refused |
-| 4. Deploy release N | After the deploy, in release N | `rewrite <target> --apply --expect <fingerprint of N> --backup <tag of N> --accept refused` | The backup keeps its rows and adds new threads, and every pass ran. Exit 0 also when a checkpoint stays refused. The output names each one |
+| 4. Deploy release N | After the deploy, in release N | `rewrite <target> --apply --expect <fingerprint of N> --backup <tag of N> --accept refused` | The backup keeps its rows and adds the latest row of each new or changed thread, and every pass ran. Exit 0 also when a checkpoint stays refused. The output names each one |
 | 5. Delete the migration | Development of release N+1 | Delete it, then `baseline update <target> --previous prev.json` | The baseline drops the history that the migration covered |
 | 6. Deploy release N+1 | Before the deploy, in release N | `rewrite <target> --expect <fingerprint of N>` | Exit 0: release N reads the store clean |
 | Roll back release N | Before the rollback, in release N | `restore <target> <tag of N>` | Exit 0: the rows of the backup are back |
@@ -724,7 +724,7 @@ Each command is `python -m langgraph_events.serde.migrations <command>`.
 
 Step 3 stops a release that cannot read the store before that release serves. A checkpoint that needs a rewrite is the expected result of a new migration, so `--accept rewrite` lets the deploy go on. A refused checkpoint exits 1, and the deploy stops. Step 3 writes no checkpoint. With `--backup`, it takes the backup before release N serves. So the backup holds each thread before release N can write to it.
 
-Step 4 runs after release N serves. Give it the same tag as step 3. The backup then keeps each row of step 3, and adds the latest row of each thread that appeared since. The deploy cannot stop there, so `--accept refused` exits 0 when a checkpoint stays refused. Read the output, and settle each refused checkpoint before step 6. When the store did not settle after the last pass, the output also names the next command. A failed backup still exits 2, and no plan runs. `--backup` needs a `PostgresSaver`, and a target without `threads=`. For another store, back up the store with the tools of its database, and leave out `--backup`.
+Step 4 runs after release N serves. Give it the same tag as step 3. The backup then keeps each row of step 3, and adds the latest row of each thread that appeared or changed since. The deploy cannot stop there, so `--accept refused` exits 0 when a checkpoint stays refused. Read the output, and settle each refused checkpoint before step 6. When the store did not settle after the last pass, the output also names the next command. A failed backup still exits 2, and no plan runs. `--backup` needs a `PostgresSaver`, and a target without `threads=`. For another store, back up the store with the tools of its database, and leave out `--backup`.
 
 Step 6 is the safety check of the deletion. CI reads no store, so CI cannot prove that the store is clean. If step 6 exits 1, do not deploy release N+1. Run step 4 again, with the fingerprint and the tag of release N. If a refused thread cannot converge, keep the migration one more release with `baseline hold`. See [The release rule](#the-release-rule).
 
@@ -892,7 +892,7 @@ The backup runs in one transaction, through the connection of the saver:
 
 - A failed backup writes nothing. The command exits 2, and no pass runs.
 - It drops the backup tables of each other tag in the current schema of the store. So the store keeps one backup.
-- A rerun with the same tag keeps each row that the backup holds, and adds the latest row of each thread that appeared since. So the apply after the deploy keeps the rows of the plan before the deploy, and a retry keeps the rows from before the first rewrite. The output line gives the rows that the backup kept and the rows that it added.
+- A rerun with the same tag keeps each row that the backup holds, and adds the latest row of each thread that appeared or changed since. A thread that changed then has two rows in the backup, and the restore puts back both, each under its own key. So the apply after the deploy keeps the rows of the plan before the deploy, and a retry keeps the rows from before the first rewrite. The output line gives the rows that the backup kept and the rows that it added.
 - It copies the columns that the backup table and the live table share. So a rerun after an upgrade of the saver adds a column still runs.
 
 The backup and the restore take locks on the checkpoint tables. To limit the wait, set `lock_timeout` and `statement_timeout` in the connection options of the store, for example `?options=-c%20lock_timeout%3D5s` in the URL.
@@ -908,7 +908,9 @@ WARNING: A restore cannot make a checkpoint readable that the new release wrote 
 | 0 | The rows are back. The output gives their counts |
 | 2 | A usage, target or store error. Examples: the store holds no backup of the tag, a target with `threads=`, a saver other than `PostgresSaver`. The message of a missing backup names each backup that the store holds. A failed restore changes nothing |
 
-Restore the backup before a rollback to a release that cannot read the shapes of the new release. That is the case when the new release adds a read-time migration. Restore just before the rollback, because a run of the new release can write the new shapes again. Give the tag of the release that you roll back. Each backup drops the backups of other tags, so the store holds only the backup of the last release that ran step 4.
+Restore the backup before a rollback to a release that cannot read the shapes of the new release. That is the case when the new release adds a read-time migration. Restore just before the rollback, because a run of the new release can write the new shapes again. Give the tag of the release that you roll back. Each backup drops the backups of other tags, a plan with `--backup` included. So the store holds only the backup of the last release that ran step 3.
+
+WARNING: Step 3 of release N+1 drops the backup of release N, also when step 3 then exits 1 and the deploy stops. After that, release N cannot be restored. If you can still need the backup of release N, copy its two tables with the tools of the database before step 3 of release N+1.
 
 WARNING: The restored rows name the old blob versions. The prune in [Old blob versions](#old-blob-versions) deletes each version that no checkpoint names. After a rewrite, often no checkpoint names the old version of a rewritten channel. So after a prune, a restored checkpoint can lose a channel, with no error. Do not restore a backup that is older than the last prune. A backup with a reused tag keeps its old rows, so it can be older than a prune that ran after its first run.
 
