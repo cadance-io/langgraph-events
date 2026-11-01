@@ -28,9 +28,6 @@ if TYPE_CHECKING:
     from langgraph_events.serde.migrations._core import MigrationSet
 
 
-_THREAD_KEYS_QUERY = "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints"
-
-
 class TargetError(Exception):
     """The target cannot give what a command needs from it."""
 
@@ -50,12 +47,16 @@ class MigrationTarget:
     ``graph`` builds the graph on the checkpointer it receives. The gate
     passes an empty in-memory saver, so building reads no store.
     ``baseline`` is the path of the committed baseline file. ``store``
-    returns a context manager that opens the real sync checkpointer. Only
-    ``rewrite`` uses it. ``threads`` lists the checkpoint namespaces of
+    returns a context manager that opens the real sync checkpointer. The
+    ``backup``, ``rewrite``, ``restore`` and ``drop-backups`` commands use
+    it. ``threads`` lists the checkpoint namespaces of
     the store. It is needed only for a saver other than ``PostgresSaver``,
     ``SqliteSaver`` or ``MemorySaver``, or for a store that more than one
     graph shares. :func:`list_thread_keys` lists the threads of any saver
-    through its public ``list()``, for a small store.
+    through its public ``list()``, for a small store. A target with
+    ``threads`` declares a store that other graphs can share, so
+    :func:`backup_live_set`, :func:`restore_live_set` and
+    :func:`drop_backups`, which act on the whole store, refuse it.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph]
@@ -83,8 +84,16 @@ class MigrationTarget:
                     if checkpoints
                 )
             )
+        # ``_postgres`` imports this module, so the import is local.
+        from langgraph_events.serde.migrations import (  # noqa: PLC0415
+            _postgres,
+            _sqlite,
+        )
+
         try:
-            rows = _sql_thread_rows(saver)
+            rows = _postgres.thread_rows(saver)
+            if rows is None:
+                rows = _sqlite.thread_rows(saver)
         except Exception as error:
             # The listing reads an internal method of the saver package,
             # which a release of that package can change.
@@ -111,7 +120,7 @@ class MigrationTarget:
         if not hasattr(opened, "__enter__") and hasattr(opened, "__aenter__"):
             raise TargetError(
                 "The store= function of the target returned an async context "
-                "manager. The rewrite command needs a sync checkpointer. Return "
+                "manager. The command needs a sync checkpointer. Return "
                 "the sync saver of the same database, for example "
                 "SqliteSaver.from_conn_string(path) for an AsyncSqliteSaver, or "
                 "PostgresSaver.from_conn_string(url) for an AsyncPostgresSaver."
@@ -203,41 +212,6 @@ def _no_thread_listing(saver: BaseCheckpointSaver[Any], failure: str) -> str:
         f"It reads every checkpoint through saver.list(None), so its time "
         f"grows with the whole store."
     )
-
-
-def _sql_thread_rows(
-    saver: BaseCheckpointSaver[Any],
-) -> list[tuple[str, str]] | None:
-    """The thread id and checkpoint namespace of each checkpoint row of a
-    ``PostgresSaver`` or a ``SqliteSaver``, or ``None`` for another saver.
-
-    Both savers keep their checkpoints in a ``checkpoints`` table. Each
-    saver is an optional dependency, so its import is local. The cursor
-    methods are internal to each saver package: ``PostgresSaver._cursor()``
-    is private, and the docstring of ``SqliteSaver.cursor()`` says that a
-    user must not call it.
-    """
-    try:
-        from langgraph.checkpoint.postgres import (  # noqa: PLC0415
-            PostgresSaver,
-        )
-    except ImportError:
-        pass
-    else:
-        if isinstance(saver, PostgresSaver):
-            with saver._cursor() as cursor:
-                cursor.execute(_THREAD_KEYS_QUERY)
-                rows = cursor.fetchall()
-            return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
-    try:
-        from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: PLC0415
-    except ImportError:
-        return None
-    if isinstance(saver, SqliteSaver):
-        with saver.cursor(transaction=False) as cursor:
-            cursor.execute(_THREAD_KEYS_QUERY)
-            return [(tid, ns) for tid, ns in cursor.fetchall()]
-    return None
 
 
 @dataclass(frozen=True)

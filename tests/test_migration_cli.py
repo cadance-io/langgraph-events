@@ -14,6 +14,8 @@ from _live_set_fixtures import (
     _copy_to_namespace,
     _Counted,
     _graph,
+    _no_store,
+    _PostgresStore,
     _releases,
     _unsettling,
 )
@@ -228,12 +230,11 @@ def describe_rewrite_command():
                 out, err = capsys.readouterr()
                 assert code == 0
                 assert out == (
+                    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
                     "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
                     "1 unchanged, 0 refused)\n"
                 )
-                assert err == (
-                    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
-                )
+                assert err == ""
 
         def when_a_plan_finds_a_thread_to_rewrite():
             def it_exits_one_and_names_the_apply_command(
@@ -328,12 +329,12 @@ def describe_rewrite_command():
 
                 code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
 
-                out, err = capsys.readouterr()
+                out = capsys.readouterr().out
                 assert code == 0
-                assert err == (
+                assert out.startswith(
                     "pass 1: applied: 3 threads, 3 rewrite, 0 unchanged, 0 refused\n"
+                    "lge rewrite: clean"
                 )
-                assert out.startswith("lge rewrite: clean")
 
         def when_the_store_is_a_custom_saver():
             def when_the_target_lists_its_threads():
@@ -356,7 +357,7 @@ def describe_rewrite_command():
                         )
 
                         assert code == 0
-                        assert capsys.readouterr().err == (
+                        assert capsys.readouterr().out.startswith(
                             "pass 1: applied: 2 threads, 2 rewrite, 0 unchanged, "
                             "0 refused\n"
                         )
@@ -382,8 +383,12 @@ def describe_rewrite_command():
                     )
 
                     out = capsys.readouterr().out.splitlines()
+                    start = next(
+                        i for i, line in enumerate(out) if line.startswith("lge ")
+                    )
+                    report = out[start:]
                     assert code == 1
-                    assert out[1].startswith(
+                    assert report[1].startswith(
                         f"  t1: needs a rewrite, the last pass refused it: the "
                         f"saver did not overwrite checkpoint {checkpoint_id}; "
                     )
@@ -431,6 +436,331 @@ def describe_rewrite_command():
                     f"{releases.expect}: {_CLI} rewrite {spec} --apply --expect "
                     f"{releases.expect}\n"
                 )
+
+
+def describe_rewrite_accept():
+    def when_a_plan_finds_a_thread_to_rewrite():
+        def when_accept_is_rewrite():
+            def it_exits_zero(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                spec = _install(monkeypatch, releases.current)
+
+                code = main(
+                    [
+                        "rewrite",
+                        spec,
+                        "--expect",
+                        releases.expect,
+                        "--accept",
+                        "rewrite",
+                    ]
+                )
+
+                assert code == 0
+                assert capsys.readouterr().out == (
+                    "lge rewrite: accepted, rewrite (--accept rewrite; last plan: "
+                    "plan: 1 thread, 1 rewrite, 0 unchanged, 0 refused)\n"
+                    "  t1: needs a rewrite\n"
+                )
+
+    def when_the_last_plan_refuses_a_thread():
+        def _refusing(tmp_path: Path) -> tuple[MigrationTarget, str]:
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(
+                releases.current, threads=lambda saver: [ThreadKey("ghost", "")]
+            )
+            return target, releases.expect
+
+        def when_accept_is_rewrite():
+            def it_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+                target, expect = _refusing(tmp_path)
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    ["rewrite", spec, "--expect", expect, "--accept", "rewrite"]
+                )
+
+                assert code == 1
+
+        def when_accept_is_refused():
+            def it_exits_zero(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, expect = _refusing(tmp_path)
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    [
+                        "rewrite",
+                        spec,
+                        "--expect",
+                        expect,
+                        "--apply",
+                        "--accept",
+                        "refused",
+                    ]
+                )
+
+                assert code == 0
+                assert capsys.readouterr().out.endswith(
+                    "  ghost: refused, no checkpoint for this thread id\n"
+                )
+
+    def when_accept_is_refused():
+        def when_the_store_does_not_settle_after_every_pass():
+            def it_exits_zero_and_names_the_next_command(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path, DictSaver(put_overwrites=False))
+                releases.seed("t1")
+                target = dataclasses.replace(releases.current, threads=list_thread_keys)
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    [
+                        "rewrite",
+                        spec,
+                        "--expect",
+                        releases.expect,
+                        "--apply",
+                        "--accept",
+                        "refused",
+                    ]
+                )
+
+                out = capsys.readouterr().out.splitlines()
+                assert code == 0
+                assert out[-2:] == [
+                    "  The store did not settle after 3 passes.",
+                    f"  Run: {_CLI} rewrite {spec} --apply --expect {releases.expect}",
+                ]
+
+    def when_accept_is_not_a_state():
+        def it_exits_two(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+            code = main(["rewrite", "m:t", "--expect", "x", "--accept", "dirty"])
+
+            assert code == 2
+            assert "invalid choice: 'dirty'" in capsys.readouterr().err
+
+
+def describe_backup_command():
+    def when_the_store_is_postgres():
+        def it_exits_zero_and_prints_the_rows_it_kept_and_added(
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            target = postgres_store.releases.current
+            expect = postgres_store.fingerprint
+            rows = postgres_store.rows
+            spec = _install(monkeypatch, target)
+
+            code = main(["backup", spec])
+
+            out, err = capsys.readouterr()
+            assert code == 0
+            assert out == (
+                f"lge backup: {expect} kept 0 checkpoints and 0 writes, added 1 "
+                f"checkpoint and 1 write.\n"
+            )
+            assert err == ""
+            assert rows.checkpoint(
+                "t1", postgres_store.backup_table()
+            ) == rows.checkpoint("t1")
+
+        def when_it_runs_again():
+            def it_keeps_the_rows(
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                postgres_store: _PostgresStore,
+            ):
+                target = postgres_store.releases.current
+                expect = postgres_store.fingerprint
+                spec = _install(monkeypatch, target)
+                main(["backup", spec])
+                capsys.readouterr()
+
+                code = main(["backup", spec])
+
+                assert code == 0
+                assert capsys.readouterr().out == (
+                    f"lge backup: {expect} kept 1 checkpoint and 1 write, added 0 "
+                    f"checkpoints and 0 writes.\n"
+                )
+
+        def when_the_backup_fails():
+            def it_exits_two_and_writes_nothing(
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                postgres_store: _PostgresStore,
+            ):
+                target = postgres_store.releases.current
+                rows = postgres_store.rows
+                rows.execute(f"CREATE TABLE {postgres_store.backup_table()} (x int)")
+                spec = _install(monkeypatch, target)
+
+                code = main(["backup", spec])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err.startswith("error: The backup failed and changed nothing: ")
+                assert rows.backup_tables() == [postgres_store.backup_table()]
+
+    def when_the_store_is_not_postgres():
+        def it_exits_two(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            spec = _install(monkeypatch, _releases(tmp_path).current)
+
+            assert main(["backup", spec]) == 2
+            assert capsys.readouterr().err == (
+                "error: The backup needs a PostgresSaver, and the saver of the "
+                "store is InMemorySaver. Back up the store with the tools of its "
+                "database.\n"
+            )
+
+    def when_the_target_sets_threads():
+        def it_exits_two_before_it_opens_the_store(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            target = dataclasses.replace(
+                _releases(tmp_path).current, store=_no_store, threads=list_thread_keys
+            )
+            spec = _install(monkeypatch, target)
+
+            assert main(["backup", spec]) == 2
+            assert capsys.readouterr().err.startswith(
+                "error: The backup acts on the whole store, and the target sets "
+                "threads=, "
+            )
+
+
+def describe_restore_command():
+    def when_the_store_holds_the_backup_of_the_running_code():
+        def it_exits_zero_and_prints_the_counts(
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            target = postgres_store.releases.current
+            expect = postgres_store.fingerprint
+            rows = postgres_store.rows
+            before = rows.checkpoint("t1")
+            spec = _install(monkeypatch, target)
+            main(["backup", spec])
+            main(["rewrite", spec, "--expect", expect, "--apply"])
+            capsys.readouterr()
+
+            code = main(["restore", spec])
+
+            assert code == 0
+            assert capsys.readouterr().out == (
+                f"lge restore: {expect} put back 1 checkpoint and 1 write, and "
+                f"removed 0 writes that the backup does not hold.\n"
+            )
+            assert rows.checkpoint("t1") == before
+
+    def when_the_store_holds_no_backup_of_the_running_code():
+        def it_exits_two_and_changes_nothing(
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            target = postgres_store.releases.current
+            expect = postgres_store.fingerprint
+            rows = postgres_store.rows
+            before = rows.checkpoint("t1")
+            spec = _install(monkeypatch, target)
+
+            code = main(["restore", spec])
+
+            out, err = capsys.readouterr()
+            assert code == 2
+            assert out == ""
+            assert err == (
+                f"error: The store holds no backup {expect}, the migration "
+                f"fingerprint of the running code. The store holds no backup. "
+                f"Nothing changed. Run restore in a container of the release "
+                f"that took the backup.\n"
+            )
+            assert rows.checkpoint("t1") == before
+
+    def when_the_store_is_not_postgres():
+        def it_exits_two(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            spec = _install(monkeypatch, _releases(tmp_path).current)
+
+            assert main(["restore", spec]) == 2
+            assert capsys.readouterr().err.startswith(
+                "error: The restore needs a PostgresSaver"
+            )
+
+
+def describe_drop_backups_command():
+    def when_the_store_holds_a_backup_of_another_release():
+        def it_exits_zero_and_names_each_dropped_backup(
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            target = postgres_store.releases.current
+            rows = postgres_store.rows
+            rows.execute("CREATE TABLE checkpoints_bak_lge_m1_0000000000000000 (x int)")
+            spec = _install(monkeypatch, target)
+            main(["backup", spec])
+            capsys.readouterr()
+
+            code = main(["drop-backups", spec])
+
+            assert code == 0
+            assert capsys.readouterr().out == (
+                "lge drop-backups: dropped lge-m1-0000000000000000.\n"
+            )
+            assert postgres_store.backup_table() in rows.backup_tables()
+
+    def when_the_store_holds_only_the_backup_of_the_running_code():
+        def it_exits_zero_and_says_so(
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            target = postgres_store.releases.current
+            spec = _install(monkeypatch, target)
+
+            code = main(["drop-backups", spec])
+
+            assert code == 0
+            assert capsys.readouterr().out == "lge drop-backups: nothing to drop.\n"
+
+    def when_the_store_is_not_postgres():
+        def it_exits_two(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            spec = _install(monkeypatch, _releases(tmp_path).current)
+
+            assert main(["drop-backups", spec]) == 2
+            assert capsys.readouterr().err.startswith(
+                "error: The drop-backups needs a PostgresSaver"
+            )
 
 
 def describe_target_errors():
@@ -490,7 +820,7 @@ def describe_target_errors():
             assert code == 2
             assert capsys.readouterr().err == (
                 "error: The store= function of the target returned an async "
-                "context manager. The rewrite command needs a sync checkpointer. "
+                "context manager. The command needs a sync checkpointer. "
                 "Return the sync saver of the same database, for example "
                 "SqliteSaver.from_conn_string(path) for an AsyncSqliteSaver, or "
                 "PostgresSaver.from_conn_string(url) for an AsyncPostgresSaver.\n"

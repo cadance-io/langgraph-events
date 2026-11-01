@@ -50,8 +50,17 @@ from langgraph_events.serde.migrations._gate import (
 )
 from langgraph_events.serde.migrations._live_set import (
     LiveSetOutcome,
+    Verdict,
     WrongRelease,
     rewrite_live_set,
+)
+from langgraph_events.serde.migrations._postgres import (
+    BackupOutcome,
+    BackupRows,
+    RestoreOutcome,
+    backup_live_set,
+    drop_backups,
+    restore_live_set,
 )
 from langgraph_events.serde.migrations._target import (
     MigrationTarget,
@@ -68,6 +77,8 @@ from langgraph_events.serde.migrations.testing import (
 __all__ = [
     "AddField",
     "AnonymousCallable",
+    "BackupOutcome",
+    "BackupRows",
     "BaselineStale",
     "Finding",
     "GateError",
@@ -82,6 +93,7 @@ __all__ = [
     "MigrationTarget",
     "PreviousRequiredError",
     "RenameEvent",
+    "RestoreOutcome",
     "SplitEvent",
     "SurvivedRelease",
     "TargetError",
@@ -89,15 +101,19 @@ __all__ = [
     "TransformFields",
     "Uncovered",
     "Unrevivable",
+    "Verdict",
     "WrongRelease",
     "assert_migration_gate",
     "assert_resume_recovers",
     "backfill",
+    "backup_live_set",
     "check",
+    "drop_backups",
     "hold_migration",
     "list_thread_keys",
     "migrate_from",
     "replay_reducer",
+    "restore_live_set",
     "rewrite_live_set",
     "split_event",
     "synthesize_legacy_payload",

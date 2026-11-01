@@ -1,8 +1,9 @@
 """The migration CLI: ``python -m langgraph_events.serde.migrations``.
 
 ``<target>`` is the ``module:attr`` of a ``MigrationTarget``. Exit 0 is a
-pass or a done write, 1 is a finding or a store that is not clean, 2 is a
-usage, target or store error, 3 is a ``rewrite`` under the wrong release.
+pass or a done write, 1 is a finding or a verdict worse than ``rewrite
+--accept``, 2 is a usage, target or store error, 3 is a ``rewrite`` under
+the wrong release. A report goes to stdout, and an error to stderr.
 """
 
 from __future__ import annotations
@@ -24,11 +25,29 @@ from langgraph_events.serde.migrations._gate import (
     hold_migration,
     update_baseline,
 )
-from langgraph_events.serde.migrations._live_set import WrongRelease, rewrite_live_set
+from langgraph_events.serde.migrations._live_set import (
+    Verdict,
+    WrongRelease,
+    rewrite_live_set,
+)
+from langgraph_events.serde.migrations._postgres import (
+    backup_live_set,
+    drop_backups,
+    restore_live_set,
+)
 from langgraph_events.serde.migrations._target import MigrationTarget, TargetError
 
-_SUBCOMMANDS = ("check", "baseline", "fingerprint", "rewrite")
+_SUBCOMMANDS = (
+    "check",
+    "baseline",
+    "fingerprint",
+    "backup",
+    "rewrite",
+    "restore",
+    "drop-backups",
+)
 _WRONG_RELEASE = 3
+_TARGET_HELP = "the module:attr of the MigrationTarget"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -64,18 +83,18 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(required=True, metavar="command")
 
     check_ = commands.add_parser("check", help="run the migration gate")
-    check_.add_argument("target")
+    check_.add_argument("target", help=_TARGET_HELP)
     check_.add_argument("--previous", type=Path)
     check_.set_defaults(run=_check)
 
     baseline = commands.add_parser("baseline", help="write the baseline")
     actions = baseline.add_subparsers(required=True, metavar="action")
     update = actions.add_parser("update", help="write the baseline the code needs")
-    update.add_argument("target")
+    update.add_argument("target", help=_TARGET_HELP)
     update.add_argument("--previous", type=Path)
     update.set_defaults(run=_update)
     hold = actions.add_parser("hold", help="keep a shipped migration one release")
-    hold.add_argument("target")
+    hold.add_argument("target", help=_TARGET_HELP)
     hold.add_argument("label")
     hold.add_argument("--reason", required=True)
     hold.add_argument("--previous", type=Path, required=True)
@@ -87,14 +106,49 @@ def _parser() -> argparse.ArgumentParser:
     fingerprint.add_argument("baseline", type=Path)
     fingerprint.set_defaults(run=_fingerprint)
 
+    backup = commands.add_parser(
+        "backup",
+        help="back up the live set of a PostgresSaver store, named after the "
+        "fingerprint of the running code",
+    )
+    backup.add_argument("target", help=_TARGET_HELP)
+    backup.set_defaults(run=_backup)
+
     rewrite = commands.add_parser(
         "rewrite", help="rewrite the live set of the store until it reads clean"
     )
-    rewrite.add_argument("target")
-    rewrite.add_argument("--expect", required=True)
-    rewrite.add_argument("--apply", action="store_true")
-    rewrite.add_argument("--passes", type=int, default=3)
+    rewrite.add_argument("target", help=_TARGET_HELP)
+    rewrite.add_argument(
+        "--expect",
+        required=True,
+        metavar="FP",
+        help="the fingerprint of the baseline of the release that must run",
+    )
+    rewrite.add_argument(
+        "--apply", action="store_true", help="write the rewrite, else only plan"
+    )
+    rewrite.add_argument(
+        "--passes", type=int, default=3, help="the most apply passes (default: 3)"
+    )
+    rewrite.add_argument(
+        "--accept",
+        choices=[str(verdict) for verdict in Verdict],
+        default=str(Verdict.CLEAN),
+        help="the worst verdict of the last plan that still exits 0 (default: clean)",
+    )
     rewrite.set_defaults(run=_rewrite)
+
+    restore = commands.add_parser(
+        "restore", help="put back the backup of the running code"
+    )
+    restore.add_argument("target", help=_TARGET_HELP)
+    restore.set_defaults(run=_restore)
+
+    drop = commands.add_parser(
+        "drop-backups", help="drop each backup except the backup of the running code"
+    )
+    drop.add_argument("target", help=_TARGET_HELP)
+    drop.set_defaults(run=_drop_backups)
     return parser
 
 
@@ -138,19 +192,49 @@ def _fingerprint(options: argparse.Namespace) -> int:
     return 0
 
 
+def _backup(options: argparse.Namespace) -> int:
+    outcome = backup_live_set(_load(options.target))
+    print(
+        f"lge backup: {outcome.fingerprint} kept {outcome.kept}, added {outcome.added}."
+    )
+    return 0
+
+
 def _rewrite(options: argparse.Namespace) -> int:
     outcome = rewrite_live_set(
         _load(options.target),
         expect=options.expect,
         apply=options.apply,
         passes=options.passes,
+        log=sys.stdout,
     )
     invocation = Invocation(options.target)
     if isinstance(outcome, WrongRelease):
         print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE
-    print(outcome.render(invocation, options.expect))
-    return 0 if outcome.clean else 1
+    accept = Verdict(options.accept)
+    print(outcome.render(invocation, options.expect, accept))
+    return 0 if outcome.accepted(accept) else 1
+
+
+def _restore(options: argparse.Namespace) -> int:
+    outcome = restore_live_set(_load(options.target))
+    removed = outcome.removed_writes
+    print(
+        f"lge restore: {outcome.fingerprint} put back {outcome.restored}, and "
+        f"removed {removed} {'write' if removed == 1 else 'writes'} that the "
+        f"backup does not hold."
+    )
+    return 0
+
+
+def _drop_backups(options: argparse.Namespace) -> int:
+    dropped = drop_backups(_load(options.target))
+    for fingerprint in dropped:
+        print(f"lge drop-backups: dropped {fingerprint}.")
+    if not dropped:
+        print("lge drop-backups: nothing to drop.")
+    return 0
 
 
 def _load(spec: str) -> MigrationTarget:

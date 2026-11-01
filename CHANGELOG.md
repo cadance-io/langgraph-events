@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Four commands now carry a migration deploy, and the operator types no backup name.** See
+  [Backup and restore](docs/event-migrations.md#backup-and-restore).
+- **`backup <target>` copies the live set of a `PostgresSaver` store.** The live set is the
+  latest checkpoint of each thread in each checkpoint namespace, and its pending writes. The copy
+  goes to `checkpoints_bak_<fp>` and `checkpoint_writes_bak_<fp>`, where `<fp>` is the
+  fingerprint with `_` for each `-`. A rerun under the same fingerprint keeps each row and adds
+  the latest row of each thread that appeared or changed since. It also copies each pending write
+  that a run added since to a backed-up checkpoint. It drops no table. The output gives the rows
+  that the backup kept and added. The Python form is `backup_live_set(target) -> BackupOutcome`.
+- **`restore <target>` puts back the backup of the running code.** In one transaction, it
+  overwrites each checkpoint row and each pending write that the backup holds and the store still
+  holds. It also deletes each pending write that a run added to a backed-up checkpoint after the
+  last backup. Before it writes, it locks `checkpoint_blobs` against writes, and refuses when a
+  blob version that it puts back is missing, for example after a prune of old blob versions. The
+  message names the count of missing versions.
+  When the store holds no backup of the running code, the message names each backup that the
+  store holds. The Python form is `restore_live_set(target) -> RestoreOutcome`.
+- **`drop-backups <target>` drops each backup except the backup of the running code.** It drops
+  only the tables of the current schema whose name has the form of a backup name. The output
+  names each dropped backup, or says `nothing to drop`. The Python form is
+  `drop_backups(target) -> tuple[str, ...]`.
+- **`backup`, `restore` and `drop-backups` exit 0, or 2 on an error.** A failed command changes
+  nothing. Each command needs a `PostgresSaver`, and refuses a target with `threads=` before it
+  opens the store: such a target declares a store that other graphs can share.
+- **The `postgres` and `sqlite` extras pin the tested range of each saver.**
+  `pip install "langgraph-events[postgres]"` installs `langgraph-checkpoint-postgres>=3.1.2,<4`
+  and `psycopg>=3.2.0,<4`. `pip install "langgraph-events[sqlite]"` installs
+  `langgraph-checkpoint-sqlite>=3.1.1,<4`. The thread listing and the backup commands call an
+  internal method of the saver, which a release of the saver package can change.
+- **`rewrite --accept clean|rewrite|refused` names the worst verdict that exits 0.** The default
+  `clean` keeps the exit code of 0.42.
+  `LiveSetOutcome.verdict` gives the `Verdict` of the last plan, an enum whose members `CLEAN`,
+  `REWRITE` and `REFUSED` compare in that order. `LiveSetOutcome.accepted(accept)` is the rule of
+  `--accept`, and the command exits 0 exactly when it is true. `LiveSetOutcome.clean` stays, and
+  equals `verdict is Verdict.CLEAN`. When the verdict is accepted and not `clean`, the report says
+  `accepted`. It names the next command only when the passes ran out and the last plan still
+  reads a checkpoint as a rewrite.
+
+### Changed
+
+- **The `rewrite` command writes each pass line to stdout.** Before, the pass lines went to
+  stderr, and the report to stdout. Some deploy tools show the stderr of a remote command only
+  when it fails, so a successful run showed no pass line. Errors stay on stderr.
+  `rewrite_live_set()` keeps `log=None` as `sys.stderr`.
+
 ## [0.42.1] - 2026-10-29
 
 ### Added

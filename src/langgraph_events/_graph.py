@@ -2709,8 +2709,9 @@ class EventGraph:
         WARNING: run it while the graph is idle, never inside a rolling
         deploy window. An old pod cannot read the new bytes. Take a
         store-level backup first: the previous blob versions stay in the
-        store, but the checkpoint row is overwritten in place. Review
-        ``plan_rewrite()`` before this call.
+        store, but the checkpoint row is overwritten in place. For a
+        ``PostgresSaver``, ``backup_live_set()`` and the ``backup`` command
+        take it. Review ``plan_rewrite()`` before this call.
 
         Historic checkpoints keep the old bytes. A ``drop`` removes the
         stored event only. Reducer state is not recomputed. Each

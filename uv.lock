@@ -649,6 +649,13 @@ agui = [
     { name = "ag-ui-protocol" },
     { name = "langchain-core" },
 ]
+postgres = [
+    { name = "langgraph-checkpoint-postgres" },
+    { name = "psycopg" },
+]
+sqlite = [
+    { name = "langgraph-checkpoint-sqlite" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -681,8 +688,11 @@ requires-dist = [
     { name = "langchain-core", marker = "extra == 'agui'", specifier = ">=1.0.0" },
     { name = "langgraph", specifier = ">=0.2.0" },
     { name = "langgraph-checkpoint", specifier = ">=4.0.3" },
+    { name = "langgraph-checkpoint-postgres", marker = "extra == 'postgres'", specifier = ">=3.1.2,<4" },
+    { name = "langgraph-checkpoint-sqlite", marker = "extra == 'sqlite'", specifier = ">=3.1.1,<4" },
+    { name = "psycopg", marker = "extra == 'postgres'", specifier = ">=3.2.0,<4" },
 ]
-provides-extras = ["agui"]
+provides-extras = ["agui", "postgres", "sqlite"]
 
 [package.metadata.requires-dev]
 dev = [

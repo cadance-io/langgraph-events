@@ -9,11 +9,13 @@ that last plan decides the outcome.
 
 from __future__ import annotations
 
+import enum
+import functools
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from langgraph_events._rewrite import RewriteReport, ThreadRewrite
+from langgraph_events._rewrite import RewriteReport, RewriteStatus, ThreadRewrite
 from langgraph_events.serde.migrations._target import TargetError, ThreadKey
 
 if TYPE_CHECKING:
@@ -55,6 +57,38 @@ class WrongRelease:
         )
 
 
+@functools.total_ordering
+class Verdict(enum.Enum):
+    """The worst state of a checkpoint in the last plan of a live-set
+    rewrite.
+
+    The members are in order, from best to worst, and compare in that
+    order. ``str()`` gives the value, the word that ``--accept`` takes.
+    """
+
+    CLEAN = "clean"
+    """The last plan reads every checkpoint unchanged."""
+    REWRITE = "rewrite"
+    """The last plan reads a checkpoint as a rewrite, and refuses none."""
+    REFUSED = "refused"
+    """The last plan refuses a checkpoint."""
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Verdict):
+            return NotImplemented
+        members = list(Verdict)
+        return members.index(self) < members.index(other)
+
+    def __str__(self) -> str:
+        return self.value
+
+
+def _verdict_of(status: RewriteStatus) -> Verdict:
+    if status == "unchanged":
+        return Verdict.CLEAN
+    return Verdict(status)
+
+
 @dataclass(frozen=True)
 class LiveSetOutcome:
     """Every apply pass and the last plan.
@@ -67,22 +101,46 @@ class LiveSetOutcome:
     final: RewriteReport
 
     @property
+    def verdict(self) -> Verdict:
+        """The worst state of a checkpoint in the last plan."""
+        return max(
+            (_verdict_of(thread.status) for thread in self.final.threads),
+            default=Verdict.CLEAN,
+        )
+
+    @property
     def clean(self) -> bool:
         """The last plan reads every checkpoint unchanged."""
-        return not _not_clean(self.final)
+        return self.verdict is Verdict.CLEAN
 
-    def render(self, invocation: Invocation, expect: str) -> str:
+    def accepted(self, accept: Verdict) -> bool:
+        """The verdict is *accept* or better. The ``rewrite`` command exits
+        0 exactly when this is true for its ``--accept``."""
+        return self.verdict <= accept
+
+    def render(
+        self,
+        invocation: Invocation,
+        expect: str,
+        accept: Verdict = Verdict.CLEAN,
+    ) -> str:
         """The verdict, each checkpoint that is not clean, then the next command.
 
         A checkpoint that the last plan reads as a rewrite also names the
         reason when the last pass refused to write it. The next command is
-        printed only when the last plan reads a checkpoint as a rewrite. A
-        refused checkpoint needs the action that its reason names first.
+        printed when the last plan reads a checkpoint as a rewrite, and the
+        verdict is not accepted or the passes ran out. A refused
+        checkpoint needs the action that its reason names first.
         """
         head = str(self.final).splitlines()[0]
         if self.clean:
             return f"lge rewrite: clean (last plan: {head})"
-        lines = [f"lge rewrite: not clean (last plan: {head})"]
+        accepted = self.accepted(accept)
+        if accepted:
+            verdict = f"accepted, {self.verdict} (--accept {accept}; last plan: {head})"
+        else:
+            verdict = f"not clean (last plan: {head})"
+        lines = [f"lge rewrite: {verdict}"]
         last_pass = self.passes[-1].threads if self.passes else ()
         pass_refusals = {_key(t): t.reason for t in last_pass if t.status == "refused"}
         for thread in self.final.threads:
@@ -92,7 +150,12 @@ class LiveSetOutcome:
                 lines.append(f"  {thread.location}: needs a rewrite{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.location}: refused, {thread.reason}")
-        if any(thread.status == "rewrite" for thread in self.final.threads):
+        if _to_rewrite(self.final) and (self.passes or not accepted):
+            if self.passes:
+                noun = "pass" if len(self.passes) == 1 else "passes"
+                lines.append(
+                    f"  The store did not settle after {len(self.passes)} {noun}."
+                )
             lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
         return "\n".join(lines)
 
@@ -187,10 +250,6 @@ def _walk(
 
 def _key(thread: ThreadRewrite) -> ThreadKey:
     return ThreadKey(thread.thread_id, thread.checkpoint_ns)
-
-
-def _not_clean(report: RewriteReport) -> list[ThreadKey]:
-    return [_key(t) for t in report.threads if t.status != "unchanged"]
 
 
 def _to_rewrite(report: RewriteReport) -> list[ThreadKey]:
