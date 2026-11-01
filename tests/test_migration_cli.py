@@ -14,8 +14,10 @@ from _live_set_fixtures import (
     _copy_to_namespace,
     _Counted,
     _graph,
+    _PostgresRows,
     _releases,
     _unsettling,
+    _write_pending,
 )
 from _migration_fixtures import (
     _CLI,
@@ -228,12 +230,11 @@ def describe_rewrite_command():
                 out, err = capsys.readouterr()
                 assert code == 0
                 assert out == (
+                    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
                     "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
                     "1 unchanged, 0 refused)\n"
                 )
-                assert err == (
-                    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
-                )
+                assert err == ""
 
         def when_a_plan_finds_a_thread_to_rewrite():
             def it_exits_one_and_names_the_apply_command(
@@ -328,12 +329,12 @@ def describe_rewrite_command():
 
                 code = main(["rewrite", spec, "--expect", releases.expect, "--apply"])
 
-                out, err = capsys.readouterr()
+                out = capsys.readouterr().out
                 assert code == 0
-                assert err == (
+                assert out.startswith(
                     "pass 1: applied: 3 threads, 3 rewrite, 0 unchanged, 0 refused\n"
+                    "lge rewrite: clean"
                 )
-                assert out.startswith("lge rewrite: clean")
 
         def when_the_store_is_a_custom_saver():
             def when_the_target_lists_its_threads():
@@ -356,7 +357,7 @@ def describe_rewrite_command():
                         )
 
                         assert code == 0
-                        assert capsys.readouterr().err == (
+                        assert capsys.readouterr().out.startswith(
                             "pass 1: applied: 2 threads, 2 rewrite, 0 unchanged, "
                             "0 refused\n"
                         )
@@ -382,8 +383,9 @@ def describe_rewrite_command():
                     )
 
                     out = capsys.readouterr().out.splitlines()
+                    report = out[[line[:4] for line in out].index("lge ") :]
                     assert code == 1
-                    assert out[1].startswith(
+                    assert report[1].startswith(
                         f"  t1: needs a rewrite, the last pass refused it: the "
                         f"saver did not overwrite checkpoint {checkpoint_id}; "
                     )
@@ -431,6 +433,267 @@ def describe_rewrite_command():
                     f"{releases.expect}: {_CLI} rewrite {spec} --apply --expect "
                     f"{releases.expect}\n"
                 )
+
+
+def _postgres_target(tmp_path: Path, url: str) -> tuple[MigrationTarget, str]:
+    """The current release over a ``PostgresSaver`` store whose thread
+    ``t1`` the previous release wrote, with one pending write, and the
+    fingerprint of the current release."""
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(url) as saver:
+        releases = _releases(tmp_path, saver)
+        releases.seed("t1")
+        _write_pending(saver, "t1")
+    target = dataclasses.replace(
+        releases.current, store=lambda: PostgresSaver.from_conn_string(url)
+    )
+    return target, releases.expect
+
+
+def describe_rewrite_accept():
+    def when_a_plan_finds_a_thread_to_rewrite():
+        def when_accept_is_rewrite():
+            def it_exits_zero(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                releases = _releases(tmp_path)
+                releases.seed("t1")
+                spec = _install(monkeypatch, releases.current)
+
+                code = main(
+                    [
+                        "rewrite",
+                        spec,
+                        "--expect",
+                        releases.expect,
+                        "--accept",
+                        "rewrite",
+                    ]
+                )
+
+                assert code == 0
+                assert capsys.readouterr().out.startswith(
+                    "lge rewrite: not clean (last plan: plan: 1 thread, 1 rewrite, "
+                )
+
+    def when_the_last_plan_refuses_a_thread():
+        def _refusing(tmp_path: Path) -> tuple[MigrationTarget, str]:
+            releases = _releases(tmp_path)
+            target = dataclasses.replace(
+                releases.current, threads=lambda saver: [ThreadKey("ghost", "")]
+            )
+            return target, releases.expect
+
+        def when_accept_is_rewrite():
+            def it_exits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+                target, expect = _refusing(tmp_path)
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    ["rewrite", spec, "--expect", expect, "--accept", "rewrite"]
+                )
+
+                assert code == 1
+
+        def when_accept_is_refused():
+            def it_exits_zero(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, expect = _refusing(tmp_path)
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    [
+                        "rewrite",
+                        spec,
+                        "--expect",
+                        expect,
+                        "--apply",
+                        "--accept",
+                        "refused",
+                    ]
+                )
+
+                assert code == 0
+                assert capsys.readouterr().out.endswith(
+                    "  ghost: refused, no checkpoint for this thread id\n"
+                )
+
+    def when_accept_is_not_a_state():
+        def it_exits_two(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+            code = main(["rewrite", "m:t", "--expect", "x", "--accept", "dirty"])
+
+            assert code == 2
+            assert "invalid choice: 'dirty'" in capsys.readouterr().err
+
+
+def describe_rewrite_backup():
+    def when_the_store_is_postgres():
+        def it_prints_the_backup_line_then_each_pass_on_stdout(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_url: str,
+        ):
+            target, expect = _postgres_target(tmp_path, postgres_url)
+            spec = _install(monkeypatch, target)
+
+            code = main(
+                ["rewrite", spec, "--expect", expect, "--apply", "--backup", "r1"]
+            )
+
+            out, err = capsys.readouterr()
+            assert code == 0
+            assert out == (
+                "backup r1: 1 checkpoint and 1 write in checkpoints_bak_r1 and "
+                "checkpoint_writes_bak_r1\n"
+                "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
+                "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
+                "1 unchanged, 0 refused)\n"
+            )
+            assert err == ""
+
+        def when_the_backup_fails():
+            def it_exits_two_and_writes_nothing(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                postgres_url: str,
+            ):
+                target, expect = _postgres_target(tmp_path, postgres_url)
+                rows = _PostgresRows(postgres_url)
+                rows.execute("CREATE TABLE checkpoint_writes_bak_r1 (x int)")
+                before = rows.checkpoint("t1")
+                spec = _install(monkeypatch, target)
+
+                code = main(
+                    ["rewrite", spec, "--expect", expect, "--apply", "--backup", "r1"]
+                )
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err.startswith(
+                    "error: The backup r1 failed, so the rewrite did not run and "
+                    "the store is unchanged: "
+                )
+                assert rows.checkpoint("t1") == before
+
+    def when_the_store_is_not_postgres():
+        def it_exits_two(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            releases = _releases(tmp_path)
+            spec = _install(monkeypatch, releases.current)
+
+            code = main(
+                [
+                    "rewrite",
+                    spec,
+                    "--expect",
+                    releases.expect,
+                    "--apply",
+                    "--backup",
+                    "r1",
+                ]
+            )
+
+            assert code == 2
+            assert capsys.readouterr().err.startswith(
+                "error: The backup needs a PostgresSaver, and the saver of the "
+                "store is InMemorySaver. "
+            )
+
+    def when_apply_is_missing():
+        def it_exits_two_before_it_loads_the_target(
+            capsys: pytest.CaptureFixture[str],
+        ):
+            code = main(
+                ["rewrite", "no.such:target", "--expect", "x", "--backup", "r1"]
+            )
+
+            assert code == 2
+            assert capsys.readouterr().err == (
+                "error: --backup needs --apply. A plan writes nothing, so it "
+                "needs no backup.\n"
+            )
+
+    def when_the_tag_is_not_valid():
+        def it_exits_two(capsys: pytest.CaptureFixture[str]):
+            code = main(
+                ["rewrite", "m:t", "--expect", "x", "--apply", "--backup", "Rel-1"]
+            )
+
+            assert code == 2
+            assert (
+                "argument --backup: The backup tag 'Rel-1' is not valid. Give 1 to "
+                "32 characters of a-z, 0-9 and _." in capsys.readouterr().err
+            )
+
+
+def describe_restore_command():
+    def when_the_store_holds_the_backup():
+        def it_exits_zero_and_prints_the_counts(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_url: str,
+        ):
+            target, expect = _postgres_target(tmp_path, postgres_url)
+            rows = _PostgresRows(postgres_url)
+            before = rows.checkpoint("t1")
+            spec = _install(monkeypatch, target)
+            main(["rewrite", spec, "--expect", expect, "--apply", "--backup", "r1"])
+            capsys.readouterr()
+
+            code = main(["restore", spec, "r1"])
+
+            assert code == 0
+            assert capsys.readouterr().out == (
+                "lge restore: put back 1 checkpoint and 1 write from the backup r1.\n"
+            )
+            assert rows.checkpoint("t1") == before
+
+    def when_the_store_holds_no_backup_of_the_tag():
+        def it_exits_one_and_changes_nothing(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_url: str,
+        ):
+            target, _ = _postgres_target(tmp_path, postgres_url)
+            rows = _PostgresRows(postgres_url)
+            before = rows.checkpoint("t1")
+            spec = _install(monkeypatch, target)
+
+            code = main(["restore", spec, "r1"])
+
+            assert code == 1
+            assert capsys.readouterr().out == (
+                "lge restore: not restored. The store holds no backup r1: no "
+                "checkpoints_bak_r1 and checkpoint_writes_bak_r1. Nothing changed.\n"
+            )
+            assert rows.checkpoint("t1") == before
+
+    def when_the_store_is_not_postgres():
+        def it_exits_two(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            spec = _install(monkeypatch, _releases(tmp_path).current)
+
+            assert main(["restore", spec, "r1"]) == 2
+            assert capsys.readouterr().err.startswith(
+                "error: The restore needs a PostgresSaver"
+            )
 
 
 def describe_target_errors():

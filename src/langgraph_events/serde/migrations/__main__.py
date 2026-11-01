@@ -1,8 +1,10 @@
 """The migration CLI: ``python -m langgraph_events.serde.migrations``.
 
 ``<target>`` is the ``module:attr`` of a ``MigrationTarget``. Exit 0 is a
-pass or a done write, 1 is a finding or a store that is not clean, 2 is a
-usage, target or store error, 3 is a ``rewrite`` under the wrong release.
+pass or a done write, 1 is a finding, a store worse than ``rewrite
+--accept`` or a ``restore`` with no backup, 2 is a usage, target or store
+error, 3 is a ``rewrite`` under the wrong release. A report goes to
+stdout, and an error to stderr.
 """
 
 from __future__ import annotations
@@ -12,6 +14,11 @@ import importlib
 import sys
 from pathlib import Path
 
+from langgraph_events.serde.migrations._backup import (
+    NoBackupError,
+    _Backup,
+    restore_live_set,
+)
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     MigrationsUnrecorded,
@@ -24,10 +31,14 @@ from langgraph_events.serde.migrations._gate import (
     hold_migration,
     update_baseline,
 )
-from langgraph_events.serde.migrations._live_set import WrongRelease, rewrite_live_set
+from langgraph_events.serde.migrations._live_set import (
+    _STATES,
+    WrongRelease,
+    rewrite_live_set,
+)
 from langgraph_events.serde.migrations._target import MigrationTarget, TargetError
 
-_SUBCOMMANDS = ("check", "baseline", "fingerprint", "rewrite")
+_SUBCOMMANDS = ("check", "baseline", "fingerprint", "rewrite", "restore")
 _WRONG_RELEASE = 3
 
 
@@ -94,8 +105,34 @@ def _parser() -> argparse.ArgumentParser:
     rewrite.add_argument("--expect", required=True)
     rewrite.add_argument("--apply", action="store_true")
     rewrite.add_argument("--passes", type=int, default=3)
+    rewrite.add_argument(
+        "--backup",
+        metavar="TAG",
+        type=_tag,
+        help="with --apply, back up the live set of a PostgresSaver store first",
+    )
+    rewrite.add_argument(
+        "--accept",
+        choices=_STATES,
+        default="clean",
+        help="the worst state of the last plan that still exits 0 (default: clean)",
+    )
     rewrite.set_defaults(run=_rewrite)
+
+    restore = commands.add_parser(
+        "restore", help="put back the backup TAG of the live set"
+    )
+    restore.add_argument("target")
+    restore.add_argument("tag", metavar="TAG", type=_tag)
+    restore.set_defaults(run=_restore)
     return parser
+
+
+def _tag(text: str) -> str:
+    try:
+        return _Backup.of(text).tag
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def _check(options: argparse.Namespace) -> int:
@@ -139,18 +176,37 @@ def _fingerprint(options: argparse.Namespace) -> int:
 
 
 def _rewrite(options: argparse.Namespace) -> int:
+    if options.backup is not None and not options.apply:
+        print(
+            "error: --backup needs --apply. A plan writes nothing, so it needs "
+            "no backup.",
+            file=sys.stderr,
+        )
+        return 2
     outcome = rewrite_live_set(
         _load(options.target),
         expect=options.expect,
         apply=options.apply,
         passes=options.passes,
+        log=sys.stdout,
+        backup=options.backup,
     )
     invocation = Invocation(options.target)
     if isinstance(outcome, WrongRelease):
         print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE
     print(outcome.render(invocation, options.expect))
-    return 0 if outcome.clean else 1
+    return 0 if outcome.within(options.accept) else 1
+
+
+def _restore(options: argparse.Namespace) -> int:
+    try:
+        counts = restore_live_set(_load(options.target), options.tag)
+    except NoBackupError as missing:
+        print(f"lge restore: not restored. {missing}")
+        return 1
+    print(f"lge restore: put back {counts} from the backup {options.tag}.")
+    return 0
 
 
 def _load(spec: str) -> MigrationTarget:

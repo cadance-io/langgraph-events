@@ -17,6 +17,11 @@ cross-module renames or composite operations flow through the serde's
 ``migrations=`` kwarg.
 """
 
+from langgraph_events.serde.migrations._backup import (
+    BackupCounts,
+    NoBackupError,
+    restore_live_set,
+)
 from langgraph_events.serde.migrations._core import (
     AddField,
     Migration,
@@ -50,6 +55,7 @@ from langgraph_events.serde.migrations._gate import (
 )
 from langgraph_events.serde.migrations._live_set import (
     LiveSetOutcome,
+    LiveSetState,
     WrongRelease,
     rewrite_live_set,
 )
@@ -68,6 +74,7 @@ from langgraph_events.serde.migrations.testing import (
 __all__ = [
     "AddField",
     "AnonymousCallable",
+    "BackupCounts",
     "BaselineStale",
     "Finding",
     "GateError",
@@ -75,11 +82,13 @@ __all__ = [
     "HandlerMissing",
     "Invocation",
     "LiveSetOutcome",
+    "LiveSetState",
     "Migration",
     "MigrationKey",
     "MigrationOutOfScope",
     "MigrationSet",
     "MigrationTarget",
+    "NoBackupError",
     "PreviousRequiredError",
     "RenameEvent",
     "SplitEvent",
@@ -98,6 +107,7 @@ __all__ = [
     "list_thread_keys",
     "migrate_from",
     "replay_reducer",
+    "restore_live_set",
     "rewrite_live_set",
     "split_event",
     "synthesize_legacy_payload",

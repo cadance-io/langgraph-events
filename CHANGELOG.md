@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`rewrite --backup TAG` backs up the live set of a `PostgresSaver` store.** With
+  `--apply`, the command copies the latest checkpoint of each thread in each checkpoint
+  namespace into `checkpoints_bak_<TAG>`, and its pending writes into
+  `checkpoint_writes_bak_<TAG>`, before the first plan. The copy runs in one transaction. A
+  failed backup writes nothing and exits 2, and no pass runs. The same transaction drops the
+  backup tables of each other tag in the current schema, so the store keeps one backup. A
+  rerun with the same tag keeps each row that the backup holds. The blobs need no copy: the
+  rewrite stores each changed channel under a new version and keeps the old one. `TAG` is 1
+  to 32 characters of `a-z`, `0-9` and `_`. The Python form is
+  `rewrite_live_set(..., backup=TAG)`, and `LiveSetOutcome.backup` holds the
+  `BackupCounts`. Another saver exits 2 with a message.
+- **`restore <target> TAG` puts the backup back.** It overwrites, in one transaction, each
+  checkpoint row and each pending write that the backup holds and the store still holds
+  under the same key. It exits 0 with the counts, 1 when the store holds no backup of `TAG`,
+  and 2 on an error. The Python form is `restore_live_set(target, tag) -> BackupCounts`. It
+  raises `NoBackupError`, a `TargetError`, when the store holds no backup. Do not restore a
+  backup that is older than the last prune of old blob versions: a restored checkpoint can
+  then lose a channel. See *Backup and restore* in `docs/event-migrations.md`.
+- **`rewrite --accept clean|rewrite|refused` names the worst state that exits 0.** The
+  states are in order: `clean`, `rewrite`, `refused`. The default `clean` keeps the exit
+  code of 0.42. A plan before a deploy runs `--accept rewrite`, so only a refused checkpoint
+  stops the deploy. An apply after a deploy runs `--accept refused`, so a refused checkpoint
+  gives a report but does not fail the deploy. `LiveSetOutcome.state` gives the state of the
+  last plan, and `LiveSetOutcome.within(accept)` compares it. `LiveSetState` is its type.
+
+### Changed
+
+- **The `rewrite` command writes each pass line to stdout.** Before, the pass lines went to
+  stderr, and the report to stdout. Some deploy tools show the stderr of a remote command only
+  when it fails, so a successful run showed no pass line. Errors stay on stderr.
+  `rewrite_live_set()` keeps `log=None` as `sys.stderr`.
+
 ## [0.42.1] - 2026-10-29
 
 ### Added

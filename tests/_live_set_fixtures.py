@@ -147,3 +147,51 @@ def _unsettling(tmp_path: Path) -> MigrationTarget:
         baseline=tmp_path / "baseline.json",
         store=lambda: contextlib.nullcontext(store),
     )
+
+
+class _PostgresRows(NamedTuple):
+    """The stored rows of a ``PostgresSaver`` store, read in SQL, as the
+    serde never sees them."""
+
+    url: str
+
+    def execute(self, query: str, params: tuple = ()) -> list[tuple]:
+        import psycopg
+
+        with psycopg.connect(self.url, autocommit=True) as conn:
+            cursor = conn.execute(query, params)  # type: ignore[arg-type]
+            return cursor.fetchall() if cursor.description else []
+
+    def checkpoint(self, tid: str, table: str = "checkpoints") -> tuple:
+        """The latest checkpoint row of *tid* in the root namespace."""
+        rows = self.execute(
+            f"SELECT checkpoint_id, checkpoint, metadata FROM {table} "  # noqa: S608 - a test-owned table name
+            "WHERE thread_id = %s AND checkpoint_ns = '' "
+            "ORDER BY checkpoint_id DESC LIMIT 1",
+            (tid,),
+        )
+        return rows[0]
+
+    def writes(self, tid: str) -> list[tuple]:
+        """The pending writes of the latest checkpoint of *tid*."""
+        return self.execute(
+            "SELECT task_id, idx, channel, type, blob FROM checkpoint_writes "
+            "WHERE thread_id = %s AND checkpoint_ns = '' AND checkpoint_id = "
+            "(SELECT max(checkpoint_id) FROM checkpoints "
+            "WHERE thread_id = %s AND checkpoint_ns = '') ORDER BY 1, 2",
+            (tid, tid),
+        )
+
+    def backup_tables(self) -> list[str]:
+        rows = self.execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() "
+            "AND tablename LIKE '%%\\_bak\\_%%' ORDER BY 1"
+        )
+        return [row[0] for row in rows]
+
+
+def _write_pending(saver: BaseCheckpointSaver, tid: str) -> None:
+    """Store one completed task write on the latest checkpoint of *tid*."""
+    tup = saver.get_tuple(_cfg(tid))
+    assert tup is not None
+    saver.put_writes(tup.config, [("audit", "kept")], "task-1")
