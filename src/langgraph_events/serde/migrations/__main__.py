@@ -1,10 +1,9 @@
 """The migration CLI: ``python -m langgraph_events.serde.migrations``.
 
 ``<target>`` is the ``module:attr`` of a ``MigrationTarget``. Exit 0 is a
-pass or a done write, 1 is a finding or a store worse than ``rewrite
---accept``, 2 is a usage, target or store error, a ``restore`` with no
-backup included, 3 is a ``rewrite`` under the wrong release. A report goes
-to stdout, and an error to stderr.
+pass or a done write, 1 is a finding or a verdict worse than ``rewrite
+--accept``, 2 is a usage, target or store error, 3 is a ``rewrite`` under
+the wrong release. A report goes to stdout, and an error to stderr.
 """
 
 from __future__ import annotations
@@ -14,7 +13,11 @@ import importlib
 import sys
 from pathlib import Path
 
-from langgraph_events.serde.migrations._backup import restore_live_set
+from langgraph_events.serde.migrations._backup import (
+    backup_live_set,
+    drop_backups,
+    restore_live_set,
+)
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     MigrationsUnrecorded,
@@ -28,13 +31,21 @@ from langgraph_events.serde.migrations._gate import (
     update_baseline,
 )
 from langgraph_events.serde.migrations._live_set import (
-    LiveSetState,
+    Verdict,
     WrongRelease,
     rewrite_live_set,
 )
 from langgraph_events.serde.migrations._target import MigrationTarget, TargetError
 
-_SUBCOMMANDS = ("check", "baseline", "fingerprint", "rewrite", "restore")
+_SUBCOMMANDS = (
+    "check",
+    "baseline",
+    "fingerprint",
+    "backup",
+    "rewrite",
+    "restore",
+    "drop-backups",
+)
 _WRONG_RELEASE = 3
 
 
@@ -94,6 +105,14 @@ def _parser() -> argparse.ArgumentParser:
     fingerprint.add_argument("baseline", type=Path)
     fingerprint.set_defaults(run=_fingerprint)
 
+    backup = commands.add_parser(
+        "backup",
+        help="back up the live set of a PostgresSaver store, named after the "
+        "fingerprint of the running code",
+    )
+    backup.add_argument("target", help="the module:attr of the MigrationTarget")
+    backup.set_defaults(run=_backup)
+
     rewrite = commands.add_parser(
         "rewrite", help="rewrite the live set of the store until it reads clean"
     )
@@ -111,26 +130,24 @@ def _parser() -> argparse.ArgumentParser:
         "--passes", type=int, default=3, help="the most apply passes (default: 3)"
     )
     rewrite.add_argument(
-        "--backup",
-        metavar="TAG",
-        help="back up the live set of a PostgresSaver store before the first plan",
-    )
-    rewrite.add_argument(
         "--accept",
-        choices=[str(state) for state in LiveSetState],
-        default=str(LiveSetState.CLEAN),
-        help="the worst state of the last plan that still exits 0 (default: clean)",
+        choices=[str(verdict) for verdict in Verdict],
+        default=str(Verdict.CLEAN),
+        help="the worst verdict of the last plan that still exits 0 (default: clean)",
     )
     rewrite.set_defaults(run=_rewrite)
 
     restore = commands.add_parser(
-        "restore", help="put back the backup TAG of the live set"
+        "restore", help="put back the backup of the running code"
     )
     restore.add_argument("target", help="the module:attr of the MigrationTarget")
-    restore.add_argument(
-        "tag", metavar="TAG", help="the tag that rewrite --backup was given"
-    )
     restore.set_defaults(run=_restore)
+
+    drop = commands.add_parser(
+        "drop-backups", help="drop each backup except the backup of the running code"
+    )
+    drop.add_argument("target", help="the module:attr of the MigrationTarget")
+    drop.set_defaults(run=_drop_backups)
     return parser
 
 
@@ -174,6 +191,14 @@ def _fingerprint(options: argparse.Namespace) -> int:
     return 0
 
 
+def _backup(options: argparse.Namespace) -> int:
+    outcome = backup_live_set(_load(options.target))
+    print(
+        f"lge backup: {outcome.fingerprint} kept {outcome.kept}, added {outcome.added}."
+    )
+    return 0
+
+
 def _rewrite(options: argparse.Namespace) -> int:
     outcome = rewrite_live_set(
         _load(options.target),
@@ -181,20 +206,33 @@ def _rewrite(options: argparse.Namespace) -> int:
         apply=options.apply,
         passes=options.passes,
         log=sys.stdout,
-        backup_tag=options.backup,
     )
     invocation = Invocation(options.target)
     if isinstance(outcome, WrongRelease):
         print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE
-    accept = LiveSetState(options.accept)
+    accept = Verdict(options.accept)
     print(outcome.render(invocation, options.expect, accept))
-    return 0 if outcome.state <= accept else 1
+    return 0 if outcome.accepted(accept) else 1
 
 
 def _restore(options: argparse.Namespace) -> int:
-    counts = restore_live_set(_load(options.target), options.tag)
-    print(f"lge restore: put back {counts} from the backup {options.tag}.")
+    outcome = restore_live_set(_load(options.target))
+    removed = outcome.removed_writes
+    print(
+        f"lge restore: {outcome.fingerprint} put back {outcome.restored}, and "
+        f"removed {removed} {'write' if removed == 1 else 'writes'} that the "
+        f"backup does not hold."
+    )
+    return 0
+
+
+def _drop_backups(options: argparse.Namespace) -> int:
+    dropped = drop_backups(_load(options.target))
+    for fingerprint in dropped:
+        print(f"lge drop-backups: dropped {fingerprint}.")
+    if not dropped:
+        print("lge drop-backups: nothing to drop.")
     return 0
 
 

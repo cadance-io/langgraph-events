@@ -190,8 +190,11 @@ class _PostgresRows(NamedTuple):
         return [row[0] for row in rows]
 
 
-def _write_pending(saver: BaseCheckpointSaver, tid: str) -> None:
-    """Store one completed task write on the latest checkpoint of *tid*."""
+def _write_pending(
+    saver: BaseCheckpointSaver, tid: str, task_id: str = "task-1"
+) -> None:
+    """Store one completed write of *task_id* on the latest checkpoint of
+    *tid*."""
     tup = saver.get_tuple(_cfg(tid))
     assert tup is not None
-    saver.put_writes(tup.config, [("audit", "kept")], "task-1")
+    saver.put_writes(tup.config, [("audit", "kept")], task_id)

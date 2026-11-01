@@ -163,11 +163,46 @@ def describe_the_lifecycle_of_a_read_time_migration():
             assert unread.returncode != 0, "N+1 cannot read the old shape yet"
             assert "legacy_total" in unread.stderr
 
+            assert older.lge("backup", target).returncode == 0
+            pre_backup = n.lge("backup", target)
+            assert pre_backup.returncode == 0, pre_backup.stderr
+            assert pre_backup.stdout == (
+                f"lge backup: {fp_n} kept 0 checkpoints and 0 writes, added 1 "
+                f"checkpoint and 0 writes.\n"
+            )
             plan = n.lge("rewrite", target, "--expect", fp_n)
             assert plan.returncode == 1, plan.stdout
             assert "  t1: needs a rewrite\n" in plan.stdout
-            post_n = n.lge("rewrite", target, "--apply", "--expect", fp_n)
-            assert post_n.returncode == 0, post_n.stdout
+            pre_deploy = n.lge(
+                "rewrite", target, "--expect", fp_n, "--accept", "rewrite"
+            )
+            assert pre_deploy.returncode == 0, pre_deploy.stdout
+
+            def post_deploy() -> None:
+                post_backup = n.lge("backup", target)
+                assert post_backup.returncode == 0, post_backup.stderr
+                post_n = n.lge(
+                    "rewrite",
+                    target,
+                    "--apply",
+                    "--expect",
+                    fp_n,
+                    "--accept",
+                    "refused",
+                )
+                assert post_n.returncode == 0, post_n.stdout
+                drop = n.lge("drop-backups", target)
+                assert drop.returncode == 0, drop.stderr
+
+            post_deploy()
+            assert n_plus_1.app("read", "t1").returncode == 0
+
+            rollback = n.lge("restore", target)
+            assert rollback.returncode == 0, rollback.stderr
+            assert "legacy_total" in n_plus_1.app("read", "t1").stderr, (
+                "the restore put back the old shape"
+            )
+            post_deploy()
 
             kept = _Release(tmp_path / "n+1-kept", _MIGRATED, postgres_url, n)
             survived = kept.lge("check", target, "--previous", str(n.baseline))

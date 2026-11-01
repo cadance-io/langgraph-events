@@ -16,12 +16,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from langgraph_events._rewrite import RewriteReport, RewriteStatus, ThreadRewrite
-from langgraph_events.serde.migrations._backup import (
-    _BACKUP_REMEDY,
-    BackupCounts,
-    _Backup,
-    _require_whole_store,
-)
 from langgraph_events.serde.migrations._target import TargetError, ThreadKey
 
 if TYPE_CHECKING:
@@ -64,8 +58,9 @@ class WrongRelease:
 
 
 @functools.total_ordering
-class LiveSetState(enum.Enum):
-    """The worst state in the last plan of a live-set rewrite.
+class Verdict(enum.Enum):
+    """The worst state of a checkpoint in the last plan of a live-set
+    rewrite.
 
     The members are in order, from best to worst, and compare in that
     order. ``str()`` gives the value, the word that ``--accept`` takes.
@@ -79,68 +74,71 @@ class LiveSetState(enum.Enum):
     """The last plan refuses a checkpoint."""
 
     def __lt__(self, other: object) -> bool:
-        if not isinstance(other, LiveSetState):
+        if not isinstance(other, Verdict):
             return NotImplemented
-        members = list(LiveSetState)
+        members = list(Verdict)
         return members.index(self) < members.index(other)
 
     def __str__(self) -> str:
         return self.value
 
 
-def _state_of(status: RewriteStatus) -> LiveSetState:
+def _verdict_of(status: RewriteStatus) -> Verdict:
     if status == "unchanged":
-        return LiveSetState.CLEAN
-    return LiveSetState(status)
+        return Verdict.CLEAN
+    return Verdict(status)
 
 
 @dataclass(frozen=True)
 class LiveSetOutcome:
-    """Every apply pass, the last plan, and the backup taken before the
-    first plan.
+    """Every apply pass and the last plan.
 
     Each report holds one ``ThreadRewrite`` per checkpoint namespace of
-    each thread, the root namespace first. ``backup`` holds the rows of the
-    backup after this run, or ``None`` when the caller asked for no backup.
+    each thread, the root namespace first.
     """
 
     passes: tuple[RewriteReport, ...]
     final: RewriteReport
-    backup: BackupCounts | None = None
+
+    @property
+    def verdict(self) -> Verdict:
+        """The worst state of a checkpoint in the last plan."""
+        return max(
+            (_verdict_of(thread.status) for thread in self.final.threads),
+            default=Verdict.CLEAN,
+        )
 
     @property
     def clean(self) -> bool:
-        """The last plan reads every checkpoint unchanged."""
-        return self.state is LiveSetState.CLEAN
+        """The last plan reads every checkpoint unchanged. It equals
+        ``verdict is Verdict.CLEAN``."""
+        return self.verdict is Verdict.CLEAN
 
-    @property
-    def state(self) -> LiveSetState:
-        """The worst state of a thread in the last plan."""
-        return max(
-            (_state_of(thread.status) for thread in self.final.threads),
-            default=LiveSetState.CLEAN,
-        )
+    def accepted(self, accept: Verdict) -> bool:
+        """The verdict is *accept* or better. The ``rewrite`` command exits
+        0 exactly when this is true for its ``--accept``."""
+        return self.verdict <= accept
 
     def render(
         self,
         invocation: Invocation,
         expect: str,
-        accept: LiveSetState = LiveSetState.CLEAN,
+        accept: Verdict = Verdict.CLEAN,
     ) -> str:
         """The verdict, each checkpoint that is not clean, then the next command.
 
         A checkpoint that the last plan reads as a rewrite also names the
         reason when the last pass refused to write it. The next command is
         printed when the last plan reads a checkpoint as a rewrite, and the
-        state is worse than *accept* or the passes ran out. A refused
+        verdict is not accepted or the passes ran out. A refused
         checkpoint needs the action that its reason names first.
         """
         head = str(self.final).splitlines()[0]
         if self.clean:
             return f"lge rewrite: clean (last plan: {head})"
-        accepted = self.state <= accept
+        accepted = self.accepted(accept)
         if accepted:
-            verdict = f"accepted, {self.state} (--accept {accept}; last plan: {head})"
+            verdict = f"accepted, {self.verdict} (--accept {accept}; last plan: {head})"
         else:
             verdict = f"not clean (last plan: {head})"
         lines = [f"lge rewrite: {verdict}"]
@@ -170,7 +168,6 @@ def rewrite_live_set(
     apply: bool,
     passes: int = 3,
     log: TextIO | None = None,
-    backup_tag: str | None = None,
 ) -> LiveSetOutcome | WrongRelease:
     """Rewrite every checkpoint namespace of every thread in the store of
     *target*, then plan again.
@@ -186,35 +183,16 @@ def rewrite_live_set(
     refused checkpoint changes only when a person acts. Without *apply*,
     the function only plans.
 
-    With *backup_tag*, the function backs up the live set of a
-    ``PostgresSaver`` store before the first plan, in one transaction:
-    the latest checkpoint of each thread in each namespace into
-    ``checkpoints_bak_<tag>``, and its pending writes into
-    ``checkpoint_writes_bak_<tag>``. A plan takes the backup too, and
-    writes no checkpoint. The same transaction drops the backup tables of
-    every other tag in the current schema of the store. A rerun with the
-    same tag keeps each row the backup holds, and adds the latest row of
-    each thread that appeared or changed since. It logs one line to *log*.
-    :func:`restore_live_set` puts the backup back.
-
     Raises:
-        ValueError: when *passes* is below 1, when *backup_tag* is not 1
-            to 32 characters of ``a-z``, ``0-9`` and ``_``, or when the
-            graph cannot be rewritten, for example under
-            ``legacy_write=True``.
+        ValueError: when *passes* is below 1, or when the graph cannot be
+            rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
             ``NamespaceAwareSerde``, when ``store`` returns an async context
-            manager, when the saver that ``store`` opens holds a serde
-            with other migrations than the code, or, with *backup_tag*,
-            when *target* sets ``threads``, when the saver is not a
-            ``PostgresSaver`` or when the backup fails. A failed backup
-            writes nothing, and no plan runs.
+            manager, or when the saver that ``store`` opens holds a serde
+            with other migrations than the code.
     """
     if passes < 1:
         raise ValueError(f"passes must be 1 or more, got {passes}.")
-    backup = _Backup(backup_tag) if backup_tag is not None else None
-    if backup is not None:
-        _require_whole_store(target, "backup", _BACKUP_REMEDY)
     running = target.snapshot().migrations
     if running.fingerprint != expect:
         return WrongRelease(
@@ -225,14 +203,6 @@ def rewrite_live_set(
     out = sys.stderr if log is None else log
     with target.open_store() as saver:
         graph = _same_serde(target.build(saver), running)
-        counts = None
-        if backup is not None:
-            taken = backup.take(saver)
-            counts = taken.total
-            out.write(
-                f"backup {backup.tag}: kept {taken.kept}, added {taken.added}, "
-                f"in {backup.checkpoints} and {backup.writes}\n"
-            )
 
         def plan() -> RewriteReport:
             return _walk(graph.plan_rewrite, target.thread_keys(saver), applied=False)
@@ -244,7 +214,7 @@ def rewrite_live_set(
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()
-    return LiveSetOutcome(tuple(reports), final, counts)
+    return LiveSetOutcome(tuple(reports), final)
 
 
 def _same_serde(live: Snapshot, code: MigrationSet) -> EventGraph:

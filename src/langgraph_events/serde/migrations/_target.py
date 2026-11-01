@@ -57,8 +57,9 @@ class MigrationTarget:
     ``SqliteSaver`` or ``MemorySaver``, or for a store that more than one
     graph shares. :func:`list_thread_keys` lists the threads of any saver
     through its public ``list()``, for a small store. A target with
-    ``threads`` declares a store that other graphs can share, so the backup
-    and the restore, which act on the whole store, refuse it.
+    ``threads`` declares a store that other graphs can share, so
+    :func:`backup_live_set`, :func:`restore_live_set` and
+    :func:`drop_backups`, which act on the whole store, refuse it.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph]
