@@ -475,8 +475,10 @@ def describe_rewrite_accept():
                 )
 
                 assert code == 0
-                assert capsys.readouterr().out.startswith(
-                    "lge rewrite: not clean (last plan: plan: 1 thread, 1 rewrite, "
+                assert capsys.readouterr().out == (
+                    "lge rewrite: accepted, rewrite (--accept rewrite; last plan: "
+                    "plan: 1 thread, 1 rewrite, 0 unchanged, 0 refused)\n"
+                    "  t1: needs a rewrite\n"
                 )
 
     def when_the_last_plan_refuses_a_thread():

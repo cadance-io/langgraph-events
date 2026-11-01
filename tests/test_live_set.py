@@ -3,6 +3,7 @@
 """
 
 import contextlib
+import dataclasses
 import io
 from collections.abc import Iterator
 from pathlib import Path
@@ -602,6 +603,24 @@ def postgres_store(tmp_path: Path, postgres_url: str) -> Iterator[_PostgresStore
         yield _PostgresStore(releases, _PostgresRows(postgres_url))
 
 
+def describe_LiveSetOutcome():
+    def describe_within():
+        def when_accept_is_not_a_state():
+            def it_raises_a_value_error(tmp_path: Path):
+                releases = _releases(tmp_path)
+                outcome = rewrite_live_set(
+                    releases.current, expect=releases.expect, apply=False
+                )
+                assert isinstance(outcome, LiveSetOutcome)
+
+                with pytest.raises(ValueError) as raised:
+                    outcome.within("refuse")  # type: ignore[arg-type]
+
+                assert str(raised.value) == (
+                    "accept must be one of clean, rewrite, refused, got 'refuse'."
+                )
+
+
 def describe_rewrite_live_set_with_a_backup():
     def when_the_store_is_postgres():
         def it_backs_up_the_live_set_before_the_first_pass(
@@ -744,6 +763,21 @@ def describe_restore_live_set():
                 restore_live_set(releases.current, "r1")
 
                 assert postgres_store.rows.checkpoint("t1") == latest
+
+        def when_the_saver_runs_in_pipeline_mode():
+            def it_counts_the_rows_it_put_back(postgres_store: _PostgresStore):
+                from langgraph.checkpoint.postgres import PostgresSaver
+
+                postgres_store.rewrite(backup="r1")
+                url = postgres_store.rows.url
+                target = dataclasses.replace(
+                    postgres_store.releases.current,
+                    store=lambda: PostgresSaver.from_conn_string(url, pipeline=True),
+                )
+
+                counts = restore_live_set(target, "r1")
+
+                assert counts == BackupCounts(checkpoints=1, writes=1)
 
     def when_the_store_holds_no_backup_of_the_tag():
         def it_raises_and_changes_nothing(postgres_store: _PostgresStore):

@@ -101,10 +101,19 @@ def _parser() -> argparse.ArgumentParser:
     rewrite = commands.add_parser(
         "rewrite", help="rewrite the live set of the store until it reads clean"
     )
-    rewrite.add_argument("target")
-    rewrite.add_argument("--expect", required=True)
-    rewrite.add_argument("--apply", action="store_true")
-    rewrite.add_argument("--passes", type=int, default=3)
+    rewrite.add_argument("target", help="the module:attr of the MigrationTarget")
+    rewrite.add_argument(
+        "--expect",
+        required=True,
+        metavar="FP",
+        help="the fingerprint of the baseline of the release that must run",
+    )
+    rewrite.add_argument(
+        "--apply", action="store_true", help="write the rewrite, else only plan"
+    )
+    rewrite.add_argument(
+        "--passes", type=int, default=3, help="the most apply passes (default: 3)"
+    )
     rewrite.add_argument(
         "--backup",
         metavar="TAG",
@@ -122,8 +131,10 @@ def _parser() -> argparse.ArgumentParser:
     restore = commands.add_parser(
         "restore", help="put back the backup TAG of the live set"
     )
-    restore.add_argument("target")
-    restore.add_argument("tag", metavar="TAG", type=_tag)
+    restore.add_argument("target", help="the module:attr of the MigrationTarget")
+    restore.add_argument(
+        "tag", metavar="TAG", type=_tag, help="the tag that rewrite --backup was given"
+    )
     restore.set_defaults(run=_restore)
     return parser
 
@@ -195,7 +206,7 @@ def _rewrite(options: argparse.Namespace) -> int:
     if isinstance(outcome, WrongRelease):
         print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE
-    print(outcome.render(invocation, options.expect))
+    print(outcome.render(invocation, options.expect, options.accept))
     return 0 if outcome.within(options.accept) else 1
 
 

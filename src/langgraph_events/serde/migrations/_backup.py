@@ -60,18 +60,22 @@ SELECT (SELECT count(*) FROM {checkpoints}) AS checkpoints,
        (SELECT count(*) FROM {writes}) AS writes
 """
 
-_RESTORE_CHECKPOINTS = """
-UPDATE checkpoints AS t SET checkpoint = b.checkpoint, metadata = b.metadata
-FROM {checkpoints} AS b
-WHERE (t.thread_id, t.checkpoint_ns, t.checkpoint_id)
-    = (b.thread_id, b.checkpoint_ns, b.checkpoint_id)
-"""
-
-_RESTORE_WRITES = """
-UPDATE checkpoint_writes AS t SET channel = b.channel, type = b.type, blob = b.blob
-FROM {writes} AS b
-WHERE (t.thread_id, t.checkpoint_ns, t.checkpoint_id, t.task_id, t.idx)
-    = (b.thread_id, b.checkpoint_ns, b.checkpoint_id, b.task_id, b.idx)
+_RESTORE = """
+WITH restored_checkpoints AS (
+    UPDATE checkpoints AS t SET checkpoint = b.checkpoint, metadata = b.metadata
+    FROM {checkpoints} AS b
+    WHERE (t.thread_id, t.checkpoint_ns, t.checkpoint_id)
+        = (b.thread_id, b.checkpoint_ns, b.checkpoint_id)
+    RETURNING 1
+), restored_writes AS (
+    UPDATE checkpoint_writes AS t SET channel = b.channel, type = b.type, blob = b.blob
+    FROM {writes} AS b
+    WHERE (t.thread_id, t.checkpoint_ns, t.checkpoint_id, t.task_id, t.idx)
+        = (b.thread_id, b.checkpoint_ns, b.checkpoint_id, b.task_id, b.idx)
+    RETURNING 1
+)
+SELECT (SELECT count(*) FROM restored_checkpoints) AS checkpoints,
+       (SELECT count(*) FROM restored_writes) AS writes
 """
 
 
@@ -186,14 +190,15 @@ class _Backup:
                         f"The store holds no backup {self.tag}: no {self.checkpoints} "
                         f"and {self.writes}. Nothing changed."
                     )
-                checkpoints = cursor.execute(self._sql(_RESTORE_CHECKPOINTS)).rowcount
-                writes = cursor.execute(self._sql(_RESTORE_WRITES)).rowcount
+                cursor.execute(self._sql(_RESTORE))
+                counts = cursor.fetchone()
         except psycopg.Error as error:
             raise TargetError(
                 f"The restore of the backup {self.tag} failed and changed "
                 f"nothing: {_one_line(error)}"
             ) from error
-        return BackupCounts(checkpoints, writes)
+        assert counts is not None  # noqa: S101 - a SELECT of two counts returns one row
+        return BackupCounts(counts["checkpoints"], counts["writes"])
 
     def _sql(self, template: str) -> sql.Composed:
         from psycopg import sql  # noqa: PLC0415

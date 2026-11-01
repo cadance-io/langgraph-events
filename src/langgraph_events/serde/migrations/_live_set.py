@@ -95,21 +95,37 @@ class LiveSetOutcome:
 
     def within(self, accept: LiveSetState) -> bool:
         """The state is *accept* or better, in the order ``"clean"``,
-        ``"rewrite"``, ``"refused"``."""
+        ``"rewrite"``, ``"refused"``.
+
+        Raises:
+            ValueError: when *accept* is not one of the three states.
+        """
+        if accept not in _STATES:
+            raise ValueError(
+                f"accept must be one of {', '.join(_STATES)}, got {accept!r}."
+            )
         return _STATES.index(self.state) <= _STATES.index(accept)
 
-    def render(self, invocation: Invocation, expect: str) -> str:
+    def render(
+        self, invocation: Invocation, expect: str, accept: LiveSetState = "clean"
+    ) -> str:
         """The verdict, each checkpoint that is not clean, then the next command.
 
         A checkpoint that the last plan reads as a rewrite also names the
         reason when the last pass refused to write it. The next command is
-        printed only when the last plan reads a checkpoint as a rewrite. A
-        refused checkpoint needs the action that its reason names first.
+        printed only when the state is worse than *accept* and the last
+        plan reads a checkpoint as a rewrite. A refused checkpoint needs
+        the action that its reason names first.
         """
         head = str(self.final).splitlines()[0]
         if self.clean:
             return f"lge rewrite: clean (last plan: {head})"
-        lines = [f"lge rewrite: not clean (last plan: {head})"]
+        accepted = self.within(accept)
+        if accepted:
+            verdict = f"accepted, {self.state} (--accept {accept}; last plan: {head})"
+        else:
+            verdict = f"not clean (last plan: {head})"
+        lines = [f"lge rewrite: {verdict}"]
         last_pass = self.passes[-1].threads if self.passes else ()
         pass_refusals = {_key(t): t.reason for t in last_pass if t.status == "refused"}
         for thread in self.final.threads:
@@ -119,7 +135,7 @@ class LiveSetOutcome:
                 lines.append(f"  {thread.location}: needs a rewrite{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.location}: refused, {thread.reason}")
-        if any(thread.status == "rewrite" for thread in self.final.threads):
+        if not accepted and any(t.status == "rewrite" for t in self.final.threads):
             lines.append(f"  Run: {invocation.rewrite(expect, apply=True)}")
         return "\n".join(lines)
 

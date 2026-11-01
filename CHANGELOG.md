@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rewrite stores each changed channel under a new version and keeps the old one. `TAG` is 1
   to 32 characters of `a-z`, `0-9` and `_`. The Python form is
   `rewrite_live_set(..., backup=TAG)`, and `LiveSetOutcome.backup` holds the
-  `BackupCounts`. Another saver exits 2 with a message.
+  `BackupCounts`. Another saver exits 2 with a message. Derive the tag from the migration
+  fingerprint, so that a redeploy of the same migrations keeps the first backup.
 - **`restore <target> TAG` puts the backup back.** It overwrites, in one transaction, each
   checkpoint row and each pending write that the backup holds and the store still holds
   under the same key. It exits 0 with the counts, 1 when the store holds no backup of `TAG`,
@@ -33,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops the deploy. An apply after a deploy runs `--accept refused`, so a refused checkpoint
   gives a report but does not fail the deploy. `LiveSetOutcome.state` gives the state of the
   last plan, and `LiveSetOutcome.within(accept)` compares it. `LiveSetState` is its type.
+  When the state is within `--accept` and not `clean`, the report says `accepted` and
+  names no next command.
 
 ### Changed
 
