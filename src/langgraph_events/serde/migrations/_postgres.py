@@ -1,5 +1,12 @@
-"""The backup of the live set of a ``PostgresSaver`` store, its restore, and
-the drop of old backups.
+"""The SQL and the private API of ``PostgresSaver`` that the commands use:
+the thread listing, the backup of the live set, its restore, and the drop
+of old backups.
+
+The saver and psycopg are optional dependencies, so their imports are
+local. Each operation reads the store through ``PostgresSaver._cursor()``,
+which is private to the saver package, so a release of that package can
+change it. It takes the lock of the saver, and a connection of its pool
+when the saver holds a pool.
 
 The live set is the latest checkpoint of each thread in each checkpoint
 namespace, and the pending writes of that checkpoint. The rewrite
@@ -7,8 +14,9 @@ overwrites only these rows. It stores each changed channel under a new
 blob version and keeps the old version, so the blobs need no copy.
 
 A backup through ``get_tuple()`` cannot work: the serde migrates each
-record on read. So each operation reads and writes the stored rows, in
-SQL, through the connection of the saver, in one transaction.
+record on read. So the backup, the restore and the drop read and write
+the stored rows, in SQL, through the connection of the saver, in one
+transaction.
 
 A backup is named after the migration fingerprint of the running code.
 So the operator gives no name, and a rerun under the same migrations
@@ -21,7 +29,7 @@ import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from langgraph_events.serde.migrations._target import TargetError, _postgres_saver
+from langgraph_events.serde.migrations._target import TargetError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -34,6 +42,8 @@ if TYPE_CHECKING:
     from langgraph_events.serde.migrations._target import MigrationTarget
 
 _T = TypeVar("_T")
+
+_THREAD_KEYS_QUERY = "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints"
 
 _BACKUP_TABLES_SQL = r"""
 SELECT relname FROM pg_class
@@ -310,6 +320,18 @@ class _Backup:
         )
 
 
+def thread_rows(saver: BaseCheckpointSaver[Any]) -> list[tuple[str, str]] | None:
+    """The thread id and checkpoint namespace of each checkpoint row of a
+    ``PostgresSaver``, or ``None`` for another saver."""
+    postgres = _postgres_saver(saver)
+    if postgres is None:
+        return None
+    with postgres._cursor() as cursor:
+        cursor.execute(_THREAD_KEYS_QUERY)
+        rows = cursor.fetchall()
+    return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
+
+
 def backup_live_set(target: MigrationTarget) -> BackupOutcome:
     """Back up the live set of the ``PostgresSaver`` store of *target*.
 
@@ -486,6 +508,15 @@ def _require_postgres(
             f"store is {type(saver).__name__}. {action.remedy}"
         )
     return postgres
+
+
+def _postgres_saver(saver: BaseCheckpointSaver[Any]) -> PostgresSaver | None:
+    """*saver* when it is a ``PostgresSaver``, else ``None``."""
+    try:
+        from langgraph.checkpoint.postgres import PostgresSaver  # noqa: PLC0415
+    except ImportError:
+        return None
+    return saver if isinstance(saver, PostgresSaver) else None
 
 
 def _one_line(error: BaseException) -> str:

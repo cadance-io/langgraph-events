@@ -43,6 +43,11 @@ Changelog = "https://github.com/cadance-io/langgraph-events/blob/main/CHANGELOG.
 
 [project.optional-dependencies]
 agui = ["ag-ui-protocol>=1.0.0", "langchain-core>=1.0.0"]
+# The migration commands call a private method of each saver, so each extra
+# pins the range of the saver that the tests cover. The backup commands
+# import psycopg directly.
+postgres = ["langgraph-checkpoint-postgres>=3.1.2,<4", "psycopg>=3.2.0,<4"]
+sqlite = ["langgraph-checkpoint-sqlite>=3.1.1,<4"]
 
 [dependency-groups]
 dev = [

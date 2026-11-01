@@ -13,11 +13,6 @@ import importlib
 import sys
 from pathlib import Path
 
-from langgraph_events.serde.migrations._backup import (
-    backup_live_set,
-    drop_backups,
-    restore_live_set,
-)
 from langgraph_events.serde.migrations._baseline import (
     Baseline,
     MigrationsUnrecorded,
@@ -34,6 +29,11 @@ from langgraph_events.serde.migrations._live_set import (
     Verdict,
     WrongRelease,
     rewrite_live_set,
+)
+from langgraph_events.serde.migrations._postgres import (
+    backup_live_set,
+    drop_backups,
+    restore_live_set,
 )
 from langgraph_events.serde.migrations._target import MigrationTarget, TargetError
 

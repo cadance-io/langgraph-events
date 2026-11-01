@@ -17,14 +17,6 @@ cross-module renames or composite operations flow through the serde's
 ``migrations=`` kwarg.
 """
 
-from langgraph_events.serde.migrations._backup import (
-    BackupOutcome,
-    BackupRows,
-    RestoreOutcome,
-    backup_live_set,
-    drop_backups,
-    restore_live_set,
-)
 from langgraph_events.serde.migrations._core import (
     AddField,
     Migration,
@@ -61,6 +53,14 @@ from langgraph_events.serde.migrations._live_set import (
     Verdict,
     WrongRelease,
     rewrite_live_set,
+)
+from langgraph_events.serde.migrations._postgres import (
+    BackupOutcome,
+    BackupRows,
+    RestoreOutcome,
+    backup_live_set,
+    drop_backups,
+    restore_live_set,
 )
 from langgraph_events.serde.migrations._target import (
     MigrationTarget,

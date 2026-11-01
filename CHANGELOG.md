@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`backup`, `restore` and `drop-backups` exit 0, or 2 on an error.** A failed command changes
   nothing. Each command needs a `PostgresSaver`, and refuses a target with `threads=` before it
   opens the store: such a target declares a store that other graphs can share.
+- **The `postgres` and `sqlite` extras pin the tested range of each saver.**
+  `pip install "langgraph-events[postgres]"` installs `langgraph-checkpoint-postgres>=3.1.2,<4`
+  and `psycopg>=3.2.0,<4`. `pip install "langgraph-events[sqlite]"` installs
+  `langgraph-checkpoint-sqlite>=3.1.1,<4`. The thread listing and the backup commands call an
+  internal method of the saver, which a release of the saver package can change.
 - **`rewrite --accept clean|rewrite|refused` names the worst verdict that exits 0.** The verdicts
   are in order: `clean`, `rewrite`, `refused`. The default `clean` keeps the exit code of 0.42.
   `LiveSetOutcome.verdict` gives the `Verdict` of the last plan, an enum whose members `CLEAN`,

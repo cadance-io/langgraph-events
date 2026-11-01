@@ -658,6 +658,13 @@ target = MigrationTarget(
 
 The table gives what each checkpointer supports. A plan writes nothing. An apply writes each checkpoint again under its own id.
 
+The built-in thread listing of `PostgresSaver` and `SqliteSaver` calls an internal method of the saver, which a release of the saver package can change. So install the saver through the extra of lge. The extra pins the range of the saver that the lge tests cover:
+
+```bash
+pip install "langgraph-events[postgres]"   # PostgresSaver and psycopg
+pip install "langgraph-events[sqlite]"     # SqliteSaver
+```
+
 | Checkpointer | Plan and apply | Thread listing of the command | Prune of old blob versions | Backup of the command |
 |---|---|---|---|---|
 | `PostgresSaver` | Yes | Built in, with one SQL query | Needed. See [Old blob versions](#old-blob-versions) | Built in: `backup`, `restore` and `drop-backups`. See [Backup and restore](#backup-and-restore) |
@@ -875,6 +882,12 @@ WARNING: Do not let an older release serve runs while the command runs. An older
 
 This section applies to `PostgresSaver` only. Under another saver, `backup`, `restore` and `drop-backups` exit 2 before they write.
 
+The three commands read and write the store through `PostgresSaver._cursor()`, a private method of the saver. Install the saver through the `postgres` extra, which pins the range of the saver that the lge tests cover:
+
+```bash
+pip install "langgraph-events[postgres]"
+```
+
 | Command | What it does |
 |---|---|
 | `backup <target>` | Copies the live set into the backup of the running code |
@@ -943,6 +956,8 @@ The prune in [Old blob versions](#old-blob-versions) and the backup need the sam
 #### Locks and timeouts
 
 The three commands take locks on the checkpoint tables. To limit the wait, set `lock_timeout` and `statement_timeout` in the connection options of the store, for example `?options=-c%20lock_timeout%3D5s` in the URL.
+
+`restore` takes a `SHARE` lock on `checkpoint_blobs` for its whole transaction. So each checkpoint write of the app that stores a blob waits while the restore runs. For a small live set, the wait is some milliseconds. Set `lock_timeout` in the connection options. Then, when another session holds a lock on a checkpoint table, the command fails fast and changes nothing.
 
 #### A store that other graphs share
 
