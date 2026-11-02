@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`AGUIAdapter.connect()` emits the run lifecycle.** The replay starts with `RUN_STARTED`
+  and ends with `RUN_FINISHED`. Both carry the thread id and the run id of the input. If the
+  replay raises, `RUN_ERROR` ends the stream. Before this fix, an AG-UI client such as
+  `@ag-ui/client` 1.0 refused the stream with "First event must be 'RUN_STARTED'". See
+  [Connect / Reconnect](docs/agui.md#connect-reconnect).
+  WARNING: a consumer that wrapped the `connect()` stream in its own `RUN_STARTED` and
+  `RUN_FINISHED` now sends each lifecycle event twice. Remove the wrapper. If the wrapper adds
+  events before `RUN_FINISHED`, insert them before the last event of the stream.
+
 ## [0.43.1] - 2026-11-02
 
 ### Fixed
