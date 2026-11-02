@@ -1,17 +1,17 @@
 """Reflection agent — langgraph-events demo.
 
-A real-world diagnosis loop: an order is cancelled deep inside an
-event-driven flow (payment declined → reaction cancels the order), and an
-agent works out *why* — lazily, by driving the ``query_log`` tool the way a
-ReAct agent would, instead of reading the whole event log into context.
+A diagnosis loop: an order is cancelled deep inside an event-driven flow
+(payment declined, a handler cancels the order), and an agent works out
+*why*. The agent drives the ``query_log`` tool the way a ReAct agent would,
+instead of reading the whole event log into context.
 
 The reflective surface is deterministic: every op returns facts (listings,
 field dumps, static topology, verdict-free evidence joins). Correlating those
-facts into a causal story is the agent's job — here scripted step by step so
-the example runs offline; each ``query_log`` call is exactly what an LLM
-would issue as a tool call. ``QueryTool``'s shape (name / description /
-JSON-schema parameters / run) maps 1:1 onto an Anthropic tool dict or
-LangChain's ``StructuredTool.from_function``.
+facts into a causal chain is the agent's job. Here it is scripted step by
+step so the example runs offline. Each ``query_log`` call is exactly what an
+LLM would issue as a tool call. The shape of ``QueryTool`` (name /
+description / JSON-schema parameters / run) maps 1:1 onto an Anthropic tool
+dict or LangChain's ``StructuredTool.from_function``.
 
 Covers APIs not shown in other examples:
   - ``EventGraph.reflect(log)`` — the ``Reflection`` read-model over a run
@@ -41,7 +41,7 @@ from langgraph_events import (
 )
 
 # ---------------------------------------------------------------------------
-# Domain — a sales flow where payment failures cancel the order
+# Namespaces: a sales flow where payment failures cancel the order
 # ---------------------------------------------------------------------------
 
 
@@ -116,7 +116,7 @@ def cancel_on_decline(event: HandlerRaised) -> Sales.Cancel:
 def brief_support_agent(event: Sales.Cancel.Cancelled, run: Reflection) -> None:
     """Injection point: a handler gets the mid-run Reflection snapshot.
 
-    In a real app this is where you'd call your LLM with
+    In a real app this is where the LLM is called with
     ``system=run.context()`` and ``tools=[run.tool()]``.
     """
     print("--- context card injected mid-run (what the LLM would see) ---")
@@ -125,7 +125,7 @@ def brief_support_agent(event: Sales.Cancel.Cancelled, run: Reflection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# The diagnosis loop — each step is one query_log tool call
+# The diagnosis loop: each step is one query_log tool call
 # ---------------------------------------------------------------------------
 
 
@@ -139,7 +139,7 @@ def diagnose(run: Reflection) -> None:
         print()
 
     print("=== agent diagnosis: why was order A-1 cancelled? ===\n")
-    call(op="overview")  # 1. shape of the run — spot the anomaly
+    call(op="overview")  # 1. shape of the run: spot the anomaly
     call(op="filter", type="Cancelled")  # 2. locate the outcome
     call(op="evidence", index=5)  # 3. Cancelled ← owning command Cancel #4
     call(op="evidence", index=4)  # 4. Cancel ← cancel_on_decline ← #3

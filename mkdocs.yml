@@ -17,13 +17,14 @@ nav:
   - Concepts: concepts.md
   - Control Flow: control-flow.md
   - Reducers: reducers.md
-  - Reflection: reflection.md
-  - Streaming: streaming.md
   - Patterns: patterns.md
-  - API Reference: api.md
+  - Streaming: streaming.md
   - AG-UI Adapter: agui.md
-  - Checkpointer & Graph Evolution: checkpointer-evolution.md
+  - Reflection: reflection.md
   - Event Migrations: event-migrations.md
+  - Migration Gate and Deploys: migration-gate.md
+  - Retiring an Interrupted Subclass: retiring-interrupted.md
+  - API Reference: api.md
 
 markdown_extensions:
   - md_in_html

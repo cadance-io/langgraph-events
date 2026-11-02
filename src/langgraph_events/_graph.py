@@ -130,7 +130,7 @@ def _planned_outcome(planned: ThreadRewrite | RewritePlan) -> ThreadRewrite:
 
 
 _SEE_CHECKPOINTERS = (
-    "Fix the saver, then rerun. See 'Checkpointers' in docs/event-migrations.md"
+    "Fix the saver, then rerun. See 'Checkpointers' in docs/migration-gate.md"
 )
 
 
@@ -397,7 +397,7 @@ def _explicit_thread_ids(method: str, thread_ids: Iterable[str] | None) -> list[
             f"None. Since 0.34.0 the library does not walk the store. To "
             f"sweep every thread, pass the ids from {_ALL_THREAD_IDS_QUERY}. "
             f"See 'Finding candidates server-side' in "
-            f"docs/event-migrations.md."
+            f"docs/retiring-interrupted.md."
         )
     if isinstance(thread_ids, str):
         raise TypeError(
@@ -2367,7 +2367,8 @@ class EventGraph:
             f"history names {', '.join(names)}, which the checkpointer's serde "
             f"cannot revive. Settling would write a placeholder into the log. "
             f"Map each identity onto a tombstone with @migrate_from instead. "
-            f"See 'Recovering a delete-first deployment' in docs/event-migrations.md."
+            f"See 'Recovering a delete-first deployment' in "
+            f"docs/retiring-interrupted.md."
         )
 
     def abandon(
@@ -2394,7 +2395,7 @@ class EventGraph:
         the settled history holds a deleted class: settling would write
         a placeholder into the log, and the serde refuses to store one.
         Recover that thread with a tombstone (see "Recovering a
-        delete-first deployment" in ``docs/event-migrations.md``).
+        delete-first deployment" in ``docs/retiring-interrupted.md``).
 
         Requires a checkpointer. Raises ``ValueError`` if the thread has
         no events to settle (never run, or only ``pre_seed``ed). Ignores
@@ -2503,7 +2504,7 @@ class EventGraph:
         store. A listed thread with no checkpoint, or with no matching
         interrupt, stays out of the result. Get the ids from one
         server-side query. See *Finding candidates server-side* in
-        ``docs/event-migrations.md``. ``thread_ids=None`` or a bare
+        ``docs/retiring-interrupted.md``. ``thread_ids=None`` or a bare
         ``str`` raises ``TypeError``.
 
         Requires a checkpointer.
@@ -2672,7 +2673,7 @@ class EventGraph:
         :class:`~langgraph_events.serde.NamespaceAwareSerde`, under
         ``legacy_write=True``, or for a ``drop`` class the serde cannot
         revive. See *Retiring an Interrupted subclass* in
-        ``docs/event-migrations.md``.
+        ``docs/retiring-interrupted.md``.
         """
         return self._rewrite_walk(
             "plan_rewrite",

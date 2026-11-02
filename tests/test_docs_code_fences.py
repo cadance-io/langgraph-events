@@ -79,9 +79,9 @@ def _fenced_python(md_path: Path) -> list[tuple[int, str]]:
 def describe_docs_code_fences():
     @pytest.mark.parametrize("md_relpath", DOC_FILES)
     def it_compiles_every_python_fence(md_relpath: str) -> None:
-        # A doc with no python fences (patterns.md, checkpointer-evolution.md —
-        # their autogen blocks are mermaid and text tabs) passes vacuously here;
-        # the corpus guard below is what proves the suite is not vacuous overall.
+        # A doc with no python fences (patterns.md, whose autogen blocks are
+        # mermaid) passes vacuously here. The corpus guard below proves the
+        # suite is not vacuous overall.
         for line, source in _fenced_python(REPO_ROOT / md_relpath):
             compile(
                 source,

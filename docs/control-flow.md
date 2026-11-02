@@ -2,7 +2,7 @@
 
 ## `Scatter`
 
-Return `Scatter([event1, event2, ...])` to fan out into multiple events; each dispatches separately in the next round. Annotate the return as `Scatter[WorkItem]` (or `Scatter[A | B]` for heterogeneous targets) — renders as a dashed edge in `graph.namespaces().mermaid()`. Bare `Scatter`, `Scatter[Any]`, `Scatter[Event]`, and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError` (v0.10).
+Return `Scatter([event1, event2, ...])` to fan out into multiple events. Each dispatches separately in the next round. Annotate the return as `Scatter[WorkItem]`, or `Scatter[A | B]` for heterogeneous targets. It renders as a dashed edge in `graph.namespaces().mermaid()`. Bare `Scatter`, `Scatter[Any]`, `Scatter[Event]` and `Scatter[T]` (TypeVar) are rejected at graph construction with `TypeError`.
 
 ```python
 from langgraph_events import EventLog, IntegrationEvent, Scatter, on
@@ -47,21 +47,24 @@ See the [Map-Reduce pattern](patterns.md#scatter-fan-out).
 
 ## Invariants
 
-Declare `invariants={InvariantClass: predicate, ...}` as a class-level attribute on a `Command` (or via `invariants=` on `@on()` for external handlers). Each predicate runs twice per matching event:
+Declare `invariants={InvariantClass: predicate, ...}` as a class-level attribute on a `Command`, or via `invariants=` on `@on()` for an external handler. Each predicate runs twice per matching event:
 
 | Phase | Timing | Log scope | On failure |
 |---|---|---|---|
-| **Pre-check** | Before handler body | Committed events | Skip handler; emit `InvariantViolated` (`would_emit` empty) |
-| **Post-check** | After handler returns | Committed + emitted | Drop emissions; emit `InvariantViolated` (`would_emit` = handler's events) |
-
-!!! note "Atomicity"
-    The two phases give the DDD semantic: the domain's consistency rules hold **before** the handler runs and **after** its effects commit.
-
-- Typed markers — subclass `Invariant` once per rule; reference the class on declaration and reactor sides. Typos fail at graph construction.
-- Declared on the `Command`'s `invariants` dict; forwarded to the inline `handle()` wrapper.
-- Recovery reactors emit **namespace-level** events (Command-private outcomes are reserved for `handle()`).
+| **Pre-check** | Before handler body | Committed events | Skip handler, emit `InvariantViolated` (`would_emit` empty) |
+| **Post-check** | After handler returns | Committed + buffered by the current node call | Drop emissions, emit `InvariantViolated` (`would_emit` = handler's events) |
 
 ```python
+from __future__ import annotations
+
+from langgraph_events import Command, DomainEvent, IntegrationEvent, Invariant
+from langgraph_events import InvariantViolated, Namespace, on
+
+
+class CustomerBanned(IntegrationEvent):
+    customer_id: str = ""
+
+
 class CustomerNotBanned(Invariant):
     """Customer must not be on the banned list."""  # pre-check catches
 
@@ -92,7 +95,7 @@ class Order(Namespace):
             )
 
     class Rejected(DomainEvent):
-        """Sibling to ``Place`` — emitted by recovery reactors."""
+        """Sibling to ``Place``, emitted by a recovery handler."""
 
         reason: str = ""
 
@@ -103,23 +106,14 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
     return Order.Rejected(reason=f"over limit (would emit {rolled.amount})")
 ```
 
-`CustomerNotBanned`: pre-check only — truth ≠ handler outputs. `OrderTotalWithinLimit`: post-check catches the case where this handler's `Placed` is what pushes the total over.
+- Subclass `Invariant` once per rule. Reference the class on the declaration side and on the handler side. `Invariant` subclasses must be zero-arg instantiable. The library calls `Cls()` at emission time for `isinstance` matching.
+- Catch all: `@on(InvariantViolated)`. Pin to a class: `@on(InvariantViolated, invariant=SomeInvariant)`. A pinned class that no declaration names raises `TypeError` at graph construction ("would never fire"). A pinned handler fires for both pre-check and post-check failures. Inspect `event.would_emit` to tell them apart.
+- A recovery handler emits a **namespace-level** event. Command-private outcomes are reserved for the inline command handler.
+- A predicate receives `EventLog`. It must be **sync** and a **pure function of `log`**. An async predicate raises `TypeError` at `@on` decoration, or at graph construction for a `Command` attribute. Predicate exceptions propagate. They are not converted to violations.
+- Multiple invariants short-circuit. One `InvariantViolated` per phase.
+- Invariants run around `raises=`. The pre-check gates the body entirely. The post-check is skipped on a caught exception, which emits `HandlerRaised` instead. Post-check is a no-op when the handler returned `None` or declares no invariants.
 
-!!! warning "Invariant reactors"
-    - Catch all: `@on(InvariantViolated)`. Pin to a class: `@on(InvariantViolated, invariant=SomeInvariant)`.
-    - Framework verifies pinned classes are actually declared somewhere — otherwise `TypeError` at graph construction ("would never fire").
-    - Pinned reactors fire for both pre- and post-check failures without distinguishing them — inspect `event.would_emit` to tell them apart.
-
-!!! note "Semantics"
-    - Predicates receive `EventLog`; must be **sync** (async rejected at decoration) and **pure functions of `log`**.
-    - Pre-check log = committed events. Post-check log = committed + everything the current node call has buffered.
-    - Multiple invariants short-circuit; one `InvariantViolated` per phase.
-    - Predicate exceptions propagate (not converted to violations).
-    - Invariants run around `raises=`: pre-check gates the body entirely; post-check skips on caught exceptions (those emit `HandlerRaised` instead).
-    - Post-check is a no-op when the handler returned `None` (empty buffer) or declares no invariants.
-    - `Invariant` subclasses must be zero-arg instantiable (framework calls `Cls()` at emission time for `isinstance` matching).
-
-### Modeling errors — when to use what
+### Modeling errors
 
 | Situation | Vehicle |
 |---|---|
@@ -127,22 +121,34 @@ def rolled_back(event: InvariantViolated) -> Order.Rejected:
 | Consistency rule gating a command (pre and/or post) | `invariants=` → `InvariantViolated` |
 | Infrastructure failure (rate limit, timeout, parse error) | `Exception` + `raises=` → `HandlerRaised` |
 
-## Warnings at construction
+## Warnings from `graph.namespaces()`
 
-`graph.namespaces()` emits two warnings that flag structural smells. Filter with `warnings.filterwarnings("ignore", category=...)` if intentional.
+The first `graph.namespaces()` call emits two warnings that flag structural smells. `graph.reflect()` and a `Reflection` injected into a handler build the same model, so they emit them too. When the structure is intentional, filter with `warnings.filterwarnings("ignore", category=...)`.
 
-- **`CommandChainWarning`** — `chain`-causation edge: an inline `Command.handle()` returning another `Command`. Prefer emitting a fact and reacting to it.
-- **`DomainPatternWarning`** — 2+ events in the same namespace fan out to identical target sets (a missing shared base / common reactor).
-
-!!! note "`IntegrationEvent` placement"
-    `IntegrationEvent` must be defined at module scope. Nesting inside a `Namespace` or `Command` raises `TypeError` at class creation (v0.10) — integration events cross a context boundary by definition.
+- **`CommandChainWarning`**: a `chain`-causation edge, an inline command handler that returns another `Command`. Prefer to emit a fact and react to it.
+- **`DomainPatternWarning`**: two or more events in the same namespace fan out to identical target sets. A shared base or a common handler is missing.
 
 ## `Interrupted` / `Resumed`
 
-Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)` (requires a checkpointer); a `Resumed` event emits alongside the dispatched event.
+Subclass `Interrupted` with typed fields to pause for human input. Resume with `graph.resume(event)`, which requires a checkpointer. A `Resumed` event emits alongside the dispatched event.
 
 ```python
 from langgraph.checkpoint.memory import MemorySaver
+
+from langgraph_events import EventGraph, EventLog, IntegrationEvent, Interrupted, on
+
+
+class OrderPlaced(IntegrationEvent):
+    order_id: str
+    total: float
+
+
+class OrderConfirmed(IntegrationEvent):
+    order_id: str
+
+
+class OrderCancelled(IntegrationEvent):
+    reason: str
 
 
 class OrderConfirmationRequested(Interrupted):
@@ -180,124 +186,93 @@ log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 
 The resume value must be an `Event`. Another value raises `TypeError` before the graph runs, so the thread stays paused and a later `resume()` can answer it. A handler that pauses two times in one run is resumed two times. After the first resume, the thread is paused again and `get_state(config).is_interrupted` is `True`. Under the default `on_unresumable="raise"`, `resume()` raises [`UnresumableError`](api.md#warnings) only when no registered handler waits for an answer.
 
-See [HITL pattern](patterns.md#expense-hitl) and [Checkpointer Evolution](checkpointer-evolution.md).
+For an interrupt whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]`. See [Typed Interrupt Payloads](agui.md#typed-interrupt-payloads).
+
+See the [approval pattern](patterns.md#expense-hitl) and [What changes safely](event-migrations.md#what-changes-safely).
 
 ### Ending a pause without answering it — `abandon()`
 
-`graph.resume(event)` answers a pending `Interrupted`. `graph.abandon(config, reason=...)` or `aabandon()` ends the pause without ever answering it. Both require a checkpointer.
+`graph.abandon(config, reason=...)` or `aabandon()` ends the pause without answering it. Both require a checkpointer. `abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass, thread_ids=...)` or `athreads_paused_on()`:
 
 ```python
-graph.abandon(config, reason="retiring OrderConfirmationRequested")
-```
-
-`abandon()` settles one thread per call. Find the paused threads with `graph.threads_paused_on(EventClass, thread_ids=...)` (or `athreads_paused_on()`):
-
-```python
+...
 # candidates: thread ids from a server-side query.
 paused = graph.threads_paused_on(OrderConfirmationRequested, thread_ids=candidates)
 for config in paused:
     graph.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
-`thread_ids=` is required. The caller names the threads, and the library does not walk the store. Get the candidate ids from a server-side query. See [Finding candidates server-side](event-migrations.md#finding-candidates-server-side). Omit the class to get every listed thread that is paused. To check one thread, pass `thread_ids=[tid]`.
+`thread_ids=` is required. The library does not read the whole store. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side). Omit the class to get every listed thread that is paused. To check one thread, pass `thread_ids=[tid]`.
 
-`abandon()` discards the interrupt instead of answering it: it never dispatches the interrupt, and the interrupt never joins the event log. This is why `abandon()` exists to retire an `Interrupted` subclass. Resuming every paused thread first would append the very identity you are deleting.
+`abandon()` never dispatches the interrupt, and the interrupt never joins the event log. That is why it retires an `Interrupted` subclass: resuming every paused thread first would append the identity you are deleting. It appends a terminal [`Abandoned`](api.md#system-events) event, a [`Halted`](concepts.md#system-events) subtype. It leaves nothing scheduled. It preserves the writes of any completed sibling handler from the same fanned-out superstep. `Abandoned` is recorded, not dispatched. `.discarded` holds the qualnames of the discarded interrupts, joined with `", "`. It settles the latest checkpoint only. A historic checkpoint of the thread keeps its own `__interrupt__` write, so a replay against it still sees the pause. For a class that is already deleted, and for the threads that already answered the interrupt, see [Retiring an Interrupted subclass](retiring-interrupted.md).
 
-The thread is terminal afterwards. `abandon()` appends a terminal [`Abandoned`](api.md#system-events) event (a [`Halted`](concepts.md#system-events) subtype). It leaves nothing scheduled. It preserves any completed sibling handler's writes from the same fanned-out superstep.
+WARNING: A release older than 0.29.0 cannot read an `Abandoned` event. A deployment rolled back below 0.29.0 raises `Cannot revive` on every read of an abandoned thread. Before you call `abandon()` in production, confirm that the previous production image also runs 0.29.0 or later.
 
-!!! warning "`Abandoned` sets a rollback floor of 0.29.0"
-    `abandon()` writes an `Abandoned` event into the thread. That class exists from langgraph-events 0.29.0. A deployment rolled back below 0.29.0 cannot revive it. Every read of an abandoned thread then raises `Cannot revive`. Before you call `abandon()` in production, confirm that the previous production image also runs 0.29.0 or later.
+WARNING: A run that is running on the thread overwrites what `abandon()` did, or the reverse, depending on ordering. Call `abandon()` only on a thread that is that no run uses.
 
-`abandon()` raises `ValueError` if the thread has no events to settle (never run, or only `pre_seed()`ed). `abandon()` also raises `ValueError` if the thread has no pending interrupt, naming the thread. This catches a stray ID in a candidate list before it silently closes out settled business history. Pass `require_interrupt=False` to settle such a thread anyway. It records `Abandoned(discarded="")`.
+`abandon()` raises `ValueError` if the thread has no events to settle (never run, or only `pre_seed()`ed), or if the thread has no pending interrupt, naming the thread. Pass `require_interrupt=False` to settle such a thread anyway. It records `Abandoned(discarded="")`.
 
-Like every event on this settle path, `Abandoned` is recorded, not dispatched. `@on(Abandoned)` never fires. Read it back like any other event: `graph.get_state(config).events.latest(Abandoned)` gives you `.reason` and `.discarded`. `.reason` is the caller-supplied string, `""` if none. `.discarded` holds the discarded interrupts' **qualnames**, for example `"Order.ApprovalRequested"` for a class nested in a `Namespace`, never the bare `"ApprovalRequested"`. Values are deduped and joined with `", "`, `""` if none. Match it with `in` or split on `", "`. Never use `==`. A fanned-out superstep can pause two interrupts, and `==` stops matching then.
-
-Always the qualname, never the bare class name: it stays unambiguous under nesting. For a plain retirement (handler deleted, or handler and class deleted together with no recovery), it also stays the *same string*: a check written before that retirement keeps matching after it. It does **not** stay the same string once the [tombstone recovery](event-migrations.md#recovering-a-delete-first-deployment) runs. `discarded` then holds the *tombstone's* qualname (e.g. `Order.RetiredApprovalGate`), not the retired class's (`Order.ApprovalRequired`). A check pinned to the original name stops matching from that point on.
-
-`threads_paused_on()` and `abandon()` still work if the `Interrupted` class itself has already been deleted, not just its handler. This is the delete-first mistake this library's docs used to train. Neither can construct the class anymore, so `discarded` then carries the interrupt's last-known qualname instead of a live instance. See [Recovering a delete-first deployment](event-migrations.md#recovering-a-delete-first-deployment) to map that identity back onto a tombstone class. The fix also revives any thread that had already answered the interrupt. `graph.unrevivable_threads(thread_ids=...)` finds those threads: it reports each listed thread whose latest checkpoint names an identity that no longer revives, in its settled history or its pending interrupt.
-
-`abandon()` cleans only the live checkpoint. A historic checkpoint for the same thread keeps its own `__interrupt__` write, so time-travel or replay against it still sees the original pause. Retirement is therefore safe only for the identity a current thread is resting on, the same framing as [event class rename/relocate](event-migrations.md#the-minimum-case-rename-inside-a-namespace).
-
-!!! warning "Concurrent runs"
-    A run in flight on the thread will silently overwrite whatever `abandon()` did,
-    or vice versa, depending on ordering. Call `abandon()` only on a thread that is
-    genuinely at rest.
-
-`abandon()` does not consult [`on_unresumable`](api.md#graph-execution). That policy governs an accidental no-op `resume()` (a renamed/removed handler, a double resume), not a deliberate abandonment. A later `resume()` on an abandoned thread still raises [`UnresumableError`](api.md#warnings) under the default policy, naming the abandonment instead of pointing at a handler rename.
-
-### Typed payloads — `InterruptedWithPayload`
-
-For interrupts whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]` and implement `interrupt_payload(self) -> PayloadT`. The AG-UI adapter recognises the contract directly — see [AG-UI](agui.md).
+`abandon()` does not consult [`on_unresumable`](api.md#graph-execution). That setting governs an accidental no-op `resume()`, not a deliberate abandonment. A later `resume()` on an abandoned thread still raises [`UnresumableError`](api.md#warnings) under the default setting, naming the abandonment.
 
 ## Soft-timeout — `RunPaused`
 
 Pass `deadline=time.monotonic() + budget` to any graph entry point (`invoke`, `ainvoke`, `astream_events`, `stream_events`, `resume`, `aresume`, `astream_resume`, `stream_resume`, or `AGUIAdapter.stream`). When the router observes a wall-clock time past the deadline between dispatch rounds, it emits a `RunPausedOnDeadline(elapsed_seconds=…)` and the run terminates cleanly.
 
-`RunPaused` is the base class of every pause. It names no cause, so `RunPaused(...)` raises `TypeError`. Each subclass names one cause. `RunPausedOnDeadline` is the deadline pause. `RunPausedOnSignal` is the [signal pause](#pause-on-a-signal-runpausedonsignal). Match `RunPaused` to see every pause, or match a subclass to see one cause.
+`RunPaused` is the base class of every pause. It names no cause, so `RunPaused(...)` raises `TypeError`. `RunPausedOnDeadline` is the deadline pause. `RunPausedOnSignal` is the [signal pause](#pause-on-a-signal-runpausedonsignal). Match `RunPaused` to see every pause, or match a subclass to see one cause.
 
 ```python
+...
 from time import monotonic
 
 log = graph.invoke(Started(data="job-42"), deadline=monotonic() + 25.0)
 
 if log.latest(RunPaused):
-    # Soft-stopped. The next /run on the same thread_id continues
-    # from the LangGraph checkpoint — same mechanism as a normal
-    # follow-up turn. No Command(resume=...) required.
+    # Paused. The next `invoke()` or stream call on the same `thread_id`
+    # continues from the LangGraph checkpoint, the same mechanism as a
+    # normal follow-up turn. No Command(resume=...) is needed.
     ...
 ```
 
-Unlike `MaxRoundsExceeded`, `RunPaused` is **not terminal across runs**: the router advances the cursor past it so a fresh `/run` on the same `thread_id` excludes the old `RunPaused` from `new_events` and continues. Resume semantics intentionally differ from `Interrupted`:
+Unlike `MaxRoundsExceeded`, `RunPaused` is **not terminal across runs**. The router advances the cursor past it, so the next call excludes the old `RunPaused` from `new_events`. Unlike `Interrupted`, which writes a pending interrupt task that `resume()` answers with `Command(resume=value)`, `RunPaused` writes **no** checkpoint task. The caller makes the next call with the same `thread_id` and a fresh deadline, and LangGraph replays from the last completed node.
 
-- `Interrupted` writes a pending interrupt task to the checkpoint; resume uses `Command(resume=value)` to deliver a typed resume value to the paused node.
-- `RunPaused` writes **no** checkpoint task; the worker/UI just makes a new `/run` call (with the same `thread_id` and a fresh deadline). LangGraph's checkpointer replays from the last completed node.
+Rules, shared with the signal pause:
 
-Position `deadline` strictly tighter than whichever hard cancellation the caller already has (`asyncio.wait_for`, SAQ `job_timeout`, LangGraph's `timeout=`) so the soft boundary fires first and the wire-format finalize path runs cleanly. In-flight events from the round when the deadline fires are persisted in the event log but not dispatched — same drop-on-pause semantic as `MaxRoundsExceeded`. Handlers should produce events such that a clean round-boundary stop leaves recoverable state.
+- Set `deadline` strictly tighter than any hard cancellation the caller already has, such as `asyncio.wait_for` or LangGraph's `timeout=`, so that the pause fires first.
+- Events emitted in the paused round are persisted in the event log but not dispatched, the same drop-on-pause semantic as `MaxRoundsExceeded`. Write handlers so that a stop at a round boundary leaves recoverable state.
+- The first round of a run always dispatches, also with `deadline=0.0`. The resume round always dispatches: the router dispatches the resume value before it checks the deadline or the signal, so a pause does not lose the answer.
+- `RunPaused` is emitted **at most once per run**, even when many parallel handlers are that is running when the deadline fires. A downstream projection can rely on one entry per pause.
+- The check happens **only between rounds**, never inside a handler, so a handler that blocks cannot be preempted. The one exception is a [`RetryPolicy`](#retries) backoff, which reads the deadline and the signal before every wait and gives up instead of sleeping past them.
 
-The first round of a run and the resume round always dispatch. On `resume()` and the other resume entry points, the router dispatches the resume value before it checks the deadline or the [`pause_on=` signal](#pause-on-a-signal-runpausedonsignal). So a pause does not lose the answer. The router pauses at the next round.
-
-`RunPaused` is emitted **at most once per `/run`**, even when many parallel handlers are still in flight when the deadline fires. The router gates re-emission so that downstream projections (custom reducers, message-channel notices) can rely on one inline entry per pause.
-
-The deadline is checked **only between rounds**, never inside a handler — so a handler that blocks cannot be preempted by it. The one exception is [`RetryPolicy`](#retries) backoff, which reads the same deadline before every wait: a sleep that would land on or past the boundary is abandoned rather than started, and the give-up surfaces as a `HandlerAbandonedOnDeadline`. The backoff reads a `pause_on=` signal the same way, and a signal give-up surfaces as a `HandlerAbandonedOnSignal`, see below. So you do not have to size the worst-case total backoff, `max_delay * (max_attempts - 1)`, under your deadline budget — the waits between attempts are bounded for you. The attempts themselves are not: a single long-running handler call can still run past the boundary, and the pause lands at the first round boundary after it returns.
+`RunPaused` has no default AG-UI wire mapping. See [Deadline and signal pauses](agui.md#deadline-and-signal-pauses).
 
 ### Pause on a signal — `RunPausedOnSignal`
 
 A deadline is fixed when the run starts. To stop a live run early, pass `pause_on=` to the same entry points. The value is an object with an `is_set()` method, for example an `asyncio.Event` or a `threading.Event`. The `PauseSignal` protocol states this contract. The router calls `is_set()` between dispatch rounds. When it returns `True`, the router emits `RunPausedOnSignal(elapsed_seconds=…)` and the run ends cleanly.
 
 ```python
+...
 import asyncio
 
 stopping = asyncio.Event()
+log = await graph.ainvoke(seed, config=config, pause_on=stopping)
 
-
-async def run_turn(seed: Event) -> EventLog:
-    return await graph.ainvoke(seed, config=config, pause_on=stopping)
-
-
-# At shutdown, the process sets the event.
-# Each live run stops at its next round boundary.
+# At shutdown, the process sets the event. Each live run stops at its next round boundary.
 stopping.set()
 ```
 
-- `RunPausedOnSignal` is a subclass of `RunPaused`. Code that matches `RunPaused` also matches a signal pause. The resume semantics are the same. Match `RunPausedOnSignal` to tell the two causes apart, for example to show a different notice.
-- When the deadline has also expired, the router emits `RunPausedOnSignal`, not `RunPausedOnDeadline`. A set signal wins, because the caller asked for it.
+- `RunPausedOnSignal` is a subclass of `RunPaused`. Code that matches `RunPaused` also matches a signal pause. Match `RunPausedOnSignal` to tell the two causes apart.
+- When the deadline has also expired, the router emits `RunPausedOnSignal`, not `RunPausedOnDeadline`.
 - `elapsed_seconds` counts from the start of the run, also when the run has no deadline.
-- The router reads the signal only between rounds. The handler calls of the current round finish first. Give the run an outer grace period that is longer than one round.
-- The first round of a run always runs, because the seed dispatches it before the router runs. A run with `deadline=0.0` does the same.
-- The resume round always runs, the same as for a deadline. See [Soft-timeout](#soft-timeout-runpaused).
-- Events that a handler emitted in the paused round stay in the log. No later run dispatches them. This is the same as a deadline pause.
+- The handler calls of the current round finish first. Give the run an outer grace period that is longer than one round.
 - The value must be an instance with a callable `is_set`. Otherwise the entry point raises `TypeError` before any round runs. The common mistakes are `pause_on=stopping.is_set` and `pause_on=asyncio.Event`, the class. Pass the event itself. A type checker also rejects these values, because each entry point declares `pause_on: PauseSignal | None`.
-- A `RetryPolicy` backoff reads the signal before every wait. When the signal is set, the policy gives up instead of starting the wait, because the run pauses at the next round anyway. The give-up is a `HandlerAbandonedOnSignal`. It is a `HandlerAbandoned`, which is a `HandlerRaised`.
-- No catcher runs on a `HandlerAbandonedOnSignal`. The router pauses over the give-up instead of dispatching it, and the give-up stays in the log. A later run does not dispatch it either, the same as any event of the paused round. Two cases end the run without a `RunPausedOnSignal`, and the router still does not dispatch the give-up:
-    - A sibling handler interrupts in the same round. The run ends at the interrupt, before the router reads the signal. The resume round dispatches the resume value and skips the give-up. The resumed run does not pause on the old signal, because each call reads its own `pause_on=`.
-    - The give-up lands in the last round that `max_rounds` allows. The run halts with `MaxRoundsExceeded`.
-- The first set read commits the run to a pause. When the retry loop reads the signal set, the router pauses at the next round, also when the caller clears the signal between the two reads.
-- `@on(HandlerRaised, exception=X)` and `log.latest(HandlerRaised)` match a `HandlerAbandonedOnSignal`. A catcher that names only `HandlerAbandonedOnSignal` does not satisfy `raises=` coverage, because a handler can also fail for other reasons.
-- A backoff wait that is already in progress when the signal is set runs to its end, and `max_delay` bounds it. The policy gives up before the next wait.
+- A `RetryPolicy` backoff reads the signal before every wait and gives up with a `HandlerAbandonedOnSignal`, which reaches no handler. See [Retries](#retries). Three rules apply to that give-up:
+    - The router pauses over it instead of dispatching it. Two cases end the run without a `RunPausedOnSignal`, and the router still does not dispatch the give-up. A sibling handler interrupts in the same round: the run ends at the interrupt, the resume round dispatches the resume value and skips the give-up, and the resumed run reads its own `pause_on=`. The give-up lands in the last round that `max_rounds` allows: the run halts with `MaxRoundsExceeded`.
+    - The first set read commits the run to a pause, also when the caller clears the signal between the two reads.
+    - A backoff wait that is already in progress when the signal is set runs to its end, and `max_delay` bounds it. The policy gives up before the next wait.
 
 ### Surfacing the pause inline
 
-A `RunPaused` is just an event in the log. To turn it into a user-visible system message in the same channel as your chat history, register a custom reducer that handles both `MessageEvent` and `RunPaused`:
+To turn a `RunPaused` into a user-visible system message in the same channel as the chat history, register a custom reducer that handles both `MessageEvent` and `RunPaused`:
 
 ```python
 from langchain_core.messages import BaseMessage, SystemMessage
@@ -324,30 +299,28 @@ messages = Reducer(
 )
 ```
 
-### AG-UI wire shape
-
-`RunPaused` is intentionally **not** surfaced on the AG-UI wire by default. There is no built-in mapping: `FallbackMapper` skips it (one-time warning) because the previous `CustomEvent(name="interrupted", value={"kind": "soft_timeout", …})` overload collided with HITL `Interrupted` events on the same wire name. Apps that want a pause signal on the wire register their own `EventMapper` — see [AG-UI → Custom Mappers](agui.md#custom-mappers).
-
 ## Field Matchers
 
-`@on(Event, field=Type)` dispatches only when `event.field` is a `Type` instance; if the handler signature includes a parameter named `field`, the value is injected:
+`@on(Event, field=Type)` dispatches only when `event.field` is a `Type` instance. When the handler signature includes a parameter named `field`, the value is injected:
 
 ```python
+...
 @on(Resumed, interrupted=OrderConfirmationRequested)
 def handle(event: Resumed, interrupted: OrderConfirmationRequested) -> OrderConfirmed:
     # `interrupted` is guaranteed to be OrderConfirmationRequested.
     ...
 ```
 
-- Works on any field typed as `Event` or `Exception`.
-- Field names validated at graph construction (typos raise `TypeError`).
+- A matcher value is an `Event`, `Exception` or `Invariant` subclass, matched by `isinstance`, or a `str`, matched by equality.
+- Field names are validated at graph construction. A typo raises `TypeError`.
 - Omit the parameter to filter dispatch without injection.
 
 ## Handler Exceptions
 
-Declare `raises=(ExceptionClass, ...)` on a `Command` (or via `raises=` on `@on(...)`). Caught exceptions emit `HandlerRaised` carrying the exception, handler name, and `source_event`; subscribe with `@on(HandlerRaised, exception=…)` to react.
+Declare `raises=(ExceptionClass, ...)` on a `Command`, or via `raises=` on `@on(...)`. A caught exception emits `HandlerRaised` with the exception, the handler name and `source_event`. Subscribe with `@on(HandlerRaised, exception=…)` to react.
 
 ```python
+...
 class RateLimitError(Exception):
     def __init__(self, retry_after: float) -> None:
         super().__init__(f"retry after {retry_after}s")
@@ -368,7 +341,7 @@ class Question(Namespace):
                 raise RateLimitError(retry_after=0.2)
             return Question.Ask.Answered(answer=...)
 
-    class GaveUp(Halted):
+    class RetriesExhausted(Halted):
         reason: str = ""
 
 
@@ -377,61 +350,43 @@ def backoff(event: HandlerRaised, exception: RateLimitError) -> Question.Ask:
     return Question.Ask(question=event.source_event.question)  # retry
 ```
 
-- Every type in `raises=` must be covered by at least one catcher, else graph construction fails with `TypeError`. A catcher covers `X` if it has no field matchers, or only `exception=X`-or-superclass. Non-`exception` matchers don't count.
-- Only `Exception` subclasses allowed — `BaseException`/`KeyboardInterrupt`/`SystemExit`/`GeneratorExit`/`asyncio.CancelledError` rejected. `CancelledError` surfaces as `Cancelled` (a `Halted` subtype).
-- Unhandled raises propagate and crash the run. Catchers can themselves declare `raises=` to escalate.
-- Use `HandlerRaised.source_event` (not `event`) for the triggering event — avoids kwarg collision.
+- Every type in `raises=` must be covered by at least one handler, or graph construction fails with `TypeError`. A handler covers `X` when it has no field matchers, or only `exception=X` or a superclass. A non-`exception` matcher does not count. A handler counts only when it subscribes to `HandlerRaised` itself, not to a subtype such as `HandlerAbandonedOnSignal`.
+- Only `Exception` subclasses are allowed. `BaseException`, `KeyboardInterrupt`, `SystemExit`, `GeneratorExit` and `asyncio.CancelledError` are rejected. `CancelledError` surfaces as `Cancelled`, a `Halted` subtype.
+- An unhandled raise propagates and crashes the run. A handler of `HandlerRaised` can itself declare `raises=` to escalate.
+- Use `HandlerRaised.source_event`, not `event`, for the triggering event. This avoids a kwarg collision.
 
 ## Retries
 
-Declare `retry=RetryPolicy(...)` alongside `raises=` — on a `Command` as a class attribute, or via `retry=` on `@on(...)`. The framework re-invokes the handler in place with exponential backoff; `HandlerRaised` fires only once the budget is spent — or once the run's `deadline=` cuts the backoff short — so catchers become pure escalation handlers.
+Declare `retry=RetryPolicy(...)` alongside `raises=`, as a class attribute on a `Command` or via `retry=` on `@on(...)`. The library calls the handler again in place with exponential backoff. `HandlerRaised` fires only when the budget is spent, or when the run's `deadline=` or `pause_on=` cuts the backoff short. So a handler of `HandlerRaised` is an escalation handler.
 
 ```python
+...
 from langgraph_events import RetryPolicy
 
 
 class Question(Namespace):
     class Ask(Command):
-        question: str = ""
-
-        raises = (RateLimitError,)
+        ...  # the fields, `raises` and the handler, as above
         retry = RetryPolicy(max_attempts=3, base_delay=0.1, max_delay=10.0)
-
-        class Answered(DomainEvent):
-            answer: str = ""
-
-        def handle(self) -> Question.Ask.Answered:
-            if upstream_rate_limited():
-                # Honored only under respect_retry_after=True; decorative here.
-                raise RateLimitError(retry_after=0.2)
-            return Question.Ask.Answered(answer=...)
-
-    class GaveUp(Halted):
-        reason: str = ""
 
 
 @on(HandlerRaised, exception=RateLimitError)
-def give_up(event: HandlerRaised) -> Question.GaveUp:
-    return Question.GaveUp(reason=str(event.exception))  # budget spent, or out of time
+def give_up(event: HandlerRaised) -> Question.RetriesExhausted:
+    return Question.RetriesExhausted(reason=str(event.exception))  # budget spent, or out of time
 ```
 
 - `max_attempts` counts the **initial call**: `3` means one call plus two retries.
-- Delay before retry *n* is `base_delay * 2 ** (n - 1)`, capped at `max_delay`. `strategy="constant"` uses `base_delay` as that ceiling on every retry instead of doubling it.
-- `jitter` is orthogonal to `strategy` and applies to whichever ceiling the strategy computes. With `jitter=True` (the default) the wait is sampled uniformly from `[0, ceiling]` — full jitter, against thundering herds. Note this means `strategy="constant", jitter=True` still varies per retry, averaging `base_delay / 2`; pass `jitter=False` for a genuinely flat wait.
-- `on=(...)` narrows which exceptions retry; each entry must **overlap** `raises=` — either a subclass of a declared raise (`raises=(OSError,)`, `on=(ConnectionResetError,)`) or a superclass of one (`raises=(ConnectionResetError,)`, `on=(OSError,)`). Scope is decided at runtime by `isinstance(exc, on)`, and only what `raises=` already catches ever reaches the policy. Anything declared in `raises=` but outside `on=` surfaces on its first raise — that is how a non-transient error stays non-transient.
-- `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve, clamped to `[0, max_delay]` and never jittered — so a skewed clock or an already-past `Retry-After` retries immediately rather than crashing the run. A non-numeric or `bool` hint is ignored and the computed curve is used.
-- Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). Use `observe="log"` for a `WARNING` instead, or `observe="silent"` for neither. Only `observe="emit"` (the default) writes the event to the log, so only it contributes the `retry` edge to `HandlerRetried` in [`graph.namespaces()`](concepts.md#namespace-introspection-visualization) — the diagram tracks what the log will contain, not what was merely declared. The `retry xN` annotation on the command shows under every setting.
-- Declaring `retry=` without `raises=`, or an `on=` entry **disjoint from** every type in `raises=`, fails at graph construction with `TypeError` — the policy could never fire.
-- Retries happen inside the handler node: they consume no `max_rounds` budget and write no checkpoint between attempts.
-- The backoff is **deadline-aware**. A sleep is never *started* if it would land on or past the run's `deadline=` — the policy gives up there and then, even with attempts left, so the run returns to the router instead of sleeping through the soft boundary. Nothing is clamped: burning the rest of the budget on an attempt that probably cannot finish either only delays the pause.
-- The backoff also reads the run's `pause_on=` signal. When the signal is set, the policy gives up before the next wait, because the run [pauses](#pause-on-a-signal-runpausedonsignal) at the next round anyway. That give-up is a `HandlerAbandonedOnSignal`, and it reaches no catcher. See [Pause on a signal](#pause-on-a-signal-runpausedonsignal).
-- A deadline give-up is a `HandlerAbandonedOnDeadline`. It is a `HandlerAbandoned`, which is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` catcher runs for it. The run continues to the router. An exhausted attempt budget, an out-of-`on=` exception and a handler with no policy each emit a plain `HandlerRaised`. Use `isinstance(event, HandlerAbandonedOnDeadline)` to tell "ran out of time" from "ran out of tries". `HandlerAbandoned` names no cause, so `HandlerAbandoned(...)` raises `TypeError`. The abandoned attempt emits no `HandlerRetried`, because no wait happened.
+- Delay before retry *n* is `base_delay * 2 ** (n - 1)`, capped at `max_delay`. `strategy="constant"` uses `base_delay` as that ceiling on every retry.
+- `jitter=True` (the default) samples the wait uniformly from `[0, ceiling]`, whatever the strategy. So `strategy="constant", jitter=True` still varies per retry, averaging `base_delay / 2`. Pass `jitter=False` for a flat wait.
+- `on=(...)` narrows which exceptions retry. Each entry must **overlap** `raises=`: a subclass of a declared raise (`raises=(OSError,)`, `on=(ConnectionResetError,)`) or a superclass of one (`raises=(ConnectionResetError,)`, `on=(OSError,)`). Scope is decided at runtime by `isinstance(exc, on)`. Anything declared in `raises=` but outside `on=` surfaces on its first raise.
+- `respect_retry_after=True` prefers a server-supplied `exception.retry_after` over the computed curve, clamped to `[0, max_delay]` and never jittered. A non-numeric or `bool` hint is ignored.
+- Each wait emits a `HandlerRetried` (handler, `source_event`, exception, `attempt`, `delay_seconds`). `observe="log"` records a `WARNING` with the exception's type and message instead, and `observe="silent"` records neither. Only `observe="emit"` (the default) writes the event to the log, so only it contributes the `retry` edge to `HandlerRetried` in [`graph.namespaces()`](concepts.md#namespace-introspection-visualization). The `retry xN` annotation on the command shows under every setting.
+- Declaring `retry=` without `raises=`, or an `on=` entry **disjoint from** every type in `raises=`, fails at graph construction with `TypeError`.
+- Retries happen inside the handler node. They consume no `max_rounds` budget and write no checkpoint between attempts.
+- A sleep is never *started* when it would land on or past the run's `deadline=`. The policy gives up at that point, even with attempts left. Nothing is clamped. An attempt that cannot finish before the deadline only delays the pause. A set `pause_on=` signal gives up the same way. See [Pause on a signal](#pause-on-a-signal-runpausedonsignal).
+- A deadline give-up is a `HandlerAbandonedOnDeadline`. It is a `HandlerAbandoned`, which is a `HandlerRaised`, so an `@on(HandlerRaised, exception=X)` handler runs for it. An exhausted attempt budget, an out-of-`on=` exception and a handler with no policy each emit a plain `HandlerRaised`. Use `isinstance(event, HandlerAbandonedOnDeadline)` to tell "ran out of time" from "ran out of tries". `HandlerAbandoned` names no cause, so `HandlerAbandoned(...)` raises `TypeError`. The abandoned attempt emits no `HandlerRetried`, because no wait happened.
 - **Handlers must be idempotent.** A retried handler re-runs from the top, including any `emit_custom` it fired before raising.
-- **`HandlerRetried` carries the exception without its traceback.** The instance is live — matchers and field injection work on it — but `__traceback__` is detached. The terminal `HandlerRaised` keeps its own.
+- **`HandlerRetried` carries the exception without its traceback.** Matchers and field injection work on the live instance, but `__traceback__` is detached. The terminal `HandlerRaised` keeps its own. For a *per-attempt* stack, capture it inside the handler while the frames are still live.
 - Not to be confused with `langgraph.types.RetryPolicy`, which re-runs an entire LangGraph node. Import this one from `langgraph_events`.
-
-Idempotence and the detached traceback are two consequences of the same design: the framework holds onto your failure. A retried call re-runs from the top, so any side effect it performed before raising happens again. And because the `events` channel is append-only, whatever a stored event still references lives for the rest of the run — a traceback pins the failing attempt's frame and every local on it, so a breadcrumb that kept one would hold a copy of what the handler was working on (the LLM response, the fetched payload, the dataframe) once per attempt. So the breadcrumb keeps the exception and drops the frames: `HandlerRetried.exception` is the live instance — `@on(HandlerRetried, exception=RateLimitError)` isinstance-matches it, field injection hands it over typed, `str(...)` and `.args` read normally — with `__traceback__` cleared, along with those of its `__cause__`/`__context__` chain and any `ExceptionGroup` members. Only the terminal `HandlerRaised` keeps a traceback, so the framework retains at most one live traceback per failing invocation, and that is the one you debug from.
-
-If you need a *per-attempt* stack, capture it inside the handler while the frames are still live. `observe="log"` records each attempt as a `WARNING`, but logs the exception's type and message, not its frames.
 
 See the [Error Recovery pattern](patterns.md#error-recovery).

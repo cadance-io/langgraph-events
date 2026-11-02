@@ -264,7 +264,7 @@ def _make_default(
                 f"UnrevivedIdentity placeholder, and a placeholder must never "
                 f"be stored. Recover the class with a tombstone, see "
                 f"'Recovering a delete-first deployment' in "
-                f"docs/event-migrations.md."
+                f"docs/retiring-interrupted.md."
             )
             raise ValueError(refusals[-1])
         if isinstance(obj, Event) and dataclasses.is_dataclass(obj):

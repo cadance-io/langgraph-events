@@ -1,13 +1,21 @@
 # Getting Started
 
+## Install
+
+Requires Python 3.11+.
+
+```bash
+pip install langgraph-events
+pip install "langgraph-events[agui]"  # AG-UI adapter
+```
+
 ## Model your domain
 
-- **Events** — facts about what happened.
-- **Commands** — intents for what should happen.
-
-Group both under a `Namespace`; for simple cases, colocate the handler inline. A `Command`'s nested `DomainEvent`s auto-form its return contract (`Command.Outcomes`):
+Group commands and events under a `Namespace`. For a simple case, colocate the handler inline. A `Command`'s nested `DomainEvent`s form its return contract (`Command.Outcomes`). See [Concepts](concepts.md#the-taxonomy) for the taxonomy.
 
 ```python
+from __future__ import annotations
+
 from langgraph_events import Command, DomainEvent, EventGraph, Namespace
 
 
@@ -36,11 +44,12 @@ log = graph.invoke(Order.Place(customer_id="alice", items=("book",)))
 print(log.latest(Order.Place.Placed))
 ```
 
-See [Concepts](concepts.md#the-taxonomy) for the full taxonomy and the `Outcomes` contract. For class-level `invariants` / `raises` or cross-domain reactors via `@on(...)`, see [Control Flow](control-flow.md#invariants).
+For class-level `invariants` / `raises` or cross-namespace handlers via `@on(...)`, see [Control Flow](control-flow.md#invariants).
 
 ## Run the graph
 
 ```python
+seed = Order.Place(customer_id="alice", items=("book",))
 log = graph.invoke(seed)                    # sync; returns EventLog
 log = await graph.ainvoke(seed)             # async
 for event in graph.stream_events(seed): ... # stream as produced
@@ -49,6 +58,7 @@ for event in graph.stream_events(seed): ... # stream as produced
 ## Inspect
 
 ```python
+...  # graph as above
 print(graph.namespaces().text())             # human-readable tree
 print(graph.namespaces().mermaid())          # Mermaid diagram
 graph.namespaces().namespaces                # structured NamespaceModel access
@@ -59,10 +69,11 @@ log.has(Order.Shipped)
 
 ## Cross-cutting events
 
-`IntegrationEvent` for facts that don't belong to any domain (external signals, shared events). Must live at module scope.
+`IntegrationEvent` is for a fact that does not belong to any namespace (an external signal, a shared event). It must live at module scope.
 
 ```python
 from langgraph_events import IntegrationEvent
+
 
 class MessageReceived(IntegrationEvent):
     text: str
@@ -70,13 +81,13 @@ class MessageReceived(IntegrationEvent):
 
 ## Common Tasks
 
-| I want to... | Reach for... | Docs |
+| I want to... | Use | Docs |
 |---|---|---|
 | Query past events in a handler | `EventLog` (`log.filter()`, `log.latest()`) | [Concepts](concepts.md#eventlog) |
 | Enforce a precondition before a handler runs | `invariants` on the `Command` (or `@on()` for non-Command handlers) | [Control Flow](control-flow.md#invariants) |
-| Register every inline handler on a domain | `EventGraph.from_namespaces(Order)` | [Concepts](concepts.md#inline-command-handlers) |
-| Accumulate state across events | `ScalarReducer` on the domain class | [Reducers](reducers.md) |
-| Accumulate LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
+| Register every inline handler on a namespace | `EventGraph.from_namespaces(Order)` | [Concepts](concepts.md#inline-command-handlers) |
+| Project state from events | `ScalarReducer` on the namespace class | [Reducers](reducers.md) |
+| Project LangChain messages | `message_reducer()` | [Reducers](reducers.md#message_reducer) |
 | Fan out parallel work | `Scatter[Item]` | [Control Flow](control-flow.md#scatter) |
 | Pause for human approval | `Interrupted` + `graph.resume()` | [Control Flow](control-flow.md#interrupted-resumed) |
 | Retire an `Interrupted` subclass | `graph.abandon(config)` / `.aabandon()` | [Control Flow](control-flow.md#ending-a-pause-without-answering-it-abandon) |
@@ -85,12 +96,5 @@ class MessageReceived(IntegrationEvent):
 | Retry a transient failure | `retry = RetryPolicy(...)` alongside `raises=` | [Control Flow](control-flow.md#retries) |
 | Stream LLM tokens | `astream_events(include_llm_tokens=True)` | [Streaming](streaming.md) |
 | Connect to an AG-UI frontend | `AGUIAdapter` | [AG-UI](agui.md) |
+| Diagnose a run with an agent | `graph.reflect(log)` + `run.tool()` | [Reflection](reflection.md) |
 | Keep old checkpoints working after a rename | `@migrate_from` / `@on(previously=)` + coverage gates | [Event Migrations](event-migrations.md) |
-| Know what's safe to change on a live graph | — | [Checkpointer Evolution](checkpointer-evolution.md) |
-
-## Where to go next
-
-- **Modelling your domain** (taxonomy, handlers, signature injection) → [Concepts](concepts.md)
-- **Enforcing rules / handling failures** (invariants, HITL, exceptions, scatter) → [Control Flow](control-flow.md)
-- **Building a real example** → [Patterns](patterns.md)
-- **Need the full export list?** → [API Reference](api.md)

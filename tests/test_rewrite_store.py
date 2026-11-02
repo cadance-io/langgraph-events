@@ -1938,7 +1938,7 @@ def describe_rewrite_store_refusals():
                 f"read of the store still migrates them. put_writes() of the "
                 f"saver must replace an __interrupt__ write of the same task. "
                 f"Fix the saver, then rerun. See 'Checkpointers' in "
-                f"docs/event-migrations.md"
+                f"docs/migration-gate.md"
             )
 
     def when_the_saver_keeps_the_old_bytes_under_the_new_versions():
@@ -1956,7 +1956,7 @@ def describe_rewrite_store_refusals():
                 f"read of the store still migrates them. put() of the saver "
                 f"must store each channel value it receives under its new "
                 f"version. Fix the saver, then rerun. See 'Checkpointers' in "
-                f"docs/event-migrations.md"
+                f"docs/migration-gate.md"
             )
 
     def when_the_read_after_the_write_refuses_the_thread():
