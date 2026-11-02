@@ -42,9 +42,9 @@ Outbound, a mapping entry with that name sets the declared field.
 AGUI_HELD_PARTS_KEY = "langgraph_events.agui.held_parts"
 """Reserved ``additional_kwargs`` key for the AG-UI content parts held off the model.
 
-A held part is a part that the model does not receive. In this release, that
-is a media part with a ``file`` source: the handle names a file in a provider
-account, and the server must not send it with its own credentials.
+A held part is a part that the model does not receive: a media part with a
+``file`` source. That handle names a file in a provider account, and the
+server must not send it with its own credentials.
 
 The value is a list. Each entry is ``{"index": i, "part": p}``. ``i`` is the
 position of the part in the AG-UI content list. ``p`` is the part as JSON, by
@@ -107,50 +107,39 @@ def collect_inbound_extras(message: BaseModel) -> dict[str, Any]:
         value = getattr(message, name, None)
         if value is not None:
             payload[name] = value
-    return _capped(
+    return capped_slot(
         AGUI_EXTRAS_KEY, payload, "extra fields", getattr(message, "id", None)
     )
 
 
-def hold_inbound_parts(
-    entries: list[dict[str, Any]], message_id: str
-) -> dict[str, Any]:
-    """Return the ``additional_kwargs`` payload for the held parts of a message.
-
-    *entries* has the shape that :data:`AGUI_HELD_PARTS_KEY` documents. No
-    entries give an empty payload. Entries over :data:`AGUI_EXTRAS_MAX_BYTES`
-    are dropped with a WARNING, for the reason that
-    :func:`collect_inbound_extras` gives.
-    """
-    return _capped(AGUI_HELD_PARTS_KEY, entries, "held content parts", message_id)
-
-
-def _capped(
+def capped_slot(
     key: str,
     payload: dict[str, Any] | list[dict[str, Any]],
     what: str,
     message_id: str | None,
 ) -> dict[str, Any]:
-    """Return ``{key: payload}``, or an empty mapping if *payload* is empty or big."""
     if not payload:
         return {}
     try:
         size = len(json.dumps(payload))
     except (TypeError, ValueError, RecursionError) as exc:
         logger.warning(
-            "Dropping the %s on inbound AG-UI message %r — they do not encode "
-            "as JSON (%s).",
+            "Dropping the %s of inbound AG-UI message %r — "
+            "additional_kwargs[%r] must encode as JSON (%s).",
             what,
             message_id,
+            key,
             exc,
         )
         return {}
     if size > AGUI_EXTRAS_MAX_BYTES:
         logger.warning(
-            "Dropping the %s on inbound AG-UI message %r — %d bytes of JSON "
-            "exceeds the %d byte cap.",
+            "Dropping the %s of inbound AG-UI message %r — "
+            "additional_kwargs[%r] holds %d bytes of JSON, over the "
+            "AGUI_EXTRAS_MAX_BYTES cap of %d.",
             what,
             message_id,
+            key,
             size,
             AGUI_EXTRAS_MAX_BYTES,
         )

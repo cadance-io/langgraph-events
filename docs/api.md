@@ -148,6 +148,8 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 |---|---|---|
 | `AGUIAdapter` | Class | Maps `EventGraph` streams to AG-UI protocol events |
 | `AGUI_EXTRAS_KEY` | Constant | Reserved `BaseMessage.additional_kwargs` key. Its mapping is forwarded as extra fields on the AG-UI message, and receives the extra fields of the client on the way back |
+| `AGUI_HELD_PARTS_KEY` | Constant | Reserved `BaseMessage.additional_kwargs` key. It holds each inbound content part with a `file` source, which the model does not receive. The snapshot restores each part at its position. See [Parts the model does not receive](agui.md#parts-the-model-does-not-receive) |
+| `held_parts(message)` | Function | Returns the parts held on a LangChain message as AG-UI `InputContentPart` objects, in their original order. Skips a corrupt entry with a `WARNING`. Never raises |
 | `AGUIAdapter.stream()` / `.connect()` / `.reconnect()` | Method | Execute, rehydrate a checkpoint, refresh |
 | `FrontendStateMutated` | Event | Adapter-emitted `IntegrationEvent` that carries `RunAgentInput.state` for a reducer that projects client state |
 | `FrontendToolCallRequested` | Event | `Interrupted` subclass for a handler-initiated frontend tool call (CopilotKit `useFrontendTool`) |
@@ -157,7 +159,7 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `MapperContext` | Dataclass | Shared state (run ID, thread ID, message counter) per stream |
 | `create_starlette_response` / `encode_sse_stream` | Function | Framework-agnostic SSE wrapping |
 | `extract_resume_input` | Function | Pulls and JSON-decodes `RunAgentInput.forwarded_props["command"]["resume"]`. Returns `None` if absent or falsy |
-| `agui_messages_to_langchain` | Function | Converts AG-UI protocol messages to LangChain `BaseMessage` instances. Maps `ToolMessage.error` to `status="error"` and extra fields to `additional_kwargs[AGUI_EXTRAS_KEY]`. Optional `drop_invalid_tool_calls=True` skips a tool call whose JSON arguments fail to parse |
+| `agui_messages_to_langchain` | Function | Converts AG-UI protocol messages to LangChain `BaseMessage` instances. Maps `ToolMessage.error` to `status="error"`, extra fields to `additional_kwargs[AGUI_EXTRAS_KEY]`, and each content part with a `file` source to `additional_kwargs[AGUI_HELD_PARTS_KEY]`. Optional `drop_invalid_tool_calls=True` skips a tool call whose JSON arguments fail to parse |
 | `detect_new_frontend_messages` | Function | `resume_factory` helper. Reads the stored messages from `checkpoint_state["reducers"][reducer_name]`, then converts only the inbound messages whose id is not stored. Returns a tuple of the new messages. A stored message wins over an inbound message with the same id |
 | `build_langchain_tools` / `detect_new_tool_results` | Function | Convert `RunAgentInput.tools` to OpenAI format, or extract the new `ToolMessage`s from a resume request |
 

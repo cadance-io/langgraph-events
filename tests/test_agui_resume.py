@@ -77,7 +77,6 @@ def _text(text: str) -> TextPart:
 
 
 def _doc(**overrides: Any) -> DocumentPart:
-    """A document part whose source is a provider file handle."""
     source = FileSource(value="file-42", provider="openai", mime_type="application/pdf")
     return DocumentPart(source=source, **overrides)
 
@@ -123,7 +122,6 @@ _UNCHANGED_CONVERSIONS: list[tuple[Any, Any]] = [
         [{"type": "image", "url": "https://x/y"}],
     ),
 ]
-"""Every content shape that converted before parts were held, with its result."""
 
 
 def describe_agui_messages_to_langchain():
@@ -206,8 +204,6 @@ def describe_agui_messages_to_langchain():
 
                     The server sends it with its own credentials. A client
                     handle can then read a file that the client does not own.
-                    So the part never reaches the model. It is held on the
-                    message instead.
                     """
 
                     def it_keeps_the_part_off_the_model_input():
@@ -333,8 +329,6 @@ def describe_agui_messages_to_langchain():
                         ]
 
     def when_no_part_has_a_file_source():
-        """A message with no held part converts exactly as before."""
-
         @pytest.mark.parametrize(("content", "expected"), _UNCHANGED_CONVERSIONS)
         def it_converts_a_user_message_unchanged(content: Any, expected: Any):
             [out] = agui_messages_to_langchain([UserMessage(id="u1", content=content)])
@@ -1069,8 +1063,6 @@ def describe_held_parts():
             assert held_parts(out) == [first, second]
 
     def when_an_entry_is_corrupt():
-        """The slot comes from a checkpoint, so it can hold anything."""
-
         def _message() -> HumanMessage:
             good = {"index": 1, "part": _doc().model_dump(by_alias=True)}
             entries = [{"index": 0, "part": {"type": "document"}}, "junk", good]

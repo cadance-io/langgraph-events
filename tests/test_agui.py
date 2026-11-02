@@ -3303,14 +3303,11 @@ def describe_user_message_content_conversion():
 
 
 def _held_doc(**overrides: Any) -> DocumentPart:
-    """A document part whose source is a provider file handle."""
     source = FileSource(value="file-42", provider="host", mime_type="application/pdf")
     return DocumentPart(source=source, **overrides)
 
 
 def describe_held_parts_round_trip():
-    """A part that the model does not receive comes back on the snapshot."""
-
     def when_a_user_message_holds_a_part():
         @pytest.mark.parametrize(
             "parts",
@@ -3318,6 +3315,14 @@ def describe_held_parts_round_trip():
                 [TextPart(text="read this"), _held_doc(metadata={"title": "Q3"})],
                 [_held_doc()],
                 [_held_doc(id="d1"), TextPart(text="and"), _held_doc(id="d2")],
+                [
+                    DocumentPart.model_validate(
+                        {
+                            "source": {"type": "file", "value": "f", "x": None},
+                            "extraField": None,
+                        }
+                    )
+                ],
                 [TextPart(text="a"), TextPart(text="b"), _held_doc()],
                 [ImagePart(source=UrlSource(value="https://x/y")), _held_doc()],
                 [TextPart(id="p1", text="kept"), _held_doc()],
@@ -3346,6 +3351,17 @@ def describe_held_parts_round_trip():
             [tool_msg] = _roled(events, "tool")
             assert tool_msg.content == parts
 
+        async def it_sends_back_the_error_reason():
+            parts = [TextPart(text="disk full"), _held_doc()]
+            [inbound] = agui_messages_to_langchain(
+                [AguiToolMessage(id="t1", content=parts, tool_call_id="tc1", error="x")]
+            )
+
+            events = await _emit(inbound)
+
+            [tool_msg] = _roled(events, "tool")
+            assert tool_msg.error == "disk full"
+
     def when_a_handler_rewrote_the_content():
         async def it_puts_the_part_at_the_end_of_the_shorter_content():
             slot = [{"index": 5, "part": _held_doc().model_dump(by_alias=True)}]
@@ -3359,11 +3375,6 @@ def describe_held_parts_round_trip():
             assert user_msg.content == [TextPart(text="new"), _held_doc()]
 
     def when_a_corrupt_slot_is_already_in_the_checkpoint():
-        """`build_messages_snapshot` runs on every `connect()`.
-
-        A raise there breaks every later connect on the thread.
-        """
-
         def when_an_index_exceeds_the_list_size_limit():
             async def it_puts_the_part_at_the_end():
                 part = _held_doc().model_dump(by_alias=True)

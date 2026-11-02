@@ -85,7 +85,7 @@ def detect_new_tool_results(
             continue
         error = getattr(msg, "error", None)
         content, held = _content_to_langchain(
-            getattr(msg, "content", "") or "", getattr(msg, "id", None) or ""
+            getattr(msg, "content", "") or "", getattr(msg, "id", None) or tc_id
         )
         results.append(
             LCToolMessage(

@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, TypeGuard
 
-from ._extras import collect_inbound_extras, hold_inbound_parts
+from ._extras import AGUI_HELD_PARTS_KEY, capped_slot, collect_inbound_extras
 
 if TYPE_CHECKING:
     from ag_ui.core import InputContentPart, Message, TextPart
@@ -40,29 +40,21 @@ def _content_to_langchain(
 ) -> tuple[str | list[str | dict[str, Any]], dict[str, Any]]:
     """Convert AG-UI message content to LangChain content and held parts.
 
-    Return the content and the ``additional_kwargs`` payload for the held
-    parts. Each kept part becomes the LangChain standard block of the same
-    modality. A part with a source type outside :data:`SOURCE_KEYS` is held
-    under :data:`~langgraph_events.agui.AGUI_HELD_PARTS_KEY` with its metadata.
     The metadata of a kept part is dropped with a WARNING, because a LangChain
-    block has no field for it.
-
-    If at least one part is held, the content collapses: no kept part gives
-    ``""``. One kept text part with no ``id`` and a non-empty text gives its
-    text. A host can then read the content as text. Content with no held part
-    converts as before.
+    block has no field for it. When a part is held, the content collapses to a
+    ``str`` if that loses nothing, so a host can read it as text.
     """
     if isinstance(content, str):
         return content, {}
-    kept = [p for p in content if p.type == "text" or p.source.type in SOURCE_KEYS]
-    held = [
-        {
-            "index": i,
-            "part": p.model_dump(mode="json", by_alias=True, exclude_none=True),
-        }
-        for i, p in enumerate(content)
-        if p.type != "text" and p.source.type not in SOURCE_KEYS
-    ]
+    kept: list[InputContentPart] = []
+    held: list[dict[str, Any]] = []
+    for index, part in enumerate(content):
+        if part.type == "text" or part.source.type in SOURCE_KEYS:
+            kept.append(part)
+        else:
+            held.append(
+                {"index": index, "part": part.model_dump(mode="json", by_alias=True)}
+            )
     if held:
         logger.debug(
             "Holding %d content part(s) with a file source from AG-UI message %s "
@@ -78,20 +70,17 @@ def _content_to_langchain(
             with_metadata,
             message_id,
         )
-    held_kwargs = hold_inbound_parts(held, message_id)
+    held_kwargs = capped_slot(
+        AGUI_HELD_PARTS_KEY, held, "held content parts", message_id
+    )
     if held and not kept:
         return "", held_kwargs
-    if held and len(kept) == 1 and _is_plain_text(kept[0]):
+    if held and len(kept) == 1 and _survives_str_round_trip(kept[0]):
         return kept[0].text, held_kwargs
     return [_part_to_block(part) for part in kept], held_kwargs
 
 
-def _is_plain_text(part: InputContentPart) -> TypeGuard[TextPart]:
-    """Return whether *part* converts to a ``str`` and back without loss.
-
-    A text part with an ``id`` loses the ``id`` in a ``str``. An empty text
-    part comes back as no part, which moves each held part after it.
-    """
+def _survives_str_round_trip(part: InputContentPart) -> TypeGuard[TextPart]:
     return part.type == "text" and part.id is None and part.text != ""
 
 

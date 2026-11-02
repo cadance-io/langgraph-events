@@ -165,9 +165,9 @@ Rename the entry, or set the field through the LangChain message.
 
 ### Parts the model does not receive
 
-A user or tool message can carry a media part whose source is a `file` source, for example a `DocumentPart`. AG-UI defines that source as a handle that the provider issued. The server sends a provider handle with its own credentials. So a client handle could read a file that the client does not own, and the model must not receive the part.
+A user or tool message can carry a media part with a `file` source, for example a `DocumentPart`. AG-UI defines that source as a handle that a provider issued. The server would send the handle with its own credentials, so a client could read a file that it does not own. The model must not receive such a part.
 
-Inbound, `agui_messages_to_langchain` and `detect_new_tool_results` hold such a part. The part, with its `metadata`, goes under the reserved `additional_kwargs` key `AGUI_HELD_PARTS_KEY`, with its position in the content list. The LangChain `content` does not hold it. Outbound, `MessagesSnapshot` puts each held part back at its position. A host that issues its own file handles can thus show them again after a reconnect.
+Inbound, `agui_messages_to_langchain` and `detect_new_tool_results` hold the part, with its `metadata` and its position, under the reserved `additional_kwargs` key `AGUI_HELD_PARTS_KEY`. Outbound, `MessagesSnapshot` puts each held part back at its position, on `stream()` and on `connect()`. A host that issues its own file handles reads them with `held_parts()`.
 
 ```python
 from ag_ui.core import DocumentPart, FileSource, TextPart, UserMessage
@@ -178,8 +178,9 @@ doc = DocumentPart(source=FileSource(value="doc-42", provider="host"))
 [message] = agui_messages_to_langchain(
     [UserMessage(id="u1", content=[TextPart(text="Read this."), doc])]
 )
-message.content  # -> "Read this."
+message.content  # -> "Read this."  (the model sees only this)
 held_parts(message)  # -> [doc]
+# The next MessagesSnapshot sends content=[TextPart(text="Read this."), doc].
 ```
 
 The content changes shape only when the message holds a part:
@@ -190,11 +191,20 @@ The content changes shape only when the message holds a part:
 | Exactly one text part, with no `id` and a non-empty text | The text of that part, as a `str` |
 | Any other set | The kept parts as standard blocks, as without a held part |
 
-A message with no held part converts as before. Outbound, the snapshot gives back the same parts in the same order.
+A provider can refuse a user message with `""` content. If a client sends only held parts, give the model a text of your own.
 
-`held_parts(message)` returns the held parts in their original order. It skips an entry that does not validate, with a `WARNING` that names the message. It never raises, because it reads checkpointed data. Outbound, the snapshot drops a bad entry the same way. If a handler rewrote the content, a position past the end puts the part at the end.
+`held_parts(message)` returns the held parts in their original order and never raises, because it reads checkpointed data. It skips an entry that does not validate, with a `WARNING` that names the message and the key. The snapshot drops a bad entry the same way. If a handler made the content shorter, a position past the end puts the part at the end.
 
-WARNING: A held part is client input, as the extras are. The trust note of the extras slot applies. The held parts of one message are measured against `AGUI_EXTRAS_MAX_BYTES` on their own. So one message can store up to 8 KiB of extras and 8 KiB of held parts. Over the cap, the held parts are dropped with a `WARNING` that names the message. The model still does not receive them, and the message still converts.
+WARNING: A held part is client input. The trust note of the extras slot applies to it.
+
+Each reserved slot has its own size cap, measured as JSON per message:
+
+| Slot | Cap | Over the cap |
+|---|---|---|
+| `AGUI_EXTRAS_KEY` | `AGUI_EXTRAS_MAX_BYTES`, 8 KiB | The extras are dropped with a `WARNING`. The message still converts. |
+| `AGUI_HELD_PARTS_KEY` | `AGUI_EXTRAS_MAX_BYTES`, 8 KiB, counted apart from the extras | The held parts are dropped with a `WARNING`. The model still does not receive them, and the message still converts. |
+
+So one message can store up to 16 KiB in the two slots.
 
 ## Connect / Reconnect
 
@@ -356,7 +366,7 @@ def place(event: OrderConfirmed) -> OrderPlaced:
 `detect_new_tool_results` covers the frontend-tool-result path of resume. A result the client marks with `error` becomes a LangChain `ToolMessage` with `status="error"`. In the other path, the frontend sends `Command(resume=…)` plus new chat messages. Three helpers cover that path:
 
 - **`extract_resume_input(input_data)`**: decode `RunAgentInput.forwarded_props["command"]["resume"]`. Every falsy value (`0`, `""`, `[]`, `{}`, `False`) means "no resume". For a "deny" signal, send `{"approved": false}`, not bare `false`.
-- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`**: convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage`, multimodal content included, see [Message field mapping](#message-field-mapping)) to LangChain `BaseMessage`. `ReasoningMessage` and `DeveloperMessage` are skipped at `DEBUG`. `ActivityMessage` and an unknown role raise `ValueError`. With `drop_invalid_tool_calls=True`, a tool call with unparseable JSON args is dropped with a `WARNING`. A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]`. Use it directly for custom merging, for example in `seed_factory`.
+- **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`**: convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage`, multimodal content included, see [Message field mapping](#message-field-mapping)) to LangChain `BaseMessage`. `ReasoningMessage` and `DeveloperMessage` are skipped at `DEBUG`. `ActivityMessage` and an unknown role raise `ValueError`. With `drop_invalid_tool_calls=True`, a tool call with unparseable JSON args is dropped with a `WARNING`. A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]`. A content part with a `file` source lands under `additional_kwargs[AGUI_HELD_PARTS_KEY]`. Use it directly for custom merging, for example in `seed_factory`.
 - **`detect_new_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`**: read the stored messages from `checkpoint_state["reducers"][reducer_name]`, then convert only the inbound messages whose id is not stored. Returns a tuple of the new messages only. A stored message wins over an inbound message with the same id, because AG-UI defines `MessagesSnapshot` as the messages that the server owns. If two inbound messages have the same id, the result holds the last copy, at the position of the first copy.
 
 ```python

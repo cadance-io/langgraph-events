@@ -21,7 +21,7 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 from langchain_core.utils.utils import LC_AUTO_PREFIX
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, NonNegativeInt, TypeAdapter, ValidationError
 
 from langgraph_events._event import (
     Event,
@@ -241,9 +241,6 @@ def _content_to_agui(message: BaseMessage, label: str) -> str | list[InputConten
     AG-UI part of the same modality. A block with no AG-UI part is dropped,
     with one WARNING that names *label*. If this function raises, each later
     ``connect()`` on the thread fails. :func:`_build_agui_message` explains why.
-
-    Each part held under :data:`AGUI_HELD_PARTS_KEY` goes back at its index.
-    An index past the end puts the part at the end.
     """
     content = _converted_content(message, label)
     held = _held_entries(message, label)
@@ -270,14 +267,15 @@ def held_parts(message: BaseMessage) -> list[InputContentPart]:
     return [part for _, part in _held_entries(message, str(message.id))]
 
 
+class _HeldEntry(BaseModel):
+    index: NonNegativeInt
+    part: InputContentPart
+
+
 def _held_entries(
     message: BaseMessage, label: str
 ) -> list[tuple[int, InputContentPart]]:
-    """Return the valid held entries of *message* as ``(index, part)``, by index.
-
-    A bad slot or entry is dropped with one WARNING per cause that names
-    *label*. A raise here would break each later ``connect()`` on the thread.
-    """
+    """A raise here would break each later ``connect()`` on the thread."""
     slot = (getattr(message, "additional_kwargs", None) or {}).get(AGUI_HELD_PARTS_KEY)
     if slot is None:
         return []
@@ -291,30 +289,20 @@ def _held_entries(
         )
         return []
     entries: list[tuple[int, InputContentPart]] = []
-    bad_shape = 0
-    bad_part = 0
     for entry in slot:
-        index = entry.get("index") if isinstance(entry, Mapping) else None
-        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
-            bad_shape += 1
-            continue
         try:
-            entries.append((index, _CONTENT_PART.validate_python(entry.get("part"))))
+            held = _HeldEntry.model_validate(entry)
         except ValidationError:
-            bad_part += 1
-    if bad_shape:
+            continue
+        entries.append((held.index, held.part))
+    if len(entries) < len(slot):
         logger.warning(
-            "Dropping %d held content part(s) of message %s — an entry must be a "
-            "mapping with a non-negative integer index.",
-            bad_shape,
+            "Dropping %d held content part(s) of message %s — each entry of "
+            "additional_kwargs[%r] must be {'index': int >= 0, 'part': an AG-UI "
+            "content part}. The client does not receive the dropped parts.",
+            len(slot) - len(entries),
             label,
-        )
-    if bad_part:
-        logger.warning(
-            "Dropping %d held content part(s) of message %s — the part is not a "
-            "valid AG-UI content part.",
-            bad_part,
-            label,
+            AGUI_HELD_PARTS_KEY,
         )
     return sorted(entries, key=lambda entry: entry[0])
 
@@ -460,7 +448,7 @@ def _langchain_to_agui_messages(
             # is the reason when there is one. Empty or block content falls
             # back to the status literal, because `error` is a string.
             is_error = getattr(msg, "status", None) == TOOL_ERROR_STATUS
-            reason = content if isinstance(content, str) else ""
+            reason = msg.content if isinstance(msg.content, str) else ""
             result.append(
                 _build_agui_message(
                     AguiToolMessage,
