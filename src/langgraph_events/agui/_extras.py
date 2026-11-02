@@ -46,11 +46,15 @@ A held part is a part that the model does not receive: a media part with a
 ``file`` source. That handle names a file in a provider account, and the
 server must not send it with its own credentials.
 
-The value is a list. Each entry is ``{"index": i, "part": p}``. ``i`` is the
-position of the part in the AG-UI content list. ``p`` is the part as JSON, by
-alias, with its ``metadata``. Inbound, the converter writes the entries.
-Outbound, each part goes back into the content list at its index. Read the
+The value is a list. Each entry is ``{"position": i, "part": p}``. ``i`` is
+the position of the part in the AG-UI content list. ``p`` is the part as JSON,
+by alias, with its ``metadata``. Inbound, the converter writes the entries.
+Outbound, each part goes back into the content list at its position. Read the
 parts with :func:`~langgraph_events.agui.held_parts`.
+
+The key is not ``index``. LangChain's ``merge_lists`` merges two list entries
+that carry the same int ``index`` as one stream chunk, so
+``merge_message_runs`` would fuse the held parts of two messages.
 
 The value is client input. The trust note of :func:`collect_inbound_extras`
 applies. The entries are measured against :data:`AGUI_EXTRAS_MAX_BYTES` on

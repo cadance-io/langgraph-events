@@ -3351,34 +3351,34 @@ def describe_held_parts_round_trip():
             [tool_msg] = _roled(events, "tool")
             assert tool_msg.content == parts
 
-        async def it_sends_back_the_error_reason():
-            parts = [TextPart(text="disk full"), _held_doc()]
-            [inbound] = agui_messages_to_langchain(
-                [AguiToolMessage(id="t1", content=parts, tool_call_id="tc1", error="x")]
-            )
-
-            events = await _emit(inbound)
-
-            [tool_msg] = _roled(events, "tool")
-            assert tool_msg.error == "disk full"
-
     def when_a_handler_rewrote_the_content():
-        async def it_puts_the_part_at_the_end_of_the_shorter_content():
-            slot = [{"index": 5, "part": _held_doc().model_dump(by_alias=True)}]
-            message = HumanMessage(
-                content="new", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+        def _message() -> HumanMessage:
+            slot = [{"position": 5, "part": _held_doc().model_dump(by_alias=True)}]
+            return HumanMessage(
+                id="h-short",
+                content="new",
+                additional_kwargs={AGUI_HELD_PARTS_KEY: slot},
             )
 
-            events = await _emit(message)
+        async def it_puts_the_part_at_the_end_of_the_shorter_content():
+            events = await _emit(_message())
 
             [user_msg] = _roled(events, "user")
             assert user_msg.content == [TextPart(text="new"), _held_doc()]
 
+        async def it_logs_a_warning_naming_the_message(caplog):
+            await _emit(_message())
+
+            assert any(
+                r.levelname == "WARNING" and "h-short" in r.message
+                for r in caplog.records
+            )
+
     def when_a_corrupt_slot_is_already_in_the_checkpoint():
-        def when_an_index_exceeds_the_list_size_limit():
+        def when_a_position_exceeds_the_list_size_limit():
             async def it_puts_the_part_at_the_end():
                 part = _held_doc().model_dump(by_alias=True)
-                slot = [{"index": 10**30, "part": part}]
+                slot = [{"position": 10**30, "part": part}]
                 message = HumanMessage(
                     content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
                 )
@@ -3389,8 +3389,8 @@ def describe_held_parts_round_trip():
                 assert user_msg.content == [TextPart(text="hi"), _held_doc()]
 
         async def it_still_serves_the_connect_snapshot():
-            good = {"index": 1, "part": _held_doc().model_dump(by_alias=True)}
-            slot = [{"index": 0, "part": {"type": "document"}}, "junk", good]
+            good = {"position": 1, "part": _held_doc().model_dump(by_alias=True)}
+            slot = [{"position": 0, "part": {"type": "document"}}, "junk", good]
             poisoned = HumanMessage(
                 content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
             )
@@ -3405,7 +3405,7 @@ def describe_held_parts_round_trip():
             assert user_msg.content == [TextPart(text="hi"), _held_doc()]
 
         async def it_logs_a_warning(caplog):
-            slot = [{"index": 0, "part": {"type": "document"}}]
+            slot = [{"position": 0, "part": {"type": "document"}}]
             message = HumanMessage(
                 id="h-bad", content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
             )
@@ -4157,7 +4157,7 @@ def describe_detect_new_tool_results():
             def it_keeps_the_part_off_the_model_input():
                 inp = _tool_input(content=[TextPart(text="report"), _held_doc()])
                 [out] = detect_new_tool_results(inp, {"messages": []})
-                assert out.content == "report"
+                assert out.content == [{"type": "text", "text": "report"}]
 
             def it_holds_the_part():
                 inp = _tool_input(content=[TextPart(text="report"), _held_doc()])

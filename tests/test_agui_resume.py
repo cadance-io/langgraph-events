@@ -33,6 +33,7 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
     ToolMessage,
+    merge_message_runs,
 )
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -209,7 +210,7 @@ def describe_agui_messages_to_langchain():
                     def it_keeps_the_part_off_the_model_input():
                         msg = UserMessage(id="u-file", content=[_text("kept"), _doc()])
                         [out] = agui_messages_to_langchain([msg])
-                        assert out.content == "kept"
+                        assert out.content == [{"type": "text", "text": "kept"}]
 
                     def it_holds_the_whole_part_metadata_included():
                         part = _doc(metadata={"title": "Q3 plan"})
@@ -217,12 +218,12 @@ def describe_agui_messages_to_langchain():
                         [out] = agui_messages_to_langchain([msg])
                         assert held_parts(out) == [part]
 
-                    def it_records_the_index_of_the_part():
+                    def it_records_the_position_of_the_part():
                         msg = UserMessage(id="u-file", content=[_text("kept"), _doc()])
                         [out] = agui_messages_to_langchain([msg])
                         assert out.additional_kwargs[AGUI_HELD_PARTS_KEY] == [
                             {
-                                "index": 1,
+                                "position": 1,
                                 "part": {
                                     "type": "document",
                                     "source": {
@@ -243,32 +244,11 @@ def describe_agui_messages_to_langchain():
                         ]
 
                     def when_no_part_is_kept():
-                        def it_converts_the_content_to_an_empty_string():
+                        def it_converts_the_content_to_an_empty_list():
                             msg = UserMessage(id="u-file", content=[_doc()])
                             [out] = agui_messages_to_langchain([msg])
-                            assert out.content == ""
+                            assert out.content == []
                             assert held_parts(out) == [_doc()]
-
-                    def when_two_text_parts_are_kept():
-                        def it_keeps_a_block_list():
-                            msg = UserMessage(
-                                id="u-file",
-                                content=[_text("a"), _text("b"), _doc()],
-                            )
-                            [out] = agui_messages_to_langchain([msg])
-                            assert out.content == [
-                                {"type": "text", "text": "a"},
-                                {"type": "text", "text": "b"},
-                            ]
-
-                    def when_a_media_part_is_kept():
-                        def it_keeps_a_block_list():
-                            image = ImagePart(source=UrlSource(value="https://x/y"))
-                            msg = UserMessage(id="u-file", content=[image, _doc()])
-                            [out] = agui_messages_to_langchain([msg])
-                            assert out.content == [
-                                {"type": "image", "url": "https://x/y"}
-                            ]
 
                     def when_the_held_parts_exceed_the_size_cap():
                         def _message() -> UserMessage:
@@ -281,7 +261,7 @@ def describe_agui_messages_to_langchain():
 
                         def it_still_keeps_the_part_off_the_model_input():
                             [out] = agui_messages_to_langchain([_message()])
-                            assert out.content == "kept"
+                            assert out.content == [{"type": "text", "text": "kept"}]
 
                         def it_logs_a_warning_naming_the_message(caplog):
                             agui_messages_to_langchain([_message()])
@@ -457,7 +437,7 @@ def describe_agui_messages_to_langchain():
                         tool_call_id="tc1",
                     )
                     [out] = agui_messages_to_langchain([msg])
-                    assert out.content == "report"
+                    assert out.content == [{"type": "text", "text": "report"}]
                     assert held_parts(out) == [_doc()]
 
         def when_the_error_field_is_set():
@@ -1064,8 +1044,8 @@ def describe_held_parts():
 
     def when_an_entry_is_corrupt():
         def _message() -> HumanMessage:
-            good = {"index": 1, "part": _doc().model_dump(by_alias=True)}
-            entries = [{"index": 0, "part": {"type": "document"}}, "junk", good]
+            good = {"position": 1, "part": _doc().model_dump(by_alias=True)}
+            entries = [{"position": 0, "part": {"type": "document"}}, "junk", good]
             return HumanMessage(
                 id="h-bad", content="", additional_kwargs={AGUI_HELD_PARTS_KEY: entries}
             )
@@ -1079,6 +1059,21 @@ def describe_held_parts():
                 r.levelname == "WARNING" and "h-bad" in r.message
                 for r in caplog.records
             )
+
+    def when_a_host_merges_two_messages_that_hold_parts():
+        """LangChain merges list entries that share an int ``index`` key."""
+
+        def it_keeps_each_held_part_intact():
+            first = DocumentPart(source=FileSource(value="src-A", provider="host"))
+            second = DocumentPart(source=FileSource(value="src-B", provider="host"))
+            messages = agui_messages_to_langchain(
+                [
+                    UserMessage(id="u1", content=[_text("a"), first]),
+                    UserMessage(id="u2", content=[_text("b"), second]),
+                ]
+            )
+            [merged] = merge_message_runs(messages)
+            assert held_parts(merged) == [first, second]
 
     def when_the_slot_is_not_a_list():
         def it_returns_an_empty_list(caplog):

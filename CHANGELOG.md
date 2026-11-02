@@ -15,9 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `MessagesSnapshot` of `stream()` and `connect()` puts it back at its position. Read it with
   the new `held_parts(message)`. See
   [Parts the model does not receive](docs/agui.md#parts-the-model-does-not-receive).
-  WARNING: for an inbound message with a `file`-source part, `content` can now be a `str`. It is
-  `""` if no part is kept, and the text if one text part with no `id` is kept. It was a list.
-  Every other message converts as before.
+  `content` stays a list of blocks. A message whose only part has a `file` source has `content`
+  `[]`, and some providers refuse an empty message.
 
 ### Changed
 

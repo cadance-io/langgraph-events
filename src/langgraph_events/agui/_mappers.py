@@ -248,8 +248,18 @@ def _content_to_agui(message: BaseMessage, label: str) -> str | list[InputConten
         return content
     if isinstance(content, str):
         content = [TextPart(text=content)] if content else []
-    for index, part in held:
-        content.insert(min(index, len(content)), part)
+    past_end = 0
+    for position, part in held:
+        past_end += position > len(content)
+        content.insert(min(position, len(content)), part)
+    if past_end:
+        logger.warning(
+            "Appending %d held content part(s) to the end of message %s — the "
+            "position in additional_kwargs[%r] is past the end of the content.",
+            past_end,
+            label,
+            AGUI_HELD_PARTS_KEY,
+        )
     return content
 
 
@@ -268,7 +278,7 @@ def held_parts(message: BaseMessage) -> list[InputContentPart]:
 
 
 class _HeldEntry(BaseModel):
-    index: NonNegativeInt
+    position: NonNegativeInt
     part: InputContentPart
 
 
@@ -294,11 +304,11 @@ def _held_entries(
             held = _HeldEntry.model_validate(entry)
         except ValidationError:
             continue
-        entries.append((held.index, held.part))
+        entries.append((held.position, held.part))
     if len(entries) < len(slot):
         logger.warning(
             "Dropping %d held content part(s) of message %s — each entry of "
-            "additional_kwargs[%r] must be {'index': int >= 0, 'part': an AG-UI "
+            "additional_kwargs[%r] must be {'position': int >= 0, 'part': an AG-UI "
             "content part}. The client does not receive the dropped parts.",
             len(slot) - len(entries),
             label,

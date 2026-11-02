@@ -178,22 +178,18 @@ doc = DocumentPart(source=FileSource(value="doc-42", provider="host"))
 [message] = agui_messages_to_langchain(
     [UserMessage(id="u1", content=[TextPart(text="Read this."), doc])]
 )
-message.content  # -> "Read this."  (the model sees only this)
+message.content  # -> [{"type": "text", "text": "Read this."}]  (the model sees only this)
 held_parts(message)  # -> [doc]
 # The next MessagesSnapshot sends content=[TextPart(text="Read this."), doc].
 ```
 
-The content changes shape only when the message holds a part:
+`content` stays a list of standard blocks. If the only part of a message is held, `content` is `[]`. Some providers refuse a message with empty content. If a client sends only held parts, give the model a text of your own.
 
-| Kept parts | LangChain `content` |
-|---|---|
-| None | `""` |
-| Exactly one text part, with no `id` and a non-empty text | The text of that part, as a `str` |
-| Any other set | The kept parts as standard blocks, as without a held part |
+Each entry of the slot is `{"position": i, "part": p}`. `i` is the position of the part in the AG-UI content list.
 
-A provider can refuse a user message with `""` content. If a client sends only held parts, give the model a text of your own.
+`held_parts(message)` returns the held parts in their original order and never raises, because it reads checkpointed data. It skips an entry that does not validate, with a `WARNING` that names the message and the key. The snapshot drops a bad entry the same way. If a handler made the content shorter, a position past the end puts the part at the end, with a `WARNING` that names the message and the key.
 
-`held_parts(message)` returns the held parts in their original order and never raises, because it reads checkpointed data. It skips an entry that does not validate, with a `WARNING` that names the message and the key. The snapshot drops a bad entry the same way. If a handler made the content shorter, a position past the end puts the part at the end.
+A host can merge messages, for example with LangChain's `merge_message_runs`. The merged message keeps every held entry, but each position still counts in its own original message. So the snapshot can restore a part at a shifted position.
 
 WARNING: A held part is client input. The trust note of the extras slot applies to it.
 

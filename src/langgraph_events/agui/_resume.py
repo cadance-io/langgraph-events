@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, TypeGuard
+from typing import TYPE_CHECKING, Any
 
 from ._extras import AGUI_HELD_PARTS_KEY, capped_slot, collect_inbound_extras
 
 if TYPE_CHECKING:
-    from ag_ui.core import InputContentPart, Message, TextPart
+    from ag_ui.core import InputContentPart, Message
     from ag_ui.core.types import RunAgentInput
     from langchain_core.messages import BaseMessage
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
@@ -41,19 +41,21 @@ def _content_to_langchain(
     """Convert AG-UI message content to LangChain content and held parts.
 
     The metadata of a kept part is dropped with a WARNING, because a LangChain
-    block has no field for it. When a part is held, the content collapses to a
-    ``str`` if that loses nothing, so a host can read it as text.
+    block has no field for it.
     """
     if isinstance(content, str):
         return content, {}
     kept: list[InputContentPart] = []
     held: list[dict[str, Any]] = []
-    for index, part in enumerate(content):
+    for position, part in enumerate(content):
         if part.type == "text" or part.source.type in SOURCE_KEYS:
             kept.append(part)
         else:
             held.append(
-                {"index": index, "part": part.model_dump(mode="json", by_alias=True)}
+                {
+                    "position": position,
+                    "part": part.model_dump(mode="json", by_alias=True),
+                }
             )
     if held:
         logger.debug(
@@ -73,15 +75,7 @@ def _content_to_langchain(
     held_kwargs = capped_slot(
         AGUI_HELD_PARTS_KEY, held, "held content parts", message_id
     )
-    if held and not kept:
-        return "", held_kwargs
-    if held and len(kept) == 1 and _survives_str_round_trip(kept[0]):
-        return kept[0].text, held_kwargs
     return [_part_to_block(part) for part in kept], held_kwargs
-
-
-def _survives_str_round_trip(part: InputContentPart) -> TypeGuard[TextPart]:
-    return part.type == "text" and part.id is None and part.text != ""
 
 
 def _part_to_block(part: InputContentPart) -> dict[str, Any]:
