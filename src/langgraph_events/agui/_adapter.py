@@ -298,15 +298,24 @@ class AGUIAdapter:
         return _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on)
 
     async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
-        """Emit checkpoint-backed state without executing the graph."""
-        run_id = input_data.run_id or str(uuid.uuid4())
-        thread_id = input_data.thread_id or str(uuid.uuid4())
-        ctx = MapperContext(
-            run_id=run_id,
-            thread_id=thread_id,
-            input_data=input_data,
-        )
-        config = self._build_config(input_data, thread_id)
+        """Emit checkpoint-backed state without executing the graph.
+
+        The replay is one AG-UI run. It starts with ``RUN_STARTED`` and ends
+        with ``RUN_FINISHED``, or with ``RUN_ERROR`` when the replay raises.
+        """
+        ctx = self._run_context(input_data)
+        async for agui_event in self._as_run(
+            ctx, self._replay_checkpoint(input_data, ctx)
+        ):
+            yield agui_event
+
+    reconnect = connect
+
+    async def _replay_checkpoint(
+        self, input_data: RunAgentInput, ctx: MapperContext
+    ) -> AsyncIterator[BaseEvent]:
+        """Yield the snapshots and pending interrupts of the checkpoint."""
+        config = self._build_config(input_data, ctx.thread_id)
         snapshot = await self._aget_checkpoint_snapshot(config)
         if snapshot is None:
             yield build_state_snapshot({})
@@ -320,8 +329,6 @@ class AGUIAdapter:
         for interrupted in self._interrupts_from_snapshot(snapshot):
             for agui_event in self._map_event(interrupted, ctx):
                 yield agui_event
-
-    reconnect = connect
 
     def _should_gate_with_checkpoint_replay(
         self,
@@ -748,27 +755,40 @@ class AGUIAdapter:
                 ``is_set``. The stream raises it on the first iteration,
                 before ``RUN_STARTED``.
         """
-        run_id = input_data.run_id or str(uuid.uuid4())
-        thread_id = input_data.thread_id or str(uuid.uuid4())
+        ctx = self._run_context(input_data)
+        config = self._build_config(
+            input_data, ctx.thread_id, deadline=deadline, pause_on=pause_on
+        )
+        async for agui_event in self._as_run(
+            ctx, self._stream_event_source(input_data, ctx, config)
+        ):
+            yield agui_event
 
-        ctx = MapperContext(
-            run_id=run_id,
-            thread_id=thread_id,
+    @staticmethod
+    def _run_context(input_data: RunAgentInput) -> MapperContext:
+        """Build the mapper context of one run, with a new id for each one absent."""
+        return MapperContext(
+            run_id=input_data.run_id or str(uuid.uuid4()),
+            thread_id=input_data.thread_id or str(uuid.uuid4()),
             input_data=input_data,
         )
 
-        config = self._build_config(
-            input_data, thread_id, deadline=deadline, pause_on=pause_on
-        )
+    async def _as_run(
+        self, ctx: MapperContext, source: AsyncIterator[BaseEvent]
+    ) -> AsyncIterator[BaseEvent]:
+        """Wrap *source* in ``RUN_STARTED`` and ``RUN_FINISHED``.
 
+        If *source* raises, close each open message and tool call, then end
+        the stream with ``RUN_ERROR`` instead of ``RUN_FINISHED``.
+        """
         yield RunStartedEvent(
             type=EventType.RUN_STARTED,
-            thread_id=thread_id,
-            run_id=run_id,
+            thread_id=ctx.thread_id,
+            run_id=ctx.run_id,
         )
 
         try:
-            async for agui_event in self._stream_event_source(input_data, ctx, config):
+            async for agui_event in source:
                 yield agui_event
 
         except UnmappedEventError:
@@ -777,7 +797,7 @@ class AGUIAdapter:
             raise
 
         except Exception as exc:
-            logger.exception("EventGraph stream failed")
+            logger.exception("AG-UI run failed")
             for message_id in ctx.drain_open_stream_message_ids():
                 yield TextMessageEndEvent(
                     type=EventType.TEXT_MESSAGE_END,
@@ -796,6 +816,6 @@ class AGUIAdapter:
 
         yield RunFinishedEvent(
             type=EventType.RUN_FINISHED,
-            thread_id=thread_id,
-            run_id=run_id,
+            thread_id=ctx.thread_id,
+            run_id=ctx.run_id,
         )

@@ -7,7 +7,7 @@ RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> S
                                                   ^
                               ResumeFactory -> astream_resume (if resuming)
 
-RunAgentInput -> AGUIAdapter.connect/reconnect -> checkpoint snapshots + interrupts
+RunAgentInput -> AGUIAdapter.connect/reconnect -> RunStarted + checkpoint snapshots + interrupts + RunFinished
 ```
 
 `AGUIAdapter` streams LLM tokens and custom events. `AGUIAdapter(...)` raises `ValueError` unless the graph registers [`message_reducer()`](reducers.md#message_reducer). That reducer is the authoritative message channel.
@@ -151,7 +151,7 @@ Nothing else in `additional_kwargs` is forwarded. Inbound, `agui_messages_to_lan
 
 WARNING: Inbound extras arrive verbatim. They flow through `add_messages` into the checkpoint. They return on the next `MessagesSnapshot` to every client on that thread. The adapter neither filters the keys nor inspects the values. Do not treat a value read from the slot as trusted input. If more than one person can reach a thread, strip or scope the slot yourself. `AGUI_EXTRAS_MAX_BYTES` (8 KiB of JSON per message) bounds how much a client can add. Extras over the cap, or extras that do not encode as JSON, are dropped with a `WARNING` naming the message. The message itself still converts.
 
-`MessagesSnapshot` is rebuilt from the **checkpointed** message list on every `connect()`. If that build raises, the error escapes into your HTTP handler, never becomes a `RunError`, and breaks the thread until someone edits the checkpoint. So nothing in the extras path raises. Four cases drop something and warn once per message class:
+`MessagesSnapshot` is rebuilt from the **checkpointed** message list on every `connect()`. If that build raises, the client gets a `RunError` on every `connect()`, and the thread stays broken until someone edits the checkpoint. So nothing in the extras path raises. Four cases drop something and warn once per message class:
 
 | Case | Dropped |
 |---|---|
@@ -164,7 +164,7 @@ Rename the entry, or set the field through the LangChain message.
 
 ## Connect / Reconnect
 
-`connect()`, alias `reconnect()`, runs no handler. It emits `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
+`connect()`, alias `reconnect()`, runs no handler. It emits `RunStarted`, then `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event, then `RunFinished`. If the replay raises, `RunError` ends the stream instead of `RunFinished`. One exception applies: with `on_unmapped="raise"`, an `UnmappedEventError` propagates to the caller and does not become `RunError`. The stream then ends without a terminal event, the same as in `stream()`. An AG-UI client refuses a stream that does not start with `RunStarted`, so do not strip these events. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
 
 ## Custom Mappers
 

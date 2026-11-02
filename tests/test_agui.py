@@ -1763,6 +1763,72 @@ def describe_connect():
         def it_is_alias_for_connect():
             assert AGUIAdapter.reconnect is AGUIAdapter.connect
 
+    def when_replay_succeeds():
+
+        async def it_wraps_the_replay_in_run_lifecycle_events():
+            graph = _graph(ask_pending, checkpointer=MemorySaver())
+            await graph.ainvoke(
+                UserAsked(question="go"),
+                config=_config("t-connect-lifecycle"),
+            )
+
+            events = await _connect(
+                graph,
+                _make_input(thread_id="t-connect-lifecycle", run_id="run-7"),
+            )
+
+            assert [e.type for e in events] == [
+                EventType.RUN_STARTED,
+                EventType.STATE_SNAPSHOT,
+                EventType.MESSAGES_SNAPSHOT,
+                EventType.CUSTOM,
+                EventType.RUN_FINISHED,
+            ]
+            for lifecycle in (events[0], events[-1]):
+                assert lifecycle.thread_id == "t-connect-lifecycle"
+                assert lifecycle.run_id == "run-7"
+
+    def when_replay_raises():
+
+        async def it_emits_run_error_last(monkeypatch):
+            graph = _graph(reply, checkpointer=MemorySaver())
+
+            async def failing_aget_state(config):
+                raise RuntimeError("checkpoint unreadable")
+
+            monkeypatch.setattr(graph.compiled, "aget_state", failing_aget_state)
+
+            events = await _connect(graph, _make_input(thread_id="t-connect-error"))
+
+            assert [e.type for e in events] == [
+                EventType.RUN_STARTED,
+                EventType.RUN_ERROR,
+            ]
+            assert events[-1].message == "checkpoint unreadable"
+
+        def when_on_unmapped_is_raise():
+
+            async def it_propagates_unmapped_event_error_after_the_snapshots():
+                graph = _graph(ask_plain_interrupt, checkpointer=MemorySaver())
+                await graph.ainvoke(
+                    UserAsked(question="go"),
+                    config=_config("t-connect-unmapped"),
+                )
+                adapter = _adapter(graph, on_unmapped="raise")
+                events: list[BaseEvent] = []
+
+                with pytest.raises(UnmappedEventError, match="PlainInterrupt"):
+                    async for event in adapter.connect(
+                        _make_input(thread_id="t-connect-unmapped")
+                    ):
+                        events.append(event)
+
+                assert _types(events) == [
+                    EventType.RUN_STARTED,
+                    EventType.STATE_SNAPSHOT,
+                    EventType.MESSAGES_SNAPSHOT,
+                ]
+
     def when_checkpointer_present():
 
         def when_existing_thread():
@@ -1795,22 +1861,24 @@ def describe_connect():
                     _make_input(thread_id="brand-new-thread"),
                     seed_factory=_ask("unused"),
                 )
-                assert len(events) == 2
-                assert events[0].type == EventType.STATE_SNAPSHOT
-                assert events[0].snapshot == {}
-                assert events[1].type == EventType.MESSAGES_SNAPSHOT
-                assert events[1].messages == []
+                replay = events[1:-1]
+                assert len(replay) == 2
+                assert replay[0].type == EventType.STATE_SNAPSHOT
+                assert replay[0].snapshot == {}
+                assert replay[1].type == EventType.MESSAGES_SNAPSHOT
+                assert replay[1].messages == []
 
     def when_no_checkpointer():
 
         async def it_emits_empty_snapshots():
             graph = _graph(reply)
             events = await _connect(graph, seed_factory=_ask("unused"))
-            assert len(events) == 2
-            assert events[0].type == EventType.STATE_SNAPSHOT
-            assert events[0].snapshot == {}
-            assert events[1].type == EventType.MESSAGES_SNAPSHOT
-            assert events[1].messages == []
+            replay = events[1:-1]
+            assert len(replay) == 2
+            assert replay[0].type == EventType.STATE_SNAPSHOT
+            assert replay[0].snapshot == {}
+            assert replay[1].type == EventType.MESSAGES_SNAPSHOT
+            assert replay[1].messages == []
 
     def when_forwarded_props():
 
