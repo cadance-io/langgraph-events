@@ -1,16 +1,16 @@
 """Content Pipeline — langgraph-events demo.
 
 Demonstrates event streaming, halt-based early termination, and post-run
-inspection in a DDD ``Content`` domain.
+inspection in a ``Content`` namespace.
 
 Covers APIs not shown in other examples:
-  - ``Halted`` — immediate graph termination (unsafe content stops the pipeline)
   - ``StreamFrame`` — NamedTuple yielded by ``astream_events()`` with reducer snapshots
   - ``stream_events()`` / ``astream_events()`` — high-level event streaming
-  - ``EventLog.has()`` — boolean existence check
-  - ``Reducer`` — polymorphic stage tracking via a ``Protocol``
 
-No LLM dependency — runs standalone with keyword-based classification rules.
+Also shows ``Halted``, ``EventLog.has()`` and a ``Reducer`` keyed on a
+``Protocol``.
+
+No LLM dependency. Runs standalone with keyword-based classification rules.
 
 Usage:
     python examples/content_pipeline.py
@@ -51,8 +51,8 @@ class Content(Namespace):
     """Content flowing through safety classification and analysis.
 
     ``Process`` is the entry command. Its inline ``handle`` classifies the
-    text (``Classified`` outcome). Downstream reactions approve or block,
-    then analyze — those facts are free-standing under the domain.
+    text (``Classified`` outcome). Downstream handlers approve or block,
+    then analyze. Those facts are free-standing under the namespace.
     """
 
     class Process(Command):
@@ -61,7 +61,7 @@ class Content(Namespace):
         text: str = ""
 
         class Classified(DomainEvent):
-            """Classification outcome — category + safety flag."""
+            """Classification outcome: category and safety flag."""
 
             category: str = ""
             safe: bool = True
@@ -70,7 +70,7 @@ class Content(Namespace):
                 return f"classified:{self.category}"
 
         def handle(self) -> Content.Process.Classified:
-            """Inline keyword classifier — trivial rules, colocated with the command."""
+            """Inline keyword classifier: trivial rules, colocated with the command."""
             words = set(self.text.lower().split())
             if words & UNSAFE_KEYWORDS:
                 return Content.Process.Classified(category="unsafe", safe=False)
@@ -79,7 +79,7 @@ class Content(Namespace):
             return Content.Process.Classified(category="general")
 
     class Approved(DomainEvent):
-        """Content cleared the safety gate — free-standing under Content."""
+        """Content cleared the safety gate. Free-standing under Content."""
 
         text: str = ""
         category: str = ""
@@ -88,7 +88,7 @@ class Content(Namespace):
             return "approved"
 
     class Analyzed(DomainEvent):
-        """Analysis produced — terminal free-standing fact."""
+        """Analysis produced. Terminal free-standing fact."""
 
         summary: str = ""
         word_count: int = 0
@@ -99,15 +99,15 @@ class Content(Namespace):
     class Blocked(Halted):
         """Halted: content failed the safety gate.
 
-        ``Halted`` subclass stays a ``SystemEvent`` (framework termination);
-        nested inside the domain class for locality only.
+        A ``Halted`` subclass stays a ``SystemEvent``. It is nested inside
+        the namespace class for locality only.
         """
 
         category: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Reducer — polymorphic stage tracking via Protocol
+# Reducer: polymorphic stage tracking via Protocol
 # ---------------------------------------------------------------------------
 
 
@@ -119,7 +119,7 @@ stages = Reducer(
 
 
 # ---------------------------------------------------------------------------
-# Handlers — ``Process`` is inline; gate and analyze are external reactions
+# Handlers. ``Process`` is inline. gate and analyze are external handlers.
 # ---------------------------------------------------------------------------
 
 
@@ -127,7 +127,7 @@ stages = Reducer(
 def gate(
     event: Content.Process.Classified, log: EventLog
 ) -> Content.Blocked | Content.Approved:
-    """Safety gate — halts the pipeline for unsafe content.
+    """Safety gate. Halts the pipeline for unsafe content.
 
     Uses ``log.latest(Content.Process)`` to pass the original text forward.
     """
@@ -148,7 +148,7 @@ def analyze(event: Content.Approved) -> Content.Analyzed:
 
 
 # ---------------------------------------------------------------------------
-# Main — three scenarios demonstrating different APIs
+# Main: three scenarios demonstrating different APIs
 # ---------------------------------------------------------------------------
 
 

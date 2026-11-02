@@ -1,33 +1,28 @@
 """Error Recovery — langgraph-events demo.
 
 Demonstrates declared handler exceptions via class-level ``raises=`` plus a
-declarative ``retry = RetryPolicy(...)``, organized around a DDD ``Question``
-domain.
+declarative ``retry = RetryPolicy(...)``, organized around a ``Question``
+namespace.
 
-A Command declares which exceptions the framework should catch. A
-``RetryPolicy`` on the same Command tells the framework to re-invoke the
-handler in place — waiting a full-jitter exponential backoff between tries —
-instead of surfacing the failure immediately. Only when the retry budget is
-spent does the exception surface as ``HandlerRaised``, so the catcher is a pure
-*escalation* handler: it never has to count attempts or schedule a retry.
+A Command declares which exceptions the library catches. A ``RetryPolicy`` on
+the same Command tells the library to re-invoke the handler in place, with a
+full-jitter exponential backoff between tries. Only when the retry budget is
+spent does the exception surface as ``HandlerRaised``. The handler that
+receives it never counts attempts and never schedules a retry.
 
 Covers:
-  - ``retry = RetryPolicy(...)`` — declarative backoff, framework-enforced
-    (not shown in any other example)
+  - ``retry = RetryPolicy(...)`` — declarative backoff, enforced by the library
   - ``HandlerRetried`` — built-in event emitted before each backoff wait
-    (not shown in any other example)
   - ``raises = (...,)`` as a class-level attribute on a ``Command``
   - ``HandlerRaised`` — built-in event wrapping a caught exception
   - ``@on(HandlerRaised, exception=...)`` as a field matcher narrowing a
-    catcher to one exception type
+    handler to one exception type
 
 Usage:
     python examples/error_recovery.py
 """
 
 from __future__ import annotations
-
-import warnings
 
 from langgraph_events import (
     Command,
@@ -38,15 +33,12 @@ from langgraph_events import (
     HandlerRaised,
     HandlerRetried,
     Namespace,
-    OrphanedEventWarning,
     RetryPolicy,
     on,
 )
 
-warnings.filterwarnings("ignore", category=OrphanedEventWarning)
-
 # ---------------------------------------------------------------------------
-# Exceptions (NOT Events — they stay plain Python exceptions)
+# Exceptions (not Events: they stay plain Python exceptions)
 # ---------------------------------------------------------------------------
 
 
@@ -71,29 +63,29 @@ _scenario = {"succeed_after": 3, "calls": 0}
 
 
 class Question(Namespace):
-    """A user question answered via a rate-limit-tolerant LLM call.
+    """A user question answered by a simulated upstream that rate-limits early calls.
 
     ``Ask`` is the entry command. Its inline ``handle`` declares
-    ``raises = (RateLimitError,)`` and a ``retry`` policy as class attributes;
-    the framework absorbs up to ``MAX_ATTEMPTS`` rate limits on its own. Only
+    ``raises = (RateLimitError,)`` and a ``retry`` policy as class attributes.
+    The library absorbs up to ``MAX_ATTEMPTS - 1`` rate limits on its own. Only
     once the budget is spent does ``HandlerRaised`` reach ``give_up``, which
-    turns it into the terminal ``GaveUp`` ``Halted`` signal.
+    turns it into the terminal ``RetriesExhausted`` ``Halted`` signal.
     """
 
     class Ask(Command):
-        """Entry command — asks a question, may take several tries to answer."""
+        """Entry command. Asks a question. Can take several tries to answer."""
 
         question: str = ""
 
         raises = (RateLimitError,)
         # Full jitter: the wait before retry n is uniform in
-        # [0, min(base_delay * 2**(n-1), max_delay)] — the cap applies to the
+        # [0, min(base_delay * 2**(n-1), max_delay)]. The cap applies to the
         # ceiling, before sampling. Set ``respect_retry_after=True`` to prefer
         # a server-supplied ``exception.retry_after`` over the computed curve.
         retry = RetryPolicy(max_attempts=MAX_ATTEMPTS, base_delay=0.05, max_delay=1.0)
 
         class Answered(DomainEvent):
-            """Question answered — terminal outcome of Ask."""
+            """Question answered. Terminal outcome of Ask."""
 
             answer: str = ""
 
@@ -103,22 +95,22 @@ class Question(Namespace):
                 raise RateLimitError(retry_after=round(0.1 * _scenario["calls"], 2))
             return Question.Ask.Answered(answer=f"Answer to: {self.question!r}")
 
-    class GaveUp(Halted):
-        """Terminal halt — retry budget exhausted."""
+    class RetriesExhausted(Halted):
+        """Terminal halt. The retry budget is spent."""
 
         reason: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Handlers — escalation only; the success path lives on Ask.handle(), and the
-# retries in between are the framework's job.
+# Handlers. Escalation only: the success path lives on Ask.handle(), and the
+# library runs the retries in between.
 # ---------------------------------------------------------------------------
 
 
 @on(HandlerRaised, exception=RateLimitError)
-def give_up(event: HandlerRaised) -> Question.GaveUp:
-    """Escalation catcher — reached only after the retry budget is spent."""
-    return Question.GaveUp(
+def give_up(event: HandlerRaised) -> Question.RetriesExhausted:
+    """Escalation handler. Reached only after the retry budget is spent."""
+    return Question.RetriesExhausted(
         reason=f"Exceeded {MAX_ATTEMPTS} attempts: {event.exception}"
     )
 
@@ -145,10 +137,10 @@ def main() -> None:
     print(f"  [result] {answer}\n")
 
     print("== Escalation when retries are exhausted ==")
-    _scenario.update(succeed_after=999, calls=0)  # unreachable — always rate-limits
+    _scenario.update(succeed_after=999, calls=0)  # unreachable: always rate-limits
     log = graph.invoke(Question.Ask(question="Will this ever succeed?"))
     _print_trail(log)
-    halted = log.latest(Question.GaveUp)
+    halted = log.latest(Question.RetriesExhausted)
     print(f"  [result] {halted}")
 
 

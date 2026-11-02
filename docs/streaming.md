@@ -1,16 +1,19 @@
 # Streaming
 
-Streaming yields events in real-time for live UI updates. All methods have async variants: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`.
+All methods have async variants: `ainvoke()`, `astream_events()`, `aresume()`, `astream_resume()`. `stream_resume()` / `astream_resume()` are the streaming equivalents of `resume()`.
 
 A resume stream yields only the events that the resumed run writes. A step can hold a handler that finished and a handler that paused. The resume stream does not yield the finished handler's events again.
 
 ```python
-from langgraph_events import emit_custom, emit_state_snapshot
+...  # QueryReceived, ReplyProduced and graph come from your app
+from langgraph_events import emit_custom, emit_state_snapshot, on
 from langgraph_events.stream import (
     CustomEventFrame,
     LLMStreamEnd,
     LLMToken,
+    LLMToolCallChunk,
     StateSnapshotFrame,
+    StreamItem,
 )
 
 
@@ -38,28 +41,29 @@ async for item in graph.astream_events(
         print(item)
 ```
 
+`StreamItem` is the union of every yielded type. `LLMToken`, `LLMStreamEnd` and `LLMToolCallChunk` are also exported from `langgraph_events`.
+
 ## Stream Options
 
 | Flag | Enables | Frame types |
 |---|---|---|
 | `include_reducers=True` | Reducer snapshots alongside events | `StreamFrame(event, reducers, changed_reducers)` |
-| `include_llm_tokens=True` | Real-time LLM token deltas | `LLMToken(run_id, content)`, `LLMStreamEnd(run_id, message_id)` |
+| `include_llm_tokens=True` | Real-time LLM token and tool-call deltas | `LLMToken(run_id, content)`, `LLMStreamEnd(run_id, message_id)`, `LLMToolCallChunk(run_id, call_index, tool_call_id, name, args_delta)` |
 | `include_custom_events=True` | Custom event passthrough | `CustomEventFrame(name, data)`, `StateSnapshotFrame(data)` |
 | `include_llm_tokens=True` or `include_custom_events=True` | The interrupts that the run leaves pending, after the run, in checkpoint task order | `InterruptFrame(value)` |
 
 ## Emission Helpers
 
-Emit telemetry from handlers without importing LangGraph callback APIs.
+Emit telemetry from a handler without importing the LangGraph callback APIs. The helpers are exported from `langgraph_events`.
 
 | Function | Use case |
 |---|---|
 | `emit_custom(name, data)` / `aemit_custom(...)` | Arbitrary stream-only telemetry |
-| `emit_state_snapshot(data)` / `aemit_state_snapshot(...)` | Typed state snapshot for UI |
-
-Surface in `astream_events(..., include_custom_events=True)` as `CustomEventFrame` / `StateSnapshotFrame`.
+| `emit_state_snapshot(data)` / `aemit_state_snapshot(...)` | Typed state snapshot for a UI |
+| `STATE_SNAPSHOT_EVENT_NAME` | The protocol name of a snapshot event (`"intermediate_state"`) |
 
 ## Reducer Deltas
 
-With `include_reducers=True`, `StreamFrame.changed_reducers: frozenset[str] | None` carries the names of reducers this event updated. Use to skip re-emitting unchanged state. `None` means delta metadata is unavailable.
+With `include_reducers=True`, `StreamFrame.changed_reducers: frozenset[str] | None` carries the names of the reducers this event updated. Use it to skip re-emitting unchanged state. `None` means delta metadata is unavailable.
 
 See [AG-UI Adapter](agui.md) for streaming to AG-UI frontends.

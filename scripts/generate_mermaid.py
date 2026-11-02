@@ -137,12 +137,6 @@ def _find_graph(module: ModuleType) -> EventGraph | None:
     return None
 
 
-def _indent(body: str, spaces: int = 4) -> str:
-    """Indent every line of *body* by *spaces* — required for tab bodies."""
-    pad = " " * spaces
-    return "\n".join(pad + line if line else line for line in body.split("\n"))
-
-
 def _render_graph_md(name: str, renders: dict[str, str]) -> str:
     """Format the .graph.md content — two views as h2 sections so GitHub
     (which doesn't support pymdownx.tabbed) still renders it usefully."""
@@ -172,16 +166,12 @@ def _render_graph_md(name: str, renders: dict[str, str]) -> str:
 
 
 def _render_patterns_block(name: str, renders: dict[str, str]) -> str:
-    """Tabbed block inserted under each example in patterns.md.
+    """Diagram block inserted under each example in patterns.md.
 
-    Two tabs: Diagram / Flow (text). Content inside a ``=== "Tab"`` block
-    must be indented 4 spaces, or pymdownx.tabbed silently drops it.
+    The text view of the same choreography lives in ``<name>.graph.md``.
     """
-    mermaid_chor = _indent(f"```mermaid\n{renders['mermaid_choreography']}\n```")
-    text_chor = _indent(f"```text\n{renders['text_choreography']}\n```")
     return (
-        f'=== "Diagram"\n\n{mermaid_chor}\n\n'
-        f'=== "Flow (text)"\n\n{text_chor}\n\n'
+        f"```mermaid\n{renders['mermaid_choreography']}\n```\n\n"
         f"[Full code]({GITHUB_EXAMPLES_URL}/{name}.py) · "
         f"[Raw diagrams on GitHub]({GITHUB_EXAMPLES_URL}/{name}.graph.md)"
     )

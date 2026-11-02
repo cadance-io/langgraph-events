@@ -1,11 +1,11 @@
 """Map-Reduce Pipeline — langgraph-events demo.
 
 Demonstrates fan-out/fan-in using ``Scatter`` and ``EventLog.filter()`` inside
-a DDD ``Batch`` domain. Replaces LangGraph's verbose ``Send`` API and
-worker subgraph patterns with a simple command-plus-scatter flow.
+a ``Batch`` namespace. Replaces LangGraph's ``Send`` API and worker subgraph
+patterns with a command-plus-scatter flow.
 
-A single ``@on(Event)`` side-effect handler logs every event as it flows,
-with ``repr()``. It replaces manual isinstance printing.
+A single ``@on(Event)`` handler, ``audit_trail``, prints every event as it
+flows.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -39,38 +39,38 @@ class Batch(Namespace):
     """A batch of documents to summarize via map-reduce.
 
     ``Summarize`` is the entry command. A fan-out handler returns
-    ``Scatter[Batch.DocDispatched]``; per-doc handlers emit ``DocSummarized``;
-    a gather handler collects them and produces ``Batch.Summarized`` when
+    ``Scatter[Batch.DocDispatched]``. Per-doc handlers emit ``DocSummarized``.
+    A gather handler collects them and produces ``Batch.Summarized`` when
     all documents have been processed.
     """
 
     class Summarize(Command):
         """Summarize this batch of documents.
 
-        ``Summarize`` is purely a fan-out command — the per-doc work and the
-        gather step both live in reactors, so ``Summarize.handle()`` would
-        have nothing useful to do as inline. ``Summarized`` is therefore a
+        ``Summarize`` is purely a fan-out command. The per-doc work and the
+        gather step both live in external handlers, so an inline handler on
+        ``Summarize`` would have nothing to do. ``Summarized`` is therefore a
         namespace-level fact (sibling of ``Summarize``), not a Command-private
-        outcome — recovery/gather reactors can produce it.
+        outcome. Gather handlers can produce it.
         """
 
         documents: tuple = ()  # tuple of (title, content) pairs
 
     class DocDispatched(DomainEvent):
-        """Scatter target — one document dispatched for summarization."""
+        """Scatter target. One document dispatched for summarization."""
 
         title: str = ""
         content: str = ""
         batch_size: int = 0
 
     class DocSummarized(DomainEvent):
-        """Per-document summary — gathered into the final outcome."""
+        """Per-document summary. Gathered into the final outcome."""
 
         title: str = ""
         summary: str = ""
 
     class Summarized(DomainEvent):
-        """Final outcome — combined summary of the whole batch."""
+        """Final outcome. Combined summary of the whole batch."""
 
         combined: str = ""
         individual: tuple = ()  # tuple of (title, summary) pairs
@@ -130,7 +130,7 @@ llm = ChatOpenAI(model="gpt-4o-mini")
 
 @on(Event)
 def audit_trail(event: Event) -> None:
-    """Side-effect handler: logs every event as it flows."""
+    """Handler with no return value. Prints every event as it flows."""
     print(f"  {event!r}")
 
 
@@ -166,8 +166,8 @@ def gather_summaries(
 
     This handler fires once per ``DocSummarized`` in the pending batch. Since
     all ``DocSummarized`` events arrive in the same dispatch round, the
-    handler runs N times. We check completion via ``EventLog.filter()`` and
-    produce the combined result — duplicates are harmless, ``log.latest()``
+    handler runs N times. It checks completion via ``EventLog.filter()`` and
+    produces the combined result. Duplicates are harmless. ``log.latest()``
     picks the final one.
     """
     all_summaries = log.filter(Batch.DocSummarized)

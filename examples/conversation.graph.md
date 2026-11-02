@@ -68,7 +68,6 @@ graph LR
     subgraph Conversation["Conversation namespace"]
         direction LR
         AnswerProduced(AnswerProduced):::devt
-        Blocked(Blocked):::devt
         Send{{Send}}:::cmd
         Sent(Sent):::devt
     end
@@ -78,15 +77,13 @@ graph LR
     _e0_[ ]:::entry ==> Send
     _e1_[ ]:::entry ==> ToolsExecuted
     Send --> Sent
-    Send --> Blocked
     Sent -->|call_llm| LLMResponded
     ToolsExecuted -->|call_llm| LLMResponded
     LLMResponded -->|finalize_answer| AnswerProduced
     Sent -.->|folds| _reducer_messages
     LLMResponded -.->|folds| _reducer_messages
     ToolsExecuted -.->|folds| _reducer_messages
-%% Side-effect handlers: audit_trail (Event)
-    linkStyle 7,8,9 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
+    linkStyle 6,7,8 stroke:#0ea5e9,stroke-width:1.5px,stroke-dasharray:2 2
 ```
 
 ## Choreography (text)
@@ -96,7 +93,6 @@ Namespaces:
   Conversation
     Command: Send
       → Sent
-      → Blocked
     Event: AnswerProduced
 Integration events:
   ToolsExecuted
@@ -106,7 +102,6 @@ Reducers:
 Policies:
   call_llm  (Sent, ToolsExecuted → LLMResponded)
   finalize_answer  (LLMResponded → AnswerProduced)
-  audit_trail  (Event)  [side-effect]
 Seed events:
   Send
   ToolsExecuted

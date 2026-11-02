@@ -1,31 +1,33 @@
 """DDD Conversation Agent — langgraph-events demo.
 
-A DDD domain wrapping a ReAct tool-calling agent with **AG-UI frontend
-tools** (CopilotKit v2 `useFrontendTool`). Illustrates:
+A namespace wrapping a ReAct tool-calling agent, with an ``AGUIAdapter``
+built for **AG-UI frontend tools** (CopilotKit v2 ``useFrontendTool``).
+Illustrates:
 
 - ``DomainEvent + MessageEvent`` mixin — ``Conversation.Send.Sent`` is
   both a domain fact *and* a message carrier, feeding into
   ``message_reducer()`` alongside the ``IntegrationEvent`` responses from
   the LLM.
-- Content moderation via ``Command.handle`` — ``Conversation.Send``
-  checks content policy before wrapping the user's text in a
-  ``HumanMessage``. Rejected messages produce a ``Blocked`` domain event
-  and never reach the LLM.
 - **AG-UI frontend tools (LLM-initiated path)** — the LLM streams
-  ``tool_call_chunks``; the ``AGUIAdapter`` translates them to
+  ``tool_call_chunks``. The ``AGUIAdapter`` translates them to
   ``ToolCallStart`` / ``ToolCallArgs`` / ``ToolCallEnd`` events for the
   frontend's ``useFrontendTool`` handler. When the frontend returns its
   result, ``detect_new_tool_results`` surfaces it and the resume factory
   continues the ReAct loop with ``ToolsExecuted``.
-- Mixed taxonomy — DDD events (``Sent``, ``Blocked``, ``AnswerProduced``)
-  and integration events (``LLMResponded``, ``ToolsExecuted``)
-  coexist in one graph with a shared ``message_reducer()``.
+- Mixed taxonomy — domain events (``Sent``, ``AnswerProduced``) and
+  integration events (``LLMResponded``, ``ToolsExecuted``) coexist in one
+  graph with a shared ``message_reducer()``.
+
+``main()`` runs the graph directly with ``graph.ainvoke`` and no frontend
+tool registered. It does not drive ``adapter.stream``. To exercise the
+frontend-tool round trip, mount ``adapter.stream(input_data)`` on a FastAPI
+route via ``create_starlette_response(...)``.
 
 For the **handler-initiated path** (backend returns
 ``FrontendToolCallRequested(Interrupted)`` to pause for a confirm
 dialog), see the snippet in ``docs/agui.md``.
 
-Frontend (React + CopilotKit v2) — wire the page to the AG-UI adapter::
+Frontend (React + CopilotKit v2). Wire the page to the AG-UI adapter::
 
     import { useFrontendTool } from "@copilotkit/react-core";
     import { z } from "zod";
@@ -37,7 +39,8 @@ Frontend (React + CopilotKit v2) — wire the page to the AG-UI adapter::
         JSON.stringify({ temp: 22, conditions: "partly cloudy" }),
     });
 
-Usage (stand-alone, no HTTP; module-import only requires no key)::
+Usage. The script is stand-alone, with no HTTP server. Importing the module
+needs no key. Running ``main()`` needs the key::
 
     export OPENAI_API_KEY="sk-..."  # pragma: allowlist secret
     python examples/conversation.py
@@ -72,35 +75,24 @@ from langgraph_events.agui import (
 )
 
 # ---------------------------------------------------------------------------
-# Content policy — simple keyword blocklist (swap for an LLM classifier in
-# production)
-# ---------------------------------------------------------------------------
-
-BLOCKED_WORDS = ["hack", "bomb", "exploit"]
-
-
-# ---------------------------------------------------------------------------
 # Namespace: Conversation
 # ---------------------------------------------------------------------------
 
 
 class Conversation(Namespace):
-    """A moderated conversation with an LLM agent.
+    """A conversation with an LLM agent.
 
-    ``Send`` is the domain's only entry point; it enforces content
-    policy before the user's message reaches the LLM. Everything
-    downstream (LLM call, frontend tool results) lives outside the
-    domain as ``IntegrationEvent`` handlers — the LLM and frontend
-    tools are external services, not owned by the conversation. The
-    final answer comes back into the domain as ``AnswerProduced``.
+    ``Send`` is the namespace's only entry point. Everything downstream
+    (LLM call, frontend tool results) lives outside the namespace as
+    ``IntegrationEvent`` handlers. The LLM and frontend tools are external
+    services, not owned by the conversation. The final answer comes back
+    into the namespace as ``AnswerProduced``.
     """
 
     class Send(Command):
         """User sends a message.
 
-        The inline ``handle`` checks content policy and wraps accepted
-        text in a ``HumanMessage``. Rejected messages produce ``Blocked``
-        and never trigger the LLM.
+        The inline ``handle`` wraps the text in a ``HumanMessage``.
         """
 
         content: str = ""
@@ -110,29 +102,19 @@ class Conversation(Namespace):
 
             message: HumanMessage = None  # type: ignore[assignment]
 
-        class Blocked(DomainEvent):
-            """User message rejected by content moderation."""
-
-            reason: str = ""
-
-        def handle(self) -> Conversation.Send.Sent | Conversation.Send.Blocked:
-            for word in BLOCKED_WORDS:
-                if word in self.content.lower():
-                    return Conversation.Send.Blocked(
-                        reason=f"Content policy: contains '{word}'",
-                    )
+        def handle(self) -> Conversation.Send.Sent:
             return Conversation.Send.Sent(
                 message=HumanMessage(content=self.content),
             )
 
     class AnswerProduced(DomainEvent):
-        """Final text answer — terminal fact of the conversation."""
+        """Final text answer. Terminal fact of the conversation."""
 
         content: str = ""
 
 
 # ---------------------------------------------------------------------------
-# Integration events — LLM / frontend-tool boundary
+# Integration events: LLM / frontend-tool boundary
 # ---------------------------------------------------------------------------
 
 
@@ -140,7 +122,7 @@ class ToolsRegistered(IntegrationEvent):
     """Seed event carrying the frontend-declared tool definitions.
 
     The ``call_llm`` handler binds these to the LLM so the model knows
-    what it can call; the actual execution happens in the frontend.
+    what it can call. The actual execution happens in the frontend.
     """
 
     tools: tuple[Any, ...] = ()
@@ -153,13 +135,13 @@ class LLMResponded(IntegrationEvent, MessageEvent):
 
 
 class ToolsExecuted(IntegrationEvent, MessageEvent):
-    """Resume event — the frontend returned one or more tool messages."""
+    """Resume event. The frontend returned one or more tool messages."""
 
     messages: tuple[ToolMessage, ...] = ()
 
 
 # ---------------------------------------------------------------------------
-# Reducer — accumulates BaseMessage from any MessageEvent so handlers
+# Reducer: projects BaseMessage from any MessageEvent so handlers
 # receive the full conversation history via the ``messages`` parameter.
 # ---------------------------------------------------------------------------
 
@@ -169,12 +151,6 @@ messages = message_reducer()
 # ---------------------------------------------------------------------------
 # Handlers
 # ---------------------------------------------------------------------------
-
-
-@on(Event)
-def audit_trail(event: Event) -> None:
-    """Side-effect handler: logs every event as it flows."""
-    print(f"  {event!r}")
 
 
 @on(Conversation.Send.Sent, ToolsExecuted)
@@ -201,12 +177,12 @@ async def call_llm(
 @on(LLMResponded)
 def finalize_answer(event: LLMResponded) -> Conversation.AnswerProduced | None:
     """Emit the terminal ``AnswerProduced`` when the LLM answered without
-    calling tools. When ``tool_calls`` are present, do nothing — the
+    calling tools. When ``tool_calls`` are present, do nothing. The
     AG-UI adapter's streaming path has already emitted
     ``ToolCallStart`` / ``ToolCallArgs`` / ``ToolCallEnd`` for the
-    frontend; the graph naturally pauses waiting for the frontend's
-    returning tool message, which the resume factory will surface as
-    ``ToolsExecuted`` to continue the loop.
+    frontend. The graph pauses until the frontend returns its tool
+    message, which the resume factory surfaces as ``ToolsExecuted`` to
+    continue the loop.
     """
     if event.message.tool_calls:
         return None
@@ -219,14 +195,14 @@ def finalize_answer(event: LLMResponded) -> Conversation.AnswerProduced | None:
 
 graph = EventGraph.from_namespaces(
     Conversation,
-    handlers=[call_llm, finalize_answer, audit_trail],
+    handlers=[call_llm, finalize_answer],
     reducers=[messages],
     checkpointer=MemorySaver(),
 )
 
 
 # ---------------------------------------------------------------------------
-# AG-UI adapter — production deployment mounts ``adapter.stream(inp)``
+# AG-UI adapter. A production deployment mounts ``adapter.stream(inp)``
 # on a FastAPI route via ``create_starlette_response(...)``.
 # ---------------------------------------------------------------------------
 
@@ -266,8 +242,8 @@ adapter = AGUIAdapter(
 
 
 # ---------------------------------------------------------------------------
-# Main — stand-alone smoke, no HTTP. For the full frontend-tools
-# round-trip, mount ``adapter.stream(input_data)`` on a FastAPI route.
+# Main: stand-alone smoke, no HTTP, no frontend tool registered. It does
+# not drive ``adapter.stream``.
 # ---------------------------------------------------------------------------
 
 
@@ -280,21 +256,11 @@ async def main() -> None:
             Conversation.Send(content="Say hello in three words."),
         ]
     )
+    for ev in log1:
+        print(f"  {ev!r}")
     answer = log1.latest(Conversation.AnswerProduced)
     if answer:
         print(f"\nAnswer: {answer.content}")
-
-    print("\n--- Blocked by moderation (never reaches LLM) ---")
-    log2 = await graph.ainvoke(
-        [
-            ToolsRegistered(tools=()),
-            Conversation.Send(content="How do I hack into a database?"),
-        ]
-    )
-    blocked = log2.latest(Conversation.Send.Blocked)
-    if blocked:
-        print(f"Result: {blocked.reason}")
-    print(f"LLM called: {log2.has(LLMResponded)}")
 
 
 if __name__ == "__main__":

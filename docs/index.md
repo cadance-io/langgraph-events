@@ -3,29 +3,11 @@
 Opinionated event-driven abstraction for LangGraph with a **DDD-aligned event taxonomy**. State IS events.
 
 !!! warning "Experimental (v0.43.0)"
-    This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything you can't easily rewrite.
+    This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything that you cannot rewrite with little effort.
 
-## What is this?
+Model your domain as namespaces with commands and outcomes, colocate the handler on the command, and let `EventGraph` derive the topology. The quick start is in the [README](https://github.com/cadance-io/langgraph-events#quick-start). The install lines are in [Getting Started](getting-started.md#install).
 
-Replace hand-wired LangGraph edges with event-driven topology: model your domain as **namespaces with commands and outcomes**, colocate the handler on the command, and let `EventGraph` derive the topology.
-
-```python
-class Order(Namespace):
-    class Place(Command):
-        customer_id: str
-
-        class Placed(DomainEvent):
-            order_id: str
-
-        def handle(self) -> Order.Place.Placed:
-            return Order.Place.Placed(order_id=f"o-{self.customer_id}")
-
-
-graph = EventGraph([Order.Place])
-log = graph.invoke(Order.Place(customer_id="alice"))
-```
-
-### What the graph looks like
+## What the graph looks like
 
 `graph.namespaces().mermaid()` on the [`order`](patterns.md#order) example:
 
@@ -69,21 +51,17 @@ graph LR
 ```
 <!-- autogen:end -->
 
-## Install
-
-```bash
-pip install langgraph-events           # core
-pip install "langgraph-events[agui]"   # + AG-UI adapter
-```
-
-Requires Python 3.11+.
-
 ## Navigate
 
-- **Start:** [Getting Started](getting-started.md) → [Core Concepts](concepts.md)
-- **Dispatch patterns:** [Control Flow](control-flow.md) — fan-out, HITL, exceptions, retries, invariants
-- **State:** [Reducers](reducers.md) — domain-scoped or graph-wide
-- **Agents over the log:** [Reflection](reflection.md) — `graph.reflect(log)` + the `query_log` tool: an LLM queries the run's facts lazily instead of holding the log in context
-- **Streams:** [Streaming](streaming.md), [AG-UI Adapter](agui.md)
-- **Reference:** [API](api.md), [Patterns](patterns.md)
-- **Evolving a deployed graph:** [Checkpointer Evolution](checkpointer-evolution.md) (what's safe to change) → [Event Migrations](event-migrations.md) (keep old checkpoints working after a rename)
+- [Getting Started](getting-started.md)
+- [Concepts](concepts.md)
+- [Control Flow](control-flow.md) — fan-out, paused threads, exceptions, retries, invariants
+- [Reducers](reducers.md) — namespace-scoped or graph-wide
+- [Patterns](patterns.md)
+- [Streaming](streaming.md)
+- [AG-UI Adapter](agui.md)
+- [Reflection](reflection.md) — `graph.reflect(log)` and the `query_log` tool: an LLM queries the run's facts lazily instead of holding the log in context
+- [Event Migrations](event-migrations.md) — keep old checkpoints working after a rename
+- [Migration Gate and Deploys](migration-gate.md) — the release gate, the deploy steps and the store rewrite
+- [Retiring an Interrupted Subclass](retiring-interrupted.md) — delete a pause class and keep each paused thread resumable
+- [API Reference](api.md)

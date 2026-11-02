@@ -1,15 +1,15 @@
 """DDD Expense Approval Agent — langgraph-events demo.
 
-Demonstrates DDD domains combined with human-in-the-loop approval:
+Demonstrates a namespace combined with a paused thread for approval:
 
 - ``Namespace`` with ``ScalarReducer`` — the ``Expense`` namespace tracks
   status through the approval lifecycle.
-- Inline ``handle`` with LLM — ``Submit.handle`` calls an LLM to extract
+- Inline handler with LLM — ``Submit.submit`` calls an LLM to extract
   structured expense data from a natural-language description.
-- ``Interrupted`` inside a DDD flow — when the expense exceeds the policy
-  threshold, the graph pauses for manager review.
+- ``Interrupted`` inside a namespace flow — when the expense exceeds the
+  policy threshold, the graph pauses for manager review.
 - ``resume()`` with a ``Command`` as seed — the manager resumes the graph
-  by sending an ``Approve`` or ``Reject`` command, which the domain
+  by sending an ``Approve`` or ``Reject`` command, which the namespace
   processes through its inline handler.
 
 Usage:
@@ -34,7 +34,7 @@ from langgraph_events import (
 )
 
 # ---------------------------------------------------------------------------
-# LLM — structured output for expense extraction
+# LLM: structured output for expense extraction
 # ---------------------------------------------------------------------------
 
 APPROVAL_THRESHOLD = 500
@@ -77,7 +77,7 @@ class Expense(Namespace):
     """Expense report lifecycle.
 
     The ``status`` reducer tracks the current state. Only ``DomainEvent``
-    outcomes update it — intermediate ``Command`` dispatches are ignored.
+    outcomes update it. Intermediate ``Command`` dispatches are ignored.
     """
 
     status = ScalarReducer(
@@ -89,8 +89,8 @@ class Expense(Namespace):
     class Submit(Command):
         """Submit an expense from a natural-language description.
 
-        The inline ``handle`` calls an LLM to extract structured fields
-        (amount, category, merchant) from free text.
+        The inline ``submit`` handler calls an LLM to extract structured
+        fields (amount, category, merchant) from free text.
         """
 
         description: str = ""
@@ -150,7 +150,7 @@ class Expense(Namespace):
 
 
 # ---------------------------------------------------------------------------
-# Interrupted event — pauses the graph for manager review
+# Interrupted event: pauses the graph for manager review
 # ---------------------------------------------------------------------------
 
 
@@ -162,7 +162,7 @@ class ApprovalRequired(Interrupted):
 
 
 # ---------------------------------------------------------------------------
-# External handler — policy checker
+# External handler: policy checker
 # ---------------------------------------------------------------------------
 
 
@@ -204,7 +204,7 @@ def main() -> None:
     print(graph.namespaces().text())
     print()
 
-    # Scenario 1 — auto-approved (under threshold)
+    # Scenario 1: auto-approved (under threshold)
     print(f"=== Auto-approved (under ${APPROVAL_THRESHOLD}) ===")
     log1 = graph.invoke(
         Expense.Submit(description="Coffee with client at Starbucks, $12"),
@@ -214,7 +214,7 @@ def main() -> None:
         print(f"  {type(ev).__qualname__}: {ev}")
     print()
 
-    # Scenario 2 — manager approves (over threshold)
+    # Scenario 2: manager approves (over threshold)
     print(f"=== Manager approval (over ${APPROVAL_THRESHOLD}) ===")
     config_2 = {"configurable": {"thread_id": "exp-002"}}
     log2 = graph.invoke(
@@ -225,7 +225,7 @@ def main() -> None:
     for ev in log2:
         print(f"  {type(ev).__qualname__}: {ev}")
 
-    # Manager approves — resume with an Approve command
+    # Manager approves: resume with an Approve command
     print("  --- manager approves ---")
     log2 = graph.resume(
         Expense.Approve(approver="manager@co.com"),
@@ -235,7 +235,7 @@ def main() -> None:
         print(f"  {type(ev).__qualname__}: {ev}")
     print()
 
-    # Scenario 3 — manager rejects (over threshold)
+    # Scenario 3: manager rejects (over threshold)
     print(f"=== Manager rejection (over ${APPROVAL_THRESHOLD}) ===")
     config_3 = {"configurable": {"thread_id": "exp-003"}}
     log3 = graph.invoke(
@@ -243,8 +243,10 @@ def main() -> None:
         config=config_3,
     )
     print("  --- graph paused for approval ---")
+    for ev in log3:
+        print(f"  {type(ev).__qualname__}: {ev}")
 
-    # Manager rejects — resume with a Reject command
+    # Manager rejects: resume with a Reject command
     print("  --- manager rejects ---")
     log3 = graph.resume(
         Expense.Reject(reason="Not a business expense"),

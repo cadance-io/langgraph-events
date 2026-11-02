@@ -4,10 +4,7 @@ Demonstrates a supervisor/coordinator pattern where typed events route tasks
 to specialist agents automatically. The supervisor handler subscribes to the
 ``Task.Run`` command and to each specialist's completion event, and emits
 sub-commands (``Task.Research``, ``Task.Code``) or the final ``Finalized``
-fact — no routing functions, no subgraph state adapters.
-
-A single ``@on(Event)`` side-effect handler logs every event as it flows,
-with ``repr()``. It replaces manual isinstance printing.
+fact. There are no routing functions and no subgraph state adapters.
 
 Usage:
     export OPENAI_API_KEY="sk-..."
@@ -26,7 +23,6 @@ from langchain_openai import ChatOpenAI
 from langgraph_events import (
     Command,
     DomainEvent,
-    Event,
     EventGraph,
     EventLog,
     Namespace,
@@ -49,7 +45,7 @@ class Contextualizable(Protocol):
 class Task(Namespace):
     """A coordinated multi-step task.
 
-    ``Run`` is the user intent — the entry command. The supervisor handler
+    ``Run`` is the user intent, the entry command. The supervisor handler
     picks it up (and each specialist completion) and dispatches either a
     ``Research`` or ``Code`` sub-command, or emits the ``Finalized`` fact
     when enough context has been gathered.
@@ -71,7 +67,7 @@ class Task(Namespace):
                 return f"[Research Result] {self.findings}"
 
         async def handle(self) -> Task.Research.Completed:
-            """Research specialist — answers research queries."""
+            """Research specialist. Answers research queries."""
             messages = [
                 SystemMessage(
                     content=(
@@ -96,7 +92,7 @@ class Task(Namespace):
                 return f"[Code Result]\n{self.code}"
 
         async def handle(self) -> Task.Code.Produced:
-            """Coding specialist — writes code based on specs."""
+            """Coding specialist. Writes code based on specs."""
             prompt = self.spec
             if self.context:
                 prompt = f"Context:\n{self.context}\n\nTask:\n{self.spec}"
@@ -114,7 +110,7 @@ class Task(Namespace):
             return Task.Code.Produced(code=response.content)
 
     class Finalized(DomainEvent):
-        """Final synthesized answer — terminal domain fact."""
+        """Final synthesized answer. Terminal fact of the namespace."""
 
         answer: str = ""
 
@@ -156,7 +152,7 @@ coder_llm = ChatOpenAI(model="gpt-4o-mini")
 
 
 # ---------------------------------------------------------------------------
-# Reducer — projects events into context parts incrementally
+# Reducer: projects events into context parts incrementally
 # ---------------------------------------------------------------------------
 
 
@@ -172,24 +168,18 @@ context_reducer = Reducer(
 # ---------------------------------------------------------------------------
 
 
-@on(Event)
-def audit_trail(event: Event) -> None:
-    """Side-effect handler: logs every event as it flows."""
-    print(f"  {event!r}")
-
-
 @on(Task.Run, Task.Research.Completed, Task.Code.Produced)
 async def supervisor(
     event: Task.Run | Task.Research.Completed | Task.Code.Produced,
     log: EventLog,
     context_parts: list,
 ) -> Task.Research | Task.Code | Task.Finalized:
-    """Supervisor hub — decides next step based on accumulated results.
+    """Supervisor hub. Decides the next step based on accumulated results.
 
     Fires on the initial ``Task.Run``, and again whenever a specialist reports
     back (``Task.Research.Completed`` / ``Task.Code.Produced``). Uses
-    tool-calling to make structured routing decisions. The ``context_parts``
-    reducer is maintained incrementally by the framework — no rebuild needed.
+    tool-calling to make structured routing decisions. The library maintains
+    the ``context_parts`` reducer incrementally. No rebuild is needed.
     """
     context = "\n\n".join(context_parts)
     messages = [
@@ -227,7 +217,7 @@ async def supervisor(
 
 
 graph = EventGraph(
-    [supervisor, Task.Research, Task.Code, audit_trail],
+    [supervisor, Task.Research, Task.Code],
     reducers=[context_reducer],
 )
 
@@ -235,7 +225,6 @@ graph = EventGraph(
 async def main() -> None:
     task = "Research what FastAPI is, then write a simple hello world API endpoint."
     print(f"Task: {task}\n")
-    print("--- Event Flow ---")
 
     log = await graph.ainvoke(Task.Run(description=task))
 

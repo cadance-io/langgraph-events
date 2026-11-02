@@ -231,8 +231,8 @@ def _stale_postgres_saver(url: str) -> Iterator[BaseCheckpointSaver]:
 
 
 def _documented_prune_sql() -> str:
-    """The SQL that *Old blob versions* in docs/event-migrations.md gives."""
-    docs = Path(__file__).resolve().parents[1] / "docs" / "event-migrations.md"
+    """The SQL that *Old blob versions* in docs/migration-gate.md gives."""
+    docs = Path(__file__).resolve().parents[1] / "docs" / "migration-gate.md"
     section = docs.read_text().split("### Old blob versions", 1)[1]
     return section.split("```sql\n", 1)[1].split("```", 1)[0]
 
@@ -1142,24 +1142,23 @@ def describe_the_documented_prune_of_old_blob_versions():
             notes = [e.note for e in graph.get_state(_cfg("t1")).events[1:]]
             assert notes == ["t1"]
 
-    def when_a_restore_follows_the_prune():
-        def it_refuses_and_changes_nothing(postgres_store: _PostgresStore):
-            backup_live_set(postgres_store.releases.current)
-            postgres_store.rewrite()
-            _prune(postgres_store.rows.url)
-            before = postgres_store.live_tables()
+    def it_refuses_a_restore_that_follows_the_prune(postgres_store: _PostgresStore):
+        backup_live_set(postgres_store.releases.current)
+        postgres_store.rewrite()
+        _prune(postgres_store.rows.url)
+        before = postgres_store.live_tables()
 
-            with pytest.raises(TargetError) as raised:
-                restore_live_set(postgres_store.releases.current)
+        with pytest.raises(TargetError) as raised:
+            restore_live_set(postgres_store.releases.current)
 
-            assert str(raised.value) == (
-                f"The backup {postgres_store.fingerprint} names 1 blob version "
-                f"that checkpoint_blobs no longer holds, so the restore would "
-                f"lose a channel. A prune of old blob versions deletes such "
-                f"versions. Nothing changed. Restore the store with the tools "
-                f"of its database."
-            )
-            assert postgres_store.live_tables() == before
+        assert str(raised.value) == (
+            f"The backup {postgres_store.fingerprint} names 1 blob version "
+            f"that checkpoint_blobs no longer holds, so the restore would "
+            f"lose a channel. A prune of old blob versions deletes such "
+            f"versions. Nothing changed. Restore the store with the tools "
+            f"of its database."
+        )
+        assert postgres_store.live_tables() == before
 
     def it_keeps_a_blob_newer_than_each_version_a_checkpoint_names(
         tmp_path: Path, postgres_url: str

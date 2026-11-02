@@ -68,7 +68,7 @@ graph LR
         direction LR
         Answered(Answered):::devt
         Ask{{Ask}}:::cmd
-        GaveUp([GaveUp]):::halt
+        RetriesExhausted([RetriesExhausted]):::halt
     end
     HandlerRaised([HandlerRaised]):::syst
     HandlerRetried([HandlerRetried]):::syst
@@ -76,7 +76,7 @@ graph LR
     Ask -.->|"(raises)"| HandlerRaised
     Ask -.->|"(retry)"| HandlerRetried
     Ask --> Answered
-    HandlerRaised -->|give_up| GaveUp
+    HandlerRaised -->|give_up| RetriesExhausted
     linkStyle 1 stroke:#6b7280,stroke-dasharray:3 3
     linkStyle 2 stroke:#0891b2,stroke-dasharray:2 4
 ```
@@ -88,11 +88,11 @@ Namespaces:
   Question
     Command: Ask  (raises RateLimitError; retry x3)
       → Answered
-    Event: GaveUp  [Halted]
+    Event: RetriesExhausted  [Halted]
 System events:
   HandlerRaised
 Policies:
-  give_up  (HandlerRaised → GaveUp)
+  give_up  (HandlerRaised → RetriesExhausted)
 Seed events:
   Ask
 ```
