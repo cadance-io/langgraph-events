@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-11-02
+
 ### Fixed
 
 - **A store with no `checkpoints` table is an empty store.** `rewrite` plans 0 threads and
@@ -1976,7 +1978,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.43.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.43.1...HEAD
+[0.43.1]: https://github.com/cadance-io/langgraph-events/compare/v0.43.0...v0.43.1
 [0.43.0]: https://github.com/cadance-io/langgraph-events/compare/v0.42.1...v0.43.0
 [0.42.1]: https://github.com/cadance-io/langgraph-events/compare/v0.42.0...v0.42.1
 [0.42.0]: https://github.com/cadance-io/langgraph-events/compare/v0.41.0...v0.42.0
