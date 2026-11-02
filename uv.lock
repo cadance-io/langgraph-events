@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 
 [[package]]
@@ -636,7 +636,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-events"
-version = "0.43.1"
+version = "0.44.0"
 source = { editable = "." }
 dependencies = [
     { name = "beartype" },

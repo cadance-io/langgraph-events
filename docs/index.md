@@ -2,7 +2,7 @@
 
 Opinionated event-driven abstraction for LangGraph with a **DDD-aligned event taxonomy**. State IS events.
 
-!!! warning "Experimental (v0.43.1)"
+!!! warning "Experimental (v0.44.0)"
     This is an early-stage personal project, not a supported product. The API will change without notice or migration path. Do not depend on this for anything that you cannot rewrite with little effort.
 
 Model your domain as namespaces with commands and outcomes, colocate the handler on the command, and let `EventGraph` derive the topology. The quick start is in the [README](https://github.com/cadance-io/langgraph-events#quick-start). The install lines are in [Getting Started](getting-started.md#install).
