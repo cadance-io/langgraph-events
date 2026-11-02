@@ -1806,6 +1806,29 @@ def describe_connect():
             ]
             assert events[-1].message == "checkpoint unreadable"
 
+        def when_on_unmapped_is_raise():
+
+            async def it_propagates_unmapped_event_error_after_the_snapshots():
+                graph = _graph(ask_plain_interrupt, checkpointer=MemorySaver())
+                await graph.ainvoke(
+                    UserAsked(question="go"),
+                    config=_config("t-connect-unmapped"),
+                )
+                adapter = _adapter(graph, on_unmapped="raise")
+                events: list[BaseEvent] = []
+
+                with pytest.raises(UnmappedEventError, match="PlainInterrupt"):
+                    async for event in adapter.connect(
+                        _make_input(thread_id="t-connect-unmapped")
+                    ):
+                        events.append(event)
+
+                assert _types(events) == [
+                    EventType.RUN_STARTED,
+                    EventType.STATE_SNAPSHOT,
+                    EventType.MESSAGES_SNAPSHOT,
+                ]
+
     def when_checkpointer_present():
 
         def when_existing_thread():

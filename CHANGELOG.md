@@ -7,16 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- **`AGUIAdapter.connect()` emits the run lifecycle.** The replay starts with `RUN_STARTED`
-  and ends with `RUN_FINISHED`. Both carry the thread id and the run id of the input. If the
-  replay raises, `RUN_ERROR` ends the stream. Before this fix, an AG-UI client such as
-  `@ag-ui/client` 1.0 refused the stream with "First event must be 'RUN_STARTED'". See
-  [Connect / Reconnect](docs/agui.md#connect-reconnect).
+- **`AGUIAdapter.connect()` sends `RUN_STARTED` first and `RUN_FINISHED` last.** See the fix
+  below.
   WARNING: a consumer that wrapped the `connect()` stream in its own `RUN_STARTED` and
   `RUN_FINISHED` now sends each lifecycle event twice. Remove the wrapper. If the wrapper adds
   events before `RUN_FINISHED`, insert them before the last event of the stream.
+- **The log record of a failed AG-UI run is "AG-UI run failed".** It was "EventGraph stream
+  failed". The new text applies to `stream()` and to `connect()`. Update a log filter or an
+  alert that matches the old text.
+
+### Fixed
+
+- **`AGUIAdapter.connect()` emits the run lifecycle.** The replay starts with `RUN_STARTED`
+  and ends with `RUN_FINISHED`. Both carry the thread id and the run id of the input. When an
+  input id is empty, the adapter makes a new UUID for it, and both events carry that UUID. If
+  the replay raises, `RUN_ERROR` ends the stream. One exception applies: with
+  `on_unmapped="raise"`, an `UnmappedEventError` propagates and does not become `RUN_ERROR`.
+  The stream then ends without a terminal event, the same as in `stream()`. Before this fix, an
+  AG-UI client such as `@ag-ui/client` 1.0 refused the stream with "First event must be
+  'RUN_STARTED'". See [Connect / Reconnect](docs/agui.md#connect-reconnect).
 
 ## [0.43.1] - 2026-11-02
 

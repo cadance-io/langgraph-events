@@ -164,7 +164,7 @@ Rename the entry, or set the field through the LangChain message.
 
 ## Connect / Reconnect
 
-`connect()`, alias `reconnect()`, runs no handler. It emits `RunStarted`, then `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event, then `RunFinished`. If the replay raises, `RunError` ends the stream instead of `RunFinished`. An AG-UI client refuses a stream that does not start with `RunStarted`, so do not strip these events. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
+`connect()`, alias `reconnect()`, runs no handler. It emits `RunStarted`, then `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event, then `RunFinished`. If the replay raises, `RunError` ends the stream instead of `RunFinished`. One exception applies: with `on_unmapped="raise"`, an `UnmappedEventError` propagates to the caller and does not become `RunError`. The stream then ends without a terminal event, the same as in `stream()`. An AG-UI client refuses a stream that does not start with `RunStarted`, so do not strip these events. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
 
 ## Custom Mappers
 
