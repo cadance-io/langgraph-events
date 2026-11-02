@@ -68,8 +68,11 @@ message. The message itself still converts.
 8 KiB holds roughly a hundred small entries or a few paragraphs of text, which
 is the scale of the hint the field exists for. It also bounds the damage: a
 thousand-message thread with every message at the cap is 8 MB of checkpoint,
-which a checkpointer can still write. There is no lower bound that a legitimate
-hint would breach and no higher one that keeps a thread's growth bounded.
+which a checkpointer can still write. The held parts of
+:data:`AGUI_HELD_PARTS_KEY` have a separate cap of the same size, so one
+message can store up to 16 KiB, and that thread up to 16 MB. There is no lower
+bound that a legitimate hint would breach and no higher one that keeps a
+thread's growth bounded.
 """
 
 

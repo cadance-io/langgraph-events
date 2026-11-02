@@ -167,7 +167,7 @@ Rename the entry, or set the field through the LangChain message.
 
 A user or tool message can carry a media part whose source is a `file` source, for example a `DocumentPart`. AG-UI defines that source as a handle that the provider issued. The server sends a provider handle with its own credentials. So a client handle could read a file that the client does not own, and the model must not receive the part.
 
-Inbound, `agui_messages_to_langchain` holds such a part. The part, with its `metadata`, goes under the reserved `additional_kwargs` key `AGUI_HELD_PARTS_KEY`, with its position in the content list. The LangChain `content` does not hold it. Outbound, `MessagesSnapshot` puts each held part back at its position. A host that issues its own file handles can thus show them again after a reconnect.
+Inbound, `agui_messages_to_langchain` and `detect_new_tool_results` hold such a part. The part, with its `metadata`, goes under the reserved `additional_kwargs` key `AGUI_HELD_PARTS_KEY`, with its position in the content list. The LangChain `content` does not hold it. Outbound, `MessagesSnapshot` puts each held part back at its position. A host that issues its own file handles can thus show them again after a reconnect.
 
 ```python
 from ag_ui.core import DocumentPart, FileSource, TextPart, UserMessage
@@ -187,14 +187,14 @@ The content changes shape only when the message holds a part:
 | Kept parts | LangChain `content` |
 |---|---|
 | None | `""` |
-| Exactly one text part | The text of that part, as a `str` |
+| Exactly one text part, with no `id` and a non-empty text | The text of that part, as a `str` |
 | Any other set | The kept parts as standard blocks, as without a held part |
 
-A message with no held part converts as before. When the content collapses to a `str`, the `id` of the text part is lost. Outbound, the text comes back as a `TextPart` with no `id`.
+A message with no held part converts as before. Outbound, the snapshot gives back the same parts in the same order.
 
 `held_parts(message)` returns the held parts in their original order. It skips an entry that does not validate, with a `WARNING` that names the message. It never raises, because it reads checkpointed data. Outbound, the snapshot drops a bad entry the same way. If a handler rewrote the content, a position past the end puts the part at the end.
 
-WARNING: A held part is client input, as the extras are. The trust note of the extras slot applies. The held parts of one message are measured against `AGUI_EXTRAS_MAX_BYTES` on their own. Over the cap, the held parts are dropped with a `WARNING` that names the message. The model still does not receive them, and the message still converts.
+WARNING: A held part is client input, as the extras are. The trust note of the extras slot applies. The held parts of one message are measured against `AGUI_EXTRAS_MAX_BYTES` on their own. So one message can store up to 8 KiB of extras and 8 KiB of held parts. Over the cap, the held parts are dropped with a `WARNING` that names the message. The model still does not receive them, and the message still converts.
 
 ## Connect / Reconnect
 

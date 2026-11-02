@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from ._extras import collect_inbound_extras, hold_inbound_parts
 
 if TYPE_CHECKING:
-    from ag_ui.core import InputContentPart, Message
+    from ag_ui.core import InputContentPart, Message, TextPart
     from ag_ui.core.types import RunAgentInput
     from langchain_core.messages import BaseMessage
     from langchain_core.messages.tool_call import ToolCall as LCToolCall
@@ -48,8 +48,9 @@ def _content_to_langchain(
     block has no field for it.
 
     If at least one part is held, the content collapses: no kept part gives
-    ``""``, and one kept text part gives its text. A host can then read the
-    content as text. Content with no held part converts as before.
+    ``""``. One kept text part with no ``id`` and a non-empty text gives its
+    text. A host can then read the content as text. Content with no held part
+    converts as before.
     """
     if isinstance(content, str):
         return content, {}
@@ -80,9 +81,18 @@ def _content_to_langchain(
     held_kwargs = hold_inbound_parts(held, message_id)
     if held and not kept:
         return "", held_kwargs
-    if held and len(kept) == 1 and kept[0].type == "text":
+    if held and len(kept) == 1 and _is_plain_text(kept[0]):
         return kept[0].text, held_kwargs
     return [_part_to_block(part) for part in kept], held_kwargs
+
+
+def _is_plain_text(part: InputContentPart) -> TypeGuard[TextPart]:
+    """Return whether *part* converts to a ``str`` and back without loss.
+
+    A text part with an ``id`` loses the ``id`` in a ``str``. An empty text
+    part comes back as no part, which moves each held part after it.
+    """
+    return part.type == "text" and part.id is None and part.text != ""
 
 
 def _part_to_block(part: InputContentPart) -> dict[str, Any]:

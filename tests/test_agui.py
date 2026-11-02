@@ -59,6 +59,7 @@ from langgraph_events.agui import (
     agui_messages_to_langchain,
     build_langchain_tools,
     detect_new_tool_results,
+    held_parts,
 )
 from langgraph_events.agui._mappers import _warned_classes, _warned_extras
 
@@ -3319,6 +3320,8 @@ def describe_held_parts_round_trip():
                 [_held_doc(id="d1"), TextPart(text="and"), _held_doc(id="d2")],
                 [TextPart(text="a"), TextPart(text="b"), _held_doc()],
                 [ImagePart(source=UrlSource(value="https://x/y")), _held_doc()],
+                [TextPart(id="p1", text="kept"), _held_doc()],
+                [TextPart(text=""), _held_doc()],
             ],
         )
         async def it_sends_back_the_same_parts(parts: list[Any]):
@@ -3360,6 +3363,19 @@ def describe_held_parts_round_trip():
 
         A raise there breaks every later connect on the thread.
         """
+
+        def when_an_index_exceeds_the_list_size_limit():
+            async def it_puts_the_part_at_the_end():
+                part = _held_doc().model_dump(by_alias=True)
+                slot = [{"index": 10**30, "part": part}]
+                message = HumanMessage(
+                    content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+                )
+
+                events = await _emit(message)
+
+                [user_msg] = _roled(events, "user")
+                assert user_msg.content == [TextPart(text="hi"), _held_doc()]
 
         async def it_still_serves_the_connect_snapshot():
             good = {"index": 1, "part": _held_doc().model_dump(by_alias=True)}
@@ -4115,6 +4131,27 @@ def describe_detect_new_tool_results():
         def it_leaves_additional_kwargs_empty():
             [out] = detect_new_tool_results(_tool_input(), {"messages": []})
             assert out.additional_kwargs == {}
+
+    def when_the_agui_message_has_content_parts():
+        def it_converts_each_part_to_a_langchain_block():
+            image = ImagePart(source=UrlSource(value="https://x/y"))
+            inp = _tool_input(content=[TextPart(text="report"), image])
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.content == [
+                {"type": "text", "text": "report"},
+                {"type": "image", "url": "https://x/y"},
+            ]
+
+        def when_a_part_has_a_file_source():
+            def it_keeps_the_part_off_the_model_input():
+                inp = _tool_input(content=[TextPart(text="report"), _held_doc()])
+                [out] = detect_new_tool_results(inp, {"messages": []})
+                assert out.content == "report"
+
+            def it_holds_the_part():
+                inp = _tool_input(content=[TextPart(text="report"), _held_doc()])
+                [out] = detect_new_tool_results(inp, {"messages": []})
+                assert held_parts(out) == [_held_doc()]
 
 
 def describe_frontend_state_mutated_event_class():

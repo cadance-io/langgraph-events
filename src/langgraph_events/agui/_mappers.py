@@ -252,7 +252,7 @@ def _content_to_agui(message: BaseMessage, label: str) -> str | list[InputConten
     if isinstance(content, str):
         content = [TextPart(text=content)] if content else []
     for index, part in held:
-        content.insert(index, part)
+        content.insert(min(index, len(content)), part)
     return content
 
 
