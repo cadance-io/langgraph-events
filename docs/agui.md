@@ -125,10 +125,11 @@ Messages reach the client on two paths at the same time. The authoritative path 
 | `AIMessage.tool_calls` | `AssistantMessage.tool_calls` | both | `args` are JSON-encoded into `function.arguments`. |
 | `ToolMessage.status` | `ToolMessage.error` | both | `status="error"` sends the content as `error`, or the literal `"error"` when the content is empty, because a falsy `error` reads as a success. A truthy inbound `error` sets `status="error"`. The error *text* does not come back: LangChain's `ToolMessage` has no field for it. |
 | *(none)* | `encrypted_value` | neither | Declared on AG-UI `BaseMessage`, `ToolMessage` and `ToolCall`. The adapter never reads it inbound and never sets it outbound, so a value the client sent is dropped. |
-| `content` blocks | `content` parts | both | On a `UserMessage` or `ToolMessage`, each part maps to the LangChain standard block of the same modality. A `document` part maps to a `file` block. A `data` source maps to `base64` with `mime_type`, and a `url` source maps to `url`. A part `id` is kept. Outbound, LangChain first translates each block to a standard block, so an `image_url` block also maps, and a `file_id` maps to a `file` source. Outbound, a block with no AG-UI part, such as a `base64` block without `mime_type`, is dropped with a `WARNING` that names the message. Inbound, a part with a `file` source is dropped with a `WARNING`: that source names a handle in the provider account, and the server sends that handle with its own credentials. Inbound, part `metadata` is dropped with a `WARNING`, because a LangChain block has no field for it. |
+| `content` blocks | `content` parts | both | On a `UserMessage` or `ToolMessage`, each part maps to the LangChain standard block of the same modality. A `document` part maps to a `file` block. A `data` source maps to `base64` with `mime_type`, and a `url` source maps to `url`. A part `id` is kept. Outbound, LangChain first translates each block to a standard block, so an `image_url` block also maps, and a `file_id` maps to a `file` source. Outbound, a block with no AG-UI part, such as a `base64` block without `mime_type`, is dropped with a `WARNING` that names the message. Inbound, a part with a `file` source is held, not sent to the model. See [Parts the model does not receive](#parts-the-model-does-not-receive). Inbound, the `metadata` of a kept part is dropped with a `WARNING`, because a LangChain block has no field for it. |
 | `additional_kwargs[AGUI_EXTRAS_KEY]["metadata"]` | `metadata` | both | AG-UI 1.0 declares `metadata` as an open mapping of extra data. Before 1.0 it was an extra field, so it stays in the extras slot. `AGUI_EXTRAS_OPEN_FIELDS` lists each such field. A non-mapping value is dropped outbound, with a `WARNING`. |
 | *(none)* | `subagent_run_id` | neither | Declared on AG-UI 1.0 messages. The adapter never reads it inbound and never sets it outbound. |
 | `additional_kwargs[AGUI_EXTRAS_KEY]` | *(extra fields)* | both | Passthrough. See below. |
+| `additional_kwargs[AGUI_HELD_PARTS_KEY]` | `content` parts with a `file` source | both | Held. See [Parts the model does not receive](#parts-the-model-does-not-receive). |
 
 ### Passing extra data on a message
 
@@ -161,6 +162,39 @@ WARNING: Inbound extras arrive verbatim. They flow through `add_messages` into t
 | An entry addresses another declared AG-UI field (`content`, `toolCallId`, …) | That entry. Otherwise it rewrites protocol data. |
 
 Rename the entry, or set the field through the LangChain message.
+
+### Parts the model does not receive
+
+A user or tool message can carry a media part whose source is a `file` source, for example a `DocumentPart`. AG-UI defines that source as a handle that the provider issued. The server sends a provider handle with its own credentials. So a client handle could read a file that the client does not own, and the model must not receive the part.
+
+Inbound, `agui_messages_to_langchain` holds such a part. The part, with its `metadata`, goes under the reserved `additional_kwargs` key `AGUI_HELD_PARTS_KEY`, with its position in the content list. The LangChain `content` does not hold it. Outbound, `MessagesSnapshot` puts each held part back at its position. A host that issues its own file handles can thus show them again after a reconnect.
+
+```python
+from ag_ui.core import DocumentPart, FileSource, TextPart, UserMessage
+
+from langgraph_events.agui import agui_messages_to_langchain, held_parts
+
+doc = DocumentPart(source=FileSource(value="doc-42", provider="host"))
+[message] = agui_messages_to_langchain(
+    [UserMessage(id="u1", content=[TextPart(text="Read this."), doc])]
+)
+message.content  # -> "Read this."
+held_parts(message)  # -> [doc]
+```
+
+The content changes shape only when the message holds a part:
+
+| Kept parts | LangChain `content` |
+|---|---|
+| None | `""` |
+| Exactly one text part | The text of that part, as a `str` |
+| Any other set | The kept parts as standard blocks, as without a held part |
+
+A message with no held part converts as before. When the content collapses to a `str`, the `id` of the text part is lost. Outbound, the text comes back as a `TextPart` with no `id`.
+
+`held_parts(message)` returns the held parts in their original order. It skips an entry that does not validate, with a `WARNING` that names the message. It never raises, because it reads checkpointed data. Outbound, the snapshot drops a bad entry the same way. If a handler rewrote the content, a position past the end puts the part at the end.
+
+WARNING: A held part is client input, as the extras are. The trust note of the extras slot applies. The held parts of one message are measured against `AGUI_EXTRAS_MAX_BYTES` on their own. Over the cap, the held parts are dropped with a `WARNING` that names the message. The model still does not receive them, and the message still converts.
 
 ## Connect / Reconnect
 

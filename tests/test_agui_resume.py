@@ -45,10 +45,14 @@ from langgraph_events import (
     on,
 )
 from langgraph_events.agui import (
+    AGUI_EXTRAS_KEY,
+    AGUI_EXTRAS_MAX_BYTES,
+    AGUI_HELD_PARTS_KEY,
     AGUIAdapter,
     agui_messages_to_langchain,
     detect_new_frontend_messages,
     extract_resume_input,
+    held_parts,
 )
 
 
@@ -66,6 +70,60 @@ def make_run_agent_input(
         context=[],
         forwarded_props=forwarded_props if forwarded_props is not None else {},
     )
+
+
+def _text(text: str) -> TextPart:
+    return TextPart(text=text)
+
+
+def _doc(**overrides: Any) -> DocumentPart:
+    """A document part whose source is a provider file handle."""
+    source = FileSource(value="file-42", provider="openai", mime_type="application/pdf")
+    return DocumentPart(source=source, **overrides)
+
+
+_UNCHANGED_CONVERSIONS: list[tuple[Any, Any]] = [
+    ("hello", "hello"),
+    ([], []),
+    ([TextPart(text="hi")], [{"type": "text", "text": "hi"}]),
+    (
+        [TextPart(text="a"), TextPart(text="b")],
+        [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+    ),
+    (
+        [TextPart(id="p1", text="hi")],
+        [{"type": "text", "text": "hi", "id": "p1"}],
+    ),
+    (
+        [ImagePart(source=UrlSource(value="https://x/y"))],
+        [{"type": "image", "url": "https://x/y"}],
+    ),
+    (
+        [ImagePart(source=DataSource(value="AAA=", mime_type="image/png"))],
+        [{"type": "image", "base64": "AAA=", "mime_type": "image/png"}],
+    ),
+    (
+        [DocumentPart(source=UrlSource(value="https://x/y.pdf", mime_type="a/b"))],
+        [{"type": "file", "url": "https://x/y.pdf", "mime_type": "a/b"}],
+    ),
+    (
+        [AudioPart(source=UrlSource(value="https://x/a"))],
+        [{"type": "audio", "url": "https://x/a"}],
+    ),
+    (
+        [VideoPart(source=UrlSource(value="https://x/v"))],
+        [{"type": "video", "url": "https://x/v"}],
+    ),
+    (
+        [TextPart(text="look"), ImagePart(source=UrlSource(value="https://x/y"))],
+        [{"type": "text", "text": "look"}, {"type": "image", "url": "https://x/y"}],
+    ),
+    (
+        [ImagePart(source=UrlSource(value="https://x/y"), metadata={"tag": "a"})],
+        [{"type": "image", "url": "https://x/y"}],
+    ),
+]
+"""Every content shape that converted before parts were held, with its result."""
 
 
 def describe_agui_messages_to_langchain():
@@ -148,22 +206,104 @@ def describe_agui_messages_to_langchain():
 
                     The server sends it with its own credentials. A client
                     handle can then read a file that the client does not own.
+                    So the part never reaches the model. It is held on the
+                    message instead.
                     """
 
-                    def _message() -> UserMessage:
-                        source = FileSource(value="file-42", provider="openai")
-                        return UserMessage(
-                            id="u-file",
-                            content=[TextPart(text="kept"), ImagePart(source=source)],
-                        )
+                    def it_keeps_the_part_off_the_model_input():
+                        msg = UserMessage(id="u-file", content=[_text("kept"), _doc()])
+                        [out] = agui_messages_to_langchain([msg])
+                        assert out.content == "kept"
 
-                    def it_drops_the_part():
-                        [out] = agui_messages_to_langchain([_message()])
-                        assert out.content == [{"type": "text", "text": "kept"}]
+                    def it_holds_the_whole_part_metadata_included():
+                        part = _doc(metadata={"title": "Q3 plan"})
+                        msg = UserMessage(id="u-file", content=[_text("kept"), part])
+                        [out] = agui_messages_to_langchain([msg])
+                        assert held_parts(out) == [part]
 
-                    def it_logs_a_warning_naming_the_message(caplog):
-                        agui_messages_to_langchain([_message()])
-                        assert any("u-file" in r.message for r in caplog.records)
+                    def it_records_the_index_of_the_part():
+                        msg = UserMessage(id="u-file", content=[_text("kept"), _doc()])
+                        [out] = agui_messages_to_langchain([msg])
+                        assert out.additional_kwargs[AGUI_HELD_PARTS_KEY] == [
+                            {
+                                "index": 1,
+                                "part": {
+                                    "type": "document",
+                                    "source": {
+                                        "type": "file",
+                                        "value": "file-42",
+                                        "provider": "openai",
+                                        "mimeType": "application/pdf",
+                                    },
+                                },
+                            }
+                        ]
+
+                    def it_logs_no_warning(caplog):
+                        msg = UserMessage(id="u-file", content=[_text("kept"), _doc()])
+                        agui_messages_to_langchain([msg])
+                        assert not [
+                            r for r in caplog.records if r.levelname == "WARNING"
+                        ]
+
+                    def when_no_part_is_kept():
+                        def it_converts_the_content_to_an_empty_string():
+                            msg = UserMessage(id="u-file", content=[_doc()])
+                            [out] = agui_messages_to_langchain([msg])
+                            assert out.content == ""
+                            assert held_parts(out) == [_doc()]
+
+                    def when_two_text_parts_are_kept():
+                        def it_keeps_a_block_list():
+                            msg = UserMessage(
+                                id="u-file",
+                                content=[_text("a"), _text("b"), _doc()],
+                            )
+                            [out] = agui_messages_to_langchain([msg])
+                            assert out.content == [
+                                {"type": "text", "text": "a"},
+                                {"type": "text", "text": "b"},
+                            ]
+
+                    def when_a_media_part_is_kept():
+                        def it_keeps_a_block_list():
+                            image = ImagePart(source=UrlSource(value="https://x/y"))
+                            msg = UserMessage(id="u-file", content=[image, _doc()])
+                            [out] = agui_messages_to_langchain([msg])
+                            assert out.content == [
+                                {"type": "image", "url": "https://x/y"}
+                            ]
+
+                    def when_the_held_parts_exceed_the_size_cap():
+                        def _message() -> UserMessage:
+                            big = _doc(metadata={"blob": "x" * AGUI_EXTRAS_MAX_BYTES})
+                            return UserMessage(id="u-big", content=[_text("kept"), big])
+
+                        def it_drops_the_held_parts():
+                            [out] = agui_messages_to_langchain([_message()])
+                            assert AGUI_HELD_PARTS_KEY not in out.additional_kwargs
+
+                        def it_still_keeps_the_part_off_the_model_input():
+                            [out] = agui_messages_to_langchain([_message()])
+                            assert out.content == "kept"
+
+                        def it_logs_a_warning_naming_the_message(caplog):
+                            agui_messages_to_langchain([_message()])
+                            assert any(
+                                r.levelname == "WARNING" and "u-big" in r.message
+                                for r in caplog.records
+                            )
+
+                    def when_the_message_also_carries_extra_fields():
+                        def it_keeps_both_slots():
+                            msg = UserMessage(
+                                id="u-file", content=[_text("kept"), _doc()], tag="a"
+                            )
+                            [out] = agui_messages_to_langchain([msg])
+                            assert out.additional_kwargs[AGUI_EXTRAS_KEY] == {
+                                "tag": "a"
+                            }
+                            assert held_parts(out) == [_doc()]
 
                 def with_part_metadata():
                     """A LangChain block has no field for it."""
@@ -191,6 +331,24 @@ def describe_agui_messages_to_langchain():
                         assert out.content == [
                             {"type": "image", "url": "https://x/y", "id": "p1"}
                         ]
+
+    def when_no_part_has_a_file_source():
+        """A message with no held part converts exactly as before."""
+
+        @pytest.mark.parametrize(("content", "expected"), _UNCHANGED_CONVERSIONS)
+        def it_converts_a_user_message_unchanged(content: Any, expected: Any):
+            [out] = agui_messages_to_langchain([UserMessage(id="u1", content=content)])
+            assert out.content == expected
+            assert type(out.content) is type(expected)
+            assert out.additional_kwargs == {}
+
+        @pytest.mark.parametrize(("content", "expected"), _UNCHANGED_CONVERSIONS)
+        def it_converts_a_tool_message_unchanged(content: Any, expected: Any):
+            msg = AGUIToolMessage(id="t1", content=content, tool_call_id="tc1")
+            [out] = agui_messages_to_langchain([msg])
+            assert out.content == expected
+            assert type(out.content) is type(expected)
+            assert out.additional_kwargs == {}
 
     def when_message_is_assistant():
         def when_content_is_none_and_no_tool_calls():
@@ -296,6 +454,17 @@ def describe_agui_messages_to_langchain():
                     {"type": "text", "text": "chart"},
                     {"type": "image", "url": "https://x/y"},
                 ]
+
+            def with_a_file_source():
+                def it_holds_the_part_the_same_way():
+                    msg = AGUIToolMessage(
+                        id="tm1",
+                        content=[_text("report"), _doc()],
+                        tool_call_id="tc1",
+                    )
+                    [out] = agui_messages_to_langchain([msg])
+                    assert out.content == "report"
+                    assert held_parts(out) == [_doc()]
 
         def when_the_error_field_is_set():
             def it_maps_the_error_field_to_an_error_status():
@@ -884,3 +1053,45 @@ async def _chat_turn(adapter: AGUIAdapter, history: list[Any], turn: str) -> lis
     history.append(UserMessage(id=turn, content=f"say {turn}"))
     inp = make_run_agent_input(messages=list(history), forwarded_props=resume)
     return [e async for e in adapter.stream(inp)]
+
+
+def describe_held_parts():
+    def when_the_message_holds_no_part():
+        def it_returns_an_empty_list():
+            assert held_parts(HumanMessage(content="hi")) == []
+
+    def when_the_message_holds_several_parts():
+        def it_returns_them_in_their_original_order():
+            first = _doc(id="d1")
+            second = _doc(id="d2")
+            msg = UserMessage(id="u1", content=[first, _text("x"), second])
+            [out] = agui_messages_to_langchain([msg])
+            assert held_parts(out) == [first, second]
+
+    def when_an_entry_is_corrupt():
+        """The slot comes from a checkpoint, so it can hold anything."""
+
+        def _message() -> HumanMessage:
+            good = {"index": 1, "part": _doc().model_dump(by_alias=True)}
+            entries = [{"index": 0, "part": {"type": "document"}}, "junk", good]
+            return HumanMessage(
+                id="h-bad", content="", additional_kwargs={AGUI_HELD_PARTS_KEY: entries}
+            )
+
+        def it_skips_the_entry():
+            assert held_parts(_message()) == [_doc()]
+
+        def it_logs_a_warning_naming_the_message(caplog):
+            held_parts(_message())
+            assert any(
+                r.levelname == "WARNING" and "h-bad" in r.message
+                for r in caplog.records
+            )
+
+    def when_the_slot_is_not_a_list():
+        def it_returns_an_empty_list(caplog):
+            msg = HumanMessage(
+                id="h-bad", content="", additional_kwargs={AGUI_HELD_PARTS_KEY: "x"}
+            )
+            assert held_parts(msg) == []
+            assert any("h-bad" in r.message for r in caplog.records)

@@ -49,6 +49,7 @@ from langgraph_events import (
     on,
 )
 from langgraph_events.agui import (
+    AGUI_HELD_PARTS_KEY,
     AGUIAdapter,
     FrontendStateMutated,
     FrontendToolCallRequested,
@@ -3298,6 +3299,110 @@ def describe_user_message_content_conversion():
             assert not _of_type(events, EventType.RUN_ERROR)
             [user_msg] = _roled(events, "user")
             assert user_msg.content == [TextPart(text="kept")]
+
+
+def _held_doc(**overrides: Any) -> DocumentPart:
+    """A document part whose source is a provider file handle."""
+    source = FileSource(value="file-42", provider="host", mime_type="application/pdf")
+    return DocumentPart(source=source, **overrides)
+
+
+def describe_held_parts_round_trip():
+    """A part that the model does not receive comes back on the snapshot."""
+
+    def when_a_user_message_holds_a_part():
+        @pytest.mark.parametrize(
+            "parts",
+            [
+                [TextPart(text="read this"), _held_doc(metadata={"title": "Q3"})],
+                [_held_doc()],
+                [_held_doc(id="d1"), TextPart(text="and"), _held_doc(id="d2")],
+                [TextPart(text="a"), TextPart(text="b"), _held_doc()],
+                [ImagePart(source=UrlSource(value="https://x/y")), _held_doc()],
+            ],
+        )
+        async def it_sends_back_the_same_parts(parts: list[Any]):
+            [inbound] = agui_messages_to_langchain(
+                [AguiUserMessage(id="u1", content=parts)]
+            )
+
+            events = await _emit(inbound)
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == parts
+
+    def when_a_tool_message_holds_a_part():
+        async def it_sends_back_the_same_parts():
+            parts = [TextPart(text="report"), _held_doc()]
+            [inbound] = agui_messages_to_langchain(
+                [AguiToolMessage(id="t1", content=parts, tool_call_id="tc1")]
+            )
+
+            events = await _emit(inbound)
+
+            [tool_msg] = _roled(events, "tool")
+            assert tool_msg.content == parts
+
+    def when_a_handler_rewrote_the_content():
+        async def it_puts_the_part_at_the_end_of_the_shorter_content():
+            slot = [{"index": 5, "part": _held_doc().model_dump(by_alias=True)}]
+            message = HumanMessage(
+                content="new", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+            )
+
+            events = await _emit(message)
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="new"), _held_doc()]
+
+    def when_a_corrupt_slot_is_already_in_the_checkpoint():
+        """`build_messages_snapshot` runs on every `connect()`.
+
+        A raise there breaks every later connect on the thread.
+        """
+
+        async def it_still_serves_the_connect_snapshot():
+            good = {"index": 1, "part": _held_doc().model_dump(by_alias=True)}
+            slot = [{"index": 0, "part": {"type": "document"}}, "junk", good]
+            poisoned = HumanMessage(
+                content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+            )
+            graph = _graph(_emitting(poisoned), checkpointer=MemorySaver())
+            await graph.ainvoke(UserAsked(question="go"), config=_config("t-held"))
+
+            events = await _connect(
+                graph, _make_input(thread_id="t-held"), seed_factory=_ask("unused")
+            )
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="hi"), _held_doc()]
+
+        async def it_logs_a_warning(caplog):
+            slot = [{"index": 0, "part": {"type": "document"}}]
+            message = HumanMessage(
+                id="h-bad", content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+            )
+
+            events = await _emit(message)
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == "hi"
+            assert any(
+                r.levelname == "WARNING" and "h-bad" in r.message
+                for r in caplog.records
+            )
+
+        def when_the_slot_is_not_a_list():
+            async def it_sends_the_content_unchanged():
+                message = HumanMessage(
+                    content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: {"a": 1}}
+                )
+
+                events = await _emit(message)
+
+                assert not _of_type(events, EventType.RUN_ERROR)
+                [user_msg] = _roled(events, "user")
+                assert user_msg.content == "hi"
 
 
 def describe_multiple_custom_reducers():

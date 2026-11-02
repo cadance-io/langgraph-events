@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AG-UI content parts with a `file` source are held, not dropped.** Inbound,
+  `agui_messages_to_langchain` stores such a part, with its `metadata`, under the new reserved
+  key `AGUI_HELD_PARTS_KEY` of `additional_kwargs`. The model does not receive it. Outbound,
+  `MessagesSnapshot` puts each held part back at its position, on `stream()` and on
+  `connect()`. The new `held_parts(message)` returns the held parts. It never raises. See
+  [Parts the model does not receive](docs/agui.md#parts-the-model-does-not-receive).
+  Behaviour change, only for an inbound message with a `file`-source part: if no part is
+  kept, `content` is `""`. If exactly one text part is kept, `content` is its text, as a `str`.
+  Before, `content` was a list of the kept blocks. Every other message converts as before.
+
 ### Changed
 
 - **`AGUIAdapter.connect()` sends `RUN_STARTED` first and `RUN_FINISHED` last.** See the fix

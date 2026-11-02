@@ -1,4 +1,4 @@
-"""The reserved ``additional_kwargs`` slot for AG-UI passthrough fields.
+"""The reserved ``additional_kwargs`` slots for AG-UI passthrough data.
 
 Stdlib only. The sibling modules defer their ``ag_ui`` and ``langchain``
 imports into the functions that need them, so the constants and the inbound
@@ -37,6 +37,25 @@ AGUI_EXTRAS_OPEN_FIELDS = frozenset({"metadata"})
 AG-UI 1.0 declares each one as an open ``Metadata`` mapping, and 0.x carried
 it as an extra field. Inbound, the field goes to the slot under its own name.
 Outbound, a mapping entry with that name sets the declared field.
+"""
+
+AGUI_HELD_PARTS_KEY = "langgraph_events.agui.held_parts"
+"""Reserved ``additional_kwargs`` key for the AG-UI content parts held off the model.
+
+A held part is a part that the model does not receive. In this release, that
+is a media part with a ``file`` source: the handle names a file in a provider
+account, and the server must not send it with its own credentials.
+
+The value is a list. Each entry is ``{"index": i, "part": p}``. ``i`` is the
+position of the part in the AG-UI content list. ``p`` is the part as JSON, by
+alias, with its ``metadata``. Inbound, the converter writes the entries.
+Outbound, each part goes back into the content list at its index. Read the
+parts with :func:`~langgraph_events.agui.held_parts`.
+
+The value is client input. The trust note of :func:`collect_inbound_extras`
+applies. The entries are measured against :data:`AGUI_EXTRAS_MAX_BYTES` on
+their own. Over the cap, the held parts are dropped with a WARNING, and the
+message still converts.
 """
 
 AGUI_EXTRAS_MAX_BYTES = 8192
@@ -85,26 +104,52 @@ def collect_inbound_extras(message: BaseModel) -> dict[str, Any]:
         value = getattr(message, name, None)
         if value is not None:
             payload[name] = value
+    return _capped(
+        AGUI_EXTRAS_KEY, payload, "extra fields", getattr(message, "id", None)
+    )
+
+
+def hold_inbound_parts(
+    entries: list[dict[str, Any]], message_id: str
+) -> dict[str, Any]:
+    """Return the ``additional_kwargs`` payload for the held parts of a message.
+
+    *entries* has the shape that :data:`AGUI_HELD_PARTS_KEY` documents. No
+    entries give an empty payload. Entries over :data:`AGUI_EXTRAS_MAX_BYTES`
+    are dropped with a WARNING, for the reason that
+    :func:`collect_inbound_extras` gives.
+    """
+    return _capped(AGUI_HELD_PARTS_KEY, entries, "held content parts", message_id)
+
+
+def _capped(
+    key: str,
+    payload: dict[str, Any] | list[dict[str, Any]],
+    what: str,
+    message_id: str | None,
+) -> dict[str, Any]:
+    """Return ``{key: payload}``, or an empty mapping if *payload* is empty or big."""
     if not payload:
         return {}
-    message_id = getattr(message, "id", None)
     try:
         size = len(json.dumps(payload))
     except (TypeError, ValueError, RecursionError) as exc:
         logger.warning(
-            "Dropping the extra fields on inbound AG-UI message %r — they do "
-            "not encode as JSON (%s).",
+            "Dropping the %s on inbound AG-UI message %r — they do not encode "
+            "as JSON (%s).",
+            what,
             message_id,
             exc,
         )
         return {}
     if size > AGUI_EXTRAS_MAX_BYTES:
         logger.warning(
-            "Dropping the extra fields on inbound AG-UI message %r — %d bytes "
-            "of JSON exceeds the %d byte cap.",
+            "Dropping the %s on inbound AG-UI message %r — %d bytes of JSON "
+            "exceeds the %d byte cap.",
+            what,
             message_id,
             size,
             AGUI_EXTRAS_MAX_BYTES,
         )
         return {}
-    return {AGUI_EXTRAS_KEY: payload}
+    return {key: payload}

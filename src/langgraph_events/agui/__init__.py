@@ -13,6 +13,7 @@ from langgraph_events.agui._extras import (
     AGUI_EXTRAS_KEY,
     AGUI_EXTRAS_MAX_BYTES,
     AGUI_EXTRAS_OPEN_FIELDS,
+    AGUI_HELD_PARTS_KEY,
 )
 from langgraph_events.agui._mappers import (
     FallbackMapper,
@@ -20,6 +21,7 @@ from langgraph_events.agui._mappers import (
     InterruptedMapper,
     SkipInternalMapper,
     UnmappedEventError,
+    held_parts,
 )
 from langgraph_events.agui._protocols import (
     AGUICustomEvent,
@@ -71,6 +73,7 @@ __all__ = [
     "AGUI_EXTRAS_KEY",
     "AGUI_EXTRAS_MAX_BYTES",
     "AGUI_EXTRAS_OPEN_FIELDS",
+    "AGUI_HELD_PARTS_KEY",
     "AGUIAdapter",
     "AGUICustomEvent",
     "AGUISerializable",
@@ -93,4 +96,5 @@ __all__ = [
     "detect_new_tool_results",
     "encode_sse_stream",
     "extract_resume_input",
+    "held_parts",
 ]

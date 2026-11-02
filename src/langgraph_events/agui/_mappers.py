@@ -15,6 +15,7 @@ from ag_ui.core import (
     InputContentPart,
     MessagesSnapshotEvent,
     StateSnapshotEvent,
+    TextPart,
     ToolCallArgsEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
@@ -35,7 +36,7 @@ from ._events import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
 )
-from ._extras import AGUI_EXTRAS_KEY, AGUI_EXTRAS_OPEN_FIELDS
+from ._extras import AGUI_EXTRAS_KEY, AGUI_EXTRAS_OPEN_FIELDS, AGUI_HELD_PARTS_KEY
 from ._protocols import AGUICustomEvent, AGUISerializable
 from ._resume import BLOCK_TYPES, SOURCE_KEYS
 
@@ -240,7 +241,87 @@ def _content_to_agui(message: BaseMessage, label: str) -> str | list[InputConten
     AG-UI part of the same modality. A block with no AG-UI part is dropped,
     with one WARNING that names *label*. If this function raises, each later
     ``connect()`` on the thread fails. :func:`_build_agui_message` explains why.
+
+    Each part held under :data:`AGUI_HELD_PARTS_KEY` goes back at its index.
+    An index past the end puts the part at the end.
     """
+    content = _converted_content(message, label)
+    held = _held_entries(message, label)
+    if not held:
+        return content
+    if isinstance(content, str):
+        content = [TextPart(text=content)] if content else []
+    for index, part in held:
+        content.insert(index, part)
+    return content
+
+
+def held_parts(message: BaseMessage) -> list[InputContentPart]:
+    """Return the AG-UI parts held on *message*, in their original order.
+
+    Inbound, :func:`~langgraph_events.agui.agui_messages_to_langchain` holds
+    each part that the model does not receive under
+    :data:`~langgraph_events.agui.AGUI_HELD_PARTS_KEY`. An entry that does not
+    validate is skipped with a WARNING. This function never raises, because it
+    reads checkpointed data.
+
+    The parts are client input. Do not treat them as trusted.
+    """
+    return [part for _, part in _held_entries(message, str(message.id))]
+
+
+def _held_entries(
+    message: BaseMessage, label: str
+) -> list[tuple[int, InputContentPart]]:
+    """Return the valid held entries of *message* as ``(index, part)``, by index.
+
+    A bad slot or entry is dropped with one WARNING per cause that names
+    *label*. A raise here would break each later ``connect()`` on the thread.
+    """
+    slot = (getattr(message, "additional_kwargs", None) or {}).get(AGUI_HELD_PARTS_KEY)
+    if slot is None:
+        return []
+    if not isinstance(slot, list):
+        logger.warning(
+            "Dropping the held content parts of message %s — "
+            "additional_kwargs[%r] must be a list, got %s.",
+            label,
+            AGUI_HELD_PARTS_KEY,
+            type(slot).__name__,
+        )
+        return []
+    entries: list[tuple[int, InputContentPart]] = []
+    bad_shape = 0
+    bad_part = 0
+    for entry in slot:
+        index = entry.get("index") if isinstance(entry, Mapping) else None
+        if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+            bad_shape += 1
+            continue
+        try:
+            entries.append((index, _CONTENT_PART.validate_python(entry.get("part"))))
+        except ValidationError:
+            bad_part += 1
+    if bad_shape:
+        logger.warning(
+            "Dropping %d held content part(s) of message %s — an entry must be a "
+            "mapping with a non-negative integer index.",
+            bad_shape,
+            label,
+        )
+    if bad_part:
+        logger.warning(
+            "Dropping %d held content part(s) of message %s — the part is not a "
+            "valid AG-UI content part.",
+            bad_part,
+            label,
+        )
+    return sorted(entries, key=lambda entry: entry[0])
+
+
+def _converted_content(
+    message: BaseMessage, label: str
+) -> str | list[InputContentPart]:
     if isinstance(message.content, str):
         return message.content
     blocks: Sequence[object]
