@@ -49,6 +49,7 @@ from langgraph_events import (
     on,
 )
 from langgraph_events.agui import (
+    AGUI_HELD_PARTS_KEY,
     AGUIAdapter,
     FrontendStateMutated,
     FrontendToolCallRequested,
@@ -58,6 +59,7 @@ from langgraph_events.agui import (
     agui_messages_to_langchain,
     build_langchain_tools,
     detect_new_tool_results,
+    held_parts,
 )
 from langgraph_events.agui._mappers import _warned_classes, _warned_extras
 
@@ -3300,6 +3302,136 @@ def describe_user_message_content_conversion():
             assert user_msg.content == [TextPart(text="kept")]
 
 
+def _held_doc(**overrides: Any) -> DocumentPart:
+    source = FileSource(value="file-42", provider="host", mime_type="application/pdf")
+    return DocumentPart(source=source, **overrides)
+
+
+def describe_held_parts_round_trip():
+    def when_a_user_message_holds_a_part():
+        @pytest.mark.parametrize(
+            "parts",
+            [
+                [TextPart(text="read this"), _held_doc(metadata={"title": "Q3"})],
+                [_held_doc()],
+                [_held_doc(id="d1"), TextPart(text="and"), _held_doc(id="d2")],
+                [
+                    DocumentPart.model_validate(
+                        {
+                            "source": {"type": "file", "value": "f", "x": None},
+                            "extraField": None,
+                        }
+                    )
+                ],
+                [TextPart(text="a"), TextPart(text="b"), _held_doc()],
+                [ImagePart(source=UrlSource(value="https://x/y")), _held_doc()],
+                [TextPart(id="p1", text="kept"), _held_doc()],
+                [TextPart(text=""), _held_doc()],
+            ],
+        )
+        async def it_sends_back_the_same_parts(parts: list[Any]):
+            [inbound] = agui_messages_to_langchain(
+                [AguiUserMessage(id="u1", content=parts)]
+            )
+
+            events = await _emit(inbound)
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == parts
+
+    def when_a_tool_message_holds_a_part():
+        async def it_sends_back_the_same_parts():
+            parts = [TextPart(text="report"), _held_doc()]
+            [inbound] = agui_messages_to_langchain(
+                [AguiToolMessage(id="t1", content=parts, tool_call_id="tc1")]
+            )
+
+            events = await _emit(inbound)
+
+            [tool_msg] = _roled(events, "tool")
+            assert tool_msg.content == parts
+
+    def when_a_handler_rewrote_the_content():
+        def _message() -> HumanMessage:
+            slot = [{"position": 5, "part": _held_doc().model_dump(by_alias=True)}]
+            return HumanMessage(
+                id="h-short",
+                content="new",
+                additional_kwargs={AGUI_HELD_PARTS_KEY: slot},
+            )
+
+        async def it_puts_the_part_at_the_end_of_the_shorter_content():
+            events = await _emit(_message())
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="new"), _held_doc()]
+
+        async def it_logs_a_warning_naming_the_message(caplog):
+            await _emit(_message())
+
+            assert any(
+                r.levelname == "WARNING" and "h-short" in r.message
+                for r in caplog.records
+            )
+
+    def when_a_corrupt_slot_is_already_in_the_checkpoint():
+        def when_a_position_exceeds_the_list_size_limit():
+            async def it_puts_the_part_at_the_end():
+                part = _held_doc().model_dump(by_alias=True)
+                slot = [{"position": 10**30, "part": part}]
+                message = HumanMessage(
+                    content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+                )
+
+                events = await _emit(message)
+
+                [user_msg] = _roled(events, "user")
+                assert user_msg.content == [TextPart(text="hi"), _held_doc()]
+
+        async def it_still_serves_the_connect_snapshot():
+            good = {"position": 1, "part": _held_doc().model_dump(by_alias=True)}
+            slot = [{"position": 0, "part": {"type": "document"}}, "junk", good]
+            poisoned = HumanMessage(
+                content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+            )
+            graph = _graph(_emitting(poisoned), checkpointer=MemorySaver())
+            await graph.ainvoke(UserAsked(question="go"), config=_config("t-held"))
+
+            events = await _connect(
+                graph, _make_input(thread_id="t-held"), seed_factory=_ask("unused")
+            )
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == [TextPart(text="hi"), _held_doc()]
+
+        async def it_logs_a_warning(caplog):
+            slot = [{"position": 0, "part": {"type": "document"}}]
+            message = HumanMessage(
+                id="h-bad", content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: slot}
+            )
+
+            events = await _emit(message)
+
+            [user_msg] = _roled(events, "user")
+            assert user_msg.content == "hi"
+            assert any(
+                r.levelname == "WARNING" and "h-bad" in r.message
+                for r in caplog.records
+            )
+
+        def when_the_slot_is_not_a_list():
+            async def it_sends_the_content_unchanged():
+                message = HumanMessage(
+                    content="hi", additional_kwargs={AGUI_HELD_PARTS_KEY: {"a": 1}}
+                )
+
+                events = await _emit(message)
+
+                assert not _of_type(events, EventType.RUN_ERROR)
+                [user_msg] = _roled(events, "user")
+                assert user_msg.content == "hi"
+
+
 def describe_multiple_custom_reducers():
     """StateSnapshot tracks changes across multiple non-message reducers."""
 
@@ -4010,6 +4142,27 @@ def describe_detect_new_tool_results():
         def it_leaves_additional_kwargs_empty():
             [out] = detect_new_tool_results(_tool_input(), {"messages": []})
             assert out.additional_kwargs == {}
+
+    def when_the_agui_message_has_content_parts():
+        def it_converts_each_part_to_a_langchain_block():
+            image = ImagePart(source=UrlSource(value="https://x/y"))
+            inp = _tool_input(content=[TextPart(text="report"), image])
+            [out] = detect_new_tool_results(inp, {"messages": []})
+            assert out.content == [
+                {"type": "text", "text": "report"},
+                {"type": "image", "url": "https://x/y"},
+            ]
+
+        def when_a_part_has_a_file_source():
+            def it_keeps_the_part_off_the_model_input():
+                inp = _tool_input(content=[TextPart(text="report"), _held_doc()])
+                [out] = detect_new_tool_results(inp, {"messages": []})
+                assert out.content == [{"type": "text", "text": "report"}]
+
+            def it_holds_the_part():
+                inp = _tool_input(content=[TextPart(text="report"), _held_doc()])
+                [out] = detect_new_tool_results(inp, {"messages": []})
+                assert held_parts(out) == [_held_doc()]
 
 
 def describe_frontend_state_mutated_event_class():

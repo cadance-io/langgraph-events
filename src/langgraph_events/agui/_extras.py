@@ -1,4 +1,4 @@
-"""The reserved ``additional_kwargs`` slot for AG-UI passthrough fields.
+"""The reserved ``additional_kwargs`` slots for AG-UI passthrough data.
 
 Stdlib only. The sibling modules defer their ``ag_ui`` and ``langchain``
 imports into the functions that need them, so the constants and the inbound
@@ -39,6 +39,29 @@ it as an extra field. Inbound, the field goes to the slot under its own name.
 Outbound, a mapping entry with that name sets the declared field.
 """
 
+AGUI_HELD_PARTS_KEY = "langgraph_events.agui.held_parts"
+"""Reserved ``additional_kwargs`` key for the AG-UI content parts held off the model.
+
+A held part is a part that the model does not receive: a media part with a
+``file`` source. That handle names a file in a provider account, and the
+server must not send it with its own credentials.
+
+The value is a list. Each entry is ``{"position": i, "part": p}``. ``i`` is
+the position of the part in the AG-UI content list. ``p`` is the part as JSON,
+by alias, with its ``metadata``. Inbound, the converter writes the entries.
+Outbound, each part goes back into the content list at its position. Read the
+parts with :func:`~langgraph_events.agui.held_parts`.
+
+The key is not ``index``. LangChain's ``merge_lists`` merges two list entries
+that carry the same int ``index`` as one stream chunk, so
+``merge_message_runs`` would fuse the held parts of two messages.
+
+The value is client input. The trust note of :func:`collect_inbound_extras`
+applies. The entries are measured against :data:`AGUI_EXTRAS_MAX_BYTES` on
+their own. Over the cap, the held parts are dropped with a WARNING, and the
+message still converts.
+"""
+
 AGUI_EXTRAS_MAX_BYTES = 8192
 """Size cap on the extra fields one inbound AG-UI message may carry.
 
@@ -49,8 +72,11 @@ message. The message itself still converts.
 8 KiB holds roughly a hundred small entries or a few paragraphs of text, which
 is the scale of the hint the field exists for. It also bounds the damage: a
 thousand-message thread with every message at the cap is 8 MB of checkpoint,
-which a checkpointer can still write. There is no lower bound that a legitimate
-hint would breach and no higher one that keeps a thread's growth bounded.
+which a checkpointer can still write. The held parts of
+:data:`AGUI_HELD_PARTS_KEY` have a separate cap of the same size, so one
+message can store up to 16 KiB, and that thread up to 16 MB. There is no lower
+bound that a legitimate hint would breach and no higher one that keeps a
+thread's growth bounded.
 """
 
 
@@ -85,26 +111,41 @@ def collect_inbound_extras(message: BaseModel) -> dict[str, Any]:
         value = getattr(message, name, None)
         if value is not None:
             payload[name] = value
+    return capped_slot(
+        AGUI_EXTRAS_KEY, payload, "extra fields", getattr(message, "id", None)
+    )
+
+
+def capped_slot(
+    key: str,
+    payload: dict[str, Any] | list[dict[str, Any]],
+    what: str,
+    message_id: str | None,
+) -> dict[str, Any]:
     if not payload:
         return {}
-    message_id = getattr(message, "id", None)
     try:
         size = len(json.dumps(payload))
     except (TypeError, ValueError, RecursionError) as exc:
         logger.warning(
-            "Dropping the extra fields on inbound AG-UI message %r — they do "
-            "not encode as JSON (%s).",
+            "Dropping the %s of inbound AG-UI message %r — "
+            "additional_kwargs[%r] must encode as JSON (%s).",
+            what,
             message_id,
+            key,
             exc,
         )
         return {}
     if size > AGUI_EXTRAS_MAX_BYTES:
         logger.warning(
-            "Dropping the extra fields on inbound AG-UI message %r — %d bytes "
-            "of JSON exceeds the %d byte cap.",
+            "Dropping the %s of inbound AG-UI message %r — "
+            "additional_kwargs[%r] holds %d bytes of JSON, over the "
+            "AGUI_EXTRAS_MAX_BYTES cap of %d.",
+            what,
             message_id,
+            key,
             size,
             AGUI_EXTRAS_MAX_BYTES,
         )
         return {}
-    return {AGUI_EXTRAS_KEY: payload}
+    return {key: payload}

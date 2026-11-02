@@ -11,7 +11,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ._extras import collect_inbound_extras
+from ._extras import AGUI_HELD_PARTS_KEY, capped_slot, collect_inbound_extras
 
 if TYPE_CHECKING:
     from ag_ui.core import InputContentPart, Message
@@ -27,31 +27,41 @@ BLOCK_TYPES = {"image": "image", "audio": "audio", "video": "video", "document":
 SOURCE_KEYS = {"data": "base64", "url": "url"}
 """The LangChain block key that holds the value of each AG-UI source type.
 
-A ``file`` source is not in the table, so an inbound part with one is dropped.
-That source names a handle in the provider account. The server sends the
-handle with its own credentials, so a client handle can read a file that the
-client does not own.
+A ``file`` source is not in the table, so an inbound part with one is held.
+It never reaches the model. That source names a handle in the provider
+account. The server sends the handle with its own credentials, so a client
+handle can read a file that the client does not own. See
+:data:`~langgraph_events.agui.AGUI_HELD_PARTS_KEY`.
 """
 
 
 def _content_to_langchain(
     content: str | list[InputContentPart], message_id: str
-) -> str | list[str | dict[str, Any]]:
-    """Convert AG-UI message content to LangChain message content.
+) -> tuple[str | list[str | dict[str, Any]], dict[str, Any]]:
+    """Convert AG-UI message content to LangChain content and held parts.
 
-    Each part becomes the LangChain standard block of the same modality. A part
-    with a source type outside :data:`SOURCE_KEYS` is dropped with a WARNING.
-    Part ``metadata`` is dropped with a WARNING, because a LangChain block has
-    no field for it.
+    The metadata of a kept part is dropped with a WARNING, because a LangChain
+    block has no field for it.
     """
     if isinstance(content, str):
-        return content
-    kept = [p for p in content if p.type == "text" or p.source.type in SOURCE_KEYS]
-    if len(kept) < len(content):
-        logger.warning(
-            "Dropping %d content part(s) with a file source from AG-UI message "
-            "%s — a client must not name a provider file handle.",
-            len(content) - len(kept),
+        return content, {}
+    kept: list[InputContentPart] = []
+    held: list[dict[str, Any]] = []
+    for position, part in enumerate(content):
+        if part.type == "text" or part.source.type in SOURCE_KEYS:
+            kept.append(part)
+        else:
+            held.append(
+                {
+                    "position": position,
+                    "part": part.model_dump(mode="json", by_alias=True),
+                }
+            )
+    if held:
+        logger.debug(
+            "Holding %d content part(s) with a file source from AG-UI message %s "
+            "— the model does not receive them.",
+            len(held),
             message_id,
         )
     with_metadata = sum(part.metadata is not None for part in kept)
@@ -62,7 +72,10 @@ def _content_to_langchain(
             with_metadata,
             message_id,
         )
-    return [_part_to_block(part) for part in kept]
+    held_kwargs = capped_slot(
+        AGUI_HELD_PARTS_KEY, held, "held content parts", message_id
+    )
+    return [_part_to_block(part) for part in kept], held_kwargs
 
 
 def _part_to_block(part: InputContentPart) -> dict[str, Any]:
@@ -97,6 +110,10 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     :func:`~langgraph_events.agui._extras.collect_inbound_extras` before you
     rely on them, and note the size cap in :data:`AGUI_EXTRAS_MAX_BYTES`.
 
+    A user or tool content part with a ``file`` source is held under
+    ``additional_kwargs[AGUI_HELD_PARTS_KEY]``, not sent to the model. Read it
+    with :func:`~langgraph_events.agui.held_parts`.
+
     The default ``drop_invalid_tool_calls=False`` propagates
     ``json.JSONDecodeError`` for parity with upstream ``ag-ui-langgraph`` —
     drop-in replacement for migrators. Set ``True`` for production resume
@@ -117,12 +134,13 @@ def agui_messages_to_langchain(  # noqa: PLR0912
     out: list[BaseMessage] = []
     for m in messages:
         if isinstance(m, UserMessage):
+            content, held = _content_to_langchain(m.content, m.id)
             out.append(
                 HumanMessage(
                     id=m.id,
-                    content=_content_to_langchain(m.content, m.id),
+                    content=content,
                     name=m.name,
-                    additional_kwargs=collect_inbound_extras(m),
+                    additional_kwargs=collect_inbound_extras(m) | held,
                 )
             )
         elif isinstance(m, AssistantMessage):
@@ -175,16 +193,17 @@ def agui_messages_to_langchain(  # noqa: PLR0912
                 )
             )
         elif isinstance(m, AGUIToolMessage):
+            content, held = _content_to_langchain(m.content, m.id)
             out.append(
                 ToolMessage(
                     id=m.id,
-                    content=_content_to_langchain(m.content, m.id),
+                    content=content,
                     tool_call_id=m.tool_call_id,
                     # A truthy `error` marks the failure, in both directions.
                     # The outbound mapper never sends an empty `error`, so a
                     # client that initialises `error: ""` reports no failure.
                     status="error" if m.error else "success",
-                    additional_kwargs=collect_inbound_extras(m),
+                    additional_kwargs=collect_inbound_extras(m) | held,
                 )
             )
         else:

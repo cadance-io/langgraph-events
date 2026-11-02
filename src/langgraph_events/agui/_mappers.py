@@ -15,12 +15,13 @@ from ag_ui.core import (
     InputContentPart,
     MessagesSnapshotEvent,
     StateSnapshotEvent,
+    TextPart,
     ToolCallArgsEvent,
     ToolCallEndEvent,
     ToolCallStartEvent,
 )
 from langchain_core.utils.utils import LC_AUTO_PREFIX
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, NonNegativeInt, TypeAdapter, ValidationError
 
 from langgraph_events._event import (
     Event,
@@ -35,7 +36,7 @@ from ._events import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
 )
-from ._extras import AGUI_EXTRAS_KEY, AGUI_EXTRAS_OPEN_FIELDS
+from ._extras import AGUI_EXTRAS_KEY, AGUI_EXTRAS_OPEN_FIELDS, AGUI_HELD_PARTS_KEY
 from ._protocols import AGUICustomEvent, AGUISerializable
 from ._resume import BLOCK_TYPES, SOURCE_KEYS
 
@@ -241,6 +242,84 @@ def _content_to_agui(message: BaseMessage, label: str) -> str | list[InputConten
     with one WARNING that names *label*. If this function raises, each later
     ``connect()`` on the thread fails. :func:`_build_agui_message` explains why.
     """
+    content = _converted_content(message, label)
+    held = _held_entries(message, label)
+    if not held:
+        return content
+    if isinstance(content, str):
+        content = [TextPart(text=content)] if content else []
+    past_end = 0
+    for position, part in held:
+        past_end += position > len(content)
+        content.insert(min(position, len(content)), part)
+    if past_end:
+        logger.warning(
+            "Appending %d held content part(s) to the end of message %s — the "
+            "position in additional_kwargs[%r] is past the end of the content.",
+            past_end,
+            label,
+            AGUI_HELD_PARTS_KEY,
+        )
+    return content
+
+
+def held_parts(message: BaseMessage) -> list[InputContentPart]:
+    """Return the AG-UI parts held on *message*, in their original order.
+
+    Inbound, :func:`~langgraph_events.agui.agui_messages_to_langchain` holds
+    each part that the model does not receive under
+    :data:`~langgraph_events.agui.AGUI_HELD_PARTS_KEY`. An entry that does not
+    validate is skipped with a WARNING. This function never raises, because it
+    reads checkpointed data.
+
+    The parts are client input. Do not treat them as trusted.
+    """
+    return [part for _, part in _held_entries(message, str(message.id))]
+
+
+class _HeldEntry(BaseModel):
+    position: NonNegativeInt
+    part: InputContentPart
+
+
+def _held_entries(
+    message: BaseMessage, label: str
+) -> list[tuple[int, InputContentPart]]:
+    """A raise here would break each later ``connect()`` on the thread."""
+    slot = (getattr(message, "additional_kwargs", None) or {}).get(AGUI_HELD_PARTS_KEY)
+    if slot is None:
+        return []
+    if not isinstance(slot, list):
+        logger.warning(
+            "Dropping the held content parts of message %s — "
+            "additional_kwargs[%r] must be a list, got %s.",
+            label,
+            AGUI_HELD_PARTS_KEY,
+            type(slot).__name__,
+        )
+        return []
+    entries: list[tuple[int, InputContentPart]] = []
+    for entry in slot:
+        try:
+            held = _HeldEntry.model_validate(entry)
+        except ValidationError:
+            continue
+        entries.append((held.position, held.part))
+    if len(entries) < len(slot):
+        logger.warning(
+            "Dropping %d held content part(s) of message %s — each entry of "
+            "additional_kwargs[%r] must be {'position': int >= 0, 'part': an AG-UI "
+            "content part}. The client does not receive the dropped parts.",
+            len(slot) - len(entries),
+            label,
+            AGUI_HELD_PARTS_KEY,
+        )
+    return sorted(entries, key=lambda entry: entry[0])
+
+
+def _converted_content(
+    message: BaseMessage, label: str
+) -> str | list[InputContentPart]:
     if isinstance(message.content, str):
         return message.content
     blocks: Sequence[object]
@@ -379,7 +458,7 @@ def _langchain_to_agui_messages(
             # is the reason when there is one. Empty or block content falls
             # back to the status literal, because `error` is a string.
             is_error = getattr(msg, "status", None) == TOOL_ERROR_STATUS
-            reason = content if isinstance(content, str) else ""
+            reason = msg.content if isinstance(msg.content, str) else ""
             result.append(
                 _build_agui_message(
                     AguiToolMessage,

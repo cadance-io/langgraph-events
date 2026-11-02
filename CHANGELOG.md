@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AG-UI content parts with a `file` source are held, not dropped.** The model still does not
+  receive such a part. `agui_messages_to_langchain` and `detect_new_tool_results` store it under
+  the new reserved `additional_kwargs` key `AGUI_HELD_PARTS_KEY`, with its 8 KiB cap of its own.
+  The `MessagesSnapshot` of `stream()` and `connect()` puts it back at its position. Read it with
+  the new `held_parts(message)`. See
+  [Parts the model does not receive](docs/agui.md#parts-the-model-does-not-receive).
+  `content` stays a list of blocks. A message whose only part has a `file` source has `content`
+  `[]`, and some providers refuse an empty message.
+
 ### Changed
 
 - **`AGUIAdapter.connect()` sends `RUN_STARTED` first and `RUN_FINISHED` last.** See the fix
@@ -17,9 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The log record of a failed AG-UI run is "AG-UI run failed".** It was "EventGraph stream
   failed". The new text applies to `stream()` and to `connect()`. Update a log filter or an
   alert that matches the old text.
+- **The WARNING for dropped inbound extras names the key and the cap.** It now reads "Dropping
+  the extra fields of inbound AG-UI message ... additional_kwargs['langgraph_events.agui'] ...".
+  Update a log filter that matches the old text.
 
 ### Fixed
 
+- **`detect_new_tool_results` converts content parts.** Each part of a tool result now becomes
+  the LangChain standard block, as in `agui_messages_to_langchain`. Before, each part reached
+  the model as the text of its Python repr, and a `file` source handle reached it too. A
+  consumer that read those AG-UI parts from `content` now reads LangChain blocks.
 - **`AGUIAdapter.connect()` emits the run lifecycle.** The replay starts with `RUN_STARTED`
   and ends with `RUN_FINISHED`. Both carry the thread id and the run id of the input. When an
   input id is empty, the adapter makes a new UUID for it, and both events carry that UUID. If

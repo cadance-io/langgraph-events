@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ._extras import collect_inbound_extras
+from ._resume import _content_to_langchain
 
 if TYPE_CHECKING:
     from ag_ui.core import RunAgentInput, Tool
@@ -48,7 +49,9 @@ def detect_new_tool_results(
 
     Carries the same fields as :func:`agui_messages_to_langchain`: a truthy
     AG-UI ``error`` becomes ``status="error"``, and the extra fields the client
-    added land under ``additional_kwargs[AGUI_EXTRAS_KEY]``. Read
+    added land under ``additional_kwargs[AGUI_EXTRAS_KEY]``. Content parts
+    convert the same way: each part becomes a LangChain block, and a part with
+    a ``file`` source is held under ``additional_kwargs[AGUI_HELD_PARTS_KEY]``. Read
     :func:`~langgraph_events.agui._extras.collect_inbound_extras` for the trust
     boundary that slot carries.
     """
@@ -81,9 +84,12 @@ def detect_new_tool_results(
         if tc_id in existing:
             continue
         error = getattr(msg, "error", None)
+        content, held = _content_to_langchain(
+            getattr(msg, "content", "") or "", getattr(msg, "id", None) or tc_id
+        )
         results.append(
             LCToolMessage(
-                content=getattr(msg, "content", "") or "",
+                content=content,
                 tool_call_id=tc_id,
                 # Normalize falsy ("") id to None so LangChain generates a fresh one.
                 id=getattr(msg, "id", None) or None,
@@ -93,7 +99,7 @@ def detect_new_tool_results(
                 # outbound mapper never sends an empty `error`, so a client
                 # that initialises `error: ""` reports no failure.
                 status="error" if error else "success",
-                additional_kwargs=collect_inbound_extras(msg),
+                additional_kwargs=collect_inbound_extras(msg) | held,
             )
         )
     return results
