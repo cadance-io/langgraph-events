@@ -31,6 +31,12 @@ if TYPE_CHECKING:
 class TargetError(Exception):
     """The target cannot give what a command needs from it."""
 
+    @classmethod
+    def refused_listing(cls, error: BaseException) -> TargetError:
+        """The error of a store that refuses the thread listing with
+        *error*."""
+        return cls(f"The store refused the thread listing ({_one_line(error)}).")
+
 
 @dataclass(frozen=True, order=True)
 class ThreadKey:
@@ -70,8 +76,8 @@ class MigrationTarget:
         Raises:
             TargetError: when the target has no ``threads`` and the saver
                 is not a ``PostgresSaver``, a ``SqliteSaver`` or a
-                ``MemorySaver``, or when the built-in listing of the saver
-                fails.
+                ``MemorySaver``, when the built-in listing of the saver
+                fails, or when the store refuses the listing.
         """
         if self.threads is not None:
             return tuple(sorted(set(self.threads(saver))))
@@ -94,6 +100,8 @@ class MigrationTarget:
             rows = _postgres.thread_rows(saver)
             if rows is None:
                 rows = _sqlite.thread_rows(saver)
+        except TargetError:
+            raise
         except Exception as error:
             # The listing reads an internal method of the saver package,
             # which a release of that package can change.
@@ -199,6 +207,11 @@ def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
             for tup in saver.list(None)
         }
     return sorted(keys)
+
+
+def _one_line(error: BaseException) -> str:
+    """*error* and its type on one line."""
+    return f"{type(error).__name__}: {' '.join(str(error).split())}"
 
 
 def _no_thread_listing(saver: BaseCheckpointSaver[Any], failure: str) -> str:

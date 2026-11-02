@@ -7,12 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A store with no `checkpoints` table is an empty store.** `rewrite` plans 0 threads and
+  exits 0. `backup` and `restore` change nothing and exit 0. A plan on a new `SqliteSaver` file
+  no longer creates tables. See
+  [A store with no checkpoint table](docs/migration-gate.md#a-store-with-no-checkpoint-table).
+- **A `checkpoints` table that the connection cannot reach exits 2 and names its schema.**
+- **A thread listing that the database refuses names the database error, not `threads=`.** It
+  exits 2.
+
 ## [0.43.0] - 2026-11-01
 
 ### Added
 
 - **Four commands now carry a migration deploy, and the operator types no backup name.** See
-  [Backup and restore](docs/event-migrations.md#backup-and-restore).
+  [Backup and restore](docs/migration-gate.md#backup-and-restore).
 - **`backup <target>` copies the live set of a `PostgresSaver` store.** The live set is the
   latest checkpoint of each thread in each checkpoint namespace, and its pending writes. The copy
   goes to `checkpoints_bak_<fp>` and `checkpoint_writes_bak_<fp>`, where `<fp>` is the

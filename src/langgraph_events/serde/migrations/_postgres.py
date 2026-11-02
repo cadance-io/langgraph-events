@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from langgraph_events.serde.migrations._target import TargetError
+from langgraph_events.serde.migrations._target import TargetError, _one_line
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -39,6 +39,21 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 _THREAD_KEYS_QUERY = "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints"
+
+# ``to_regclass`` resolves the name as the unqualified SQL of the saver
+# does. ``pg_class`` shows each table to each role, so ``elsewhere`` names
+# each schema that holds a table the connection cannot reach.
+_HAS_CHECKPOINTS_SQL = r"""
+SELECT to_regclass('checkpoints') IS NOT NULL AS present, ARRAY(
+    SELECT n.nspname FROM pg_class AS c
+    JOIN pg_namespace AS n ON n.oid = c.relnamespace
+    WHERE c.relname = 'checkpoints'
+      AND c.relkind IN ('r', 'p')
+      AND n.nspname NOT LIKE 'pg\_%'
+      AND n.nspname <> 'information_schema'
+    ORDER BY n.nspname
+) AS elsewhere
+"""
 
 _BACKUP_TABLES_SQL = r"""
 SELECT relname FROM pg_class
@@ -171,6 +186,9 @@ class BackupRows:
         return f"{self.checkpoints} {checkpoints} and {self.writes} {writes}"
 
 
+_NO_ROWS = BackupRows(checkpoints=0, writes=0)
+
+
 @dataclass(frozen=True)
 class BackupOutcome:
     """What :func:`backup_live_set` did to the backup of ``fingerprint``.
@@ -224,6 +242,11 @@ class _Backup:
 
     def take(self, cursor: Cursor[DictRow]) -> BackupOutcome:
         """Copy the live set into the two tables."""
+        held = _held_backups(cursor)
+        if not _has_checkpoints(cursor):
+            if held:
+                raise TargetError(_no_live_tables(held))
+            return BackupOutcome(self.fingerprint, kept=_NO_ROWS, added=_NO_ROWS)
         cursor.execute(
             self._sql(
                 "CREATE TABLE IF NOT EXISTS {checkpoints} "
@@ -256,8 +279,13 @@ class _Backup:
         """Put back the rows of the backup, after the checks that refuse a
         missing backup and a missing blob version."""
         held = _held_backups(cursor)
+        live = _has_checkpoints(cursor)
+        if not live and not held:
+            return RestoreOutcome(self.fingerprint, _NO_ROWS, removed_writes=0)
         if self not in held:
             raise TargetError(self._missing(held))
+        if not live:
+            raise TargetError(_no_live_tables(held))
         # A row lock on a blob does not stop a prune whose snapshot is older
         # than the restore. The table lock waits for a running prune, and
         # holds back a new one until the restore commits.
@@ -329,13 +357,24 @@ class _Backup:
 
 def thread_rows(saver: BaseCheckpointSaver[Any]) -> list[tuple[str, str]] | None:
     """The thread id and checkpoint namespace of each checkpoint row of a
-    ``PostgresSaver``, or ``None`` for another saver."""
+    ``PostgresSaver``, or ``None`` for another saver.
+
+    Raises:
+        TargetError: when the database refuses a statement.
+    """
     postgres = _postgres_saver(saver)
     if postgres is None:
         return None
-    with postgres._cursor() as cursor:
-        cursor.execute(_THREAD_KEYS_QUERY)
-        rows = cursor.fetchall()
+    import psycopg  # noqa: PLC0415
+
+    try:
+        with postgres._cursor() as cursor:
+            if not _has_checkpoints(cursor):
+                return []
+            cursor.execute(_THREAD_KEYS_QUERY)
+            rows = cursor.fetchall()
+    except psycopg.Error as error:
+        raise TargetError.refused_listing(error) from error
     return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
 
 
@@ -447,6 +486,41 @@ def _on_store(
             ) from error
 
 
+def _has_checkpoints(cursor: Cursor[DictRow]) -> bool:
+    """Whether the connection reaches a ``checkpoints`` table. A store
+    before the first ``setup()`` of the saver has none, so it holds no
+    checkpoint.
+
+    Raises:
+        TargetError: when the database holds a ``checkpoints`` table that
+            the connection cannot reach.
+    """
+    cursor.execute(_HAS_CHECKPOINTS_SQL)
+    row = _one(cursor)
+    if row["present"]:
+        return True
+    if row["elsewhere"]:
+        schemas = "schema" if len(row["elsewhere"]) == 1 else "schemas"
+        raise TargetError(
+            f"A checkpoints table is in the {schemas} "
+            f"{', '.join(row['elsewhere'])}, and the connection cannot reach "
+            f"it. The schema is not on the search_path of the connection, or "
+            f"the role has no USAGE privilege on it."
+        )
+    return False
+
+
+def _no_live_tables(held: tuple[_Backup, ...]) -> str:
+    """The message of a store that holds the backups *held* and no
+    ``checkpoints`` table."""
+    names = ", ".join(backup.fingerprint for backup in held)
+    return (
+        f"The store holds the backup {names}, and no checkpoints table. "
+        f"Nothing changed. Create the checkpoint tables with setup() of the "
+        f"saver, or point the store at the database of the backup."
+    )
+
+
 def _backup_tables(cursor: Cursor[DictRow]) -> list[str]:
     """The name of each backup table in the current schema, sorted."""
     cursor.execute(_BACKUP_TABLES_SQL)
@@ -485,7 +559,3 @@ def _postgres_saver(saver: BaseCheckpointSaver[Any]) -> PostgresSaver | None:
     except ImportError:
         return None
     return saver if isinstance(saver, PostgresSaver) else None
-
-
-def _one_line(error: BaseException) -> str:
-    return f"{type(error).__name__}: {' '.join(str(error).split())}"

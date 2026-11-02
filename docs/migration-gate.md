@@ -229,7 +229,7 @@ Step 3 stops a release that cannot read the store before that release serves. A 
 
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
 2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the check judge the serde of step 1, so the serde that writes must be the same.
-3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore).
+3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
 4. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stdout.
 5. The verdict of the last plan and `--accept` decide the exit code.
 
@@ -245,7 +245,7 @@ The verdict of the last plan is the worst state of a checkpoint in it, in this o
 |---|---|---|
 | 0 | The verdict of the last plan is `--accept` or better | The counts of each pass and of the last plan. When the verdict is not `clean`, the word `accepted` and each checkpoint that is not clean. When the passes ran out and the last plan still reads a checkpoint as a rewrite, the output says that the store did not settle, and names the next command: `rewrite --apply` |
 | 1 | The verdict of the last plan is worse than `--accept` | Each checkpoint and its reason. When the last plan reads a checkpoint as a rewrite, the output also names the next command: `rewrite --apply` |
-| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open | The error, on one line, with its type when the library did not raise it |
+| 2 | A usage, target or store error. Examples: the target has no `store`, the graph factory takes no checkpointer, the graph has no `NamespaceAwareSerde`, the serde has `legacy_write=True`, `store` returns an async context manager, the store does not open, the store refuses the thread listing, the connection cannot reach the `checkpoints` table | The error, on one line, with its type when the library did not raise it |
 | 3 | Wrong release: the running code does not hold the expected migrations | Both fingerprints, the running migrations and the command |
 
 The Python form is `rewrite_live_set(target, expect=..., apply=...)`. It returns a `LiveSetOutcome`, or a `WrongRelease` when the `--expect` check refuses. `LiveSetOutcome.passes` holds the report of each pass, and `final` holds the last plan. `verdict` gives the `Verdict` of the last plan. The members of `Verdict` compare in the order of the table. `accepted(accept)` is `verdict <= accept`, and the command exits 0 exactly when it is true. `clean` equals `verdict is Verdict.CLEAN`.
@@ -302,8 +302,8 @@ This section applies to `PostgresSaver` only. The three commands read and write 
 
 | Command | What it does | Exit 0 output | Exit 2 |
 |---|---|---|---|
-| `backup <target>` | Copies the live set into the backup of the running code. It drops no table | The rows that the backup kept and added | A saver other than `PostgresSaver`, a target with `threads=`, or a failed statement. Nothing changed |
-| `restore <target>` | Puts back the backup of the running code | The rows that it put back and the writes that it removed | The errors of `backup`, a store with no backup of the running code, or a missing blob version. The message of a missing backup names each backup that the store holds. Nothing changed |
+| `backup <target>` | Copies the live set into the backup of the running code. It drops no table | The rows that the backup kept and added | A saver other than `PostgresSaver`, a target with `threads=`, a store with a backup and no `checkpoints` table, or a failed statement. Nothing changed |
+| `restore <target>` | Puts back the backup of the running code | The rows that it put back and the writes that it removed | The errors of `backup`, a store with no backup of the running code that is not an empty store, or a missing blob version. The message of a missing backup names each backup that the store holds. Nothing changed |
 | `drop-backups <target>` | Drops each backup except the backup of the running code | One line per dropped backup, or `nothing to drop` | The errors of `backup`. Nothing changed |
 
 ```text
@@ -328,6 +328,24 @@ WARNING: A restore cannot make a checkpoint readable that the new release wrote 
 `drop-backups` drops the backup tables of each fingerprint except the fingerprint of the running code, in the current schema of the store. It drops only the tables whose name has the form `checkpoints_bak_lge_m<n>_<16 hex digits>` or `checkpoint_writes_bak_lge_m<n>_<16 hex digits>`. Step 4 runs it after the rewrite. So the store holds the backup of the release that serves, and a rollback of that release can restore it. A rollback of two releases cannot restore, because step 4 of release N+1 drops the backup of release N. When release N+1 holds the same migrations as release N, both releases write to one backup, and `drop-backups` keeps it. Over a series of releases with the same fingerprint, the backup grows with each deploy. To limit it, drop the two tables of that backup with the tools of the database when no rollback needs them. The next `backup` then starts a new backup.
 
 The three commands take locks on the checkpoint tables. To limit the wait, set `lock_timeout` and `statement_timeout` in the connection options of the store, for example `?options=-c%20lock_timeout%3D5s` in the URL. Then, when another session holds a lock on a checkpoint table, the command fails fast and changes nothing. A target with `threads=` declares a store that other graphs can share. `backup`, `restore` and `drop-backups` exit 2 for it, before they open the store. The commands act on every row of the store, and the backup name does not name the graph. `drop-backups` of one graph would drop the backup of another graph, and two graphs with the same fingerprint would write to one backup. For a shared store, back up the store with the tools of its database.
+
+### A store with no checkpoint table
+
+A store before the first `setup()` of its saver has no `checkpoints` table, for example a new database before release N first serves. Each command reads such a store as an empty store, and creates no table:
+
+| Command | On a store with no `checkpoints` table |
+|---|---|
+| `rewrite` | Plans 0 threads. The verdict is `clean`, so the plan and `--apply` exit 0 |
+| `backup` | Copies nothing and exits 0 with the counts `0` |
+| `restore` | Puts back nothing and exits 0 with the counts `0` |
+
+A store with a backup and no `checkpoints` table is not an empty store. `backup` and `restore` then exit 2 and name each backup that the store holds.
+
+When the connection finds no `checkpoints` table, the command looks for one in each schema of the database. When a schema holds one, the command exits 2 and names the schema. The search path of the connection does not include that schema, or the role has no `USAGE` privilege on it.
+
+WARNING: A connection to the wrong database finds no `checkpoints` table. The command cannot tell it from a new store, so it reads an empty store and exits 0. Make sure that the URL of `store` names the database of the app.
+
+A backup of an empty store creates no table. After release N creates the tables, `restore` under release N exits 2 until step 4 runs `backup` again. Release N wrote each checkpoint of that store, so no restore is necessary.
 
 ### Subgraph checkpoints
 

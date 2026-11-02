@@ -144,18 +144,25 @@ def postgres_server() -> Iterator[str]:
 
 
 @pytest.fixture
-def postgres_url(postgres_server: str) -> str:
-    """The URL of a new empty database that holds the checkpoint tables."""
+def bare_postgres_url(postgres_server: str) -> str:
+    """The URL of a new database that holds no table, as before any
+    ``setup()`` of a saver."""
     import psycopg
-    from langgraph.checkpoint.postgres import PostgresSaver
 
     name = f"lge_{uuid.uuid4().hex}"
     with psycopg.connect(postgres_server, autocommit=True) as conn:
         conn.execute(f"CREATE DATABASE {name}")  # type: ignore[arg-type]
-    url = f"{postgres_server.rsplit('/', 1)[0]}/{name}"
-    with PostgresSaver.from_conn_string(url) as saver:
+    return f"{postgres_server.rsplit('/', 1)[0]}/{name}"
+
+
+@pytest.fixture
+def postgres_url(bare_postgres_url: str) -> str:
+    """The URL of a new empty database that holds the checkpoint tables."""
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    with PostgresSaver.from_conn_string(bare_postgres_url) as saver:
         saver.setup()
-    return url
+    return bare_postgres_url
 
 
 @pytest.fixture

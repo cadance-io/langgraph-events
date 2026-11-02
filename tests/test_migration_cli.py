@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import subprocess
 import sys
+import uuid
 from typing import TYPE_CHECKING
 
 from _dict_saver import DictSaver
@@ -15,6 +17,7 @@ from _live_set_fixtures import (
     _Counted,
     _graph,
     _no_store,
+    _PostgresRows,
     _PostgresStore,
     _releases,
     _unsettling,
@@ -38,7 +41,6 @@ from langgraph_events.serde.migrations import (
 from langgraph_events.serde.migrations.__main__ import main
 
 if TYPE_CHECKING:
-    import contextlib
     from pathlib import Path
 
     import pytest
@@ -53,6 +55,88 @@ CLI_TARGET: MigrationTarget | None = None
 def _install(monkeypatch: pytest.MonkeyPatch, target: MigrationTarget) -> str:
     monkeypatch.setattr(sys.modules[__name__], "CLI_TARGET", target)
     return f"{__name__}:CLI_TARGET"
+
+
+def _on_postgres(tmp_path: Path, url: str) -> MigrationTarget:
+    """The current release of :func:`_releases` over the Postgres store at
+    *url*."""
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    return dataclasses.replace(
+        _releases(tmp_path).current, store=lambda: PostgresSaver.from_conn_string(url)
+    )
+
+
+def _on_sqlite(tmp_path: Path) -> tuple[MigrationTarget, Path]:
+    """The current release of :func:`_releases` over a new ``SqliteSaver``
+    file, and the path of that file."""
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    path = tmp_path / "store.db"
+    target = dataclasses.replace(
+        _releases(tmp_path).current,
+        store=lambda: SqliteSaver.from_conn_string(str(path)),
+    )
+    return target, path
+
+
+def _reader(url: str, *grants: str) -> str:
+    """The URL of *url* as a new role that holds no privilege but *grants*."""
+    rows = _PostgresRows(url)
+    role = f"reader_{uuid.uuid4().hex[:8]}"
+    password = "reader"  # noqa: S105  # pragma: allowlist secret
+    rows.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+    for grant in grants:
+        rows.execute(grant.format(role=role))
+    host = url.split("://", 1)[1].partition("@")[2]
+    return f"postgresql://{role}:{password}@{host}"
+
+
+def _hidden_schema(url: str) -> str:
+    """The URL of *url* as a role that can read each table of the schema
+    ``public``, but has no USAGE privilege on that schema."""
+    _PostgresRows(url).execute("REVOKE ALL ON SCHEMA public FROM PUBLIC")
+    return _reader(url, "GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role}")
+
+
+def _unreachable_error(schema: str) -> str:
+    return (
+        f"error: A checkpoints table is in the schema {schema}, and the "
+        f"connection cannot reach it. The schema is not on the search_path of "
+        f"the connection, or the role has no USAGE privilege on it.\n"
+    )
+
+
+_HIDDEN_SCHEMA_ERROR = _unreachable_error("public")
+
+
+def _no_live_tables_error(fingerprint: str) -> str:
+    return (
+        f"error: The store holds the backup {fingerprint}, and no checkpoints "
+        f"table. Nothing changed. Create the checkpoint tables with setup() of "
+        f"the saver, or point the store at the database of the backup.\n"
+    )
+
+
+def _held_backup_tables(url: str, fingerprint: str) -> list[str]:
+    """Create the two tables of a backup of *fingerprint* at *url*. Return
+    their names, sorted."""
+    suffix = fingerprint.replace("-", "_")
+    names = [f"checkpoint_writes_bak_{suffix}", f"checkpoints_bak_{suffix}"]
+    for name in names:
+        _PostgresRows(url).execute(f"CREATE TABLE {name} (x int)")
+    return names
+
+
+def _tables(url: str) -> list[str]:
+    """The name of each table in the current schema of *url*, sorted."""
+    return [
+        row[0]
+        for row in _PostgresRows(url).execute(
+            "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() "
+            "ORDER BY 1"
+        )
+    ]
 
 
 def describe_gate_commands():
@@ -393,6 +477,134 @@ def describe_rewrite_command():
                         f"saver did not overwrite checkpoint {checkpoint_id}; "
                     )
 
+        def when_the_store_has_no_checkpoint_table():
+            def when_the_store_is_a_postgres_saver():
+                def it_plans_no_thread_exits_zero_and_creates_no_table(
+                    tmp_path: Path,
+                    monkeypatch: pytest.MonkeyPatch,
+                    capsys: pytest.CaptureFixture[str],
+                    bare_postgres_url: str,
+                ):
+                    target = _on_postgres(tmp_path, bare_postgres_url)
+                    expect = target.snapshot().migrations.fingerprint
+                    spec = _install(monkeypatch, target)
+
+                    code = main(["rewrite", spec, "--expect", expect])
+
+                    out, err = capsys.readouterr()
+                    assert code == 0
+                    assert out == (
+                        "lge rewrite: clean (last plan: plan: 0 threads, "
+                        "0 rewrite, 0 unchanged, 0 refused)\n"
+                    )
+                    assert err == ""
+                    assert _tables(bare_postgres_url) == []
+
+            def when_the_store_is_a_sqlite_saver():
+                def it_exits_zero_and_creates_no_table(
+                    tmp_path: Path,
+                    monkeypatch: pytest.MonkeyPatch,
+                    capsys: pytest.CaptureFixture[str],
+                ):
+                    import sqlite3
+
+                    target, path = _on_sqlite(tmp_path)
+                    expect = target.snapshot().migrations.fingerprint
+                    spec = _install(monkeypatch, target)
+
+                    code = main(["rewrite", spec, "--expect", expect])
+
+                    assert code == 0
+                    assert capsys.readouterr().out == (
+                        "lge rewrite: clean (last plan: plan: 0 threads, "
+                        "0 rewrite, 0 unchanged, 0 refused)\n"
+                    )
+                    with contextlib.closing(sqlite3.connect(path)) as conn:
+                        tables = conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type = 'table'"
+                        ).fetchall()
+                    assert tables == []
+
+        def when_the_sqlite_file_is_not_a_database():
+            def it_exits_two_and_names_the_database_error_only(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, path = _on_sqlite(tmp_path)
+                path.write_bytes(b"not a database" * 100)
+                expect = target.snapshot().migrations.fingerprint
+                spec = _install(monkeypatch, target)
+
+                code = main(["rewrite", spec, "--expect", expect])
+
+                err = capsys.readouterr().err
+                assert code == 2
+                assert err == (
+                    "error: The store refused the thread listing "
+                    "(DatabaseError: file is not a database).\n"
+                )
+
+        def when_the_database_refuses_the_thread_listing():
+            def it_exits_two_and_names_the_database_error_only(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                postgres_url: str,
+            ):
+                target = _on_postgres(tmp_path, _reader(postgres_url))
+                expect = target.snapshot().migrations.fingerprint
+                spec = _install(monkeypatch, target)
+
+                code = main(["rewrite", spec, "--expect", expect])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err == (
+                    "error: The store refused the thread listing "
+                    "(InsufficientPrivilege: permission denied for table "
+                    "checkpoints).\n"
+                )
+
+        def when_the_role_cannot_use_the_schema_of_the_table():
+            def it_exits_two_and_names_the_schema(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                postgres_store: _PostgresStore,
+            ):
+                url = _hidden_schema(postgres_store.rows.url)
+                spec = _install(monkeypatch, _on_postgres(tmp_path, url))
+
+                code = main(["rewrite", spec, "--expect", postgres_store.fingerprint])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err == _HIDDEN_SCHEMA_ERROR
+
+        def when_the_table_is_in_a_schema_off_the_search_path():
+            def it_exits_two_and_names_the_schema(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                bare_postgres_url: str,
+            ):
+                rows = _PostgresRows(bare_postgres_url)
+                rows.execute("CREATE SCHEMA app")
+                rows.execute("CREATE TABLE app.checkpoints (x int)")
+                target = _on_postgres(tmp_path, bare_postgres_url)
+                expect = target.snapshot().migrations.fingerprint
+                spec = _install(monkeypatch, target)
+
+                code = main(["rewrite", spec, "--expect", expect])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err == _unreachable_error("app")
+
         def when_a_class_stage_transform_does_not_settle():
             def it_exits_one_and_names_the_migration(
                 tmp_path: Path,
@@ -616,6 +828,65 @@ def describe_backup_command():
                 assert err.startswith("error: The backup failed and changed nothing: ")
                 assert rows.backup_tables() == [postgres_store.backup_table()]
 
+    def when_the_role_cannot_use_the_schema_of_the_table():
+        def it_exits_two_and_creates_no_table(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            url = _hidden_schema(postgres_store.rows.url)
+            spec = _install(monkeypatch, _on_postgres(tmp_path, url))
+
+            code = main(["backup", spec])
+
+            assert code == 2
+            assert capsys.readouterr().err == _HIDDEN_SCHEMA_ERROR
+            assert postgres_store.rows.backup_tables() == []
+
+    def when_the_store_has_no_checkpoint_table():
+        def when_the_store_holds_no_backup():
+            def it_exits_zero_backs_up_nothing_and_creates_no_table(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                bare_postgres_url: str,
+            ):
+                target = _on_postgres(tmp_path, bare_postgres_url)
+                expect = target.snapshot().migrations.fingerprint
+                spec = _install(monkeypatch, target)
+
+                code = main(["backup", spec])
+
+                out, err = capsys.readouterr()
+                assert code == 0
+                assert out == (
+                    f"lge backup: {expect} kept 0 checkpoints and 0 writes, added 0 "
+                    f"checkpoints and 0 writes.\n"
+                )
+                assert err == ""
+                assert _tables(bare_postgres_url) == []
+
+        def when_the_store_holds_a_backup():
+            def it_exits_two_and_changes_nothing(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                bare_postgres_url: str,
+            ):
+                target = _on_postgres(tmp_path, bare_postgres_url)
+                expect = target.snapshot().migrations.fingerprint
+                tables = _held_backup_tables(bare_postgres_url, expect)
+                spec = _install(monkeypatch, target)
+
+                code = main(["backup", spec])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err == _no_live_tables_error(expect)
+                assert _tables(bare_postgres_url) == tables
+
     def when_the_store_is_not_postgres():
         def it_exits_two(
             tmp_path: Path,
@@ -698,6 +969,99 @@ def describe_restore_command():
                 f"that took the backup.\n"
             )
             assert rows.checkpoint("t1") == before
+
+    def when_the_role_cannot_use_the_schema_of_the_backup():
+        def it_exits_two_and_changes_nothing(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+            postgres_store: _PostgresStore,
+        ):
+            target = postgres_store.releases.current
+            rows = postgres_store.rows
+            main(["backup", _install(monkeypatch, target)])
+            postgres_store.rewrite()
+            before = rows.checkpoint("t1")
+            url = _hidden_schema(rows.url)
+            spec = _install(monkeypatch, _on_postgres(tmp_path, url))
+            capsys.readouterr()
+
+            code = main(["restore", spec])
+
+            assert code == 2
+            assert capsys.readouterr().err == _HIDDEN_SCHEMA_ERROR
+            assert rows.checkpoint("t1") == before
+
+    def when_the_store_has_no_checkpoint_table():
+        def when_the_store_holds_no_backup():
+            def it_exits_zero_and_puts_back_nothing(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                bare_postgres_url: str,
+            ):
+                target = _on_postgres(tmp_path, bare_postgres_url)
+                expect = target.snapshot().migrations.fingerprint
+                spec = _install(monkeypatch, target)
+                main(["backup", spec])
+                capsys.readouterr()
+
+                code = main(["restore", spec])
+
+                out, err = capsys.readouterr()
+                assert code == 0
+                assert out == (
+                    f"lge restore: {expect} put back 0 checkpoints and 0 writes, and "
+                    f"removed 0 writes that the backup does not hold.\n"
+                )
+                assert err == ""
+                assert _tables(bare_postgres_url) == []
+
+        def when_the_store_holds_the_backup_of_the_running_code():
+            def it_exits_two_and_changes_nothing(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                bare_postgres_url: str,
+            ):
+                target = _on_postgres(tmp_path, bare_postgres_url)
+                expect = target.snapshot().migrations.fingerprint
+                tables = _held_backup_tables(bare_postgres_url, expect)
+                spec = _install(monkeypatch, target)
+
+                code = main(["restore", spec])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err == _no_live_tables_error(expect)
+                assert _tables(bare_postgres_url) == tables
+
+        def when_the_store_holds_a_backup_of_another_release():
+            def it_exits_two_and_names_the_backup(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+                bare_postgres_url: str,
+            ):
+                target = _on_postgres(tmp_path, bare_postgres_url)
+                expect = target.snapshot().migrations.fingerprint
+                other = "lge-m1-0000000000000000"
+                tables = _held_backup_tables(bare_postgres_url, other)
+                spec = _install(monkeypatch, target)
+
+                code = main(["restore", spec])
+
+                out, err = capsys.readouterr()
+                assert code == 2
+                assert out == ""
+                assert err == (
+                    f"error: The store holds no backup {expect}, the migration "
+                    f"fingerprint of the running code. The store holds the backup "
+                    f"{other}. Nothing changed. Run restore in a container of the "
+                    f"release that took the backup.\n"
+                )
+                assert _tables(bare_postgres_url) == tables
 
     def when_the_store_is_not_postgres():
         def it_exits_two(

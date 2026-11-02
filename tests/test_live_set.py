@@ -128,6 +128,7 @@ def describe_MigrationTarget():
                         raise AttributeError("cursor")
 
                     with SqliteSaver.from_conn_string(str(tmp_path / "s.db")) as saver:
+                        saver.setup()
                         monkeypatch.setattr(saver, "cursor", gone)
                         target = MigrationTarget(
                             graph=_graph, baseline=tmp_path / "b.json"
