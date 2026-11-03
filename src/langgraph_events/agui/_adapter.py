@@ -79,13 +79,6 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
-async def _resolved(value: _T | Awaitable[_T]) -> _T:
-    """Await *value* when it is awaitable, so a factory can be sync or async."""
-    if inspect.isawaitable(value):
-        return await value
-    return value
-
-
 class _FactoryRefusalError(Exception):
     """Carry a :class:`RunRefusedError` from a factory to ``_as_run``.
 
@@ -105,13 +98,16 @@ async def _call_factory(
     *,
     accepts_state: bool,
 ) -> _T:
-    """Call a seed or resume *factory* and await its result.
+    """Call a sync or async seed or resume *factory*.
 
     A ``RunRefusedError`` from the factory leaves as ``_FactoryRefusalError``.
     """
     args = (input_data, checkpoint_state) if accepts_state else (input_data,)
     try:
-        return await _resolved(factory(*args))
+        result = factory(*args)
+        if inspect.isawaitable(result):
+            return await result
+        return result
     except RunRefusedError as refusal:
         raise _FactoryRefusalError(refusal) from refusal
 
@@ -268,34 +264,6 @@ class AGUIAdapter:
             )
         ]
         return len(positional) >= 2
-
-    async def _call_resume_factory(
-        self,
-        input_data: RunAgentInput,
-        checkpoint_state: CheckpointState | None,
-    ) -> Event | None:
-        """Call resume_factory with optional checkpoint state if supported."""
-        if self._resume_factory is None:
-            return None
-        return await _call_factory(
-            self._resume_factory,
-            input_data,
-            checkpoint_state,
-            accepts_state=self._resume_accepts_state,
-        )
-
-    async def _call_seed_factory(
-        self,
-        input_data: RunAgentInput,
-        checkpoint_state: CheckpointState | None,
-    ) -> Event | list[Event]:
-        """Call seed_factory with optional checkpoint state if supported."""
-        return await _call_factory(
-            self._seed_factory,
-            input_data,
-            checkpoint_state,
-            accepts_state=self._seed_accepts_state,
-        )
 
     @staticmethod
     def _build_config(
@@ -529,7 +497,12 @@ class AGUIAdapter:
         """
         if resume_event is not None:
             return self._resume_event_stream(input_data, resume_event, config, snapshot)
-        seed = await self._call_seed_factory(input_data, checkpoint_state)
+        seed: Event | list[Event] = await _call_factory(
+            self._seed_factory,
+            input_data,
+            checkpoint_state,
+            accepts_state=self._seed_accepts_state,
+        )
         seeds = self._prepend_frontend_state(input_data, seed)
         return self._graph.astream_events(
             seeds,
@@ -687,7 +660,16 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        resume_event = await self._call_resume_factory(input_data, checkpoint_state)
+        resume_event: Event | None = (
+            None
+            if self._resume_factory is None
+            else await _call_factory(
+                self._resume_factory,
+                input_data,
+                checkpoint_state,
+                accepts_state=self._resume_accepts_state,
+            )
+        )
         is_resume = resume_event is not None
         emitted_state_snapshot = False
 

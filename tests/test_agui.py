@@ -7,9 +7,10 @@ import json
 import logging
 import pickle
 import warnings
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
+import pytest_asyncio
 from ag_ui.core import (
     AudioPart,
     BaseEvent,
@@ -380,7 +381,7 @@ def _graph(*handlers: Any, **overrides: Any) -> EventGraph:
     return EventGraph(list(handlers), **overrides)
 
 
-def _refusing(*_: Any) -> Any:
+def _refusing(*_: Any) -> NoReturn:
     """Seed or resume factory that refuses the run."""
     raise RunRefusedError("too_large", "The file is too large.")
 
@@ -1413,7 +1414,8 @@ def describe_AGUIAdapter():
             assert task_events[0].name == "custom.task"
 
     def describe_a_mapper_that_returns_run_error():
-        async def _run_mapped_to_error(thread_id: str) -> tuple[Any, list[Any]]:
+        @pytest_asyncio.fixture(scope="module", loop_scope="module")
+        async def run() -> tuple[list[BaseEvent], list[Any]]:
             @on(UserAsked)
             def create_task(event: UserAsked) -> TaskCreated:
                 return TaskCreated(title="t")
@@ -1430,17 +1432,17 @@ def describe_AGUIAdapter():
 
             graph = _graph(create_task, reply_to_task, checkpointer=MemorySaver())
             events = await _stream(
-                graph, _make_input(thread_id=thread_id), mappers=[ErrorMapper()]
+                graph, _make_input(thread_id="t-map-err"), mappers=[ErrorMapper()]
             )
-            return events, await _stored_events(graph, thread_id)
+            return events, await _stored_events(graph, "t-map-err")
 
-        async def it_runs_the_later_handlers():
-            _, stored = await _run_mapped_to_error("t-map-err")
+        def it_runs_the_later_handlers(run: tuple[list[BaseEvent], list[Any]]):
+            _, stored = run
 
             assert any(isinstance(e, AgentReplied) for e in stored)
 
-        async def it_finishes_the_run():
-            events, _ = await _run_mapped_to_error("t-map-err")
+        def it_finishes_the_run(run: tuple[list[BaseEvent], list[Any]]):
+            events, _ = run
 
             assert EventType.RUN_ERROR in _types(events)
             assert events[-1].type == EventType.RUN_FINISHED
@@ -1688,7 +1690,15 @@ def describe_AGUIAdapter():
                 )
 
                 assert await _stored_events(graph, "t-r") == stored
+
+            async def it_keeps_the_thread_resumable():
+                graph = await _paused("t-r")
+                await _resume(
+                    graph, _make_input(thread_id="t-r"), resume_factory=_refusing
+                )
+
                 events = await _resume(graph, _make_input(thread_id="t-r"))
+
                 assert _roled(events, "assistant")[-1].content == "Approved!"
 
     def describe_init():
@@ -2561,7 +2571,12 @@ def describe_RunRefusedError():
             err = pickle.loads(dumped)  # noqa: S301 - the test wrote the bytes
 
             assert (err.code, err.message) == ("too_large", "Too big.")
-            assert str(err) == "too_large: Too big."
+
+    def when_printed():
+        def it_shows_the_code_and_the_message():
+            assert str(RunRefusedError("too_large", "Too big.")) == (
+                "too_large: Too big."
+            )
 
 
 def describe_connect_frontend_tool_interrupt():

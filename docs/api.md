@@ -156,6 +156,7 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `InterruptedWithPayload[PayloadT]` | Generic base | `Interrupted` variant with a typed payload from `interrupt_payload(self) -> PayloadT`. See [Typed Interrupt Payloads](agui.md#typed-interrupt-payloads) |
 | `AGUICustomEvent` / `AGUISerializable` | Protocol | Override the fallback event name or the payload serialization |
 | `SeedFactory` / `ResumeFactory` / `EventMapper` | Protocol | Input to seed events, resume detection, event mapping |
+| `RunRefusedError(code, message)` | Exception | Raise it from a seed factory or a resume factory to refuse the run. The client gets `RUN_ERROR` with that `code` and `message`, and the run stores nothing. See [Async Factories and Refusals](agui.md#async-factories-and-refusals) |
 | `MapperContext` | Dataclass | Shared state (run ID, thread ID, message counter) per stream |
 | `create_starlette_response` / `encode_sse_stream` | Function | Framework-agnostic SSE wrapping |
 | `extract_resume_input` | Function | Pulls and JSON-decodes `RunAgentInput.forwarded_props["command"]["resume"]`. Returns `None` if absent or falsy |
