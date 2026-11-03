@@ -270,6 +270,25 @@ When `RunAgentInput.state` is populated alongside a resume:
 
 A reducer can subscribe to `FrontendStateMutated` to project a selected client-state key on the server. A module-level reducer must set `name=`: `ScalarReducer(name="focus", event_type=FrontendStateMutated, fn=lambda e: e.state.get("focus", SKIP))`.
 
+## Async Factories and Refusals
+
+A `seed_factory` or a `resume_factory` can be `async`. The adapter awaits the result. A sync factory still works. The optional `checkpoint_state` argument works the same way for both kinds.
+
+A factory can refuse the run. Raise `RunRefused(code, message)`. The adapter then sends `RUN_STARTED`, then one `RUN_ERROR` with that `code` and that `message`, and nothing after. The graph does not start, so the run stores nothing in the checkpoint. The `error_message` of the adapter does not replace the `message` of a refusal. The adapter logs a refusal at `WARNING`, without a traceback.
+
+```python
+from langgraph_events.agui import RunRefused
+
+
+async def seed_factory(input_data: RunAgentInput) -> list[Event]:
+    last_msg = input_data.messages[-1]
+    if not await uploads.exist(last_msg.id):
+        raise RunRefused("unknown_file", "The attached file does not exist.")
+    return [UserMessageReceived(message=HumanMessage(content=last_msg.content))]
+```
+
+The adapter catches `RunRefused` only from the two factories. A handler that raises `RunRefused` gets the same treatment as any other exception: a generic `RUN_ERROR` without a `code`. The graph has run by then, so the run can have stored events.
+
 ## Frontend Tools
 
 The AG-UI spec positions tool calls as "inherently frontend-executed" and as the mechanism for human-in-the-loop (HITL) interaction. The adapter wires all three parts to an `EventGraph`:

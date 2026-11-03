@@ -28,6 +28,7 @@ from langgraph_events.agui._protocols import (
     AGUISerializable,
     EventMapper,
     ResumeFactory,
+    RunRefused,
     SeedFactory,
 )
 from langgraph_events.agui._resume import (
@@ -86,6 +87,7 @@ __all__ = [
     "InterruptedWithPayload",
     "MapperContext",
     "ResumeFactory",
+    "RunRefused",
     "SeedFactory",
     "SkipInternalMapper",
     "UnmappedEventError",

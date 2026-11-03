@@ -46,6 +46,7 @@ from ._mappers import (
     build_state_snapshot,
     default_mappers,
 )
+from ._protocols import RunRefused
 from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,13 @@ if TYPE_CHECKING:
     from langgraph_events._types import PauseSignal
 
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
+
+
+async def _resolved(value: object) -> object:
+    """Await *value* when it is awaitable, so a factory can be sync or async."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class AGUIAdapter:
@@ -228,7 +236,7 @@ class AGUIAdapter:
         ]
         return len(positional) >= 2
 
-    def _call_resume_factory(
+    async def _call_resume_factory(
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
@@ -238,10 +246,12 @@ class AGUIAdapter:
             return None
         factory = cast("Any", self._resume_factory)
         if self._resume_accepts_state:
-            return factory(input_data, checkpoint_state)
-        return factory(input_data)
+            result = factory(input_data, checkpoint_state)
+        else:
+            result = factory(input_data)
+        return cast("Event | None", await _resolved(result))
 
-    def _call_seed_factory(
+    async def _call_seed_factory(
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
@@ -249,8 +259,10 @@ class AGUIAdapter:
         """Call seed_factory with optional checkpoint state if supported."""
         factory = cast("Any", self._seed_factory)
         if self._seed_accepts_state:
-            return factory(input_data, checkpoint_state)
-        return factory(input_data)
+            result = factory(input_data, checkpoint_state)
+        else:
+            result = factory(input_data)
+        return cast("Event | list[Event]", await _resolved(result))
 
     @staticmethod
     def _build_config(
@@ -469,7 +481,7 @@ class AGUIAdapter:
                 updates[name] = contribution
         return updates
 
-    def _build_event_stream(
+    async def _build_event_stream(
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
@@ -484,7 +496,7 @@ class AGUIAdapter:
         """
         if resume_event is not None:
             return self._resume_event_stream(input_data, resume_event, config, snapshot)
-        seed = self._call_seed_factory(input_data, checkpoint_state)
+        seed = await self._call_seed_factory(input_data, checkpoint_state)
         seeds = self._prepend_frontend_state(input_data, seed)
         return self._graph.astream_events(
             seeds,
@@ -642,12 +654,35 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        resume_event = self._call_resume_factory(input_data, checkpoint_state)
+        try:
+            resume_event = await self._call_resume_factory(input_data, checkpoint_state)
+            gated = self._should_gate_with_checkpoint_replay(
+                resume_event, checkpoint_state
+            )
+            event_stream = (
+                None
+                if gated
+                else await self._build_event_stream(
+                    input_data,
+                    checkpoint_state,
+                    resume_event,
+                    config,
+                    checkpoint_snapshot,
+                )
+            )
+        except RunRefused as refusal:
+            logger.warning("AG-UI run refused: %s", refusal)
+            yield RunErrorEvent(
+                type=EventType.RUN_ERROR,
+                code=refusal.code,
+                message=refusal.message,
+            )
+            return
         is_resume = resume_event is not None
         emitted_state_snapshot = False
 
         # Interrupt gate: re-emit state without executing when interrupted
-        if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
+        if event_stream is None:
             state = cast("CheckpointState", checkpoint_state)
             yield build_state_snapshot(self._project_state(state["reducers"]))
             messages = state["messages"]
@@ -657,14 +692,6 @@ class AGUIAdapter:
                 for agui_event in self._map_event(interrupted, ctx):
                     yield agui_event
             return
-
-        event_stream = self._build_event_stream(
-            input_data,
-            checkpoint_state,
-            resume_event,
-            config,
-            checkpoint_snapshot,
-        )
 
         async for item in event_stream:
             if isinstance(item, LLMToken):
@@ -779,7 +806,8 @@ class AGUIAdapter:
         """Wrap *source* in ``RUN_STARTED`` and ``RUN_FINISHED``.
 
         If *source* raises, close each open message and tool call, then end
-        the stream with ``RUN_ERROR`` instead of ``RUN_FINISHED``.
+        the stream with ``RUN_ERROR`` instead of ``RUN_FINISHED``. A
+        ``RUN_ERROR`` that *source* yields also ends the stream.
         """
         yield RunStartedEvent(
             type=EventType.RUN_STARTED,
@@ -790,6 +818,8 @@ class AGUIAdapter:
         try:
             async for agui_event in source:
                 yield agui_event
+                if agui_event.type == EventType.RUN_ERROR:
+                    return
 
         except UnmappedEventError:
             # on_unmapped="raise" is a strict CI gate — propagate instead of

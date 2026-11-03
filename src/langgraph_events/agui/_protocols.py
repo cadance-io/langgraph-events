@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from ag_ui.core import BaseEvent, RunAgentInput
 
     from langgraph_events._event import Event
@@ -50,6 +52,19 @@ class EventMapper(Protocol):
         ...
 
 
+class RunRefused(Exception):  # noqa: N818 - the name states the outcome
+    """Refuse an AG-UI run from a seed factory or a resume factory.
+
+    The adapter ends the run with ``RUN_ERROR`` that carries *code* and
+    *message*. The graph does not start, so the run stores nothing.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
 @runtime_checkable
 class SeedFactory(Protocol):
     """Convert AG-UI RunAgentInput into domain seed event(s).
@@ -58,13 +73,16 @@ class SeedFactory(Protocol):
     reducer snapshots, events, messages, and interrupt info from the
     checkpoint.  The adapter detects the arity at runtime, so single-arg
     factories remain fully supported.
+
+    The factory can be ``async``. The adapter awaits an awaitable result.
+    Raise :class:`RunRefused` to refuse the run before the graph starts.
     """
 
     def __call__(
         self,
         input_data: RunAgentInput,
         checkpoint_state: dict[str, Any] | None = ...,
-    ) -> Event | list[Event]:
+    ) -> Event | list[Event] | Awaitable[Event | list[Event]]:
         """Produce seed event(s) from an AG-UI run request."""
         ...
 
@@ -75,13 +93,14 @@ class ResumeFactory(Protocol):
 
     Optionally accepts a second ``checkpoint_state`` dict.  The adapter
     detects the arity at runtime, so single-arg factories remain fully
-    supported.
+    supported. The ``async`` and :class:`RunRefused` rules of
+    :class:`SeedFactory` apply.
     """
 
     def __call__(
         self,
         input_data: RunAgentInput,
         checkpoint_state: dict[str, Any] | None = ...,
-    ) -> Event | None:
+    ) -> Event | None | Awaitable[Event | None]:
         """Return a domain Event to resume with, or None for a fresh run."""
         ...
