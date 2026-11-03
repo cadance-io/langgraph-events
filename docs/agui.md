@@ -274,20 +274,20 @@ A reducer can subscribe to `FrontendStateMutated` to project a selected client-s
 
 A `seed_factory` or a `resume_factory` can be `async`. The adapter awaits the result. A sync factory still works. The optional `checkpoint_state` argument works the same way for both kinds.
 
-A factory can refuse the run. Raise `RunRefused(code, message)`. The adapter then sends `RUN_STARTED`, then one `RUN_ERROR` with that `code` and that `message`, and nothing after. The graph does not start, so the run stores nothing in the checkpoint. The `error_message` of the adapter does not replace the `message` of a refusal. The adapter logs a refusal at `WARNING`, without a traceback.
+A factory can refuse the run. Raise `RunRefusedError(code, message)`. The adapter then sends `RUN_STARTED`, then one `RUN_ERROR` with that `code` and that `message`, and nothing after. The graph does not start, so the run stores nothing in the checkpoint. The `error_message` of the adapter does not replace the `message` of a refusal. The adapter logs the `code` of a refusal at `WARNING`, without the `message` and without a traceback.
 
 ```python
-from langgraph_events.agui import RunRefused
+from langgraph_events.agui import RunRefusedError
 
 
 async def seed_factory(input_data: RunAgentInput) -> list[Event]:
     last_msg = input_data.messages[-1]
     if not await uploads.exist(last_msg.id):
-        raise RunRefused("unknown_file", "The attached file does not exist.")
+        raise RunRefusedError("unknown_file", "The attached file does not exist.")
     return [UserMessageReceived(message=HumanMessage(content=last_msg.content))]
 ```
 
-The adapter catches `RunRefused` only from the two factories. A handler that raises `RunRefused` gets the same treatment as any other exception: a generic `RUN_ERROR` without a `code`. The graph has run by then, so the run can have stored events.
+The adapter catches `RunRefusedError` only from the two factories. A handler that raises `RunRefusedError` gets the same treatment as any other exception: a generic `RUN_ERROR` without a `code`. The graph has run by then, so the run can have stored events.
 
 ## Frontend Tools
 

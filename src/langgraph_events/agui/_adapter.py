@@ -6,7 +6,7 @@ import copy
 import inspect
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
 
 from ag_ui.core import (
     BaseEvent,
@@ -38,6 +38,7 @@ from langgraph_events.stream import (
 )
 
 from ._context import MapperContext
+from ._errors import RunRefusedError
 from ._events import FrontendStateMutated
 from ._mappers import (
     FallbackMapper,
@@ -46,7 +47,6 @@ from ._mappers import (
     build_state_snapshot,
     default_mappers,
 )
-from ._protocols import RunRefused
 from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ class CheckpointState(TypedDict):
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from ag_ui.core import RunAgentInput
     from langchain_core.runnables import RunnableConfig
@@ -76,11 +76,44 @@ if TYPE_CHECKING:
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
 
 
-async def _resolved(value: object) -> object:
+_T = TypeVar("_T")
+
+
+async def _resolved(value: _T | Awaitable[_T]) -> _T:
     """Await *value* when it is awaitable, so a factory can be sync or async."""
     if inspect.isawaitable(value):
         return await value
     return value
+
+
+class _FactoryRefusalError(Exception):
+    """Carry a :class:`RunRefusedError` from a factory to ``_as_run``.
+
+    A handler can also raise ``RunRefusedError``. Only a refusal from a
+    factory gets its own ``RUN_ERROR`` code, so the factory call wraps it.
+    """
+
+    def __init__(self, refusal: RunRefusedError) -> None:
+        super().__init__(refusal)
+        self.refusal = refusal
+
+
+async def _call_factory(
+    factory: Callable[..., _T | Awaitable[_T]],
+    input_data: RunAgentInput,
+    checkpoint_state: CheckpointState | None,
+    *,
+    accepts_state: bool,
+) -> _T:
+    """Call a seed or resume *factory* and await its result.
+
+    A ``RunRefusedError`` from the factory leaves as ``_FactoryRefusalError``.
+    """
+    args = (input_data, checkpoint_state) if accepts_state else (input_data,)
+    try:
+        return await _resolved(factory(*args))
+    except RunRefusedError as refusal:
+        raise _FactoryRefusalError(refusal) from refusal
 
 
 class AGUIAdapter:
@@ -244,12 +277,12 @@ class AGUIAdapter:
         """Call resume_factory with optional checkpoint state if supported."""
         if self._resume_factory is None:
             return None
-        factory = cast("Any", self._resume_factory)
-        if self._resume_accepts_state:
-            result = factory(input_data, checkpoint_state)
-        else:
-            result = factory(input_data)
-        return cast("Event | None", await _resolved(result))
+        return await _call_factory(
+            self._resume_factory,
+            input_data,
+            checkpoint_state,
+            accepts_state=self._resume_accepts_state,
+        )
 
     async def _call_seed_factory(
         self,
@@ -257,12 +290,12 @@ class AGUIAdapter:
         checkpoint_state: CheckpointState | None,
     ) -> Event | list[Event]:
         """Call seed_factory with optional checkpoint state if supported."""
-        factory = cast("Any", self._seed_factory)
-        if self._seed_accepts_state:
-            result = factory(input_data, checkpoint_state)
-        else:
-            result = factory(input_data)
-        return cast("Event | list[Event]", await _resolved(result))
+        return await _call_factory(
+            self._seed_factory,
+            input_data,
+            checkpoint_state,
+            accepts_state=self._seed_accepts_state,
+        )
 
     @staticmethod
     def _build_config(
@@ -654,35 +687,12 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        try:
-            resume_event = await self._call_resume_factory(input_data, checkpoint_state)
-            gated = self._should_gate_with_checkpoint_replay(
-                resume_event, checkpoint_state
-            )
-            event_stream = (
-                None
-                if gated
-                else await self._build_event_stream(
-                    input_data,
-                    checkpoint_state,
-                    resume_event,
-                    config,
-                    checkpoint_snapshot,
-                )
-            )
-        except RunRefused as refusal:
-            logger.warning("AG-UI run refused: %s", refusal)
-            yield RunErrorEvent(
-                type=EventType.RUN_ERROR,
-                code=refusal.code,
-                message=refusal.message,
-            )
-            return
+        resume_event = await self._call_resume_factory(input_data, checkpoint_state)
         is_resume = resume_event is not None
         emitted_state_snapshot = False
 
         # Interrupt gate: re-emit state without executing when interrupted
-        if event_stream is None:
+        if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
             state = cast("CheckpointState", checkpoint_state)
             yield build_state_snapshot(self._project_state(state["reducers"]))
             messages = state["messages"]
@@ -692,6 +702,14 @@ class AGUIAdapter:
                 for agui_event in self._map_event(interrupted, ctx):
                     yield agui_event
             return
+
+        event_stream = await self._build_event_stream(
+            input_data,
+            checkpoint_state,
+            resume_event,
+            config,
+            checkpoint_snapshot,
+        )
 
         async for item in event_stream:
             if isinstance(item, LLMToken):
@@ -806,8 +824,8 @@ class AGUIAdapter:
         """Wrap *source* in ``RUN_STARTED`` and ``RUN_FINISHED``.
 
         If *source* raises, close each open message and tool call, then end
-        the stream with ``RUN_ERROR`` instead of ``RUN_FINISHED``. A
-        ``RUN_ERROR`` that *source* yields also ends the stream.
+        the stream with ``RUN_ERROR`` instead of ``RUN_FINISHED``. A factory
+        refusal ends it with ``RUN_ERROR`` that carries the refusal code.
         """
         yield RunStartedEvent(
             type=EventType.RUN_STARTED,
@@ -818,13 +836,21 @@ class AGUIAdapter:
         try:
             async for agui_event in source:
                 yield agui_event
-                if agui_event.type == EventType.RUN_ERROR:
-                    return
 
         except UnmappedEventError:
             # on_unmapped="raise" is a strict CI gate — propagate instead of
             # masking it as a RunErrorEvent.
             raise
+
+        except _FactoryRefusalError as refused:
+            refusal = refused.refusal
+            logger.warning("AG-UI run refused: %s", refusal.code)
+            yield RunErrorEvent(
+                type=EventType.RUN_ERROR,
+                code=refusal.code,
+                message=refusal.message,
+            )
+            return
 
         except Exception as exc:
             logger.exception("AG-UI run failed")

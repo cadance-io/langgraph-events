@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import pickle
 import warnings
 from typing import Any
 
@@ -19,6 +20,7 @@ from ag_ui.core import (
     FileSource,
     ImagePart,
     RunAgentInput,
+    RunErrorEvent,
     TextPart,
     Tool,
     UrlSource,
@@ -55,7 +57,7 @@ from langgraph_events.agui import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
     MapperContext,
-    RunRefused,
+    RunRefusedError,
     UnmappedEventError,
     agui_messages_to_langchain,
     build_langchain_tools,
@@ -380,7 +382,7 @@ def _graph(*handlers: Any, **overrides: Any) -> EventGraph:
 
 def _refusing(*_: Any) -> Any:
     """Seed or resume factory that refuses the run."""
-    raise RunRefused("too_large", "The file is too large.")
+    raise RunRefusedError("too_large", "The file is too large.")
 
 
 async def _stored_events(graph: Any, thread_id: str) -> list[Any]:
@@ -833,17 +835,6 @@ def describe_AGUIAdapter():
                 # RunFinished should NOT appear after error
                 assert events[-1].type == EventType.RUN_ERROR
 
-            async def it_sends_a_generic_error_for_a_handler_refusal():
-                @on(UserAsked)
-                def refuse(event: UserAsked) -> None:
-                    _refusing()
-
-                events = await _stream(_graph(refuse), error_message="generic")
-
-                assert events[-1].type == EventType.RUN_ERROR
-                assert events[-1].code is None
-                assert events[-1].message == "generic"
-
             async def it_streams_text_message_content_during_llm_calls():
                 graph = _graph(_llm_replier("stream me"))
                 events = await _stream(graph)
@@ -1031,6 +1022,18 @@ def describe_AGUIAdapter():
                 assert (
                     error_events[0].message == "Something went wrong. Please try again."
                 )
+
+        def when_a_handler_raises_run_refused_error():
+            async def it_sends_the_generic_error():
+                @on(UserAsked)
+                def refuse(event: UserAsked) -> None:
+                    _refusing()
+
+                events = await _stream(_graph(refuse), error_message="generic")
+
+                assert events[-1].type == EventType.RUN_ERROR
+                assert events[-1].code is None
+                assert events[-1].message == "generic"
 
         def when_messages_unchanged():
             async def it_skips_redundant_messages_snapshots():
@@ -1409,6 +1412,39 @@ def describe_AGUIAdapter():
             assert len(task_events) == 1
             assert task_events[0].name == "custom.task"
 
+    def describe_a_mapper_that_returns_run_error():
+        async def _run_mapped_to_error(thread_id: str) -> tuple[Any, list[Any]]:
+            @on(UserAsked)
+            def create_task(event: UserAsked) -> TaskCreated:
+                return TaskCreated(title="t")
+
+            @on(TaskCreated)
+            def reply_to_task(event: TaskCreated) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="done"))
+
+            class ErrorMapper:
+                def map(self, event: Any, ctx: Any) -> Any:
+                    if isinstance(event, TaskCreated):
+                        return [RunErrorEvent(type=EventType.RUN_ERROR, message="x")]
+                    return None
+
+            graph = _graph(create_task, reply_to_task, checkpointer=MemorySaver())
+            events = await _stream(
+                graph, _make_input(thread_id=thread_id), mappers=[ErrorMapper()]
+            )
+            return events, await _stored_events(graph, thread_id)
+
+        async def it_runs_the_later_handlers():
+            _, stored = await _run_mapped_to_error("t-map-err")
+
+            assert any(isinstance(e, AgentReplied) for e in stored)
+
+        async def it_finishes_the_run():
+            events, _ = await _run_mapped_to_error("t-map-err")
+
+            assert EventType.RUN_ERROR in _types(events)
+            assert events[-1].type == EventType.RUN_FINISHED
+
     def describe_resume():
         def when_resume_factory_available():
             async def it_uses_resume_factory():
@@ -1628,7 +1664,7 @@ def describe_AGUIAdapter():
                 assert events[-1].type == EventType.RUN_FINISHED
                 assert _roled(events, "assistant")[-1].content == "Approved!"
 
-        def when_the_resume_factory_raises_run_refused():
+        def when_the_resume_factory_raises_run_refused_error():
             async def it_sends_the_refusal_code():
                 graph = await _paused("t-r")
 
@@ -1751,7 +1787,7 @@ def describe_AGUIAdapter():
                 assert events[-1].type == EventType.RUN_FINISHED
                 assert _roled(events, "assistant")[-1].content == "awaited"
 
-        def when_the_factory_raises_run_refused():
+        def when_the_factory_raises_run_refused_error():
             async def it_sends_the_refusal_code():
                 graph = _graph(reply)
                 events = await _stream(
@@ -1771,12 +1807,14 @@ def describe_AGUIAdapter():
 
                 assert await _stored_events(graph, "t-ref") == stored
 
-            async def it_logs_no_error(caplog):
+            async def it_logs_one_warning_that_names_only_the_code(caplog):
                 with caplog.at_level(logging.INFO, logger="langgraph_events.agui"):
                     await _stream(_graph(reply), seed_factory=_refusing)
 
                 assert [r.levelno for r in caplog.records] == [logging.WARNING]
-                assert "too_large" in caplog.records[0].getMessage()
+                logged = caplog.records[0].getMessage()
+                assert "too_large" in logged
+                assert "The file is too large." not in logged
 
         def when_the_factory_raises_another_exception():
             async def it_sends_the_generic_error():
@@ -2513,6 +2551,17 @@ def describe_AGUICustomEvent():
             # Should use class name, not agui_event_name
             custom = _custom(events, "TaskCreated")
             assert len(custom) == 1
+
+
+def describe_RunRefusedError():
+    def when_pickled():
+        def it_keeps_the_code_and_the_message():
+            dumped = pickle.dumps(RunRefusedError("too_large", "Too big."))
+
+            err = pickle.loads(dumped)  # noqa: S301 - the test wrote the bytes
+
+            assert (err.code, err.message) == ("too_large", "Too big.")
+            assert str(err) == "too_large: Too big."
 
 
 def describe_connect_frontend_tool_interrupt():

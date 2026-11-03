@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 from langgraph_events.agui._adapter import AGUIAdapter
 from langgraph_events.agui._context import MapperContext
+from langgraph_events.agui._errors import RunRefusedError
 from langgraph_events.agui._events import (
     FrontendStateMutated,
     FrontendToolCallRequested,
@@ -28,7 +29,6 @@ from langgraph_events.agui._protocols import (
     AGUISerializable,
     EventMapper,
     ResumeFactory,
-    RunRefused,
     SeedFactory,
 )
 from langgraph_events.agui._resume import (
@@ -87,7 +87,7 @@ __all__ = [
     "InterruptedWithPayload",
     "MapperContext",
     "ResumeFactory",
-    "RunRefused",
+    "RunRefusedError",
     "SeedFactory",
     "SkipInternalMapper",
     "UnmappedEventError",

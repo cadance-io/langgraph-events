@@ -11,11 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An AG-UI seed factory or resume factory can be `async`.** `AGUIAdapter` awaits an awaitable
   result. A sync factory still works, with or without the `checkpoint_state` argument.
-- **`RunRefused(code, message)` lets a factory refuse an AG-UI run.** Import it from
+- **`RunRefusedError(code, message)` lets a factory refuse an AG-UI run.** Import it from
   `langgraph_events.agui`. When a seed factory or a resume factory raises it, the stream is
   `RUN_STARTED`, then one `RUN_ERROR` with that `code` and that `message`. The graph does not
-  start, so the run stores nothing. The adapter logs the refusal at `WARNING`. A `RunRefused` that
-  a handler raises gets the generic `RUN_ERROR`. See
+  start, so the run stores nothing. The adapter logs the refusal `code` at `WARNING`. A
+  `RunRefusedError` that a handler raises gets the generic `RUN_ERROR`. See
   [Async Factories and Refusals](docs/agui.md#async-factories-and-refusals).
 
 ## [0.44.0] - 2026-11-02

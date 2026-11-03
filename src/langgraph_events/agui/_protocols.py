@@ -52,19 +52,6 @@ class EventMapper(Protocol):
         ...
 
 
-class RunRefused(Exception):  # noqa: N818 - the name states the outcome
-    """Refuse an AG-UI run from a seed factory or a resume factory.
-
-    The adapter ends the run with ``RUN_ERROR`` that carries *code* and
-    *message*. The graph does not start, so the run stores nothing.
-    """
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(f"{code}: {message}")
-        self.code = code
-        self.message = message
-
-
 @runtime_checkable
 class SeedFactory(Protocol):
     """Convert AG-UI RunAgentInput into domain seed event(s).
@@ -75,7 +62,7 @@ class SeedFactory(Protocol):
     factories remain fully supported.
 
     The factory can be ``async``. The adapter awaits an awaitable result.
-    Raise :class:`RunRefused` to refuse the run before the graph starts.
+    Raise :class:`RunRefusedError` to refuse the run before the graph starts.
     """
 
     def __call__(
@@ -93,7 +80,7 @@ class ResumeFactory(Protocol):
 
     Optionally accepts a second ``checkpoint_state`` dict.  The adapter
     detects the arity at runtime, so single-arg factories remain fully
-    supported. The ``async`` and :class:`RunRefused` rules of
+    supported. The ``async`` and :class:`RunRefusedError` rules of
     :class:`SeedFactory` apply.
     """
 
