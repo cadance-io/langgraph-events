@@ -9,12 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`AGUIAdapter.stream()` takes `configurable=`, a mapping of server values for the run.** A
-  handler reads them from its `RunnableConfig`. A server key wins over a client
-  `forwarded_props` key of the same name. A server `thread_id` or `__lge_` key raises
-  `ValueError` before `RUN_STARTED`.
+- **`AGUIAdapter.stream()` takes `config=`, the server run config, and
+  `client_configurable=`, the names of the client `configurable` keys it accepts.** A
+  handler reads the run config from its `RunnableConfig`. A server key wins over an
+  accepted client key of the same name. A `thread_id` or `__lge_` key in either argument
+  raises `ValueError` before `RUN_STARTED`. See [Run config](docs/agui.md#run-config).
 
-See [Server configurable](docs/agui.md#server-configurable).
+### Changed
+
+- **Breaking: `AGUIAdapter` ignores the client run config in `forwarded_props` by
+  default.** This covers `langgraph_config`, `config` and a top-level config, with every
+  part such as `configurable`, `recursion_limit`, `metadata`, `tags` and `run_name`. Before,
+  a client could set any run config key that the server did not set. `connect()` also reads
+  the checkpoint with `thread_id` only. Migration: pass the server values in
+  `stream(config=...)`, or name the client keys in `stream(client_configurable=...)`.
 
 ## [0.45.0] - 2026-11-03
 

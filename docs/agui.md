@@ -470,15 +470,12 @@ def request_review(event: DraftWritten) -> ReviewInterrupted:
 
 Plain `Interrupted`, with no payload, remains the right choice for a paused thread without a frontend.
 
-## LangGraph Config Passthrough
+## Run config
 
-`stream()` and `connect()` accept a LangGraph config via `RunAgentInput.forwarded_props`, under the key `langgraph_config`, the key `config`, or as the dict itself. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`. Other keys, for example `recursion_limit` or tenant routing, pass through.
-
-### Server configurable
-
-A server value must not come from the client. Pass it to `stream()` with `configurable=`. The adapter merges it into the run's `configurable`, and a handler reads it from its `RunnableConfig`:
+The client is not trusted. The server config is the only source of run config. Pass it to `stream()` with `config=`, a LangGraph `RunnableConfig`. It can set `configurable`, `recursion_limit`, `metadata`, `tags` and `run_name`. A handler reads it from its `RunnableConfig`. The example builds on the Quick Start:
 
 ```python
+...
 from langchain_core.runnables import RunnableConfig
 
 
@@ -488,22 +485,45 @@ async def reply(event: UserMessageReceived, config: RunnableConfig) -> Assistant
     return AssistantReplied(message=AIMessage(content=f"Reply in {locale}."))
 
 
+graph = EventGraph([reply], checkpointer=MemorySaver(), reducers=[message_reducer()])
+adapter = AGUIAdapter(graph, seed_factory=seed_factory)
+
+
 @app.post("/api/copilotkit")
 async def run(request: Request):
     input_data = RunAgentInput.model_validate_json(await request.body())
-    stream = adapter.stream(input_data, configurable={"locale": "fr"})
+    stream = adapter.stream(
+        input_data,
+        config={"configurable": {"locale": "fr"}, "recursion_limit": 50},
+    )
     return create_starlette_response(stream)
+```
+
+The adapter ignores the client run config in `RunAgentInput.forwarded_props`. This covers the keys `langgraph_config` and `config`, and a config at the top level of `forwarded_props`. Every part is ignored, for example `configurable`, `recursion_limit`, `metadata`, `tags` and `run_name`.
+
+To accept a client `configurable` key, name it in `client_configurable=`. The adapter reads only the named keys from the client. It ignores every other part of the client run config:
+
+```python
+stream = adapter.stream(
+    input_data,
+    config={"configurable": {"locale": "fr"}},
+    client_configurable={"theme"},
+)
 ```
 
 The adapter builds `configurable` in this order. A later source wins over an earlier source for the same key.
 
 | Order | Source | Keys |
 |---|---|---|
-| 1 | Client `forwarded_props` config | Every key except a key with the prefix `__lge_` |
-| 2 | Server `configurable=` | Every key |
+| 1 | Client `forwarded_props` config | Only the keys that `client_configurable=` names |
+| 2 | Server `config=` | Every key |
 | 3 | `RunAgentInput.thread_id` | `thread_id` |
 
-A server `configurable` that sets `thread_id`, or a key with the prefix `__lge_`, raises `ValueError` before `RUN_STARTED`. `connect()` takes no `configurable=`, because it runs no handler. It reads the checkpoint of the thread only.
+A server `configurable` key `thread_id`, or a key with the prefix `__lge_`, raises `ValueError` before `RUN_STARTED`. The same names in `client_configurable=` raise the same error.
+
+A `seed_factory` or a `resume_factory` receives `input_data`, not the run config. A handler reads the run config from its `RunnableConfig`.
+
+`connect()` takes no `config=`, because it runs no handler. It reads the checkpoint of `RunAgentInput.thread_id` only, and ignores the client run config.
 
 ## Deadline and signal pauses
 
