@@ -1323,12 +1323,11 @@ def describe_AGUIAdapter():
 
         def when_the_pause_signal_has_no_is_set_method():
 
-            async def it_raises_TypeError_before_the_run_starts():
+            def it_raises_TypeError_at_call_time():
                 adapter = _adapter(_graph(reply_hi), seed_factory=_ask("hi"))
-                stream = adapter.stream(_make_input(), pause_on=True)
 
                 with pytest.raises(TypeError, match="pause_on"):
-                    await anext(stream)
+                    adapter.stream(_make_input(), pause_on=True)
 
         def when_the_client_forwards_framework_pause_keys():
 
@@ -1359,7 +1358,8 @@ def describe_AGUIAdapter():
                             forwarded_props={
                                 "configurable": {"tenant_id": "acme", **planted}
                             }
-                        )
+                        ),
+                        client_configurable={"tenant_id"},
                     )
                 ]
 
@@ -2063,9 +2063,9 @@ def describe_connect():
             assert replay[1].type == EventType.MESSAGES_SNAPSHOT
             assert replay[1].messages == []
 
-    def when_forwarded_props():
+    def when_the_client_forwards_a_run_config():
 
-        async def it_passes_config_to_aget_state(monkeypatch):
+        async def it_reads_the_checkpoint_by_thread_id_only(monkeypatch):
             graph = _graph(ask_pending, checkpointer=MemorySaver())
             await graph.ainvoke(
                 UserAsked(question="go"),
@@ -2095,11 +2095,56 @@ def describe_connect():
                 seed_factory=_ask("unused"),
             )
 
-            assert len(captured) == 1
-            assert captured[0]["recursion_limit"] == 13
-            assert captured[0]["configurable"]["tenant_id"] == "acme"
-            assert captured[0]["configurable"]["thread_id"] == "t-connect-config"
+            assert captured == [{"configurable": {"thread_id": "t-connect-config"}}]
             assert any(e.type == EventType.STATE_SNAPSHOT for e in events)
+
+    def when_the_checkpointer_reads_a_configurable_key():
+
+        @pytest.fixture
+        async def adapter():
+            adapter = _adapter(
+                _graph(ask_pending, checkpointer=_TenantSaver()),
+                seed_factory=_ask("go"),
+            )
+            [
+                event
+                async for event in adapter.stream(
+                    _make_input(thread_id="t-tenant"), config=_TENANT_CONFIG
+                )
+            ]
+            return adapter
+
+        async def it_replays_the_checkpoint(adapter):
+            events = [
+                event
+                async for event in adapter.connect(
+                    _make_input(thread_id="t-tenant"), config=_TENANT_CONFIG
+                )
+            ]
+
+            assert events[-1].type == EventType.RUN_FINISHED
+            interrupted = _custom(events, "interrupted")
+            assert interrupted[0].value["draft"] == "pending"
+
+        def when_the_server_config_is_absent():
+
+            async def it_ends_the_replay_as_the_checkpointer_dictates(adapter):
+                input_data = _make_input(thread_id="t-tenant")
+                events = [event async for event in adapter.connect(input_data)]
+
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert "tenant" in events[-1].message
+
+    def when_the_server_config_names_a_reserved_key():
+
+        @pytest.mark.parametrize("key", ["thread_id", "__lge_pause_budget"])
+        def it_raises_at_call_time(key):
+            adapter = _adapter(_graph(ask_pending, checkpointer=MemorySaver()))
+
+            with pytest.raises(ValueError, match="config=") as raised:
+                adapter.connect(_make_input(), config={"configurable": {key: "x"}})
+
+            assert key in str(raised.value)
 
     def when_internal_audit_log_present():
         async def it_strips_events_audit_log_from_state_snapshot():
@@ -2148,94 +2193,161 @@ def describe_connect():
             assert snapshot.get("focus") == "scene-7"
 
 
-def describe_config_passthrough():
-    def _setup_stream_capture(monkeypatch):
-        graph = _graph(reply)
-        calls = _patch_astream(monkeypatch, graph)
-        return _adapter(graph), calls
+class _TenantSaver(MemorySaver):
+    """A ``MemorySaver`` that refuses a config without ``configurable["tenant"]``."""
 
-    async def it_forwards_langgraph_config_from_forwarded_props(monkeypatch):
-        adapter, calls = _setup_stream_capture(monkeypatch)
+    @staticmethod
+    def _require_tenant(config: Any) -> None:
+        if "tenant" not in config["configurable"]:
+            raise KeyError("the checkpointer needs configurable['tenant']")
+
+    async def aget_tuple(self, config: Any) -> Any:
+        self._require_tenant(config)
+        return await super().aget_tuple(config)
+
+    async def aput(self, config: Any, *args: Any) -> Any:
+        self._require_tenant(config)
+        return await super().aput(config, *args)
+
+
+_TENANT_CONFIG: RunnableConfig = {"configurable": {"tenant": "acme"}}
+
+_CLIENT_RUN_CONFIG: dict[str, Any] = {
+    "recursion_limit": 1_000_000,
+    "metadata": {"probe": "client"},
+    "tags": ["client"],
+    "run_name": "client",
+    "configurable": {"llm_override": "client-model", "locale": "en"},
+}
+
+
+def describe_stream_run_config():
+
+    @pytest.fixture
+    def seen() -> dict[str, Any]:
+        return {}
+
+    @pytest.fixture
+    def adapter(seen):
+        @on(UserAsked)
+        def read_config(event: UserAsked, config: RunnableConfig) -> AgentReplied:
+            seen.update(config)
+            return AgentReplied(message=AIMessage(content="hi"))
+
+        return _adapter(_graph(read_config))
+
+    async def _drain(adapter, forwarded_props=None, **kwargs):
         input_data = _make_input(
-            thread_id="t-config",
-            forwarded_props={
-                "langgraph_config": {
-                    "recursion_limit": 7,
-                    "configurable": {"tenant_id": "acme"},
-                }
-            },
+            thread_id="t-run", forwarded_props=forwarded_props or {}
         )
+        return [event async for event in adapter.stream(input_data, **kwargs)]
 
-        events = await _collect(adapter, input_data)
+    def when_no_server_config():
 
-        assert events[0].type == EventType.RUN_STARTED
-        assert events[-1].type == EventType.RUN_FINISHED
-        assert len(calls) == 1
-        assert calls[0]["config"]["recursion_limit"] == 7
-        assert calls[0]["config"]["configurable"]["tenant_id"] == "acme"
-        assert calls[0]["config"]["configurable"]["thread_id"] == "t-config"
+        async def it_gives_the_handler_the_thread_id(adapter, seen):
+            await _drain(adapter)
 
-    async def it_forwards_config_key_from_forwarded_props(monkeypatch):
-        adapter, calls = _setup_stream_capture(monkeypatch)
-        input_data = _make_input(
-            thread_id="t-config-key",
-            forwarded_props={
-                "config": {
-                    "recursion_limit": 9,
-                    "configurable": {
-                        "tenant_id": "acme",
-                        "thread_id": "wrong-thread",
-                    },
-                }
-            },
+            assert seen["configurable"]["thread_id"] == "t-run"
+
+        @pytest.mark.parametrize(
+            "forwarded_props",
+            [
+                {"langgraph_config": _CLIENT_RUN_CONFIG},
+                {"config": _CLIENT_RUN_CONFIG},
+                _CLIENT_RUN_CONFIG,
+            ],
+            ids=["langgraph_config", "config", "top_level"],
         )
+        async def it_ignores_the_client_run_config(adapter, seen, forwarded_props):
+            await _drain(adapter, forwarded_props)
 
-        events = await _collect(adapter, input_data)
+            assert "llm_override" not in seen["configurable"]
+            assert "locale" not in seen["configurable"]
+            assert seen["recursion_limit"] != 1_000_000
+            assert "probe" not in seen.get("metadata", {})
+            assert "client" not in seen.get("tags", [])
+            assert seen.get("run_name") != "client"
 
-        assert events[0].type == EventType.RUN_STARTED
-        assert events[-1].type == EventType.RUN_FINISHED
-        assert len(calls) == 1
-        assert calls[0]["config"]["recursion_limit"] == 9
-        assert calls[0]["config"]["configurable"]["tenant_id"] == "acme"
-        # Request thread_id wins over forwarded config thread_id.
-        assert calls[0]["config"]["configurable"]["thread_id"] == "t-config-key"
+    def when_server_config():
 
-    async def it_accepts_top_level_langgraph_config_shape(monkeypatch):
-        adapter, calls = _setup_stream_capture(monkeypatch)
-        input_data = _make_input(
-            thread_id="t-top-level",
-            forwarded_props={
-                "recursion_limit": 11,
-                "configurable": {
-                    "tenant_id": "top-level-tenant",
-                    "thread_id": "ignored-thread",
+        async def it_gives_the_values_to_the_handler(adapter, seen):
+            await _drain(
+                adapter,
+                config={
+                    "configurable": {"locale": "fr"},
+                    "recursion_limit": 50,
+                    "metadata": {"probe": "server"},
                 },
-            },
+            )
+
+            assert seen["configurable"]["locale"] == "fr"
+            assert seen["configurable"]["thread_id"] == "t-run"
+            assert seen["recursion_limit"] == 50
+            assert seen["metadata"]["probe"] == "server"
+
+        async def it_ignores_a_client_key_of_another_name(adapter, seen):
+            await _drain(
+                adapter,
+                {"langgraph_config": _CLIENT_RUN_CONFIG},
+                config={"configurable": {"tenant_id": "acme"}},
+            )
+
+            assert seen["configurable"]["tenant_id"] == "acme"
+            assert "llm_override" not in seen["configurable"]
+
+        @pytest.mark.parametrize("key", ["thread_id", "__lge_pause_budget"])
+        def it_raises_at_call_time(adapter, seen, key):
+            with pytest.raises(ValueError, match="config=") as raised:
+                adapter.stream(
+                    _make_input(thread_id="t-run"),
+                    config={"configurable": {key: "x"}},
+                )
+
+            assert key in str(raised.value)
+            assert seen == {}
+
+        @pytest.mark.parametrize("key", ["checkpoint_ns", "checkpoint_id"])
+        async def it_accepts_a_checkpoint_key(adapter, key):
+            adapter.stream(_make_input(), config={"configurable": {key: ""}})
+
+    def when_client_configurable():
+
+        async def it_gives_an_allowed_client_key_to_the_handler(adapter, seen):
+            await _drain(
+                adapter,
+                {"langgraph_config": _CLIENT_RUN_CONFIG},
+                client_configurable={"locale"},
+            )
+
+            assert seen["configurable"]["locale"] == "en"
+            assert "llm_override" not in seen["configurable"]
+            assert seen["recursion_limit"] != 1_000_000
+
+        async def it_lets_a_server_key_of_the_same_name_win(adapter, seen):
+            await _drain(
+                adapter,
+                {"langgraph_config": _CLIENT_RUN_CONFIG},
+                config={"configurable": {"locale": "fr"}},
+                client_configurable={"locale"},
+            )
+
+            assert seen["configurable"]["locale"] == "fr"
+
+        @pytest.mark.parametrize(
+            "key",
+            ["thread_id", "checkpoint_id", "checkpoint_ns", "__lge_pause_budget"],
         )
+        def it_raises_on_a_reserved_name_at_call_time(adapter, seen, key):
+            with pytest.raises(ValueError, match=key):
+                adapter.stream(_make_input(), client_configurable={key})
 
-        events = await _collect(adapter, input_data)
+            assert seen == {}
 
-        assert events[0].type == EventType.RUN_STARTED
-        assert events[-1].type == EventType.RUN_FINISHED
-        assert len(calls) == 1
-        assert calls[0]["config"]["recursion_limit"] == 11
-        assert calls[0]["config"]["configurable"]["tenant_id"] == "top-level-tenant"
-        assert calls[0]["config"]["configurable"]["thread_id"] == "t-top-level"
+        def when_it_is_a_string():
 
-    async def it_ignores_unrecognized_forwarded_props(monkeypatch):
-        adapter, calls = _setup_stream_capture(monkeypatch)
-        input_data = _make_input(
-            thread_id="t-default-config",
-            forwarded_props={"foo": "bar"},
-        )
-
-        events = await _collect(adapter, input_data)
-
-        assert events[0].type == EventType.RUN_STARTED
-        assert events[-1].type == EventType.RUN_FINISHED
-        assert len(calls) == 1
-        assert calls[0]["config"]["configurable"]["thread_id"] == "t-default-config"
-        assert "foo" not in calls[0]["config"]
+            def it_raises_TypeError_at_call_time(adapter):
+                with pytest.raises(TypeError, match="client_configurable"):
+                    adapter.stream(_make_input(), client_configurable="locale")
 
 
 def describe_custom_event_passthrough():

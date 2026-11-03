@@ -65,6 +65,7 @@ class CheckpointState(TypedDict):
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import Set as AbstractSet
 
     from ag_ui.core import RunAgentInput
     from langchain_core.runnables import RunnableConfig
@@ -77,6 +78,9 @@ if TYPE_CHECKING:
 
 
 _T = TypeVar("_T")
+
+_SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
+"""The ``configurable`` keys that a client cannot set. They choose a checkpoint."""
 
 
 class _FactoryRefusalError(Exception):
@@ -265,70 +269,115 @@ class AGUIAdapter:
         ]
         return len(positional) >= 2
 
-    @staticmethod
+    @classmethod
     def _build_config(
+        cls,
         input_data: RunAgentInput,
         thread_id: str,
         *,
+        config: RunnableConfig | None = None,
+        client_configurable: AbstractSet[str] = frozenset(),
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
     ) -> RunnableConfig:
-        """Build LangGraph config, including passthrough forwarded props.
+        """Build the LangGraph config of one run at the client trust boundary.
 
-        Drops every client ``configurable`` key with the framework prefix
-        ``__lge_``, so a client cannot plant a pause of its own. Delegates
-        ``deadline`` and ``pause_on`` to :func:`_with_pause_budget`, the
-        same writer as the :class:`EventGraph` entry points.
+        The server *config* is the only source of run config. The adapter
+        ignores the client run config in ``forwarded_props``. The one exception
+        is a client ``configurable`` key that *client_configurable* names. A
+        server key wins over a client key of the same name. ``thread_id`` always
+        comes from *thread_id*. Delegates ``deadline`` and ``pause_on`` to
+        :func:`_with_pause_budget`, the same writer as the :class:`EventGraph`
+        entry points.
         """
-        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
-        forwarded_raw = input_data.forwarded_props
-        forwarded = forwarded_raw if isinstance(forwarded_raw, dict) else {}
-        candidate: Any = None
-
-        if isinstance(forwarded.get("langgraph_config"), dict):
-            candidate = forwarded["langgraph_config"]
-        elif isinstance(forwarded.get("config"), dict):
-            candidate = forwarded["config"]
-        elif isinstance(forwarded, dict) and (
-            "configurable" in forwarded or "recursion_limit" in forwarded
+        if isinstance(client_configurable, str):
+            raise TypeError(
+                "client_configurable=... must be a set of key names, not the "
+                f"string {client_configurable!r}."
+            )
+        server_configurable = (config or {}).get("configurable") or {}
+        for argument, keys, owned in (
+            ("config", server_configurable, {"thread_id"}),
+            ("client_configurable", client_configurable, _SERVER_ONLY_KEYS),
         ):
-            candidate = forwarded
+            reserved = sorted(
+                key
+                for key in keys
+                if key in owned or key.startswith(_FRAMEWORK_KEY_PREFIX)
+            )
+            if reserved:
+                raise ValueError(
+                    f"{argument}=... must not name the reserved configurable "
+                    f"keys {reserved!r}. The adapter owns thread_id and every "
+                    "__lge_ key. Only the server can choose a checkpoint."
+                )
 
-        if isinstance(candidate, dict):
-            merged = {**candidate}
-            configurable = candidate.get("configurable")
-            client_keys = configurable if isinstance(configurable, dict) else {}
-            merged["configurable"] = {
-                **{
-                    key: value
-                    for key, value in client_keys.items()
-                    if not key.startswith(_FRAMEWORK_KEY_PREFIX)
-                },
+        client = cls._client_configurable(input_data)
+        run_config = {
+            **(config or {}),
+            "configurable": {
+                **{key: client[key] for key in client_configurable if key in client},
+                **server_configurable,
                 "thread_id": thread_id,
-            }
-            config = merged
+            },
+        }
+        return _with_pause_budget(
+            cast("RunnableConfig", run_config), deadline, pause_on
+        )
 
-        return _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on)
+    @staticmethod
+    def _client_configurable(input_data: RunAgentInput) -> dict[str, Any]:
+        """Return the client ``configurable`` in ``forwarded_props``, or ``{}``.
 
-    async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
+        A client sends it under ``langgraph_config``, under ``config``, or at
+        the top level of ``forwarded_props``.
+        """
+        forwarded = input_data.forwarded_props
+        if not isinstance(forwarded, dict):
+            return {}
+        candidate = forwarded.get("langgraph_config")
+        if not isinstance(candidate, dict):
+            candidate = forwarded.get("config")
+        if not isinstance(candidate, dict):
+            candidate = forwarded
+        configurable = candidate.get("configurable")
+        return configurable if isinstance(configurable, dict) else {}
+
+    def connect(
+        self,
+        input_data: RunAgentInput,
+        *,
+        config: RunnableConfig | None = None,
+    ) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph.
 
         The replay is one AG-UI run. It starts with ``RUN_STARTED`` and ends
         with ``RUN_FINISHED``, or with ``RUN_ERROR`` when the replay raises.
+
+        Args:
+            input_data: AG-UI ``RunAgentInput``.
+            config: The server run config.  The checkpointer reads the
+                checkpoint with it, for example with a tenant key in
+                ``configurable``.  Pass the same config as to
+                :meth:`stream`.  The adapter ignores the client run config.
+                ``None`` (default) reads the checkpoint with ``thread_id``
+                only.
+
+        Raises:
+            ValueError: *config* ``configurable`` names ``thread_id`` or a
+                key with the framework prefix ``__lge_``. ``connect()``
+                raises it when it is called, before the stream starts.
         """
         ctx = self._run_context(input_data)
-        async for agui_event in self._as_run(
-            ctx, self._replay_checkpoint(input_data, ctx)
-        ):
-            yield agui_event
+        run_config = self._build_config(input_data, ctx.thread_id, config=config)
+        return self._as_run(ctx, self._replay_checkpoint(ctx, run_config))
 
     reconnect = connect
 
     async def _replay_checkpoint(
-        self, input_data: RunAgentInput, ctx: MapperContext
+        self, ctx: MapperContext, config: RunnableConfig
     ) -> AsyncIterator[BaseEvent]:
         """Yield the snapshots and pending interrupts of the checkpoint."""
-        config = self._build_config(input_data, ctx.thread_id)
         snapshot = await self._aget_checkpoint_snapshot(config)
         if snapshot is None:
             yield build_state_snapshot({})
@@ -745,10 +794,12 @@ class AGUIAdapter:
                 tool_call_id=tc_id,
             )
 
-    async def stream(
+    def stream(
         self,
         input_data: RunAgentInput,
         *,
+        config: RunnableConfig | None = None,
+        client_configurable: AbstractSet[str] = frozenset(),
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
     ) -> AsyncIterator[BaseEvent]:
@@ -760,6 +811,18 @@ class AGUIAdapter:
 
         Args:
             input_data: AG-UI ``RunAgentInput``.
+            config: The server run config, for example ``configurable``,
+                ``recursion_limit`` or ``metadata``.  It is the only source of
+                run config.  A handler reads it from its ``RunnableConfig``.
+                ``None`` (default) gives the run only its ``thread_id``.
+            client_configurable: The names of the client ``configurable``
+                keys that the run accepts from ``forwarded_props``.  The
+                adapter ignores every other part of the client run config.
+                A key of the server *config* wins over a client key of the
+                same name.  Empty (default) accepts no client key.  A
+                client cannot choose a checkpoint, so ``checkpoint_id`` and
+                ``checkpoint_ns`` are reserved here.  The server *config*
+                can set them.
             deadline: Absolute ``time.monotonic()`` value.  When the run's
                 router observes a current time >= deadline between
                 dispatch rounds, it emits :class:`RunPausedOnDeadline` and
@@ -779,17 +842,25 @@ class AGUIAdapter:
 
         Raises:
             TypeError: *pause_on* is a class, or has no callable
-                ``is_set``. The stream raises it on the first iteration,
-                before ``RUN_STARTED``.
+                ``is_set``.  Or *client_configurable* is a ``str``.
+                ``stream()`` raises it when it is called, before the stream
+                starts.
+            ValueError: *config* ``configurable`` names ``thread_id`` or a
+                key with the framework prefix ``__lge_``.  Or
+                *client_configurable* names one of these keys,
+                ``checkpoint_id`` or ``checkpoint_ns``.  ``stream()`` raises
+                it when it is called, before the stream starts.
         """
         ctx = self._run_context(input_data)
-        config = self._build_config(
-            input_data, ctx.thread_id, deadline=deadline, pause_on=pause_on
+        run_config = self._build_config(
+            input_data,
+            ctx.thread_id,
+            config=config,
+            client_configurable=client_configurable,
+            deadline=deadline,
+            pause_on=pause_on,
         )
-        async for agui_event in self._as_run(
-            ctx, self._stream_event_source(input_data, ctx, config)
-        ):
-            yield agui_event
+        return self._as_run(ctx, self._stream_event_source(input_data, ctx, run_config))
 
     @staticmethod
     def _run_context(input_data: RunAgentInput) -> MapperContext:
