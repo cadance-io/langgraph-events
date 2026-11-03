@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-03
+
 ### Added
 
 - **An AG-UI seed factory or resume factory can be `async`.**
@@ -2034,7 +2036,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.44.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.45.0...HEAD
+[0.45.0]: https://github.com/cadance-io/langgraph-events/compare/v0.44.0...v0.45.0
 [0.44.0]: https://github.com/cadance-io/langgraph-events/compare/v0.43.1...v0.44.0
 [0.43.1]: https://github.com/cadance-io/langgraph-events/compare/v0.43.0...v0.43.1
 [0.43.0]: https://github.com/cadance-io/langgraph-events/compare/v0.42.1...v0.43.0
