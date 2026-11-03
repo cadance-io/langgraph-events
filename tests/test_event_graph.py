@@ -10,6 +10,7 @@ import warnings
 import pytest
 from conftest import (
     Completed,
+    Counted,
     Ended,
     LoadCountingSaver,
     MessageReceived,
@@ -17,6 +18,7 @@ from conftest import (
     Order,
     Processed,
     Started,
+    count_to_twenty,
 )
 from langchain_core.messages import (
     AIMessage,
@@ -26,6 +28,7 @@ from langchain_core.messages import (
     SystemMessage,
 )
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END
 from langgraph.types import Command as LGCommand
 from langgraph.types import StateUpdate
@@ -3267,6 +3270,52 @@ def describe_EventGraph():
                 graph = EventGraph([looper], max_rounds=3)
                 events = list(graph.stream_events(LoopEvent(n=0)))
                 assert any(isinstance(e, MaxRoundsExceeded) for e in events)
+
+        def describe_streamed_recursion_limit():
+
+            @pytest.mark.parametrize(
+                "frames",
+                [{}, {"include_llm_tokens": True}, {"include_custom_events": True}],
+                ids=["events", "llm_tokens", "custom_events"],
+            )
+            async def it_runs_under_the_auto_sized_limit(frames):
+                graph = EventGraph([count_to_twenty])
+
+                items = await _adrain(graph.astream_events(Counted(), **frames))
+
+                assert Ended(result="counted") in items
+
+            async def it_resumes_under_the_auto_sized_limit():
+                @on(Completed)
+                def count_after_resume(event: Completed) -> Counted:
+                    return Counted()
+
+                graph = EventGraph(
+                    [_pause_at_step_one, count_after_resume, count_to_twenty],
+                    checkpointer=MemorySaver(),
+                )
+                config = {"configurable": {"thread_id": "streamed-limit"}}
+                await graph.ainvoke(Started(), config=config)
+
+                items = await _adrain(
+                    graph.astream_resume(
+                        Completed(), include_custom_events=True, config=config
+                    )
+                )
+
+                assert Ended(result="counted") in items
+
+            async def it_lets_the_caller_limit_win():
+                graph = EventGraph([count_to_twenty])
+
+                with pytest.raises(GraphRecursionError):
+                    await _adrain(
+                        graph.astream_events(
+                            Counted(),
+                            include_custom_events=True,
+                            config={"recursion_limit": 10},
+                        )
+                    )
 
         def describe_deadline():
 

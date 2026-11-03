@@ -83,6 +83,18 @@ class Completed(IntegrationEvent):
     result: str = ""
 
 
+class Counted(IntegrationEvent):
+    n: int = 0
+
+
+@on(Counted)
+def count_to_twenty(event: Counted) -> Counted | Ended:
+    """Run 20 rounds, about 40 supersteps: more than LangGraph's default of 25."""
+    if event.n >= 20:
+        return Ended(result="counted")
+    return Counted(n=event.n + 1)
+
+
 # Canonical namespace used by test_invariant.py / test_namespace.py /
 # test_reducer_namespace.py. The ``current_status`` reducer demonstrates
 # the declarative namespace-reducer form — auto-named "current_status",

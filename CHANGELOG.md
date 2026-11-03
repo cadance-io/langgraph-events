@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed run uses the `recursion_limit` that `EventGraph` sizes to its handlers.**
+  Before, LangGraph's default limit of 25 supersteps replaced it. This affected
+  `AGUIAdapter.stream()`, and `astream_events()` and `astream_resume()` with
+  `include_llm_tokens=True` or `include_custom_events=True`. A run that needed more than
+  25 supersteps raised `GraphRecursionError`. A `recursion_limit` in the caller's
+  `config=` still wins.
+
 ## [0.46.0] - 2026-11-03
 
 ### Added
