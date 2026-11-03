@@ -474,6 +474,37 @@ Plain `Interrupted`, with no payload, remains the right choice for a paused thre
 
 `stream()` and `connect()` accept a LangGraph config via `RunAgentInput.forwarded_props`, under the key `langgraph_config`, the key `config`, or as the dict itself. The adapter always overrides `configurable.thread_id` from `RunAgentInput.thread_id`. Other keys, for example `recursion_limit` or tenant routing, pass through.
 
+### Server configurable
+
+A server value must not come from the client. Pass it to `stream()` with `configurable=`. The adapter merges it into the run's `configurable`, and a handler reads it from its `RunnableConfig`:
+
+```python
+from langchain_core.runnables import RunnableConfig
+
+
+@on(UserMessageReceived)
+async def reply(event: UserMessageReceived, config: RunnableConfig) -> AssistantReplied:
+    locale = config["configurable"]["locale"]
+    return AssistantReplied(message=AIMessage(content=f"Reply in {locale}."))
+
+
+@app.post("/api/copilotkit")
+async def run(request: Request):
+    input_data = RunAgentInput.model_validate_json(await request.body())
+    stream = adapter.stream(input_data, configurable={"locale": "fr"})
+    return create_starlette_response(stream)
+```
+
+The adapter builds `configurable` in this order. A later source wins over an earlier source for the same key.
+
+| Order | Source | Keys |
+|---|---|---|
+| 1 | Client `forwarded_props` config | Every key except a key with the prefix `__lge_` |
+| 2 | Server `configurable=` | Every key |
+| 3 | `RunAgentInput.thread_id` | `thread_id` |
+
+A server `configurable` that sets `thread_id`, or a key with the prefix `__lge_`, raises `ValueError` before `RUN_STARTED`. `connect()` takes no `configurable=`, because it runs no handler. It reads the checkpoint of the thread only.
+
 ## Deadline and signal pauses
 
 `stream()` accepts `deadline=`, an absolute `time.monotonic()` reference, and `pause_on=`, an object with `is_set()` such as an `asyncio.Event`. The router emits a `RunPausedOnDeadline` or a `RunPausedOnSignal`, both `RunPaused` subclasses, and the run finalises through the same `RunFinishedEvent` path as a normal completion. See [Control Flow → Deadline pause](control-flow.md#soft-timeout-runpaused) and [Control Flow → Pause on a signal](control-flow.md#pause-on-a-signal-runpausedonsignal) for the semantics and the resume rule.

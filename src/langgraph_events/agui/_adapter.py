@@ -64,7 +64,7 @@ class CheckpointState(TypedDict):
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
     from ag_ui.core import RunAgentInput
     from langchain_core.runnables import RunnableConfig
@@ -270,13 +270,15 @@ class AGUIAdapter:
         input_data: RunAgentInput,
         thread_id: str,
         *,
+        configurable: Mapping[str, Any] | None = None,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
     ) -> RunnableConfig:
         """Build LangGraph config, including passthrough forwarded props.
 
         Drops every client ``configurable`` key with the framework prefix
-        ``__lge_``, so a client cannot plant a pause of its own. Delegates
+        ``__lge_``, so a client cannot plant a pause of its own. A key of the
+        server *configurable* wins over a client key of the same name. Delegates
         ``deadline`` and ``pause_on`` to :func:`_with_pause_budget`, the
         same writer as the :class:`EventGraph` entry points.
         """
@@ -294,19 +296,34 @@ class AGUIAdapter:
         ):
             candidate = forwarded
 
+        server_keys = dict(configurable or {})
+        reserved = [
+            key
+            for key in server_keys
+            if key == "thread_id" or key.startswith(_FRAMEWORK_KEY_PREFIX)
+        ]
+        if reserved:
+            raise ValueError(
+                f"configurable must not set the reserved keys {reserved!r}. "
+                "The adapter owns thread_id and every __lge_ key."
+            )
+
         if isinstance(candidate, dict):
-            merged = {**candidate}
-            configurable = candidate.get("configurable")
-            client_keys = configurable if isinstance(configurable, dict) else {}
-            merged["configurable"] = {
-                **{
-                    key: value
-                    for key, value in client_keys.items()
-                    if not key.startswith(_FRAMEWORK_KEY_PREFIX)
-                },
-                "thread_id": thread_id,
+            config = {**candidate}
+            client_configurable = candidate.get("configurable")
+            client_keys = (
+                client_configurable if isinstance(client_configurable, dict) else {}
+            )
+            config["configurable"] = {
+                key: value
+                for key, value in client_keys.items()
+                if not key.startswith(_FRAMEWORK_KEY_PREFIX)
             }
-            config = merged
+        config["configurable"] = {
+            **config["configurable"],
+            **server_keys,
+            "thread_id": thread_id,
+        }
 
         return _with_pause_budget(cast("RunnableConfig", config), deadline, pause_on)
 
@@ -749,6 +766,7 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         *,
+        configurable: Mapping[str, Any] | None = None,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
     ) -> AsyncIterator[BaseEvent]:
@@ -760,6 +778,10 @@ class AGUIAdapter:
 
         Args:
             input_data: AG-UI ``RunAgentInput``.
+            configurable: Server values for the run's ``configurable``.
+                A handler reads them from its ``RunnableConfig``.  A key here
+                wins over a client ``forwarded_props`` key of the same name.
+                ``None`` (default) adds nothing.
             deadline: Absolute ``time.monotonic()`` value.  When the run's
                 router observes a current time >= deadline between
                 dispatch rounds, it emits :class:`RunPausedOnDeadline` and
@@ -781,10 +803,17 @@ class AGUIAdapter:
             TypeError: *pause_on* is a class, or has no callable
                 ``is_set``. The stream raises it on the first iteration,
                 before ``RUN_STARTED``.
+            ValueError: *configurable* sets ``thread_id`` or a key with the
+                framework prefix ``__lge_``. The stream raises it on the
+                first iteration, before ``RUN_STARTED``.
         """
         ctx = self._run_context(input_data)
         config = self._build_config(
-            input_data, ctx.thread_id, deadline=deadline, pause_on=pause_on
+            input_data,
+            ctx.thread_id,
+            configurable=configurable,
+            deadline=deadline,
+            pause_on=pause_on,
         )
         async for agui_event in self._as_run(
             ctx, self._stream_event_source(input_data, ctx, config)

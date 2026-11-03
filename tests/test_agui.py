@@ -2238,6 +2238,58 @@ def describe_config_passthrough():
         assert "foo" not in calls[0]["config"]
 
 
+def describe_stream_server_configurable():
+
+    @pytest.fixture
+    def seen() -> dict[str, Any]:
+        return {}
+
+    @pytest.fixture
+    def adapter(seen):
+        @on(UserAsked)
+        def read_config(event: UserAsked, config: RunnableConfig) -> AgentReplied:
+            seen.update(config["configurable"])
+            return AgentReplied(message=AIMessage(content="hi"))
+
+        return _adapter(_graph(read_config))
+
+    async def _drain(adapter, configurable, forwarded_props=None):
+        input_data = _make_input(
+            thread_id="t-server", forwarded_props=forwarded_props or {}
+        )
+        return [
+            event
+            async for event in adapter.stream(input_data, configurable=configurable)
+        ]
+
+    async def it_gives_the_value_to_the_handler(adapter, seen):
+        await _drain(adapter, {"locale": "fr"})
+
+        assert seen["locale"] == "fr"
+        assert seen["thread_id"] == "t-server"
+
+    async def it_wins_over_a_client_key_of_the_same_name(adapter, seen):
+        await _drain(
+            adapter,
+            {"locale": "fr"},
+            {
+                "langgraph_config": {
+                    "configurable": {"locale": "en", "tenant_id": "acme"}
+                }
+            },
+        )
+
+        assert seen["locale"] == "fr"
+        assert seen["tenant_id"] == "acme"
+
+    @pytest.mark.parametrize("key", ["thread_id", "__lge_pause_budget"])
+    async def it_refuses_a_reserved_key(adapter, seen, key):
+        with pytest.raises(ValueError, match=key):
+            await _drain(adapter, {key: "x"})
+
+        assert seen == {}
+
+
 def describe_custom_event_passthrough():
     async def it_maps_state_snapshot_frame_to_state_snapshot(monkeypatch):
         from langgraph_events.stream import StateSnapshotFrame

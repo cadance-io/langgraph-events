@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`AGUIAdapter.stream()` takes `configurable=`, a mapping of server values for the run.** A
+  handler reads them from its `RunnableConfig`. A server key wins over a client
+  `forwarded_props` key of the same name. A server `thread_id` or `__lge_` key raises
+  `ValueError` before `RUN_STARTED`.
+
+See [Server configurable](docs/agui.md#server-configurable).
+
 ## [0.45.0] - 2026-11-03
 
 ### Added
