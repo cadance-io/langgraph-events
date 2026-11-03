@@ -29,7 +29,7 @@ from ag_ui.core import (
 )
 from ag_ui.core import ToolMessage as AguiToolMessage
 from ag_ui.core import UserMessage as AguiUserMessage
-from conftest import LoadCountingSaver
+from conftest import Counted, LoadCountingSaver, count_to_twenty
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig  # noqa: TC002 -- @on resolves it
@@ -2248,6 +2248,13 @@ def describe_stream_run_config():
             await _drain(adapter)
 
             assert seen["configurable"]["thread_id"] == "t-run"
+
+        async def it_runs_a_long_turn_under_the_auto_sized_limit():
+            events = await _stream(
+                _graph(count_to_twenty), seed_factory=lambda inp: Counted()
+            )
+
+            assert events[-1].type == EventType.RUN_FINISHED
 
         @pytest.mark.parametrize(
             "forwarded_props",

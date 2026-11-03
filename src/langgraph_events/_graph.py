@@ -3124,6 +3124,9 @@ class EventGraph:
         seen: set[int] = set()
         interrupts: list[Interrupt] = []
 
+        # Runnable.astream_events fills LangGraph's default recursion_limit
+        # before Pregel merges compiled.config, so the default would win.
+        kwargs["config"] = {**(compiled.config or {}), **(kwargs.get("config") or {})}
         async for raw in compiled.astream_events(
             inp,
             version="v2",
