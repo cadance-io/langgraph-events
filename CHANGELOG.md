@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **An AG-UI seed factory or resume factory can be `async`.**
+- **A factory can raise `RunRefusedError(code, message)` to refuse an AG-UI run.** The client
+  gets `RUN_ERROR` with that `code` and that `message`. The run stores nothing.
+
+See [Async Factories and Refusals](docs/agui.md#async-factories-and-refusals).
+
+### Changed
+
+- **The return type of `SeedFactory` and `ResumeFactory` now includes an `Awaitable`.** Code that
+  calls a factory directly can fail the type check. Such a caller must narrow the result with
+  `inspect.isawaitable`, or await it. A sync factory implementation needs no change.
+
 ## [0.44.0] - 2026-11-02
 
 ### Added

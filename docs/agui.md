@@ -64,7 +64,7 @@ async def run(request: Request):
     return create_starlette_response(adapter.stream(input_data))
 ```
 
-Pass `error_message="Something went wrong."` to `AGUIAdapter(...)` so that exception details do not reach the client.
+Pass `error_message="Something went wrong."` to `AGUIAdapter(...)` so that exception details do not reach the client. To send the client a specific error code from a factory, see [Async Factories and Refusals](#async-factories-and-refusals).
 
 ## Built-in Mapper Chain
 
@@ -98,7 +98,7 @@ Outside the chain, the adapter also emits:
 - `StateSnapshotFrame` → `StateSnapshot`.
 - `CustomEventFrame` → `CustomEvent` (name/value passthrough).
 - `InterruptFrame` → its `value` through the mapper chain. The run yields one frame for each interrupt that it leaves pending.
-- Lifecycle: `RunStarted`, `RunFinished`, `RunError` on exception.
+- Lifecycle: `RunStarted`, `RunFinished`, `RunError` on exception. A handler that raises `RunRefusedError` gets the generic `RunError`, see [Async Factories and Refusals](#async-factories-and-refusals).
 
 ### Shaping client-facing state
 
@@ -234,7 +234,7 @@ adapter = AGUIAdapter(graph, seed_factory=seed_factory, mappers=[PlanMapper()])
 
 ## Resume Support
 
-Implement `resume_factory(input_data, checkpoint_state)`. Return an `Event` to trigger `astream_resume()`. Return `None` for a fresh run via `seed_factory`. On a thread paused on an `Interrupted`, `None` instead replays the checkpoint. The adapter emits `StateSnapshot`, `MessagesSnapshot` and each pending `Interrupted`. It does not call `seed_factory`. `checkpoint_state` is optional. A one-argument factory still works.
+Implement `resume_factory(input_data, checkpoint_state)`. Return an `Event` to trigger `astream_resume()`. Return `None` for a fresh run via `seed_factory`. On a thread paused on an `Interrupted`, `None` instead replays the checkpoint. The adapter emits `StateSnapshot`, `MessagesSnapshot` and each pending `Interrupted`. It does not call `seed_factory`. `checkpoint_state` is optional. A one-argument factory still works. A `resume_factory` can be `async` and can refuse the run, see [Async Factories and Refusals](#async-factories-and-refusals).
 
 ```python
 ...
@@ -269,6 +269,45 @@ When `RunAgentInput.state` is populated alongside a resume:
 - **An `@on(FrontendStateMutated)` handler does NOT fire on resume.** Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for a resume-time side effect.
 
 A reducer can subscribe to `FrontendStateMutated` to project a selected client-state key on the server. A module-level reducer must set `name=`: `ScalarReducer(name="focus", event_type=FrontendStateMutated, fn=lambda e: e.state.get("focus", SKIP))`.
+
+## Async Factories and Refusals
+
+A `seed_factory` or a `resume_factory` can be `async`. The adapter awaits the result. A sync factory still works. The optional `checkpoint_state` argument works the same way for both kinds.
+
+A factory can refuse the run. Raise `RunRefusedError(code, message)`. The adapter then sends `RUN_STARTED`, then one `RUN_ERROR` with that `code` and that `message`, and nothing after. The graph does not start, so the run stores nothing in the checkpoint. The `error_message` of the adapter does not replace the `message` of a refusal. The adapter logs the `code` of a refusal at `WARNING`, without the `message` and without a traceback.
+
+The example builds on the Quick Start. `KNOWN_FILE_IDS` stands in for your own upload store.
+
+```python
+...
+from ag_ui.core import RunAgentInput
+from langchain_core.messages import HumanMessage
+
+from langgraph_events import Event
+from langgraph_events.agui import AGUIAdapter, RunRefusedError
+
+KNOWN_FILE_IDS: set[str] = set()
+
+
+async def file_exists(file_id: str) -> bool:
+    return file_id in KNOWN_FILE_IDS
+
+
+async def seed_factory(input_data: RunAgentInput) -> list[Event]:
+    last_msg = input_data.messages[-1]
+    if not await file_exists(last_msg.id):
+        raise RunRefusedError("unknown_file", "The attached file does not exist.")
+    return [UserMessageReceived(message=HumanMessage(content=last_msg.content))]
+
+
+adapter = AGUIAdapter(graph, seed_factory=seed_factory)
+```
+
+A client reads two fields of `RUN_ERROR`: `code` and `message`. A refusal always sets `code`. A generic error has no `code`. A client branches on the presence of `code`.
+
+`connect()` calls no factory, so a refusal cannot occur there.
+
+The adapter catches `RunRefusedError` only from the two factories. A handler that raises `RunRefusedError` gets the same treatment as any other exception: a generic `RUN_ERROR` without a `code`. This path logs at `ERROR` with a traceback, and the traceback includes the `message` of the refusal. The graph has run by then, so the run can have stored events.
 
 ## Frontend Tools
 

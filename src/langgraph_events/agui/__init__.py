@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, NoReturn
 
 from langgraph_events.agui._adapter import AGUIAdapter
 from langgraph_events.agui._context import MapperContext
+from langgraph_events.agui._errors import RunRefusedError
 from langgraph_events.agui._events import (
     FrontendStateMutated,
     FrontendToolCallRequested,
@@ -86,6 +87,7 @@ __all__ = [
     "InterruptedWithPayload",
     "MapperContext",
     "ResumeFactory",
+    "RunRefusedError",
     "SeedFactory",
     "SkipInternalMapper",
     "UnmappedEventError",

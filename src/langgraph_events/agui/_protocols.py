@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from ag_ui.core import BaseEvent, RunAgentInput
 
     from langgraph_events._event import Event
@@ -58,13 +60,16 @@ class SeedFactory(Protocol):
     reducer snapshots, events, messages, and interrupt info from the
     checkpoint.  The adapter detects the arity at runtime, so single-arg
     factories remain fully supported.
+
+    The factory can be ``async``. The adapter awaits an awaitable result.
+    Raise :class:`RunRefusedError` to refuse the run before the graph starts.
     """
 
     def __call__(
         self,
         input_data: RunAgentInput,
         checkpoint_state: dict[str, Any] | None = ...,
-    ) -> Event | list[Event]:
+    ) -> Event | list[Event] | Awaitable[Event | list[Event]]:
         """Produce seed event(s) from an AG-UI run request."""
         ...
 
@@ -75,13 +80,14 @@ class ResumeFactory(Protocol):
 
     Optionally accepts a second ``checkpoint_state`` dict.  The adapter
     detects the arity at runtime, so single-arg factories remain fully
-    supported.
+    supported. The ``async`` and :class:`RunRefusedError` rules of
+    :class:`SeedFactory` apply.
     """
 
     def __call__(
         self,
         input_data: RunAgentInput,
         checkpoint_state: dict[str, Any] | None = ...,
-    ) -> Event | None:
+    ) -> Event | None | Awaitable[Event | None]:
         """Return a domain Event to resume with, or None for a fresh run."""
         ...

@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import pickle
 import warnings
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
+import pytest_asyncio
 from ag_ui.core import (
     AudioPart,
     BaseEvent,
@@ -19,6 +21,7 @@ from ag_ui.core import (
     FileSource,
     ImagePart,
     RunAgentInput,
+    RunErrorEvent,
     TextPart,
     Tool,
     UrlSource,
@@ -55,6 +58,7 @@ from langgraph_events.agui import (
     FrontendToolCallRequested,
     InterruptedWithPayload,
     MapperContext,
+    RunRefusedError,
     UnmappedEventError,
     agui_messages_to_langchain,
     build_langchain_tools,
@@ -270,6 +274,11 @@ def reply_hi(event: UserAsked) -> AgentReplied:
 
 
 @on(UserAsked)
+def echo_question(event: UserAsked) -> AgentReplied:
+    return AgentReplied(message=AIMessage(content=event.question))
+
+
+@on(UserAsked)
 def reply_hello(event: UserAsked) -> AgentReplied:
     return AgentReplied(message=AIMessage(content="hello"))
 
@@ -370,6 +379,31 @@ def _graph(*handlers: Any, **overrides: Any) -> EventGraph:
     """``EventGraph`` with the ``message_reducer()`` these tests always install."""
     overrides.setdefault("reducers", [message_reducer()])
     return EventGraph(list(handlers), **overrides)
+
+
+def _refusing(*_: Any) -> NoReturn:
+    """Seed or resume factory that refuses the run."""
+    raise RunRefusedError("too_large", "The file is too large.")
+
+
+async def _stored_events(graph: Any, thread_id: str) -> list[Any]:
+    """The events that the checkpoint of ``thread_id`` holds."""
+    snapshot = await graph.compiled.aget_state(_config(thread_id))
+    return list(snapshot.values.get("events", []))
+
+
+async def _paused(thread_id: str) -> EventGraph:
+    """A graph whose thread ``thread_id`` waits on ``ApprovalRequested``."""
+    graph = _graph(ask_approval, approve, checkpointer=MemorySaver())
+    await graph.ainvoke(UserAsked(question="go"), config=_config(thread_id))
+    return graph
+
+
+def _assert_refused(events: list[BaseEvent]) -> None:
+    """The run starts, then ends with the refusal of ``_refusing``."""
+    assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+    assert events[-1].code == "too_large"
+    assert events[-1].message == "The file is too large."
 
 
 def _adapter(graph: Any, **overrides: Any) -> AGUIAdapter:
@@ -990,6 +1024,18 @@ def describe_AGUIAdapter():
                     error_events[0].message == "Something went wrong. Please try again."
                 )
 
+        def when_a_handler_raises_run_refused_error():
+            async def it_sends_the_generic_error():
+                @on(UserAsked)
+                def refuse(event: UserAsked) -> None:
+                    _refusing()
+
+                events = await _stream(_graph(refuse), error_message="generic")
+
+                assert events[-1].type == EventType.RUN_ERROR
+                assert events[-1].code is None
+                assert events[-1].message == "generic"
+
         def when_messages_unchanged():
             async def it_skips_redundant_messages_snapshots():
                 @on(AgentReplied)
@@ -1367,6 +1413,40 @@ def describe_AGUIAdapter():
             assert len(task_events) == 1
             assert task_events[0].name == "custom.task"
 
+    def describe_a_mapper_that_returns_run_error():
+        @pytest_asyncio.fixture(scope="module", loop_scope="module")
+        async def run() -> tuple[list[BaseEvent], list[Any]]:
+            @on(UserAsked)
+            def create_task(event: UserAsked) -> TaskCreated:
+                return TaskCreated(title="t")
+
+            @on(TaskCreated)
+            def reply_to_task(event: TaskCreated) -> AgentReplied:
+                return AgentReplied(message=AIMessage(content="done"))
+
+            class ErrorMapper:
+                def map(self, event: Any, ctx: Any) -> Any:
+                    if isinstance(event, TaskCreated):
+                        return [RunErrorEvent(type=EventType.RUN_ERROR, message="x")]
+                    return None
+
+            graph = _graph(create_task, reply_to_task, checkpointer=MemorySaver())
+            events = await _stream(
+                graph, _make_input(thread_id="t-map-err"), mappers=[ErrorMapper()]
+            )
+            return events, await _stored_events(graph, "t-map-err")
+
+        def it_runs_the_later_handlers(run: tuple[list[BaseEvent], list[Any]]):
+            _, stored = run
+
+            assert any(isinstance(e, AgentReplied) for e in stored)
+
+        def it_finishes_the_run(run: tuple[list[BaseEvent], list[Any]]):
+            events, _ = run
+
+            assert EventType.RUN_ERROR in _types(events)
+            assert events[-1].type == EventType.RUN_FINISHED
+
     def describe_resume():
         def when_resume_factory_available():
             async def it_uses_resume_factory():
@@ -1571,6 +1651,56 @@ def describe_AGUIAdapter():
                 assert events[-1].type == EventType.RUN_FINISHED
                 assert _roled(events, "assistant")[-1].content == "Approved twice!"
 
+        def when_the_resume_factory_is_async():
+            async def it_resumes_the_run_from_the_awaited_event():
+                async def factory(inp: RunAgentInput) -> ApprovalGiven:
+                    await asyncio.sleep(0)
+                    return ApprovalGiven(approved=True)
+
+                graph = await _paused("t-a")
+
+                events = await _resume(
+                    graph, _make_input(thread_id="t-a"), resume_factory=factory
+                )
+
+                assert events[-1].type == EventType.RUN_FINISHED
+                assert _roled(events, "assistant")[-1].content == "Approved!"
+
+        def when_the_resume_factory_raises_run_refused_error():
+            async def it_sends_the_refusal_code():
+                graph = await _paused("t-r")
+
+                events = await _resume(
+                    graph,
+                    _make_input(thread_id="t-r"),
+                    resume_factory=_refusing,
+                    error_message="generic",
+                )
+
+                _assert_refused(events)
+
+            async def it_stores_nothing_for_the_run():
+                graph = await _paused("t-r")
+                stored = await _stored_events(graph, "t-r")
+
+                await _resume(
+                    graph,
+                    _make_input(thread_id="t-r", state={"focus": "x"}),
+                    resume_factory=_refusing,
+                )
+
+                assert await _stored_events(graph, "t-r") == stored
+
+            async def it_keeps_the_thread_resumable():
+                graph = await _paused("t-r")
+                await _resume(
+                    graph, _make_input(thread_id="t-r"), resume_factory=_refusing
+                )
+
+                events = await _resume(graph, _make_input(thread_id="t-r"))
+
+                assert _roled(events, "assistant")[-1].content == "Approved!"
+
     def describe_init():
         def when_resume_factory_missing_checkpointer():
             def it_raises():
@@ -1636,27 +1766,78 @@ def describe_AGUIAdapter():
                     )
 
     def describe_seed_factory():
-        async def it_passes_input_to_factory():
-            received_inputs: list[Any] = []
+        def when_the_factory_is_sync():
+            async def it_passes_input_to_factory():
+                received_inputs: list[Any] = []
 
-            def tracking_factory(inp: RunAgentInput) -> UserAsked:
-                received_inputs.append(inp)
-                return UserAsked(question="from factory")
+                def tracking_factory(inp: RunAgentInput) -> UserAsked:
+                    received_inputs.append(inp)
+                    return UserAsked(question="from factory")
 
-            @on(UserAsked)
-            def reply(event: UserAsked) -> AgentReplied:
-                return AgentReplied(message=AIMessage(content=event.question))
+                graph = _graph(echo_question)
+                adapter = _adapter(graph, seed_factory=tracking_factory)
+                input_data = _make_input(thread_id="t-seed")
+                events = await _collect(adapter, input_data)
 
-            graph = _graph(reply)
-            adapter = _adapter(graph, seed_factory=tracking_factory)
-            input_data = _make_input(thread_id="t-seed")
-            events = await _collect(adapter, input_data)
+                assert len(received_inputs) == 1
+                assert received_inputs[0].thread_id == "t-seed"
 
-            assert len(received_inputs) == 1
-            assert received_inputs[0].thread_id == "t-seed"
+                ai_msgs = _roled(events, "assistant")
+                assert any("from factory" in m.content for m in ai_msgs)
 
-            ai_msgs = _roled(events, "assistant")
-            assert any("from factory" in m.content for m in ai_msgs)
+        def when_the_factory_is_async():
+            async def it_seeds_the_run_from_the_awaited_event():
+                async def factory(inp: RunAgentInput, state: Any) -> UserAsked:
+                    await asyncio.sleep(0)
+                    return UserAsked(question="awaited")
+
+                graph = _graph(echo_question)
+                events = await _stream(graph, seed_factory=factory)
+
+                assert events[-1].type == EventType.RUN_FINISHED
+                assert _roled(events, "assistant")[-1].content == "awaited"
+
+        def when_the_factory_raises_run_refused_error():
+            async def it_sends_the_refusal_code():
+                graph = _graph(reply)
+                events = await _stream(
+                    graph, seed_factory=_refusing, error_message="generic"
+                )
+
+                _assert_refused(events)
+
+            async def it_stores_nothing_for_the_run():
+                graph = _graph(reply, checkpointer=MemorySaver())
+                await graph.ainvoke(UserAsked(question="go"), config=_config("t-ref"))
+                stored = await _stored_events(graph, "t-ref")
+
+                await _stream(
+                    graph, _make_input(thread_id="t-ref"), seed_factory=_refusing
+                )
+
+                assert await _stored_events(graph, "t-ref") == stored
+
+            async def it_logs_one_warning_that_names_only_the_code(caplog):
+                with caplog.at_level(logging.INFO, logger="langgraph_events.agui"):
+                    await _stream(_graph(reply), seed_factory=_refusing)
+
+                assert [r.levelno for r in caplog.records] == [logging.WARNING]
+                logged = caplog.records[0].getMessage()
+                assert "too_large" in logged
+                assert "The file is too large." not in logged
+
+        def when_the_factory_raises_another_exception():
+            async def it_sends_the_generic_error():
+                def factory(inp: RunAgentInput) -> UserAsked:
+                    raise RuntimeError("database down")
+
+                events = await _stream(
+                    _graph(reply), seed_factory=factory, error_message="generic"
+                )
+
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert events[-1].code is None
+                assert events[-1].message == "generic"
 
 
 def describe_transport():
@@ -2380,6 +2561,22 @@ def describe_AGUICustomEvent():
             # Should use class name, not agui_event_name
             custom = _custom(events, "TaskCreated")
             assert len(custom) == 1
+
+
+def describe_RunRefusedError():
+    def when_pickled():
+        def it_keeps_the_code_and_the_message():
+            dumped = pickle.dumps(RunRefusedError("too_large", "Too big."))
+
+            err = pickle.loads(dumped)  # noqa: S301 - the test wrote the bytes
+
+            assert (err.code, err.message) == ("too_large", "Too big.")
+
+    def when_printed():
+        def it_shows_the_code_and_the_message():
+            assert str(RunRefusedError("too_large", "Too big.")) == (
+                "too_large: Too big."
+            )
 
 
 def describe_connect_frontend_tool_interrupt():
