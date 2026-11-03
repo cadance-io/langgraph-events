@@ -472,7 +472,7 @@ Plain `Interrupted`, with no payload, remains the right choice for a paused thre
 
 ## Run config
 
-The client is not trusted. The server config is the only source of run config. Pass it to `stream()` with `config=`, a LangGraph `RunnableConfig`. It can set `configurable`, `recursion_limit`, `metadata`, `tags` and `run_name`. A handler reads it from its `RunnableConfig`. The example builds on the Quick Start:
+The client is not trusted. Without a boundary, a client could set any run config key that the server did not set, such as `recursion_limit` or a test-only `configurable` key. The server config is the only source of run config. Pass it to `stream()` with `config=`, a LangGraph `RunnableConfig`. It can set `configurable`, `recursion_limit`, `metadata`, `tags` and `run_name`. A handler reads it from its `RunnableConfig`. The example builds on the Quick Start:
 
 ```python
 ...
@@ -519,11 +519,11 @@ The adapter builds `configurable` in this order. A later source wins over an ear
 | 2 | Server `config=` | Every key |
 | 3 | `RunAgentInput.thread_id` | `thread_id` |
 
-A server `configurable` key `thread_id`, or a key with the prefix `__lge_`, raises `ValueError` before `RUN_STARTED`. The same names in `client_configurable=` raise the same error.
+A server `configurable` key `thread_id`, or a key with the prefix `__lge_`, raises `ValueError` when `stream()` is called. The same names in `client_configurable=` raise the same error. A client cannot choose a checkpoint, so `checkpoint_id` and `checkpoint_ns` in `client_configurable=` also raise `ValueError`. The server `config=` can set them. A `str` in `client_configurable=` raises `TypeError`, because the adapter would read each character as a key name.
 
 A `seed_factory` or a `resume_factory` receives `input_data`, not the run config. A handler reads the run config from its `RunnableConfig`.
 
-`connect()` takes no `config=`, because it runs no handler. It reads the checkpoint of `RunAgentInput.thread_id` only, and ignores the client run config.
+`connect()` also takes `config=`, because the checkpointer reads the checkpoint with the run config. For example, a checkpointer can route on a tenant key in `configurable`. Pass the same server config to `stream()` and to `connect()`. Without `config=`, `connect()` reads the checkpoint with `RunAgentInput.thread_id` only. It always ignores the client run config. The reserved keys raise `ValueError` when `connect()` is called.
 
 ## Deadline and signal pauses
 

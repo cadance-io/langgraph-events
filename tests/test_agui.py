@@ -1323,12 +1323,11 @@ def describe_AGUIAdapter():
 
         def when_the_pause_signal_has_no_is_set_method():
 
-            async def it_raises_TypeError_before_the_run_starts():
+            def it_raises_TypeError_at_call_time():
                 adapter = _adapter(_graph(reply_hi), seed_factory=_ask("hi"))
-                stream = adapter.stream(_make_input(), pause_on=True)
 
                 with pytest.raises(TypeError, match="pause_on"):
-                    await anext(stream)
+                    adapter.stream(_make_input(), pause_on=True)
 
         def when_the_client_forwards_framework_pause_keys():
 
@@ -2099,6 +2098,54 @@ def describe_connect():
             assert captured == [{"configurable": {"thread_id": "t-connect-config"}}]
             assert any(e.type == EventType.STATE_SNAPSHOT for e in events)
 
+    def when_the_checkpointer_reads_a_configurable_key():
+
+        @pytest.fixture
+        async def adapter():
+            adapter = _adapter(
+                _graph(ask_pending, checkpointer=_TenantSaver()),
+                seed_factory=_ask("go"),
+            )
+            [
+                event
+                async for event in adapter.stream(
+                    _make_input(thread_id="t-tenant"), config=_TENANT_CONFIG
+                )
+            ]
+            return adapter
+
+        async def it_replays_the_checkpoint(adapter):
+            events = [
+                event
+                async for event in adapter.connect(
+                    _make_input(thread_id="t-tenant"), config=_TENANT_CONFIG
+                )
+            ]
+
+            assert events[-1].type == EventType.RUN_FINISHED
+            interrupted = _custom(events, "interrupted")
+            assert interrupted[0].value["draft"] == "pending"
+
+        def when_the_server_config_is_absent():
+
+            async def it_ends_the_replay_as_the_checkpointer_dictates(adapter):
+                input_data = _make_input(thread_id="t-tenant")
+                events = [event async for event in adapter.connect(input_data)]
+
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert "tenant" in events[-1].message
+
+    def when_the_server_config_names_a_reserved_key():
+
+        @pytest.mark.parametrize("key", ["thread_id", "__lge_pause_budget"])
+        def it_raises_at_call_time(key):
+            adapter = _adapter(_graph(ask_pending, checkpointer=MemorySaver()))
+
+            with pytest.raises(ValueError, match="config=") as raised:
+                adapter.connect(_make_input(), config={"configurable": {key: "x"}})
+
+            assert key in str(raised.value)
+
     def when_internal_audit_log_present():
         async def it_strips_events_audit_log_from_state_snapshot():
             """`events` is graph-internal and must not leak into client state.
@@ -2145,6 +2192,25 @@ def describe_connect():
             # User-defined reducers must STILL be present (no over-filtering).
             assert snapshot.get("focus") == "scene-7"
 
+
+class _TenantSaver(MemorySaver):
+    """A ``MemorySaver`` that refuses a config without ``configurable["tenant"]``."""
+
+    @staticmethod
+    def _require_tenant(config: Any) -> None:
+        if "tenant" not in config["configurable"]:
+            raise KeyError("the checkpointer needs configurable['tenant']")
+
+    async def aget_tuple(self, config: Any) -> Any:
+        self._require_tenant(config)
+        return await super().aget_tuple(config)
+
+    async def aput(self, config: Any, *args: Any) -> Any:
+        self._require_tenant(config)
+        return await super().aput(config, *args)
+
+
+_TENANT_CONFIG: RunnableConfig = {"configurable": {"tenant": "acme"}}
 
 _CLIENT_RUN_CONFIG: dict[str, Any] = {
     "recursion_limit": 1_000_000,
@@ -2230,18 +2296,19 @@ def describe_stream_run_config():
             assert "llm_override" not in seen["configurable"]
 
         @pytest.mark.parametrize("key", ["thread_id", "__lge_pause_budget"])
-        async def it_refuses_a_reserved_key_before_run_started(adapter, seen, key):
-            events: list[Any] = []
-            with pytest.raises(ValueError, match="stream\\(config=") as raised:
-                async for event in adapter.stream(
+        def it_raises_at_call_time(adapter, seen, key):
+            with pytest.raises(ValueError, match="config=") as raised:
+                adapter.stream(
                     _make_input(thread_id="t-run"),
                     config={"configurable": {key: "x"}},
-                ):
-                    events.append(event)
+                )
 
             assert key in str(raised.value)
-            assert events == []
             assert seen == {}
+
+        @pytest.mark.parametrize("key", ["checkpoint_ns", "checkpoint_id"])
+        async def it_accepts_a_checkpoint_key(adapter, key):
+            adapter.stream(_make_input(), config={"configurable": {key: ""}})
 
     def when_client_configurable():
 
@@ -2266,12 +2333,21 @@ def describe_stream_run_config():
 
             assert seen["configurable"]["locale"] == "fr"
 
-        @pytest.mark.parametrize("key", ["thread_id", "__lge_pause_budget"])
-        async def it_refuses_a_reserved_name(adapter, seen, key):
+        @pytest.mark.parametrize(
+            "key",
+            ["thread_id", "checkpoint_id", "checkpoint_ns", "__lge_pause_budget"],
+        )
+        def it_raises_on_a_reserved_name_at_call_time(adapter, seen, key):
             with pytest.raises(ValueError, match=key):
-                await _drain(adapter, client_configurable={key})
+                adapter.stream(_make_input(), client_configurable={key})
 
             assert seen == {}
+
+        def when_it_is_a_string():
+
+            def it_raises_TypeError_at_call_time(adapter):
+                with pytest.raises(TypeError, match="client_configurable"):
+                    adapter.stream(_make_input(), client_configurable="locale")
 
 
 def describe_custom_event_passthrough():

@@ -79,6 +79,9 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
+_SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
+"""The ``configurable`` keys that a client cannot set. They choose a checkpoint."""
+
 
 class _FactoryRefusalError(Exception):
     """Carry a :class:`RunRefusedError` from a factory to ``_as_run``.
@@ -266,8 +269,9 @@ class AGUIAdapter:
         ]
         return len(positional) >= 2
 
-    @staticmethod
+    @classmethod
     def _build_config(
+        cls,
         input_data: RunAgentInput,
         thread_id: str,
         *,
@@ -286,24 +290,29 @@ class AGUIAdapter:
         :func:`_with_pause_budget`, the same writer as the :class:`EventGraph`
         entry points.
         """
+        if isinstance(client_configurable, str):
+            raise TypeError(
+                "client_configurable=... must be a set of key names, not the "
+                f"string {client_configurable!r}."
+            )
         server_configurable = (config or {}).get("configurable") or {}
-        for argument, keys in (
-            ("config", server_configurable),
-            ("client_configurable", client_configurable),
+        for argument, keys, owned in (
+            ("config", server_configurable, {"thread_id"}),
+            ("client_configurable", client_configurable, _SERVER_ONLY_KEYS),
         ):
             reserved = sorted(
                 key
                 for key in keys
-                if key == "thread_id" or key.startswith(_FRAMEWORK_KEY_PREFIX)
+                if key in owned or key.startswith(_FRAMEWORK_KEY_PREFIX)
             )
             if reserved:
                 raise ValueError(
-                    f"stream({argument}=...) must not name the reserved "
-                    f"configurable keys {reserved!r}. The adapter owns "
-                    "thread_id and every __lge_ key."
+                    f"{argument}=... must not name the reserved configurable "
+                    f"keys {reserved!r}. The adapter owns thread_id and every "
+                    "__lge_ key. Only the server can choose a checkpoint."
                 )
 
-        client = AGUIAdapter._client_configurable(input_data)
+        client = cls._client_configurable(input_data)
         run_config = {
             **(config or {}),
             "configurable": {
@@ -334,25 +343,41 @@ class AGUIAdapter:
         configurable = candidate.get("configurable")
         return configurable if isinstance(configurable, dict) else {}
 
-    async def connect(self, input_data: RunAgentInput) -> AsyncIterator[BaseEvent]:
+    def connect(
+        self,
+        input_data: RunAgentInput,
+        *,
+        config: RunnableConfig | None = None,
+    ) -> AsyncIterator[BaseEvent]:
         """Emit checkpoint-backed state without executing the graph.
 
         The replay is one AG-UI run. It starts with ``RUN_STARTED`` and ends
         with ``RUN_FINISHED``, or with ``RUN_ERROR`` when the replay raises.
+
+        Args:
+            input_data: AG-UI ``RunAgentInput``.
+            config: The server run config.  The checkpointer reads the
+                checkpoint with it, for example with a tenant key in
+                ``configurable``.  Pass the same config as to
+                :meth:`stream`.  The adapter ignores the client run config.
+                ``None`` (default) reads the checkpoint with ``thread_id``
+                only.
+
+        Raises:
+            ValueError: *config* ``configurable`` names ``thread_id`` or a
+                key with the framework prefix ``__lge_``. ``connect()``
+                raises it when it is called, before the stream starts.
         """
         ctx = self._run_context(input_data)
-        async for agui_event in self._as_run(
-            ctx, self._replay_checkpoint(input_data, ctx)
-        ):
-            yield agui_event
+        run_config = self._build_config(input_data, ctx.thread_id, config=config)
+        return self._as_run(ctx, self._replay_checkpoint(ctx, run_config))
 
     reconnect = connect
 
     async def _replay_checkpoint(
-        self, input_data: RunAgentInput, ctx: MapperContext
+        self, ctx: MapperContext, config: RunnableConfig
     ) -> AsyncIterator[BaseEvent]:
         """Yield the snapshots and pending interrupts of the checkpoint."""
-        config = self._build_config(input_data, ctx.thread_id)
         snapshot = await self._aget_checkpoint_snapshot(config)
         if snapshot is None:
             yield build_state_snapshot({})
@@ -769,7 +794,7 @@ class AGUIAdapter:
                 tool_call_id=tc_id,
             )
 
-    async def stream(
+    def stream(
         self,
         input_data: RunAgentInput,
         *,
@@ -794,7 +819,10 @@ class AGUIAdapter:
                 keys that the run accepts from ``forwarded_props``.  The
                 adapter ignores every other part of the client run config.
                 A key of the server *config* wins over a client key of the
-                same name.  Empty (default) accepts no client key.
+                same name.  Empty (default) accepts no client key.  A
+                client cannot choose a checkpoint, so ``checkpoint_id`` and
+                ``checkpoint_ns`` are reserved here.  The server *config*
+                can set them.
             deadline: Absolute ``time.monotonic()`` value.  When the run's
                 router observes a current time >= deadline between
                 dispatch rounds, it emits :class:`RunPausedOnDeadline` and
@@ -814,12 +842,14 @@ class AGUIAdapter:
 
         Raises:
             TypeError: *pause_on* is a class, or has no callable
-                ``is_set``. The stream raises it on the first iteration,
-                before ``RUN_STARTED``.
-            ValueError: *config* ``configurable`` or *client_configurable*
-                names ``thread_id`` or a key with the framework prefix
-                ``__lge_``. The stream raises it on the first iteration,
-                before ``RUN_STARTED``.
+                ``is_set``.  Or *client_configurable* is a ``str``.
+                ``stream()`` raises it when it is called, before the stream
+                starts.
+            ValueError: *config* ``configurable`` names ``thread_id`` or a
+                key with the framework prefix ``__lge_``.  Or
+                *client_configurable* names one of these keys,
+                ``checkpoint_id`` or ``checkpoint_ns``.  ``stream()`` raises
+                it when it is called, before the stream starts.
         """
         ctx = self._run_context(input_data)
         run_config = self._build_config(
@@ -830,10 +860,7 @@ class AGUIAdapter:
             deadline=deadline,
             pause_on=pause_on,
         )
-        async for agui_event in self._as_run(
-            ctx, self._stream_event_source(input_data, ctx, run_config)
-        ):
-            yield agui_event
+        return self._as_run(ctx, self._stream_event_source(input_data, ctx, run_config))
 
     @staticmethod
     def _run_context(input_data: RunAgentInput) -> MapperContext:

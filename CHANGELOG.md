@@ -13,16 +13,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `client_configurable=`, the names of the client `configurable` keys it accepts.** A
   handler reads the run config from its `RunnableConfig`. A server key wins over an
   accepted client key of the same name. A `thread_id` or `__lge_` key in either argument
-  raises `ValueError` before `RUN_STARTED`. See [Run config](docs/agui.md#run-config).
+  raises `ValueError` when `stream()` is called. `checkpoint_id` and `checkpoint_ns` in
+  `client_configurable=` also raise `ValueError`, and a `str` raises `TypeError`. See
+  [Run config](docs/agui.md#run-config).
+- **`AGUIAdapter.connect()` takes `config=`, the server run config.** The checkpointer
+  reads the checkpoint with it, for example with a tenant key in `configurable`. A
+  reserved key raises `ValueError` when `connect()` is called.
 
 ### Changed
 
 - **Breaking: `AGUIAdapter` ignores the client run config in `forwarded_props` by
   default.** This covers `langgraph_config`, `config` and a top-level config, with every
   part such as `configurable`, `recursion_limit`, `metadata`, `tags` and `run_name`. Before,
-  a client could set any run config key that the server did not set. `connect()` also reads
-  the checkpoint with `thread_id` only. Migration: pass the server values in
-  `stream(config=...)`, or name the client keys in `stream(client_configurable=...)`.
+  a client could set any run config key that the server did not set. `connect()` also
+  ignores the client run config. Migration:
+  - Pass the server values in `stream(config=...)`, or name the client keys in
+    `stream(client_configurable=...)`.
+  - To keep a client `recursion_limit`, read it from the request, clamp it, and pass it
+    in `config=`.
+  - Take a tenant from the server's auth and pass it in `config=` to both `stream()` and
+    `connect()`. Do not allow-list it.
+- **`AGUIAdapter.stream()` and `connect()` are plain methods that return an async
+  iterator.** They validate their arguments when they are called, not on the first
+  iteration. `async for event in adapter.stream(...)` works as before.
 
 ## [0.45.0] - 2026-11-03
 
