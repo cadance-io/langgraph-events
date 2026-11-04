@@ -20,7 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The checkpoint state has a new channel, `_stranded`.** It holds the log positions of
   the stopped events. A checkpoint saved before this release has no such channel, and it
-  loads with no stopped work.
+  loads with no stopped work. `rewrite_store(drop=...)` lowers the positions past a dropped
+  event.
 
 ## [0.46.1] - 2026-11-03
 

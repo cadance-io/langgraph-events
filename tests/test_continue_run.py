@@ -26,6 +26,7 @@ from langgraph_events import (
     Scatter,
     on,
 )
+from langgraph_events.serde import NamespaceAwareSerde
 
 
 class Begun(IntegrationEvent):
@@ -435,6 +436,76 @@ def describe_ContinueRun():
             graph.invoke(ContinueRun(), config=config)
 
             assert seen == [[1], [1, 2]]
+
+
+class Noted(IntegrationEvent):
+    pass
+
+
+def _paused_below_a_note(saver: MemorySaver, calls: Counter[str]) -> EventGraph:
+    """A thread paused on its deadline, with a ``Noted`` seed below the
+    stopped ``Stepped(1)``."""
+    saver.serde = NamespaceAwareSerde(
+        events=(Noted, Begun, Stepped, Finished, Asked, Answered)
+    )
+    graph = EventGraph(_chain(calls), checkpointer=saver)  # type: ignore[arg-type]
+    graph.invoke([Noted(), Begun()], config=_config("drop"), deadline=0.0)
+    return graph
+
+
+def describe_rewrite_store():
+    def when_drop_removes_an_event_below_the_stopped_work():
+        def it_continues_the_stopped_work():
+            saver = MemorySaver()
+            calls: Counter[str] = Counter()
+            graph = _paused_below_a_note(saver, calls)
+
+            report = graph.rewrite_store(drop=(Noted,), thread_ids=["drop"])
+            assert report.threads[0].status == "rewrite"
+            log = graph.invoke(ContinueRun(), config=_config("drop"))
+
+            assert not log.has(Noted)
+            assert log.count(Finished) == 1
+            assert _ran_once(calls)
+
+    def when_drop_removes_the_stopped_work():
+        def it_continues_nothing():
+            saver = MemorySaver()
+            calls: Counter[str] = Counter()
+            graph = _paused_below_a_note(saver, calls)
+
+            graph.rewrite_store(drop=(Stepped,), thread_ids=["drop"])
+            stored = saver.get_tuple(_config("drop")).checkpoint["channel_values"]
+            assert stored["_stranded"] == []
+            graph.invoke(ContinueRun(), config=_config("drop"))
+
+            assert calls == Counter(begin=1)
+
+    def when_a_continued_handler_waits_on_a_dropped_event():
+        def it_refuses_the_thread():
+            saver = MemorySaver()
+            saver.serde = NamespaceAwareSerde(
+                events=(Begun, Stepped, Approval, Approved, Finished)
+            )
+
+            @on(Begun)
+            def begin(event: Begun) -> Stepped:
+                return Stepped(n=1)
+
+            @on(Stepped)
+            def ask(event: Stepped) -> Approval:
+                return Approval()
+
+            graph = EventGraph([begin, ask], checkpointer=saver)
+            config = _config("refuse")
+            graph.invoke(Begun(), config=config, deadline=0.0)
+            graph.invoke(ContinueRun(), config=config)
+
+            report = graph.rewrite_store(drop=(Stepped,), thread_ids=["refuse"])
+
+            [thread] = report.threads
+            assert thread.status == "refused"
+            assert "pending dispatch on a paused thread" in thread.reason
 
 
 def describe_the_documented_loop():
