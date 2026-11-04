@@ -71,6 +71,7 @@ def _handler_raised(cls: type) -> dict[str, object]:
 BUILDERS: dict[str, Callable[[type], dict[str, object]]] = {
     "Abandoned": _one(reason="stale", discarded="Approval"),
     "Cancelled": _one(),
+    "ContinueRun": _one(),
     "Halted": _one(),
     "HandlerAbandonedOnDeadline": _one(**_raised()),
     "HandlerAbandonedOnSignal": _one(**_raised()),

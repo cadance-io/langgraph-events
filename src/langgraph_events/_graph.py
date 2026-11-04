@@ -1947,9 +1947,11 @@ class EventGraph:
         writes, preserving an already-completed write from a fanned-out
         sibling.
 
-        The suite pins the leading clear and the ``_cursor`` reset, each
-        with its own failing test. The trailing clear and
-        ``_pending: []`` are a second guard. Neither is pinned alone.
+        The suite pins the leading clear, the ``_cursor`` reset and the
+        ``_stranded`` reset, each with its own failing test. An abandoned
+        ``ContinueRun`` round must not run again on the next ``ContinueRun``.
+        The trailing clear and ``_pending: []`` are a second guard. Neither
+        is pinned alone.
         """
         appended = [terminal]
         return [
@@ -1961,6 +1963,7 @@ class EventGraph:
                             "events": appended,
                             "_cursor": len(events) + len(appended),
                             "_pending": [],
+                            "_stranded": [],
                         },
                         FRAMEWORK,
                     ),

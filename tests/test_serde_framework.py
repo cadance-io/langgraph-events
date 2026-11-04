@@ -191,7 +191,7 @@ V0_24_0 = {
     "HandlerRaised": ("HandlerRaised", RAISED),
 }
 
-# The release this branch will be. Its own bytes revive unchanged.
+# 0.41.0 added the abandon and pause causes.
 V0_41_0 = {
     **{
         label: V0_40_0[label]
@@ -206,6 +206,9 @@ V0_41_0 = {
     "RunPausedOnSignal": ("RunPausedOnSignal", {"elapsed_seconds": 2.5}),
 }
 
+# The release this branch will be. Its own bytes revive unchanged.
+V0_47_0 = {**V0_41_0, "ContinueRun": ("ContinueRun", {})}
+
 # Before 0.2.0, Halted carried a free-text reason.
 V0_1_1 = {"Halted": ("Halted", {})}
 
@@ -218,6 +221,7 @@ V0_5_0 = {
 }
 
 EXPECTED = {
+    "v0_47_0": V0_47_0,
     "v0_41_0": V0_41_0,
     "v0_40_0": V0_40_0,
     "v0_24_0": V0_24_0,

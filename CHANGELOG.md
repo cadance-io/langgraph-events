@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ContinueRun` continues the work of a paused run.** A `RunPaused` leaves the events of
+  its last round in the log, and no call dispatched them. Seed the next call on the same
+  `thread_id` with `ContinueRun()`. Its first round dispatches each stopped event once. A
+  call without `ContinueRun()` discards the stopped work, so the behaviour of a plain call
+  does not change. A second `ContinueRun()` is a plain seed. An AG-UI seed factory can
+  return it. See [Continue the stopped work](docs/control-flow.md#continue-the-stopped-work-continuerun).
+
+### Changed
+
+- **The checkpoint state has a new channel, `_stranded`.** It holds the log positions of
+  the stopped events. A checkpoint saved before this release has no such channel, and it
+  loads with no stopped work.
+
 ## [0.46.1] - 2026-11-03
 
 ### Fixed

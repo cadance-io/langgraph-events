@@ -72,7 +72,7 @@ Mappers claim events in priority order. The first non-`None` return wins. An unc
 
 | Priority | Mapper | Handles | AG-UI Events Produced |
 |---|---|---|---|
-| 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet`, `FrontendStateMutated` | *(suppressed)* |
+| 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet`, `ContinueRun`, `FrontendStateMutated` | *(suppressed)* |
 | 2 | `FrontendToolCallRequestedMapper` | `FrontendToolCallRequested` | `ToolCallStart` / `ToolCallArgs` / `ToolCallEnd` |
 | 3 | `InterruptedMapper` | `Interrupted` subclasses | `CustomEvent` (name=`"interrupted"`) |
 | 4 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
