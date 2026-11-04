@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._causes import dropped, resolve
-from langgraph_events._event import Event, Resumed
+from langgraph_events._event import ContinueRun, Event, Resumed
 from langgraph_events._identity import Identity
 
 if TYPE_CHECKING:
@@ -44,7 +44,10 @@ _LOG_CHANNELS = ("events", "_pending")
 _POSITION_CHANNELS = ("_cursor",)
 """The channels that hold a position in ``events``."""
 
-_POSITION_WRITES = ("causes", *_POSITION_CHANNELS)
+_POSITION_LIST_CHANNELS = ("_stranded",)
+"""The channels that hold a list of positions in ``events``."""
+
+_POSITION_WRITES = ("causes", *_POSITION_CHANNELS, *_POSITION_LIST_CHANNELS)
 """The channels whose task write can hold a position in ``events``."""
 
 RewriteStatus = Literal["rewrite", "unchanged", "refused"]
@@ -402,9 +405,7 @@ def _pending_refusal(
                 f"thread is paused on {type(payload).__qualname__}, a dropped "
                 f"class; {_RESUME_THE_ROOT if subgraph else 'abandon it first'}"
             )
-    if interrupt_writes and any(
-        type(entry) in drop for entry in _log_entries(values, "_pending") or ()
-    ):
+    if interrupt_writes and any(type(entry) in drop for entry in _to_dispatch(values)):
         # The resumed task would find no matching event, return nothing,
         # and end the thread unpaused with the resume payload lost.
         remedy = "resume or abandon the thread first"
@@ -446,6 +447,24 @@ def _pending_refusal(
         if problem is not None:
             return f"{where} channel {channel!r} that {problem}; {remedy}"
     return None
+
+
+def _to_dispatch(values: dict[str, Any]) -> list[Any]:
+    """The entries that the round of a paused thread dispatches: the
+    ``_pending`` entries, and the ``_stranded`` events that a ``ContinueRun``
+    round dispatches with them."""
+    pending = _log_entries(values, "_pending") or []
+    stranded = values.get("_stranded")
+    continues = values.get("_round") == 0 and any(
+        isinstance(e, ContinueRun) for e in pending
+    )
+    if not continues or not isinstance(stranded, list):
+        return pending
+    events = _log_entries(values, "events") or []
+    return [
+        *pending,
+        *(events[p] for p in stranded if isinstance(p, int) and p < len(events)),
+    ]
 
 
 def _write_problem(
@@ -562,6 +581,15 @@ def _shift_positions(
         if below:
             new_values[channel] = position - below
             changed.add(channel)
+    new_position = _kept_positions(events, drop)
+    for channel in _POSITION_LIST_CHANNELS:
+        positions = values.get(channel)
+        if not isinstance(positions, list):
+            continue
+        kept = [new_position[p] for p in positions if p in new_position]
+        if kept != positions:
+            new_values[channel] = kept
+            changed.add(channel)
     causes = _log_entries(values, "causes")
     if causes is None:
         return
@@ -569,6 +597,15 @@ def _shift_positions(
     if remapped != causes:
         new_values["causes"] = remapped
         changed.add("causes")
+
+
+def _kept_positions(events: list[Any], drop: tuple[type[Event], ...]) -> dict[int, int]:
+    """The new position of each ``events`` entry that ``drop`` keeps."""
+    new_position: dict[int, int] = {}
+    for old, event in enumerate(events):
+        if type(event) not in drop:
+            new_position[old] = len(new_position)
+    return new_position
 
 
 def _remap_causes(
@@ -584,10 +621,7 @@ def _remap_causes(
     and the type of the deleted event stay known.
     """
     entries, known_from = resolve(events, causes)
-    new_position: dict[int, int] = {}
-    for old, event in enumerate(events):
-        if type(event) not in drop:
-            new_position[old] = len(new_position)
+    new_position = _kept_positions(events, drop)
     remapped: list[CauseEntry] = []
     for position in range(known_from, len(events)):
         if position not in new_position:

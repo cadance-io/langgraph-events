@@ -785,9 +785,10 @@ class RunPaused(SystemEvent, _abstract=True):
     :class:`agui.InterruptedWithPayload`) for HITL pauses that need a
     typed resume value.
 
-    In-flight events from the current dispatch round that hadn't been
-    dispatched at the time the pause fired are persisted in the event
-    log but not dispatched — same semantic as :class:`MaxRoundsExceeded`.
+    The pause leaves the newest events of the run in the log, but does not
+    dispatch them. A fresh ``/run`` dispatches only its own seeds. To
+    dispatch the stopped events, seed the next run with
+    :class:`ContinueRun`.
 
     AG-UI wire format: ``RunPaused`` intentionally does **not** implement
     the ``AGUISerializable`` protocol, so :class:`agui.FallbackMapper`
@@ -817,6 +818,35 @@ class RunPausedOnSignal(RunPaused):
     When the deadline has also expired, the router emits this event, not
     :class:`RunPausedOnDeadline`. ``elapsed_seconds`` counts from the start
     of the run.
+    """
+
+
+class ContinueRun(SystemEvent):
+    """Seed that continues the work of the run that paused before this one.
+
+    A :class:`RunPaused` stops a run between dispatch rounds. The events
+    that the run did not dispatch stay in the log. Seed the next run on the
+    same ``thread_id`` with ``ContinueRun()`` to dispatch them, each one
+    once, in the first round of that run::
+
+        log = graph.invoke(ContinueRun(), config=config, deadline=deadline)
+
+    The seed can come with other seeds. The first round then dispatches the
+    stopped events and the other seeds together. The continued run counts
+    its rounds from zero, and it can pause again.
+
+    A ``ContinueRun`` does nothing more than a plain seed when no run paused
+    before it. This includes a second ``ContinueRun`` after the first one,
+    and a ``ContinueRun`` after a run with no ``ContinueRun``: a run without
+    it discards the stopped events. It is not an error, so a retried job can
+    send it again.
+
+    When the stopped events hold a :class:`Halted`, the pause discards them,
+    because the run would have ended at it.
+
+    The continued round does not dispatch a :class:`HandlerAbandonedOnSignal`,
+    like the router round that the pause replaced. ``@on(ContinueRun)`` is
+    allowed, like a handler of any seed.
     """
 
 

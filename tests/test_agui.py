@@ -40,6 +40,7 @@ from pydantic import BaseModel
 
 from langgraph_events import (
     SKIP,
+    ContinueRun,
     Event,
     EventGraph,
     IntegrationEvent,
@@ -1320,6 +1321,35 @@ def describe_AGUIAdapter():
                     assert len(_custom(events, "run.paused")) == 1
                     assert followed_up == []
                     assert events[-1].type == EventType.RUN_FINISHED
+
+        def when_the_seed_factory_returns_ContinueRun():
+            async def it_dispatches_the_stopped_work_once():
+                @on(UserAsked)
+                def plan(event: UserAsked) -> TaskCreated:
+                    return TaskCreated(title=event.question)
+
+                followed_up: list[str] = []
+
+                @on(TaskCreated)
+                def follow_up(event: TaskCreated) -> AgentReplied:
+                    followed_up.append(event.title)
+                    return AgentReplied(message=AIMessage(content="later"))
+
+                graph = _graph(plan, follow_up, checkpointer=MemorySaver())
+                run = _make_input(thread_id="t-continue")
+                paused = _adapter(graph, seed_factory=_ask("task"))
+                [e async for e in paused.stream(run, deadline=0.0)]
+                assert followed_up == []
+                continuing = _adapter(graph, seed_factory=lambda inp: ContinueRun())
+
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    events = [e async for e in continuing.stream(run)]
+                [e async for e in continuing.stream(run)]
+
+                assert followed_up == ["task"]
+                assert events[-1].type == EventType.RUN_FINISHED
+                assert not [w for w in caught if "ContinueRun" in str(w.message)]
 
         def when_the_pause_signal_has_no_is_set_method():
 

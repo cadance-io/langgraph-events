@@ -238,12 +238,39 @@ Unlike `MaxRoundsExceeded`, `RunPaused` is **not terminal across runs**. The rou
 Rules, shared with the signal pause:
 
 - Set `deadline` strictly tighter than any hard cancellation the caller already has, such as `asyncio.wait_for` or LangGraph's `timeout=`, so that the pause fires first.
-- Events emitted in the paused round are persisted in the event log but not dispatched, the same drop-on-pause semantic as `MaxRoundsExceeded`. Write handlers so that a stop at a round boundary leaves recoverable state.
+- Events emitted in the paused round are persisted in the event log but not dispatched. A plain next call does not dispatch them either. To dispatch them, seed the next call with [`ContinueRun`](#continue-the-stopped-work-continuerun).
 - The first round of a run always dispatches, also with `deadline=0.0`. The resume round always dispatches: the router dispatches the resume value before it checks the deadline or the signal, so a pause does not lose the answer.
 - `RunPaused` is emitted **at most once per run**, even when many parallel handlers are that is running when the deadline fires. A downstream projection can rely on one entry per pause.
 - The check happens **only between rounds**, never inside a handler, so a handler that blocks cannot be preempted. The one exception is a [`RetryPolicy`](#retries) backoff, which reads the deadline and the signal before every wait and gives up instead of sleeping past them.
 
 `RunPaused` has no default AG-UI wire mapping. See [Deadline and signal pauses](agui.md#deadline-and-signal-pauses).
+
+### Continue the stopped work — `ContinueRun`
+
+A pause leaves the newest events of the run in the log, and no handler takes them. To dispatch them, seed the next call on the same `thread_id` with `ContinueRun()`:
+
+```python
+...
+from time import monotonic
+
+from langgraph_events import ContinueRun, RunPaused
+
+log = graph.invoke(Started(data="job-42"), config=config, deadline=monotonic() + 25.0)
+while log.latest(RunPaused, not_followed_by=ContinueRun):
+    log = graph.invoke(ContinueRun(), config=config, deadline=monotonic() + 25.0)
+```
+
+The log holds the whole thread. The loop stops when a `ContinueRun` comes after the newest pause, so the newest call did not pause. Rules:
+
+- The first round of the call dispatches each stopped event once, before the other seeds of the call. This includes the events that a `@on(RunPaused)` handler emitted.
+- The call counts its rounds from zero, so it gets the full `max_rounds`. It can pause again. The next `ContinueRun()` then continues from that pause.
+- A call without `ContinueRun()` discards the stopped work. A later `ContinueRun()` cannot dispatch old work after newer work. To keep the stopped work, send `ContinueRun()` with the new seeds: `graph.invoke([ContinueRun(), message], config=config)`.
+- `ContinueRun()` with no stopped work is a plain seed. This includes a second `ContinueRun()` and a thread that never paused. It is not an error, so a retried job can send it again.
+- When the stopped events hold a `Halted`, such as a `Cancelled`, the pause discards them. The run would have ended at it.
+- The continued round does not dispatch a `HandlerAbandonedOnSignal`, like the router round that the pause replaced.
+- When a handler of the continued round interrupts, `resume()` finishes that round. `abandon()` discards the stopped work.
+- A checkpoint saved before 0.47.0 does not record the stopped work. `ContinueRun()` on it is a plain seed.
+- An AG-UI seed factory can return `ContinueRun()`. The adapter does not put it on the wire.
 
 ### Pause on a signal — `RunPausedOnSignal`
 

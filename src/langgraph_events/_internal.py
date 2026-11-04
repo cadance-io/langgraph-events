@@ -34,6 +34,7 @@ from langgraph_events._custom_event import (
 )
 from langgraph_events._event import (
     Cancelled,
+    ContinueRun,
     Event,
     Halted,
     HandlerAbandonedOnSignal,
@@ -71,6 +72,10 @@ _BASE_FIELDS: dict[str, Any] = {
     "_round": int,
     # Router-side gate: one RunPaused per /run regardless of fan-ins (#88).
     "_run_paused_emitted": bool,
+    # The log indices of the events that the last paused run did not
+    # dispatch. A ContinueRun seed dispatches them. A checkpoint saved before
+    # this channel existed has no value, which reads as [].
+    "_stranded": list[int],
 }
 
 
@@ -162,6 +167,10 @@ def make_seed_node(
             "_round": 0,
             "_run_paused_emitted": False,
         }
+        if state.get("_stranded") and not _continues(new_events):
+            # A run without ContinueRun discards the stopped work, so a later
+            # ContinueRun cannot dispatch it after newer work.
+            result["_stranded"] = []
         if reds:
             if prev_cursor == 0:
                 for name, r in reds.items():
@@ -198,6 +207,11 @@ def make_router_node(
 
     def router(state: StateDict, config: RunnableConfig) -> StateDict:
         new_events = state["events"][state["_cursor"] :]
+        stranded: list[int] = state.get("_stranded", [])
+        # Before this run pauses, a record comes from an earlier run. The
+        # first round of this run dispatched it, so it is spent.
+        spent = bool(stranded) and not state.get("_run_paused_emitted")
+        consumed: dict[str, Any] = {"_stranded": []} if spent else {}
         has_resume = any(isinstance(e, Resumed) for e in new_events)
         current_round = 1 if has_resume else state.get("_round", 0) + 1
         if current_round > max_rounds:
@@ -208,6 +222,7 @@ def make_router_node(
                     "_pending": [halted],
                     "_round": current_round,
                     "events": [halted],
+                    **consumed,
                 },
                 FRAMEWORK,
             )
@@ -223,6 +238,7 @@ def make_router_node(
                     "_cursor": len(state["events"]),
                     "_pending": [],
                     "_round": current_round,
+                    "_stranded": _stranded(state, stranded),
                 }
             return pad_causes(
                 {
@@ -235,6 +251,7 @@ def make_router_node(
                     "_round": current_round,
                     "events": [paused],
                     "_run_paused_emitted": True,
+                    "_stranded": _stranded(state, []),
                 },
                 FRAMEWORK,
             )
@@ -242,9 +259,29 @@ def make_router_node(
             "_cursor": len(state["events"]),
             "_pending": new_events,
             "_round": current_round,
+            **consumed,
         }
 
     return router
+
+
+def _stranded(state: StateDict, recorded: list[int]) -> list[int]:
+    """*recorded* plus the positions of the events this router call strands.
+
+    A stranded ``Halted`` ends the stopped work: dispatch would have ended
+    the run at it. The record is then empty, so a ``ContinueRun`` does not
+    halt again and again.
+    """
+    events = state["events"]
+    positions = [*recorded, *range(state["_cursor"], len(events))]
+    if any(isinstance(events[p], Halted) for p in positions):
+        return []
+    return positions
+
+
+def _continues(seeds: list[Event]) -> bool:
+    """Whether *seeds* ask the run to dispatch the stopped work."""
+    return any(isinstance(e, ContinueRun) for e in seeds)
 
 
 def _dispatchable(state: StateDict) -> list[tuple[int, Event]]:
@@ -259,15 +296,28 @@ def _dispatchable(state: StateDict) -> list[tuple[int, Event]]:
     pauses over it. When a sibling handler interrupts in the same superstep,
     the run ends before the router reads the signal, and the resume round
     must skip the give-up too. The seed round dispatches every seed.
+
+    A seed round with a ``ContinueRun`` also dispatches the ``_stranded``
+    events, before the seeds. They stand in for the router round that the
+    pause replaced, so the give-up filter applies to them.
     """
     pending = state.get("_pending", [])
     base = state["_cursor"] - len(pending)
     routed = state.get("_round", 0) > 0
-    return [
+    current = [
         (base + k, e)
         for k, e in enumerate(pending)
         if not (routed and isinstance(e, HandlerAbandonedOnSignal))
     ]
+    if routed or not _continues(pending):
+        return current
+    events = state["events"]
+    continued = [
+        (i, events[i])
+        for i in state.get("_stranded", [])
+        if not isinstance(events[i], HandlerAbandonedOnSignal)
+    ]
+    return [*continued, *current]
 
 
 def make_dispatch(

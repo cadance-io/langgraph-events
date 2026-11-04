@@ -24,6 +24,7 @@ from langchain_core.utils.utils import LC_AUTO_PREFIX
 from pydantic import BaseModel, NonNegativeInt, TypeAdapter, ValidationError
 
 from langgraph_events._event import (
+    ContinueRun,
     Event,
     Interrupted,
     Resumed,
@@ -475,7 +476,7 @@ def _langchain_to_agui_messages(
 
 class SkipInternalMapper:
     """Suppress framework-internal events (Resumed, SystemPromptSet,
-    FrontendStateMutated).
+    ContinueRun, FrontendStateMutated).
 
     ``FrontendStateMutated`` originates from the client — echoing it back
     over the wire is redundant.  Its downstream reducer changes surface
@@ -483,7 +484,9 @@ class SkipInternalMapper:
     """
 
     def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
-        if isinstance(event, (Resumed, SystemPromptSet, FrontendStateMutated)):
+        if isinstance(
+            event, (Resumed, SystemPromptSet, ContinueRun, FrontendStateMutated)
+        ):
             return []
         return None
 
