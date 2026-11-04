@@ -271,6 +271,22 @@ def describe_ContinueRun():
 
             assert calls == Counter(begin=1)
 
+        def it_runs_the_seeds_of_the_next_ContinueRun():
+            calls: Counter[str] = Counter()
+
+            @on(Begun)
+            def stop(event: Begun) -> Stopped:
+                return Stopped()
+
+            graph = EventGraph([*_chain(calls), stop], checkpointer=MemorySaver())
+            config = _config("halt-then-seed")
+            graph.invoke(Begun(), config=config, deadline=0.0)
+            graph.invoke(ContinueRun(), config=config)
+
+            log = graph.invoke([ContinueRun(), Asked(text="x")], config=config)
+
+            assert log.count(Answered) == 1
+
     def when_a_plain_run_follows_the_pause():
         def it_does_not_run_the_stranded_work():
             calls: Counter[str] = Counter()
@@ -506,6 +522,25 @@ def describe_rewrite_store():
             [thread] = report.threads
             assert thread.status == "refused"
             assert "pending dispatch on a paused thread" in thread.reason
+
+    def when_a_pause_handler_waits_on_input():
+        def it_drops_the_stopped_work():
+            saver = MemorySaver()
+            saver.serde = NamespaceAwareSerde(
+                events=(Begun, Stepped, Finished, Asked, Answered, Approval)
+            )
+
+            @on(RunPaused)
+            def confirm(event: RunPaused) -> Approval:
+                return Approval()
+
+            calls: Counter[str] = Counter()
+            graph = EventGraph([*_chain(calls), confirm], checkpointer=saver)
+            graph.invoke(Begun(), config=_config("pause-wait"), deadline=0.0)
+
+            report = graph.rewrite_store(drop=(Stepped,), thread_ids=["pause-wait"])
+
+            assert report.threads[0].status == "rewrite"
 
 
 def describe_the_documented_loop():

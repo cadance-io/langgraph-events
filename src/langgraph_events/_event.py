@@ -841,6 +841,9 @@ class ContinueRun(SystemEvent):
     it discards the stopped events. It is not an error, so a retried job can
     send it again.
 
+    When the stopped events hold a :class:`Halted`, the pause discards them,
+    because the run would have ended at it.
+
     The continued round does not dispatch a :class:`HandlerAbandonedOnSignal`,
     like the router round that the pause replaced. ``@on(ContinueRun)`` is
     allowed, like a handler of any seed.

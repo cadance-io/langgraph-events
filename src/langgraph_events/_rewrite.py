@@ -16,7 +16,7 @@ from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._causes import dropped, resolve
-from langgraph_events._event import Event, Resumed
+from langgraph_events._event import ContinueRun, Event, Resumed
 from langgraph_events._identity import Identity
 
 if TYPE_CHECKING:
@@ -453,12 +453,17 @@ def _to_dispatch(values: dict[str, Any]) -> list[Any]:
     """The entries that the round of a paused thread dispatches: the
     ``_pending`` entries, and the ``_stranded`` events that a ``ContinueRun``
     round dispatches with them."""
-    events = _log_entries(values, "events") or []
+    pending = _log_entries(values, "_pending") or []
     stranded = values.get("_stranded")
-    positions = stranded if isinstance(stranded, list) else []
+    continues = values.get("_round") == 0 and any(
+        isinstance(e, ContinueRun) for e in pending
+    )
+    if not continues or not isinstance(stranded, list):
+        return pending
+    events = _log_entries(values, "events") or []
     return [
-        *(_log_entries(values, "_pending") or ()),
-        *(events[p] for p in positions if isinstance(p, int) and p < len(events)),
+        *pending,
+        *(events[p] for p in stranded if isinstance(p, int) and p < len(events)),
     ]
 
 

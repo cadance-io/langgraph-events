@@ -266,6 +266,7 @@ The log holds the whole thread. The loop stops when a `ContinueRun` comes after 
 - The call counts its rounds from zero, so it gets the full `max_rounds`. It can pause again. The next `ContinueRun()` then continues from that pause.
 - A call without `ContinueRun()` discards the stopped work. A later `ContinueRun()` cannot dispatch old work after newer work. To keep the stopped work, send `ContinueRun()` with the new seeds: `graph.invoke([ContinueRun(), message], config=config)`.
 - `ContinueRun()` with no stopped work is a plain seed. This includes a second `ContinueRun()` and a thread that never paused. It is not an error, so a retried job can send it again.
+- When the stopped events hold a `Halted`, such as a `Cancelled`, the pause discards them. The run would have ended at it.
 - The continued round does not dispatch a `HandlerAbandonedOnSignal`, like the router round that the pause replaced.
 - When a handler of the continued round interrupts, `resume()` finishes that round. `abandon()` discards the stopped work.
 - A checkpoint saved before 0.47.0 does not record the stopped work. `ContinueRun()` on it is a plain seed.

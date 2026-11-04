@@ -238,10 +238,7 @@ def make_router_node(
                     "_cursor": len(state["events"]),
                     "_pending": [],
                     "_round": current_round,
-                    "_stranded": [
-                        *stranded,
-                        *range(state["_cursor"], len(state["events"])),
-                    ],
+                    "_stranded": _stranded(state, stranded),
                 }
             return pad_causes(
                 {
@@ -254,7 +251,7 @@ def make_router_node(
                     "_round": current_round,
                     "events": [paused],
                     "_run_paused_emitted": True,
-                    "_stranded": list(range(state["_cursor"], len(state["events"]))),
+                    "_stranded": _stranded(state, []),
                 },
                 FRAMEWORK,
             )
@@ -266,6 +263,20 @@ def make_router_node(
         }
 
     return router
+
+
+def _stranded(state: StateDict, recorded: list[int]) -> list[int]:
+    """*recorded* plus the positions of the events this router call strands.
+
+    A stranded ``Halted`` ends the stopped work: dispatch would have ended
+    the run at it. The record is then empty, so a ``ContinueRun`` does not
+    halt again and again.
+    """
+    events = state["events"]
+    positions = [*recorded, *range(state["_cursor"], len(events))]
+    if any(isinstance(events[p], Halted) for p in positions):
+        return []
+    return positions
 
 
 def _continues(seeds: list[Event]) -> bool:
@@ -321,11 +332,12 @@ def make_dispatch(
     """
 
     def dispatch(state: StateDict) -> list[str | Send] | str:
-        if not state.get("_pending"):
+        pending = state.get("_pending", [])
+        if not pending:
             return END
 
-        dispatchable = [e for _, e in _dispatchable(state)]
-        if any(isinstance(e, Halted) for e in dispatchable):
+        # Check for Halted
+        if any(isinstance(e, Halted) for e in pending):
             return END
 
         # Find handlers whose event_types match any pending event. Route by
@@ -333,6 +345,7 @@ def make_dispatch(
         # handlers is the command qualname rather than the method name.
         matched: list[str] = []
         seen: set[str] = set()
+        dispatchable = [e for _, e in _dispatchable(state)]
         for meta in handler_metas:
             if meta.node_name not in seen and any(
                 meta.matches(e) for e in dispatchable
