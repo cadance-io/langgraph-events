@@ -1,6 +1,6 @@
 # Retiring an Interrupted subclass
 
-Delete an `Interrupted` subclass from the codebase once no live checkpoint still references it. `graph.store.abandon(config)` or `.aabandon()` settles one paused thread without an answer. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon). `graph.store.threads_paused_on(EventClass, thread_ids=...)` or `.athreads_paused_on()` finds the paused threads among the ids you pass. See [Finding candidates server-side](#finding-candidates-server-side).
+Delete an `Interrupted` subclass from the codebase once no live checkpoint still references it. `graph.event_store.abandon(config)` or `.aabandon()` settles one paused thread without an answer. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon). `graph.event_store.threads_paused_on(EventClass, thread_ids=...)` or `.athreads_paused_on()` finds the paused threads among the ids you pass. See [Finding candidates server-side](#finding-candidates-server-side).
 
 Both methods read the checkpoint of each thread directly, not the compiled topology of the graph. They survive two deletions:
 
@@ -8,7 +8,7 @@ Both methods read the checkpoint of each thread directly, not the compiled topol
 - The **class** is already deleted. The interrupt cannot revive. With no filter, `threads_paused_on()` still returns the thread. With a class filter, it matches nothing. `abandon()` still settles the thread, and records the last known qualname of the interrupt in `discarded`.
 
 !!! warning "`threads_paused_on()` and `abandon()` cover paused threads only"
-    A thread that already answered the interrupt holds the retired class in its settled history. `threads_paused_on()` does not find it. A read of its history after the class is deleted raises `Cannot revive`. `graph.store.unrevivable_threads(thread_ids=...)` finds it. It reads the latest checkpoint of each listed thread through the tolerant path of the serde. It maps each thread id to the qualnames it can no longer revive. Such a qualname can sit in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise. It reports nothing while the class still imports, so run it after the class is deleted, against the real store. Recover each reported thread with a [tombstone](#recovering-a-delete-first-deployment). `abandon()` and `aabandon()` raise `ValueError`, naming the thread and the qualnames, when the settled history holds a deleted class. They settle only a thread whose sole unrevivable identity is its pending interrupt. `NamespaceAwareSerde` never stores a placeholder. A write that holds one raises `ValueError` naming the identity.
+    A thread that already answered the interrupt holds the retired class in its settled history. `threads_paused_on()` does not find it. A read of its history after the class is deleted raises `Cannot revive`. `graph.event_store.unrevivable_threads(thread_ids=...)` finds it. It reads the latest checkpoint of each listed thread through the tolerant path of the serde. It maps each thread id to the qualnames it can no longer revive. Such a qualname can sit in the settled history, in a pending interrupt, in a completed sibling write, or nested in a field of a live event. It needs a `NamespaceAwareSerde` on the checkpointer and raises `ValueError` otherwise. It reports nothing while the class still imports, so run it after the class is deleted, against the real store. Recover each reported thread with a [tombstone](#recovering-a-delete-first-deployment). `abandon()` and `aabandon()` raise `ValueError`, naming the thread and the qualnames, when the settled history holds a deleted class. They settle only a thread whose sole unrevivable identity is its pending interrupt. `NamespaceAwareSerde` never stores a placeholder. A write that holds one raises `ValueError` naming the identity.
 
 ## Finding candidates server-side
 
@@ -58,18 +58,18 @@ thread_ids = [row[0] for row in conn.execute(ALL_THREAD_IDS)]
 assert thread_ids, "the query returned no thread ids"
 
 # Step 2. Settle each paused thread. Step 3. Verify.
-for config in graph.store.threads_paused_on(EventClass, thread_ids=thread_ids):
-    graph.store.abandon(config, reason="retiring EventClass")
-assert graph.store.threads_paused_on(EventClass, thread_ids=thread_ids) == []
+for config in graph.event_store.threads_paused_on(EventClass, thread_ids=thread_ids):
+    graph.event_store.abandon(config, reason="retiring EventClass")
+assert graph.event_store.threads_paused_on(EventClass, thread_ids=thread_ids) == []
 
 # Step 4. Plan the rewrite and review it. The plan reaches an answered
 # thread, which holds the class in its settled history.
-report = graph.store.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)
+report = graph.event_store.plan_rewrite(drop=(EventClass,), thread_ids=thread_ids)
 print(report)
 assert not report.refused
 
 # Step 5. Take a store backup first. Then rewrite.
-report = graph.store.rewrite_store(drop=(EventClass,), thread_ids=thread_ids)
+report = graph.event_store.rewrite_store(drop=(EventClass,), thread_ids=thread_ids)
 assert not report.refused
 
 # Step 6. Delete the class, run `baseline update` and deploy. The update
@@ -84,7 +84,7 @@ assert not report.refused
 # removes a retired entry only for the source of a deleted shipped rename.
 thread_ids = [row[0] for row in conn.execute(ALL_THREAD_IDS)]
 assert thread_ids, "the query returned no thread ids"
-assert graph.store.unrevivable_threads(thread_ids=thread_ids) == {}
+assert graph.event_store.unrevivable_threads(thread_ids=thread_ids) == {}
 ```
 
 The [migration gate](migration-gate.md#the-migration-gate) keeps checking a retired identity. Its `coverage` and `revive` rules fail on it until a migration covers it. After the hand edit of step 7, the gate does not check the identity, and every rule passes whether or not a settled thread still cannot revive. WARNING: After the hand edit the gate cannot see a thread that still cannot revive. Run `unrevivable_threads()` against the real store before the hand edit.
@@ -145,6 +145,6 @@ graph = EventGraph([Order.Approve], checkpointer=checkpointer)
 
 `events=` must list every loose event class the graph touches, as for any hand-built `NamespaceAwareSerde`. `Order.Approve` must be in the handler list, because without the namespace walk nothing else registers its inline command handler.
 
-**Deleting the tombstone.** The `@migrate_from` ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`, then verify `graph.store.unrevivable_threads(thread_ids=thread_ids) == {}`. In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired` and moves the tombstone class to `retired`. Delete that entry by hand, as in step 7.
+**Deleting the tombstone.** The `@migrate_from` ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`, then verify `graph.event_store.unrevivable_threads(thread_ids=thread_ids) == {}`. In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired` and moves the tombstone class to `retired`. Delete that entry by hand, as in step 7.
 
 **Onto a sibling instead of a tombstone.** A sibling is a live class that already stands for the retired one. When every field of the sibling has a default, put the same decorator on the sibling. The stored fields are discarded, and the sibling constructs from its defaults. Do not map a stored field onto a sibling field that means something else, for example a message id onto an order id.

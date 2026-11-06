@@ -192,14 +192,14 @@ See the [approval pattern](patterns.md#expense-hitl) and [What changes safely](e
 
 ### Ending a pause without answering it — `abandon()`
 
-`graph.store.abandon(config, reason=...)` or `aabandon()` ends the pause without answering it. `graph.store` requires a checkpointer. `abandon()` settles one thread per call. Find the paused threads with `graph.store.threads_paused_on(EventClass, thread_ids=...)` or `athreads_paused_on()`:
+`graph.event_store.abandon(config, reason=...)` or `aabandon()` ends the pause without answering it. `graph.event_store` requires a checkpointer. `abandon()` settles one thread per call. Find the paused threads with `graph.event_store.threads_paused_on(EventClass, thread_ids=...)` or `athreads_paused_on()`:
 
 ```python
 ...
 # candidates: thread ids from a server-side query.
-paused = graph.store.threads_paused_on(OrderConfirmationRequested, thread_ids=candidates)
+paused = graph.event_store.threads_paused_on(OrderConfirmationRequested, thread_ids=candidates)
 for config in paused:
-    graph.store.abandon(config, reason="retiring OrderConfirmationRequested")
+    graph.event_store.abandon(config, reason="retiring OrderConfirmationRequested")
 ```
 
 `thread_ids=` is required. The library does not read the whole store. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side). Omit the class to get every listed thread that is paused. To check one thread, pass `thread_ids=[tid]`.

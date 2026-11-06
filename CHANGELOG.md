@@ -9,13 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- **The store methods move from `EventGraph` to `EventGraph.store`.** `EventGraph` no longer
-  subclasses `EventStore`. It holds one, so the store methods are not declared twice. The
-  methods are `threads_paused_on()`, `abandon()`, `unrevivable_threads()`, `plan_rewrite()`,
-  `rewrite_store()` and each async twin. Migrate each call: `graph.abandon(...)` becomes
-  `graph.store.abandon(...)`. `graph.store` raises `ValueError: store requires a
-  checkpointer` on a graph with no checkpointer. The store of a graph settles a thread
-  through the graph, with its services, as before.
+- **The store methods move from `EventGraph` to `EventGraph.event_store`.** `EventGraph` no
+  longer subclasses `EventStore`. It holds one, so the store methods are not declared twice.
+  The methods are `threads_paused_on()`, `abandon()`, `unrevivable_threads()`,
+  `plan_rewrite()`, `rewrite_store()` and each async twin. Migrate each call:
+  `graph.abandon(...)` becomes `graph.event_store.abandon(...)`. On a graph with no
+  checkpointer, `graph.event_store` raises `ValueError: event_store requires a checkpointer`.
+  The store of a graph settles a thread through the graph, with its services, as before. The
+  `store=` keyword of `EventGraph(...)` is still the LangGraph `BaseStore`.
 
 ### Added
 
@@ -24,23 +25,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never runs a handler. Examples are a graph renderer, the migration gate, a store rewrite
   and an abandon script. `EventTopology(handlers, reducers=...)` runs every construction
   check that needs no service. `topology.requirements` lists each parameter that only a
-  service can fill. `EventGraph.of(topology, services=..., ...)` binds the services and
+  service can fill, as `ServiceRequirement(node, qualname, param, annotation)`. `node` is the
+  graph-node name of the handler. `qualname` is the module and qualified name of the handler
+  function. `annotation` is `Unannotated()` or `UnresolvedAnnotation(reason)` when no
+  annotation resolved. `EventGraph.of(topology, services=..., ...)` binds the services and
   raises the same `TypeError` as `EventGraph(...)` for a missing one. `EventStore(topology,
   checkpointer)` finds, abandons, plans and rewrites stored threads with no services.
   `MigrationTarget(graph=...)` accepts a factory that returns an `EventStore`.
   `topology.serde()` builds the `NamespaceAwareSerde` of a topology, the same serde that
-  `from_namespaces(..., checkpointer=...)` wires. `ServiceRequirement.annotation` is
-  `Unannotated()` or `UnresolvedAnnotation(reason)` when no annotation resolved.
-  `EventGraph(...)` keeps its signature and its messages. See *Topology, graph and store* in
-  `docs/concepts.md`.
+  `from_namespaces(..., checkpointer=...)` wires. `EventGraph(...)` keeps its signature. See
+  *Topology, graph and store* in `docs/concepts.md`.
 
 ### Changed
 
-- **One order change in `EventGraph(...)` errors.** The service checks of a handler now run
-  after every check that needs no service. A handler with an unclaimed parameter and a second
-  fault, for example a `raises=` with no catcher, reports the second fault first. A topology
-  warning, for example `OrphanedEventWarning`, can fire before the unclaimed-parameter
-  `TypeError`. A bad `services=` is still refused first.
+- **A construction error names a handler in one format.** The format is
+  `Handler '<module>.<qualname>' (node '<node name>')`, for example
+  `Handler 'app.orders.Order.Place.handle' (node 'Order.Place')`. Before, each error used
+  another name: the function name, the node name, the command name or the name before the
+  dedup suffix. The node name of a renamed duplicate now shows its suffix, for example
+  `handle_2`. The format applies to the service errors, the return-type errors, the node-name
+  and `previously=` errors, the `raises=`, `retry=` and invariant checks, and the reactor
+  privacy error. A test that matches the old text must change.
+- **One order change in `EventGraph(...)` errors.** The order of `main` holds up to the
+  services: the command expansion, the namespace collision and the reserved reducer names
+  are checked first, then `services=`. The service checks of each handler now run after every
+  check that needs no service. A handler with an unclaimed parameter and a second fault, for
+  example a `raises=` with no catcher, reports the second fault first. A topology warning,
+  for example `OrphanedEventWarning`, can fire before the unclaimed-parameter `TypeError`.
+- **`MigrationTarget` names its graph factory when the graph has no checkpointer.** The
+  `TargetError` says `MigrationTarget.graph returned a graph with no checkpointer`.
 - **No reducer typo warning for a variadic parameter.** A `*args` or `**kwargs` parameter of
   a handler no longer gets the "don't match any reducer. Typo?" warning.
 

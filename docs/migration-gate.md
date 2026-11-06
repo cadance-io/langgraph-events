@@ -29,15 +29,17 @@ target = MigrationTarget(
 )
 ```
 
-`graph` receives a checkpointer and returns the graph. The commands use `graph.store`. The factory can return an `EventStore` instead, when a command must not build the services of a run. Set the serde of the topology on the checkpointer in that case:
+`graph` receives a checkpointer and returns the graph. The commands use `graph.event_store`. The factory can return an `EventStore` instead, when a command must not build the services of a run. In that case, set the serde of the topology on the checkpointer. Keep a `NamespaceAwareSerde` that the checkpointer already holds, as `from_namespaces` does:
 
 ```python
 from langgraph_events import EventStore, EventTopology
+from langgraph_events.serde import NamespaceAwareSerde
 
 
 def build_store(checkpointer):
     topology = EventTopology([Order.Place, Shipment.Ship])
-    checkpointer.serde = topology.serde()
+    if not isinstance(checkpointer.serde, NamespaceAwareSerde):
+        checkpointer.serde = topology.serde()
     return EventStore(topology, checkpointer)
 ```
 
@@ -285,7 +287,7 @@ The `rewrite` command can run while release N serves runs. It builds its own gra
 
 WARNING: Do not let an older release serve runs while the command runs. An older release writes the old shape again, and it cannot read the new bytes. The fence stops the command under an older release, but it cannot stop an older release that still serves traffic. Finish the rolling deploy first.
 
-The Python form `graph.store.rewrite_store()` has one more rule. It toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Call it on a graph whose serde instance serves no run, for example in a one-off process.
+The Python form `graph.event_store.rewrite_store()` has one more rule. It toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Call it on a graph whose serde instance serves no run, for example in a one-off process.
 
 ### Old blob versions
 
@@ -372,17 +374,17 @@ A subgraph checkpoint that holds a pending `__error__` write from a failed task 
 
 ## Rewriting the live set
 
-Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.store.plan_rewrite()` and `graph.store.rewrite_store()` rewrite the stored bytes. For a deploy step, use the `rewrite` command. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
+Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.event_store.plan_rewrite()` and `graph.event_store.rewrite_store()` rewrite the stored bytes. For a deploy step, use the `rewrite` command. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
 The live set is the latest checkpoint of each thread in each checkpoint namespace, plus its pending writes. `rewrite_store()` reads one checkpoint namespace per call. The default `checkpoint_ns=""` is the root checkpoint namespace. Pass `checkpoint_ns=` to read a subgraph checkpoint namespace. It reads each checkpoint through the serde of the checkpointer, so every rename, transform, split and fill applies. It writes the result back through `put()` of the checkpointer, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same reads and the same verification, and writes nothing. The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
 
 ```python
 ...  # graph, Order and thread_ids come from your app
-report = graph.store.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
+report = graph.event_store.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
 print(report)
 assert not report.refused
 
-report = graph.store.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
+report = graph.event_store.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
 assert not report.refused
 ```
 
