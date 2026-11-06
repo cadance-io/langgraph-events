@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EventStore(graph.topology, checkpointer)`. A settle runs no handler, so its checkpoints are
   the same as before. The `store=` keyword of `EventGraph(...)` is still the LangGraph
   `BaseStore`.
+- **`from_namespaces(..., checkpointer=...)` no longer replaces a serde that you chose.**
+  Before, it replaced every serde that was not a `NamespaceAwareSerde`. It dropped an
+  `EncryptedSerializer` and the settings of a configured `JsonPlusSerializer`, for example
+  `pickle_fallback=True`, with no error. Now it replaces only LangGraph's default
+  `JsonPlusSerializer` with its default settings, and it keeps a `NamespaceAwareSerde`. Any
+  other serde raises `TypeError` and stays on the checkpointer. This is a behaviour change: a
+  graph that built before can now raise. Migrate with
+  `EventGraph.of(EventTopology.from_namespaces(...), checkpointer=saver)`, and set
+  `saver.serde = topology.serde()`, or wrap it, for example
+  `EncryptedSerializer(cipher, serde=topology.serde())`.
 - **The unclaimed-parameter `TypeError` has new text.** It names the annotation of each
   missing parameter, the types or name keys that `services=` holds, and the call that received
   `services=`: `EventGraph(services=)` or `EventGraph.of(..., services=)`. A test that matches
@@ -51,6 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A run call refuses an unknown keyword.** `invoke()`, `resume()`, the stream methods and
   their async twins take `context=` as a keyword. A keyword that LangGraph's `Pregel.stream`
   does not take raises `TypeError`, so a typo such as `contxt=` no longer passes silently.
+  This is a behaviour change: a call that passed such a keyword before now raises. The
+  refused keywords include each deprecated keyword that LangGraph's run still accepts
+  through `**kwargs`, for example `checkpoint_during=`. Use `durability=` in its place.
 - **`AGUIAdapter.stream()` takes `context=`.** The adapter passes it to the run on a
   start and on a resume. See [Run config](docs/agui.md#run-config).
 - **`assert_resume_recovers()` takes `context=`.** It passes the context to both runs.

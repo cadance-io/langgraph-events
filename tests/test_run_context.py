@@ -400,6 +400,15 @@ def describe_context_schema():
                 with pytest.raises(TypeError, match=r"\['contxt'\]"):
                     graph.invoke(Started(), contxt=RunFacts("fr"))
 
+        def when_a_keyword_is_deprecated_in_langgraph():
+            def it_raises_naming_the_keyword():
+                graph = EventGraph([greet], context_schema=RunFacts)
+
+                with pytest.raises(TypeError, match=r"\['checkpoint_during'\]"):
+                    graph.invoke(
+                        Started(), context=RunFacts("fr"), checkpoint_during=True
+                    )
+
         def when_the_thread_is_not_paused():
             @pytest.mark.parametrize("policy", ["halt", "warn"])
             def it_still_refuses_a_missing_context(policy: Any):

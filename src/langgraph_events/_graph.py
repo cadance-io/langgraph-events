@@ -166,6 +166,27 @@ _RUN_KWARGS = frozenset(inspect.signature(Pregel.stream).parameters) - {
 }
 
 
+def _is_default_serde(serde: object) -> bool:
+    """Whether *serde* is LangGraph's untouched default ``JsonPlusSerializer``.
+
+    It is when its type is exactly ``JsonPlusSerializer`` and each plain
+    attribute equals the one of a fresh ``JsonPlusSerializer()``. A callable
+    attribute is skipped: LangGraph builds it from the plain ones. Any other
+    serde, for example an ``EncryptedSerializer``, is not the default.
+    """
+    from langgraph.checkpoint.serde.jsonplus import (  # noqa: PLC0415
+        JsonPlusSerializer,
+    )
+
+    if type(serde) is not JsonPlusSerializer:
+        return False
+
+    def plain(s: object) -> dict[str, object]:
+        return {k: v for k, v in vars(s).items() if not callable(v)}
+
+    return plain(serde) == plain(JsonPlusSerializer())
+
+
 def _snapshot_interrupts(snapshot: StateSnapshot) -> list[Interrupt]:
     """Every interrupt that *snapshot* holds pending, in checkpoint task order.
 
@@ -494,6 +515,17 @@ class EventGraph:
 
             serde = getattr(checkpointer, "serde", None)
             if serde is not None and not isinstance(serde, NamespaceAwareSerde):
+                if not _is_default_serde(serde):
+                    raise TypeError(
+                        f"from_namespaces(checkpointer=...) replaces only "
+                        f"LangGraph's default serde, but the checkpointer holds a "
+                        f"{type(serde).__name__} that is not the default. Build "
+                        f"the graph with EventGraph.of(EventTopology."
+                        f"from_namespaces(...), checkpointer=saver). Set "
+                        f"saver.serde = topology.serde() first, or wrap it, for "
+                        f"example EncryptedSerializer(cipher, "
+                        f"serde=topology.serde())."
+                    )
                 # Not ``domains``: a namespace can reach the graph through
                 # ``handlers=`` alone, and its events would then keep
                 # resolving by import — the bleed #155 exists to close.
