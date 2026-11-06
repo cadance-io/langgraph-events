@@ -68,6 +68,11 @@ class RunScoped(Generic[T]):
     factory is called with the run config once per node call. Its result is
     injected under the handler's parameter name.
 
+    A factory whose second parameter is annotated with the graph's
+    ``context_schema`` also receives the run context, as
+    ``factory(config, context)``. That parameter must be positional and
+    required. The graph build refuses any other second parameter.
+
     The factory must be a plain callable. A coroutine function is rejected,
     because its result would be injected without an ``await``.
 
@@ -79,7 +84,7 @@ class RunScoped(Generic[T]):
         def handle(event: SomeEvent, model: ConversationModel) -> None: ...
     """
 
-    factory: Callable[[RunnableConfig], T]
+    factory: Callable[[RunnableConfig], T] | Callable[[RunnableConfig, Any], T]
 
     def __post_init__(self) -> None:
         if not callable(self.factory):
@@ -104,6 +109,61 @@ class RunScoped(Generic[T]):
             return
         if "return" not in getattr(source, "__annotations__", {}):
             raise TypeError(_missing_return_annotation(self.factory, source))
+
+    def takes_context(self, name: str, context_schema: type | None) -> bool:
+        """Whether the factory of service *name* takes the run context.
+
+        It does when its second parameter is positional, required and
+        annotated with *context_schema*. A signature that Python cannot read
+        counts as the run config only. Raises ``TypeError`` for any other
+        second parameter, with the fix.
+        """
+        try:
+            params = inspect.signature(self.factory).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+        extra = [p for p in params if p.kind not in variadic][1:]
+        if not extra:
+            return False
+        source = _annotation_source(self.factory)
+        label = f"RunScoped factory {_factory_label(source)!r} for service {name!r}"
+        second = extra[0]
+        positional = second.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        )
+        required = second.default is inspect.Parameter.empty
+        if context_schema is None:
+            if not (positional and required):
+                return False
+            raise TypeError(
+                f"{label} takes a second parameter {second.name!r}, but the graph "
+                f"has no context_schema. Pass context_schema= to the graph to give "
+                f"the factory the run context, or give the factory one parameter."
+            )
+        init = source.__init__ if isinstance(source, type) else source  # type: ignore[misc]
+        hints, _ = _resolve_hints_and_errors(init)
+        annotation = hints.get(second.name, inspect.Parameter.empty)
+        if len(extra) == 1 and positional and required and annotation is context_schema:
+            return True
+        if len(extra) > 1:
+            why = "has more than two parameters"
+        elif not positional:
+            why = f"has a keyword-only parameter {second.name!r}"
+        elif not required:
+            why = f"has an optional parameter {second.name!r}"
+        elif annotation is inspect.Parameter.empty:
+            why = f"has an unannotated parameter {second.name!r}"
+        else:
+            why = f"annotates parameter {second.name!r} as {_hint_label(annotation)}"
+        schema = context_schema.__qualname__
+        raise TypeError(
+            f"{label} {why}. A factory that takes the run context declares it "
+            f"as a second positional parameter, required and annotated with "
+            f"{schema}: (config, {second.name}: {schema}). Change the parameter, "
+            f"or remove it."
+        )
 
     def provided_type(self, name: str) -> object:
         """Resolve the return annotation of the factory of service *name*.
@@ -160,15 +220,29 @@ class TypedServices:
         names = sorted(t.__qualname__ for t in self._by_type)
         return f"services= has the types {names}."
 
-    def bind(self, meta: HandlerMeta) -> BoundHandler:
+    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
         """Fill each candidate of *meta* whose annotation is a class with the
         service of that class.
+
+        Raises ``TypeError`` for a service that is an instance of
+        *context_schema*: the run context fills a parameter of that type.
 
         The service is the unique registered one whose type is a subclass of
         (or equal to) the annotation. Multi-match is rejected — the user must
         disambiguate by narrowing the annotation or registering only one
         matching service.
         """
+        # A ``TypedDict`` refuses ``issubclass``, and its instance is a dict.
+        if context_schema is not None and not typing.is_typeddict(context_schema):
+            for t in self._by_type:
+                if issubclass(t, context_schema):
+                    raise TypeError(
+                        f"services= holds an instance of {t.__qualname__}, the "
+                        f"context_schema of the graph. The run context fills a "
+                        f"parameter of that type, so the service is never "
+                        f"injected. Pass the value with context= on each run "
+                        f"call, and remove it from services=."
+                    )
         detected: list[tuple[str, object]] = []
         for candidate in meta.service_candidates:
             hint = candidate.annotation
@@ -223,15 +297,24 @@ class NamedServices:
             return "services= has no service."
         return f"services= has the name keys {sorted(self._by_name)}."
 
-    def bind(self, meta: HandlerMeta) -> BoundHandler:
+    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
         """Fill each candidate of *meta* with the service of its name, then
-        check each service against the annotation."""
+        check each service against the annotation. A ``RunScoped`` factory
+        whose second parameter is annotated with *context_schema* also gets
+        the run context."""
+        services = tuple(
+            (c.param, self._by_name[c.param])
+            for c in meta.service_candidates
+            if c.param in self._by_name
+        )
         bound = BoundHandler(
             meta,
-            tuple(
-                (c.param, self._by_name[c.param])
-                for c in meta.service_candidates
-                if c.param in self._by_name
+            services,
+            frozenset(
+                param
+                for param, value in services
+                if isinstance(value, RunScoped)
+                and value.takes_context(param, context_schema)
             ),
         )
         self._verify(bound)

@@ -8,7 +8,7 @@ import inspect
 import types
 import typing
 from collections import abc
-from dataclasses import dataclass
+from dataclasses import dataclass, is_dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langgraph_events._event import Event, Invariant
@@ -542,6 +542,9 @@ class HandlerMeta:
     required_reducer_params: frozenset[str] = frozenset()
     config_param: str | None = None
     store_param: str | None = None
+    # Parameter annotated with exactly the ``context_schema`` of the topology.
+    # It receives the run context of LangGraph's ``Runtime``.
+    context_param: str | None = None
     # Each entry is (field_name, matcher, is_type_matcher). The bool is
     # precomputed at extract time so the hot-path ``matches`` loop avoids
     # an ``isinstance(matcher, type)`` probe per dispatch.
@@ -581,9 +584,16 @@ class HandlerMeta:
 
     @classmethod
     def of(
-        cls, fn: Callable[..., Any], *, reducer_names: frozenset[str]
+        cls,
+        fn: Callable[..., Any],
+        *,
+        reducer_names: frozenset[str],
+        context_schema: type | None = None,
     ) -> HandlerMeta:
         """Extract the metadata of a decorated function, with no services.
+
+        A parameter annotated with exactly *context_schema* is the context
+        parameter.
 
         Each non-variadic parameter that the event, a framework injectable, a
         reducer or a field matcher does not claim is recorded in
@@ -605,7 +615,7 @@ class HandlerMeta:
                 f"type. Make each annotation importable at run time.",
             )
 
-        framework_params = _detect_framework_params(hints)
+        framework_params = _detect_framework_params(hints, context_schema)
 
         # Detect reducer parameters by name match
         sig = inspect.signature(fn)
@@ -679,6 +689,7 @@ class HandlerMeta:
             reflection_param=framework_params["reflection_param"],
             config_param=framework_params["config_param"],
             store_param=framework_params["store_param"],
+            context_param=framework_params["context_param"],
             is_async=asyncio.iscoroutinefunction(fn),
             reducer_params=reducer_params,
             required_reducer_params=required_reducer_params,
@@ -708,7 +719,7 @@ class HandlerMeta:
 
     @property
     def framework_params(self) -> tuple[str, ...]:
-        """Param names claimed by framework injectables (log/reflection/config/store).
+        """Param names claimed by framework injectables, such as log or context.
 
         The one place that knows the full injectable set — claim/consume
         bookkeeping iterates this instead of hand-listing each field.
@@ -718,6 +729,7 @@ class HandlerMeta:
             for p in (
                 self.log_param,
                 self.reflection_param,
+                self.context_param,
                 self.config_param,
                 self.store_param,
             )
@@ -736,9 +748,16 @@ class BoundHandler:
     # (param_name, service) for each candidate that a service fills. A
     # ``RunScoped`` service is resolved per node call at dispatch.
     services: tuple[tuple[str, object], ...]
+    # The params whose ``RunScoped`` factory also takes the run context.
+    context_services: frozenset[str] = frozenset()
 
     def require_claimed(
-        self, reducer_names: frozenset[str], *, received: str, entry: str
+        self,
+        reducer_names: frozenset[str],
+        *,
+        received: str,
+        entry: str,
+        context_schema: type | None = None,
     ) -> None:
         """Raise if a handler declares a param the framework cannot inject.
 
@@ -750,7 +769,8 @@ class BoundHandler:
         it at graph build time so the failure is colocated with the
         misconfiguration. With *reducer_names*, a typo warning comes first.
         *received* states what ``services=`` holds, so a near-miss name key
-        shows. *entry* is the call that received ``services=``.
+        shows. *entry* is the call that received ``services=``. A parameter
+        that looks like the run context gets a hint on *context_schema*.
         """
         meta = self.meta
         bound = {param for param, _ in self.services}
@@ -786,11 +806,55 @@ class BoundHandler:
         )
         raise TypeError(
             f"{meta.label} declares parameter(s) {unclaimed} "
-            f"that the framework cannot inject: {wanted}.{cause} {received} "
+            f"that the framework cannot inject: {wanted}.{cause}"
+            f"{_context_hint(missing, context_schema)} {received} "
             f"For service injection, register a matching instance via "
             f"{entry}; for state, register a Reducer; "
             f"otherwise remove the parameter."
         )
+
+
+def is_coercible_schema(schema: type) -> bool:
+    """Whether LangGraph coerces a ``dict`` context to *schema*: a dataclass
+    or a pydantic model."""
+    from pydantic import BaseModel  # noqa: PLC0415
+
+    return is_dataclass(schema) or issubclass(schema, BaseModel)
+
+
+def _context_hint(missing: list[ServiceCandidate], context_schema: type | None) -> str:
+    """A hint for each missing parameter that looks like the run context.
+
+    Without *context_schema*, a dataclass, a pydantic model or a
+    ``TypedDict`` annotation can be a context schema. These are the schema
+    kinds of LangGraph. With *context_schema*, a parameter is a near miss when
+    its annotation is a subclass of the schema, or a union that holds it.
+    """
+    hints: list[str] = []
+    for c in missing:
+        hint = c.annotation
+        if context_schema is None:
+            if isinstance(hint, type) and (
+                is_coercible_schema(hint) or typing.is_typeddict(hint)
+            ):
+                hints.append(
+                    f" If {c.param!r} is the run context, pass "
+                    f"context_schema={hint.__qualname__}."
+                )
+            continue
+        subclass = (
+            isinstance(hint, type)
+            and not typing.is_typeddict(context_schema)
+            and issubclass(hint, context_schema)
+        )
+        near = subclass or context_schema in typing.get_args(hint)
+        if near:
+            hints.append(
+                f" {c.param!r} is annotated {_annotation_label(hint)}, but only "
+                f"the exact type context_schema={context_schema.__qualname__} "
+                f"receives the run context."
+            )
+    return "".join(hints)
 
 
 def _annotation_label(annotation: object) -> str:
@@ -804,13 +868,15 @@ def _annotation_label(annotation: object) -> str:
     return repr(annotation)
 
 
-def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
+def _detect_framework_params(
+    hints: dict[str, Any], context_schema: type | None
+) -> dict[str, str | None]:
     """Find params annotated with framework injectables, by exact type hint.
 
-    Returns a dict keyed by the ``HandlerMeta`` field names
-    (``log_param`` / ``reflection_param`` / ``config_param`` / ``store_param``)
-    so call sites read each key by name — no positional slots to miswire.
-    First matching param wins for each injectable.
+    Returns a dict keyed by the ``HandlerMeta`` field names, for example
+    ``log_param`` or ``context_param``, so call sites read each key by name.
+    First matching param wins for each injectable. Without *context_schema*,
+    ``context_param`` is ``None``.
     """
     from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
     from langgraph.store.base import BaseStore  # noqa: PLC0415
@@ -824,6 +890,9 @@ def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
         BaseStore: "store_param",
     }
     detected: dict[str, str | None] = dict.fromkeys(hint_to_field.values())
+    detected["context_param"] = None
+    if context_schema is not None:
+        hint_to_field[context_schema] = "context_param"
     for param_name, hint in hints.items():
         field = hint_to_field.get(hint)
         if field is not None and detected[field] is None:

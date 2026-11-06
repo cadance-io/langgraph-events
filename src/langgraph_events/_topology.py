@@ -31,6 +31,7 @@ from langgraph_events._handler import (
     HandlerMeta,
     ServiceRequirement,
     _resolve_hints_and_errors,
+    is_coercible_schema,
     normalize_previous_names,
     on,
 )
@@ -569,9 +570,11 @@ class EventTopology:
         handlers: list[Callable[..., Any]],
         *,
         reducers: list[BaseReducer] | None = None,
+        context_schema: type | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventTopology requires at least one handler")
+        self._context_schema = context_schema
         handlers = _expand_command_handlers(handlers)
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
@@ -587,7 +590,9 @@ class EventTopology:
         reducer_names = self.reducer_names
         seen_names: dict[str, int] = {}
         for fn in handlers:
-            meta = HandlerMeta.of(fn, reducer_names=reducer_names)
+            meta = HandlerMeta.of(
+                fn, reducer_names=reducer_names, context_schema=context_schema
+            )
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:
@@ -624,6 +629,7 @@ class EventTopology:
         *domains: type[Namespace],
         handlers: list[Callable[..., Any]] | None = None,
         reducers: list[BaseReducer] | None = None,
+        context_schema: type | None = None,
     ) -> EventTopology:
         """Build the topology of the inline command handlers of *domains*.
 
@@ -634,7 +640,11 @@ class EventTopology:
             topology = EventTopology.from_namespaces(Order, handlers=[react])
             store = EventStore(topology, saver)
         """
-        return cls(namespace_handlers(domains, handlers), reducers=reducers)
+        return cls(
+            namespace_handlers(domains, handlers),
+            reducers=reducers,
+            context_schema=context_schema,
+        )
 
     def _serde_scope(
         self,
@@ -718,6 +728,44 @@ class EventTopology:
         }
 
     @property
+    def context_schema(self) -> type | None:
+        """The type of the run context, or ``None`` for a graph without one.
+
+        A handler parameter annotated with exactly this type receives the
+        context, so it is not in :attr:`requirements`.
+        """
+        return self._context_schema
+
+    def require_context(self, context: object) -> object:
+        """Check the *context* of one run, and return it as the run gets it.
+
+        A ``dict`` is coerced to a dataclass or pydantic schema, as LangGraph
+        does. Raises ``TypeError`` when the topology has a schema and
+        *context* is ``None``, or is not an instance of the schema.
+        """
+        schema = self._context_schema
+        if schema is None:
+            return context
+        name = schema.__qualname__
+        if context is None:
+            raise TypeError(
+                f"context_schema={name} requires a run context. Pass "
+                f"context={name}(...) to each run call, including a resume."
+            )
+        if typing.is_typeddict(schema):
+            if isinstance(context, dict):
+                return context
+        else:
+            if isinstance(context, dict) and is_coercible_schema(schema):
+                context = schema(**context)
+            if isinstance(context, schema):
+                return context
+        raise TypeError(
+            f"context= must be an instance of {name}, the context_schema of "
+            f"the graph, got {type(context).__qualname__}."
+        )
+
+    @property
     def requirements(self) -> tuple[ServiceRequirement, ...]:
         """Each handler parameter that only a service can fill, in handler
         and signature order. A variadic parameter is not listed."""
@@ -733,9 +781,12 @@ class EventTopology:
         reducer_names = self.reducer_names
         bound: list[BoundHandler] = []
         for meta in self._handler_metas:
-            handler = services.bind(meta)
+            handler = services.bind(meta, self._context_schema)
             handler.require_claimed(
-                reducer_names, received=services.received(), entry=entry
+                reducer_names,
+                received=services.received(),
+                entry=entry,
+                context_schema=self._context_schema,
             )
             bound.append(handler)
         return tuple(bound)
@@ -824,6 +875,7 @@ class EventTopology:
             state_schema,
             input_schema=_InputState,  # type: ignore[arg-type]
             output_schema=out_schema,
+            context_schema=self._context_schema,
         )
 
         # --- nodes ---

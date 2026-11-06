@@ -356,6 +356,8 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                 "is configured. Pass store=... to EventGraph(...)."
             )
         inject[meta.store_param] = store
+    if meta.context_param:
+        inject[meta.context_param] = _runtime_context(meta)
     for param_name, service in bound.services:
         if not isinstance(service, RunScoped):
             inject[param_name] = service
@@ -365,8 +367,13 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                 f"Handler '{meta.name}' requested the run-scoped service "
                 f"'{param_name}', but runtime config is missing."
             )
+        args = (
+            (config, _runtime_context(meta))
+            if param_name in bound.context_services
+            else (config,)
+        )
         try:
-            inject[param_name] = service.factory(config)
+            inject[param_name] = service.factory(*args)
         except Exception as exc:
             # Keep the type, so a caller that catches it still can.
             # The note names the seam, like the missing-config branch.
@@ -376,6 +383,23 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
             )
             raise
     return inject
+
+
+def _runtime_context(meta: HandlerMeta) -> object:
+    """Return the context of the current run from LangGraph's ``Runtime``.
+
+    The context is ``None`` only when a caller runs ``EventGraph.compiled``
+    directly without ``context=``. The ``EventGraph`` run methods refuse that.
+    """
+    from langgraph.runtime import get_runtime  # noqa: PLC0415
+
+    context = get_runtime().context
+    if context is None:
+        raise ValueError(
+            f"Handler {meta.name!r} needs the run context, but the run has no "
+            f"context. Pass context=... to the run call."
+        )
+    return context
 
 
 def _make_reducer_not_set_error(

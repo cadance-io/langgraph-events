@@ -48,6 +48,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EventGraph(context_schema=...)` exposes LangGraph's typed run context.** Pass the
+  context with `context=` on each run call. `EventTopology(context_schema=...)` holds the
+  schema, and `EventGraph.of(topology, ...)` reads it. A handler parameter annotated with
+  exactly the schema type receives the context, so it is not a service requirement. A
+  `RunScoped` factory whose second parameter is annotated with the schema type receives
+  `(config, context)`. The build refuses another second parameter on a graph with a schema,
+  and a type-keyed service that is an instance of the schema. The context is not
+  checkpointed. When the schema is set, a run or a resume without `context=`, or with a
+  context of another type, raises `TypeError`. `topology.require_context(context)` runs the
+  same check. See [Run context](docs/concepts.md#run-context).
+- **A run call refuses an unknown keyword.** `invoke()`, `resume()`, the stream methods and
+  their async twins take `context=` as a keyword. A keyword that LangGraph's `Pregel.stream`
+  does not take raises `TypeError`, so a typo such as `contxt=` no longer passes silently.
+  This is a behaviour change: a call that passed such a keyword before now raises. The
+  refused keywords include each deprecated keyword that LangGraph's run still accepts
+  through `**kwargs`, for example `checkpoint_during=`. Use `durability=` in its place.
+- **`AGUIAdapter.stream()` takes `context=`.** The adapter passes it to the run on a
+  start and on a resume. See [Run config](docs/agui.md#run-config).
+- **`assert_resume_recovers()` takes `context=`.** It passes the context to both runs.
 - **`EventTopology`, `EventGraph.of()` and `EventStore` split a graph from its services.**
   Before, every client of a graph had to supply every service value, also a client that
   never runs a handler. Examples are a graph renderer, the migration gate, a store rewrite

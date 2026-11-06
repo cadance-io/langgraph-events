@@ -62,6 +62,7 @@ def assert_resume_recovers(
     seed: Event | list[Event],
     resume_with: Event,
     thread_id: str | None = None,
+    context: object = None,
 ) -> EventLog:
     """Assert a thread paused inside a handler on *before* resumes on *after*.
 
@@ -75,7 +76,8 @@ def assert_resume_recovers(
     further assertions.
 
     *before* and *after* must be constructed with the **same** checkpointer
-    instance so the paused checkpoint survives the rebuild.
+    instance so the paused checkpoint survives the rebuild. *context* is
+    passed to both runs, for a graph with ``EventGraph(context_schema=...)``.
     """
     if before._checkpointer is None or before._checkpointer is not after._checkpointer:
         raise ValueError(
@@ -85,13 +87,13 @@ def assert_resume_recovers(
         )
     tid = thread_id or f"resume-recovers-{uuid.uuid4().hex}"
     config: RunnableConfig = {"configurable": {"thread_id": tid}}
-    before.invoke(seed, config=config)
+    before.invoke(seed, config=config, context=context)
     if not before.get_state(config).is_interrupted:
         raise AssertionError(
             "assert_resume_recovers: `seed` did not pause `before` — it must "
             "trigger an Interrupted so there is a paused checkpoint to resume."
         )
-    log = after.resume(resume_with, config=config)
+    log = after.resume(resume_with, config=config, context=context)
     if log.latest(Resumed) is None:
         raise AssertionError(
             "assert_resume_recovers: resume did not recover the paused thread "

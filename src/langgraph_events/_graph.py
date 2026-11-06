@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import functools
+import inspect
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.pregel import Pregel
 from langgraph.types import Command as LGCommand
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
@@ -155,6 +157,15 @@ StreamItem = (
 )
 
 
+# The keyword arguments that a run call forwards to LangGraph. Read from the
+# signature of ``Pregel.stream``, which every run call ends in.
+_RUN_KWARGS = frozenset(inspect.signature(Pregel.stream).parameters) - {
+    "self",
+    "input",
+    "kwargs",
+}
+
+
 def _is_default_serde(serde: object) -> bool:
     """Whether *serde* is LangGraph's untouched default ``JsonPlusSerializer``.
 
@@ -242,11 +253,12 @@ class EventGraph:
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
+        context_schema: type | None = None,
     ) -> None:
         _validate_on_unresumable(on_unresumable)
         parsed = parse_services(services)
         self._init(
-            EventTopology(handlers, reducers=reducers),
+            EventTopology(handlers, reducers=reducers, context_schema=context_schema),
             max_rounds=max_rounds,
             services=parsed,
             checkpointer=checkpointer,
@@ -405,6 +417,34 @@ class EventGraph:
         seeds = seed if isinstance(seed, list) else [seed]
         return {"events": seeds, "causes": [None] * len(seeds)}
 
+    def _prepare_run(
+        self,
+        kwargs: dict[str, Any],
+        deadline: float | None,
+        pause_on: PauseSignal | None,
+    ) -> None:
+        """Check the run with :meth:`_check_run`, then add the pause budget to
+        the run config."""
+        self._check_run(kwargs)
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+
+    def _check_run(self, kwargs: dict[str, Any]) -> None:
+        """Check the keyword arguments and the context of one run.
+
+        Raises ``TypeError`` for a keyword that LangGraph's ``Pregel.stream``
+        does not take, so a typo such as ``contxt=`` does not pass silently.
+        A resume calls it before the ``on_unresumable`` policy, so the policy
+        never hides a bad run call. A second call is harmless.
+        """
+        unknown = sorted(set(kwargs) - _RUN_KWARGS)
+        if unknown:
+            raise TypeError(
+                f"Unexpected keyword argument(s) {unknown}. A run call takes "
+                f"context= and the keyword arguments of LangGraph's run: "
+                f"{sorted(_RUN_KWARGS)}."
+            )
+        kwargs["context"] = self._topology.require_context(kwargs.get("context"))
+
     def _run(
         self,
         inp: _GraphInput,
@@ -413,7 +453,7 @@ class EventGraph:
         pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> EventLog:
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         result = self.compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
@@ -425,7 +465,7 @@ class EventGraph:
         pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> EventLog:
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         result = await self.compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
@@ -500,6 +540,7 @@ class EventGraph:
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> EventLog:
         """Run the graph synchronously with one or more seed events.
@@ -520,6 +561,7 @@ class EventGraph:
         Raises:
             TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
+        kwargs["context"] = context
         return self._run(
             self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
         )
@@ -530,12 +572,14 @@ class EventGraph:
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> EventLog:
         """Run the graph asynchronously with one or more seed events.
 
         Takes the same arguments as :meth:`invoke`.
         """
+        kwargs["context"] = context
         return await self._arun(
             self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
         )
@@ -719,6 +763,7 @@ class EventGraph:
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> EventLog:
         """Resume an interrupted graph with a domain event.
@@ -743,8 +788,10 @@ class EventGraph:
         Raises:
             TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
+        kwargs["context"] = context
         self._require_checkpointer("resume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         if not self._resume_is_pending(kwargs):
             return self._apply_unresumable_policy(value, kwargs)
         return self._run(
@@ -757,6 +804,7 @@ class EventGraph:
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> EventLog:
         """Async version of resume().
@@ -766,8 +814,10 @@ class EventGraph:
         awaiting input, the ``on_unresumable`` policy applies (default raise).
         Takes the same arguments as :meth:`resume`.
         """
+        kwargs["context"] = context
         self._require_checkpointer("aresume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(
@@ -1121,7 +1171,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         compiled = self.compiled
         if not reducer_names:
             yield from seeds
@@ -1176,6 +1226,7 @@ class EventGraph:
         include_reducers: bool | list[str] = False,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Yield individual events as they are produced during graph execution.
@@ -1201,6 +1252,7 @@ class EventGraph:
         Raises:
             TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
+        kwargs["context"] = context
         inp = self._prepare_input(seed)
         kwargs.pop("stream_mode", None)
         reducer_names = self._topology.resolve_reducer_names(include_reducers)
@@ -1221,6 +1273,7 @@ class EventGraph:
         include_reducers: bool | list[str] = False,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Yield events produced when resuming an interrupted graph.
@@ -1252,8 +1305,10 @@ class EventGraph:
         Raises:
             TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
+        kwargs["context"] = context
         self._require_checkpointer("stream_resume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         if not self._resume_is_pending(kwargs):
             log = self._apply_unresumable_policy(value, kwargs)  # raises for raise
             if self._on_unresumable == "halt":
@@ -1291,7 +1346,7 @@ class EventGraph:
         path loads no checkpoint, so it has no use for *snapshot*.
         """
         kwargs.pop("stream_mode", None)
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         reducer_names = self._topology.resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(
@@ -1320,6 +1375,7 @@ class EventGraph:
         _snapshot: StateSnapshot | None = None,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_resume()``.
@@ -1360,8 +1416,10 @@ class EventGraph:
         Raises:
             TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
+        kwargs["context"] = context
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, _snapshot)
         if not await self._aresume_is_pending(kwargs, snapshot):
             # raises for the 'raise' policy; warn/halt return a log to adapt
@@ -1394,6 +1452,7 @@ class EventGraph:
         _snapshot: StateSnapshot | None = None,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        context: object | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Async version of ``stream_events()``.
@@ -1426,6 +1485,7 @@ class EventGraph:
         Raises:
             TypeError: *pause_on* is a class, or has no callable ``is_set``.
         """
+        kwargs["context"] = context
         inp = self._prepare_input(seed)
         async for item in self._astream_entry(
             inp,
