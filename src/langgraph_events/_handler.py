@@ -842,9 +842,12 @@ def _context_hint(missing: list[ServiceCandidate], context_schema: type | None) 
                     f"context_schema={hint.__qualname__}."
                 )
             continue
-        near = (
-            isinstance(hint, type) and issubclass(hint, context_schema)
-        ) or context_schema in typing.get_args(hint)
+        subclass = (
+            isinstance(hint, type)
+            and not typing.is_typeddict(context_schema)
+            and issubclass(hint, context_schema)
+        )
+        near = subclass or context_schema in typing.get_args(hint)
         if near:
             hints.append(
                 f" {c.param!r} is annotated {_annotation_label(hint)}, but only "

@@ -232,7 +232,8 @@ class TypedServices:
         disambiguate by narrowing the annotation or registering only one
         matching service.
         """
-        if context_schema is not None:
+        # A ``TypedDict`` refuses ``issubclass``, and its instance is a dict.
+        if context_schema is not None and not typing.is_typeddict(context_schema):
             for t in self._by_type:
                 if issubclass(t, context_schema):
                     raise TypeError(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 import pytest
 from ag_ui.core import EventType, RunAgentInput
@@ -63,6 +63,16 @@ def _config_only(config: RunnableConfig, retries: int = 3) -> _Model:
     return _Model("none", config["configurable"]["thread_id"])
 
 
+class DictFacts(TypedDict):
+    """A ``TypedDict`` schema."""
+
+    language: str
+
+
+class _Db:
+    pass
+
+
 @dataclass(frozen=True)
 class LocalFacts(RunFacts):
     """A subclass of the schema."""
@@ -107,6 +117,11 @@ def maybe_greet(event: Started, facts: RunFacts | None) -> None:
 @on(Started)
 def local_greet(event: Started, facts: LocalFacts) -> None:
     pass
+
+
+@on(Started)
+def dict_greet(event: Started, facts: DictFacts, db: _Db) -> Ended:
+    return Ended(result=facts["language"])
 
 
 @on(Started)
@@ -361,6 +376,22 @@ def describe_context_schema():
                     "of the graph."
                 )
 
+    def describe_TypedDict_schema():
+        def when_a_type_keyed_service_is_given():
+            def it_injects_the_context():
+                graph = EventGraph(
+                    [dict_greet], context_schema=DictFacts, services=[_Db()]
+                )
+
+                log = graph.invoke(Started(), context={"language": "nl"})
+
+                assert log.latest(Ended) == Ended(result="nl")
+
+        def when_a_service_is_missing():
+            def it_raises_the_unclaimed_parameter_error():
+                with pytest.raises(TypeError, match="cannot inject"):
+                    EventGraph([dict_greet], context_schema=DictFacts)
+
     def describe_run_call():
         def when_a_keyword_is_misspelled():
             def it_raises_naming_the_keyword():
@@ -368,6 +399,19 @@ def describe_context_schema():
 
                 with pytest.raises(TypeError, match=r"\['contxt'\]"):
                     graph.invoke(Started(), contxt=RunFacts("fr"))
+
+        def when_the_thread_is_not_paused():
+            @pytest.mark.parametrize("policy", ["halt", "warn"])
+            def it_still_refuses_a_missing_context(policy: Any):
+                graph = EventGraph(
+                    [ask, note_answer],
+                    context_schema=RunFacts,
+                    checkpointer=MemorySaver(),
+                    on_unresumable=policy,
+                )
+
+                with pytest.raises(TypeError, match="RunFacts"):
+                    graph.resume(Answered(), config=_thread("idle"))
 
         def when_the_context_has_another_type():
             def it_raises_naming_both_types():

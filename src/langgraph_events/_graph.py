@@ -402,11 +402,18 @@ class EventGraph:
         deadline: float | None,
         pause_on: PauseSignal | None,
     ) -> None:
-        """Check the keyword arguments and the context of one run, then add
-        the pause budget to the run config.
+        """Check the run with :meth:`_check_run`, then add the pause budget to
+        the run config."""
+        self._check_run(kwargs)
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+
+    def _check_run(self, kwargs: dict[str, Any]) -> None:
+        """Check the keyword arguments and the context of one run.
 
         Raises ``TypeError`` for a keyword that LangGraph's ``Pregel.stream``
         does not take, so a typo such as ``contxt=`` does not pass silently.
+        A resume calls it before the ``on_unresumable`` policy, so the policy
+        never hides a bad run call. A second call is harmless.
         """
         unknown = sorted(set(kwargs) - _RUN_KWARGS)
         if unknown:
@@ -416,7 +423,6 @@ class EventGraph:
                 f"{sorted(_RUN_KWARGS)}."
             )
         kwargs["context"] = self._topology.require_context(kwargs.get("context"))
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
 
     def _run(
         self,
@@ -753,6 +759,7 @@ class EventGraph:
         kwargs["context"] = context
         self._require_checkpointer("resume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         if not self._resume_is_pending(kwargs):
             return self._apply_unresumable_policy(value, kwargs)
         return self._run(
@@ -778,6 +785,7 @@ class EventGraph:
         kwargs["context"] = context
         self._require_checkpointer("aresume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         if not await self._aresume_is_pending(kwargs):
             return await self._aapply_unresumable_policy(value, kwargs)
         return await self._arun(
@@ -1268,6 +1276,7 @@ class EventGraph:
         kwargs["context"] = context
         self._require_checkpointer("stream_resume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         if not self._resume_is_pending(kwargs):
             log = self._apply_unresumable_policy(value, kwargs)  # raises for raise
             if self._on_unresumable == "halt":
@@ -1378,6 +1387,7 @@ class EventGraph:
         kwargs["context"] = context
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
+        self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, _snapshot)
         if not await self._aresume_is_pending(kwargs, snapshot):
             # raises for the 'raise' policy; warn/halt return a log to adapt
