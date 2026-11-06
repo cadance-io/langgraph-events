@@ -4658,7 +4658,7 @@ def describe_handler_evolution():
             def newer(event: Started) -> Ended:
                 return Ended(result="x")
 
-            nodes = set(EventGraph([newer])._compile().get_graph().nodes)
+            nodes = set(EventGraph([newer]).compiled.get_graph().nodes)
             assert "newer" in nodes
             assert "old_name" in nodes
 

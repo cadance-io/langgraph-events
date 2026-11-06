@@ -153,7 +153,7 @@ class TypedServices:
                 )
             self._by_type[t] = s
 
-    def bind(self, meta: HandlerMeta, reducer_names: frozenset[str]) -> BoundHandler:
+    def bind(self, meta: HandlerMeta) -> BoundHandler:
         """Fill each candidate of *meta* whose annotation is a class with the
         service of that class.
 
@@ -191,9 +191,7 @@ class TypedServices:
                 )
             if matches:
                 detected.append((candidate.param, self._by_type[matches[0]]))
-        bound = BoundHandler(meta, tuple(detected))
-        bound.require_claimed(reducer_names)
-        return bound
+        return BoundHandler(meta, tuple(detected))
 
 
 class NamedServices:
@@ -212,7 +210,7 @@ class NamedServices:
             if isinstance(value, RunScoped)
         }
 
-    def bind(self, meta: HandlerMeta, reducer_names: frozenset[str]) -> BoundHandler:
+    def bind(self, meta: HandlerMeta) -> BoundHandler:
         """Fill each candidate of *meta* with the service of its name, then
         check each service against the annotation."""
         bound = BoundHandler(
@@ -223,7 +221,6 @@ class NamedServices:
                 if c.param in self._by_name
             ),
         )
-        bound.require_claimed(reducer_names)
         self._verify(bound)
         return bound
 

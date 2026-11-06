@@ -304,6 +304,23 @@ def describe_EventGraph():
 
             assert str(info.value) == _SERVICE_COLLISION
 
+    def when_no_handler_is_given():
+        def when_on_unresumable_is_invalid():
+            def it_refuses_on_unresumable_first():
+                with pytest.raises(ValueError) as info:
+                    EventGraph([], on_unresumable="bogus")  # type: ignore[arg-type]
+
+                assert str(info.value) == (
+                    "on_unresumable must be 'raise', 'halt', or 'warn', got 'bogus'"
+                )
+
+        def when_the_services_are_invalid():
+            def it_refuses_the_services_first():
+                with pytest.raises(TypeError) as info:
+                    EventGraph([], services=[_Mailer(), _Mailer()])
+
+                assert str(info.value) == _SERVICE_COLLISION
+
     def when_the_graph_has_no_checkpointer():
         def it_has_no_event_store():
             with pytest.raises(ValueError) as info:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -25,7 +26,7 @@ from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
 from langgraph_events._services import parse_services
-from langgraph_events._store import EventStore, _GraphEventStore
+from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology
 from langgraph_events._warn import warn_user
 
@@ -286,29 +287,22 @@ class EventGraph:
         self._checkpointer = checkpointer
         self._base_store = store
         self._handlers = topology._bind(services)
-        self._compiled_graph: CompiledStateGraph | None = None
-        self._event_store = (
-            _GraphEventStore(topology, checkpointer, self._compile)
-            if isinstance(checkpointer, BaseCheckpointSaver)
-            else None
-        )
 
     @property
     def topology(self) -> EventTopology:
         """The topology that this graph runs."""
         return self._topology
 
-    @property
+    @functools.cached_property
     def event_store(self) -> EventStore:
         """The :class:`EventStore` of the threads of this graph.
 
-        It finds, abandons and rewrites stored threads. It settles a thread
-        through this graph, with its services. Raises ``ValueError`` when
-        the graph has no checkpointer.
+        It finds, abandons and rewrites stored threads. Raises
+        ``ValueError`` when the graph has no checkpointer.
         """
-        if self._event_store is None:
+        if not isinstance(self._checkpointer, BaseCheckpointSaver):
             raise ValueError("event_store requires a checkpointer")
-        return self._event_store
+        return EventStore(self._topology, self._checkpointer)
 
     def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
         if not isinstance(self._checkpointer, BaseCheckpointSaver):
@@ -348,7 +342,7 @@ class EventGraph:
         """See :attr:`EventTopology.resumable_node_names`."""
         return self._topology.resumable_node_names
 
-    @property
+    @functools.cached_property
     def compiled(self) -> CompiledStateGraph:
         """The underlying LangGraph ``CompiledStateGraph``.
 
@@ -365,21 +359,13 @@ class EventGraph:
         Write events through :meth:`pre_seed`, or write a ``None`` cause for
         each event in the same update.
         """
-        return self._compile()
-
-    def _compile(self) -> CompiledStateGraph:
-        """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
-        if self._compiled_graph is None:
-            self._compiled_graph = self._topology._compile(
-                lambda meta: self._topology._handler_node(
-                    self._handlers[meta.node_name]
-                ),
-                max_rounds=self._max_rounds,
-                recursion_limit=self._recursion_limit,
-                checkpointer=self._checkpointer,
-                store=self._base_store,
-            )
-        return self._compiled_graph
+        return self._topology._compile(
+            self._handlers,
+            max_rounds=self._max_rounds,
+            recursion_limit=self._recursion_limit,
+            checkpointer=self._checkpointer,
+            store=self._base_store,
+        )
 
     @staticmethod
     def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
@@ -401,8 +387,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> EventLog:
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        compiled = self._compile()
-        result = compiled.invoke(inp, **kwargs)
+        result = self.compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(
@@ -414,8 +399,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> EventLog:
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        compiled = self._compile()
-        result = await compiled.ainvoke(inp, **kwargs)
+        result = await self.compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
     @classmethod
@@ -547,14 +531,12 @@ class EventGraph:
         Requires a checkpointer.
         """
         self._require_checkpointer("pre_seed")
-        compiled = self._compile()
-        compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
+        self.compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
 
     async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
         """Async version of :meth:`pre_seed`."""
         self._require_checkpointer("apre_seed")
-        compiled = self._compile()
-        await compiled.aupdate_state(
+        await self.compiled.aupdate_state(
             config, pad_causes(values, None), as_node="__seed__"
         )
 
@@ -588,7 +570,7 @@ class EventGraph:
         config = kwargs.get("config")
         if config is None:
             return True
-        return self._awaits_resume(self._compile().get_state(config))
+        return self._awaits_resume(self.compiled.get_state(config))
 
     async def _aresume_snapshot(
         self, kwargs: dict[str, Any], snapshot: StateSnapshot | None
@@ -605,7 +587,7 @@ class EventGraph:
         config = kwargs.get("config")
         if config is None:
             return None
-        return await self._compile().aget_state(config)
+        return await self.compiled.aget_state(config)
 
     async def _aresume_is_pending(
         self, kwargs: dict[str, Any], snapshot: StateSnapshot | None = None
@@ -841,7 +823,7 @@ class EventGraph:
     def get_state(self, config: RunnableConfig) -> GraphState:
         """Get event-level state of a checkpointed thread."""
         self._require_checkpointer("get_state")
-        return self._graph_state(self._compile().get_state(config))
+        return self._graph_state(self.compiled.get_state(config))
 
     async def aget_state(self, config: RunnableConfig) -> GraphState:
         """Async version of :meth:`get_state`.
@@ -851,7 +833,7 @@ class EventGraph:
         running event loop.
         """
         self._require_checkpointer("aget_state")
-        return self._graph_state(await self._compile().aget_state(config))
+        return self._graph_state(await self.compiled.aget_state(config))
 
     # --- LLM token helpers ---
 
@@ -882,7 +864,7 @@ class EventGraph:
         A chunk marked ``cached`` replays the saved writes of a task that
         finished before a pause. The run that wrote them streamed them, and
         the checkpoint already holds them, so they are not new events.
-        LangGraph also marks a node cache hit ``cached``, but ``_compile``
+        LangGraph also marks a node cache hit ``cached``, but ``compiled``
         sets no node cache, so here the marker means only that replay.
         """
         events: list[Event] = []
@@ -932,7 +914,7 @@ class EventGraph:
         *snapshot* is the checkpoint of ``config`` before the run, or ``None``
         when the caller did not load it.
         """
-        compiled = self._compile()
+        compiled = self.compiled
         is_resume = isinstance(inp, LGCommand)
 
         # Initialize incremental reducer state.  When a checkpoint exists
@@ -1098,7 +1080,7 @@ class EventGraph:
         """
         interrupts = streamed
         if len(streamed) > 1 and config is not None:
-            after = await self._compile().aget_state(config)
+            after = await self.compiled.aget_state(config)
             interrupts = _snapshot_interrupts(after)
         return [
             InterruptFrame(value=i.value) for i in interrupts if i.value is not None
@@ -1116,7 +1098,7 @@ class EventGraph:
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        compiled = self._compile()
+        compiled = self.compiled
         if not reducer_names:
             yield from seeds
             seen: set[int] = set()
@@ -1142,7 +1124,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> AsyncIterator[Event | StreamFrame]:
         """Shared async streaming core for astream_events/astream_resume."""
-        compiled = self._compile()
+        compiled = self.compiled
         if not reducer_names:
             for s in seeds:
                 yield s

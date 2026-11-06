@@ -15,8 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plan_rewrite()`, `rewrite_store()` and each async twin. Migrate each call:
   `graph.abandon(...)` becomes `graph.event_store.abandon(...)`. On a graph with no
   checkpointer, `graph.event_store` raises `ValueError: event_store requires a checkpointer`.
-  The store of a graph settles a thread through the graph, with its services, as before. The
-  `store=` keyword of `EventGraph(...)` is still the LangGraph `BaseStore`.
+  `graph.event_store` is `EventStore(graph.topology, checkpointer)`. A settle runs no handler,
+  so its checkpoints are the same as before. The `store=` keyword of `EventGraph(...)` is still the LangGraph `BaseStore`.
 
 ### Added
 
@@ -48,13 +48,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `previously=` errors, the `raises=`, `retry=` and invariant checks, and the reactor
   privacy error. The `RuntimeError` of a handler node in an `EventStore` uses it too. A test
   that matches the old text must change.
-- **`EventGraph(...)` checks `services=` first.** Before, the command expansion, the
-  namespace collision and the reserved reducer names were checked before `services=`. Now a
-  bad `services=` raises its `TypeError` before every check of the handlers and the reducers.
-  The service checks of each handler run after every check that needs no service. A handler
-  with an unclaimed parameter and a second fault, for example a `raises=` with no catcher,
-  reports the second fault first. A topology warning, for example `OrphanedEventWarning`, can
-  fire before the unclaimed-parameter `TypeError`. `EventGraph(handlers=[])` raises
+- **`EventGraph(...)` checks `services=` before the handlers.** The order is `on_unresumable`,
+  then `services=`, then the topology. Before, the empty-handlers check ran first, and the
+  command expansion, the namespace collision and the reserved reducer names were checked
+  before `services=`. Now `EventGraph([], on_unresumable="bogus")` raises the
+  `on_unresumable` `ValueError`, and `EventGraph([], services=[S(), S()])` raises the
+  same-type `TypeError`. The service checks of each handler run after every check that needs
+  no service. A handler with an unclaimed parameter and a second fault, for example a
+  `raises=` with no catcher, reports the second fault first. A name-keyed service that does
+  not satisfy its annotation is reported before an unclaimed parameter of the same handler.
+  A topology warning, for example `OrphanedEventWarning`, can fire before the
+  unclaimed-parameter `TypeError`. `EventGraph(handlers=[])` raises
   `ValueError: EventTopology requires at least one handler`.
 - **`MigrationTarget` names its graph factory when the graph has no checkpointer.** The
   `TargetError` says `MigrationTarget.graph returned a graph with no checkpointer`.

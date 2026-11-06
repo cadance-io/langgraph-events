@@ -234,10 +234,11 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
   `reducers`. A requirement that no service matches raises the same `TypeError` as
   `EventGraph(...)`.
 - `EventGraph(handlers, ...)` builds the same graph as
-  `EventGraph.of(EventTopology(handlers, reducers=...), ...)`. It checks `services=` before it
-  builds the topology.
-- `graph.event_store` is the store of a graph. It settles a thread through the graph, with its
-  services. A graph with no checkpointer has no store, and `graph.event_store` raises `ValueError`.
+  `EventGraph.of(EventTopology(handlers, reducers=...), ...)`. It checks `on_unresumable`, then
+  `services=`, then builds the topology.
+- `graph.event_store` is `EventStore(graph.topology, checkpointer)`. A settle runs no handler, so
+  the store needs no service. A graph with no checkpointer has no store, and
+  `graph.event_store` raises `ValueError`.
 - `EventStore` does not wire a serde. Set `checkpointer.serde = topology.serde()` before you
   call a method that needs one. `topology.serde()` is the serde that
   `from_namespaces(..., checkpointer=...)` wires. See [Event migrations](event-migrations.md).

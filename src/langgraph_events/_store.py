@@ -18,10 +18,7 @@ from langgraph_events._event import (
     Interrupted,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._internal import (
-    _leaf_node,
-    pad_causes,
-)
+from langgraph_events._internal import pad_causes
 from langgraph_events._rewrite import (
     RewritePlan,
     RewriteReport,
@@ -36,16 +33,12 @@ if TYPE_CHECKING:
         Iterable,
     )
 
-    from langchain_core.runnables import RunnableConfig, RunnableLambda
+    from langchain_core.runnables import RunnableConfig
     from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.types import StateSnapshot
 
-    from langgraph_events._handler import (
-        HandlerMeta,
-    )
     from langgraph_events._topology import EventTopology
-    from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import (
         DecodedValue,
         NamespaceAwareSerde,
@@ -197,21 +190,6 @@ class _PendingInterrupts(NamedTuple):
     unresolved_names: list[str]
 
 
-def _store_node(meta: HandlerMeta) -> RunnableLambda:
-    """A node that refuses to run the handler of *meta*."""
-
-    def refuse(state: StateDict) -> StateDict:
-        raise RuntimeError(
-            f"{meta.label} cannot run in an EventStore. A store has no "
-            f"services. Run the thread with an EventGraph."
-        )
-
-    async def arefuse(state: StateDict) -> StateDict:
-        return refuse(state)
-
-    return _leaf_node(refuse, arefuse, meta.name)
-
-
 class EventStore:
     """Maintain the checkpoints of one topology, with no services.
 
@@ -224,8 +202,8 @@ class EventStore:
         for config in configs:
             store.abandon(config, reason="retired")
 
-    :attr:`EventGraph.event_store` is the store of a graph. It settles a thread
-    through the compiled graph of that graph, with its services.
+    :attr:`EventGraph.event_store` is the store of the topology and the
+    checkpointer of a graph.
     """
 
     def __init__(
@@ -250,7 +228,7 @@ class EventStore:
         limits are inert for the same reason.
         """
         return self._topology._compile(
-            _store_node,
+            None,
             max_rounds=100,
             recursion_limit=None,
             checkpointer=self._checkpointer,
@@ -1084,21 +1062,3 @@ class EventStore:
         with serde._record_reads(decoded):
             tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
         return tup, _plan_read(plan, cfg, tup, unresolved, decoded)
-
-
-class _GraphEventStore(EventStore):
-    """The store of an :class:`EventGraph`. It settles a thread through the
-    compiled graph of that graph, with its services."""
-
-    def __init__(
-        self,
-        topology: EventTopology,
-        checkpointer: BaseCheckpointSaver[Any],
-        compile_graph: Callable[[], CompiledStateGraph],
-    ) -> None:
-        super().__init__(topology, checkpointer)
-        self._compile_graph = compile_graph
-
-    @property
-    def _compiled(self) -> CompiledStateGraph:
-        return self._compile_graph()

@@ -857,7 +857,7 @@ def describe_partial_hint_resolution():
                 mailer = object()
                 graph = EventGraph([handler], services={"mailer": mailer})
 
-            (bound,) = graph._handlers.values()
+            (bound,) = graph._handlers
             assert bound.services == (("mailer", mailer),)
 
     def when_a_name_is_declared_after_the_handler():
@@ -868,7 +868,7 @@ def describe_partial_hint_resolution():
             dep = LateService()
             graph = EventGraph([_forward_ref_handler], services=[dep])
 
-            (bound,) = graph._handlers.values()
+            (bound,) = graph._handlers
             assert bound.services == (("dep", dep),)
 
     def when_the_handler_declares_a_pep_695_type_parameter():

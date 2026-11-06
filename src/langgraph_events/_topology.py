@@ -506,6 +506,21 @@ def _expand_command_handlers(
     return expanded
 
 
+def _refusing_node(meta: HandlerMeta) -> RunnableLambda:
+    """A node that refuses to run the handler of *meta*."""
+
+    def refuse(state: StateDict) -> StateDict:
+        raise RuntimeError(
+            f"{meta.label} cannot run in an EventStore. A store has no "
+            f"services. Run the thread with an EventGraph."
+        )
+
+    async def arefuse(state: StateDict) -> StateDict:
+        return refuse(state)
+
+    return _leaf_node(refuse, arefuse, meta.name)
+
+
 class EventTopology:
     """The handlers, reducers and namespaces of a graph, with no services.
 
@@ -618,8 +633,8 @@ class EventTopology:
         (with ``view="structure"`` or ``view="choreography"``),
         :meth:`NamespaceModel.json`, or read the data attributes directly.
 
-        Built once and cached — handler metadata is immutable after
-        construction, and per-dispatch ``Reflection`` injection reads it.
+        Handler metadata is immutable after construction, and per-dispatch
+        ``Reflection`` injection reads it.
         """
         return self._namespace_model
 
@@ -665,17 +680,19 @@ class EventTopology:
         and signature order. A variadic parameter is not listed."""
         return tuple(r for meta in self._handler_metas for r in meta.requirements)
 
-    def _bind(self, services: Services) -> dict[str, BoundHandler]:
-        """Bind *services* to each handler, by node name, in handler order.
+    def _bind(self, services: Services) -> tuple[BoundHandler, ...]:
+        """Bind *services* to each handler, in handler order.
 
-        Raises ``TypeError`` for a parameter that no source fills, and for a
-        name-keyed service that does not satisfy the parameter annotation.
+        Raises ``TypeError`` for a name-keyed service that does not satisfy
+        the parameter annotation, and for a parameter that no source fills.
         """
         reducer_names = self.reducer_names
-        return {
-            meta.node_name: services.bind(meta, reducer_names)
-            for meta in self._handler_metas
-        }
+        bound: list[BoundHandler] = []
+        for meta in self._handler_metas:
+            handler = services.bind(meta)
+            handler.require_claimed(reducer_names)
+            bound.append(handler)
+        return tuple(bound)
 
     def _update_reducer_state(
         self,
@@ -722,7 +739,7 @@ class EventTopology:
 
     def _compile(
         self,
-        node_of: Callable[[HandlerMeta], RunnableLambda],
+        bound: Sequence[BoundHandler] | None,
         *,
         max_rounds: int,
         recursion_limit: int | None,
@@ -731,9 +748,9 @@ class EventTopology:
     ) -> CompiledStateGraph:
         """Compile the topology into a LangGraph ``CompiledStateGraph``.
 
-        *node_of* builds the node of each handler. :class:`EventGraph` builds
-        the node of a bound handler. :class:`EventStore` builds a node that
-        refuses to run, because a store has no services.
+        Each handler of *bound* becomes a node that runs it with its
+        services. With ``None``, each handler node refuses to run:
+        :class:`EventStore` has no services.
         """
         reducers = self._reducers
         handler_metas = self._handler_metas
@@ -776,9 +793,13 @@ class EventTopology:
             "__router__", cast("Any", _leaf_node(router_node, arouter, "__router__"))
         )
 
+        nodes = (
+            ((m, _refusing_node(m)) for m in handler_metas)
+            if bound is None
+            else ((b.meta, self._handler_node(b)) for b in bound)
+        )
         handler_names: list[str] = []
-        for meta in handler_metas:
-            handler_node = node_of(meta)
+        for meta, handler_node in nodes:
             graph.add_node(meta.node_name, cast("Any", handler_node))
             handler_names.append(meta.node_name)
             # Register an alias node per historic name (@on(previously=...)) so an

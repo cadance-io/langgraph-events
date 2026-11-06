@@ -169,7 +169,7 @@ def describe_RunScoped():
                     pass
 
                 bound = NamedServices({"model": RunScoped(_model_for)}).bind(
-                    HandlerMeta.of(handle, reducer_names=frozenset()), frozenset()
+                    HandlerMeta.of(handle, reducer_names=frozenset())
                 )
 
                 with pytest.raises(ValueError, match=r"handle.*model"):
