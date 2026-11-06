@@ -153,6 +153,13 @@ class TypedServices:
                 )
             self._by_type[t] = s
 
+    def received(self) -> str:
+        """State the types that ``services=`` holds, for an error."""
+        if not self._by_type:
+            return "services= has no service."
+        names = sorted(t.__qualname__ for t in self._by_type)
+        return f"services= has the types {names}."
+
     def bind(self, meta: HandlerMeta) -> BoundHandler:
         """Fill each candidate of *meta* whose annotation is a class with the
         service of that class.
@@ -209,6 +216,12 @@ class NamedServices:
             for name, value in self._by_name.items()
             if isinstance(value, RunScoped)
         }
+
+    def received(self) -> str:
+        """State the name keys that ``services=`` holds, for an error."""
+        if not self._by_name:
+            return "services= has no service."
+        return f"services= has the name keys {sorted(self._by_name)}."
 
     def bind(self, meta: HandlerMeta) -> BoundHandler:
         """Fill each candidate of *meta* with the service of its name, then

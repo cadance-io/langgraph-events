@@ -209,13 +209,16 @@ Topology is derived from handler subscriptions. No manual node or edge wiring is
 | `EventStore` | a topology and a checkpointer | no service | find, abandon, rewrite and verify stored threads |
 | `EventGraph` | a topology, its services and a checkpointer | every service a handler asks for | run, resume and stream threads. `graph.event_store` is its store |
 
-A client that never runs a handler does not need the services. Build the topology once, and
-bind the services only where a handler runs:
+`EventGraph(handlers, ...)` is the shortcut for
+`EventGraph.of(EventTopology(handlers, reducers=...), ...)`. A client that never runs a handler
+does not need the services. Build the topology once, and bind the services only where a handler
+runs:
 
 ```python
 from langgraph_events import EventGraph, EventStore, EventTopology
 
 topology = EventTopology([place, respond], reducers=[messages])
+# or: EventTopology.from_namespaces(Order, handlers=[respond], reducers=[messages])
 print(topology.namespaces().mermaid())
 print(topology.requirements)  # one ServiceRequirement per service parameter
 
@@ -230,22 +233,31 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
   `ServiceRequirement(node, qualname, param, annotation)`. `node` is the graph-node name of
   the handler. `qualname` is the module and qualified name of the handler function. The
   annotation is `Unannotated()` when the parameter has none. It is `UnresolvedAnnotation(reason)` when it did not resolve.
+- `EventTopology.from_namespaces(*namespaces, handlers=..., reducers=...)` collects the same
+  handlers as `EventGraph.from_namespaces(...)`. A store-only client does not list every handler.
+- Read the static facts of a graph from `topology`: `handler_names`, `reducer_names`,
+  `resumable_node_names`, `reducers`, `requirements` and `namespaces()`. On a graph, use
+  `graph.topology.handler_names`. The same properties on `EventGraph` forward to the topology.
 - `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
-  `reducers`. A requirement that no service matches raises the same `TypeError` as
-  `EventGraph(...)`.
+  `reducers`. A requirement that no service matches raises `TypeError`. The error names the
+  missing type and the keys or types that `services=` holds, so a near-miss key shows.
 - `EventGraph(handlers, ...)` builds the same graph as
   `EventGraph.of(EventTopology(handlers, reducers=...), ...)`. It checks `on_unresumable`, then
   `services=`, then builds the topology.
 - `graph.event_store` is `EventStore(graph.topology, checkpointer)`. A settle runs no handler, so
   the store needs no service. A graph with no checkpointer has no store, and
   `graph.event_store` raises `ValueError`.
-- `EventStore` does not wire a serde. Set `checkpointer.serde = topology.serde()` before you
-  call a method that needs one. `topology.serde()` is the serde that
-  `from_namespaces(..., checkpointer=...)` wires. See [Event migrations](event-migrations.md).
+- `EventStore` does not change the serde of the saver. A rewrite needs a `NamespaceAwareSerde`,
+  so set `saver.serde = topology.serde()` before you build the store. `topology.serde()` is the
+  serde that `from_namespaces(..., checkpointer=...)` wires. WARNING: every process that reads
+  the saver must use the same serde. A process with LangGraph's default serde reads an event
+  that a `NamespaceAwareSerde` wrote as `None`. See [Event migrations](event-migrations.md).
 
 ### Namespace introspection & visualization
 
-- `graph.namespaces()` returns a `NamespaceModel`: code-derived structure and choreography.
+- `topology.namespaces()` returns a `NamespaceModel`: code-derived structure and choreography.
+  A renderer needs no services: build an `EventTopology` and call `namespaces()` on it.
+  `graph.namespaces()` returns the same model.
 - **Render**: `.text()` (tree), `.text(view="structure")` (taxonomy only), `.mermaid()` (flowchart), `.json()` / `.to_dict()`.
 - **Inspect** (all frozen dataclass tuples/dicts):
     - `.namespaces`: `dict[str, NamespaceModel.Namespace]`

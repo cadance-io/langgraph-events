@@ -176,7 +176,7 @@ class AGUIAdapter:
         # Note: `False` resolves to activation=["messages"] (so
         # MessagesSnapshot still works) while the projection returns `{}` —
         # empty StateSnapshot, populated MessagesSnapshot.  Intentional.
-        resolved = graph.topology._resolve_reducer_names(include_reducers)
+        resolved = graph.topology.resolve_reducer_names(include_reducers)
         if "messages" not in resolved:
             include_reducers = (
                 [*include_reducers, "messages"]

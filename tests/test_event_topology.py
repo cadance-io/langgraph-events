@@ -13,6 +13,7 @@ import pytest
 from conftest import Ended, Started
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from langgraph_events import (
     Abandoned,
@@ -226,6 +227,46 @@ def describe_EventTopology():
             assert serde.loads_typed(stored) == _NewNote()
 
 
+class _Desk(Namespace):
+    class Book(Command):
+        class Booked(DomainEvent):
+            pass
+
+        def handle(self) -> "_Desk.Book.Booked":
+            return _Desk.Book.Booked()
+
+
+@on(_Desk.Book.Booked)
+def _confirm(event: _Desk.Book.Booked, mailer: _Mailer) -> None:
+    mailer.send("booked")
+
+
+def describe_EventTopology_from_namespaces():
+    def when_a_namespace_has_an_inline_handler():
+        def it_lists_the_handlers_of_from_namespaces():
+            topology = EventTopology.from_namespaces(_Desk, handlers=[_confirm])
+            graph = EventGraph.from_namespaces(
+                _Desk, handlers=[_confirm], services=[_Mailer()]
+            )
+
+            assert topology.handler_names == graph.topology.handler_names
+            assert topology.handler_names == {"_Desk.Book", "_confirm"}
+
+        def it_needs_no_service():
+            topology = EventTopology.from_namespaces(_Desk, handlers=[_confirm])
+
+            assert [r.param for r in topology.requirements] == ["mailer"]
+
+    def when_an_argument_is_not_a_namespace():
+        def it_raises_a_type_error():
+            with pytest.raises(TypeError) as info:
+                EventTopology.from_namespaces(_Mailer)  # type: ignore[arg-type]
+
+            assert str(info.value) == (
+                f"from_namespaces expects Namespace subclasses, got {_Mailer!r}"
+            )
+
+
 def describe_EventGraph_of():
     def when_every_requirement_has_a_service():
         def it_injects_the_service():
@@ -239,15 +280,33 @@ def describe_EventGraph_of():
             assert log.latest(Ended) == Ended(result="sent done")
 
     def when_a_service_is_missing():
-        def it_raises_the_type_error_of_the_constructor():
-            with pytest.raises(TypeError) as direct:
-                EventGraph(_HANDLERS)
-
-            with pytest.raises(TypeError) as bound:
+        def it_names_the_missing_type():
+            with pytest.raises(TypeError) as info:
                 EventGraph.of(EventTopology(_HANDLERS))
 
-            assert "cannot inject" in str(bound.value)
-            assert str(bound.value) == str(direct.value)
+            assert str(info.value) == (
+                "Handler 'test_event_topology._ask' (node '_ask') declares "
+                "parameter(s) ['mailer'] that the framework cannot inject: "
+                "'mailer' (_Mailer). services= has no service. For service "
+                "injection, register a matching instance via "
+                "EventGraph.of(..., services=); for state, register a Reducer; "
+                "otherwise remove the parameter."
+            )
+
+        def when_a_name_key_is_a_near_miss():
+            def it_lists_the_name_keys_it_received():
+                with pytest.raises(TypeError) as info:
+                    EventGraph.of(EventTopology(_HANDLERS), services={"mailr": 1})
+
+                assert "services= has the name keys ['mailr']." in str(info.value)
+
+        def when_the_constructor_raises():
+            def it_names_the_constructor():
+                with pytest.raises(TypeError) as info:
+                    EventGraph(_HANDLERS, services=[1])
+
+                assert "services= has the types ['int']." in str(info.value)
+                assert "via EventGraph(services=)" in str(info.value)
 
     def when_a_renamed_duplicate_misses_a_service():
         def it_names_the_function_and_the_node():
@@ -256,9 +315,10 @@ def describe_EventGraph_of():
 
             assert str(info.value) == (
                 "Handler 'test_event_topology.handle' (node 'handle_2') declares "
-                "parameter(s) ['mailer'] that the framework cannot inject. For "
-                "service injection, register a matching instance via "
-                "EventGraph(services=[...]); for state, register a Reducer; "
+                "parameter(s) ['mailer'] that the framework cannot inject: "
+                "'mailer' (_Mailer). services= has no service. For service "
+                "injection, register a matching instance via "
+                "EventGraph(services=); for state, register a Reducer; "
                 "otherwise remove the parameter."
             )
 
@@ -326,7 +386,10 @@ def describe_EventGraph():
             with pytest.raises(ValueError) as info:
                 _ = EventGraph(_HANDLERS, services=[_Mailer()]).event_store
 
-            assert str(info.value) == "event_store requires a checkpointer"
+            assert str(info.value) == (
+                "event_store requires a checkpointer. Pass checkpointer= to "
+                "EventGraph(...), or use EventStore(topology, saver)."
+            )
 
 
 def describe_EventStore():
@@ -390,6 +453,26 @@ def describe_EventStore():
                 t.status
                 for t in store.plan_rewrite(thread_ids=["store-rewrite"]).threads
             ] == ["unchanged"]
+
+    def when_the_saver_holds_another_serde():
+        def it_keeps_the_serde():
+            saver = MemorySaver()
+
+            EventStore(EventTopology(_HANDLERS), saver)
+
+            assert type(saver.serde) is JsonPlusSerializer
+
+        def it_names_the_topology_serde_in_the_error():
+            store = EventStore(EventTopology(_HANDLERS), MemorySaver())
+
+            with pytest.raises(ValueError) as info:
+                store.plan_rewrite(thread_ids=["t"])
+
+            assert str(info.value) == (
+                "plan_rewrite() needs a NamespaceAwareSerde on the checkpointer, "
+                "found JsonPlusSerializer. Only that serde can report an identity "
+                "it cannot revive. Set checkpointer.serde = topology.serde()."
+            )
 
     def when_a_handler_runs_through_the_store():
         def it_raises_an_error_that_names_the_store():

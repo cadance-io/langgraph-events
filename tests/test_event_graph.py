@@ -5330,7 +5330,7 @@ def describe_abandon():
             cfg = {"configurable": {"thread_id": "abandon-no-checkpointer"}}
 
             with pytest.raises(
-                ValueError, match=r"^event_store requires a checkpointer$"
+                ValueError, match=r"^event_store requires a checkpointer\. "
             ):
                 graph.event_store.abandon(cfg)
 
@@ -5628,7 +5628,7 @@ def describe_async_only_checkpointer():
                 cfg = {"configurable": {"thread_id": "aabandon-no-checkpointer"}}
 
                 with pytest.raises(
-                    ValueError, match=r"^event_store requires a checkpointer$"
+                    ValueError, match=r"^event_store requires a checkpointer\. "
                 ):
                     await graph.event_store.aabandon(cfg)
 
@@ -5786,7 +5786,7 @@ def describe_threads_paused_on():
         def it_raises():
             graph = EventGraph([_waiter])
             with pytest.raises(
-                ValueError, match=r"^event_store requires a checkpointer$"
+                ValueError, match=r"^event_store requires a checkpointer\. "
             ):
                 graph.event_store.threads_paused_on(thread_ids=[])
 
@@ -5886,7 +5886,7 @@ def describe_athreads_paused_on():
         async def it_raises():
             graph = EventGraph([_waiter])
             with pytest.raises(
-                ValueError, match=r"^event_store requires a checkpointer$"
+                ValueError, match=r"^event_store requires a checkpointer\. "
             ):
                 await graph.event_store.athreads_paused_on(thread_ids=[])
 
@@ -6308,7 +6308,7 @@ def describe_unrevivable_threads():
         def it_raises():
             graph = EventGraph([_waiter])
             with pytest.raises(
-                ValueError, match=r"^event_store requires a checkpointer$"
+                ValueError, match=r"^event_store requires a checkpointer\. "
             ):
                 graph.event_store.unrevivable_threads(thread_ids=[])
 
@@ -6436,7 +6436,7 @@ def describe_aunrevivable_threads():
         async def it_raises():
             graph = EventGraph([_waiter])
             with pytest.raises(
-                ValueError, match=r"^event_store requires a checkpointer$"
+                ValueError, match=r"^event_store requires a checkpointer\. "
             ):
                 await graph.event_store.aunrevivable_threads(thread_ids=[])
 

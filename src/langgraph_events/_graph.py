@@ -11,7 +11,6 @@ from langgraph.types import Command as LGCommand
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     Abandoned,
-    Command,
     Event,
     Interrupted,
     Namespace,
@@ -27,7 +26,7 @@ from langgraph_events._rewrite import (
 )
 from langgraph_events._services import parse_services
 from langgraph_events._store import EventStore
-from langgraph_events._topology import EventTopology
+from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -233,6 +232,7 @@ class EventGraph:
             store=store,
             recursion_limit=recursion_limit,
             on_unresumable=on_unresumable,
+            entry="EventGraph(services=)",
         )
 
     @classmethod
@@ -264,6 +264,7 @@ class EventGraph:
             store=store,
             recursion_limit=recursion_limit,
             on_unresumable=on_unresumable,
+            entry="EventGraph.of(..., services=)",
         )
         return graph
 
@@ -277,16 +278,18 @@ class EventGraph:
         store: BaseStore | None,
         recursion_limit: int | None,
         on_unresumable: Literal["raise", "halt", "warn"],
+        entry: str,
     ) -> None:
         """Bind *services* to the handlers of *topology*: run every
-        construction check that needs a service."""
+        construction check that needs a service. *entry* is the public call
+        that received ``services=``, for the error."""
         self._topology = topology
         self._max_rounds = max_rounds
         self._recursion_limit = recursion_limit
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._base_store = store
-        self._handlers = topology._bind(services)
+        self._handlers = topology._bind(services, entry=entry)
 
     @property
     def topology(self) -> EventTopology:
@@ -301,7 +304,10 @@ class EventGraph:
         ``ValueError`` when the graph has no checkpointer.
         """
         if not isinstance(self._checkpointer, BaseCheckpointSaver):
-            raise ValueError("event_store requires a checkpointer")
+            raise ValueError(
+                "event_store requires a checkpointer. Pass checkpointer= to "
+                "EventGraph(...), or use EventStore(topology, saver)."
+            )
         return EventStore(self._topology, self._checkpointer)
 
     def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
@@ -425,21 +431,7 @@ class EventGraph:
             graph = EventGraph.from_namespaces(Order, Customer,
                                             handlers=[react])
         """
-        collected: list[Any] = []
-        for dom in domains:
-            if not (isinstance(dom, type) and issubclass(dom, Namespace)):
-                raise TypeError(
-                    f"from_namespaces expects Namespace subclasses, got {dom!r}"
-                )
-            for attr in dom.__dict__.values():
-                if (
-                    isinstance(attr, type)
-                    and issubclass(attr, Command)
-                    and getattr(attr, "__command_handler__", None) is not None
-                ):
-                    collected.append(attr)
-        if handlers:
-            collected.extend(handlers)
+        collected = namespace_handlers(domains, handlers)
 
         # Auto-wire migration-aware deserialization: the user only writes
         # @migrate_from on the class. We have both the domains and the
@@ -1179,7 +1171,7 @@ class EventGraph:
         """
         inp = self._prepare_input(seed)
         kwargs.pop("stream_mode", None)
-        reducer_names = self._topology._resolve_reducer_names(include_reducers)
+        reducer_names = self._topology.resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
             inp,
             inp["events"],
@@ -1238,7 +1230,7 @@ class EventGraph:
                     yield latest
             return
         kwargs.pop("stream_mode", None)
-        reducer_names = self._topology._resolve_reducer_names(include_reducers)
+        reducer_names = self._topology.resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
             LGCommand(resume=value),
             seeds or [],
@@ -1268,7 +1260,7 @@ class EventGraph:
         """
         kwargs.pop("stream_mode", None)
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        reducer_names = self._topology._resolve_reducer_names(include_reducers)
+        reducer_names = self._topology.resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(
                 inp,

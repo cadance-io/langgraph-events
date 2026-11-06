@@ -737,7 +737,9 @@ class BoundHandler:
     # ``RunScoped`` service is resolved per node call at dispatch.
     services: tuple[tuple[str, object], ...]
 
-    def require_claimed(self, reducer_names: frozenset[str]) -> None:
+    def require_claimed(
+        self, reducer_names: frozenset[str], *, received: str, entry: str
+    ) -> None:
         """Raise if a handler declares a param the framework cannot inject.
 
         Every parameter must be claimed by exactly one source: the event
@@ -747,12 +749,15 @@ class BoundHandler:
         intended an injection the framework has no way to provide — surface
         it at graph build time so the failure is colocated with the
         misconfiguration. With *reducer_names*, a typo warning comes first.
+        *received* states what ``services=`` holds, so a near-miss name key
+        shows. *entry* is the call that received ``services=``.
         """
         meta = self.meta
         bound = {param for param, _ in self.services}
-        unclaimed = [c.param for c in meta.service_candidates if c.param not in bound]
-        if not unclaimed:
+        missing = [c for c in meta.service_candidates if c.param not in bound]
+        if not missing:
             return
+        unclaimed = [c.param for c in missing]
         if reducer_names:
             warn_user(
                 f"{meta.label} has parameter(s) {unclaimed} "
@@ -765,8 +770,8 @@ class BoundHandler:
         # the resolution failure first. See issue #183.
         errors = {
             c.param: c.annotation.reason
-            for c in meta.service_candidates
-            if c.param in unclaimed and isinstance(c.annotation, UnresolvedAnnotation)
+            for c in missing
+            if isinstance(c.annotation, UnresolvedAnnotation)
         }
         cause = ""
         if errors:
@@ -776,12 +781,27 @@ class BoundHandler:
                 f"framework could not match it by type. Make the annotation "
                 f"importable at run time."
             )
+        wanted = ", ".join(
+            f"{c.param!r} ({_annotation_label(c.annotation)})" for c in missing
+        )
         raise TypeError(
             f"{meta.label} declares parameter(s) {unclaimed} "
-            f"that the framework cannot inject.{cause} For service injection, "
-            f"register a matching instance via EventGraph(services=[...]); "
-            f"for state, register a Reducer; otherwise remove the parameter."
+            f"that the framework cannot inject: {wanted}.{cause} {received} "
+            f"For service injection, register a matching instance via "
+            f"{entry}; for state, register a Reducer; "
+            f"otherwise remove the parameter."
         )
+
+
+def _annotation_label(annotation: object) -> str:
+    """Render the annotation of an unclaimed parameter for an error."""
+    if isinstance(annotation, Unannotated):
+        return "no annotation"
+    if isinstance(annotation, UnresolvedAnnotation):
+        return "unresolved annotation"
+    if isinstance(annotation, type):
+        return annotation.__qualname__
+    return repr(annotation)
 
 
 def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:

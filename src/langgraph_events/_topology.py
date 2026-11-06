@@ -521,6 +521,33 @@ def _refusing_node(meta: HandlerMeta) -> RunnableLambda:
     return _leaf_node(refuse, arefuse, meta.name)
 
 
+def namespace_handlers(
+    domains: Iterable[type[Namespace]],
+    handlers: list[Callable[..., Any]] | None,
+) -> list[Callable[..., Any]]:
+    """Each ``Command`` of *domains* with an inline handler, then *handlers*.
+
+    A command with no inline handler is skipped. Raises ``TypeError`` for an
+    entry of *domains* that is not a ``Namespace`` subclass.
+    """
+    collected: list[Callable[..., Any]] = []
+    for dom in domains:
+        if not (isinstance(dom, type) and issubclass(dom, Namespace)):
+            raise TypeError(
+                f"from_namespaces expects Namespace subclasses, got {dom!r}"
+            )
+        collected.extend(
+            attr
+            for attr in dom.__dict__.values()
+            if isinstance(attr, type)
+            and issubclass(attr, Command)
+            and getattr(attr, "__command_handler__", None) is not None
+        )
+    if handlers:
+        collected.extend(handlers)
+    return collected
+
+
 class EventTopology:
     """The handlers, reducers and namespaces of a graph, with no services.
 
@@ -591,6 +618,24 @@ class EventTopology:
         enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_error_handling()
 
+    @classmethod
+    def from_namespaces(
+        cls,
+        *domains: type[Namespace],
+        handlers: list[Callable[..., Any]] | None = None,
+        reducers: list[BaseReducer] | None = None,
+    ) -> EventTopology:
+        """Build the topology of the inline command handlers of *domains*.
+
+        It collects the same handlers as :meth:`EventGraph.from_namespaces`.
+        *handlers* are appended as they are. A store-only client can then
+        build its topology without a list of every handler::
+
+            topology = EventTopology.from_namespaces(Order, handlers=[react])
+            store = EventStore(topology, saver)
+        """
+        return cls(namespace_handlers(domains, handlers), reducers=reducers)
+
     def _serde_scope(
         self,
     ) -> tuple[tuple[type[Namespace], ...], tuple[type[Event], ...]]:
@@ -609,7 +654,8 @@ class EventTopology:
         outside every namespace that a handler subscribes to or returns. It
         collects each ``@migrate_from`` and ``@backfill`` on those classes.
         ``EventGraph.from_namespaces(..., checkpointer=...)`` wires the same
-        serde. *migrations* and *legacy_write* go to the serde unchanged::
+        serde. *migrations* and *legacy_write* go to the serde unchanged.
+        An :class:`EventStore` needs it for a rewrite::
 
             saver.serde = topology.serde()
             store = EventStore(topology, saver)
@@ -677,17 +723,20 @@ class EventTopology:
         and signature order. A variadic parameter is not listed."""
         return tuple(r for meta in self._handler_metas for r in meta.requirements)
 
-    def _bind(self, services: Services) -> tuple[BoundHandler, ...]:
+    def _bind(self, services: Services, *, entry: str) -> tuple[BoundHandler, ...]:
         """Bind *services* to each handler, in handler order.
 
         Raises ``TypeError`` for a name-keyed service that does not satisfy
         the parameter annotation, and for a parameter that no source fills.
+        *entry* is the call that received ``services=``, for the error.
         """
         reducer_names = self.reducer_names
         bound: list[BoundHandler] = []
         for meta in self._handler_metas:
             handler = services.bind(meta)
-            handler.require_claimed(reducer_names)
+            handler.require_claimed(
+                reducer_names, received=services.received(), entry=entry
+            )
             bound.append(handler)
         return tuple(bound)
 
@@ -711,8 +760,13 @@ class EventTopology:
                 changed.add(name)
         return frozenset(changed)
 
-    def _resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
-        """Return reducer names to include, or empty list for disabled."""
+    def resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
+        """The reducer names that *include_reducers* selects.
+
+        ``True`` selects every reducer, and ``False`` or ``[]`` selects none.
+        A list selects its known names in its order. An unknown name gets a
+        warning and is skipped.
+        """
         if include_reducers is True:
             return list(self._reducers.keys())
         if include_reducers:  # non-empty list

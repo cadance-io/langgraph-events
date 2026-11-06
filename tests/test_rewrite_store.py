@@ -709,7 +709,7 @@ def describe_plan_rewrite():
     def when_preconditions_fail():
         def it_requires_a_checkpointer():
             with pytest.raises(
-                ValueError, match=r"^event_store requires a checkpointer$"
+                ValueError, match=r"^event_store requires a checkpointer\. "
             ):
                 EventGraph([_completes]).event_store.plan_rewrite(thread_ids=[])
 

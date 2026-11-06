@@ -11,12 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The store methods move from `EventGraph` to `EventGraph.event_store`.** `EventGraph` no
   longer subclasses `EventStore`. It holds one, so the store methods are not declared twice.
-  The methods are `threads_paused_on()`, `abandon()`, `unrevivable_threads()`,
-  `plan_rewrite()`, `rewrite_store()` and each async twin. Migrate each call:
-  `graph.abandon(...)` becomes `graph.event_store.abandon(...)`. On a graph with no
-  checkpointer, `graph.event_store` raises `ValueError: event_store requires a checkpointer`.
-  `graph.event_store` is `EventStore(graph.topology, checkpointer)`. A settle runs no handler,
-  so its checkpoints are the same as before. The `store=` keyword of `EventGraph(...)` is still the LangGraph `BaseStore`.
+  No forward stays on `EventGraph`, so an old call raises `AttributeError`. Migrate each call:
+
+  | Removed from `EventGraph` | New path |
+  |---|---|
+  | `graph.threads_paused_on(...)` | `graph.event_store.threads_paused_on(...)` |
+  | `graph.athreads_paused_on(...)` | `graph.event_store.athreads_paused_on(...)` |
+  | `graph.abandon(...)` | `graph.event_store.abandon(...)` |
+  | `graph.aabandon(...)` | `graph.event_store.aabandon(...)` |
+  | `graph.unrevivable_threads(...)` | `graph.event_store.unrevivable_threads(...)` |
+  | `graph.aunrevivable_threads(...)` | `graph.event_store.aunrevivable_threads(...)` |
+  | `graph.plan_rewrite(...)` | `graph.event_store.plan_rewrite(...)` |
+  | `graph.aplan_rewrite(...)` | `graph.event_store.aplan_rewrite(...)` |
+  | `graph.rewrite_store(...)` | `graph.event_store.rewrite_store(...)` |
+  | `graph.arewrite_store(...)` | `graph.event_store.arewrite_store(...)` |
+
+  A client that has no services can use `EventStore(topology, saver)` for each of them. On a
+  graph with no checkpointer, `graph.event_store` raises `ValueError`. `graph.event_store` is
+  `EventStore(graph.topology, checkpointer)`. A settle runs no handler, so its checkpoints are
+  the same as before. The `store=` keyword of `EventGraph(...)` is still the LangGraph
+  `BaseStore`.
+- **The unclaimed-parameter `TypeError` has new text.** It names the annotation of each
+  missing parameter, the types or name keys that `services=` holds, and the call that received
+  `services=`: `EventGraph(services=)` or `EventGraph.of(..., services=)`. A test that matches
+  the old text must change.
 
 ### Added
 
@@ -34,8 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpointer)` finds, abandons, plans and rewrites stored threads with no services.
   `MigrationTarget(graph=...)` accepts a factory that returns an `EventStore`.
   `topology.serde()` builds the `NamespaceAwareSerde` of a topology, the same serde that
-  `from_namespaces(..., checkpointer=...)` wires. `EventGraph(...)` keeps its signature. See
-  *Topology, graph and store* in `docs/concepts.md`.
+  `from_namespaces(..., checkpointer=...)` wires. A rewrite through `EventStore` needs
+  `checkpointer.serde = topology.serde()`, and the `ValueError` of a rewrite names that line. `EventTopology.from_namespaces(*namespaces,
+  handlers=...)` collects the handlers of `EventGraph.from_namespaces()`, so a store-only
+  client does not list every handler. `topology.resolve_reducer_names(include_reducers)` is
+  public, so an adapter does not read a private method. `EventGraph(...)` keeps its signature,
+  and it is the shortcut for `EventGraph.of(EventTopology(...), ...)`. See *Topology, graph and
+  store* in `docs/concepts.md`.
 
 ### Changed
 

@@ -202,6 +202,11 @@ class EventStore:
         for config in configs:
             store.abandon(config, reason="retired")
 
+    The store does not change the serde of the saver. A rewrite needs a
+    ``NamespaceAwareSerde``. Set it before you build the store::
+
+        saver.serde = topology.serde()
+
     :attr:`EventGraph.event_store` is the store of the topology and the
     checkpointer of a graph.
     """
@@ -719,9 +724,8 @@ class EventStore:
         raise ValueError(
             f"{method}() needs a NamespaceAwareSerde on the checkpointer, "
             f"found {type(serde).__name__}. Only that serde can report an "
-            f"identity it cannot revive. Wire one with "
-            f"EventGraph.from_namespaces(..., checkpointer=...) or set "
-            f"checkpointer.serde = NamespaceAwareSerde(...)."
+            f"identity it cannot revive. Set checkpointer.serde = "
+            f"topology.serde()."
         )
 
     def unrevivable_threads(self, *, thread_ids: Iterable[str]) -> dict[str, list[str]]:
