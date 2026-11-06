@@ -5,7 +5,7 @@ never runs a handler. These suites pin that such a client needs no service
 value: the handlers below need a ``_Mailer`` that is never built.
 """
 
-import inspect
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -16,13 +16,17 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     Abandoned,
+    Event,
     EventGraph,
     EventStore,
     EventTopology,
     IntegrationEvent,
     Interrupted,
+    OrphanedEventWarning,
     ScalarReducer,
     ServiceRequirement,
+    Unannotated,
+    UnresolvedAnnotation,
     on,
 )
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
@@ -113,14 +117,38 @@ def describe_EventTopology():
             assert topology.resumable_node_names == graph.resumable_node_names
 
     def when_a_parameter_has_no_annotation():
-        def it_lists_the_empty_annotation():
+        def it_lists_the_parameter_as_unannotated():
             @on(Started)
             def untyped(event: Started, client) -> None:
                 return None
 
             (requirement,) = EventTopology([untyped]).requirements
 
-            assert requirement.annotation is inspect.Parameter.empty
+            assert requirement.annotation == Unannotated()
+
+    def when_an_annotation_does_not_resolve():
+        def it_lists_the_reason():
+            @on(Started)
+            def broken(event: Started, client: int) -> None:
+                return None
+
+            broken.__annotations__["client"] = "MissingClient"
+
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                (requirement,) = EventTopology([broken]).requirements
+
+            assert requirement.annotation == UnresolvedAnnotation(
+                "NameError: name 'MissingClient' is not defined"
+            )
+
+    def when_a_parameter_is_variadic():
+        def it_lists_no_requirement():
+            @on(Started)
+            def catch_all(event: Started, *args: Any, **kwargs: Any) -> None:
+                return None
+
+            assert EventTopology([catch_all]).requirements == ()
 
     def when_a_reducer_claims_the_parameter():
         def it_lists_no_requirement():
@@ -133,6 +161,25 @@ def describe_EventTopology():
         def it_raises_a_value_error():
             with pytest.raises(ValueError, match="at least one handler"):
                 EventTopology([])
+
+    def when_a_loose_event_declares_a_migration():
+        def it_builds_a_serde_that_revives_the_old_identity():
+            class _OldNote(IntegrationEvent):
+                pass
+
+            stored = NamespaceAwareSerde(events=(_OldNote,)).dumps_typed(_OldNote())
+
+            @migrate_from(_OldNote.__qualname__, in_module=_OldNote.__module__)
+            class _NewNote(IntegrationEvent):
+                pass
+
+            @on(_NewNote)
+            def react(event) -> None:  # type: ignore[no-untyped-def]
+                return None
+
+            serde = EventTopology([react]).serde()
+
+            assert serde.loads_typed(stored) == _NewNote()
 
 
 def describe_EventGraph_of():
@@ -157,6 +204,51 @@ def describe_EventGraph_of():
 
             assert "cannot inject" in str(bound.value)
             assert str(bound.value) == str(direct.value)
+
+    def when_a_renamed_duplicate_misses_a_service():
+        def it_names_the_handler_as_declared():
+            @on(Started)
+            def handle(event: Started) -> None:
+                return None
+
+            first = handle
+
+            @on(Started)  # type: ignore[no-redef]
+            def handle(event: Started, mailer: _Mailer) -> None:
+                return None
+
+            with pytest.raises(TypeError) as info:
+                EventGraph([first, handle])
+
+            assert str(info.value) == (
+                "Handler 'handle' declares parameter(s) ['mailer'] that the "
+                "framework cannot inject. For service injection, register a "
+                "matching instance via EventGraph(services=[...]); for state, "
+                "register a Reducer; otherwise remove the parameter."
+            )
+
+
+def _bad_return(event: Started) -> Event:
+    return Ended(result="x")
+
+
+def describe_EventGraph():
+    def when_the_services_and_a_handler_are_both_invalid():
+        def it_refuses_the_services_first():
+            bad = on(Started)(_bad_return)
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                with pytest.raises(TypeError) as info:
+                    EventGraph([bad], services=[_Mailer(), _Mailer()])
+
+            assert str(info.value) == (
+                "EventGraph(services=...) has two instances of type '_Mailer' "
+                "\u2014 same-type collision. Register only one instance, switch "
+                "to the name-keyed mapping form (services={'primary': a, "
+                "'backup': b}), or use a subclass to distinguish them."
+            )
+            assert not [w for w in caught if w.category is OrphanedEventWarning]
 
 
 def describe_EventStore():
@@ -221,6 +313,21 @@ def describe_EventStore():
                 for t in store.plan_rewrite(thread_ids=["store-rewrite"]).threads
             ] == ["unchanged"]
 
+    def when_a_handler_runs_through_the_store():
+        def it_raises_an_error_that_names_the_store():
+            store = EventStore(EventTopology(_HANDLERS), MemorySaver())
+
+            with pytest.raises(RuntimeError) as info:
+                store._compile().invoke(
+                    {"events": [Started(data="x")], "causes": [None]},
+                    config=_cfg("store-runs"),
+                )
+
+            assert str(info.value) == (
+                "EventStore cannot run handler '_ask'. A store has no services. "
+                "Run the thread with an EventGraph."
+            )
+
     def when_the_checkpointer_is_not_a_saver():
         def it_raises_a_type_error():
             with pytest.raises(TypeError, match="BaseCheckpointSaver"):
@@ -244,3 +351,33 @@ def describe_MigrationTarget():
             report = check(MigrationTarget(graph=store, baseline=baseline))
 
             assert report.findings == ()
+
+    def when_the_store_serde_comes_from_the_topology():
+        def it_holds_the_migrations_of_the_graph_serde():
+            class _OldPing(IntegrationEvent):
+                pass
+
+            @migrate_from(_OldPing.__qualname__, in_module=_OldPing.__module__)
+            class _Ping(IntegrationEvent):
+                pass
+
+            @on(_Ping)
+            def react(event) -> None:  # type: ignore[no-untyped-def]
+                return None
+
+            def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                return EventGraph.from_namespaces(handlers=[react], checkpointer=saver)
+
+            def store(saver: BaseCheckpointSaver[Any]) -> EventStore:
+                topology = EventTopology([react])
+                saver.serde = topology.serde()
+                return EventStore(topology, saver)
+
+            from_graph = MigrationTarget(graph=graph, baseline=Path("unused"))
+            from_store = MigrationTarget(graph=store, baseline=Path("unused"))
+
+            assert len(from_store.snapshot().migrations.keys) == 1
+            assert (
+                from_store.snapshot().migrations.fingerprint
+                == from_graph.snapshot().migrations.fingerprint
+            )

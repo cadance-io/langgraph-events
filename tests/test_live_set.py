@@ -471,7 +471,7 @@ def describe_rewrite_live_set():
                     (t.checkpoint_ns, t.status) for t in outcome.passes[0].threads
                 ] == [("", "rewrite"), ("child:1", "rewrite")]
                 graph = releases.current.graph(releases.saver)
-                [child] = graph.plan_rewrite(
+                [child] = graph.store.plan_rewrite(
                     thread_ids=["t1"], checkpoint_ns="child:1"
                 ).threads
                 assert child.status == "unchanged"
@@ -496,7 +496,7 @@ def describe_rewrite_live_set():
                     assert len(outcome.passes) == 1
                     assert releases.plan("t1") == ["unchanged"]
                     graph = releases.current.graph(saver)
-                    [child] = graph.plan_rewrite(
+                    [child] = graph.store.plan_rewrite(
                         thread_ids=["t1"], checkpoint_ns="child:1"
                     ).threads
                     assert child.status == "unchanged"
@@ -906,7 +906,7 @@ def describe_restore_live_set():
                     )
                     before = rows.checkpoint("t1")
                     backup_live_set(target)
-                    graph.rewrite_store(drop=(retiring,), thread_ids=["t1"])
+                    graph.store.rewrite_store(drop=(retiring,), thread_ids=["t1"])
                     assert rows.checkpoint("t1") != before
 
                     outcome = restore_live_set(target)

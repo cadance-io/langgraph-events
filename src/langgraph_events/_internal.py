@@ -45,7 +45,7 @@ from langgraph_events._event import (
     Scatter,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import HandlerMeta  # noqa: TC001
+from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._services import RunScoped
@@ -312,7 +312,7 @@ def make_dispatch(
 
 
 def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
-    meta: HandlerMeta,
+    bound: BoundHandler,
     state: StateDict,
     reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
@@ -322,6 +322,7 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     model_provider: Callable[[], NamespaceModel],
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
+    meta = bound.meta
     inject: dict[str, Any] = {}
     if meta.log_param or meta.reflection_param:
         log_view = EventLog._from_state(
@@ -357,11 +358,11 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                 "is configured. Pass store=... to EventGraph(...)."
             )
         inject[meta.store_param] = store
-    if services_by_type and meta.service_params:
-        for param_name, svc_type in meta.service_params:
+    if services_by_type and bound.service_params:
+        for param_name, svc_type in bound.service_params:
             inject[param_name] = services_by_type[svc_type]
-    if services_by_name and meta.service_name_params:
-        for param_name, svc_name in meta.service_name_params:
+    if services_by_name and bound.service_name_params:
+        for param_name, svc_name in bound.service_name_params:
             svc = services_by_name[svc_name]
             if isinstance(svc, RunScoped):
                 if config is None:
@@ -819,7 +820,7 @@ async def _process_events_async(
 
 
 def make_handler_node(
-    meta: HandlerMeta,
+    bound: BoundHandler,
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: ReturnContract | None = None,
     services_by_type: dict[type, Any] | None = None,
@@ -844,6 +845,7 @@ def make_handler_node(
     )
     from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
+    meta = bound.meta
     reds = reducers or {}
     svcs_by_type = services_by_type
     svcs_by_name = services_by_name
@@ -853,7 +855,7 @@ def make_handler_node(
     ) -> tuple[list[tuple[int, Event]], dict[str, Any], _PauseBudget]:
         matching = [(i, e) for i, e in _dispatchable(state) if meta.matches(e)]
         inject = _build_inject(
-            meta,
+            bound,
             state,
             reds,
             config,

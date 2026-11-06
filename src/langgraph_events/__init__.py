@@ -56,10 +56,14 @@ from langgraph_events._graph import (
     LLMToken,
     LLMToolCallChunk,
     OrphanedEventWarning,
-    ServiceRequirement,
     UnresumableError,
 )
-from langgraph_events._handler import on
+from langgraph_events._handler import (
+    ServiceRequirement,
+    Unannotated,
+    UnresolvedAnnotation,
+    on,
+)
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import CommandPrivacyError
 from langgraph_events._namespace._smells import (
@@ -172,7 +176,9 @@ __all__ = [
     "SystemEvent",
     "SystemPromptSet",
     "ThreadRewrite",
+    "Unannotated",
     "UnknownCause",
+    "UnresolvedAnnotation",
     "Unresumable",
     "UnresumableError",
     "aemit_custom",

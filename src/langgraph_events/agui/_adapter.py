@@ -137,7 +137,7 @@ class AGUIAdapter:
             raise ValueError(
                 "AGUIAdapter resume_factory requires a checkpointer on the EventGraph"
             )
-        if "messages" not in graph._reducers:
+        if "messages" not in graph._topology._reducers:
             raise ValueError(
                 "AGUIAdapter requires a message_reducer() on the EventGraph. "
                 "Add reducers=[message_reducer()] when constructing your "
@@ -525,7 +525,7 @@ class AGUIAdapter:
         see them via parameter injection.
         """
         updates: dict[str, Any] = {}
-        for name, reducer in self._graph._reducers.items():
+        for name, reducer in self._graph._topology._reducers.items():
             contribution = reducer.collect(events)
             if reducer.has_contributions(contribution):
                 updates[name] = contribution

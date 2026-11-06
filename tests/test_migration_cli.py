@@ -1160,8 +1160,8 @@ def describe_target_errors():
             assert capsys.readouterr().err == (
                 "error: The graph factory of the target cannot take a "
                 "checkpointer: too many positional arguments. Write it as "
-                "def build(checkpointer) -> EventGraph, and build the graph on "
-                "that checkpointer.\n"
+                "def build(checkpointer) -> EventGraph | EventStore, and build "
+                "it on that checkpointer.\n"
             )
 
     def when_the_store_opens_an_async_saver():

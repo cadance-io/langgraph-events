@@ -38,9 +38,10 @@ from langgraph_events._event import (
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import (
+    BoundHandler,
     HandlerMeta,
+    ServiceRequirement,
     _resolve_hints_and_errors,
-    bind_services,
     classify_handler,
     normalize_previous_names,
     on,
@@ -83,7 +84,7 @@ if TYPE_CHECKING:
         Sequence,
     )
 
-    from langchain_core.runnables import RunnableConfig
+    from langchain_core.runnables import RunnableConfig, RunnableLambda
     from langgraph.checkpoint.base import CheckpointTuple
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
@@ -97,6 +98,7 @@ if TYPE_CHECKING:
         NamespaceAwareSerde,
         UnrevivedIdentity,
     )
+    from langgraph_events.serde.migrations._core import Migration
 
     _GraphInput = dict[str, Any] | LGCommand
 
@@ -676,80 +678,6 @@ def _register_graph_namespaces(
         )
 
 
-def _register_produced_types(
-    handler_metas: list[HandlerMeta],
-    return_info: dict[str, ReturnInfo],
-    namespaces: dict[str, type[Namespace]],
-) -> tuple[type[Event], ...]:
-    """Fold handlers' return types into the graph's namespace registry, warn
-    about events produced but never consumed, and return the event types this
-    graph touches that belong to no namespace.
-
-    Those loose types — module-level ``IntegrationEvent``s, framework
-    ``SystemEvent``s — are what a serde needs in ``events=`` to keep them out
-    of import-resolution. Computed here because the subscribed/produced split
-    is already in hand; building a ``NamespaceModel`` to recover them would
-    fire its design-smell warnings from inside the library and populate the
-    model cache, so a later ``graph.namespaces()`` would never warn at all.
-
-    Both jobs need the same subscribed/produced split, and both are only
-    possible once return-type introspection has run. Registering here completes
-    the registry: a namespace reachable only through a handler's return type is
-    as much part of this graph as a subscribed one, and just as able to collide.
-    """
-    subscribed: set[type[Event]] = set()
-    for meta in handler_metas:
-        subscribed.update(meta.event_types)
-    produced: set[type[Event]] = set()
-    for info in return_info.values():
-        produced.update(info.event_types)
-        produced.update(info.scatter_types)
-
-    _register_graph_namespaces(produced, namespaces)
-
-    orphaned = {
-        t
-        for t in produced
-        if not issubclass(t, (Halted, Interrupted))
-        # A DomainEvent owned by a Namespace or Command — as an outcome
-        # (__command__ set) or as a free-standing domain fact
-        # (__namespace__ set) — is a terminal by design; having no
-        # subscriber is idiomatic, not an orphan.
-        and not (
-            issubclass(t, DomainEvent)
-            and (
-                getattr(t, "__command__", None) is not None
-                or getattr(t, "__namespace__", None) is not None
-            )
-        )
-        # A catch-all ``@on(Event)`` observer does not process an event.
-        and not any(issubclass(t, s) for s in subscribed if s is not Event)
-    }
-    if orphaned:
-        names = ", ".join(sorted(t.__name__ for t in orphaned))
-        warn_user(
-            f"Event type(s) {names} are returned by handlers but no handler "
-            f"subscribes to them. These events will be produced but never "
-            f"processed.",
-            OrphanedEventWarning,
-        )
-
-    # ``subscribed``/``produced`` are sets, so their iteration order varies
-    # per process. It reaches migration collection, and from there decides
-    # which class a collision diagnostic names first — keep it reproducible.
-    return tuple(
-        dict.fromkeys(
-            t
-            for t in sorted(
-                (*subscribed, *produced),
-                key=lambda c: (c.__module__, c.__qualname__),
-            )
-            # A mixin that a handler subscribes to is not a stored class.
-            if issubclass(t, Event) and getattr(t, "__namespace_cls__", None) is None
-        )
-    )
-
-
 def _collect_graph_namespaces(
     handlers: list[Callable[..., Any]],
 ) -> dict[str, type[Namespace]]:
@@ -797,9 +725,24 @@ def _discover_namespace_reducers(
         explicit_reducers.setdefault(name, r)
 
 
+class _Services(NamedTuple):
+    """The ``services=`` of one graph, split into its two lookups.
+
+    A ``Mapping[str, Any]`` fills ``by_name``: resolution by handler param
+    name, so two instances of one type can coexist (a primary and a backup
+    chat model). A ``Sequence[Any]`` fills ``by_type``: resolution by param
+    annotation, and a same-type collision is rejected.
+    """
+
+    by_type: dict[type, Any]
+    by_name: dict[str, Any]
+    run_scoped_types: dict[str, Any]
+    """The type that each ``RunScoped`` factory in ``by_name`` returns."""
+
+
 def _build_service_registries(
     services: Sequence[Any] | _Mapping[str, Any] | None,
-) -> tuple[dict[type, Any], dict[str, Any]]:
+) -> _Services:
     """Split ``services=`` into type-keyed and name-keyed lookups.
 
     Mapping form populates name-keyed; sequence form populates type-keyed
@@ -807,12 +750,11 @@ def _build_service_registries(
     per ``EventGraph`` instance.
     """
     by_type: dict[type, Any] = {}
-    by_name: dict[str, Any] = {}
     if isinstance(services, _Mapping):
         by_name = dict(services)
-        return by_type, by_name
+        return _Services(by_type, by_name, _resolve_run_scoped_types(by_name))
     if services is None:
-        return by_type, by_name
+        return _Services(by_type, {}, {})
     for s in services:
         if isinstance(s, RunScoped):
             raise TypeError(
@@ -830,7 +772,7 @@ def _build_service_registries(
                 f"subclass to distinguish them."
             )
         by_type[t] = s
-    return by_type, by_name
+    return _Services(by_type, {}, {})
 
 
 def _validate_on_unresumable(value: str) -> None:
@@ -856,135 +798,6 @@ Without this check the collision surfaces only at first compile/invoke —
 as an opaque "node already present" for the framework pair, and as a
 claimant-less "reserved" error for LangGraph's — never naming the
 declaration that smuggled the name in."""
-
-
-def _validate_handler_metas(metas: list[HandlerMeta]) -> None:
-    """Run all build-time handler-identity checks (node names, then aliases)."""
-    _validate_node_names(metas)
-    _validate_handler_aliases(metas)
-
-
-def _validate_node_names(metas: list[HandlerMeta]) -> None:
-    """Raise if two handlers resolve to the same graph-node identity.
-
-    ``node_name`` uniqueness is the invariant interrupted checkpoints depend on:
-    a paused thread resumes into the node of that name, so two handlers sharing
-    one is a silent mis-dispatch. Display-name collisions are deduplicated
-    positionally, but ``node_name`` is not (an inline command's qualname or an
-    ``@on(node_name=...)`` pin is taken as-is) — so guard it explicitly and fail
-    at build time with a clear message rather than an opaque LangGraph
-    ``add_node`` error at compile. The usual trigger is the same command (or two
-    handlers pinned to the same name) registered twice in ``handlers=[...]``.
-    """
-    seen: dict[str, HandlerMeta] = {}
-    for meta in metas:
-        if meta.node_name in _RESERVED_NODE_NAMES:
-            # Reachable via an explicit @on(node_name=...) pin or a function
-            # literally named after the reserved node (node names come from
-            # fn.__name__) — so name the claimant by its qualname; the node
-            # name itself IS the reserved string and would point at nothing.
-            raise ValueError(
-                f"Handler {meta.fn.__qualname__!r} resolves to graph node "
-                f"{meta.node_name!r}, which is reserved for framework graph "
-                f"nodes; choose another name."
-            )
-        prior = seen.get(meta.node_name)
-        if prior is not None:
-            raise ValueError(
-                f"Handlers {prior.name!r} and {meta.name!r} both resolve to "
-                f"graph node {meta.node_name!r}; node identity must be unique. "
-                f"Register each command/handler once, or give one a distinct "
-                f"@on(node_name=...)."
-            )
-        seen[meta.node_name] = meta
-
-
-def _validate_handler_aliases(metas: list[HandlerMeta]) -> None:
-    """Raise if any ``@on(previously=...)`` alias is unusable.
-
-    Each historic node name becomes a real graph node, so it must be unique
-    and must not shadow a live handler node — surfaced at build time.
-    """
-    live_names = {meta.node_name for meta in metas}
-    claimed: dict[str, str] = {}
-    for meta in metas:
-        for alias in meta.previous_names:
-            if alias in _RESERVED_NODE_NAMES:
-                raise ValueError(
-                    f"Handler {meta.node_name!r} declares "
-                    f"previously={alias!r}, which is reserved for the "
-                    f"framework's own graph nodes and can never have been "
-                    f"a historic handler name; remove it."
-                )
-            if alias in live_names:
-                raise ValueError(
-                    f"Handler {meta.node_name!r} declares "
-                    f"previously={alias!r}, which collides with a live "
-                    f"handler node of the same name; choose a distinct "
-                    f"historic name."
-                )
-            first = claimed.get(alias)
-            if first is not None:
-                raise ValueError(
-                    f"Historic node name {alias!r} is declared as previously= "
-                    f"by both {first!r} and {meta.node_name!r}; each historic "
-                    f"node name may map to only one handler."
-                )
-            claimed[alias] = meta.node_name
-
-
-def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
-    """Raise if a handler declares a param the framework cannot inject.
-
-    Every parameter must be claimed by exactly one source: the event itself
-    (the first positional param), ``EventLog``/``RunnableConfig``/``BaseStore``
-    framework injectables, a registered reducer name, a field matcher, or a
-    type-matched service. An unclaimed param means the user intended an
-    injection the framework has no way to provide — surface it at graph
-    build time so the failure is colocated with the misconfiguration.
-    """
-    sig = inspect.signature(meta.fn)
-    first_param = next(iter(sig.parameters), None)
-    claimed: set[str | None] = {first_param, "self"}
-    claimed.update(meta.framework_params)
-    claimed.update(meta.reducer_params)
-    claimed.update(meta.field_inject_params)
-    claimed.update(name for name, _ in meta.service_params)
-    claimed.update(name for name, _ in meta.service_name_params)
-    # Variadic params (``*args`` / ``**kwargs``) cannot be claimed by any
-    # injection source; they are caller-controlled. Treat them as claimed
-    # so generic catcher-style handlers (e.g. ``def react(event, *a, **kw)``)
-    # build cleanly.
-    variadic = {
-        inspect.Parameter.VAR_POSITIONAL,
-        inspect.Parameter.VAR_KEYWORD,
-    }
-    unclaimed = [
-        name
-        for name, p in sig.parameters.items()
-        if name not in claimed and p.kind not in variadic
-    ]
-    if unclaimed:
-        # An unclaimed param whose annotation failed to resolve has a cause
-        # the generic advice cannot express — the framework never saw a type
-        # to match, so "register a service" is the wrong instruction. State
-        # the resolution failure first. See issue #183.
-        errors = dict(meta.hint_errors)
-        blamed = [name for name in unclaimed if name in errors]
-        cause = ""
-        if blamed:
-            detail = ", ".join(f"{name!r} ({errors[name]})" for name in blamed)
-            cause = (
-                f" The annotation on {detail} did not resolve, so the "
-                f"framework could not match it by type. Make the annotation "
-                f"importable at run time."
-            )
-        raise TypeError(
-            f"Handler {meta.name!r} declares parameter(s) {unclaimed} that "
-            f"the framework cannot inject.{cause} For service injection, "
-            f"register a matching instance via EventGraph(services=[...]); "
-            f"for state, register a Reducer; otherwise remove the parameter."
-        )
 
 
 def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any]:
@@ -1069,11 +882,7 @@ def _satisfies(
         return f"{type(exc).__name__}: {exc}"
 
 
-def _verify_service_name_types(
-    meta: HandlerMeta,
-    services_by_name: dict[str, Any],
-    run_scoped_types: dict[str, Any],
-) -> None:
+def _verify_service_name_types(bound: BoundHandler, services: _Services) -> None:
     """Raise if a name-keyed service does not satisfy the handler annotation.
 
     Name-keyed binding matches on the parameter name and needs no annotation.
@@ -1084,17 +893,18 @@ def _verify_service_name_types(
     a runtime ``Protocol`` with methods only, and a generic alias. A
     ``NewType`` is nominal for a factory and erased for a plain value.
     """
-    if not meta.service_name_hints:
+    if not bound.service_name_hints:
         return
     # A cold import costs about 200 ms. Only the first graph in the process
     # with an annotated name-keyed parameter pays it.
     from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
 
-    for param, declared in meta.service_name_hints:
-        value = services_by_name[param]
+    handler = bound.meta.declared_name
+    for param, declared in bound.service_name_hints:
+        value = services.by_name[param]
         label = _hint_label(declared)
         if isinstance(value, RunScoped):
-            provided = run_scoped_types[param]
+            provided = services.run_scoped_types[param]
             # ``Any`` and a bare type variable say nothing about the result.
             if provided is Any or isinstance(provided, TypeVar):
                 continue
@@ -1103,7 +913,7 @@ def _verify_service_name_types(
                 factory = _factory_label(_annotation_source(value.factory))
                 returns = _hint_label(provided)
                 raise TypeError(
-                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"Handler {handler!r} declares parameter {param!r} as "
                     f"{label}, but services[{param!r}] is RunScoped({factory}) "
                     f"and that factory returns {returns}. Change the annotation "
                     f"to {returns}, or register a factory that returns {label}."
@@ -1118,14 +928,14 @@ def _verify_service_name_types(
                     what = f"an instance of {type(value).__qualname__}"
                     fix = "Widen the annotation"
                 raise TypeError(
-                    f"Handler {meta.name!r} declares parameter {param!r} as "
+                    f"Handler {handler!r} declares parameter {param!r} as "
                     f"{label}, but services[{param!r}] is {what}, not an "
                     f"instance of {label}. {fix}, or register a value that "
                     f"satisfies it."
                 )
         if isinstance(verdict, str):
             warn_user(
-                f"Handler {meta.name!r} declares parameter {param!r} as {label}, "
+                f"Handler {handler!r} declares parameter {param!r} as {label}, "
                 f"which Python cannot test at run time ({verdict}). The service "
                 f"under services[{param!r}] is not checked against it."
             )
@@ -1204,138 +1014,6 @@ def _expand_command_handlers(
     return expanded
 
 
-def _compile_state_graph(
-    handler_metas: list[HandlerMeta],
-    *,
-    reducers: dict[str, BaseReducer],
-    return_contracts: dict[str, ReturnContract | None],
-    model_provider: Callable[[], NamespaceModel],
-    max_rounds: int,
-    recursion_limit: int | None,
-    services_by_type: dict[type, Any] | None,
-    services_by_name: dict[str, Any] | None,
-    checkpointer: Checkpointer,
-    store: BaseStore | None,
-) -> CompiledStateGraph:
-    """Compile *handler_metas* into a LangGraph ``CompiledStateGraph``.
-
-    Shared by :class:`EventGraph`, which passes its services, and by
-    :class:`EventStore`, which passes none: a store never runs a handler.
-    """
-    # Dynamic state schema with per-reducer channels
-    state_schema = build_state_schema(reducers)
-
-    # Always include reducer channels — filtering is an output concern
-    out_schema: Any = _OutputState
-    if reducers:
-        reducer_fields: dict[str, Any] = {
-            "events": list[Event],
-            "causes": list[CauseEntry],
-        }
-        for name, r in reducers.items():
-            reducer_fields[name] = r.output_type()
-        _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
-        out_schema = _OutputWithReducers
-
-    graph: StateGraph[Any] = StateGraph(
-        state_schema,
-        input_schema=_InputState,  # type: ignore[arg-type]
-        output_schema=out_schema,
-    )
-
-    # --- nodes ---
-    seed_node = make_seed_node(reducers=reducers)
-    router_node = make_router_node(max_rounds)
-    dispatch_fn = make_dispatch(handler_metas)
-
-    async def aseed(state: StateDict) -> StateDict:
-        return seed_node(state)
-
-    async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
-        return router_node(state, config)
-
-    graph.add_node("__seed__", cast("Any", _leaf_node(seed_node, aseed, "__seed__")))
-    graph.add_node(
-        "__router__", cast("Any", _leaf_node(router_node, arouter, "__router__"))
-    )
-
-    handler_names: list[str] = []
-    for meta in handler_metas:
-        handler_node = make_handler_node(
-            meta,
-            reducers=reducers,
-            return_contract=return_contracts.get(meta.name),
-            services_by_type=services_by_type or None,
-            services_by_name=services_by_name or None,
-            model_provider=model_provider,
-        )
-        graph.add_node(meta.node_name, cast("Any", handler_node))
-        handler_names.append(meta.node_name)
-        # Register an alias node per historic name (@on(previously=...)) so an
-        # interrupted checkpoint paused at the old node re-enters the same
-        # handler on resume. The dispatcher only ever returns canonical
-        # names, so aliases never fire for new work — they exist purely to
-        # catch resumes of in-flight checkpoints.
-        for alias in meta.previous_names:
-            graph.add_node(alias, cast("Any", handler_node))
-            handler_names.append(alias)
-
-    # --- edges ---
-    graph.add_edge(START, "__seed__")
-
-    # dispatch from seed and from router
-    destinations = [*handler_names, END]
-    graph.add_conditional_edges("__seed__", dispatch_fn, destinations)
-    graph.add_conditional_edges("__router__", dispatch_fn, destinations)
-
-    # all handlers fan-in back to router
-    for name in handler_names:
-        graph.add_edge(name, "__router__")
-
-    compile_kwargs: dict[str, Any] = {}
-    if checkpointer is not None:
-        compile_kwargs["checkpointer"] = checkpointer
-    if store is not None:
-        compile_kwargs["store"] = store
-    compiled = graph.compile(**compile_kwargs)
-
-    # Resolve recursion_limit: explicit kwarg wins; otherwise auto-size
-    # so LangGraph's limit never trips before our max_rounds does.
-    # Each round is at most 1 router + all handlers.
-    if recursion_limit is not None:
-        limit = recursion_limit
-    else:
-        n_handlers = len(handler_metas) + sum(
-            len(meta.previous_names) for meta in handler_metas
-        )
-        needed = max_rounds * (n_handlers + 1) + 1
-        existing = (compiled.config or {}).get("recursion_limit", 25)
-        limit = max(needed, existing)
-    compiled.config = {
-        **(compiled.config or {}),
-        "recursion_limit": limit,
-    }
-
-    return compiled
-
-
-class ServiceRequirement(NamedTuple):
-    """A handler parameter that only a service can fill.
-
-    The event, a framework injectable, a reducer and a field matcher do not
-    claim it. :meth:`EventGraph.of` must bind a service to it, or the build
-    raises ``TypeError``.
-    """
-
-    handler: str
-    """The display name of the handler."""
-    param: str
-    """The parameter name."""
-    annotation: Any
-    """The resolved annotation, or ``inspect.Parameter.empty`` when the
-    parameter has none or when it did not resolve."""
-
-
 class EventTopology:
     """The handlers, reducers and namespaces of a graph, with no services.
 
@@ -1376,7 +1054,7 @@ class EventTopology:
 
         self._handler_metas: list[HandlerMeta] = []
 
-        reducer_names = frozenset(self._reducers.keys())
+        reducer_names = self.reducer_names
         seen_names: dict[str, int] = {}
         for fn in handlers:
             meta = classify_handler(fn, reducer_names=reducer_names)
@@ -1389,7 +1067,8 @@ class EventTopology:
                 seen_names[meta.name] = 1
             self._handler_metas.append(meta)
 
-        _validate_handler_metas(self._handler_metas)
+        self._validate_node_names()
+        self._validate_handler_aliases()
 
         self._return_info: dict[str, ReturnInfo] = {}
         self._return_contracts: dict[str, ReturnContract | None] = {}
@@ -1404,9 +1083,7 @@ class EventTopology:
             self._return_contracts[meta.name] = _compute_return_contract(meta, info)
             _verify_inline_outcome_coverage(meta, info)
 
-        self._loose_events = _register_produced_types(
-            self._handler_metas, self._return_info, self._namespaces
-        )
+        self._loose_events = self._register_produced_types()
 
         enforce_command_privacy(self._handler_metas, self._return_info)
         self._verify_error_handling()
@@ -1418,6 +1095,31 @@ class EventTopology:
         event class this graph can store: its namespaces, and the events
         outside every namespace that its handlers subscribe to or return."""
         return tuple(self._namespaces.values()), self._loose_events
+
+    def serde(
+        self, migrations: Sequence[Migration] = (), *, legacy_write: bool = False
+    ) -> NamespaceAwareSerde:
+        """Build a ``NamespaceAwareSerde`` that reads every event class of
+        the topology.
+
+        The serde reads the namespaces of the topology, and each event
+        outside every namespace that a handler subscribes to or returns. It
+        collects each ``@migrate_from`` and ``@backfill`` on those classes.
+        ``EventGraph.from_namespaces(..., checkpointer=...)`` wires the same
+        serde. *migrations* and *legacy_write* go to the serde unchanged::
+
+            saver.serde = topology.serde()
+            store = EventStore(topology, saver)
+        """
+        from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
+
+        namespaces, events = self._serde_scope()
+        return NamespaceAwareSerde(
+            migrations,
+            namespaces=namespaces,
+            events=events,
+            legacy_write=legacy_write,
+        )
 
     def namespaces(self) -> NamespaceModel:
         """Return a :class:`NamespaceModel` — the code-derived snapshot.
@@ -1466,16 +1168,269 @@ class EventTopology:
     def requirements(self) -> tuple[ServiceRequirement, ...]:
         """Each handler parameter that only a service can fill, in handler
         and signature order. A variadic parameter is not listed."""
-        variadic = {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
-        found: list[ServiceRequirement] = []
-        for meta in self._handler_metas:
-            params = inspect.signature(meta.fn).parameters
-            found.extend(
-                ServiceRequirement(meta.name, name, annotation)
-                for name, annotation in meta.service_candidates
-                if params[name].kind not in variadic
+        return tuple(r for meta in self._handler_metas for r in meta.requirements)
+
+    def handler_node(
+        self,
+        bound: BoundHandler,
+        *,
+        services_by_type: dict[type, Any],
+        services_by_name: dict[str, Any],
+    ) -> RunnableLambda:
+        """The node that runs *bound* with the services of one graph."""
+        return make_handler_node(
+            bound,
+            reducers=self._reducers,
+            return_contract=self._return_contracts.get(bound.meta.name),
+            services_by_type=services_by_type or None,
+            services_by_name=services_by_name or None,
+            model_provider=self.namespaces,
+        )
+
+    def compile(
+        self,
+        node_for: Callable[[HandlerMeta], RunnableLambda],
+        *,
+        max_rounds: int,
+        recursion_limit: int | None,
+        checkpointer: Checkpointer,
+        store: BaseStore | None,
+    ) -> CompiledStateGraph:
+        """Compile the topology into a LangGraph ``CompiledStateGraph``.
+
+        *node_for* builds the node of each handler. :class:`EventGraph` passes
+        :meth:`handler_node` with its services. :class:`EventStore` passes a
+        node that refuses to run, because a store has no services.
+        """
+        reducers = self._reducers
+        handler_metas = self._handler_metas
+        # Dynamic state schema with per-reducer channels
+        state_schema = build_state_schema(reducers)
+
+        # Always include reducer channels — filtering is an output concern
+        out_schema: Any = _OutputState
+        if reducers:
+            reducer_fields: dict[str, Any] = {
+                "events": list[Event],
+                "causes": list[CauseEntry],
+            }
+            for name, r in reducers.items():
+                reducer_fields[name] = r.output_type()
+            _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
+            out_schema = _OutputWithReducers
+
+        graph: StateGraph[Any] = StateGraph(
+            state_schema,
+            input_schema=_InputState,  # type: ignore[arg-type]
+            output_schema=out_schema,
+        )
+
+        # --- nodes ---
+        seed_node = make_seed_node(reducers=reducers)
+        router_node = make_router_node(max_rounds)
+        dispatch_fn = make_dispatch(handler_metas)
+
+        async def aseed(state: StateDict) -> StateDict:
+            return seed_node(state)
+
+        async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
+            return router_node(state, config)
+
+        graph.add_node(
+            "__seed__", cast("Any", _leaf_node(seed_node, aseed, "__seed__"))
+        )
+        graph.add_node(
+            "__router__", cast("Any", _leaf_node(router_node, arouter, "__router__"))
+        )
+
+        handler_names: list[str] = []
+        for meta in handler_metas:
+            handler_node = node_for(meta)
+            graph.add_node(meta.node_name, cast("Any", handler_node))
+            handler_names.append(meta.node_name)
+            # Register an alias node per historic name (@on(previously=...)) so an
+            # interrupted checkpoint paused at the old node re-enters the same
+            # handler on resume. The dispatcher only ever returns canonical
+            # names, so aliases never fire for new work — they exist purely to
+            # catch resumes of in-flight checkpoints.
+            for alias in meta.previous_names:
+                graph.add_node(alias, cast("Any", handler_node))
+                handler_names.append(alias)
+
+        # --- edges ---
+        graph.add_edge(START, "__seed__")
+
+        # dispatch from seed and from router
+        destinations = [*handler_names, END]
+        graph.add_conditional_edges("__seed__", dispatch_fn, destinations)
+        graph.add_conditional_edges("__router__", dispatch_fn, destinations)
+
+        # all handlers fan-in back to router
+        for name in handler_names:
+            graph.add_edge(name, "__router__")
+
+        compile_kwargs: dict[str, Any] = {}
+        if checkpointer is not None:
+            compile_kwargs["checkpointer"] = checkpointer
+        if store is not None:
+            compile_kwargs["store"] = store
+        compiled = graph.compile(**compile_kwargs)
+
+        # Resolve recursion_limit: explicit kwarg wins; otherwise auto-size
+        # so LangGraph's limit never trips before our max_rounds does.
+        # Each round is at most 1 router + all handlers.
+        if recursion_limit is not None:
+            limit = recursion_limit
+        else:
+            n_handlers = len(handler_metas) + sum(
+                len(meta.previous_names) for meta in handler_metas
             )
-        return tuple(found)
+            needed = max_rounds * (n_handlers + 1) + 1
+            existing = (compiled.config or {}).get("recursion_limit", 25)
+            limit = max(needed, existing)
+        compiled.config = {
+            **(compiled.config or {}),
+            "recursion_limit": limit,
+        }
+
+        return compiled
+
+    def _register_produced_types(self) -> tuple[type[Event], ...]:
+        """Fold handlers' return types into the graph's namespace registry, warn
+        about events produced but never consumed, and return the event types this
+        graph touches that belong to no namespace.
+
+        Those loose types — module-level ``IntegrationEvent``s, framework
+        ``SystemEvent``s — are what a serde needs in ``events=`` to keep them out
+        of import-resolution. Computed here because the subscribed/produced split
+        is already in hand; building a ``NamespaceModel`` to recover them would
+        fire its design-smell warnings from inside the library and populate the
+        model cache, so a later ``graph.namespaces()`` would never warn at all.
+
+        Both jobs need the same subscribed/produced split, and both are only
+        possible once return-type introspection has run. Registering here completes
+        the registry: a namespace reachable only through a handler's return type is
+        as much part of this graph as a subscribed one, and just as able to collide.
+        """
+        subscribed: set[type[Event]] = set()
+        for meta in self._handler_metas:
+            subscribed.update(meta.event_types)
+        produced: set[type[Event]] = set()
+        for info in self._return_info.values():
+            produced.update(info.event_types)
+            produced.update(info.scatter_types)
+
+        _register_graph_namespaces(produced, self._namespaces)
+
+        orphaned = {
+            t
+            for t in produced
+            if not issubclass(t, (Halted, Interrupted))
+            # A DomainEvent owned by a Namespace or Command — as an outcome
+            # (__command__ set) or as a free-standing domain fact
+            # (__namespace__ set) — is a terminal by design; having no
+            # subscriber is idiomatic, not an orphan.
+            and not (
+                issubclass(t, DomainEvent)
+                and (
+                    getattr(t, "__command__", None) is not None
+                    or getattr(t, "__namespace__", None) is not None
+                )
+            )
+            # A catch-all ``@on(Event)`` observer does not process an event.
+            and not any(issubclass(t, s) for s in subscribed if s is not Event)
+        }
+        if orphaned:
+            names = ", ".join(sorted(t.__name__ for t in orphaned))
+            warn_user(
+                f"Event type(s) {names} are returned by handlers but no handler "
+                f"subscribes to them. These events will be produced but never "
+                f"processed.",
+                OrphanedEventWarning,
+            )
+
+        # ``subscribed``/``produced`` are sets, so their iteration order varies
+        # per process. It reaches migration collection, and from there decides
+        # which class a collision diagnostic names first — keep it reproducible.
+        return tuple(
+            dict.fromkeys(
+                t
+                for t in sorted(
+                    (*subscribed, *produced),
+                    key=lambda c: (c.__module__, c.__qualname__),
+                )
+                # A mixin that a handler subscribes to is not a stored class.
+                if issubclass(t, Event)
+                and getattr(t, "__namespace_cls__", None) is None
+            )
+        )
+
+    def _validate_node_names(self) -> None:
+        """Raise if two handlers resolve to the same graph-node identity.
+
+        ``node_name`` uniqueness is the invariant interrupted checkpoints depend on:
+        a paused thread resumes into the node of that name, so two handlers sharing
+        one is a silent mis-dispatch. Display-name collisions are deduplicated
+        positionally, but ``node_name`` is not (an inline command's qualname or an
+        ``@on(node_name=...)`` pin is taken as-is) — so guard it explicitly and fail
+        at build time with a clear message rather than an opaque LangGraph
+        ``add_node`` error at compile. The usual trigger is the same command (or two
+        handlers pinned to the same name) registered twice in ``handlers=[...]``.
+        """
+        seen: dict[str, HandlerMeta] = {}
+        for meta in self._handler_metas:
+            if meta.node_name in _RESERVED_NODE_NAMES:
+                # Reachable via an explicit @on(node_name=...) pin or a function
+                # literally named after the reserved node (node names come from
+                # fn.__name__) — so name the claimant by its qualname; the node
+                # name itself IS the reserved string and would point at nothing.
+                raise ValueError(
+                    f"Handler {meta.fn.__qualname__!r} resolves to graph node "
+                    f"{meta.node_name!r}, which is reserved for framework graph "
+                    f"nodes; choose another name."
+                )
+            prior = seen.get(meta.node_name)
+            if prior is not None:
+                raise ValueError(
+                    f"Handlers {prior.name!r} and {meta.name!r} both resolve to "
+                    f"graph node {meta.node_name!r}; node identity must be unique. "
+                    f"Register each command/handler once, or give one a distinct "
+                    f"@on(node_name=...)."
+                )
+            seen[meta.node_name] = meta
+
+    def _validate_handler_aliases(self) -> None:
+        """Raise if any ``@on(previously=...)`` alias is unusable.
+
+        Each historic node name becomes a real graph node, so it must be unique
+        and must not shadow a live handler node — surfaced at build time.
+        """
+        live_names = {meta.node_name for meta in self._handler_metas}
+        claimed: dict[str, str] = {}
+        for meta in self._handler_metas:
+            for alias in meta.previous_names:
+                if alias in _RESERVED_NODE_NAMES:
+                    raise ValueError(
+                        f"Handler {meta.node_name!r} declares "
+                        f"previously={alias!r}, which is reserved for the "
+                        f"framework's own graph nodes and can never have been "
+                        f"a historic handler name; remove it."
+                    )
+                if alias in live_names:
+                    raise ValueError(
+                        f"Handler {meta.node_name!r} declares "
+                        f"previously={alias!r}, which collides with a live "
+                        f"handler node of the same name; choose a distinct "
+                        f"historic name."
+                    )
+                first = claimed.get(alias)
+                if first is not None:
+                    raise ValueError(
+                        f"Historic node name {alias!r} is declared as previously= "
+                        f"by both {first!r} and {meta.node_name!r}; each historic "
+                        f"node name may map to only one handler."
+                    )
+                claimed[alias] = meta.node_name
 
     def _verify_error_handling(self) -> None:
         """Run the construction-time error-handling gates.
@@ -1618,6 +1573,21 @@ class EventTopology:
                     )
 
 
+def _store_node(meta: HandlerMeta) -> RunnableLambda:
+    """A node that refuses to run the handler of *meta*."""
+
+    def refuse(state: StateDict) -> StateDict:
+        raise RuntimeError(
+            f"EventStore cannot run handler {meta.name!r}. A store has no "
+            f"services. Run the thread with an EventGraph."
+        )
+
+    async def arefuse(state: StateDict) -> StateDict:
+        return refuse(state)
+
+    return _leaf_node(refuse, arefuse, meta.name)
+
+
 class EventStore:
     """Maintain the checkpoints of one topology, with no services.
 
@@ -1630,8 +1600,8 @@ class EventStore:
         for config in configs:
             store.abandon(config, reason="retired")
 
-    :class:`EventGraph` is an ``EventStore`` too: it settles a thread
-    through its own compiled graph, with its services.
+    :attr:`EventGraph.store` is the store of a graph. It settles a thread
+    through the compiled graph of that graph, with its services.
     """
 
     def __init__(
@@ -1643,8 +1613,22 @@ class EventStore:
                 f"{type(checkpointer).__name__}"
             )
         self._topology = topology
-        self._checkpointer: Checkpointer = checkpointer
+        self._checkpointer = checkpointer
         self._compiled_graph: CompiledStateGraph | None = None
+        self._compiled: Callable[[], CompiledStateGraph] = self._compile_unbound
+
+    @classmethod
+    def _of_graph(
+        cls,
+        topology: EventTopology,
+        checkpointer: BaseCheckpointSaver[Any],
+        compiled: Callable[[], CompiledStateGraph],
+    ) -> EventStore:
+        """The store of a graph. It settles through *compiled*, the compiled
+        graph of that graph, with its services."""
+        store = cls(topology, checkpointer)
+        store._compiled = compiled
+        return store
 
     @property
     def topology(self) -> EventTopology:
@@ -1652,32 +1636,26 @@ class EventStore:
         return self._topology
 
     def _compile(self) -> CompiledStateGraph:
+        return self._compiled()
+
+    def _compile_unbound(self) -> CompiledStateGraph:
         """The graph of the topology on the checkpointer, with no services.
 
         A settle writes through ``bulk_update_state(as_node="__seed__")``.
         LangGraph runs only the writers of that node and the dispatch
-        function, never a handler body, so a handler needs no service here.
+        function, never a handler body. Each handler node refuses to run,
+        so a store can never call a handler without its services. The round
+        limits are inert for the same reason.
         """
         if self._compiled_graph is None:
-            topology = self._topology
-            self._compiled_graph = _compile_state_graph(
-                topology._handler_metas,
-                reducers=topology._reducers,
-                return_contracts=topology._return_contracts,
-                model_provider=topology.namespaces,
+            self._compiled_graph = self._topology.compile(
+                _store_node,
                 max_rounds=100,
                 recursion_limit=None,
-                services_by_type=None,
-                services_by_name=None,
                 checkpointer=self._checkpointer,
                 store=None,
             )
         return self._compiled_graph
-
-    def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
-        if not isinstance(self._checkpointer, BaseCheckpointSaver):
-            raise ValueError(f"{method}() requires a checkpointer")
-        return self._checkpointer
 
     @staticmethod
     def _events(snapshot: StateSnapshot) -> EventLog:
@@ -1840,10 +1818,9 @@ class EventStore:
         discovery included.
         """
         thread_id = config.get("configurable", {}).get("thread_id")
-        saver = self._require_checkpointer(method)
         try:
             with self._tolerant_read() as unresolved:
-                tup = saver.get_tuple(config)
+                tup = self._checkpointer.get_tuple(config)
         except Exception as exc:
             raise RuntimeError(
                 f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
@@ -1856,10 +1833,9 @@ class EventStore:
         """Async sibling of :meth:`_read_checkpoint_tuple`, via
         ``aget_tuple``."""
         thread_id = config.get("configurable", {}).get("thread_id")
-        saver = self._require_checkpointer(method)
         try:
             with self._tolerant_read() as unresolved:
-                tup = await saver.aget_tuple(config)
+                tup = await self._checkpointer.aget_tuple(config)
         except Exception as exc:
             raise RuntimeError(
                 f"{method}() could not read thread {thread_id!r}'s checkpoint: {exc}"
@@ -2007,15 +1983,14 @@ class EventStore:
         Recover that thread with a tombstone (see "Recovering a
         delete-first deployment" in ``docs/retiring-interrupted.md``).
 
-        Requires a checkpointer. Raises ``ValueError`` if the thread has
-        no events to settle (never run, or only ``pre_seed``ed). Ignores
+        Raises ``ValueError`` if the thread has no events to settle
+        (never run, or only ``pre_seed``ed). Ignores
         ``on_unresumable``: that policy governs an accidental no-op
         ``resume()``, not a deliberate abandonment.
 
         Runs no graph, so returns no log: call
         ``graph.get_state(config).events`` for it.
         """
-        self._require_checkpointer("abandon")
         with self._tolerant_read() as unresolved:
             snapshot = self._compile().get_state(config)
             self._require_settleable("abandon", snapshot, config)
@@ -2041,7 +2016,6 @@ class EventStore:
         require_interrupt: bool = True,
     ) -> None:
         """Async version of :meth:`abandon`."""
-        self._require_checkpointer("aabandon")
         with self._tolerant_read() as unresolved:
             snapshot = await self._compile().aget_state(config)
             self._require_settleable("aabandon", snapshot, config)
@@ -2116,11 +2090,8 @@ class EventStore:
         server-side query. See *Finding candidates server-side* in
         ``docs/retiring-interrupted.md``. ``thread_ids=None`` or a bare
         ``str`` raises ``TypeError``.
-
-        Requires a checkpointer.
         """
         ids = _explicit_thread_ids("threads_paused_on", thread_ids)
-        self._require_checkpointer("threads_paused_on")
         configs: list[RunnableConfig] = []
         for tid in ids:
             cfg = self._thread_config(tid)
@@ -2137,7 +2108,6 @@ class EventStore:
     ) -> list[RunnableConfig]:
         """Async version of :meth:`threads_paused_on`."""
         ids = _explicit_thread_ids("athreads_paused_on", thread_ids)
-        self._require_checkpointer("athreads_paused_on")
         configs: list[RunnableConfig] = []
         for tid in ids:
             cfg = self._thread_config(tid)
@@ -2216,13 +2186,12 @@ class EventStore:
         If one checkpointer stores more than one graph, keep only the
         thread ids of this graph.
 
-        Requires a checkpointer whose serde is a
+        Requires a checkpointer serde that is a
         :class:`~langgraph_events.serde.NamespaceAwareSerde`. Raises
         ``ValueError`` otherwise. Raises ``RuntimeError`` naming the
         thread if one checkpoint cannot be read.
         """
         ids = _explicit_thread_ids("unrevivable_threads", thread_ids)
-        self._require_checkpointer("unrevivable_threads")
         self._require_namespace_aware_serde("unrevivable_threads")
         found: dict[str, list[str]] = {}
         for tid in ids:
@@ -2237,7 +2206,6 @@ class EventStore:
     ) -> dict[str, list[str]]:
         """Async version of :meth:`unrevivable_threads`."""
         ids = _explicit_thread_ids("aunrevivable_threads", thread_ids)
-        self._require_checkpointer("aunrevivable_threads")
         self._require_namespace_aware_serde("aunrevivable_threads")
         found: dict[str, list[str]] = {}
         for tid in ids:
@@ -2279,7 +2247,7 @@ class EventStore:
         child namespace, for example the checkpoints of a graph that a
         handler invokes on the same checkpointer.
 
-        Raises ``ValueError`` without a checkpointer, without a
+        Raises ``ValueError`` without a
         :class:`~langgraph_events.serde.NamespaceAwareSerde`, under
         ``legacy_write=True``, or for a ``drop`` class the serde cannot
         revive. See *Retiring an Interrupted subclass* in
@@ -2342,7 +2310,7 @@ class EventStore:
         self, cfg: RunnableConfig, tup: CheckpointTuple, plan: RewritePlan, method: str
     ) -> None:
         """Store one planned rewrite under the checkpoint id of *tup*."""
-        saver = self._require_checkpointer(method)
+        saver = self._checkpointer
         saver.put(
             self._rewrite_base_config(cfg, tup),
             plan.checkpoint,
@@ -2409,7 +2377,7 @@ class EventStore:
         """Shared preconditions of the rewrite walk. Returns the serde
         and the planner bound to this graph's serde, drop classes,
         checkpoint namespace and version function."""
-        saver = self._require_checkpointer(method)
+        saver = self._checkpointer
         serde = self._require_namespace_aware_serde(method)
         if serde._legacy_write:
             raise ValueError(
@@ -2489,7 +2457,7 @@ class EventStore:
         self, cfg: RunnableConfig, tup: CheckpointTuple, plan: RewritePlan, method: str
     ) -> None:
         """Async sibling of :meth:`_write_plan`."""
-        saver = self._require_checkpointer(method)
+        saver = self._checkpointer
         await saver.aput(
             self._rewrite_base_config(cfg, tup),
             plan.checkpoint,
@@ -2513,7 +2481,7 @@ class EventStore:
         return tup, _plan_read(plan, cfg, tup, unresolved, decoded)
 
 
-class EventGraph(EventStore):
+class EventGraph:
     """Build and run an event-driven graph from ``@on`` handlers.
 
     Topology is auto-derived from handler subscriptions.  Internally builds
@@ -2551,10 +2519,13 @@ class EventGraph(EventStore):
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
         _validate_on_unresumable(on_unresumable)
+        # Before the topology: a bad services= is refused before any handler
+        # check or warning, as the one-step build did.
+        registry = _build_service_registries(services)
         self._bind(
             EventTopology(handlers, reducers=reducers),
             max_rounds=max_rounds,
-            services=services,
+            services=registry,
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
@@ -2585,7 +2556,7 @@ class EventGraph(EventStore):
         graph._bind(
             topology,
             max_rounds=max_rounds,
-            services=services,
+            services=_build_service_registries(services),
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
@@ -2598,7 +2569,7 @@ class EventGraph(EventStore):
         topology: EventTopology,
         *,
         max_rounds: int,
-        services: Sequence[Any] | Mapping[str, Any] | None,
+        services: _Services,
         checkpointer: Checkpointer,
         store: BaseStore | None,
         recursion_limit: int | None,
@@ -2612,48 +2583,44 @@ class EventGraph(EventStore):
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._store = store
-        self._reducers = topology._reducers
-        self._namespaces = topology._namespaces
-        self._loose_events = topology._loose_events
-
-        # services= takes one of two shapes:
-        #   • Mapping[str, Any] — name-keyed registry; resolution by handler
-        #     param name. Allows multiple instances of the same type
-        #     (e.g. primary + backup chat models).
-        #   • Sequence[Any] — type-keyed registry; resolution by handler
-        #     param annotation. Same-type collisions are rejected.
-        # The two forms are mutually exclusive within a single EventGraph.
-        self._services_by_type, self._services_by_name = _build_service_registries(
-            services
-        )
-        run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
-
-        self._handler_metas: list[HandlerMeta] = []
+        self._services = services
         self._compiled_graph: CompiledStateGraph | None = None
+        self._event_store = (
+            EventStore._of_graph(topology, checkpointer, self._compile)
+            if isinstance(checkpointer, BaseCheckpointSaver)
+            else None
+        )
 
-        reducer_names = topology.reducer_names
-        service_types = frozenset(self._services_by_type.keys())
-        service_names = frozenset(self._services_by_name.keys())
-        for unbound in topology._handler_metas:
-            meta = bind_services(
-                unbound,
-                reducer_names=reducer_names,
-                service_types=service_types,
-                service_names=service_names,
-            )
-            _verify_no_unclaimed_params(meta)
-            _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
-            self._handler_metas.append(meta)
+        service_types = frozenset(services.by_type)
+        service_names = frozenset(services.by_name)
+        self._bound: dict[str, BoundHandler] = {}
+        for meta in topology._handler_metas:
+            bound = meta.bind(service_types=service_types, service_names=service_names)
+            bound.require_claimed(topology.reducer_names)
+            _verify_service_name_types(bound, services)
+            self._bound[meta.node_name] = bound
 
     @property
-    def _namespaces_cache(self) -> NamespaceModel | None:
-        return self._topology._namespaces_cache
+    def topology(self) -> EventTopology:
+        """The topology that this graph runs."""
+        return self._topology
 
-    def _serde_scope(
-        self,
-    ) -> tuple[tuple[type[Namespace], ...], tuple[type[Event], ...]]:
-        """See :meth:`EventTopology._serde_scope`."""
-        return self._topology._serde_scope()
+    @property
+    def store(self) -> EventStore:
+        """The :class:`EventStore` of the threads of this graph.
+
+        It finds, abandons and rewrites stored threads. It settles a thread
+        through this graph, with its services. Raises ``ValueError`` when
+        the graph has no checkpointer.
+        """
+        if self._event_store is None:
+            raise ValueError("store requires a checkpointer")
+        return self._event_store
+
+    def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
+        if not isinstance(self._checkpointer, BaseCheckpointSaver):
+            raise ValueError(f"{method}() requires a checkpointer")
+        return self._checkpointer
 
     def namespaces(self) -> NamespaceModel:
         """Return the :class:`NamespaceModel` of the topology. See
@@ -2669,7 +2636,9 @@ class EventGraph(EventStore):
         """
         from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
-        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
+        return Reflection(
+            log, model=self.namespaces(), reducers=self._topology._reducers
+        )
 
     @property
     def reducer_names(self) -> frozenset[str]:
@@ -2708,19 +2677,21 @@ class EventGraph(EventStore):
     def _compile(self) -> CompiledStateGraph:
         """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
         if self._compiled_graph is None:
-            self._compiled_graph = _compile_state_graph(
-                self._handler_metas,
-                reducers=self._reducers,
-                return_contracts=self._topology._return_contracts,
-                model_provider=self.namespaces,
+            self._compiled_graph = self._topology.compile(
+                self._handler_node,
                 max_rounds=self._max_rounds,
                 recursion_limit=self._recursion_limit,
-                services_by_type=self._services_by_type,
-                services_by_name=self._services_by_name,
                 checkpointer=self._checkpointer,
                 store=self._store,
             )
         return self._compiled_graph
+
+    def _handler_node(self, meta: HandlerMeta) -> RunnableLambda:
+        return self._topology.handler_node(
+            self._bound[meta.node_name],
+            services_by_type=self._services.by_type,
+            services_by_name=self._services.by_name,
+        )
 
     @staticmethod
     def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
@@ -2822,11 +2793,8 @@ class EventGraph(EventStore):
                 # Not ``domains``: a namespace can reach the graph through
                 # ``handlers=`` alone, and its events would then keep
                 # resolving by import — the bleed #155 exists to close.
-                # ``graph._namespaces`` is the full set.
-                namespaces, events = graph._serde_scope()
-                checkpointer.serde = NamespaceAwareSerde(
-                    namespaces=namespaces, events=events
-                )
+                # The topology holds the full set.
+                checkpointer.serde = graph._topology.serde()
 
         return graph
 
@@ -3023,7 +2991,7 @@ class EventGraph(EventStore):
         log = self.get_state(config).events
         if self._unresumable_short_circuits(log, config):
             return log
-        return self._settle(config, self._unresumable_event(value))
+        return self.store._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
@@ -3033,7 +3001,7 @@ class EventGraph(EventStore):
         log = (await self.aget_state(config)).events
         if self._unresumable_short_circuits(log, config):
             return log
-        return await self._asettle(config, self._unresumable_event(value))
+        return await self.store._asettle(config, self._unresumable_event(value))
 
     @staticmethod
     def _unresumable_event(value: Event) -> Unresumable:
@@ -3165,7 +3133,7 @@ class EventGraph(EventStore):
         graph, unlike discovery (:meth:`threads_paused_on`) or
         ``abandon()``, which read the checkpoint directly.
         """
-        log = self._events(snapshot)
+        log = EventStore._events(snapshot)
         is_interrupted = self._is_interrupted(snapshot)
         interrupted = log.latest(Interrupted) if is_interrupted else None
         if is_interrupted and interrupted is None:
@@ -3226,7 +3194,7 @@ class EventGraph(EventStore):
         """Incrementally update reducer state with a single new event."""
         changed: set[str] = set()
         for name in reducer_names:
-            r = self._reducers[name]
+            r = self._topology._reducers[name]
             contribution = r.collect([event])
             if r.has_contributions(contribution):
                 reducer_fn = getattr(r, "reducer", None)
@@ -3242,15 +3210,15 @@ class EventGraph(EventStore):
     def _resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
         """Return reducer names to include, or empty list for disabled."""
         if include_reducers is True:
-            return list(self._reducers.keys())
+            return list(self._topology._reducers.keys())
         if include_reducers:  # non-empty list
-            unknown = set(include_reducers) - set(self._reducers.keys())
+            unknown = set(include_reducers) - set(self._topology._reducers.keys())
             if unknown:
                 warn_user(
                     f"Unknown reducer name(s) {unknown} in include_reducers; "
-                    f"available: {set(self._reducers.keys())}",
+                    f"available: {set(self._topology._reducers.keys())}",
                 )
-            return [n for n in include_reducers if n in self._reducers]
+            return [n for n in include_reducers if n in self._topology._reducers]
         return []
 
     @staticmethod
@@ -3286,7 +3254,8 @@ class EventGraph(EventStore):
         if not new_events:
             return prev_count, []
         reducers = {
-            name: state.get(name, self._reducers[name].empty) for name in reducer_names
+            name: state.get(name, self._topology._reducers[name].empty)
+            for name in reducer_names
         }
         return len(all_events), [
             StreamFrame(event=e, reducers=reducers, changed_reducers=None)
@@ -3329,10 +3298,10 @@ class EventGraph(EventStore):
         for name in reducer_names:
             if checkpoint_values is not None:
                 reducer_state[name] = checkpoint_values.get(
-                    name, self._reducers[name].empty
+                    name, self._topology._reducers[name].empty
                 )
             else:
-                reducer_state[name] = self._reducers[name].seed(seeds)
+                reducer_state[name] = self._topology._reducers[name].seed(seeds)
 
         # Merge seed contributions on top of checkpointed state.
         # - On astream_events second-run: seeds carry new events whose
@@ -3358,8 +3327,8 @@ class EventGraph(EventStore):
                 changed = frozenset(
                     name
                     for name in reducer_names
-                    if self._reducers[name].has_contributions(
-                        self._reducers[name].collect([s])
+                    if self._topology._reducers[name].has_contributions(
+                        self._topology._reducers[name].collect([s])
                     )
                 )
                 yield StreamFrame(

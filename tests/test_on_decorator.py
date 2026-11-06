@@ -13,12 +13,13 @@ from langgraph_events import (
     HandlerRaised,
     IntegrationEvent,
     Invariant,
+    ScalarReducer,
     on,
 )
 from langgraph_events._event import Interrupted, Resumed
 from langgraph_events._handler import (
     _resolve_each_annotation,
-    extract_handler_meta,
+    classify_handler,
 )
 
 
@@ -36,6 +37,9 @@ class SampleEvent(IntegrationEvent):
 
 class MustBeTrue(Invariant):
     pass
+
+
+_MESSAGES = ScalarReducer(name="messages", event_type=SampleEvent, fn=lambda e: e.x)
 
 
 # Declared before ``LateService`` on purpose. Bare @on resolves hints at
@@ -495,7 +499,7 @@ def describe_on_annotation_inference():
                 assert handler._field_matchers == {"interrupted": ApprovalRequested}
 
 
-def describe_extract_handler_meta():
+def describe_classify_handler():
 
     def when_basic_handler():
 
@@ -504,7 +508,7 @@ def describe_extract_handler_meta():
             async def my_handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(my_handler)
+            meta = classify_handler(my_handler, reducer_names=frozenset())
             assert meta.event_types == (SampleEvent,)
             assert "my_handler" in meta.name
 
@@ -513,7 +517,7 @@ def describe_extract_handler_meta():
             async def handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.is_async is True
 
         def it_detects_sync_handlers():
@@ -521,7 +525,7 @@ def describe_extract_handler_meta():
             def handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.is_async is False
 
     def when_handler_wants_log():
@@ -531,7 +535,7 @@ def describe_extract_handler_meta():
             async def handler(event: SampleEvent, log: EventLog):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.wants_log is True
 
     def when_handler_has_no_log():
@@ -541,7 +545,7 @@ def describe_extract_handler_meta():
             async def handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.wants_log is False
 
     def when_function_not_decorated():
@@ -551,7 +555,7 @@ def describe_extract_handler_meta():
                 pass
 
             with pytest.raises(ValueError, match="not decorated"):
-                extract_handler_meta(plain_fn)
+                classify_handler(plain_fn, reducer_names=frozenset())
 
     def when_reducer_params():
 
@@ -560,7 +564,7 @@ def describe_extract_handler_meta():
             def handler(event: SampleEvent, messages: list, history: list):
                 pass
 
-            meta = extract_handler_meta(
+            meta = classify_handler(
                 handler, reducer_names=frozenset({"messages", "history"})
             )
             assert set(meta.reducer_params) == {"messages", "history"}
@@ -570,7 +574,7 @@ def describe_extract_handler_meta():
             def handler(event: SampleEvent, messages: list, other: str):
                 pass
 
-            meta = extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+            meta = classify_handler(handler, reducer_names=frozenset({"messages"}))
             assert meta.reducer_params == ("messages",)
             assert "other" not in meta.reducer_params
             assert "event" not in meta.reducer_params
@@ -584,7 +588,8 @@ def describe_extract_handler_meta():
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+                with pytest.raises(TypeError, match="mesages"):
+                    EventGraph([handler], reducers=[_MESSAGES])
 
             assert len(w) == 1
             assert "mesages" in str(w[0].message)
@@ -598,7 +603,7 @@ def describe_extract_handler_meta():
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+                EventGraph([handler], reducers=[_MESSAGES])
 
             assert len(w) == 0
 
@@ -609,7 +614,8 @@ def describe_extract_handler_meta():
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                extract_handler_meta(handler, reducer_names=frozenset())
+                with pytest.raises(TypeError, match="whatever"):
+                    EventGraph([handler])
 
             assert len(w) == 0
 
@@ -620,7 +626,7 @@ def describe_extract_handler_meta():
             async def handler(event: Event, log: EventLog):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.event_types == (EventA, EventB)
             assert meta.wants_log is True
 
@@ -631,7 +637,7 @@ def describe_extract_handler_meta():
             def handler(event: Resumed, interrupted: ApprovalRequested):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.field_matchers == (("interrupted", ApprovalRequested, True),)
 
         def it_identifies_field_inject_params_from_signature():
@@ -639,7 +645,7 @@ def describe_extract_handler_meta():
             def handler(event: Resumed, interrupted: ApprovalRequested):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.field_inject_params == frozenset({"interrupted"})
 
         def when_field_param_not_in_signature():
@@ -649,7 +655,7 @@ def describe_extract_handler_meta():
                 def handler(event: Resumed):
                     pass
 
-                meta = extract_handler_meta(handler)
+                meta = classify_handler(handler, reducer_names=frozenset())
                 assert meta.field_inject_params == frozenset()
 
         def it_does_not_warn_about_field_inject_params():
@@ -659,7 +665,7 @@ def describe_extract_handler_meta():
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                extract_handler_meta(handler, reducer_names=frozenset({"messages"}))
+                EventGraph([handler], reducers=[_MESSAGES])
 
             typo_warnings = [x for x in w if "Typo?" in str(x.message)]
             assert len(typo_warnings) == 0
@@ -671,7 +677,7 @@ def describe_extract_handler_meta():
             def handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.raises == (_DomainError, _OtherError)
 
         def it_extracts_single_as_tuple():
@@ -679,7 +685,7 @@ def describe_extract_handler_meta():
             def handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.raises == (_DomainError,)
 
     def when_raises_omitted_from_decorator():
@@ -689,7 +695,7 @@ def describe_extract_handler_meta():
             def handler(event: SampleEvent):
                 pass
 
-            meta = extract_handler_meta(handler)
+            meta = classify_handler(handler, reducer_names=frozenset())
             assert meta.raises == ()
 
     def when_type_hints_cannot_be_resolved():
@@ -704,7 +710,7 @@ def describe_extract_handler_meta():
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                meta = extract_handler_meta(handler)
+                meta = classify_handler(handler, reducer_names=frozenset())
 
             assert len(w) == 1
             message = str(w[0].message)
@@ -727,7 +733,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert extract_handler_meta(place).name == "submit"
+            assert classify_handler(place, reducer_names=frozenset()).name == "submit"
 
     def when_node_name_is_omitted():
         def it_defaults_to_the_function_name():
@@ -735,7 +741,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert extract_handler_meta(place).name == "place"
+            assert classify_handler(place, reducer_names=frozenset()).name == "place"
 
     def when_previously_is_a_single_name():
         def it_records_one_alias():
@@ -743,7 +749,9 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert extract_handler_meta(place).previous_names == ("old_place",)
+            assert classify_handler(
+                place, reducer_names=frozenset()
+            ).previous_names == ("old_place",)
 
     def when_previously_is_a_tuple():
         def it_records_all_aliases():
@@ -751,7 +759,9 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert extract_handler_meta(place).previous_names == ("a", "b")
+            assert classify_handler(
+                place, reducer_names=frozenset()
+            ).previous_names == ("a", "b")
 
     def when_previously_is_omitted():
         def it_defaults_to_empty():
@@ -759,7 +769,9 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert extract_handler_meta(place).previous_names == ()
+            assert (
+                classify_handler(place, reducer_names=frozenset()).previous_names == ()
+            )
 
     def when_previously_contains_a_non_string():
         def it_raises_TypeError_at_decoration():
@@ -813,7 +825,7 @@ def describe_partial_hint_resolution():
 
             with warnings.catch_warnings(record=True):
                 warnings.simplefilter("always")
-                meta = extract_handler_meta(handler)
+                meta = classify_handler(handler, reducer_names=frozenset())
 
             assert meta.log_param == "log"
 
@@ -845,8 +857,8 @@ def describe_partial_hint_resolution():
                 warnings.simplefilter("always")
                 graph = EventGraph([handler], services={"mailer": object()})
 
-            meta = graph._handler_metas[0]
-            assert meta.service_name_params == (("mailer", "mailer"),)
+            (bound,) = graph._bound.values()
+            assert bound.service_name_params == (("mailer", "mailer"),)
 
     def when_a_name_is_declared_after_the_handler():
         # A failed resolution must not be cached. The name exists by the time
@@ -855,8 +867,8 @@ def describe_partial_hint_resolution():
         def it_resolves_the_annotation_at_graph_build():
             graph = EventGraph([_forward_ref_handler], services=[LateService()])
 
-            meta = graph._handler_metas[0]
-            assert meta.service_params == (("dep", LateService),)
+            (bound,) = graph._bound.values()
+            assert bound.service_params == (("dep", LateService),)
 
     def when_the_handler_declares_a_pep_695_type_parameter():
         # ``get_type_hints`` puts ``fn.__type_params__`` in scope. The
@@ -885,7 +897,7 @@ def describe_partial_hint_resolution():
         def it_builds_the_graph():
             graph = EventGraph([_MethodHandlerHost().react])
 
-            assert graph._handler_metas[0].event_types == (SampleEvent,)
+            assert graph._topology._handler_metas[0].event_types == (SampleEvent,)
 
     def when_the_event_annotation_resolves_but_another_does_not():
 
@@ -907,7 +919,7 @@ def describe_partial_hint_resolution():
                 with warnings.catch_warnings(record=True):
                     warnings.simplefilter("always")
                     handler = on(undecorated)
-                    meta = extract_handler_meta(handler)
+                    meta = classify_handler(handler, reducer_names=frozenset())
 
                 assert meta.event_types == (SampleEvent,)
 

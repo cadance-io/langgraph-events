@@ -760,7 +760,7 @@ def describe_Command_handle():
                         def handle(self) -> None:
                             return None
 
-                (meta,) = EventGraph([_Aliased.Cmd])._handler_metas
+                (meta,) = EventGraph([_Aliased.Cmd])._topology._handler_metas
                 assert meta.previous_names == ("legacy_aliased",)
 
         def when_previously_is_declared_as_a_dataclass_field():
@@ -828,7 +828,8 @@ def describe_Command_handle():
 
         def _name_to_command(graph: EventGraph) -> dict[str, type]:
             return {
-                meta.node_name: meta.fn._inline_command for meta in graph._handler_metas
+                meta.node_name: meta.fn._inline_command
+                for meta in graph._topology._handler_metas
             }
 
         def when_command_registered():

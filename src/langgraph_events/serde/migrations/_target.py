@@ -51,7 +51,8 @@ class MigrationTarget:
     """One graph, its committed baseline and its store.
 
     ``graph`` builds the graph on the checkpointer it receives. It can
-    return an :class:`~langgraph_events.EventGraph`, or an
+    return an :class:`~langgraph_events.EventGraph`, whose
+    :attr:`~langgraph_events.EventGraph.store` the commands use, or an
     :class:`~langgraph_events.EventStore` when the commands must not build
     the services of a run. The gate passes an empty in-memory saver, so
     building reads no store.
@@ -161,11 +162,14 @@ class MigrationTarget:
         except TypeError as error:
             raise TargetError(
                 f"The graph factory of the target cannot take a checkpointer: "
-                f"{error}. Write it as def build(checkpointer) -> EventGraph, "
-                f"and build the graph on that checkpointer."
+                f"{error}. Write it as def build(checkpointer) -> EventGraph | "
+                f"EventStore, and build it on that checkpointer."
             ) from error
-        store = self.graph(saver)
+        from langgraph_events._graph import EventStore as _Store  # noqa: PLC0415
+
+        built = self.graph(saver)
         try:
+            store = built if isinstance(built, _Store) else built.store
             serde = store._require_namespace_aware_serde("MigrationTarget.graph")
         except ValueError as error:
             raise TargetError(str(error)) from error

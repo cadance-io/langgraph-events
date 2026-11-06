@@ -9,7 +9,7 @@ import pytest
 from conftest import Started
 
 from langgraph_events import EventGraph, RunScoped, on
-from langgraph_events._handler import extract_handler_meta
+from langgraph_events._handler import classify_handler
 from langgraph_events._internal import _build_inject
 from langgraph_events._namespace import NamespaceModel
 
@@ -167,11 +167,13 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
-                meta = extract_handler_meta(handle, service_names=frozenset({"model"}))
+                bound = classify_handler(handle, reducer_names=frozenset()).bind(
+                    service_types=frozenset(), service_names=frozenset({"model"})
+                )
 
                 with pytest.raises(ValueError, match=r"handle.*model"):
                     _build_inject(
-                        meta,
+                        bound,
                         {"events": []},
                         {},
                         None,
