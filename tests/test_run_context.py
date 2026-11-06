@@ -20,6 +20,7 @@ from langgraph_events import (
     on,
 )
 from langgraph_events.agui import AGUIAdapter
+from langgraph_events.serde import assert_resume_recovers
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -299,6 +300,26 @@ def describe_context_schema():
 
                     with pytest.raises(TypeError, match="RunFacts"):
                         await _adrain(resume(graph))
+
+    def describe_assert_resume_recovers():
+        def it_passes_the_context_to_both_runs():
+            saver = MemorySaver()
+            before, after = (
+                EventGraph(
+                    [ask, note_answer], context_schema=RunFacts, checkpointer=saver
+                )
+                for _ in range(2)
+            )
+
+            log = assert_resume_recovers(
+                before,
+                after,
+                seed=Started(),
+                resume_with=Answered(),
+                context=RunFacts("fr"),
+            )
+
+            assert log.latest(Ended) == Ended(result="fr")
 
 
 def _chat_graph() -> EventGraph:
