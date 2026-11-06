@@ -29,7 +29,19 @@ target = MigrationTarget(
 )
 ```
 
-`graph` receives a checkpointer and returns the graph. The gate passes an empty `MemorySaver`, so it reads no store. The graph must carry a `NamespaceAwareSerde`. `from_namespaces(..., checkpointer=...)` wires one. A hand-built serde with `migrations=` also works. Set it on the checkpointer before you build the graph. `store` is for the commands that open the store. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
+`graph` receives a checkpointer and returns the graph. It can return an `EventStore` instead, when a command must not build the services of a run. Set the serde on the checkpointer yourself in that case:
+
+```python
+from langgraph_events import EventStore, EventTopology
+from langgraph_events.serde import NamespaceAwareSerde
+
+
+def build_store(checkpointer):
+    checkpointer.serde = NamespaceAwareSerde(namespaces=(Order, Shipment))
+    return EventStore(EventTopology([Order.Place, Shipment.Ship]), checkpointer)
+```
+
+The rest of this section applies to both forms. The gate passes an empty `MemorySaver`, so it reads no store. The graph must carry a `NamespaceAwareSerde`. `from_namespaces(..., checkpointer=...)` wires one. A hand-built serde with `migrations=` also works. Set it on the checkpointer before you build the graph. `store` is for the commands that open the store. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
 The gate judges every event class that the graph can store. That set holds each class that the serde reads, from its `namespaces=` and its `events=`. It holds each class of a namespace that the graph uses. It holds each event outside every namespace that a handler subscribes to or returns, for example `HandlerRaised` or an `IntegrationEvent`. A class outside the serde revives by import, so the gate records it as live. A serde built with `namespaces=` only needs no `events=` for the gate. A mixin that a handler subscribes to is not a stored class, and the gate does not record it.
 

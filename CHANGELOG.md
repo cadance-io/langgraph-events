@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventTopology`, `EventGraph.of()` and `EventStore` split a graph from its services.**
+  Before, every client of a graph had to supply every service value, also a client that
+  never runs a handler. Examples are a graph renderer, the migration gate, a store rewrite
+  and an abandon script. `EventTopology(handlers, reducers=...)` runs every construction
+  check that needs no service. `topology.requirements` lists each parameter that only a
+  service can fill. `EventGraph.of(topology, services=..., ...)` binds the services and
+  raises the same `TypeError` as `EventGraph(...)` for a missing one. `EventStore(topology,
+  checkpointer)` finds, abandons, plans and rewrites stored threads with no services.
+  `MigrationTarget(graph=...)` accepts a factory that returns an `EventStore`.
+  `EventGraph(...)` keeps its signature and its behavior. See *Topology, graph and store* in
+  `docs/concepts.md`.
+
 ## [0.46.1] - 2026-11-03
 
 ### Fixed

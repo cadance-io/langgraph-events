@@ -199,6 +199,44 @@ graph = EventGraph([place, respond], max_rounds=100)
 
 Topology is derived from handler subscriptions. No manual node or edge wiring is needed. `max_rounds` (default 100) sets the recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) on overflow. `graph.compiled` exposes the underlying `CompiledStateGraph` for subgraph composition or direct state access.
 
+### Topology, graph and store { #topology-graph-and-store }
+
+`EventGraph` has three parts. Each part is a class that you can build alone:
+
+| Class | Holds | Needs | Use it to |
+|---|---|---|---|
+| `EventTopology` | the handlers, reducers and namespaces | no service, no checkpointer | render the graph, list handler names, feed the migration gate |
+| `EventStore` | a topology and a checkpointer | no service | find, abandon, rewrite and verify stored threads |
+| `EventGraph` | a topology, its services and a checkpointer | every service a handler asks for | run, resume and stream threads |
+
+A client that never runs a handler does not need the services. Build the topology once, and
+bind the services only where a handler runs:
+
+```python
+from langgraph_events import EventGraph, EventStore, EventTopology
+
+topology = EventTopology([place, respond], reducers=[messages])
+print(topology.namespaces().mermaid())
+print(topology.requirements)  # one ServiceRequirement per service parameter
+
+graph = EventGraph.of(topology, services={"llm": llm}, checkpointer=saver)
+
+store = EventStore(topology, saver)
+for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
+    store.abandon(config, reason="retired")
+```
+
+- `topology.requirements` lists each handler parameter that only a service can fill, as
+  `ServiceRequirement(handler, param, annotation)`. The annotation is
+  `inspect.Parameter.empty` when the parameter has none.
+- `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
+  `reducers`. A requirement that no service matches raises the same `TypeError` as
+  `EventGraph(...)`.
+- `EventGraph(handlers, ...)` is `EventGraph.of(EventTopology(handlers, reducers=...), ...)`.
+- An `EventGraph` is an `EventStore`, so the store methods stay on the graph.
+- `EventStore` does not wire a serde. Set a `NamespaceAwareSerde` on the checkpointer before
+  you call a method that needs one. See [Event migrations](event-migrations.md).
+
 ### Namespace introspection & visualization
 
 - `graph.namespaces()` returns a `NamespaceModel`: code-derived structure and choreography.
