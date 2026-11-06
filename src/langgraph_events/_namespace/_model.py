@@ -34,10 +34,10 @@ from langgraph_events._namespace._smells import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from langgraph_events._graph import ReturnInfo
     from langgraph_events._handler import HandlerMeta
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._retry import RetryPolicy
+    from langgraph_events._topology import ReturnInfo
 
 
 View = Literal["structure", "choreography"]

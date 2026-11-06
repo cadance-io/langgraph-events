@@ -9,9 +9,10 @@ import pytest
 from conftest import Started
 
 from langgraph_events import EventGraph, RunScoped, on
-from langgraph_events._handler import extract_handler_meta
+from langgraph_events._handler import HandlerMeta
 from langgraph_events._internal import _build_inject
 from langgraph_events._namespace import NamespaceModel
+from langgraph_events._services import NamedServices
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -167,15 +168,16 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
-                meta = extract_handler_meta(handle, service_names=frozenset({"model"}))
+                bound = NamedServices({"model": RunScoped(_model_for)}).bind(
+                    HandlerMeta.of(handle, reducer_names=frozenset()), None
+                )
 
                 with pytest.raises(ValueError, match=r"handle.*model"):
                     _build_inject(
-                        meta,
+                        bound,
                         {"events": []},
                         {},
                         None,
-                        services_by_name={"model": RunScoped(_model_for)},
                         model_provider=lambda: NamespaceModel([]),
                     )
 

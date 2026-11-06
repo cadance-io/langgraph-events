@@ -53,10 +53,14 @@ from langgraph_events._graph import (
     LLMStreamEnd,
     LLMToken,
     LLMToolCallChunk,
-    OrphanedEventWarning,
     UnresumableError,
 )
-from langgraph_events._handler import on
+from langgraph_events._handler import (
+    ServiceRequirement,
+    Unannotated,
+    UnresolvedAnnotation,
+    on,
+)
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import CommandPrivacyError
 from langgraph_events._namespace._smells import (
@@ -78,6 +82,8 @@ from langgraph_events._reflection import QueryTool, Reflection
 from langgraph_events._retry import RetryPolicy
 from langgraph_events._rewrite import RewriteReport, ThreadRewrite
 from langgraph_events._services import RunScoped
+from langgraph_events._store import EventStore
+from langgraph_events._topology import EventTopology, OrphanedEventWarning
 from langgraph_events._types import (
     HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
@@ -125,6 +131,8 @@ __all__ = [
     "Event",
     "EventGraph",
     "EventLog",
+    "EventStore",
+    "EventTopology",
     "FoldReducer",
     "Foldable",
     "FrameworkEvent",
@@ -162,11 +170,14 @@ __all__ = [
     "RunScoped",
     "ScalarReducer",
     "Scatter",
+    "ServiceRequirement",
     "SourceDropped",
     "SystemEvent",
     "SystemPromptSet",
     "ThreadRewrite",
+    "Unannotated",
     "UnknownCause",
+    "UnresolvedAnnotation",
     "Unresumable",
     "UnresumableError",
     "aemit_custom",

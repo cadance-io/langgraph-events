@@ -7,17 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The store methods move from `EventGraph` to `EventGraph.event_store`.** `EventGraph` no
+  longer subclasses `EventStore`. It holds one, so the store methods are not declared twice.
+  No forward stays on `EventGraph`, so an old call raises `AttributeError`. Migrate each call:
+
+  | Removed from `EventGraph` | New path |
+  |---|---|
+  | `graph.threads_paused_on(...)` | `graph.event_store.threads_paused_on(...)` |
+  | `graph.athreads_paused_on(...)` | `graph.event_store.athreads_paused_on(...)` |
+  | `graph.abandon(...)` | `graph.event_store.abandon(...)` |
+  | `graph.aabandon(...)` | `graph.event_store.aabandon(...)` |
+  | `graph.unrevivable_threads(...)` | `graph.event_store.unrevivable_threads(...)` |
+  | `graph.aunrevivable_threads(...)` | `graph.event_store.aunrevivable_threads(...)` |
+  | `graph.plan_rewrite(...)` | `graph.event_store.plan_rewrite(...)` |
+  | `graph.aplan_rewrite(...)` | `graph.event_store.aplan_rewrite(...)` |
+  | `graph.rewrite_store(...)` | `graph.event_store.rewrite_store(...)` |
+  | `graph.arewrite_store(...)` | `graph.event_store.arewrite_store(...)` |
+
+  A client that has no services can use `EventStore(topology, saver)` for each of them. On a
+  graph with no checkpointer, `graph.event_store` raises `ValueError`. `graph.event_store` is
+  `EventStore(graph.topology, checkpointer)`. A settle runs no handler, so its checkpoints are
+  the same as before. The `store=` keyword of `EventGraph(...)` is still the LangGraph
+  `BaseStore`.
+- **The unclaimed-parameter `TypeError` has new text.** It names the annotation of each
+  missing parameter, the types or name keys that `services=` holds, and the call that received
+  `services=`: `EventGraph(services=)` or `EventGraph.of(..., services=)`. A test that matches
+  the old text must change.
+
 ### Added
 
 - **`EventGraph(context_schema=...)` exposes LangGraph's typed run context.** Pass the
-  context with `context=` on each run call. A handler parameter annotated with the
-  schema type receives it. A `RunScoped` factory with two required positional
-  parameters receives `(config, context)`. The context is not checkpointed. When the
-  schema is set, a run or a resume without `context=` raises `TypeError`. See
-  [Run context](docs/concepts.md#run-context).
+  context with `context=` on each run call. `EventTopology(context_schema=...)` holds the
+  schema, and `EventGraph.of(topology, ...)` reads it. A handler parameter annotated with
+  exactly the schema type receives the context, so it is not a service requirement. A
+  `RunScoped` factory whose second parameter is annotated with the schema type receives
+  `(config, context)`. The build refuses another second parameter on a graph with a schema,
+  and a type-keyed service that is an instance of the schema. The context is not
+  checkpointed. When the schema is set, a run or a resume without `context=`, or with a
+  context of another type, raises `TypeError`. `topology.require_context(context)` runs the
+  same check. See [Run context](docs/concepts.md#run-context).
+- **A run call refuses an unknown keyword.** `invoke()`, `resume()`, the stream methods and
+  their async twins take `context=` as a keyword. A keyword that LangGraph's `Pregel.stream`
+  does not take raises `TypeError`, so a typo such as `contxt=` no longer passes silently.
 - **`AGUIAdapter.stream()` takes `context=`.** The adapter passes it to the run on a
   start and on a resume. See [Run config](docs/agui.md#run-config).
 - **`assert_resume_recovers()` takes `context=`.** It passes the context to both runs.
+- **`EventTopology`, `EventGraph.of()` and `EventStore` split a graph from its services.**
+  Before, every client of a graph had to supply every service value, also a client that
+  never runs a handler. Examples are a graph renderer, the migration gate, a store rewrite
+  and an abandon script. `EventTopology(handlers, reducers=...)` runs every construction
+  check that needs no service. `topology.reducers` maps each reducer name to its reducer.
+  `topology.requirements` lists each parameter that only a
+  service can fill, as `ServiceRequirement(node, qualname, param, annotation)`. `node` is the
+  graph-node name of the handler. `qualname` is the module and qualified name of the handler
+  function. `annotation` is `Unannotated()` or `UnresolvedAnnotation(reason)` when no
+  annotation resolved. `EventGraph.of(topology, services=..., ...)` binds the services and
+  raises the same `TypeError` as `EventGraph(...)` for a missing one. `EventStore(topology,
+  checkpointer)` finds, abandons, plans and rewrites stored threads with no services.
+  `MigrationTarget(graph=...)` accepts a factory that returns an `EventStore`.
+  `topology.serde()` builds the `NamespaceAwareSerde` of a topology, the same serde that
+  `from_namespaces(..., checkpointer=...)` wires. A rewrite through `EventStore` needs
+  `checkpointer.serde = topology.serde()`, and the `ValueError` of a rewrite names that line. `EventTopology.from_namespaces(*namespaces,
+  handlers=...)` collects the handlers of `EventGraph.from_namespaces()`, so a store-only
+  client does not list every handler. `topology.resolve_reducer_names(include_reducers)` is
+  public, so an adapter does not read a private method. `EventGraph(...)` keeps its signature,
+  and it is the shortcut for `EventGraph.of(EventTopology(...), ...)`. See *Topology, graph and
+  store* in `docs/concepts.md`.
+
+### Changed
+
+- **A construction error names a handler in one format.** The format is
+  `Handler '<module>.<qualname>' (node '<node name>')`, for example
+  `Handler 'app.orders.Order.Place.handle' (node 'Order.Place')`. Before, each error used
+  another name: the function name, the node name, the command name or the name before the
+  dedup suffix. The node name of a renamed duplicate now shows its suffix, for example
+  `handle_2`. The format applies to the service errors, the return-type errors, the node-name
+  and `previously=` errors, the `raises=`, `retry=` and invariant checks, and the reactor
+  privacy error. The `RuntimeError` of a handler node in an `EventStore` uses it too. A test
+  that matches the old text must change.
+- **`EventGraph(...)` checks `services=` before the handlers.** The order is `on_unresumable`,
+  then `services=`, then the topology. Before, the empty-handlers check ran first, and the
+  command expansion, the namespace collision and the reserved reducer names were checked
+  before `services=`. Now `EventGraph([], on_unresumable="bogus")` raises the
+  `on_unresumable` `ValueError`, and `EventGraph([], services=[S(), S()])` raises the
+  same-type `TypeError`. The service checks of each handler run after every check that needs
+  no service. A handler with an unclaimed parameter and a second fault, for example a
+  `raises=` with no catcher, reports the second fault first. A name-keyed service that does
+  not satisfy its annotation is reported before an unclaimed parameter of the same handler.
+  A topology warning, for example `OrphanedEventWarning`, can fire before the
+  unclaimed-parameter `TypeError`. `EventGraph(handlers=[])` raises
+  `ValueError: EventTopology requires at least one handler`.
+- **`MigrationTarget` names its graph factory when the graph has no checkpointer.** The
+  `TargetError` says `MigrationTarget.graph returned a graph with no checkpointer`.
+- **No reducer typo warning for a variadic parameter.** A `*args` or `**kwargs` parameter of
+  a handler no longer gets the "don't match any reducer. Typo?" warning.
 
 ## [0.46.1] - 2026-11-03
 

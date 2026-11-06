@@ -105,7 +105,7 @@ class UnrevivedIdentity(NamedTuple):
     hold them. Not an ``Event`` subclass: a caller must never mistake
     this for a real, dispatchable event.
 
-    Exists for ``EventGraph.threads_paused_on()``/``abandon()``. These
+    Exists for ``EventStore.threads_paused_on()``/``abandon()``. These
     are the retirement tools that must keep working on a thread whose
     paused class was deleted before every thread was settled. Every
     other read path stays strict: an unrevivable identity there is a
@@ -650,11 +650,11 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         Yields a collector. Every identity degraded inside the block is
         appended to it, in read order, wherever it sat in the blob: a
         top-level event, a pending write, or a field nested inside a
-        live event. ``EventGraph.unrevivable_threads()`` reads this
+        live event. ``EventStore.unrevivable_threads()`` reads this
         collector. A reader that walked the checkpoint structure instead
         would miss the nested shapes.
 
-        For the retirement tools only: ``EventGraph.threads_paused_on()``,
+        For the retirement tools only: ``EventStore.threads_paused_on()``,
         ``abandon()`` and ``unrevivable_threads()``. These must keep
         working on a thread whose class was already deleted.
         ``loads_typed()`` stays strict outside this block, so a genuine
@@ -703,7 +703,7 @@ class NamespaceAwareSerde(JsonPlusSerializer):
         ``loads_typed`` call inside the block. So the caller knows which
         records each returned value holds.
 
-        For ``EventGraph.plan_rewrite()`` and ``rewrite_store()`` only.
+        For ``EventStore.plan_rewrite()`` and ``rewrite_store()`` only.
         Reentrant like :meth:`tolerate_unresolved`, and with the same
         per-instance-state caveat: do not read through this serde from
         another thread or task while the block is open.

@@ -137,7 +137,7 @@ class AGUIAdapter:
             raise ValueError(
                 "AGUIAdapter resume_factory requires a checkpointer on the EventGraph"
             )
-        if "messages" not in graph._reducers:
+        if "messages" not in graph.topology.reducers:
             raise ValueError(
                 "AGUIAdapter requires a message_reducer() on the EventGraph. "
                 "Add reducers=[message_reducer()] when constructing your "
@@ -176,7 +176,7 @@ class AGUIAdapter:
         # Note: `False` resolves to activation=["messages"] (so
         # MessagesSnapshot still works) while the projection returns `{}` —
         # empty StateSnapshot, populated MessagesSnapshot.  Intentional.
-        resolved = graph._resolve_reducer_names(include_reducers)
+        resolved = graph.topology.resolve_reducer_names(include_reducers)
         if "messages" not in resolved:
             include_reducers = (
                 [*include_reducers, "messages"]
@@ -527,7 +527,7 @@ class AGUIAdapter:
         see them via parameter injection.
         """
         updates: dict[str, Any] = {}
-        for name, reducer in self._graph._reducers.items():
+        for name, reducer in self._graph.topology.reducers.items():
             contribution = reducer.collect(events)
             if reducer.has_contributions(contribution):
                 updates[name] = contribution
@@ -866,7 +866,7 @@ class AGUIAdapter:
                 ``checkpoint_id`` or ``checkpoint_ns``.  ``stream()`` raises
                 it when it is called, before the stream starts.
         """
-        self._graph._require_context(context)
+        self._graph.topology.require_context(context)
         ctx = self._run_context(input_data)
         run_config = self._build_config(
             input_data,

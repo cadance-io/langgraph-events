@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from langgraph_events import EventGraph
+    from langgraph_events import EventGraph, EventStore
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
     from langgraph_events.serde.migrations._core import MigrationSet
 
@@ -50,8 +50,12 @@ class ThreadKey:
 class MigrationTarget:
     """One graph, its committed baseline and its store.
 
-    ``graph`` builds the graph on the checkpointer it receives. The gate
-    passes an empty in-memory saver, so building reads no store.
+    ``graph`` builds the graph on the checkpointer it receives. It can
+    return an :class:`~langgraph_events.EventGraph`, whose
+    :attr:`~langgraph_events.EventGraph.event_store` the commands use, or an
+    :class:`~langgraph_events.EventStore` when the commands must not build
+    the services of a run. The gate passes an empty in-memory saver, so
+    building reads no store.
     ``baseline`` is the path of the committed baseline file. ``store``
     returns a context manager that opens the real sync checkpointer. The
     ``backup``, ``rewrite``, ``restore`` and ``drop-backups`` commands use
@@ -65,7 +69,7 @@ class MigrationTarget:
     :func:`drop_backups`, which act on the whole store, refuse it.
     """
 
-    graph: Callable[[BaseCheckpointSaver[Any]], EventGraph]
+    graph: Callable[[BaseCheckpointSaver[Any]], EventGraph | EventStore]
     baseline: Path
     store: Callable[[], AbstractContextManager[BaseCheckpointSaver[Any]]] | None = None
     threads: Callable[[BaseCheckpointSaver[Any]], Iterable[ThreadKey]] | None = None
@@ -145,7 +149,8 @@ class MigrationTarget:
         return self.build(MemorySaver())
 
     def build(self, saver: BaseCheckpointSaver[Any]) -> Snapshot:
-        """The graph on *saver*, its serde and its client migrations.
+        """The store of the graph on *saver*, its serde and its client
+        migrations.
 
         Raises:
             TargetError: when ``graph`` cannot take a checkpointer, when the
@@ -157,12 +162,21 @@ class MigrationTarget:
         except TypeError as error:
             raise TargetError(
                 f"The graph factory of the target cannot take a checkpointer: "
-                f"{error}. Write it as def build(checkpointer) -> EventGraph, "
-                f"and build the graph on that checkpointer."
+                f"{error}. Write it as def build(checkpointer) -> EventGraph | "
+                f"EventStore, and build it on that checkpointer."
             ) from error
-        graph = self.graph(saver)
+        from langgraph_events._store import EventStore as _Store  # noqa: PLC0415
+
+        built = self.graph(saver)
         try:
-            serde = graph._require_namespace_aware_serde("MigrationTarget.graph")
+            store = built if isinstance(built, _Store) else built.event_store
+        except ValueError as error:
+            raise TargetError(
+                "MigrationTarget.graph returned a graph with no checkpointer. "
+                "Build the graph on the checkpointer that the factory receives."
+            ) from error
+        try:
+            serde = store._require_namespace_aware_serde("MigrationTarget.graph")
         except ValueError as error:
             raise TargetError(str(error)) from error
         try:
@@ -171,7 +185,7 @@ class MigrationTarget:
             raise TargetError(
                 f"A client migration has no valid key: {error}"
             ) from error
-        return Snapshot(graph, serde, migrations)
+        return Snapshot(store, serde, migrations)
 
 
 def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
@@ -229,14 +243,14 @@ def _no_thread_listing(saver: BaseCheckpointSaver[Any], failure: str) -> str:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """The graph, its serde and its client migrations.
+    """The store of the graph, its serde and its client migrations.
 
     The event classes of the snapshot are the classes the serde reads and
     the classes the graph can store. A graph class outside the serde
     revives by import, so it is live too.
     """
 
-    graph: EventGraph
+    store: EventStore
     serde: NamespaceAwareSerde
     migrations: MigrationSet
 
@@ -267,4 +281,4 @@ class Snapshot:
         )
 
     def _graph_classes(self) -> list[type]:
-        return _serde_event_classes(*self.graph._serde_scope())
+        return _serde_event_classes(*self.store.topology._serde_scope())

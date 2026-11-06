@@ -17,9 +17,9 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
-    from langgraph_events._graph import ReturnContract
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._topology import ReturnContract
 
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
@@ -45,7 +45,7 @@ from langgraph_events._event import (
     Scatter,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import HandlerMeta  # noqa: TC001
+from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import ReducerNotSetError
 from langgraph_events._services import RunScoped
@@ -312,16 +312,15 @@ def make_dispatch(
 
 
 def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
-    meta: HandlerMeta,
+    bound: BoundHandler,
     state: StateDict,
     reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
-    services_by_type: dict[type, Any] | None = None,
-    services_by_name: dict[str, Any] | None = None,
     *,
     model_provider: Callable[[], NamespaceModel],
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call."""
+    meta = bound.meta
     inject: dict[str, Any] = {}
     if meta.log_param or meta.reflection_param:
         log_view = EventLog._from_state(
@@ -359,32 +358,30 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
         inject[meta.store_param] = store
     if meta.context_param:
         inject[meta.context_param] = _runtime_context(meta)
-    if services_by_type and meta.service_params:
-        for param_name, svc_type in meta.service_params:
-            inject[param_name] = services_by_type[svc_type]
-    if services_by_name and meta.service_name_params:
-        for param_name, svc_name in meta.service_name_params:
-            svc = services_by_name[svc_name]
-            if isinstance(svc, RunScoped):
-                if config is None:
-                    raise ValueError(
-                        f"Handler '{meta.name}' requested the run-scoped service "
-                        f"'{param_name}', but runtime config is missing."
-                    )
-                args = (
-                    (config, _runtime_context(meta)) if svc.takes_context else (config,)
-                )
-                try:
-                    svc = svc.factory(*args)
-                except Exception as exc:
-                    # Keep the type, so a caller that catches it still can.
-                    # The note names the seam, like the missing-config branch.
-                    exc.add_note(
-                        f"Handler '{meta.name}' requested the run-scoped service "
-                        f"'{param_name}', but its factory raised."
-                    )
-                    raise
-            inject[param_name] = svc
+    for param_name, service in bound.services:
+        if not isinstance(service, RunScoped):
+            inject[param_name] = service
+            continue
+        if config is None:
+            raise ValueError(
+                f"Handler '{meta.name}' requested the run-scoped service "
+                f"'{param_name}', but runtime config is missing."
+            )
+        args = (
+            (config, _runtime_context(meta))
+            if param_name in bound.context_services
+            else (config,)
+        )
+        try:
+            inject[param_name] = service.factory(*args)
+        except Exception as exc:
+            # Keep the type, so a caller that catches it still can.
+            # The note names the seam, like the missing-config branch.
+            exc.add_note(
+                f"Handler '{meta.name}' requested the run-scoped service "
+                f"'{param_name}', but its factory raised."
+            )
+            raise
     return inject
 
 
@@ -841,11 +838,9 @@ async def _process_events_async(
 
 
 def make_handler_node(
-    meta: HandlerMeta,
+    bound: BoundHandler,
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: ReturnContract | None = None,
-    services_by_type: dict[type, Any] | None = None,
-    services_by_name: dict[str, Any] | None = None,
     *,
     model_provider: Callable[[], NamespaceModel],
 ) -> RunnableLambda:
@@ -866,21 +861,18 @@ def make_handler_node(
     )
     from langgraph.types import interrupt as lg_interrupt  # noqa: PLC0415
 
+    meta = bound.meta
     reds = reducers or {}
-    svcs_by_type = services_by_type
-    svcs_by_name = services_by_name
 
     def _prepare(
         state: StateDict, config: RunnableConfig
     ) -> tuple[list[tuple[int, Event]], dict[str, Any], _PauseBudget]:
         matching = [(i, e) for i, e in _dispatchable(state) if meta.matches(e)]
         inject = _build_inject(
-            meta,
+            bound,
             state,
             reds,
             config,
-            svcs_by_type,
-            svcs_by_name,
             model_provider=model_provider,
         )
         return matching, inject, _pause_budget(config)

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
     from typing import TextIO
 
-    from langgraph_events import EventGraph
+    from langgraph_events import EventStore
     from langgraph_events.serde.migrations._core import MigrationSet
     from langgraph_events.serde.migrations._gate import Invocation
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
@@ -201,25 +201,26 @@ def rewrite_live_set(
         )
     out = sys.stderr if log is None else log
     with target.open_store() as saver:
-        graph = _same_serde(target.build(saver), running)
+        store = _same_serde(target.build(saver), running)
 
         def plan() -> RewriteReport:
-            return _walk(graph.plan_rewrite, target.thread_keys(saver), applied=False)
+            return _walk(store.plan_rewrite, target.thread_keys(saver), applied=False)
 
         reports: list[RewriteReport] = []
         final = plan()
         while apply and _to_rewrite(final) and len(reports) < passes:
-            report = _walk(graph.rewrite_store, _to_rewrite(final), applied=True)
+            report = _walk(store.rewrite_store, _to_rewrite(final), applied=True)
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()
     return LiveSetOutcome(tuple(reports), final)
 
 
-def _same_serde(live: Snapshot, code: MigrationSet) -> EventGraph:
-    """The graph on the real store, when its serde holds the migrations of
-    the code. A saver that already holds a ``NamespaceAwareSerde`` keeps
-    it, so the graph factory does not decide the serde that writes."""
+def _same_serde(live: Snapshot, code: MigrationSet) -> EventStore:
+    """The store built on the real saver, when its serde holds the
+    migrations of the code. A saver that already holds a
+    ``NamespaceAwareSerde`` keeps it, so the graph factory does not decide
+    the serde that writes."""
     if live.migrations.fingerprint != code.fingerprint:
         raise TargetError(
             f"The saver that store= opens holds its own serde, with the "
@@ -228,7 +229,7 @@ def _same_serde(live: Snapshot, code: MigrationSet) -> EventGraph:
             f"--expect fence judge those. Set the serde in the graph factory, "
             f"not in the store."
         )
-    return live.graph
+    return live.store
 
 
 def _walk(
