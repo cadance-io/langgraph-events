@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import inspect
-import typing
-from collections.abc import Mapping as _Mapping
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command as LGCommand
@@ -20,11 +17,6 @@ from langgraph_events._event import (
     Unresumable,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import (
-    BoundHandler,
-    HandlerMeta,
-    _resolve_hints_and_errors,
-)
 from langgraph_events._internal import (
     pad_causes,
 )
@@ -32,7 +24,7 @@ from langgraph_events._pause import _with_pause_budget
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
-from langgraph_events._services import RunScoped, _annotation_source
+from langgraph_events._services import parse_services
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology
 from langgraph_events._warn import warn_user
@@ -46,7 +38,7 @@ if TYPE_CHECKING:
         Sequence,
     )
 
-    from langchain_core.runnables import RunnableConfig, RunnableLambda
+    from langchain_core.runnables import RunnableConfig
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer, Interrupt, StateSnapshot
@@ -54,6 +46,7 @@ if TYPE_CHECKING:
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reflection import Reflection
+    from langgraph_events._services import Services
     from langgraph_events._types import PauseSignal
 
     _GraphInput = dict[str, Any] | LGCommand
@@ -177,56 +170,6 @@ def _coerce_snapshot_data(data: object) -> dict[str, Any]:
     return {}
 
 
-class _Services(NamedTuple):
-    """The ``services=`` of one graph, split into its two lookups.
-
-    A ``Mapping[str, Any]`` fills ``by_name``: resolution by handler param
-    name, so two instances of one type can coexist (a primary and a backup
-    chat model). A ``Sequence[Any]`` fills ``by_type``: resolution by param
-    annotation, and a same-type collision is rejected.
-    """
-
-    by_type: dict[type, Any]
-    by_name: dict[str, Any]
-    run_scoped_types: dict[str, Any]
-    """The type that each ``RunScoped`` factory in ``by_name`` returns."""
-
-
-def _build_service_registries(
-    services: Sequence[Any] | _Mapping[str, Any] | None,
-) -> _Services:
-    """Split ``services=`` into type-keyed and name-keyed lookups.
-
-    Mapping form populates name-keyed; sequence form populates type-keyed
-    (rejecting same-type collisions). The two forms are mutually exclusive
-    per ``EventGraph`` instance.
-    """
-    by_type: dict[type, Any] = {}
-    if isinstance(services, _Mapping):
-        by_name = dict(services)
-        return _Services(by_type, by_name, _resolve_run_scoped_types(by_name))
-    if services is None:
-        return _Services(by_type, {}, {})
-    for s in services:
-        if isinstance(s, RunScoped):
-            raise TypeError(
-                "RunScoped is only supported in the name-keyed mapping form: "
-                "services={'name': RunScoped(factory)}. The type-keyed sequence "
-                "form resolves by annotation, and no handler annotates RunScoped."
-            )
-        t = type(s)
-        if t in by_type:
-            raise TypeError(
-                f"EventGraph(services=...) has two instances of type "
-                f"{t.__name__!r} — same-type collision. Register only "
-                f"one instance, switch to the name-keyed mapping form "
-                f"(services={{'primary': a, 'backup': b}}), or use a "
-                f"subclass to distinguish them."
-            )
-        by_type[t] = s
-    return _Services(by_type, {}, {})
-
-
 def _validate_on_unresumable(value: str) -> None:
     """Reject an unknown ``on_unresumable`` policy at construction.
 
@@ -240,147 +183,6 @@ def _validate_on_unresumable(value: str) -> None:
         raise ValueError(
             f"on_unresumable must be 'raise', 'halt', or 'warn', got {value!r}"
         )
-
-
-def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any]:
-    """Resolve the return annotation of every ``RunScoped`` factory.
-
-    The result maps the service name to the type the factory provides. The
-    build compares it with the handler parameter's annotation. A return
-    annotation that does not resolve raises ``TypeError`` here, so the failure
-    does not wait for the first handler that names the service.
-    """
-    provided: dict[str, Any] = {}
-    for name, value in services_by_name.items():
-        if not isinstance(value, RunScoped):
-            continue
-        source = _annotation_source(value.factory)
-        if isinstance(source, type):
-            provided[name] = source
-            continue
-        hints, errors = _resolve_hints_and_errors(source)
-        if "return" in errors:
-            raise TypeError(
-                f"RunScoped factory {_factory_label(source)!r} for service "
-                f"{name!r} has a "
-                f"return annotation that did not resolve ({errors['return']}). "
-                f"The framework compares it with each handler's parameter "
-                f"annotation at graph build, so it cannot be left unresolvable. "
-                f"Make every name in the annotation importable at run time, or "
-                f"declare the class at module level."
-            )
-        provided[name] = _resolve_self(hints["return"], source)
-    return provided
-
-
-def _resolve_self(hint: object, source: Callable[..., object]) -> object:
-    """Replace ``typing.Self`` with the class the method is bound to.
-
-    ``get_type_hints`` leaves ``Self`` as is. A method bound to a class
-    provides that class. A method bound to an instance provides its type. An
-    unbound function has no owner, so the hint is treated as ``Any``.
-    """
-    if hint is not typing.Self:
-        return hint
-    owner = getattr(source, "__self__", None)
-    if owner is None:
-        return Any
-    return owner if isinstance(owner, type) else type(owner)
-
-
-def _hint_label(hint: object) -> str:
-    """Render an annotation for an error message.
-
-    A generic alias such as ``list[str]`` forwards ``__qualname__`` to its
-    origin, so only a plain class uses it.
-    """
-    if isinstance(hint, type):
-        return hint.__qualname__
-    return repr(hint)
-
-
-def _factory_label(factory: object) -> str:
-    """Render a ``RunScoped`` factory for an error message."""
-    if inspect.isroutine(factory):
-        return factory.__qualname__
-    return _hint_label(factory)
-
-
-def _satisfies(
-    check: Callable[[Any, Any], bool], subject: object, declared: object
-) -> bool | str:
-    """Apply a ``beartype.door`` check. A string is the reason it cannot run.
-
-    ``typing`` refuses a ``Protocol`` that is not ``runtime_checkable``, and
-    beartype refuses a hint it cannot test at run time, at any nesting depth.
-    Such an annotation stays a valid static contract, so the build must not
-    fail on it. The caller warns instead.
-    """
-    from beartype.roar import BeartypeException  # noqa: PLC0415
-
-    try:
-        return check(subject, declared)
-    except (TypeError, BeartypeException) as exc:
-        return f"{type(exc).__name__}: {exc}"
-
-
-def _verify_service_name_types(bound: BoundHandler, services: _Services) -> None:
-    """Raise if a name-keyed service does not satisfy the handler annotation.
-
-    Name-keyed binding matches on the parameter name and needs no annotation.
-    When the parameter has an annotation that resolved, the framework checks
-    the registered service against it. A plain value must be an instance of
-    the annotation. A ``RunScoped`` factory must return a subtype of the
-    annotation. The comparison uses ``beartype.door``. It handles ``Union``,
-    a runtime ``Protocol`` with methods only, and a generic alias. A
-    ``NewType`` is nominal for a factory and erased for a plain value.
-    """
-    if not bound.service_name_hints:
-        return
-    # A cold import costs about 200 ms. Only the first graph in the process
-    # with an annotated name-keyed parameter pays it.
-    from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
-
-    handler = bound.meta.declared_name
-    for param, declared in bound.service_name_hints:
-        value = services.by_name[param]
-        label = _hint_label(declared)
-        if isinstance(value, RunScoped):
-            provided = services.run_scoped_types[param]
-            # ``Any`` and a bare type variable say nothing about the result.
-            if provided is Any or isinstance(provided, TypeVar):
-                continue
-            verdict = _satisfies(is_subhint, provided, declared)
-            if verdict is False:
-                factory = _factory_label(_annotation_source(value.factory))
-                returns = _hint_label(provided)
-                raise TypeError(
-                    f"Handler {handler!r} declares parameter {param!r} as "
-                    f"{label}, but services[{param!r}] is RunScoped({factory}) "
-                    f"and that factory returns {returns}. Change the annotation "
-                    f"to {returns}, or register a factory that returns {label}."
-                )
-        else:
-            verdict = _satisfies(is_bearable, value, declared)
-            if verdict is False:
-                if value is None:
-                    what = "None"
-                    fix = f"Widen the annotation to {label} | None"
-                else:
-                    what = f"an instance of {type(value).__qualname__}"
-                    fix = "Widen the annotation"
-                raise TypeError(
-                    f"Handler {handler!r} declares parameter {param!r} as "
-                    f"{label}, but services[{param!r}] is {what}, not an "
-                    f"instance of {label}. {fix}, or register a value that "
-                    f"satisfies it."
-                )
-        if isinstance(verdict, str):
-            warn_user(
-                f"Handler {handler!r} declares parameter {param!r} as {label}, "
-                f"which Python cannot test at run time ({verdict}). The service "
-                f"under services[{param!r}] is not checked against it."
-            )
 
 
 class EventGraph:
@@ -421,13 +223,16 @@ class EventGraph:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
         _validate_on_unresumable(on_unresumable)
-        # Before the topology: a bad services= is refused before any handler
-        # check or warning, as the one-step build did.
-        registry = _build_service_registries(services)
+        topology = EventTopology.__new__(EventTopology)
+        expanded = topology._hold_reducers(handlers, reducers)
+        # A bad services= is refused after the reducer checks and before
+        # any handler check.
+        parsed = parse_services(services)
+        topology._hold_handlers(expanded)
         self._bind(
-            EventTopology(handlers, reducers=reducers),
+            topology,
             max_rounds=max_rounds,
-            services=registry,
+            services=parsed,
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
@@ -458,7 +263,7 @@ class EventGraph:
         graph._bind(
             topology,
             max_rounds=max_rounds,
-            services=_build_service_registries(services),
+            services=parse_services(services),
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
@@ -471,7 +276,7 @@ class EventGraph:
         topology: EventTopology,
         *,
         max_rounds: int,
-        services: _Services,
+        services: Services,
         checkpointer: Checkpointer,
         store: BaseStore | None,
         recursion_limit: int | None,
@@ -484,8 +289,8 @@ class EventGraph:
         self._recursion_limit = recursion_limit
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
-        self._store = store
-        self._services = services
+        self._base_store = store
+        self._handlers = topology._bind(services)
         self._compiled_graph: CompiledStateGraph | None = None
         self._event_store = (
             EventStore._of_graph(topology, checkpointer, self._compile)
@@ -493,22 +298,13 @@ class EventGraph:
             else None
         )
 
-        service_types = frozenset(services.by_type)
-        service_names = frozenset(services.by_name)
-        self._bound: dict[str, BoundHandler] = {}
-        for meta in topology._handler_metas:
-            bound = meta.bind(service_types=service_types, service_names=service_names)
-            bound.require_claimed(topology.reducer_names)
-            _verify_service_name_types(bound, services)
-            self._bound[meta.node_name] = bound
-
     @property
     def topology(self) -> EventTopology:
         """The topology that this graph runs."""
         return self._topology
 
     @property
-    def store(self) -> EventStore:
+    def event_store(self) -> EventStore:
         """The :class:`EventStore` of the threads of this graph.
 
         It finds, abandons and rewrites stored threads. It settles a thread
@@ -516,7 +312,7 @@ class EventGraph:
         the graph has no checkpointer.
         """
         if self._event_store is None:
-            raise ValueError("store requires a checkpointer")
+            raise ValueError("event_store requires a checkpointer")
         return self._event_store
 
     def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
@@ -539,7 +335,7 @@ class EventGraph:
         from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
         return Reflection(
-            log, model=self.namespaces(), reducers=self._topology._reducers
+            log, model=self.namespaces(), reducers=self._topology.reducers
         )
 
     @property
@@ -579,21 +375,14 @@ class EventGraph:
     def _compile(self) -> CompiledStateGraph:
         """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
         if self._compiled_graph is None:
-            self._compiled_graph = self._topology.compile(
-                self._handler_node,
+            self._compiled_graph = self._topology._compile(
+                [(b.meta, self._topology._handler_node(b)) for b in self._handlers],
                 max_rounds=self._max_rounds,
                 recursion_limit=self._recursion_limit,
                 checkpointer=self._checkpointer,
-                store=self._store,
+                store=self._base_store,
             )
         return self._compiled_graph
-
-    def _handler_node(self, meta: HandlerMeta) -> RunnableLambda:
-        return self._topology.handler_node(
-            self._bound[meta.node_name],
-            services_by_type=self._services.by_type,
-            services_by_name=self._services.by_name,
-        )
 
     @staticmethod
     def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
@@ -696,7 +485,7 @@ class EventGraph:
                 # ``handlers=`` alone, and its events would then keep
                 # resolving by import — the bleed #155 exists to close.
                 # The topology holds the full set.
-                checkpointer.serde = graph._topology.serde()
+                checkpointer.serde = graph.topology.serde()
 
         return graph
 
@@ -893,7 +682,7 @@ class EventGraph:
         log = self.get_state(config).events
         if self._unresumable_short_circuits(log, config):
             return log
-        return self.store._settle(config, self._unresumable_event(value))
+        return self.event_store._settle(config, self._unresumable_event(value))
 
     async def _aapply_unresumable_policy(
         self, value: Event, kwargs: dict[str, Any]
@@ -903,7 +692,7 @@ class EventGraph:
         log = (await self.aget_state(config)).events
         if self._unresumable_short_circuits(log, config):
             return log
-        return await self.store._asettle(config, self._unresumable_event(value))
+        return await self.event_store._asettle(config, self._unresumable_event(value))
 
     @staticmethod
     def _unresumable_event(value: Event) -> Unresumable:
@@ -997,7 +786,7 @@ class EventGraph:
         uninterrupted here. Used only by :meth:`_graph_state`, reached
         through a caller's own working graph. Everywhere else
         (discovery, ``abandon()``) reads the checkpoint's raw pending
-        writes instead — see :meth:`_pending_interrupt_writes`.
+        writes instead — see :meth:`EventStore._pending_interrupt_writes`.
         """
         return bool(_snapshot_interrupts(snapshot))
 
@@ -1032,7 +821,7 @@ class EventGraph:
         happens here, which keeps ``is_interrupted``/``interrupted``
         topology-dependent (see :meth:`_is_interrupted`). A caller
         holding a ``GraphState`` reached it through its own working
-        graph, unlike discovery (:meth:`threads_paused_on`) or
+        graph, unlike discovery (:meth:`EventStore.threads_paused_on`) or
         ``abandon()``, which read the checkpoint directly.
         """
         log = EventStore._events(snapshot)
@@ -1087,41 +876,7 @@ class EventGraph:
             return "".join(parts)
         return ""
 
-    def _update_reducer_state(
-        self,
-        state: dict[str, Any],
-        event: Event,
-        reducer_names: list[str],
-    ) -> frozenset[str]:
-        """Incrementally update reducer state with a single new event."""
-        changed: set[str] = set()
-        for name in reducer_names:
-            r = self._topology._reducers[name]
-            contribution = r.collect([event])
-            if r.has_contributions(contribution):
-                reducer_fn = getattr(r, "reducer", None)
-                if callable(reducer_fn):
-                    state[name] = reducer_fn(state[name], contribution)
-                else:
-                    state[name] = contribution
-                changed.add(name)
-        return frozenset(changed)
-
     # --- High-level event streaming ---
-
-    def _resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
-        """Return reducer names to include, or empty list for disabled."""
-        if include_reducers is True:
-            return list(self._topology._reducers.keys())
-        if include_reducers:  # non-empty list
-            unknown = set(include_reducers) - set(self._topology._reducers.keys())
-            if unknown:
-                warn_user(
-                    f"Unknown reducer name(s) {unknown} in include_reducers; "
-                    f"available: {set(self._topology._reducers.keys())}",
-                )
-            return [n for n in include_reducers if n in self._topology._reducers]
-        return []
 
     @staticmethod
     def _events_from_chunk(chunk: object, seen: set[int]) -> list[Event]:
@@ -1156,7 +911,7 @@ class EventGraph:
         if not new_events:
             return prev_count, []
         reducers = {
-            name: state.get(name, self._topology._reducers[name].empty)
+            name: state.get(name, self._topology.reducers[name].empty)
             for name in reducer_names
         }
         return len(all_events), [
@@ -1200,10 +955,10 @@ class EventGraph:
         for name in reducer_names:
             if checkpoint_values is not None:
                 reducer_state[name] = checkpoint_values.get(
-                    name, self._topology._reducers[name].empty
+                    name, self._topology.reducers[name].empty
                 )
             else:
-                reducer_state[name] = self._topology._reducers[name].seed(seeds)
+                reducer_state[name] = self._topology.reducers[name].seed(seeds)
 
         # Merge seed contributions on top of checkpointed state.
         # - On astream_events second-run: seeds carry new events whose
@@ -1221,7 +976,7 @@ class EventGraph:
         #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
         if checkpoint_values is not None and not is_resume:
             for s in seeds:
-                self._update_reducer_state(reducer_state, s, reducer_names)
+                self._topology._update_reducer_state(reducer_state, s, reducer_names)
 
         # Yield seed events
         for s in seeds:
@@ -1229,8 +984,8 @@ class EventGraph:
                 changed = frozenset(
                     name
                     for name in reducer_names
-                    if self._topology._reducers[name].has_contributions(
-                        self._topology._reducers[name].collect([s])
+                    if self._topology.reducers[name].has_contributions(
+                        self._topology.reducers[name].collect([s])
                     )
                 )
                 yield StreamFrame(
@@ -1316,7 +1071,7 @@ class EventGraph:
                 interrupts.extend(chunk.get(_INTERRUPT_CHANNEL, ()))
             for event in self._events_from_chunk(chunk, seen):
                 if reducer_names:
-                    changed = self._update_reducer_state(
+                    changed = self._topology._update_reducer_state(
                         reducer_state,
                         event,
                         reducer_names,
@@ -1445,7 +1200,7 @@ class EventGraph:
         """
         inp = self._prepare_input(seed)
         kwargs.pop("stream_mode", None)
-        reducer_names = self._resolve_reducer_names(include_reducers)
+        reducer_names = self._topology._resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
             inp,
             inp["events"],
@@ -1504,7 +1259,7 @@ class EventGraph:
                     yield latest
             return
         kwargs.pop("stream_mode", None)
-        reducer_names = self._resolve_reducer_names(include_reducers)
+        reducer_names = self._topology._resolve_reducer_names(include_reducers)
         yield from self._stream_sync(
             LGCommand(resume=value),
             seeds or [],
@@ -1534,7 +1289,7 @@ class EventGraph:
         """
         kwargs.pop("stream_mode", None)
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        reducer_names = self._resolve_reducer_names(include_reducers)
+        reducer_names = self._topology._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(
                 inp,

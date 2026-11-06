@@ -538,7 +538,7 @@ def describe_abandon():
     def it_records_the_abandoned_marker_as_a_framework_event():
         graph, config, _saver = _paused("abandon")
 
-        graph.store.abandon(config)
+        graph.event_store.abandon(config)
         log = graph.get_state(config).events
 
         assert log.cause(log.first(Processed)) == Cause(

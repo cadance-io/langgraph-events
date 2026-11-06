@@ -42,7 +42,7 @@ def enforce_command_privacy(
 ) -> None:
     """Validate every handler's emitted events against the privacy rule.
 
-    ``return_info`` is the ``EventGraph._return_info`` map — already populated
+    ``return_info`` is the ``EventTopology._return_info`` map — already populated
     from ``_parse_return_types`` during graph construction. Reusing it avoids
     re-resolving type hints (which would re-emit warnings for hints that fail
     to resolve, since the resolution cache only stores successes).
@@ -104,7 +104,7 @@ def _reactor_leak_msg(
     event_owner: type[Command],
 ) -> str:
     return (
-        f"Reactor {meta.name!r} emits {_qualname(event_cls)}, which is private "
-        f"to {_qualname(event_owner)}. Only {_qualname(event_owner)}.handle() "
-        f"may emit it."
+        f"{meta.blame} is a reactor and emits {_qualname(event_cls)}, which "
+        f"is private to {_qualname(event_owner)}. Only "
+        f"{_qualname(event_owner)}.handle() may emit it."
     )

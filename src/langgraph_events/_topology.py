@@ -30,7 +30,6 @@ from langgraph_events._handler import (
     HandlerMeta,
     ServiceRequirement,
     _resolve_hints_and_errors,
-    classify_handler,
     normalize_previous_names,
     on,
 )
@@ -49,12 +48,14 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._services import NamedServices
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import (
         Callable,
         Iterable,
+        Mapping,
         Sequence,
     )
 
@@ -64,6 +65,7 @@ if TYPE_CHECKING:
     from langgraph.types import Checkpointer
 
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._services import Services
     from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import (
         NamespaceAwareSerde,
@@ -149,7 +151,7 @@ def _format_scatter_repr(scatter_alias: object) -> str:
     return f"Scatter[{' | '.join(parts)}]"
 
 
-def _raise_empty_scatter(fn: Callable[..., Any], offending: str) -> None:
+def _raise_empty_scatter(meta: HandlerMeta, offending: str) -> None:
     """Reject a Scatter annotation that contributes no concrete event types.
 
     Bare ``Scatter``, ``Scatter[Any]``, ``Scatter[TypeVar]``, and
@@ -159,19 +161,11 @@ def _raise_empty_scatter(fn: Callable[..., Any], offending: str) -> None:
     build time so users can't paper over a privacy violation by widening the
     annotation.
     """
-    handler_name = getattr(fn, "__name__", "handler")
-    cmd: type[Command] | None = getattr(fn, "_inline_command", None)
-    if cmd is not None:
-        nested = _iter_nested_outcomes(cmd)
-        suggested = (
-            " | ".join(o.__name__ for o in nested) if nested else "EventA | EventB"
-        )
-        location = f"Inline handler {handler_name!r} on {cmd.__qualname__}"
-    else:
-        suggested = "EventA | EventB"
-        location = f"Handler {handler_name!r}"
+    cmd: type[Command] | None = getattr(meta.fn, "_inline_command", None)
+    nested = _iter_nested_outcomes(cmd) if cmd is not None else ()
+    suggested = " | ".join(o.__name__ for o in nested) if nested else "EventA | EventB"
     raise TypeError(
-        f"{location} returns {offending}, which declares no concrete event "
+        f"{meta.blame} returns {offending}, which declares no concrete event "
         f"types and bypasses build-time privacy enforcement. "
         f"Use `Scatter[{suggested}]` to enumerate the events you scatter. "
         f"(Do not work around this by demoting your Command to a "
@@ -180,13 +174,13 @@ def _raise_empty_scatter(fn: Callable[..., Any], offending: str) -> None:
     )
 
 
-def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
+def _parse_return_types(meta: HandlerMeta) -> ReturnInfo:
     """Parse handler return annotation into a ``ReturnInfo``.
 
     Raises ``TypeError`` for Scatter shapes that contribute no concrete event
     types — see :func:`_raise_empty_scatter`.
     """
-    hints, hint_errors = _resolve_hints_and_errors(fn)
+    hints, hint_errors = _resolve_hints_and_errors(meta.fn)
     if "return" in hint_errors:
         # A handler constructs the events it returns, so those classes are
         # already importable at run time. An unresolvable return annotation is
@@ -195,7 +189,7 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
         # genuinely unannotated handler, so the defect stayed invisible in a
         # committed mermaid baseline. See issue #183.
         raise TypeError(
-            f"Handler {fn.__qualname__!r} has a return annotation that did "
+            f"{meta.blame} has a return annotation that did "
             f"not resolve ({hint_errors['return']}). The framework reads the "
             f"return annotation to build the topology, so it cannot be left "
             f"unresolvable. Make every name in the annotation importable at "
@@ -222,11 +216,11 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
         if arg is type(None):
             continue
         if arg is Scatter:
-            _raise_empty_scatter(fn, "bare `Scatter`")
+            _raise_empty_scatter(meta, "bare `Scatter`")
         elif typing.get_origin(arg) is Scatter:
             members = _scatter_event_types(arg)
             if not members or any(is_abstract_event(m) for m in members):
-                _raise_empty_scatter(fn, f"`{_format_scatter_repr(arg)}`")
+                _raise_empty_scatter(meta, f"`{_format_scatter_repr(arg)}`")
             scatter_types.extend(members)
         elif isinstance(arg, type) and issubclass(arg, Event):
             if issubclass(arg, Interrupted):
@@ -234,7 +228,7 @@ def _parse_return_types(fn: Callable[..., Any]) -> ReturnInfo:
             event_types.append(arg)
         else:
             raise TypeError(
-                f"Handler {fn.__qualname__!r} has a return annotation that "
+                f"{meta.blame} has a return annotation that "
                 f"holds {arg!r}, which is not an Event subclass. The framework "
                 f"reads the return annotation to route the events, so each "
                 f"member must be an Event subclass, Scatter[...] or None. For "
@@ -303,7 +297,6 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
     nested_outcomes = _iter_nested_outcomes(cmd)
     if not nested_outcomes:
         return
-    handler_name = getattr(meta.fn, "__name__", "handler")
     covered = tuple(info.event_types) + tuple(info.scatter_types)
     missing = [o for o in nested_outcomes if not any(issubclass(c, o) for c in covered)]
     if not missing:
@@ -348,7 +341,7 @@ def _verify_inline_outcome_coverage(meta: HandlerMeta, info: ReturnInfo) -> None
             else ""
         )
     raise TypeError(
-        f"Inline handler {handler_name!r} on {cmd.__qualname__} declares "
+        f"{meta.blame} declares "
         f"return type `{declared}` but does not cover outcome(s): "
         f"{missing_names}. {hint}"
     )
@@ -391,7 +384,7 @@ def _collect_graph_namespaces(
 
     The graph's own registry, seeded from the ``__namespace_cls__`` stamps
     rather than from process-global state. Produced types are folded in later
-    in ``EventGraph.__init__``, once return-type introspection has run.
+    in ``_hold_handlers``, once return-type introspection has run.
     """
     found: dict[str, type[Namespace]] = {}
     for fn in handlers:
@@ -465,7 +458,7 @@ def _expand_command_handlers(
     """Replace ``Command`` subclasses with their inline handler functions.
 
     Each substituted function is stamped via ``on(cls, raises=...,
-    invariants=..., previously=...)(fn)`` so that ``classify_handler``
+    invariants=..., previously=...)(fn)`` so that ``HandlerMeta.of``
     sees it like any other ``@on``-subscribed handler.
     ``raises``/``invariants``/``retry``/``previously`` are read from
     class-level attributes on the Command, since inline handlers have no
@@ -541,8 +534,17 @@ class EventTopology:
     ) -> None:
         if not handlers:
             raise ValueError("EventTopology requires at least one handler")
-        handlers = _expand_command_handlers(handlers)
+        self._hold_handlers(self._hold_reducers(handlers, reducers))
 
+    def _hold_reducers(
+        self, handlers: list[Callable[..., Any]], reducers: list[BaseReducer] | None
+    ) -> list[Callable[..., Any]]:
+        """Expand the commands, collect the namespaces and the reducers.
+
+        Return the expanded handlers. :class:`EventGraph` parses its
+        ``services=`` between this step and :meth:`_hold_handlers`.
+        """
+        handlers = _expand_command_handlers(handlers)
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
         _discover_namespace_reducers(self._namespaces, self._reducers)
@@ -551,13 +553,16 @@ class EventTopology:
             raise ValueError(
                 f"Reducer name(s) {conflicts} conflict with reserved state fields"
             )
+        return handlers
 
+    def _hold_handlers(self, handlers: list[Callable[..., Any]]) -> None:
+        """Classify the handlers and run every check that needs no service."""
         self._handler_metas: list[HandlerMeta] = []
 
         reducer_names = self.reducer_names
         seen_names: dict[str, int] = {}
         for fn in handlers:
-            meta = classify_handler(fn, reducer_names=reducer_names)
+            meta = HandlerMeta.of(fn, reducer_names=reducer_names)
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:
@@ -573,11 +578,11 @@ class EventTopology:
         self._return_info: dict[str, ReturnInfo] = {}
         self._return_contracts: dict[str, ReturnContract | None] = {}
         for meta in self._handler_metas:
-            info = _parse_return_types(meta.fn)
+            info = _parse_return_types(meta)
             self._return_info[meta.name] = info
             if info.has_annotation and any(t is Event for t in info.event_types):
                 raise ValueError(
-                    f"Handler '{meta.name}' return type includes base 'Event'. "
+                    f"{meta.blame} return type includes base 'Event'. "
                     f"Use specific types (e.g., TypeA | TypeB)."
                 )
             self._return_contracts[meta.name] = _compute_return_contract(meta, info)
@@ -640,6 +645,11 @@ class EventTopology:
         return self._namespaces_cache
 
     @property
+    def reducers(self) -> Mapping[str, BaseReducer]:
+        """Each registered reducer by its name. Read-only."""
+        return types.MappingProxyType(self._reducers)
+
+    @property
     def reducer_names(self) -> frozenset[str]:
         """The names of all registered reducers."""
         return frozenset(self._reducers.keys())
@@ -670,26 +680,67 @@ class EventTopology:
         and signature order. A variadic parameter is not listed."""
         return tuple(r for meta in self._handler_metas for r in meta.requirements)
 
-    def handler_node(
+    def _bind(self, services: Services) -> tuple[BoundHandler, ...]:
+        """Bind *services* to each handler, in handler order.
+
+        Raises ``TypeError`` for a parameter that no source fills, and for a
+        name-keyed service that does not satisfy the parameter annotation.
+        """
+        bound_handlers = []
+        for meta in self._handler_metas:
+            bound = meta.bind(services)
+            bound.require_claimed(self.reducer_names)
+            if isinstance(services, NamedServices):
+                services.verify(bound)
+            bound_handlers.append(bound)
+        return tuple(bound_handlers)
+
+    def _update_reducer_state(
         self,
-        bound: BoundHandler,
-        *,
-        services_by_type: dict[type, Any],
-        services_by_name: dict[str, Any],
-    ) -> RunnableLambda:
-        """The node that runs *bound* with the services of one graph."""
+        state: dict[str, Any],
+        event: Event,
+        reducer_names: list[str],
+    ) -> frozenset[str]:
+        """Incrementally update reducer state with a single new event."""
+        changed: set[str] = set()
+        for name in reducer_names:
+            r = self._reducers[name]
+            contribution = r.collect([event])
+            if r.has_contributions(contribution):
+                reducer_fn = getattr(r, "reducer", None)
+                if callable(reducer_fn):
+                    state[name] = reducer_fn(state[name], contribution)
+                else:
+                    state[name] = contribution
+                changed.add(name)
+        return frozenset(changed)
+
+    def _resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
+        """Return reducer names to include, or empty list for disabled."""
+        if include_reducers is True:
+            return list(self._reducers.keys())
+        if include_reducers:  # non-empty list
+            unknown = set(include_reducers) - set(self._reducers.keys())
+            if unknown:
+                warn_user(
+                    f"Unknown reducer name(s) {unknown} in include_reducers; "
+                    f"available: {set(self._reducers.keys())}",
+                )
+            return [n for n in include_reducers if n in self._reducers]
+        return []
+
+    def _handler_node(self, bound: BoundHandler) -> RunnableLambda:
+        """The node that runs *bound* with its services."""
         return make_handler_node(
             bound,
             reducers=self._reducers,
             return_contract=self._return_contracts.get(bound.meta.name),
-            services_by_type=services_by_type or None,
-            services_by_name=services_by_name or None,
             model_provider=self.namespaces,
         )
 
-    def compile(
+    def _compile(
         self,
-        node_for: Callable[[HandlerMeta], RunnableLambda],
+        nodes: Sequence[tuple[HandlerMeta, RunnableLambda]],
         *,
         max_rounds: int,
         recursion_limit: int | None,
@@ -698,9 +749,10 @@ class EventTopology:
     ) -> CompiledStateGraph:
         """Compile the topology into a LangGraph ``CompiledStateGraph``.
 
-        *node_for* builds the node of each handler. :class:`EventGraph` passes
-        :meth:`handler_node` with its services. :class:`EventStore` passes a
-        node that refuses to run, because a store has no services.
+        *nodes* pairs each handler with its node, in handler order.
+        :class:`EventGraph` passes the nodes of its bound handlers.
+        :class:`EventStore` passes nodes that refuse to run, because a store
+        has no services.
         """
         reducers = self._reducers
         handler_metas = self._handler_metas
@@ -744,8 +796,7 @@ class EventTopology:
         )
 
         handler_names: list[str] = []
-        for meta in handler_metas:
-            handler_node = node_for(meta)
+        for meta, handler_node in nodes:
             graph.add_node(meta.node_name, cast("Any", handler_node))
             handler_names.append(meta.node_name)
             # Register an alias node per historic name (@on(previously=...)) so an
@@ -882,18 +933,16 @@ class EventTopology:
             if meta.node_name in _RESERVED_NODE_NAMES:
                 # Reachable via an explicit @on(node_name=...) pin or a function
                 # literally named after the reserved node (node names come from
-                # fn.__name__) — so name the claimant by its qualname; the node
-                # name itself IS the reserved string and would point at nothing.
+                # fn.__name__).
                 raise ValueError(
-                    f"Handler {meta.fn.__qualname__!r} resolves to graph node "
-                    f"{meta.node_name!r}, which is reserved for framework graph "
-                    f"nodes; choose another name."
+                    f"{meta.blame} resolves to a graph node name that is "
+                    f"reserved for framework graph nodes; choose another name."
                 )
             prior = seen.get(meta.node_name)
             if prior is not None:
                 raise ValueError(
-                    f"Handlers {prior.name!r} and {meta.name!r} both resolve to "
-                    f"graph node {meta.node_name!r}; node identity must be unique. "
+                    f"{prior.blame} and {meta.blame} resolve to one graph node; "
+                    f"node identity must be unique. "
                     f"Register each command/handler once, or give one a distinct "
                     f"@on(node_name=...)."
                 )
@@ -906,19 +955,19 @@ class EventTopology:
         and must not shadow a live handler node — surfaced at build time.
         """
         live_names = {meta.node_name for meta in self._handler_metas}
-        claimed: dict[str, str] = {}
+        claimed: dict[str, HandlerMeta] = {}
         for meta in self._handler_metas:
             for alias in meta.previous_names:
                 if alias in _RESERVED_NODE_NAMES:
                     raise ValueError(
-                        f"Handler {meta.node_name!r} declares "
+                        f"{meta.blame} declares "
                         f"previously={alias!r}, which is reserved for the "
                         f"framework's own graph nodes and can never have been "
                         f"a historic handler name; remove it."
                     )
                 if alias in live_names:
                     raise ValueError(
-                        f"Handler {meta.node_name!r} declares "
+                        f"{meta.blame} declares "
                         f"previously={alias!r}, which collides with a live "
                         f"handler node of the same name; choose a distinct "
                         f"historic name."
@@ -927,10 +976,10 @@ class EventTopology:
                 if first is not None:
                     raise ValueError(
                         f"Historic node name {alias!r} is declared as previously= "
-                        f"by both {first!r} and {meta.node_name!r}; each historic "
+                        f"by both {first.blame} and {meta.blame}; each historic "
                         f"node name may map to only one handler."
                     )
-                claimed[alias] = meta.node_name
+                claimed[alias] = meta
 
     def _verify_error_handling(self) -> None:
         """Run the construction-time error-handling gates.
@@ -984,7 +1033,7 @@ class EventTopology:
                 if not _any_catcher_covers(catchers, exc_type):
                     declared = ", ".join(t.__name__ for t in meta.raises)
                     raise TypeError(
-                        f"Handler {meta.claimant!r} declares raises=({declared}), "
+                        f"{meta.blame} declares raises=({declared}), "
                         f"but no handler subscribes to catch {exc_type.__name__}. "
                         f"Add a handler decorated with "
                         f"@on(HandlerRaised, exception={exc_type.__name__}) "
@@ -1015,7 +1064,7 @@ class EventTopology:
                 continue
             if not meta.raises:
                 raise TypeError(
-                    f"Handler {meta.claimant!r} declares retry= but no raises=. A "
+                    f"{meta.blame} declares retry= but no raises=. A "
                     f"retry policy only sees exceptions the framework catches; "
                     f"add raises=(YourError,) or drop the policy."
                 )
@@ -1030,7 +1079,7 @@ class EventTopology:
                 if not overlaps:
                     declared = ", ".join(t.__name__ for t in meta.raises)
                     raise TypeError(
-                        f"Handler {meta.claimant!r} declares "
+                        f"{meta.blame} declares "
                         f"retry=RetryPolicy(on={exc_type.__name__}), but "
                         f"{exc_type.__name__} is not covered by "
                         f"raises=({declared}). An exception unrelated to "
@@ -1064,7 +1113,7 @@ class EventTopology:
                 inv_cls = cast("type[Invariant]", matcher)
                 if inv_cls not in declared:
                     raise TypeError(
-                        f"Handler {meta.name!r} subscribes to "
+                        f"{meta.blame} subscribes to "
                         f"@on(InvariantViolated, invariant={inv_cls.__name__}), "
                         f"but no handler declares {inv_cls.__name__} in "
                         f"invariants=. The reactor would never fire — add the "

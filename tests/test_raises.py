@@ -78,8 +78,10 @@ def describe_raises():
                     # error must identify the claimant the user can find. #108
                     with pytest.raises(TypeError) as excinfo:
                         EventGraph([_UncoveredInline.Sync])
-                    assert "_UncoveredInline.Sync" in str(excinfo.value)
-                    assert "Handler 'handle'" not in str(excinfo.value)
+                    assert str(excinfo.value).startswith(
+                        "Handler 'test_raises._UncoveredInline.Sync.handle' "
+                        "(node '_UncoveredInline.Sync') declares raises=(DomainError)"
+                    )
 
             def with_matching_catcher():
 

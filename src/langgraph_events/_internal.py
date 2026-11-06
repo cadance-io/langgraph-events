@@ -316,8 +316,6 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     state: StateDict,
     reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
-    services_by_type: dict[type, Any] | None = None,
-    services_by_name: dict[str, Any] | None = None,
     *,
     model_provider: Callable[[], NamespaceModel],
 ) -> dict[str, Any]:
@@ -358,29 +356,25 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                 "is configured. Pass store=... to EventGraph(...)."
             )
         inject[meta.store_param] = store
-    if services_by_type and bound.service_params:
-        for param_name, svc_type in bound.service_params:
-            inject[param_name] = services_by_type[svc_type]
-    if services_by_name and bound.service_name_params:
-        for param_name, svc_name in bound.service_name_params:
-            svc = services_by_name[svc_name]
-            if isinstance(svc, RunScoped):
-                if config is None:
-                    raise ValueError(
-                        f"Handler '{meta.name}' requested the run-scoped service "
-                        f"'{param_name}', but runtime config is missing."
-                    )
-                try:
-                    svc = svc.factory(config)
-                except Exception as exc:
-                    # Keep the type, so a caller that catches it still can.
-                    # The note names the seam, like the missing-config branch.
-                    exc.add_note(
-                        f"Handler '{meta.name}' requested the run-scoped service "
-                        f"'{param_name}', but its factory raised."
-                    )
-                    raise
-            inject[param_name] = svc
+    for param_name, service in bound.services:
+        if not isinstance(service, RunScoped):
+            inject[param_name] = service
+            continue
+        if config is None:
+            raise ValueError(
+                f"Handler '{meta.name}' requested the run-scoped service "
+                f"'{param_name}', but runtime config is missing."
+            )
+        try:
+            inject[param_name] = service.factory(config)
+        except Exception as exc:
+            # Keep the type, so a caller that catches it still can.
+            # The note names the seam, like the missing-config branch.
+            exc.add_note(
+                f"Handler '{meta.name}' requested the run-scoped service "
+                f"'{param_name}', but its factory raised."
+            )
+            raise
     return inject
 
 
@@ -823,8 +817,6 @@ def make_handler_node(
     bound: BoundHandler,
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: ReturnContract | None = None,
-    services_by_type: dict[type, Any] | None = None,
-    services_by_name: dict[str, Any] | None = None,
     *,
     model_provider: Callable[[], NamespaceModel],
 ) -> RunnableLambda:
@@ -847,8 +839,6 @@ def make_handler_node(
 
     meta = bound.meta
     reds = reducers or {}
-    svcs_by_type = services_by_type
-    svcs_by_name = services_by_name
 
     def _prepare(
         state: StateDict, config: RunnableConfig
@@ -859,8 +849,6 @@ def make_handler_node(
             state,
             reds,
             config,
-            svcs_by_type,
-            svcs_by_name,
             model_provider=model_provider,
         )
         return matching, inject, _pause_budget(config)

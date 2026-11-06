@@ -178,7 +178,7 @@ def _explicit_thread_ids(method: str, thread_ids: Iterable[str] | None) -> list[
 
 class _PendingInterrupts(NamedTuple):
     """Topology-independent read of a checkpoint's pending interrupt(s).
-    See ``EventGraph._read_pending_interrupts``.
+    See :meth:`EventStore._read_pending_interrupts`.
 
     ``has_interrupt`` is ``True`` for any pending ``__interrupt__``
     write, including a non-``Event`` payload (e.g. a raw
@@ -224,7 +224,7 @@ class EventStore:
         for config in configs:
             store.abandon(config, reason="retired")
 
-    :attr:`EventGraph.store` is the store of a graph. It settles a thread
+    :attr:`EventGraph.event_store` is the store of a graph. It settles a thread
     through the compiled graph of that graph, with its services.
     """
 
@@ -236,10 +236,24 @@ class EventStore:
                 f"EventStore requires a BaseCheckpointSaver, got "
                 f"{type(checkpointer).__name__}"
             )
-        self._topology = topology
-        self._checkpointer = checkpointer
-        self._compiled_graph: CompiledStateGraph | None = None
-        self._compiled: Callable[[], CompiledStateGraph] = self._compile_unbound
+        # A settle writes through ``bulk_update_state(as_node="__seed__")``.
+        # LangGraph runs only the writers of that node and the dispatch
+        # function, never a handler body. Each handler node refuses to run,
+        # so a store can never call a handler without its services. The
+        # round limits are inert for the same reason.
+        self._hold(
+            topology,
+            checkpointer,
+            functools.cache(
+                lambda: topology._compile(
+                    [(meta, _store_node(meta)) for meta in topology._handler_metas],
+                    max_rounds=100,
+                    recursion_limit=None,
+                    checkpointer=checkpointer,
+                    store=None,
+                )
+            ),
+        )
 
     @classmethod
     def _of_graph(
@@ -250,36 +264,24 @@ class EventStore:
     ) -> EventStore:
         """The store of a graph. It settles through *compiled*, the compiled
         graph of that graph, with its services."""
-        store = cls(topology, checkpointer)
-        store._compiled = compiled
+        store = cls.__new__(cls)
+        store._hold(topology, checkpointer, compiled)
         return store
+
+    def _hold(
+        self,
+        topology: EventTopology,
+        checkpointer: BaseCheckpointSaver[Any],
+        compiled: Callable[[], CompiledStateGraph],
+    ) -> None:
+        self._topology = topology
+        self._checkpointer = checkpointer
+        self._compiled = compiled
 
     @property
     def topology(self) -> EventTopology:
         """The topology of the stored threads."""
         return self._topology
-
-    def _compile(self) -> CompiledStateGraph:
-        return self._compiled()
-
-    def _compile_unbound(self) -> CompiledStateGraph:
-        """The graph of the topology on the checkpointer, with no services.
-
-        A settle writes through ``bulk_update_state(as_node="__seed__")``.
-        LangGraph runs only the writers of that node and the dispatch
-        function, never a handler body. Each handler node refuses to run,
-        so a store can never call a handler without its services. The round
-        limits are inert for the same reason.
-        """
-        if self._compiled_graph is None:
-            self._compiled_graph = self._topology.compile(
-                _store_node,
-                max_rounds=100,
-                recursion_limit=None,
-                checkpointer=self._checkpointer,
-                store=None,
-            )
-        return self._compiled_graph
 
     @staticmethod
     def _events(snapshot: StateSnapshot) -> EventLog:
@@ -329,22 +331,22 @@ class EventStore:
         # whose snapshot applies the same pending writes the leading
         # clear commits. A direct checkpoint read undercounts `_cursor`
         # without raising an error, and no test in this suite catches it.
-        events = self._events(self._compile().get_state(config))
-        self._compile().bulk_update_state(
+        events = self._events(self._compiled().get_state(config))
+        self._compiled().bulk_update_state(
             config,
             self._settle_supersteps(events, terminal),
         )
-        return self._events(self._compile().get_state(config))
+        return self._events(self._compiled().get_state(config))
 
     async def _asettle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Async sibling of :meth:`_settle`."""
         # Same `_cursor` reasoning as `_settle`, via `aget_state`.
-        events = self._events(await self._compile().aget_state(config))
-        await self._compile().abulk_update_state(
+        events = self._events(await self._compiled().aget_state(config))
+        await self._compiled().abulk_update_state(
             config,
             self._settle_supersteps(events, terminal),
         )
-        return self._events(await self._compile().aget_state(config))
+        return self._events(await self._compiled().aget_state(config))
 
     @staticmethod
     def _pending_interrupt_writes(pending_writes: Iterable[Any]) -> _PendingInterrupts:
@@ -616,7 +618,7 @@ class EventStore:
         ``graph.get_state(config).events`` for it.
         """
         with self._tolerant_read() as unresolved:
-            snapshot = self._compile().get_state(config)
+            snapshot = self._compiled().get_state(config)
             self._require_settleable("abandon", snapshot, config)
             pending = self._read_pending_interrupts(config, "abandon")
             if require_interrupt:
@@ -641,7 +643,7 @@ class EventStore:
     ) -> None:
         """Async version of :meth:`abandon`."""
         with self._tolerant_read() as unresolved:
-            snapshot = await self._compile().aget_state(config)
+            snapshot = await self._compiled().aget_state(config)
             self._require_settleable("aabandon", snapshot, config)
             pending = await self._aread_pending_interrupts(config, "aabandon")
             if require_interrupt:

@@ -52,7 +52,7 @@ class MigrationTarget:
 
     ``graph`` builds the graph on the checkpointer it receives. It can
     return an :class:`~langgraph_events.EventGraph`, whose
-    :attr:`~langgraph_events.EventGraph.store` the commands use, or an
+    :attr:`~langgraph_events.EventGraph.event_store` the commands use, or an
     :class:`~langgraph_events.EventStore` when the commands must not build
     the services of a run. The gate passes an empty in-memory saver, so
     building reads no store.
@@ -169,7 +169,13 @@ class MigrationTarget:
 
         built = self.graph(saver)
         try:
-            store = built if isinstance(built, _Store) else built.store
+            store = built if isinstance(built, _Store) else built.event_store
+        except ValueError as error:
+            raise TargetError(
+                "MigrationTarget.graph returned a graph with no checkpointer. "
+                "Build the graph on the checkpointer that the factory receives."
+            ) from error
+        try:
             serde = store._require_namespace_aware_serde("MigrationTarget.graph")
         except ValueError as error:
             raise TargetError(str(error)) from error

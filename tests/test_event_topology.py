@@ -16,12 +16,15 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
     Abandoned,
+    Command,
+    DomainEvent,
     Event,
     EventGraph,
     EventStore,
     EventTopology,
     IntegrationEvent,
     Interrupted,
+    Namespace,
     OrphanedEventWarning,
     ScalarReducer,
     ServiceRequirement,
@@ -32,6 +35,7 @@ from langgraph_events import (
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
 from langgraph_events.serde.migrations import (
     MigrationTarget,
+    TargetError,
     check,
     update_baseline,
 )
@@ -74,6 +78,26 @@ def _count(event: Started, total: int | None) -> _Counted:
 
 _TOTAL = ScalarReducer(name="total", event_type=_Counted, fn=lambda e: 1)
 
+
+@on(Started)
+def handle(event: Started) -> None:
+    return None
+
+
+_FIRST_HANDLE = handle
+
+
+@on(Started)  # type: ignore[no-redef]
+def handle(event: Started, mailer: _Mailer) -> None:
+    return None
+
+
+class _Shop(Namespace):
+    class Unhandled(Command):
+        class Done(DomainEvent):
+            pass
+
+
 _HANDLERS = [_ask, _finish]
 
 
@@ -95,8 +119,28 @@ def describe_EventTopology():
             topology = EventTopology(_HANDLERS)
 
             assert topology.requirements == (
-                ServiceRequirement("_ask", "mailer", _Mailer),
-                ServiceRequirement("_finish", "mailer", _Mailer),
+                ServiceRequirement(
+                    node="_ask",
+                    qualname="test_event_topology._ask",
+                    param="mailer",
+                    annotation=_Mailer,
+                ),
+                ServiceRequirement(
+                    node="_finish",
+                    qualname="test_event_topology._finish",
+                    param="mailer",
+                    annotation=_Mailer,
+                ),
+            )
+
+        def it_names_the_node_of_a_renamed_duplicate():
+            topology = EventTopology([_FIRST_HANDLE, handle])
+
+            (requirement,) = topology.requirements
+
+            assert (requirement.node, requirement.qualname) == (
+                "handle_2",
+                "test_event_topology.handle",
             )
 
         def it_renders_the_model_of_the_graph():
@@ -206,25 +250,16 @@ def describe_EventGraph_of():
             assert str(bound.value) == str(direct.value)
 
     def when_a_renamed_duplicate_misses_a_service():
-        def it_names_the_handler_as_declared():
-            @on(Started)
-            def handle(event: Started) -> None:
-                return None
-
-            first = handle
-
-            @on(Started)  # type: ignore[no-redef]
-            def handle(event: Started, mailer: _Mailer) -> None:
-                return None
-
+        def it_names_the_function_and_the_node():
             with pytest.raises(TypeError) as info:
-                EventGraph([first, handle])
+                EventGraph([_FIRST_HANDLE, handle])
 
             assert str(info.value) == (
-                "Handler 'handle' declares parameter(s) ['mailer'] that the "
-                "framework cannot inject. For service injection, register a "
-                "matching instance via EventGraph(services=[...]); for state, "
-                "register a Reducer; otherwise remove the parameter."
+                "Handler 'test_event_topology.handle' (node 'handle_2') declares "
+                "parameter(s) ['mailer'] that the framework cannot inject. For "
+                "service injection, register a matching instance via "
+                "EventGraph(services=[...]); for state, register a Reducer; "
+                "otherwise remove the parameter."
             )
 
 
@@ -249,6 +284,35 @@ def describe_EventGraph():
                 "'backup': b}), or use a subclass to distinguish them."
             )
             assert not [w for w in caught if w.category is OrphanedEventWarning]
+
+    def when_the_services_and_a_reducer_are_both_invalid():
+        def it_refuses_the_reducer_first():
+            reserved = ScalarReducer(name="events", event_type=_Counted, fn=len)
+
+            with pytest.raises(ValueError) as info:
+                EventGraph([_ask], reducers=[reserved], services=[_Mailer(), _Mailer()])
+
+            assert str(info.value) == (
+                "Reducer name(s) {'events'} conflict with reserved state fields"
+            )
+
+    def when_the_services_and_a_command_are_both_invalid():
+        def it_refuses_the_command_first():
+            with pytest.raises(TypeError) as info:
+                EventGraph([_Shop.Unhandled], services=[_Mailer(), _Mailer()])
+
+            assert str(info.value) == (
+                "Command _Shop.Unhandled has no inline handler. Define one public "
+                "method inside the command class (any name — `handle`, `place`, "
+                "`ship`, …)."
+            )
+
+    def when_the_graph_has_no_checkpointer():
+        def it_has_no_event_store():
+            with pytest.raises(ValueError) as info:
+                _ = EventGraph(_HANDLERS, services=[_Mailer()]).event_store
+
+            assert str(info.value) == "event_store requires a checkpointer"
 
 
 def describe_EventStore():
@@ -318,7 +382,7 @@ def describe_EventStore():
             store = EventStore(EventTopology(_HANDLERS), MemorySaver())
 
             with pytest.raises(RuntimeError) as info:
-                store._compile().invoke(
+                store._compiled().invoke(
                     {"events": [Started(data="x")], "causes": [None]},
                     config=_cfg("store-runs"),
                 )
@@ -335,6 +399,19 @@ def describe_EventStore():
 
 
 def describe_MigrationTarget():
+    def when_the_factory_ignores_the_checkpointer():
+        def it_names_the_graph_factory():
+            def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                return EventGraph(_HANDLERS, services=[_Mailer()])
+
+            with pytest.raises(TargetError) as info:
+                MigrationTarget(graph=graph, baseline=Path("unused")).snapshot()
+
+            assert str(info.value) == (
+                "MigrationTarget.graph returned a graph with no checkpointer. "
+                "Build the graph on the checkpointer that the factory receives."
+            )
+
     def when_the_factory_returns_a_store():
         def it_passes_against_the_baseline_of_the_graph(tmp_path: Path):
             def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
