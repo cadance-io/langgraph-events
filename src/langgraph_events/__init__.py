@@ -49,11 +49,14 @@ from langgraph_events._event_log import (
 )
 from langgraph_events._graph import (
     EventGraph,
+    EventStore,
+    EventTopology,
     GraphState,
     LLMStreamEnd,
     LLMToken,
     LLMToolCallChunk,
     OrphanedEventWarning,
+    ServiceRequirement,
     UnresumableError,
 )
 from langgraph_events._handler import on
@@ -125,6 +128,8 @@ __all__ = [
     "Event",
     "EventGraph",
     "EventLog",
+    "EventStore",
+    "EventTopology",
     "FoldReducer",
     "Foldable",
     "FrameworkEvent",
@@ -162,6 +167,7 @@ __all__ = [
     "RunScoped",
     "ScalarReducer",
     "Scatter",
+    "ServiceRequirement",
     "SourceDropped",
     "SystemEvent",
     "SystemPromptSet",

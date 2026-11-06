@@ -257,7 +257,7 @@ class Baseline:
                 for identity, fields in live.items()
             },
             retired={i: f for i, f in history.items() if i not in live},
-            handlers=frozenset(code.graph.handler_names),
+            handlers=frozenset(code.store.topology.handler_names),
             code=CodeRecord(
                 tuple(
                     MigrationRecord(key, holds.get(key))

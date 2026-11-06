@@ -40,7 +40,8 @@ from langgraph_events._event_log import EventLog
 from langgraph_events._handler import (
     HandlerMeta,
     _resolve_hints_and_errors,
-    extract_handler_meta,
+    bind_services,
+    classify_handler,
     normalize_previous_names,
     on,
 )
@@ -1154,7 +1155,7 @@ def _expand_command_handlers(
     """Replace ``Command`` subclasses with their inline handler functions.
 
     Each substituted function is stamped via ``on(cls, raises=...,
-    invariants=..., previously=...)(fn)`` so that ``extract_handler_meta``
+    invariants=..., previously=...)(fn)`` so that ``classify_handler``
     sees it like any other ``@on``-subscribed handler.
     ``raises``/``invariants``/``retry``/``previously`` are read from
     class-level attributes on the Command, since inline handlers have no
@@ -1203,24 +1204,152 @@ def _expand_command_handlers(
     return expanded
 
 
-class EventGraph:
-    """Build and run an event-driven graph from ``@on`` handlers.
+def _compile_state_graph(
+    handler_metas: list[HandlerMeta],
+    *,
+    reducers: dict[str, BaseReducer],
+    return_contracts: dict[str, ReturnContract | None],
+    model_provider: Callable[[], NamespaceModel],
+    max_rounds: int,
+    recursion_limit: int | None,
+    services_by_type: dict[type, Any] | None,
+    services_by_name: dict[str, Any] | None,
+    checkpointer: Checkpointer,
+    store: BaseStore | None,
+) -> CompiledStateGraph:
+    """Compile *handler_metas* into a LangGraph ``CompiledStateGraph``.
 
-    Topology is auto-derived from handler subscriptions.  Internally builds
-    a LangGraph ``StateGraph`` with a hub-and-spoke reactive loop.
+    Shared by :class:`EventGraph`, which passes its services, and by
+    :class:`EventStore`, which passes none: a store never runs a handler.
+    """
+    # Dynamic state schema with per-reducer channels
+    state_schema = build_state_schema(reducers)
 
-    Accepts a single seed event or a list of seed events::
+    # Always include reducer channels — filtering is an output concern
+    out_schema: Any = _OutputState
+    if reducers:
+        reducer_fields: dict[str, Any] = {
+            "events": list[Event],
+            "causes": list[CauseEntry],
+        }
+        for name, r in reducers.items():
+            reducer_fields[name] = r.output_type()
+        _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
+        out_schema = _OutputWithReducers
 
-        graph = EventGraph([classify, route, review])
+    graph: StateGraph[Any] = StateGraph(
+        state_schema,
+        input_schema=_InputState,  # type: ignore[arg-type]
+        output_schema=out_schema,
+    )
 
-        # Single seed event
-        log = graph.invoke(DocumentReceived(doc_id="1", content="..."))
+    # --- nodes ---
+    seed_node = make_seed_node(reducers=reducers)
+    router_node = make_router_node(max_rounds)
+    dispatch_fn = make_dispatch(handler_metas)
 
-        # Multiple seed events (e.g. system prompt + user message)
-        log = graph.invoke([
-            SystemPromptSet.from_str("You are helpful"),
-            UserMessageReceived(message=HumanMessage(content="Hi")),
-        ])
+    async def aseed(state: StateDict) -> StateDict:
+        return seed_node(state)
+
+    async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
+        return router_node(state, config)
+
+    graph.add_node("__seed__", cast("Any", _leaf_node(seed_node, aseed, "__seed__")))
+    graph.add_node(
+        "__router__", cast("Any", _leaf_node(router_node, arouter, "__router__"))
+    )
+
+    handler_names: list[str] = []
+    for meta in handler_metas:
+        handler_node = make_handler_node(
+            meta,
+            reducers=reducers,
+            return_contract=return_contracts.get(meta.name),
+            services_by_type=services_by_type or None,
+            services_by_name=services_by_name or None,
+            model_provider=model_provider,
+        )
+        graph.add_node(meta.node_name, cast("Any", handler_node))
+        handler_names.append(meta.node_name)
+        # Register an alias node per historic name (@on(previously=...)) so an
+        # interrupted checkpoint paused at the old node re-enters the same
+        # handler on resume. The dispatcher only ever returns canonical
+        # names, so aliases never fire for new work — they exist purely to
+        # catch resumes of in-flight checkpoints.
+        for alias in meta.previous_names:
+            graph.add_node(alias, cast("Any", handler_node))
+            handler_names.append(alias)
+
+    # --- edges ---
+    graph.add_edge(START, "__seed__")
+
+    # dispatch from seed and from router
+    destinations = [*handler_names, END]
+    graph.add_conditional_edges("__seed__", dispatch_fn, destinations)
+    graph.add_conditional_edges("__router__", dispatch_fn, destinations)
+
+    # all handlers fan-in back to router
+    for name in handler_names:
+        graph.add_edge(name, "__router__")
+
+    compile_kwargs: dict[str, Any] = {}
+    if checkpointer is not None:
+        compile_kwargs["checkpointer"] = checkpointer
+    if store is not None:
+        compile_kwargs["store"] = store
+    compiled = graph.compile(**compile_kwargs)
+
+    # Resolve recursion_limit: explicit kwarg wins; otherwise auto-size
+    # so LangGraph's limit never trips before our max_rounds does.
+    # Each round is at most 1 router + all handlers.
+    if recursion_limit is not None:
+        limit = recursion_limit
+    else:
+        n_handlers = len(handler_metas) + sum(
+            len(meta.previous_names) for meta in handler_metas
+        )
+        needed = max_rounds * (n_handlers + 1) + 1
+        existing = (compiled.config or {}).get("recursion_limit", 25)
+        limit = max(needed, existing)
+    compiled.config = {
+        **(compiled.config or {}),
+        "recursion_limit": limit,
+    }
+
+    return compiled
+
+
+class ServiceRequirement(NamedTuple):
+    """A handler parameter that only a service can fill.
+
+    The event, a framework injectable, a reducer and a field matcher do not
+    claim it. :meth:`EventGraph.of` must bind a service to it, or the build
+    raises ``TypeError``.
+    """
+
+    handler: str
+    """The display name of the handler."""
+    param: str
+    """The parameter name."""
+    annotation: Any
+    """The resolved annotation, or ``inspect.Parameter.empty`` when the
+    parameter has none or when it did not resolve."""
+
+
+class EventTopology:
+    """The handlers, reducers and namespaces of a graph, with no services.
+
+    Runs every construction check of :class:`EventGraph` that needs no
+    service and no checkpointer. Use it to render or list a graph, to feed
+    the migration gate, or to maintain a store, without the services of a
+    run::
+
+        topology = EventTopology([classify, route, review])
+        print(topology.namespaces().mermaid())
+        graph = EventGraph.of(topology, services={"llm": llm})
+
+    A handler parameter that only a service can fill is listed in
+    :attr:`requirements`. :meth:`EventGraph.of` binds the services to them.
     """
 
     # Lazily built by namespaces(); class-level default keeps __init__ lean.
@@ -1230,25 +1359,12 @@ class EventGraph:
         self,
         handlers: list[Callable[..., Any]],
         *,
-        max_rounds: int = 100,
         reducers: list[BaseReducer] | None = None,
-        services: Sequence[Any] | Mapping[str, Any] | None = None,
-        checkpointer: Checkpointer = None,
-        store: BaseStore | None = None,
-        recursion_limit: int | None = None,
-        on_unresumable: Literal["raise", "halt", "warn"] = "raise",
     ) -> None:
         if not handlers:
-            raise ValueError("EventGraph requires at least one handler")
-        _validate_on_unresumable(on_unresumable)
-
+            raise ValueError("EventTopology requires at least one handler")
         handlers = _expand_command_handlers(handlers)
 
-        self._max_rounds = max_rounds
-        self._recursion_limit = recursion_limit
-        self._on_unresumable = on_unresumable
-        self._checkpointer = checkpointer
-        self._store = store
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
         _discover_namespace_reducers(self._namespaces, self._reducers)
@@ -1258,34 +1374,12 @@ class EventGraph:
                 f"Reducer name(s) {conflicts} conflict with reserved state fields"
             )
 
-        # services= takes one of two shapes:
-        #   • Mapping[str, Any] — name-keyed registry; resolution by handler
-        #     param name. Allows multiple instances of the same type
-        #     (e.g. primary + backup chat models).
-        #   • Sequence[Any] — type-keyed registry; resolution by handler
-        #     param annotation. Same-type collisions are rejected.
-        # The two forms are mutually exclusive within a single EventGraph.
-        self._services_by_type, self._services_by_name = _build_service_registries(
-            services
-        )
-        run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
-
         self._handler_metas: list[HandlerMeta] = []
-        self._compiled_graph: CompiledStateGraph | None = None
 
         reducer_names = frozenset(self._reducers.keys())
-        service_types = frozenset(self._services_by_type.keys())
-        service_names = frozenset(self._services_by_name.keys())
         seen_names: dict[str, int] = {}
         for fn in handlers:
-            meta = extract_handler_meta(
-                fn,
-                reducer_names=reducer_names,
-                service_types=service_types,
-                service_names=service_names,
-            )
-            _verify_no_unclaimed_params(meta)
-            _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
+            meta = classify_handler(fn, reducer_names=reducer_names)
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
             if meta.name in seen_names:
@@ -1343,17 +1437,6 @@ class EventGraph:
             )
         return self._namespaces_cache
 
-    def reflect(self, log: EventLog) -> Reflection:
-        """Return a :class:`Reflection` — deterministic query surface over *log*.
-
-        Bundles the log with this graph's namespace model and reducers so an
-        agent (or code) can query facts about a run: listings, field dumps,
-        static topology, reducer projections, and verdict-free evidence joins.
-        """
-        from langgraph_events._reflection import Reflection  # noqa: PLC0415
-
-        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
-
     @property
     def reducer_names(self) -> frozenset[str]:
         """The names of all registered reducers."""
@@ -1380,126 +1463,19 @@ class EventGraph:
         }
 
     @property
-    def compiled(self) -> CompiledStateGraph:
-        """The underlying LangGraph ``CompiledStateGraph``.
-
-        This is the bridge to full LangGraph when you need features
-        beyond the EventGraph API: subgraph composition, custom
-        streaming modes, direct state access, or advanced checkpointer
-        workflows.
-
-        The instance is compiled lazily on first access and cached.
-
-        Warning: the ``causes`` channel must stay aligned with ``events``. A
-        direct ``update_state`` that writes ``events`` without one ``causes``
-        entry per event shifts every older cause, and no check can detect it.
-        Write events through :meth:`pre_seed`, or write a ``None`` cause for
-        each event in the same update.
-        """
-        return self._compile()
-
-    def _compile(self) -> CompiledStateGraph:
-        """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
-        if self._compiled_graph is not None:
-            return self._compiled_graph
-
-        # Dynamic state schema with per-reducer channels
-        state_schema = build_state_schema(self._reducers)
-
-        # Always include reducer channels — filtering is an output concern
-        out_schema: Any = _OutputState
-        if self._reducers:
-            reducer_fields: dict[str, Any] = {
-                "events": list[Event],
-                "causes": list[CauseEntry],
-            }
-            for name, r in self._reducers.items():
-                reducer_fields[name] = r.output_type()
-            _OutputWithReducers = TypedDict("_OutputWithReducers", reducer_fields)  # type: ignore[misc]
-            out_schema = _OutputWithReducers
-
-        graph: StateGraph[Any] = StateGraph(
-            state_schema,
-            input_schema=_InputState,  # type: ignore[arg-type]
-            output_schema=out_schema,
-        )
-
-        # --- nodes ---
-        seed_node = make_seed_node(reducers=self._reducers)
-        router_node = make_router_node(self._max_rounds)
-        dispatch_fn = make_dispatch(self._handler_metas)
-
-        async def aseed(state: StateDict) -> StateDict:
-            return seed_node(state)
-
-        async def arouter(state: StateDict, config: RunnableConfig) -> StateDict:
-            return router_node(state, config)
-
-        graph.add_node(
-            "__seed__", cast("Any", _leaf_node(seed_node, aseed, "__seed__"))
-        )
-        graph.add_node(
-            "__router__", cast("Any", _leaf_node(router_node, arouter, "__router__"))
-        )
-
-        handler_names: list[str] = []
+    def requirements(self) -> tuple[ServiceRequirement, ...]:
+        """Each handler parameter that only a service can fill, in handler
+        and signature order. A variadic parameter is not listed."""
+        variadic = {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+        found: list[ServiceRequirement] = []
         for meta in self._handler_metas:
-            handler_node = make_handler_node(
-                meta,
-                reducers=self._reducers,
-                return_contract=self._return_contracts.get(meta.name),
-                services_by_type=self._services_by_type or None,
-                services_by_name=self._services_by_name or None,
-                model_provider=self.namespaces,
+            params = inspect.signature(meta.fn).parameters
+            found.extend(
+                ServiceRequirement(meta.name, name, annotation)
+                for name, annotation in meta.service_candidates
+                if params[name].kind not in variadic
             )
-            graph.add_node(meta.node_name, cast("Any", handler_node))
-            handler_names.append(meta.node_name)
-            # Register an alias node per historic name (@on(previously=...)) so an
-            # interrupted checkpoint paused at the old node re-enters the same
-            # handler on resume. The dispatcher only ever returns canonical
-            # names, so aliases never fire for new work — they exist purely to
-            # catch resumes of in-flight checkpoints.
-            for alias in meta.previous_names:
-                graph.add_node(alias, cast("Any", handler_node))
-                handler_names.append(alias)
-
-        # --- edges ---
-        graph.add_edge(START, "__seed__")
-
-        # dispatch from seed and from router
-        destinations = [*handler_names, END]
-        graph.add_conditional_edges("__seed__", dispatch_fn, destinations)
-        graph.add_conditional_edges("__router__", dispatch_fn, destinations)
-
-        # all handlers fan-in back to router
-        for name in handler_names:
-            graph.add_edge(name, "__router__")
-
-        compile_kwargs: dict[str, Any] = {}
-        if self._checkpointer is not None:
-            compile_kwargs["checkpointer"] = self._checkpointer
-        if self._store is not None:
-            compile_kwargs["store"] = self._store
-        self._compiled_graph = graph.compile(**compile_kwargs)
-
-        # Resolve recursion_limit: explicit kwarg wins; otherwise auto-size
-        # so LangGraph's limit never trips before our max_rounds does.
-        # Each round is at most 1 router + all handlers.
-        if self._recursion_limit is not None:
-            limit = self._recursion_limit
-        else:
-            n_handlers = len(self._handler_metas) + sum(
-                len(meta.previous_names) for meta in self._handler_metas
-            )
-            needed = self._max_rounds * (n_handlers + 1) + 1
-            existing = (self._compiled_graph.config or {}).get("recursion_limit", 25)
-            limit = max(needed, existing)
-        self._compiled_graph.config = {
-            **(self._compiled_graph.config or {}),
-            "recursion_limit": limit,
-        }
-
-        return self._compiled_graph
+        return tuple(found)
 
     def _verify_error_handling(self) -> None:
         """Run the construction-time error-handling gates.
@@ -1641,299 +1617,74 @@ class EventGraph:
                         f"remove the matcher."
                     )
 
+
+class EventStore:
+    """Maintain the checkpoints of one topology, with no services.
+
+    Finds paused threads, abandons them, finds unrevivable threads, and
+    plans and applies a store rewrite. None of these runs a handler, so the
+    store needs the topology and the checkpointer only::
+
+        store = EventStore(topology, saver)
+        configs = store.threads_paused_on(Approval, thread_ids=ids)
+        for config in configs:
+            store.abandon(config, reason="retired")
+
+    :class:`EventGraph` is an ``EventStore`` too: it settles a thread
+    through its own compiled graph, with its services.
+    """
+
+    def __init__(
+        self, topology: EventTopology, checkpointer: BaseCheckpointSaver[Any]
+    ) -> None:
+        if not isinstance(checkpointer, BaseCheckpointSaver):
+            raise TypeError(
+                f"EventStore requires a BaseCheckpointSaver, got "
+                f"{type(checkpointer).__name__}"
+            )
+        self._topology = topology
+        self._checkpointer: Checkpointer = checkpointer
+        self._compiled_graph: CompiledStateGraph | None = None
+
+    @property
+    def topology(self) -> EventTopology:
+        """The topology of the stored threads."""
+        return self._topology
+
+    def _compile(self) -> CompiledStateGraph:
+        """The graph of the topology on the checkpointer, with no services.
+
+        A settle writes through ``bulk_update_state(as_node="__seed__")``.
+        LangGraph runs only the writers of that node and the dispatch
+        function, never a handler body, so a handler needs no service here.
+        """
+        if self._compiled_graph is None:
+            topology = self._topology
+            self._compiled_graph = _compile_state_graph(
+                topology._handler_metas,
+                reducers=topology._reducers,
+                return_contracts=topology._return_contracts,
+                model_provider=topology.namespaces,
+                max_rounds=100,
+                recursion_limit=None,
+                services_by_type=None,
+                services_by_name=None,
+                checkpointer=self._checkpointer,
+                store=None,
+            )
+        return self._compiled_graph
+
     def _require_checkpointer(self, method: str) -> BaseCheckpointSaver:
         if not isinstance(self._checkpointer, BaseCheckpointSaver):
             raise ValueError(f"{method}() requires a checkpointer")
         return self._checkpointer
 
     @staticmethod
-    def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
-        """Build the input dict from a seed event or list of events.
-
-        The input writes a ``None`` cause for each seed, so ``causes`` stays
-        aligned with ``events`` with no guess, also on a checkpoint saved
-        before causes existed.
-        """
-        seeds = seed if isinstance(seed, list) else [seed]
-        return {"events": seeds, "causes": [None] * len(seeds)}
-
-    def _run(
-        self,
-        inp: _GraphInput,
-        *,
-        deadline: float | None,
-        pause_on: PauseSignal | None,
-        **kwargs: Any,
-    ) -> EventLog:
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        compiled = self._compile()
-        result = compiled.invoke(inp, **kwargs)
-        return EventLog._from_state(result["events"], result.get("causes"))
-
-    async def _arun(
-        self,
-        inp: _GraphInput,
-        *,
-        deadline: float | None,
-        pause_on: PauseSignal | None,
-        **kwargs: Any,
-    ) -> EventLog:
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
-        compiled = self._compile()
-        result = await compiled.ainvoke(inp, **kwargs)
-        return EventLog._from_state(result["events"], result.get("causes"))
-
-    @classmethod
-    def from_namespaces(
-        cls,
-        *domains: type[Namespace],
-        handlers: list[Callable[..., Any]] | None = None,
-        **kwargs: Any,
-    ) -> EventGraph:
-        """Build an ``EventGraph`` from domains' inline command handlers.
-
-        Walks each domain's class namespace and registers every ``Command``
-        that defines an inline handler. Commands without one are silently
-        skipped — register those via the ``handlers=`` kwarg or
-        ``EventGraph([...])`` directly, which errors on missing handlers.
-
-        The ``handlers=`` kwarg is appended as-is — useful for reaction
-        handlers subscribed to ``DomainEvent``s, ``HandlerRaised``,
-        ``InvariantViolated``, etc.
-
-        Example::
-
-            graph = EventGraph.from_namespaces(Order, Customer,
-                                            handlers=[react])
-        """
-        collected: list[Any] = []
-        for dom in domains:
-            if not (isinstance(dom, type) and issubclass(dom, Namespace)):
-                raise TypeError(
-                    f"from_namespaces expects Namespace subclasses, got {dom!r}"
-                )
-            for attr in dom.__dict__.values():
-                if (
-                    isinstance(attr, type)
-                    and issubclass(attr, Command)
-                    and getattr(attr, "__command_handler__", None) is not None
-                ):
-                    collected.append(attr)
-        if handlers:
-            collected.extend(handlers)
-
-        # Auto-wire migration-aware deserialization: the user only writes
-        # @migrate_from on the class. We have both the domains and the
-        # checkpointer here, so scope a NamespaceAwareSerde to these
-        # namespaces. A user-supplied NamespaceAwareSerde (possibly
-        # carrying hand-authored migrations=) is left untouched — that is
-        # the opt-out. The serde still owns coverage; we own construction.
-        graph = cls(collected, **kwargs)
-
-        # Wired after construction, not before: the events that live outside
-        # every namespace — module-level IntegrationEvents, framework
-        # SystemEvents — are only knowable once the graph has parsed its
-        # handlers' subscriptions and return types. Without them those
-        # identities resolve by import and are shared between engine
-        # lifetimes of one module. ``compiled`` is lazy, so the serde is in
-        # place well before anything reads it.
-        checkpointer = kwargs.get("checkpointer")
-        if checkpointer is not None:
-            from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
-
-            serde = getattr(checkpointer, "serde", None)
-            if serde is not None and not isinstance(serde, NamespaceAwareSerde):
-                # Not ``domains``: a namespace can reach the graph through
-                # ``handlers=`` alone, and its events would then keep
-                # resolving by import — the bleed #155 exists to close.
-                # ``graph._namespaces`` is the full set.
-                namespaces, events = graph._serde_scope()
-                checkpointer.serde = NamespaceAwareSerde(
-                    namespaces=namespaces, events=events
-                )
-
-        return graph
-
-    def invoke(
-        self,
-        seed: Event | list[Event],
-        *,
-        deadline: float | None = None,
-        pause_on: PauseSignal | None = None,
-        **kwargs: Any,
-    ) -> EventLog:
-        """Run the graph synchronously with one or more seed events.
-
-        Args:
-            seed: A single event or list of events to start the graph.
-            deadline: A ``time.monotonic()`` instant. At the first round
-                boundary past it, the router emits ``RunPausedOnDeadline``
-                and the run ends cleanly. ``None`` (default) disables.
-            pause_on: An object with ``is_set()``, for example an
-                ``asyncio.Event``. At the first round boundary where
-                ``is_set()`` returns ``True``, the router emits
-                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
-                (default) disables.
-
-        Returns an ``EventLog`` containing all events produced during the run.
-
-        Raises:
-            TypeError: *pause_on* is a class, or has no callable ``is_set``.
-        """
-        return self._run(
-            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+    def _events(snapshot: StateSnapshot) -> EventLog:
+        """The event log of *snapshot*, with its recorded causes."""
+        return EventLog._from_state(
+            snapshot.values.get("events", []), snapshot.values.get("causes")
         )
-
-    async def ainvoke(
-        self,
-        seed: Event | list[Event],
-        *,
-        deadline: float | None = None,
-        pause_on: PauseSignal | None = None,
-        **kwargs: Any,
-    ) -> EventLog:
-        """Run the graph asynchronously with one or more seed events.
-
-        Takes the same arguments as :meth:`invoke`.
-        """
-        return await self._arun(
-            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
-        )
-
-    def pre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
-        """Inject external state into reducer channels before the first run.
-
-        Use this to hydrate reducers from an external source (e.g. a database
-        migration or test fixture) when modelling the data as seed events isn't
-        practical.  Call it once before ``invoke``/``ainvoke``::
-
-            graph.pre_seed(config, {"my_reducer": existing_value})
-            graph.invoke(StartEvent(), config=config)
-
-        Each event in ``values["events"]`` gets a ``None`` cause.
-
-        Requires a checkpointer.
-        """
-        self._require_checkpointer("pre_seed")
-        compiled = self._compile()
-        compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
-
-    async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
-        """Async version of :meth:`pre_seed`."""
-        self._require_checkpointer("apre_seed")
-        compiled = self._compile()
-        await compiled.aupdate_state(
-            config, pad_causes(values, None), as_node="__seed__"
-        )
-
-    @staticmethod
-    def _awaits_resume(snapshot: StateSnapshot) -> bool:
-        """Whether *snapshot* has work to resume into.
-
-        A resume is awaited when the checkpoint's ``next`` is set, or when a
-        task holds a pending interrupt. With neither, nothing is scheduled.
-        Then ``resume()`` does nothing: the paused handler is gone, the thread
-        finished, or the thread was resumed twice.
-
-        ``next`` is read because a caller can ``pre_seed`` before it resumes,
-        for example ``AGUIAdapter`` commits a ``FrontendStateMutated``. That
-        write hides the pending interrupt, but ``next`` stays set. A Phase-1
-        ``@on(previously=...)`` alias keeps the node live, so a declared
-        rename still reports ``True``.
-
-        The interrupts are read because LangGraph before 1.2.13 drops from
-        ``next`` a task that holds a saved resume write. A handler that pauses
-        a second time in one run is such a task. See :meth:`_is_interrupted`.
-        """
-        return bool(snapshot.next) or EventGraph._is_interrupted(snapshot)
-
-    def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
-        """Whether the thread of ``kwargs["config"]`` has work to resume into.
-
-        See :meth:`_awaits_resume`. If no ``config`` was passed, assume
-        pending and let the normal path surface any error.
-        """
-        config = kwargs.get("config")
-        if config is None:
-            return True
-        return self._awaits_resume(self._compile().get_state(config))
-
-    async def _aresume_snapshot(
-        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None
-    ) -> StateSnapshot | None:
-        """The checkpoint of ``kwargs["config"]`` for an async resume.
-
-        Returns *snapshot* when the caller already loaded it. Otherwise loads
-        it with ``aget_state``, so an async resume never drives an async-only
-        checkpointer synchronously from the running event loop. Returns
-        ``None`` if no ``config`` was passed.
-        """
-        if snapshot is not None:
-            return snapshot
-        config = kwargs.get("config")
-        if config is None:
-            return None
-        return await self._compile().aget_state(config)
-
-    async def _aresume_is_pending(
-        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None = None
-    ) -> bool:
-        """Async sibling of :meth:`_resume_is_pending`.
-
-        Pass *snapshot* when the checkpoint is already loaded, so this check
-        does not load it again. See :meth:`_aresume_snapshot`.
-        """
-        snapshot = await self._aresume_snapshot(kwargs, snapshot)
-        return snapshot is None or self._awaits_resume(snapshot)
-
-    def _unresumable_message(
-        self, log: EventLog | None = None, config: RunnableConfig | None = None
-    ) -> str:
-        """Diagnostic for a ``resume()`` that would be a no-op.
-
-        Keys the abandoned diagnosis on the *last* event, not
-        ``log.latest(Halted)`` (a whole-log search): a thread reused
-        after :meth:`abandon` must fall back to the generic message once
-        ``Abandoned`` is no longer latest.
-        """
-        if log and isinstance(log[-1], Abandoned):
-            abandoned = log[-1]
-            thread_id = (config or {}).get("configurable", {}).get("thread_id")
-            detail = ""
-            if abandoned.reason:
-                detail += f" reason={abandoned.reason!r}."
-            if abandoned.discarded:
-                detail += f" discarded={abandoned.discarded!r}."
-            return (
-                f"resume() called on thread {thread_id!r}, which was "
-                f"abandoned via abandon()/aabandon().{detail} The thread was "
-                "deliberately settled without an answer and is terminal; it "
-                "cannot be resumed."
-            )
-        return (
-            "resume() called on a thread that is not awaiting input. The paused "
-            "handler may have been renamed/removed, or the thread already "
-            "completed. Declare @on(previously=...) to recover a renamed "
-            "handler, or set EventGraph(on_unresumable='halt'|'warn')."
-        )
-
-    def _unresumable_short_circuits(
-        self, log: EventLog | None = None, config: RunnableConfig | None = None
-    ) -> bool:
-        """Apply ``on_unresumable``'s ``raise``/``warn`` arm. ``False``
-        means append a terminal event (``halt``). ``True`` means return
-        the log unchanged (``warn``). ``raise`` raises.
-
-        Caller supplies the state read. The async path must ``await
-        aget_state``: an async-only checkpointer rejects a sync read
-        from the running loop.
-        """
-        if self._on_unresumable == "raise":
-            raise UnresumableError(self._unresumable_message(log, config))
-        if self._on_unresumable == "warn":
-            warn_user(self._unresumable_message(log, config))
-            return True
-        return False
 
     @staticmethod
     def _settle_supersteps(
@@ -1976,163 +1727,22 @@ class EventGraph:
         # whose snapshot applies the same pending writes the leading
         # clear commits. A direct checkpoint read undercounts `_cursor`
         # without raising an error, and no test in this suite catches it.
-        events = self.get_state(config).events
+        events = self._events(self._compile().get_state(config))
         self._compile().bulk_update_state(
             config,
             self._settle_supersteps(events, terminal),
         )
-        return self.get_state(config).events
+        return self._events(self._compile().get_state(config))
 
     async def _asettle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Async sibling of :meth:`_settle`."""
         # Same `_cursor` reasoning as `_settle`, via `aget_state`.
-        events = (await self.aget_state(config)).events
+        events = self._events(await self._compile().aget_state(config))
         await self._compile().abulk_update_state(
             config,
             self._settle_supersteps(events, terminal),
         )
-        return (await self.aget_state(config)).events
-
-    def _apply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
-    ) -> EventLog:
-        """Sync ``on_unresumable`` for a resume that would be a no-op.
-
-        Runs only when :meth:`_resume_is_pending` is ``False``, so no
-        completed sibling write can be lost on this path.
-        """
-        config = kwargs["config"]
-        log = self.get_state(config).events
-        if self._unresumable_short_circuits(log, config):
-            return log
-        return self._settle(config, self._unresumable_event(value))
-
-    async def _aapply_unresumable_policy(
-        self, value: Event, kwargs: dict[str, Any]
-    ) -> EventLog:
-        """Async sibling of :meth:`_apply_unresumable_policy`."""
-        config = kwargs["config"]
-        log = (await self.aget_state(config)).events
-        if self._unresumable_short_circuits(log, config):
-            return log
-        return await self._asettle(config, self._unresumable_event(value))
-
-    @staticmethod
-    def _unresumable_event(value: Event) -> Unresumable:
-        return Unresumable(resume_value=type(value).__name__)
-
-    @staticmethod
-    def _require_resume_event(value: object) -> None:
-        """Raise ``TypeError`` if *value* is not an ``Event``.
-
-        The check runs before the graph runs. LangGraph saves a resume value
-        in the checkpoint before the paused handler reads it. A rerun then
-        reads the saved value again, so a bad value strands the thread.
-        """
-        if not isinstance(value, Event):
-            got = type(value).__name__
-            raise TypeError(f"resume() requires an Event instance, got {got}")
-
-    def resume(
-        self,
-        value: Event,
-        *,
-        deadline: float | None = None,
-        pause_on: PauseSignal | None = None,
-        **kwargs: Any,
-    ) -> EventLog:
-        """Resume an interrupted graph with a domain event.
-
-        The event is auto-dispatched (handlers subscribed to its type fire),
-        then a ``Resumed`` event is created alongside it. If the thread is not
-        awaiting input, the ``on_unresumable`` policy applies (default raise).
-        The resume round always dispatches. A pause can start at the next
-        round.
-
-        Args:
-            value: The domain event to resume with.
-            deadline: A ``time.monotonic()`` instant. At the first round
-                boundary past it, the router emits ``RunPausedOnDeadline``
-                and the run ends cleanly. ``None`` (default) disables.
-            pause_on: An object with ``is_set()``, for example an
-                ``asyncio.Event``. At the first round boundary where
-                ``is_set()`` returns ``True``, the router emits
-                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
-                (default) disables.
-
-        Raises:
-            TypeError: *pause_on* is a class, or has no callable ``is_set``.
-        """
-        self._require_checkpointer("resume")
-        self._require_resume_event(value)
-        if not self._resume_is_pending(kwargs):
-            return self._apply_unresumable_policy(value, kwargs)
-        return self._run(
-            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
-        )
-
-    async def aresume(
-        self,
-        value: Event,
-        *,
-        deadline: float | None = None,
-        pause_on: PauseSignal | None = None,
-        **kwargs: Any,
-    ) -> EventLog:
-        """Async version of resume().
-
-        The event is auto-dispatched (handlers subscribed to its type fire),
-        then a ``Resumed`` event is created alongside it. If the thread is not
-        awaiting input, the ``on_unresumable`` policy applies (default raise).
-        Takes the same arguments as :meth:`resume`.
-        """
-        self._require_checkpointer("aresume")
-        self._require_resume_event(value)
-        if not await self._aresume_is_pending(kwargs):
-            return await self._aapply_unresumable_policy(value, kwargs)
-        return await self._arun(
-            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
-        )
-
-    @staticmethod
-    def _is_interrupted(snapshot: StateSnapshot) -> bool:
-        """Whether *snapshot* is currently paused at a real interrupt.
-
-        Reads ``snapshot.tasks[*].interrupts``, not ``snapshot.next``. A
-        cancelled or crashed graph also leaves ``next`` set. Before LangGraph
-        1.2.13, ``next`` also drops a task that holds a ``__resume__`` write,
-        for example a handler that pauses a second time in one run.
-
-        Topology-dependent: ``snapshot.tasks`` only reports a task the
-        graph that produced *snapshot* can still schedule, so a thread
-        paused on a handler this graph no longer registers looks
-        uninterrupted here. Used only by :meth:`_graph_state`, reached
-        through a caller's own working graph. Everywhere else
-        (discovery, ``abandon()``) reads the checkpoint's raw pending
-        writes instead — see :meth:`_pending_interrupt_writes`.
-        """
-        return bool(_snapshot_interrupts(snapshot))
-
-    @staticmethod
-    def _pending_interrupt_events(snapshot: StateSnapshot) -> list[Event]:
-        """Event instance(s) behind every pending interrupt, deduped by
-        type name, in discovery order. Empty if none.
-
-        Scans every task, not just ``tasks[0]``: a fanned-out dispatch
-        can pause more than one. Skips a non-``Event`` payload, e.g. a
-        raw ``langgraph.types.interrupt("...")`` call.
-
-        Topology-dependent, same caveat as :meth:`_is_interrupted`: used
-        only by :meth:`_graph_state`'s first-pause fallback.
-        """
-        seen: set[str] = set()
-        values: list[Event] = []
-        for i in _snapshot_interrupts(snapshot):
-            value = i.value
-            if isinstance(value, Event) and type(value).__name__ not in seen:
-                seen.add(type(value).__name__)
-                values.append(value)
-        return values
+        return self._events(await self._compile().aget_state(config))
 
     @staticmethod
     def _pending_interrupt_writes(pending_writes: Iterable[Any]) -> _PendingInterrupts:
@@ -2902,6 +2512,646 @@ class EventGraph:
             tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
         return tup, _plan_read(plan, cfg, tup, unresolved, decoded)
 
+
+class EventGraph(EventStore):
+    """Build and run an event-driven graph from ``@on`` handlers.
+
+    Topology is auto-derived from handler subscriptions.  Internally builds
+    a LangGraph ``StateGraph`` with a hub-and-spoke reactive loop.
+
+    Accepts a single seed event or a list of seed events::
+
+        graph = EventGraph([classify, route, review])
+
+        # Single seed event
+        log = graph.invoke(DocumentReceived(doc_id="1", content="..."))
+
+        # Multiple seed events (e.g. system prompt + user message)
+        log = graph.invoke([
+            SystemPromptSet.from_str("You are helpful"),
+            UserMessageReceived(message=HumanMessage(content="Hi")),
+        ])
+
+    ``EventGraph(handlers, ...)`` is ``EventGraph.of(EventTopology(handlers,
+    reducers=...), ...)``. See :class:`EventTopology` and :class:`EventStore`.
+    """
+
+    def __init__(
+        self,
+        handlers: list[Callable[..., Any]],
+        *,
+        max_rounds: int = 100,
+        reducers: list[BaseReducer] | None = None,
+        services: Sequence[Any] | Mapping[str, Any] | None = None,
+        checkpointer: Checkpointer = None,
+        store: BaseStore | None = None,
+        recursion_limit: int | None = None,
+        on_unresumable: Literal["raise", "halt", "warn"] = "raise",
+    ) -> None:
+        if not handlers:
+            raise ValueError("EventGraph requires at least one handler")
+        _validate_on_unresumable(on_unresumable)
+        self._bind(
+            EventTopology(handlers, reducers=reducers),
+            max_rounds=max_rounds,
+            services=services,
+            checkpointer=checkpointer,
+            store=store,
+            recursion_limit=recursion_limit,
+            on_unresumable=on_unresumable,
+        )
+
+    @classmethod
+    def of(
+        cls,
+        topology: EventTopology,
+        *,
+        max_rounds: int = 100,
+        services: Sequence[Any] | Mapping[str, Any] | None = None,
+        checkpointer: Checkpointer = None,
+        store: BaseStore | None = None,
+        recursion_limit: int | None = None,
+        on_unresumable: Literal["raise", "halt", "warn"] = "raise",
+    ) -> EventGraph:
+        """Build a graph that runs *topology* with *services*.
+
+        Takes the same keyword arguments as ``EventGraph(...)``, except
+        ``reducers``: the topology holds them. Each entry of
+        :attr:`EventTopology.requirements` must match a service, else this
+        raises ``TypeError``. One topology can bind several graphs.
+        """
+        _validate_on_unresumable(on_unresumable)
+        graph = cls.__new__(cls)
+        graph._bind(
+            topology,
+            max_rounds=max_rounds,
+            services=services,
+            checkpointer=checkpointer,
+            store=store,
+            recursion_limit=recursion_limit,
+            on_unresumable=on_unresumable,
+        )
+        return graph
+
+    def _bind(
+        self,
+        topology: EventTopology,
+        *,
+        max_rounds: int,
+        services: Sequence[Any] | Mapping[str, Any] | None,
+        checkpointer: Checkpointer,
+        store: BaseStore | None,
+        recursion_limit: int | None,
+        on_unresumable: Literal["raise", "halt", "warn"],
+    ) -> None:
+        """Bind *services* to the handlers of *topology*: run every
+        construction check that needs a service."""
+        self._topology = topology
+        self._max_rounds = max_rounds
+        self._recursion_limit = recursion_limit
+        self._on_unresumable = on_unresumable
+        self._checkpointer = checkpointer
+        self._store = store
+        self._reducers = topology._reducers
+        self._namespaces = topology._namespaces
+        self._loose_events = topology._loose_events
+
+        # services= takes one of two shapes:
+        #   • Mapping[str, Any] — name-keyed registry; resolution by handler
+        #     param name. Allows multiple instances of the same type
+        #     (e.g. primary + backup chat models).
+        #   • Sequence[Any] — type-keyed registry; resolution by handler
+        #     param annotation. Same-type collisions are rejected.
+        # The two forms are mutually exclusive within a single EventGraph.
+        self._services_by_type, self._services_by_name = _build_service_registries(
+            services
+        )
+        run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
+
+        self._handler_metas: list[HandlerMeta] = []
+        self._compiled_graph: CompiledStateGraph | None = None
+
+        reducer_names = topology.reducer_names
+        service_types = frozenset(self._services_by_type.keys())
+        service_names = frozenset(self._services_by_name.keys())
+        for unbound in topology._handler_metas:
+            meta = bind_services(
+                unbound,
+                reducer_names=reducer_names,
+                service_types=service_types,
+                service_names=service_names,
+            )
+            _verify_no_unclaimed_params(meta)
+            _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
+            self._handler_metas.append(meta)
+
+    @property
+    def _namespaces_cache(self) -> NamespaceModel | None:
+        return self._topology._namespaces_cache
+
+    def _serde_scope(
+        self,
+    ) -> tuple[tuple[type[Namespace], ...], tuple[type[Event], ...]]:
+        """See :meth:`EventTopology._serde_scope`."""
+        return self._topology._serde_scope()
+
+    def namespaces(self) -> NamespaceModel:
+        """Return the :class:`NamespaceModel` of the topology. See
+        :meth:`EventTopology.namespaces`."""
+        return self._topology.namespaces()
+
+    def reflect(self, log: EventLog) -> Reflection:
+        """Return a :class:`Reflection` — deterministic query surface over *log*.
+
+        Bundles the log with this graph's namespace model and reducers so an
+        agent (or code) can query facts about a run: listings, field dumps,
+        static topology, reducer projections, and verdict-free evidence joins.
+        """
+        from langgraph_events._reflection import Reflection  # noqa: PLC0415
+
+        return Reflection(log, model=self.namespaces(), reducers=self._reducers)
+
+    @property
+    def reducer_names(self) -> frozenset[str]:
+        """See :attr:`EventTopology.reducer_names`."""
+        return self._topology.reducer_names
+
+    @property
+    def handler_names(self) -> frozenset[str]:
+        """See :attr:`EventTopology.handler_names`."""
+        return self._topology.handler_names
+
+    @property
+    def resumable_node_names(self) -> frozenset[str]:
+        """See :attr:`EventTopology.resumable_node_names`."""
+        return self._topology.resumable_node_names
+
+    @property
+    def compiled(self) -> CompiledStateGraph:
+        """The underlying LangGraph ``CompiledStateGraph``.
+
+        This is the bridge to full LangGraph when you need features
+        beyond the EventGraph API: subgraph composition, custom
+        streaming modes, direct state access, or advanced checkpointer
+        workflows.
+
+        The instance is compiled lazily on first access and cached.
+
+        Warning: the ``causes`` channel must stay aligned with ``events``. A
+        direct ``update_state`` that writes ``events`` without one ``causes``
+        entry per event shifts every older cause, and no check can detect it.
+        Write events through :meth:`pre_seed`, or write a ``None`` cause for
+        each event in the same update.
+        """
+        return self._compile()
+
+    def _compile(self) -> CompiledStateGraph:
+        """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
+        if self._compiled_graph is None:
+            self._compiled_graph = _compile_state_graph(
+                self._handler_metas,
+                reducers=self._reducers,
+                return_contracts=self._topology._return_contracts,
+                model_provider=self.namespaces,
+                max_rounds=self._max_rounds,
+                recursion_limit=self._recursion_limit,
+                services_by_type=self._services_by_type,
+                services_by_name=self._services_by_name,
+                checkpointer=self._checkpointer,
+                store=self._store,
+            )
+        return self._compiled_graph
+
+    @staticmethod
+    def _prepare_input(seed: Event | list[Event]) -> dict[str, Any]:
+        """Build the input dict from a seed event or list of events.
+
+        The input writes a ``None`` cause for each seed, so ``causes`` stays
+        aligned with ``events`` with no guess, also on a checkpoint saved
+        before causes existed.
+        """
+        seeds = seed if isinstance(seed, list) else [seed]
+        return {"events": seeds, "causes": [None] * len(seeds)}
+
+    def _run(
+        self,
+        inp: _GraphInput,
+        *,
+        deadline: float | None,
+        pause_on: PauseSignal | None,
+        **kwargs: Any,
+    ) -> EventLog:
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        compiled = self._compile()
+        result = compiled.invoke(inp, **kwargs)
+        return EventLog._from_state(result["events"], result.get("causes"))
+
+    async def _arun(
+        self,
+        inp: _GraphInput,
+        *,
+        deadline: float | None,
+        pause_on: PauseSignal | None,
+        **kwargs: Any,
+    ) -> EventLog:
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        compiled = self._compile()
+        result = await compiled.ainvoke(inp, **kwargs)
+        return EventLog._from_state(result["events"], result.get("causes"))
+
+    @classmethod
+    def from_namespaces(
+        cls,
+        *domains: type[Namespace],
+        handlers: list[Callable[..., Any]] | None = None,
+        **kwargs: Any,
+    ) -> EventGraph:
+        """Build an ``EventGraph`` from domains' inline command handlers.
+
+        Walks each domain's class namespace and registers every ``Command``
+        that defines an inline handler. Commands without one are silently
+        skipped — register those via the ``handlers=`` kwarg or
+        ``EventGraph([...])`` directly, which errors on missing handlers.
+
+        The ``handlers=`` kwarg is appended as-is — useful for reaction
+        handlers subscribed to ``DomainEvent``s, ``HandlerRaised``,
+        ``InvariantViolated``, etc.
+
+        Example::
+
+            graph = EventGraph.from_namespaces(Order, Customer,
+                                            handlers=[react])
+        """
+        collected: list[Any] = []
+        for dom in domains:
+            if not (isinstance(dom, type) and issubclass(dom, Namespace)):
+                raise TypeError(
+                    f"from_namespaces expects Namespace subclasses, got {dom!r}"
+                )
+            for attr in dom.__dict__.values():
+                if (
+                    isinstance(attr, type)
+                    and issubclass(attr, Command)
+                    and getattr(attr, "__command_handler__", None) is not None
+                ):
+                    collected.append(attr)
+        if handlers:
+            collected.extend(handlers)
+
+        # Auto-wire migration-aware deserialization: the user only writes
+        # @migrate_from on the class. We have both the domains and the
+        # checkpointer here, so scope a NamespaceAwareSerde to these
+        # namespaces. A user-supplied NamespaceAwareSerde (possibly
+        # carrying hand-authored migrations=) is left untouched — that is
+        # the opt-out. The serde still owns coverage; we own construction.
+        graph = cls(collected, **kwargs)
+
+        # Wired after construction, not before: the events that live outside
+        # every namespace — module-level IntegrationEvents, framework
+        # SystemEvents — are only knowable once the graph has parsed its
+        # handlers' subscriptions and return types. Without them those
+        # identities resolve by import and are shared between engine
+        # lifetimes of one module. ``compiled`` is lazy, so the serde is in
+        # place well before anything reads it.
+        checkpointer = kwargs.get("checkpointer")
+        if checkpointer is not None:
+            from langgraph_events.serde import NamespaceAwareSerde  # noqa: PLC0415
+
+            serde = getattr(checkpointer, "serde", None)
+            if serde is not None and not isinstance(serde, NamespaceAwareSerde):
+                # Not ``domains``: a namespace can reach the graph through
+                # ``handlers=`` alone, and its events would then keep
+                # resolving by import — the bleed #155 exists to close.
+                # ``graph._namespaces`` is the full set.
+                namespaces, events = graph._serde_scope()
+                checkpointer.serde = NamespaceAwareSerde(
+                    namespaces=namespaces, events=events
+                )
+
+        return graph
+
+    def invoke(
+        self,
+        seed: Event | list[Event],
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
+        """Run the graph synchronously with one or more seed events.
+
+        Args:
+            seed: A single event or list of events to start the graph.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Returns an ``EventLog`` containing all events produced during the run.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
+        """
+        return self._run(
+            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+        )
+
+    async def ainvoke(
+        self,
+        seed: Event | list[Event],
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
+        """Run the graph asynchronously with one or more seed events.
+
+        Takes the same arguments as :meth:`invoke`.
+        """
+        return await self._arun(
+            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+        )
+
+    def pre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
+        """Inject external state into reducer channels before the first run.
+
+        Use this to hydrate reducers from an external source (e.g. a database
+        migration or test fixture) when modelling the data as seed events isn't
+        practical.  Call it once before ``invoke``/``ainvoke``::
+
+            graph.pre_seed(config, {"my_reducer": existing_value})
+            graph.invoke(StartEvent(), config=config)
+
+        Each event in ``values["events"]`` gets a ``None`` cause.
+
+        Requires a checkpointer.
+        """
+        self._require_checkpointer("pre_seed")
+        compiled = self._compile()
+        compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
+
+    async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
+        """Async version of :meth:`pre_seed`."""
+        self._require_checkpointer("apre_seed")
+        compiled = self._compile()
+        await compiled.aupdate_state(
+            config, pad_causes(values, None), as_node="__seed__"
+        )
+
+    @staticmethod
+    def _awaits_resume(snapshot: StateSnapshot) -> bool:
+        """Whether *snapshot* has work to resume into.
+
+        A resume is awaited when the checkpoint's ``next`` is set, or when a
+        task holds a pending interrupt. With neither, nothing is scheduled.
+        Then ``resume()`` does nothing: the paused handler is gone, the thread
+        finished, or the thread was resumed twice.
+
+        ``next`` is read because a caller can ``pre_seed`` before it resumes,
+        for example ``AGUIAdapter`` commits a ``FrontendStateMutated``. That
+        write hides the pending interrupt, but ``next`` stays set. A Phase-1
+        ``@on(previously=...)`` alias keeps the node live, so a declared
+        rename still reports ``True``.
+
+        The interrupts are read because LangGraph before 1.2.13 drops from
+        ``next`` a task that holds a saved resume write. A handler that pauses
+        a second time in one run is such a task. See :meth:`_is_interrupted`.
+        """
+        return bool(snapshot.next) or EventGraph._is_interrupted(snapshot)
+
+    def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
+        """Whether the thread of ``kwargs["config"]`` has work to resume into.
+
+        See :meth:`_awaits_resume`. If no ``config`` was passed, assume
+        pending and let the normal path surface any error.
+        """
+        config = kwargs.get("config")
+        if config is None:
+            return True
+        return self._awaits_resume(self._compile().get_state(config))
+
+    async def _aresume_snapshot(
+        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None
+    ) -> StateSnapshot | None:
+        """The checkpoint of ``kwargs["config"]`` for an async resume.
+
+        Returns *snapshot* when the caller already loaded it. Otherwise loads
+        it with ``aget_state``, so an async resume never drives an async-only
+        checkpointer synchronously from the running event loop. Returns
+        ``None`` if no ``config`` was passed.
+        """
+        if snapshot is not None:
+            return snapshot
+        config = kwargs.get("config")
+        if config is None:
+            return None
+        return await self._compile().aget_state(config)
+
+    async def _aresume_is_pending(
+        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None = None
+    ) -> bool:
+        """Async sibling of :meth:`_resume_is_pending`.
+
+        Pass *snapshot* when the checkpoint is already loaded, so this check
+        does not load it again. See :meth:`_aresume_snapshot`.
+        """
+        snapshot = await self._aresume_snapshot(kwargs, snapshot)
+        return snapshot is None or self._awaits_resume(snapshot)
+
+    def _unresumable_message(
+        self, log: EventLog | None = None, config: RunnableConfig | None = None
+    ) -> str:
+        """Diagnostic for a ``resume()`` that would be a no-op.
+
+        Keys the abandoned diagnosis on the *last* event, not
+        ``log.latest(Halted)`` (a whole-log search): a thread reused
+        after :meth:`abandon` must fall back to the generic message once
+        ``Abandoned`` is no longer latest.
+        """
+        if log and isinstance(log[-1], Abandoned):
+            abandoned = log[-1]
+            thread_id = (config or {}).get("configurable", {}).get("thread_id")
+            detail = ""
+            if abandoned.reason:
+                detail += f" reason={abandoned.reason!r}."
+            if abandoned.discarded:
+                detail += f" discarded={abandoned.discarded!r}."
+            return (
+                f"resume() called on thread {thread_id!r}, which was "
+                f"abandoned via abandon()/aabandon().{detail} The thread was "
+                "deliberately settled without an answer and is terminal; it "
+                "cannot be resumed."
+            )
+        return (
+            "resume() called on a thread that is not awaiting input. The paused "
+            "handler may have been renamed/removed, or the thread already "
+            "completed. Declare @on(previously=...) to recover a renamed "
+            "handler, or set EventGraph(on_unresumable='halt'|'warn')."
+        )
+
+    def _unresumable_short_circuits(
+        self, log: EventLog | None = None, config: RunnableConfig | None = None
+    ) -> bool:
+        """Apply ``on_unresumable``'s ``raise``/``warn`` arm. ``False``
+        means append a terminal event (``halt``). ``True`` means return
+        the log unchanged (``warn``). ``raise`` raises.
+
+        Caller supplies the state read. The async path must ``await
+        aget_state``: an async-only checkpointer rejects a sync read
+        from the running loop.
+        """
+        if self._on_unresumable == "raise":
+            raise UnresumableError(self._unresumable_message(log, config))
+        if self._on_unresumable == "warn":
+            warn_user(self._unresumable_message(log, config))
+            return True
+        return False
+
+    def _apply_unresumable_policy(
+        self, value: Event, kwargs: dict[str, Any]
+    ) -> EventLog:
+        """Sync ``on_unresumable`` for a resume that would be a no-op.
+
+        Runs only when :meth:`_resume_is_pending` is ``False``, so no
+        completed sibling write can be lost on this path.
+        """
+        config = kwargs["config"]
+        log = self.get_state(config).events
+        if self._unresumable_short_circuits(log, config):
+            return log
+        return self._settle(config, self._unresumable_event(value))
+
+    async def _aapply_unresumable_policy(
+        self, value: Event, kwargs: dict[str, Any]
+    ) -> EventLog:
+        """Async sibling of :meth:`_apply_unresumable_policy`."""
+        config = kwargs["config"]
+        log = (await self.aget_state(config)).events
+        if self._unresumable_short_circuits(log, config):
+            return log
+        return await self._asettle(config, self._unresumable_event(value))
+
+    @staticmethod
+    def _unresumable_event(value: Event) -> Unresumable:
+        return Unresumable(resume_value=type(value).__name__)
+
+    @staticmethod
+    def _require_resume_event(value: object) -> None:
+        """Raise ``TypeError`` if *value* is not an ``Event``.
+
+        The check runs before the graph runs. LangGraph saves a resume value
+        in the checkpoint before the paused handler reads it. A rerun then
+        reads the saved value again, so a bad value strands the thread.
+        """
+        if not isinstance(value, Event):
+            got = type(value).__name__
+            raise TypeError(f"resume() requires an Event instance, got {got}")
+
+    def resume(
+        self,
+        value: Event,
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
+        """Resume an interrupted graph with a domain event.
+
+        The event is auto-dispatched (handlers subscribed to its type fire),
+        then a ``Resumed`` event is created alongside it. If the thread is not
+        awaiting input, the ``on_unresumable`` policy applies (default raise).
+        The resume round always dispatches. A pause can start at the next
+        round.
+
+        Args:
+            value: The domain event to resume with.
+            deadline: A ``time.monotonic()`` instant. At the first round
+                boundary past it, the router emits ``RunPausedOnDeadline``
+                and the run ends cleanly. ``None`` (default) disables.
+            pause_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. At the first round boundary where
+                ``is_set()`` returns ``True``, the router emits
+                ``RunPausedOnSignal`` and the run ends cleanly. ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* is a class, or has no callable ``is_set``.
+        """
+        self._require_checkpointer("resume")
+        self._require_resume_event(value)
+        if not self._resume_is_pending(kwargs):
+            return self._apply_unresumable_policy(value, kwargs)
+        return self._run(
+            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
+        )
+
+    async def aresume(
+        self,
+        value: Event,
+        *,
+        deadline: float | None = None,
+        pause_on: PauseSignal | None = None,
+        **kwargs: Any,
+    ) -> EventLog:
+        """Async version of resume().
+
+        The event is auto-dispatched (handlers subscribed to its type fire),
+        then a ``Resumed`` event is created alongside it. If the thread is not
+        awaiting input, the ``on_unresumable`` policy applies (default raise).
+        Takes the same arguments as :meth:`resume`.
+        """
+        self._require_checkpointer("aresume")
+        self._require_resume_event(value)
+        if not await self._aresume_is_pending(kwargs):
+            return await self._aapply_unresumable_policy(value, kwargs)
+        return await self._arun(
+            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
+        )
+
+    @staticmethod
+    def _is_interrupted(snapshot: StateSnapshot) -> bool:
+        """Whether *snapshot* is currently paused at a real interrupt.
+
+        Reads ``snapshot.tasks[*].interrupts``, not ``snapshot.next``. A
+        cancelled or crashed graph also leaves ``next`` set. Before LangGraph
+        1.2.13, ``next`` also drops a task that holds a ``__resume__`` write,
+        for example a handler that pauses a second time in one run.
+
+        Topology-dependent: ``snapshot.tasks`` only reports a task the
+        graph that produced *snapshot* can still schedule, so a thread
+        paused on a handler this graph no longer registers looks
+        uninterrupted here. Used only by :meth:`_graph_state`, reached
+        through a caller's own working graph. Everywhere else
+        (discovery, ``abandon()``) reads the checkpoint's raw pending
+        writes instead — see :meth:`_pending_interrupt_writes`.
+        """
+        return bool(_snapshot_interrupts(snapshot))
+
+    @staticmethod
+    def _pending_interrupt_events(snapshot: StateSnapshot) -> list[Event]:
+        """Event instance(s) behind every pending interrupt, deduped by
+        type name, in discovery order. Empty if none.
+
+        Scans every task, not just ``tasks[0]``: a fanned-out dispatch
+        can pause more than one. Skips a non-``Event`` payload, e.g. a
+        raw ``langgraph.types.interrupt("...")`` call.
+
+        Topology-dependent, same caveat as :meth:`_is_interrupted`: used
+        only by :meth:`_graph_state`'s first-pause fallback.
+        """
+        seen: set[str] = set()
+        values: list[Event] = []
+        for i in _snapshot_interrupts(snapshot):
+            value = i.value
+            if isinstance(value, Event) and type(value).__name__ not in seen:
+                seen.add(type(value).__name__)
+                values.append(value)
+        return values
+
     def _graph_state(self, snapshot: StateSnapshot) -> GraphState:
         """Build a :class:`GraphState` from a checkpoint snapshot.
 
@@ -2915,8 +3165,7 @@ class EventGraph:
         graph, unlike discovery (:meth:`threads_paused_on`) or
         ``abandon()``, which read the checkpoint directly.
         """
-        all_events = snapshot.values.get("events", [])
-        log = EventLog._from_state(all_events, snapshot.values.get("causes"))
+        log = self._events(snapshot)
         is_interrupted = self._is_interrupted(snapshot)
         interrupted = log.latest(Interrupted) if is_interrupted else None
         if is_interrupted and interrupted is None:

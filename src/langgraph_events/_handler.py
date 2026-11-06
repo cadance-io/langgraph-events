@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import inspect
 import types
 import typing
@@ -519,6 +520,12 @@ class HandlerMeta:
     # did not resolve, is absent. The graph build compares each annotation
     # with the registered service. Name-keyed binding itself needs none.
     service_name_hints: tuple[tuple[str, Any], ...] = ()
+    # (param_name, resolved_annotation) for each param that the event, a
+    # framework injectable, a reducer or a field matcher does not claim, in
+    # signature order. Only a service can fill one. The annotation is
+    # ``inspect.Parameter.empty`` when the param has none, or when it did not
+    # resolve. ``bind_services`` matches these against one graph's services.
+    service_candidates: tuple[tuple[str, Any], ...] = ()
     # Parameters whose annotation did not resolve, mapped to the reason. A
     # parameter listed here carries no hint, so no type-matched injection can
     # claim it. ``_verify_no_unclaimed_params`` reads this to name the real
@@ -579,15 +586,11 @@ class HandlerMeta:
 
 def _warn_on_unknown_reducer_params(
     fn: Callable[..., Any],
-    sig: inspect.Signature,
+    unknown: list[str],
     *,
     reducer_names: frozenset[str],
-    consumed: set[str | None],
 ) -> None:
     """Surface a typo warning when reducer-style param names go unmatched."""
-    unknown = [
-        name for name in sig.parameters if name not in consumed and name != "self"
-    ]
     if not unknown:
         return
     warn_user(
@@ -598,11 +601,10 @@ def _warn_on_unknown_reducer_params(
 
 
 def _detect_service_name_params(
-    sig: inspect.Signature,
+    candidates: tuple[tuple[str, Any], ...],
     service_names: frozenset[str],
-    consumed: set[str | None],
 ) -> tuple[tuple[str, str], ...]:
-    """Match unclaimed handler params against the name-keyed services map.
+    """Match the service candidates against the name-keyed services map.
 
     A param whose name appears as a key in ``EventGraph(services={...})`` is
     bound to the corresponding instance at dispatch. Annotation-free params
@@ -612,19 +614,17 @@ def _detect_service_name_params(
         return ()
     return tuple(
         (param_name, param_name)
-        for param_name in sig.parameters
-        if param_name not in consumed and param_name in service_names
+        for param_name, _hint in candidates
+        if param_name in service_names
     )
 
 
 def _detect_service_params(
     fn: Callable[..., Any],
-    sig: inspect.Signature,
-    hints: dict[str, Any],
+    candidates: tuple[tuple[str, Any], ...],
     service_types: frozenset[type],
-    consumed: set[str | None],
 ) -> tuple[tuple[str, type], ...]:
-    """Match unclaimed handler params against registered service types.
+    """Match the service candidates against registered service types.
 
     For each param whose annotation is a class, the matching service type is
     the unique registered type that is a subclass of (or equal to) the
@@ -634,11 +634,8 @@ def _detect_service_params(
     if not service_types:
         return ()
     detected: list[tuple[str, type]] = []
-    for param_name in sig.parameters:
-        if param_name in consumed:
-            continue
-        hint = hints.get(param_name)
-        if not isinstance(hint, type):
+    for param_name, hint in candidates:
+        if hint is inspect.Parameter.empty or not isinstance(hint, type):
             continue
         # ``object`` matches every registered type; treating it as a service
         # claim would silently consume an unrelated instance. Skip — the
@@ -700,19 +697,27 @@ def extract_handler_meta(
     service_types: frozenset[type] = frozenset(),
     service_names: frozenset[str] = frozenset(),
 ) -> HandlerMeta:
-    """Extract handler metadata from a decorated function.
+    """Extract handler metadata from a decorated function, with its services.
 
-    ``service_types`` is the set of exact types registered on
-    ``EventGraph(services=[...])`` (sequence form). Each handler param whose
-    annotation is a base class of (or identical to) a registered service
-    type is recorded as a service param.
+    :func:`classify_handler`, then :func:`bind_services`.
+    """
+    return bind_services(
+        classify_handler(fn, reducer_names),
+        reducer_names=reducer_names,
+        service_types=service_types,
+        service_names=service_names,
+    )
 
-    ``service_names`` is the set of keys in ``EventGraph(services={...})``
-    (mapping form). Each handler param whose name matches a key is recorded
-    as a name-keyed service param.
 
-    Only one of the two forms is populated per ``EventGraph`` — they are
-    mutually exclusive.
+def classify_handler(
+    fn: Callable[..., Any],
+    reducer_names: frozenset[str] = frozenset(),
+) -> HandlerMeta:
+    """Extract handler metadata from a decorated function, with no services.
+
+    Each parameter that the event, a framework injectable, a reducer or a
+    field matcher does not claim is recorded in ``service_candidates``.
+    :func:`bind_services` matches them against the services of one graph.
     """
     event_types = getattr(fn, "_event_types", None)
     if event_types is None:
@@ -764,35 +769,19 @@ def extract_handler_meta(
         fn, "_invariants", ()
     )
 
-    # Detect service params by type. Resolution order: anything claimed by
-    # log/config/store/reducer/field-matcher or the first (event) param is
-    # already consumed; the rest are candidates for service injection.
+    # Resolution order: anything claimed by log/config/store/reducer/
+    # field-matcher or the first (event) param is already consumed; the rest
+    # are candidates for service injection.
     first_param = next(iter(sig.parameters), None)
     consumed_for_services: set[str | None] = {first_param, "self"}
     consumed_for_services.update(p for p in framework_params.values() if p)
     consumed_for_services.update(reducer_params)
     consumed_for_services.update(raw_field_matchers.keys())
-    service_params = _detect_service_params(
-        fn, sig, hints, service_types, consumed_for_services
+    service_candidates = tuple(
+        (name, hints.get(name, inspect.Parameter.empty))
+        for name in sig.parameters
+        if name not in consumed_for_services
     )
-    service_name_params = _detect_service_name_params(
-        sig, service_names, consumed_for_services
-    )
-    service_name_hints = tuple(
-        (name, hints[name]) for name, _ in service_name_params if name in hints
-    )
-
-    if reducer_names:
-        _warn_on_unknown_reducer_params(
-            fn,
-            sig,
-            reducer_names=reducer_names,
-            consumed=(
-                consumed_for_services
-                | {n for n, _ in service_params}
-                | {n for n, _ in service_name_params}
-            ),
-        )
 
     name = getattr(fn, "_node_name", None) or fn.__name__
     # Inline command handlers route by their command's qualname (stable,
@@ -822,8 +811,52 @@ def extract_handler_meta(
         raises=raises,
         retry=retry,
         invariants=invariants,
+        service_candidates=service_candidates,
+        hint_errors=tuple(param_errors.items()),
+    )
+
+
+def bind_services(
+    meta: HandlerMeta,
+    *,
+    reducer_names: frozenset[str],
+    service_types: frozenset[type],
+    service_names: frozenset[str],
+) -> HandlerMeta:
+    """Return *meta* with its service candidates matched to one graph's services.
+
+    ``service_types`` is the set of exact types registered on
+    ``EventGraph(services=[...])`` (sequence form). Each candidate whose
+    annotation is a base class of (or identical to) a registered service
+    type is recorded as a service param.
+
+    ``service_names`` is the set of keys in ``EventGraph(services={...})``
+    (mapping form). Each candidate whose name matches a key is recorded as
+    a name-keyed service param.
+
+    Only one of the two forms is populated per ``EventGraph`` — they are
+    mutually exclusive. With ``reducer_names``, a candidate that no service
+    claims gets the reducer typo warning.
+    """
+    candidates = meta.service_candidates
+    service_params = _detect_service_params(meta.fn, candidates, service_types)
+    service_name_params = _detect_service_name_params(candidates, service_names)
+    named = {n for n, _ in service_name_params}
+    service_name_hints = tuple(
+        (name, hint)
+        for name, hint in candidates
+        if name in named and hint is not inspect.Parameter.empty
+    )
+    if reducer_names:
+        bound = named | {n for n, _ in service_params}
+        _warn_on_unknown_reducer_params(
+            meta.fn,
+            [name for name, _ in candidates if name not in bound],
+            reducer_names=reducer_names,
+        )
+    return dataclasses.replace(
+        meta,
         service_params=service_params,
         service_name_params=service_name_params,
         service_name_hints=service_name_hints,
-        hint_errors=tuple(param_errors.items()),
     )
