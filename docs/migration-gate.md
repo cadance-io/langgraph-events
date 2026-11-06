@@ -29,7 +29,23 @@ target = MigrationTarget(
 )
 ```
 
-`graph` receives a checkpointer and returns the graph. The gate passes an empty `MemorySaver`, so it reads no store. The graph must carry a `NamespaceAwareSerde`. `from_namespaces(..., checkpointer=...)` wires one. A hand-built serde with `migrations=` also works. Set it on the checkpointer before you build the graph. `store` is for the commands that open the store. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
+`graph` receives a checkpointer and returns the graph. The commands use `graph.event_store`. The factory can return an `EventStore` instead, when a command must not build the services of a run. In that case, set the serde of the topology on the checkpointer:
+
+```python
+from langgraph_events import EventStore, EventTopology
+
+
+def build_store(checkpointer):
+    topology = EventTopology.from_namespaces(Order, Shipment)
+    checkpointer.serde = topology.serde()
+    return EventStore(topology, checkpointer)
+```
+
+The factory receives the checkpointer of the gate, so it can set the serde. A serde with `migrations=` goes through `topology.serde(migrations)`.
+
+`topology.serde()` reads the same event classes as the serde of `from_namespaces(..., checkpointer=...)`. Both collect each `@migrate_from` on an event outside every namespace, for example an `IntegrationEvent`. So both forms give the gate the same migrations. WARNING: A serde built with `namespaces=` only does not collect a migration on such an event. The gate then reports a different migration set. Use `topology.serde()`.
+
+The rest of this section applies to both forms. The gate passes an empty `MemorySaver`, so it reads no store. The graph must carry a `NamespaceAwareSerde`. `from_namespaces(..., checkpointer=...)` wires one. A hand-built serde with `migrations=` also works. Set it on the checkpointer before you build the graph. `store` is for the commands that open the store. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
 The gate judges every event class that the graph can store. That set holds each class that the serde reads, from its `namespaces=` and its `events=`. It holds each class of a namespace that the graph uses. It holds each event outside every namespace that a handler subscribes to or returns, for example `HandlerRaised` or an `IntegrationEvent`. A class outside the serde revives by import, so the gate records it as live. A serde built with `namespaces=` only needs no `events=` for the gate. A mixin that a handler subscribes to is not a stored class, and the gate does not record it.
 
@@ -271,7 +287,7 @@ The `rewrite` command can run while release N serves runs. It builds its own gra
 
 WARNING: Do not let an older release serve runs while the command runs. An older release writes the old shape again, and it cannot read the new bytes. The fence stops the command under an older release, but it cannot stop an older release that still serves traffic. Finish the rolling deploy first.
 
-The Python form `graph.rewrite_store()` has one more rule. It toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Call it on a graph whose serde instance serves no run, for example in a one-off process.
+The Python form `graph.event_store.rewrite_store()` has one more rule. It toggles per-instance state on the serde, like `tolerate_unresolved()`, so a concurrent run through the same serde instance corrupts the report. Call it on a graph whose serde instance serves no run, for example in a one-off process.
 
 ### Old blob versions
 
@@ -358,17 +374,17 @@ A subgraph checkpoint that holds a pending `__error__` write from a failed task 
 
 ## Rewriting the live set
 
-Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.plan_rewrite()` and `graph.rewrite_store()` rewrite the stored bytes. For a deploy step, use the `rewrite` command. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
+Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.event_store.plan_rewrite()` and `graph.event_store.rewrite_store()` rewrite the stored bytes. For a deploy step, use the `rewrite` command. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
 The live set is the latest checkpoint of each thread in each checkpoint namespace, plus its pending writes. `rewrite_store()` reads one checkpoint namespace per call. The default `checkpoint_ns=""` is the root checkpoint namespace. Pass `checkpoint_ns=` to read a subgraph checkpoint namespace. It reads each checkpoint through the serde of the checkpointer, so every rename, transform, split and fill applies. It writes the result back through `put()` of the checkpointer, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same reads and the same verification, and writes nothing. The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
 
 ```python
 ...  # graph, Order and thread_ids come from your app
-report = graph.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
+report = graph.event_store.plan_rewrite(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
 print(report)
 assert not report.refused
 
-report = graph.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
+report = graph.event_store.rewrite_store(drop=(Order.ApprovalRequired,), thread_ids=thread_ids)
 assert not report.refused
 ```
 

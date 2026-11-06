@@ -731,7 +731,7 @@ class Abandoned(Halted):
     dispatching the ``Interrupted`` it was paused on. Recorded, not
     dispatched: ``@on(Abandoned)`` never fires. The ``Halted`` gate
     routes straight to ``END`` before any handler match. See
-    :meth:`EventGraph.abandon`.
+    :meth:`EventStore.abandon`.
 
     ``discarded`` is the discarded interrupt's **qualname**, not the
     instance. A revived instance would leave a non-event in the log once

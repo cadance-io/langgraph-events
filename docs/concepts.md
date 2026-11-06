@@ -119,6 +119,7 @@ Handler params resolve from:
 
 - `log: EventLog`: full history
 - `config: RunnableConfig` / `store: BaseStore`: LangGraph injections
+- A parameter annotated with the graph's `context_schema`: the typed run context (see [Run context](#run-context))
 - Reducer channel by **parameter name** (see [Reducers](reducers.md))
 - Field matchers (external only): typed subset dispatch and injection
 - **Services**: project dependencies registered on `EventGraph(services=...)`
@@ -182,6 +183,48 @@ Rules:
 - `RunScoped` is rejected in the type-keyed sequence form.
 - A resumed run receives a freshly built config, not a checkpointed one.
 - The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error, with a note that names the handler and the parameter. Keep the factory to a lookup. Validate the config in the factory and raise a clear error.
+- A factory whose second parameter is annotated with the `context_schema` type receives `(config, context)`. See [Run context](#run-context).
+
+#### Run context
+
+A per-run server fact, such as the run language or a model override, does not belong in `configurable`. That dict can also carry client input, and LangGraph copies its plain values into the checkpoint metadata. Use LangGraph's typed run context instead. Declare its type with `EventGraph(context_schema=...)`, and pass a value with `context=` on each run call:
+
+```python
+...
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class RunFacts:
+    language: str
+
+def model_for(config: RunnableConfig, facts: RunFacts) -> ConversationModel:
+    return models.main(facts.language)
+
+@on(SomeEvent)
+def handle(event: SomeEvent, facts: RunFacts, model: ConversationModel) -> ...: ...
+
+graph = EventGraph(
+    [handle],
+    context_schema=RunFacts,
+    services={"model": RunScoped(model_for)},
+)
+graph.invoke(SomeEvent(), context=RunFacts(language="fr"))
+```
+
+Rules:
+
+- The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model. It coerces with the schema of the top-level graph, so a graph embedded as a subgraph receives the context as the parent passes it.
+- `context_schema` belongs to the topology: `EventTopology(handlers, context_schema=RunFacts)`. `EventGraph(handlers, context_schema=...)` passes it on, and `EventGraph.of(topology, ...)` reads it from the topology.
+- A handler parameter whose annotation is exactly the schema type receives the context. It is claimed like `RunnableConfig`, before a service, so it is not in `topology.requirements`. Only the exact type matches. A parameter annotated `RunFacts | None` or with a subclass stays unclaimed, and the `TypeError` of the build says so. Without `context_schema`, the error of a dataclass, pydantic or `TypedDict` parameter names `context_schema=`.
+- A type-keyed service that is an instance of the schema raises `TypeError` at build. The context fills a parameter of that type, so such a service is never injected.
+- A `RunScoped` factory takes the context when its second parameter is annotated with the schema type: `def model_for(config, facts: RunFacts)`. That parameter must be positional and required. A factory with one parameter receives the config only, as before.
+- On a graph with `context_schema`, the build refuses a second factory parameter that is optional, keyword-only, unannotated or of another type. The `TypeError` names the factory and the fix. On a graph without `context_schema`, a required second parameter raises `TypeError` at build. An optional one is not passed.
+- A factory receives the context typed as its annotation, but `EventGraph` is not generic in the context type. A type checker cannot match the factory to the schema.
+- The context is read through LangGraph's `get_runtime()`. It is not written to the checkpoint state or to the checkpoint metadata.
+- When `context_schema` is set, every run call must pass `context=`. This includes a resume and `AGUIAdapter.stream()`. A missing context, or a context of another type, raises `TypeError` that names the schema, before the graph runs. A stream method of `EventGraph` raises it at the first iteration, because a generator runs no code before then.
+- Each run method takes `context=` as a keyword. A keyword that LangGraph's run does not take, for example a typo such as `contxt=`, raises `TypeError`.
+- `EventStore` runs no handler, so it needs no context. Build its topology with the same `context_schema` as the graph, or without it.
+- A resume does not reuse the context of the earlier run. Pass the context again.
 
 ### Return contract
 
@@ -199,9 +242,65 @@ graph = EventGraph([place, respond], max_rounds=100)
 
 Topology is derived from handler subscriptions. No manual node or edge wiring is needed. `max_rounds` (default 100) sets the recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) on overflow. `graph.compiled` exposes the underlying `CompiledStateGraph` for subgraph composition or direct state access.
 
+### Topology, graph and store { #topology-graph-and-store }
+
+`EventGraph` has three parts. Each part is a class that you can build alone:
+
+| Class | Holds | Needs | Use it to |
+|---|---|---|---|
+| `EventTopology` | the handlers, reducers and namespaces | no service, no checkpointer | render the graph, list handler names, feed the migration gate |
+| `EventStore` | a topology and a checkpointer | no service | find, abandon, rewrite and verify stored threads |
+| `EventGraph` | a topology, its services and a checkpointer | every service a handler asks for | run, resume and stream threads. `graph.event_store` is its store |
+
+`EventGraph(handlers, ...)` is the shortcut for
+`EventGraph.of(EventTopology(handlers, reducers=...), ...)`. A client that never runs a handler
+does not need the services. Build the topology once, and bind the services only where a handler
+runs:
+
+```python
+from langgraph_events import EventGraph, EventStore, EventTopology
+
+topology = EventTopology([place, respond], reducers=[messages])
+# or: EventTopology.from_namespaces(Order, handlers=[respond], reducers=[messages])
+print(topology.namespaces().mermaid())
+print(topology.requirements)  # one ServiceRequirement per service parameter
+
+graph = EventGraph.of(topology, services={"llm": llm}, checkpointer=saver)
+
+store = EventStore(topology, saver)
+for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
+    store.abandon(config, reason="retired")
+```
+
+- `topology.requirements` lists each handler parameter that only a service can fill, as
+  `ServiceRequirement(node, qualname, param, annotation)`. `node` is the graph-node name of
+  the handler. `qualname` is the module and qualified name of the handler function. The
+  annotation is `Unannotated()` when the parameter has none. It is `UnresolvedAnnotation(reason)` when it did not resolve.
+- `EventTopology.from_namespaces(*namespaces, handlers=..., reducers=...)` collects the same
+  handlers as `EventGraph.from_namespaces(...)`. A store-only client does not list every handler.
+- Read the static facts of a graph from `topology`: `handler_names`, `reducer_names`,
+  `resumable_node_names`, `reducers`, `requirements` and `namespaces()`. On a graph, use
+  `graph.topology.handler_names`. The same properties on `EventGraph` forward to the topology.
+- `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
+  `reducers`. A requirement that no service matches raises `TypeError`. The error names the
+  missing type and the keys or types that `services=` holds, so a near-miss key shows.
+- `EventGraph(handlers, ...)` builds the same graph as
+  `EventGraph.of(EventTopology(handlers, reducers=...), ...)`. It checks `on_unresumable`, then
+  `services=`, then builds the topology.
+- `graph.event_store` is `EventStore(graph.topology, checkpointer)`. A settle runs no handler, so
+  the store needs no service. A graph with no checkpointer has no store, and
+  `graph.event_store` raises `ValueError`.
+- `EventStore` does not change the serde of the saver. A rewrite needs a `NamespaceAwareSerde`,
+  so set `saver.serde = topology.serde()` before you build the store. `topology.serde()` is the
+  serde that `from_namespaces(..., checkpointer=...)` wires. WARNING: every process that reads
+  the saver must use the same serde. A process with LangGraph's default serde reads an event
+  that a `NamespaceAwareSerde` wrote as `None`. See [Event migrations](event-migrations.md).
+
 ### Namespace introspection & visualization
 
-- `graph.namespaces()` returns a `NamespaceModel`: code-derived structure and choreography.
+- `topology.namespaces()` returns a `NamespaceModel`: code-derived structure and choreography.
+  A renderer needs no services: build an `EventTopology` and call `namespaces()` on it.
+  `graph.namespaces()` returns the same model.
 - **Render**: `.text()` (tree), `.text(view="structure")` (taxonomy only), `.mermaid()` (flowchart), `.json()` / `.to_dict()`.
 - **Inspect** (all frozen dataclass tuples/dicts):
     - `.namespaces`: `dict[str, NamespaceModel.Namespace]`
@@ -372,7 +471,7 @@ Across graphs the name is free, so one process can run two versions of one names
 
 `SystemEvent` subclasses control runtime flow. Subscribe like any event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed`, `HandlerRaised`, `HandlerRetried`, `InvariantViolated`. Full table in [API](api.md#system-events).
 
-To retire an `Interrupted` subclass, settle its paused threads first with `graph.abandon(config)` / `.aabandon()`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
+To retire an `Interrupted` subclass, settle its paused threads first with `graph.event_store.abandon(config)` / `.aabandon()`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
 Custom halts subclass `Halted` and nest under their namespace for locality. `graph.namespaces()` groups them with the namespace's events, not with the library's system events:
 

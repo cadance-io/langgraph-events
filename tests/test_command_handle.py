@@ -552,7 +552,7 @@ def describe_Command_handle():
 
         def when_previously_set_as_class_attribute():
             def it_registers_an_alias_node():
-                nodes = set(EventGraph([Vault.Persist])._compile().get_graph().nodes)
+                nodes = set(EventGraph([Vault.Persist]).compiled.get_graph().nodes)
                 assert "Vault.Persist" in nodes
                 assert "save" in nodes
 
@@ -567,8 +567,8 @@ def describe_Command_handle():
                 # _expand_command_handlers re-stamps the same handler function
                 # on every EventGraph construction; the constant class-attr
                 # value makes that idempotent.
-                first = set(EventGraph([Vault.Persist])._compile().get_graph().nodes)
-                second = set(EventGraph([Vault.Persist])._compile().get_graph().nodes)
+                first = set(EventGraph([Vault.Persist]).compiled.get_graph().nodes)
+                second = set(EventGraph([Vault.Persist]).compiled.get_graph().nodes)
                 assert "save" in first
                 assert first == second
 
@@ -584,10 +584,10 @@ def describe_Command_handle():
                         def handle(self) -> None:
                             return None
 
-                first = set(EventGraph([_Era.Cmd])._compile().get_graph().nodes)
+                first = set(EventGraph([_Era.Cmd]).compiled.get_graph().nodes)
                 assert "first_era" in first
                 del _Era.Cmd.previously
-                second = set(EventGraph([_Era.Cmd])._compile().get_graph().nodes)
+                second = set(EventGraph([_Era.Cmd]).compiled.get_graph().nodes)
                 assert "first_era" not in second
 
         def when_a_paused_reactor_becomes_an_inline_command():
@@ -631,7 +631,7 @@ def describe_Command_handle():
                         def handle(self) -> None:
                             return None
 
-                nodes = set(EventGraph([_Solo.Cmd])._compile().get_graph().nodes)
+                nodes = set(EventGraph([_Solo.Cmd]).compiled.get_graph().nodes)
                 assert "old_solo" in nodes
 
         def when_an_alias_collides():
@@ -760,7 +760,7 @@ def describe_Command_handle():
                         def handle(self) -> None:
                             return None
 
-                (meta,) = EventGraph([_Aliased.Cmd])._handler_metas
+                (meta,) = EventGraph([_Aliased.Cmd])._topology._handler_metas
                 assert meta.previous_names == ("legacy_aliased",)
 
         def when_previously_is_declared_as_a_dataclass_field():
@@ -828,7 +828,8 @@ def describe_Command_handle():
 
         def _name_to_command(graph: EventGraph) -> dict[str, type]:
             return {
-                meta.node_name: meta.fn._inline_command for meta in graph._handler_metas
+                meta.node_name: meta.fn._inline_command
+                for meta in graph._topology._handler_metas
             }
 
         def when_command_registered():
@@ -1107,7 +1108,7 @@ def describe_Command_handle():
 
         def when_a_handler_has_an_unclaimed_param_and_a_mismatch():
 
-            def it_reports_the_unclaimed_param_first():
+            def it_reports_the_mismatch_first():
                 @on(Shop.Buy.Bought)
                 def twice_wrong(
                     event: Shop.Buy.Bought,
@@ -1116,7 +1117,11 @@ def describe_Command_handle():
                 ) -> None:
                     pass
 
-                with pytest.raises(TypeError, match=r"cannot inject"):
+                with pytest.raises(
+                    TypeError,
+                    match=r"services\['primary_chat'\] is an instance of object, "
+                    r"not an instance of _StubChatModel\.",
+                ):
                     EventGraph([twice_wrong], services={"primary_chat": object()})
 
         def when_a_name_keyed_annotation_is_a_generic_alias():

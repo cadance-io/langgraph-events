@@ -11,6 +11,8 @@ import ormsgpack
 import pytest
 from conftest import Started
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.serde.encrypted import EncryptedSerializer
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.types import Interrupt
 from pydantic import BaseModel
 from pydantic.v1 import BaseModel as BaseModelV1
@@ -19,6 +21,7 @@ from langgraph_events import (
     Command,
     DomainEvent,
     EventGraph,
+    EventTopology,
     Halted,
     IntegrationEvent,
     Interrupted,
@@ -2436,6 +2439,16 @@ def describe_replay_reducer():
             assert rebuilt == reducer.seed(events)
 
 
+class _XorCipher:
+    """A test cipher in the shape of LangGraph's ``CipherProtocol``."""
+
+    def encrypt(self, plaintext: bytes) -> tuple[str, bytes]:
+        return "xor", bytes(b ^ 0x5A for b in plaintext)
+
+    def decrypt(self, ciphername: str, ciphertext: bytes) -> bytes:
+        return bytes(b ^ 0x5A for b in ciphertext)
+
+
 def describe_from_namespaces_serde_auto_wiring():
     def when_the_checkpointer_carries_the_default_serde():
         def it_wraps_it_in_a_namespace_scoped_serde():
@@ -2467,6 +2480,61 @@ def describe_from_namespaces_serde_auto_wiring():
             )
 
             assert graph._checkpointer.serde is own
+
+    def when_the_checkpointer_carries_another_serde():
+        @pytest.mark.parametrize(
+            ("serde", "name"),
+            [
+                (
+                    lambda: EncryptedSerializer(_XorCipher()),
+                    "EncryptedSerializer",
+                ),
+                (
+                    lambda: JsonPlusSerializer(pickle_fallback=True),
+                    "JsonPlusSerializer",
+                ),
+                (
+                    lambda: JsonPlusSerializer(allowed_msgpack_modules=None),
+                    "JsonPlusSerializer",
+                ),
+                (
+                    lambda: JsonPlusSerializer(
+                        __unpack_ext_hook__=lambda code, data: None
+                    ),
+                    "JsonPlusSerializer",
+                ),
+            ],
+            ids=["encrypted", "pickle-fallback", "msgpack-modules", "ext-hook"],
+        )
+        def it_raises_and_keeps_the_serde(serde: Any, name: str):
+            saver = MemorySaver(serde=serde())
+            kept = saver.serde
+
+            with pytest.raises(TypeError) as info:
+                EventGraph.from_namespaces(DecoReorg, checkpointer=saver)
+
+            assert saver.serde is kept
+            assert str(info.value) == (
+                f"from_namespaces(checkpointer=...) replaces only LangGraph's "
+                f"default serde, but the checkpointer holds a {name} that is not "
+                f"the default. Build the graph with EventGraph.of("
+                f"EventTopology.from_namespaces(...), checkpointer=saver). Set "
+                f"saver.serde = topology.serde() first, or wrap it, for example "
+                f"EncryptedSerializer(cipher, serde=topology.serde())."
+            )
+
+        def when_the_fix_wraps_the_topology_serde():
+            def it_runs_the_graph_encrypted():
+                topology = EventTopology.from_namespaces(DecoReorg)
+                saver = MemorySaver(
+                    serde=EncryptedSerializer(_XorCipher(), serde=topology.serde())
+                )
+                graph = EventGraph.of(topology, checkpointer=saver)
+                cfg: Any = {"configurable": {"thread_id": "enc"}}
+
+                graph.invoke(DecoReorg.Persist(), config=cfg)
+
+                assert graph.get_state(cfg).events
 
 
 def describe_backfill():

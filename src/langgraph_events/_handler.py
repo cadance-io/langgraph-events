@@ -8,8 +8,8 @@ import inspect
 import types
 import typing
 from collections import abc
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass, is_dataclass
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langgraph_events._event import Event, Invariant
 from langgraph_events._event_log import (
@@ -144,7 +144,7 @@ def _resolve_hints_and_errors(
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Return ``fn``'s resolved hints and its per-annotation failures.
 
-    Both ``_infer_event_type`` (at decoration) and ``extract_handler_meta``
+    Both ``_infer_event_type`` (at decoration) and ``HandlerMeta.of``
     (at graph construction) need the same hints — resolving twice is wasteful
     and doubles the chance of forward-ref surprises. Cache on ``fn`` itself.
 
@@ -340,14 +340,14 @@ def _build_on_decorator(
         # ``invariants`` / ``previously`` / ``retry``, so a conditional stamp
         # would let an earlier build's value keep a since-removed contract,
         # alias, or policy alive. Their falsy values match the defaults
-        # ``extract_handler_meta`` reads them with, so an empty stamp is
+        # ``HandlerMeta.of`` reads them with, so an empty stamp is
         # indistinguishable from no stamp for every consumer.
         fn._raises = raises_tuple  # type: ignore[attr-defined]
         fn._invariants = invariants_tuple  # type: ignore[attr-defined]
         fn._previous_names = previous_names  # type: ignore[attr-defined]
         fn._retry = retry  # type: ignore[attr-defined]
         # ``node_name`` has no class-level declaration to re-stamp from (see
-        # ``extract_handler_meta``), so there is no stale value to correct and
+        # ``HandlerMeta.of``), so there is no stale value to correct and
         # an unconditional stamp would only erase an explicit
         # ``@on(node_name=...)`` pin — the identity that keeps interrupted
         # checkpoints resumable across a rename.
@@ -463,8 +463,58 @@ def on(
 
 
 @dataclass(frozen=True)
+class Unannotated:
+    """The annotation of a handler parameter that has none."""
+
+
+@dataclass(frozen=True)
+class UnresolvedAnnotation:
+    """The annotation of a handler parameter that did not resolve."""
+
+    reason: str
+    """The error that the resolution raised."""
+
+
+class ServiceRequirement(NamedTuple):
+    """A handler parameter that only a service can fill.
+
+    The event, a framework injectable, a reducer and a field matcher do not
+    claim it. :meth:`EventGraph.of` must bind a service to it, or the build
+    raises ``TypeError``.
+    """
+
+    node: str
+    """The graph-node name of the handler: its checkpoint identity."""
+    qualname: str
+    """The module and qualified name of the handler function."""
+    param: str
+    """The parameter name."""
+    annotation: Any
+    """The resolved annotation, :class:`Unannotated` or
+    :class:`UnresolvedAnnotation`."""
+
+
+class ServiceCandidate(NamedTuple):
+    """A parameter that the event, the injectables, the reducers and the
+    field matchers do not claim."""
+
+    param: str
+    annotation: Any
+    """The resolved annotation, :class:`Unannotated` or
+    :class:`UnresolvedAnnotation`."""
+
+    @property
+    def has_resolved_annotation(self) -> bool:
+        """``True`` when the parameter has an annotation that resolved."""
+        return not isinstance(self.annotation, (Unannotated, UnresolvedAnnotation))
+
+
+@dataclass(frozen=True)
 class HandlerMeta:
-    """Extracted metadata about a registered handler."""
+    """Extracted metadata about a registered handler, with no services.
+
+    The ``services=`` of one graph bind to its service candidates.
+    """
 
     name: str
     fn: Callable[..., HandlerReturn]
@@ -476,7 +526,7 @@ class HandlerMeta:
     # ``__qualname__`` (e.g. ``Order.Place``) so the node a paused checkpoint
     # resumes into never depends on ``handlers=[...]`` order. ``name`` stays the
     # human-readable handler label used in choreography/mermaid/diagnostics.
-    # Required — always populated by ``extract_handler_meta``; never empty.
+    # Required — always populated by ``HandlerMeta.of``; never empty.
     node_name: str
     # Historic node names this handler answered to, declared via
     # ``@on(previously=...)``. The graph registers an alias node per name so an
@@ -492,6 +542,9 @@ class HandlerMeta:
     required_reducer_params: frozenset[str] = frozenset()
     config_param: str | None = None
     store_param: str | None = None
+    # Parameter annotated with exactly the ``context_schema`` of the topology.
+    # It receives the run context of LangGraph's ``Runtime``.
+    context_param: str | None = None
     # Each entry is (field_name, matcher, is_type_matcher). The bool is
     # precomputed at extract time so the hot-path ``matches`` loop avoids
     # an ``isinstance(matcher, type)`` probe per dispatch.
@@ -505,37 +558,148 @@ class HandlerMeta:
     # Command. ``None`` means one attempt, the pre-retry behaviour.
     retry: RetryPolicy | None = None
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
-    # (param_name, registered_service_type) for params whose annotation is a
-    # base class of (or identical to) a service type registered on
-    # EventGraph(services=[...]). Used as the lookup key in the type-keyed
-    # services map at dispatch time.
-    service_params: tuple[tuple[str, type], ...] = ()
-    # (param_name, registered_service_name) for params whose name matches a
-    # key in EventGraph(services={...}). Used as the lookup key in the
-    # name-keyed services map at dispatch time.
-    service_name_params: tuple[tuple[str, str], ...] = ()
-    # (param_name, resolved_annotation) for the name-keyed service params
-    # that carry an annotation. A param with no annotation, or with one that
-    # did not resolve, is absent. The graph build compares each annotation
-    # with the registered service. Name-keyed binding itself needs none.
-    service_name_hints: tuple[tuple[str, Any], ...] = ()
-    # Parameters whose annotation did not resolve, mapped to the reason. A
-    # parameter listed here carries no hint, so no type-matched injection can
-    # claim it. ``_verify_no_unclaimed_params`` reads this to name the real
-    # cause instead of blaming an unrelated parameter. See issue #183.
-    hint_errors: tuple[tuple[str, str], ...] = ()
+    # Each non-variadic param that the event, a framework injectable, a
+    # reducer or a field matcher does not claim, in signature order. Only a
+    # service can fill one. The ``services=`` of one graph bind to these.
+    service_candidates: tuple[ServiceCandidate, ...] = ()
 
     @property
-    def claimant(self) -> str:
-        """The name to blame in a construction-time error message.
+    def qualname(self) -> str:
+        """The module and qualified name of the handler function."""
+        return f"{self.fn.__module__}.{self.fn.__qualname__}"
 
-        An inline ``Command`` handler is named by its command identity
-        (``Order.Place``), not by the method name — ``handle``, or the
-        positional dedup suffix ``handle_2``, does not help the user find it.
+    @property
+    def label(self) -> str:
+        """The subject of a construction-time error or warning about this
+        handler."""
+        return f"Handler '{self.qualname}' (node '{self.node_name}')"
+
+    @property
+    def requirements(self) -> tuple[ServiceRequirement, ...]:
+        """Each parameter that only a service can fill, in signature order."""
+        return tuple(
+            ServiceRequirement(self.node_name, self.qualname, c.param, c.annotation)
+            for c in self.service_candidates
+        )
+
+    @classmethod
+    def of(
+        cls,
+        fn: Callable[..., Any],
+        *,
+        reducer_names: frozenset[str],
+        context_schema: type | None = None,
+    ) -> HandlerMeta:
+        """Extract the metadata of a decorated function, with no services.
+
+        A parameter annotated with exactly *context_schema* is the context
+        parameter.
+
+        Each non-variadic parameter that the event, a framework injectable, a
+        reducer or a field matcher does not claim is recorded in
+        ``service_candidates``. The ``services=`` of one graph bind to them.
         """
-        if getattr(self.fn, "_inline_command", None) is not None:
-            return self.node_name
-        return self.name
+        event_types = getattr(fn, "_event_types", None)
+        if event_types is None:
+            raise ValueError(
+                f"Function {fn.__qualname__!r} is not decorated with @on(EventType)"
+            )
+
+        hints, hint_errors = _resolve_hints_and_errors(fn)
+        param_errors = {n: e for n, e in hint_errors.items() if n != "return"}
+        if param_errors:
+            failed = ", ".join(f"{n!r} ({e})" for n, e in param_errors.items())
+            warn_user(
+                f"Failed to resolve the annotation on parameter(s) {failed} of "
+                f"handler {fn.__qualname__!r}; the framework cannot match them by "
+                f"type. Make each annotation importable at run time.",
+            )
+
+        framework_params = _detect_framework_params(hints, context_schema)
+
+        # Detect reducer parameters by name match
+        sig = inspect.signature(fn)
+        reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
+        required_reducer_params = frozenset(
+            name
+            for name in reducer_params
+            if name in hints and not _annotation_accepts_none(hints[name])
+        )
+
+        # Extract field matchers; classify each now so dispatch avoids isinstance.
+        raw_field_matchers: dict[
+            str, type[Event] | type[Exception] | type[Invariant] | str
+        ] = getattr(fn, "_field_matchers", {})
+        field_matchers = tuple(
+            (name, matcher, isinstance(matcher, type))
+            for name, matcher in raw_field_matchers.items()
+        )
+        field_inject_params = frozenset(
+            name for name in sig.parameters if name in raw_field_matchers
+        )
+
+        # Extract declared raises
+        raises: tuple[type[Exception], ...] = getattr(fn, "_raises", ())
+
+        # Extract the declared retry policy
+        retry: RetryPolicy | None = getattr(fn, "_retry", None)
+
+        # Extract declared invariants
+        invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = getattr(
+            fn, "_invariants", ()
+        )
+
+        # Resolution order: anything claimed by log/config/store/reducer/
+        # field-matcher or the first (event) param is already consumed; the rest
+        # are candidates for service injection.
+        first_param = next(iter(sig.parameters), None)
+        consumed_for_services: set[str | None] = {first_param, "self"}
+        consumed_for_services.update(p for p in framework_params.values() if p)
+        consumed_for_services.update(reducer_params)
+        consumed_for_services.update(raw_field_matchers.keys())
+        # Variadic params (``*args`` / ``**kwargs``) cannot be claimed by any
+        # injection source; they are caller-controlled. They are no candidate, so
+        # generic catcher-style handlers (``def react(event, *a, **kw)``) build.
+        variadic = {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+        service_candidates = tuple(
+            ServiceCandidate(name, _candidate_annotation(name, hints, param_errors))
+            for name, param in sig.parameters.items()
+            if name not in consumed_for_services and param.kind not in variadic
+        )
+
+        name = getattr(fn, "_node_name", None) or fn.__name__
+        # Inline command handlers route by their command's qualname (stable,
+        # order-independent); every other handler routes by its own name. The
+        # qualname intentionally wins over any ``_node_name`` here — inline
+        # handlers never carry one today (``_expand_command_handlers`` forwards
+        # raises/invariants/previously but no ``node_name``), but were that to
+        # change, command identity must stay the resume identity.
+        inline_command = getattr(fn, "_inline_command", None)
+        node_name = (
+            command_identity(inline_command) if inline_command is not None else name
+        )
+
+        return cls(
+            name=name,
+            node_name=node_name,
+            fn=fn,
+            event_types=tuple(event_types),
+            previous_names=getattr(fn, "_previous_names", ()),
+            log_param=framework_params["log_param"],
+            reflection_param=framework_params["reflection_param"],
+            config_param=framework_params["config_param"],
+            store_param=framework_params["store_param"],
+            context_param=framework_params["context_param"],
+            is_async=asyncio.iscoroutinefunction(fn),
+            reducer_params=reducer_params,
+            required_reducer_params=required_reducer_params,
+            field_matchers=field_matchers,
+            field_inject_params=field_inject_params,
+            raises=raises,
+            retry=retry,
+            invariants=invariants,
+            service_candidates=service_candidates,
+        )
 
     def matches(self, event: Event) -> bool:
         """Check whether *event* satisfies this handler's type + field matchers.
@@ -554,13 +718,8 @@ class HandlerMeta:
         return True
 
     @property
-    def wants_log(self) -> bool:
-        """Backward-compatible property."""
-        return self.log_param is not None
-
-    @property
     def framework_params(self) -> tuple[str, ...]:
-        """Param names claimed by framework injectables (log/reflection/config/store).
+        """Param names claimed by framework injectables, such as log or context.
 
         The one place that knows the full injectable set — claim/consume
         bookkeeping iterates this instead of hand-listing each field.
@@ -570,6 +729,7 @@ class HandlerMeta:
             for p in (
                 self.log_param,
                 self.reflection_param,
+                self.context_param,
                 self.config_param,
                 self.store_param,
             )
@@ -577,103 +737,146 @@ class HandlerMeta:
         )
 
 
-def _warn_on_unknown_reducer_params(
-    fn: Callable[..., Any],
-    sig: inspect.Signature,
-    *,
-    reducer_names: frozenset[str],
-    consumed: set[str | None],
-) -> None:
-    """Surface a typo warning when reducer-style param names go unmatched."""
-    unknown = [
-        name for name in sig.parameters if name not in consumed and name != "self"
-    ]
-    if not unknown:
-        return
-    warn_user(
-        f"Handler {fn.__qualname__!r} has parameter(s) {unknown} that "
-        f"don't match any reducer. "
-        f"Available reducers: {sorted(reducer_names)}. Typo?",
-    )
+@dataclass(frozen=True)
+class BoundHandler:
+    """A handler with its parameters matched to the services of one graph.
 
-
-def _detect_service_name_params(
-    sig: inspect.Signature,
-    service_names: frozenset[str],
-    consumed: set[str | None],
-) -> tuple[tuple[str, str], ...]:
-    """Match unclaimed handler params against the name-keyed services map.
-
-    A param whose name appears as a key in ``EventGraph(services={...})`` is
-    bound to the corresponding instance at dispatch. Annotation-free params
-    are eligible — name-keyed binding does not require a type hint.
+    Only a bound handler becomes a node that runs the handler body.
     """
-    if not service_names:
-        return ()
-    return tuple(
-        (param_name, param_name)
-        for param_name in sig.parameters
-        if param_name not in consumed and param_name in service_names
-    )
 
+    meta: HandlerMeta
+    # (param_name, service) for each candidate that a service fills. A
+    # ``RunScoped`` service is resolved per node call at dispatch.
+    services: tuple[tuple[str, object], ...]
+    # The params whose ``RunScoped`` factory also takes the run context.
+    context_services: frozenset[str] = frozenset()
 
-def _detect_service_params(
-    fn: Callable[..., Any],
-    sig: inspect.Signature,
-    hints: dict[str, Any],
-    service_types: frozenset[type],
-    consumed: set[str | None],
-) -> tuple[tuple[str, type], ...]:
-    """Match unclaimed handler params against registered service types.
+    def require_claimed(
+        self,
+        reducer_names: frozenset[str],
+        *,
+        received: str,
+        entry: str,
+        context_schema: type | None = None,
+    ) -> None:
+        """Raise if a handler declares a param the framework cannot inject.
 
-    For each param whose annotation is a class, the matching service type is
-    the unique registered type that is a subclass of (or equal to) the
-    annotation. Multi-match is rejected — the user must disambiguate by
-    narrowing the annotation or registering only one matching service.
-    """
-    if not service_types:
-        return ()
-    detected: list[tuple[str, type]] = []
-    for param_name in sig.parameters:
-        if param_name in consumed:
-            continue
-        hint = hints.get(param_name)
-        if not isinstance(hint, type):
-            continue
-        # ``object`` matches every registered type; treating it as a service
-        # claim would silently consume an unrelated instance. Skip — the
-        # caller meant "untyped" and ``_verify_no_unclaimed_params`` will
-        # surface the missing-source error at graph build.
-        if hint is object:
-            continue
-        # Exact-type match wins over subclass-only match — it lets users
-        # register a base + subclass pair (e.g. ``[BaseChatModel(), Anthropic()]``)
-        # and resolve `param: BaseChatModel` to the base instance unambiguously.
-        if hint in service_types:
-            detected.append((param_name, hint))
-            continue
-        matches = [t for t in service_types if issubclass(t, hint)]
-        if len(matches) > 1:
-            names = ", ".join(sorted(t.__name__ for t in matches))
-            raise TypeError(
-                f"Handler {fn.__qualname__!r} parameter {param_name!r} "
-                f"annotated as {hint.__name__!r} matches multiple "
-                f"registered services ({names}). Disambiguate by "
-                f"narrowing the annotation, or register only one "
-                f"service that satisfies it."
+        Every parameter must be claimed by exactly one source: the event
+        itself (the first positional param), ``EventLog``/``RunnableConfig``/
+        ``BaseStore`` framework injectables, a registered reducer name, a
+        field matcher, or a service. An unclaimed param means the user
+        intended an injection the framework has no way to provide — surface
+        it at graph build time so the failure is colocated with the
+        misconfiguration. With *reducer_names*, a typo warning comes first.
+        *received* states what ``services=`` holds, so a near-miss name key
+        shows. *entry* is the call that received ``services=``. A parameter
+        that looks like the run context gets a hint on *context_schema*.
+        """
+        meta = self.meta
+        bound = {param for param, _ in self.services}
+        missing = [c for c in meta.service_candidates if c.param not in bound]
+        if not missing:
+            return
+        unclaimed = [c.param for c in missing]
+        if reducer_names:
+            warn_user(
+                f"{meta.label} has parameter(s) {unclaimed} "
+                f"that don't match any reducer. "
+                f"Available reducers: {sorted(reducer_names)}. Typo?",
             )
-        if matches:
-            detected.append((param_name, matches[0]))
-    return tuple(detected)
+        # An unclaimed param whose annotation failed to resolve has a cause
+        # the generic advice cannot express — the framework never saw a type
+        # to match, so "register a service" is the wrong instruction. State
+        # the resolution failure first. See issue #183.
+        errors = {
+            c.param: c.annotation.reason
+            for c in missing
+            if isinstance(c.annotation, UnresolvedAnnotation)
+        }
+        cause = ""
+        if errors:
+            detail = ", ".join(f"{name!r} ({error})" for name, error in errors.items())
+            cause = (
+                f" The annotation on {detail} did not resolve, so the "
+                f"framework could not match it by type. Make the annotation "
+                f"importable at run time."
+            )
+        wanted = ", ".join(
+            f"{c.param!r} ({_annotation_label(c.annotation)})" for c in missing
+        )
+        raise TypeError(
+            f"{meta.label} declares parameter(s) {unclaimed} "
+            f"that the framework cannot inject: {wanted}.{cause}"
+            f"{_context_hint(missing, context_schema)} {received} "
+            f"For service injection, register a matching instance via "
+            f"{entry}; for state, register a Reducer; "
+            f"otherwise remove the parameter."
+        )
 
 
-def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
+def is_coercible_schema(schema: type) -> bool:
+    """Whether LangGraph coerces a ``dict`` context to *schema*: a dataclass
+    or a pydantic model."""
+    from pydantic import BaseModel  # noqa: PLC0415
+
+    return is_dataclass(schema) or issubclass(schema, BaseModel)
+
+
+def _context_hint(missing: list[ServiceCandidate], context_schema: type | None) -> str:
+    """A hint for each missing parameter that looks like the run context.
+
+    Without *context_schema*, a dataclass, a pydantic model or a
+    ``TypedDict`` annotation can be a context schema. These are the schema
+    kinds of LangGraph. With *context_schema*, a parameter is a near miss when
+    its annotation is a subclass of the schema, or a union that holds it.
+    """
+    hints: list[str] = []
+    for c in missing:
+        hint = c.annotation
+        if context_schema is None:
+            if isinstance(hint, type) and (
+                is_coercible_schema(hint) or typing.is_typeddict(hint)
+            ):
+                hints.append(
+                    f" If {c.param!r} is the run context, pass "
+                    f"context_schema={hint.__qualname__}."
+                )
+            continue
+        subclass = (
+            isinstance(hint, type)
+            and not typing.is_typeddict(context_schema)
+            and issubclass(hint, context_schema)
+        )
+        near = subclass or context_schema in typing.get_args(hint)
+        if near:
+            hints.append(
+                f" {c.param!r} is annotated {_annotation_label(hint)}, but only "
+                f"the exact type context_schema={context_schema.__qualname__} "
+                f"receives the run context."
+            )
+    return "".join(hints)
+
+
+def _annotation_label(annotation: object) -> str:
+    """Render the annotation of an unclaimed parameter for an error."""
+    if isinstance(annotation, Unannotated):
+        return "no annotation"
+    if isinstance(annotation, UnresolvedAnnotation):
+        return "unresolved annotation"
+    if isinstance(annotation, type):
+        return annotation.__qualname__
+    return repr(annotation)
+
+
+def _detect_framework_params(
+    hints: dict[str, Any], context_schema: type | None
+) -> dict[str, str | None]:
     """Find params annotated with framework injectables, by exact type hint.
 
-    Returns a dict keyed by the ``HandlerMeta`` field names
-    (``log_param`` / ``reflection_param`` / ``config_param`` / ``store_param``)
-    so call sites read each key by name — no positional slots to miswire.
-    First matching param wins for each injectable.
+    Returns a dict keyed by the ``HandlerMeta`` field names, for example
+    ``log_param`` or ``context_param``, so call sites read each key by name.
+    First matching param wins for each injectable. Without *context_schema*,
+    ``context_param`` is ``None``.
     """
     from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
     from langgraph.store.base import BaseStore  # noqa: PLC0415
@@ -687,6 +890,9 @@ def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
         BaseStore: "store_param",
     }
     detected: dict[str, str | None] = dict.fromkeys(hint_to_field.values())
+    detected["context_param"] = None
+    if context_schema is not None:
+        hint_to_field[context_schema] = "context_param"
     for param_name, hint in hints.items():
         field = hint_to_field.get(hint)
         if field is not None and detected[field] is None:
@@ -694,136 +900,9 @@ def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
     return detected
 
 
-def extract_handler_meta(
-    fn: Callable[..., Any],
-    reducer_names: frozenset[str] = frozenset(),
-    service_types: frozenset[type] = frozenset(),
-    service_names: frozenset[str] = frozenset(),
-) -> HandlerMeta:
-    """Extract handler metadata from a decorated function.
-
-    ``service_types`` is the set of exact types registered on
-    ``EventGraph(services=[...])`` (sequence form). Each handler param whose
-    annotation is a base class of (or identical to) a registered service
-    type is recorded as a service param.
-
-    ``service_names`` is the set of keys in ``EventGraph(services={...})``
-    (mapping form). Each handler param whose name matches a key is recorded
-    as a name-keyed service param.
-
-    Only one of the two forms is populated per ``EventGraph`` — they are
-    mutually exclusive.
-    """
-    event_types = getattr(fn, "_event_types", None)
-    if event_types is None:
-        raise ValueError(
-            f"Function {fn.__qualname__!r} is not decorated with @on(EventType)"
-        )
-
-    hints, hint_errors = _resolve_hints_and_errors(fn)
-    param_errors = {n: e for n, e in hint_errors.items() if n != "return"}
-    if param_errors:
-        failed = ", ".join(f"{n!r} ({e})" for n, e in param_errors.items())
-        warn_user(
-            f"Failed to resolve the annotation on parameter(s) {failed} of "
-            f"handler {fn.__qualname__!r}; the framework cannot match them by "
-            f"type. Make each annotation importable at run time.",
-        )
-
-    framework_params = _detect_framework_params(hints)
-
-    # Detect reducer parameters by name match
-    sig = inspect.signature(fn)
-    reducer_params = tuple(name for name in sig.parameters if name in reducer_names)
-    required_reducer_params = frozenset(
-        name
-        for name in reducer_params
-        if name in hints and not _annotation_accepts_none(hints[name])
-    )
-
-    # Extract field matchers; classify each now so dispatch avoids isinstance.
-    raw_field_matchers: dict[
-        str, type[Event] | type[Exception] | type[Invariant] | str
-    ] = getattr(fn, "_field_matchers", {})
-    field_matchers = tuple(
-        (name, matcher, isinstance(matcher, type))
-        for name, matcher in raw_field_matchers.items()
-    )
-    field_inject_params = frozenset(
-        name for name in sig.parameters if name in raw_field_matchers
-    )
-
-    # Extract declared raises
-    raises: tuple[type[Exception], ...] = getattr(fn, "_raises", ())
-
-    # Extract the declared retry policy
-    retry: RetryPolicy | None = getattr(fn, "_retry", None)
-
-    # Extract declared invariants
-    invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = getattr(
-        fn, "_invariants", ()
-    )
-
-    # Detect service params by type. Resolution order: anything claimed by
-    # log/config/store/reducer/field-matcher or the first (event) param is
-    # already consumed; the rest are candidates for service injection.
-    first_param = next(iter(sig.parameters), None)
-    consumed_for_services: set[str | None] = {first_param, "self"}
-    consumed_for_services.update(p for p in framework_params.values() if p)
-    consumed_for_services.update(reducer_params)
-    consumed_for_services.update(raw_field_matchers.keys())
-    service_params = _detect_service_params(
-        fn, sig, hints, service_types, consumed_for_services
-    )
-    service_name_params = _detect_service_name_params(
-        sig, service_names, consumed_for_services
-    )
-    service_name_hints = tuple(
-        (name, hints[name]) for name, _ in service_name_params if name in hints
-    )
-
-    if reducer_names:
-        _warn_on_unknown_reducer_params(
-            fn,
-            sig,
-            reducer_names=reducer_names,
-            consumed=(
-                consumed_for_services
-                | {n for n, _ in service_params}
-                | {n for n, _ in service_name_params}
-            ),
-        )
-
-    name = getattr(fn, "_node_name", None) or fn.__name__
-    # Inline command handlers route by their command's qualname (stable,
-    # order-independent); every other handler routes by its own name. The
-    # qualname intentionally wins over any ``_node_name`` here — inline
-    # handlers never carry one today (``_expand_command_handlers`` forwards
-    # raises/invariants/previously but no ``node_name``), but were that to
-    # change, command identity must stay the resume identity.
-    inline_command = getattr(fn, "_inline_command", None)
-    node_name = command_identity(inline_command) if inline_command is not None else name
-
-    return HandlerMeta(
-        name=name,
-        node_name=node_name,
-        fn=fn,
-        event_types=tuple(event_types),
-        previous_names=getattr(fn, "_previous_names", ()),
-        log_param=framework_params["log_param"],
-        reflection_param=framework_params["reflection_param"],
-        config_param=framework_params["config_param"],
-        store_param=framework_params["store_param"],
-        is_async=asyncio.iscoroutinefunction(fn),
-        reducer_params=reducer_params,
-        required_reducer_params=required_reducer_params,
-        field_matchers=field_matchers,
-        field_inject_params=field_inject_params,
-        raises=raises,
-        retry=retry,
-        invariants=invariants,
-        service_params=service_params,
-        service_name_params=service_name_params,
-        service_name_hints=service_name_hints,
-        hint_errors=tuple(param_errors.items()),
-    )
+def _candidate_annotation(
+    name: str, hints: dict[str, Any], errors: dict[str, str]
+) -> object:
+    if name in errors:
+        return UnresolvedAnnotation(errors[name])
+    return hints.get(name, Unannotated())

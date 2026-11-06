@@ -386,7 +386,9 @@ def check(target: MigrationTarget, *, previous: Path | None = None) -> GateRepor
     findings.extend(_coverage_and_revival(code, judged))
     findings.extend(
         HandlerMissing(name)
-        for name in sorted(committed.handlers - code.graph.resumable_node_names)
+        for name in sorted(
+            committed.handlers - code.store.topology.resumable_node_names
+        )
     )
     rules = set(_RULE_ORDER) - {"release"}
     not_run: ReleaseNotRun | None = None

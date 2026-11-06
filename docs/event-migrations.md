@@ -97,7 +97,16 @@ graph = EventGraph.from_namespaces(Order, checkpointer=MemorySaver())
 ```
 
 - `from_namespaces(..., checkpointer=...)` wires a migration-aware serde scoped to the passed namespaces. The serde walks only those namespaces for `@migrate_from` metadata. A decorator on an unrelated imported module contributes nothing.
-- `from_namespaces` keeps a `NamespaceAwareSerde` that the checkpointer already carries, for example one with hand-authored `migrations=`. It replaces any other serde, for example LangGraph's default `JsonPlusSerializer`.
+- `from_namespaces` keeps a `NamespaceAwareSerde` that the checkpointer already carries, for example one with hand-authored `migrations=`. It replaces LangGraph's default `JsonPlusSerializer` only when that serde has its default settings.
+- WARNING: `from_namespaces` raises `TypeError` for any other serde, so that it never drops an encryption or a serializer setting. Build the graph with `EventGraph.of(topology, checkpointer=saver)` instead, and give the saver the topology serde:
+
+    ```python
+    topology = EventTopology.from_namespaces(Order)
+    saver = MemorySaver(serde=EncryptedSerializer(cipher, serde=topology.serde()))
+    graph = EventGraph.of(topology, checkpointer=saver)
+    ```
+
+    A wrapped serde reads and writes through `topology.serde()`. But the saver then holds no `NamespaceAwareSerde`, so `EventStore.unrevivable_threads()`, `plan_rewrite()` and `rewrite_store()` raise `ValueError` on it.
 
 A multi-step chain lists the oldest qualname first. Stacked decorators give the same chain, with the oldest at the bottom. The serde flattens the chain, so any historic step revives at the current class in one lookup. Prefer the multi-arg form:
 

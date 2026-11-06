@@ -1,6 +1,6 @@
 """Apply-side migration: plan the rewrite of one thread's live checkpoint.
 
-``EventGraph.plan_rewrite()`` and ``rewrite_store()`` read the latest
+``EventStore.plan_rewrite()`` and ``rewrite_store()`` read the latest
 checkpoint of each thread the caller names. The serde's read path
 already applies every rename, transform, split and fill, so a
 checkpoint read through ``get_tuple()`` and written back through
@@ -80,8 +80,8 @@ class ThreadRewrite:
 
 @dataclass(frozen=True)
 class RewriteReport:
-    """What :meth:`EventGraph.plan_rewrite` found, or what
-    :meth:`EventGraph.rewrite_store` did.
+    """What :meth:`EventStore.plan_rewrite` found, or what
+    :meth:`EventStore.rewrite_store` did.
 
     ``applied`` is ``False`` from ``plan_rewrite()``. A ``"rewrite"``
     status then means the thread would be rewritten. From

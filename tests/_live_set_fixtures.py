@@ -65,7 +65,7 @@ class _Releases(NamedTuple):
 
     def plan(self, *thread_ids: str) -> list[str]:
         graph = self.current.graph(self.saver)
-        report = graph.plan_rewrite(thread_ids=thread_ids)
+        report = graph.event_store.plan_rewrite(thread_ids=thread_ids)
         return [thread.status for thread in report.threads]
 
 

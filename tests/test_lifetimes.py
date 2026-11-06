@@ -69,8 +69,8 @@ def describe_sequential_lifetimes():
             second = _next_lifetime()
             graph_two = EventGraph([second.Place])
 
-            assert graph_one._namespaces["Trading"] is first
-            assert graph_two._namespaces["Trading"] is second
+            assert graph_one._topology._namespaces["Trading"] is first
+            assert graph_two._topology._namespaces["Trading"] is second
 
         def it_discovers_reducers_from_its_own_lifetime():
             first = _next_lifetime()
@@ -79,8 +79,8 @@ def describe_sequential_lifetimes():
             graph_two = EventGraph([second.Place])
 
             # Same reducer *name* either side; the objects must not be shared.
-            assert graph_one._reducers["last_symbol"] is first.last_symbol
-            assert graph_two._reducers["last_symbol"] is second.last_symbol
+            assert graph_one._topology._reducers["last_symbol"] is first.last_symbol
+            assert graph_two._topology._reducers["last_symbol"] is second.last_symbol
             assert first.last_symbol is not second.last_symbol
 
     def when_the_second_lifetime_resumes_the_first_lifetimes_checkpoint():
@@ -213,7 +213,9 @@ def describe_namespaces_reaching_one_graph():
             def handle_b(event: object) -> None:
                 return None
 
-            assert EventGraph([handle_a, handle_b])._namespaces["Trading"] is one
+            assert (
+                EventGraph([handle_a, handle_b])._topology._namespaces["Trading"] is one
+            )
 
 
 def describe_namespace_scoped_reducers():
@@ -362,7 +364,7 @@ def describe_from_namespaces_auto_wiring():
                 first, handlers=[echo], checkpointer=MemorySaver()
             )
 
-            assert graph._namespaces_cache is None
+            assert "_namespace_model" not in vars(graph._topology)
 
 
 def describe_one_class_reached_twice():
@@ -408,7 +410,7 @@ def describe_loose_event_ordering():
             def two(event: _Bet) -> None:
                 return None
 
-            loose = EventGraph([one, two])._loose_events
+            loose = EventGraph([one, two])._topology._loose_events
 
             assert list(loose) == sorted(
                 set(loose), key=lambda c: (c.__module__, c.__qualname__)
