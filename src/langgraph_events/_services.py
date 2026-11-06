@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import functools
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 if TYPE_CHECKING:
@@ -53,6 +53,24 @@ def _missing_return_annotation(
     return f"{lead}, but {label!r} has none. {why} Add one, for example: {example}."
 
 
+def _takes_context(factory: Callable[..., object]) -> bool:
+    """Whether *factory* has two required positional parameters.
+
+    A signature that Python cannot read counts as one parameter, the run
+    config only.
+    """
+    try:
+        params = inspect.signature(factory).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    positional = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    )
+    required = [p for p in params if p.kind in positional and p.default is p.empty]
+    return len(required) == 2
+
+
 @dataclass(frozen=True)
 class RunScoped(Generic[T]):
     """A service derived per run from the node's ``RunnableConfig``.
@@ -60,6 +78,10 @@ class RunScoped(Generic[T]):
     Place a ``RunScoped`` value in the name-keyed ``services=`` mapping. The
     factory is called with the run config once per node call. Its result is
     injected under the handler's parameter name.
+
+    A factory with two required positional parameters also receives the run
+    context, as ``factory(config, context)``. The graph must then set
+    ``EventGraph(context_schema=...)``.
 
     The factory must be a plain callable. A coroutine function is rejected,
     because its result would be injected without an ``await``.
@@ -72,7 +94,8 @@ class RunScoped(Generic[T]):
         def handle(event: SomeEvent, model: ConversationModel) -> None: ...
     """
 
-    factory: Callable[[RunnableConfig], T]
+    factory: Callable[[RunnableConfig], T] | Callable[[RunnableConfig, Any], T]
+    takes_context: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not callable(self.factory):
@@ -92,6 +115,7 @@ class RunScoped(Generic[T]):
                 "would be an un-awaited coroutine. Derive the value with a "
                 "plain function."
             )
+        object.__setattr__(self, "takes_context", _takes_context(self.factory))
         source = _annotation_source(self.factory)
         if isinstance(source, type):
             return

@@ -357,6 +357,8 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                 "is configured. Pass store=... to EventGraph(...)."
             )
         inject[meta.store_param] = store
+    if meta.context_param:
+        inject[meta.context_param] = _run_context(meta, "the run context")
     if services_by_type and meta.service_params:
         for param_name, svc_type in meta.service_params:
             inject[param_name] = services_by_type[svc_type]
@@ -369,8 +371,12 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                         f"Handler '{meta.name}' requested the run-scoped service "
                         f"'{param_name}', but runtime config is missing."
                     )
+                args: tuple[Any, ...] = (config,)
+                if svc.takes_context:
+                    wanted = f"the context of {param_name!r}"
+                    args = (config, _run_context(meta, wanted))
                 try:
-                    svc = svc.factory(config)
+                    svc = svc.factory(*args)
                 except Exception as exc:
                     # Keep the type, so a caller that catches it still can.
                     # The note names the seam, like the missing-config branch.
@@ -381,6 +387,23 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                     raise
             inject[param_name] = svc
     return inject
+
+
+def _run_context(meta: HandlerMeta, wanted: str) -> object:
+    """Return the context of the current run from LangGraph's ``Runtime``.
+
+    The context is ``None`` only when a caller runs ``EventGraph.compiled``
+    directly without ``context=``. The ``EventGraph`` run methods refuse that.
+    """
+    from langgraph.runtime import get_runtime  # noqa: PLC0415
+
+    context = get_runtime().context
+    if context is None:
+        raise ValueError(
+            f"Handler {meta.name!r} requested {wanted}, but the run has no "
+            f"context. Pass context=... to the run call."
+        )
+    return context
 
 
 def _make_reducer_not_set_error(

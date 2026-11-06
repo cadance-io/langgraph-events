@@ -523,6 +523,12 @@ A server `configurable` key `thread_id`, or a key with the prefix `__lge_`, rais
 
 A `seed_factory` or a `resume_factory` receives `input_data`, not the run config. A handler reads the run config from its `RunnableConfig`.
 
+`stream()` also takes `context=`, the typed run context of a graph with `EventGraph(context_schema=...)`. The adapter passes it to the run on a start and on a resume. A client cannot set it, and it is not checkpointed. Use it for a per-run server fact, such as the run language, in place of a `configurable` key. When the graph has a context schema, `stream()` without `context=` raises `TypeError` when it is called. See [Run context](concepts.md#run-context).
+
+```python
+stream = adapter.stream(input_data, context=RunFacts(language="fr"))
+```
+
 `connect()` also takes `config=`, because the checkpointer reads the checkpoint with the run config. For example, a checkpointer can route on a tenant key in `configurable`. Pass the same server config to `stream()` and to `connect()`. Without `config=`, `connect()` reads the checkpoint with `RunAgentInput.thread_id` only. It always ignores the client run config. The reserved keys raise `ValueError` when `connect()` is called.
 
 ## Deadline and signal pauses

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventGraph(context_schema=...)` exposes LangGraph's typed run context.** Pass the
+  context with `context=` on each run call. A handler parameter annotated with the
+  schema type receives it. A `RunScoped` factory with two required positional
+  parameters receives `(config, context)`. The context is not written to the
+  checkpoint state or metadata, and a client cannot set it. When the schema is set, a
+  run or a resume without `context=` raises `TypeError` that names the schema. A graph
+  without `context_schema` behaves as before. See
+  [Run context](docs/concepts.md#run-context).
+- **`AGUIAdapter.stream()` takes `context=`.** The adapter passes it to the run on a
+  start and on a resume. See [Run config](docs/agui.md#run-config).
+
 ## [0.46.1] - 2026-11-03
 
 ### Fixed

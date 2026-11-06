@@ -119,6 +119,7 @@ Handler params resolve from:
 
 - `log: EventLog`: full history
 - `config: RunnableConfig` / `store: BaseStore`: LangGraph injections
+- A parameter annotated with the graph's `context_schema`: the typed run context (see [Run context](#run-context))
 - Reducer channel by **parameter name** (see [Reducers](reducers.md))
 - Field matchers (external only): typed subset dispatch and injection
 - **Services**: project dependencies registered on `EventGraph(services=...)`
@@ -182,6 +183,42 @@ Rules:
 - `RunScoped` is rejected in the type-keyed sequence form.
 - A resumed run receives a freshly built config, not a checkpointed one.
 - The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error, with a note that names the handler and the parameter. Keep the factory to a lookup. Validate the config in the factory and raise a clear error.
+- A factory with two required positional parameters receives `(config, context)`. The second argument is the run context. See [Run context](#run-context).
+
+#### Run context
+
+A per-run server fact, such as the run language or a model override, does not belong in `configurable`. That dict can also carry client input, and LangGraph copies its plain values into the checkpoint metadata. Use LangGraph's typed run context instead. Declare its type with `EventGraph(context_schema=...)`, and pass a value with `context=` on each run call:
+
+```python
+...
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class RunFacts:
+    language: str
+
+def model_for(config: RunnableConfig, facts: RunFacts) -> ConversationModel:
+    return models.main(facts.language)
+
+@on(SomeEvent)
+def handle(event: SomeEvent, facts: RunFacts, model: ConversationModel) -> ...: ...
+
+graph = EventGraph(
+    [handle],
+    context_schema=RunFacts,
+    services={"model": RunScoped(model_for)},
+)
+graph.invoke(SomeEvent(), context=RunFacts(language="fr"))
+```
+
+Rules:
+
+- The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model.
+- A handler parameter whose annotation is exactly the schema type receives the context. It is a library type, like `RunnableConfig`, so it is claimed before a service. Without `context_schema`, the parameter stays unclaimed and the build raises `TypeError`.
+- A `RunScoped` factory with two required positional parameters receives `(config, context)`. A factory with one parameter receives the config only, as before. A two-parameter factory on a graph without `context_schema` raises `TypeError` at build.
+- The context is read through LangGraph's `get_runtime()`. It is not written to the checkpoint state or to the checkpoint metadata.
+- When `context_schema` is set, every run call must pass `context=`. This covers `invoke`, `ainvoke`, `stream_events`, `astream_events`, `resume`, `aresume`, `stream_resume`, `astream_resume` and `AGUIAdapter.stream()`. A missing context raises `TypeError` that names the schema, before the graph runs. A stream method raises it at the first iteration. There is no default context.
+- A resume does not reuse the context of the earlier run. Pass the context again.
 
 ### Return contract
 

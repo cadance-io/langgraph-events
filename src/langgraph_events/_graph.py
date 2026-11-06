@@ -986,6 +986,23 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
         )
 
 
+def _verify_run_scoped_context(
+    services_by_name: dict[str, Any], context_schema: type | None
+) -> None:
+    """Raise if a ``RunScoped`` factory takes a context the graph cannot give."""
+    if context_schema is not None:
+        return
+    for name, value in services_by_name.items():
+        if isinstance(value, RunScoped) and value.takes_context:
+            factory = _factory_label(_annotation_source(value.factory))
+            raise TypeError(
+                f"RunScoped factory {factory!r} for service {name!r} takes "
+                f"(config, context), but the graph has no context_schema. "
+                f"Pass EventGraph(context_schema=...), or give the factory "
+                f"one parameter."
+            )
+
+
 def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any]:
     """Resolve the return annotation of every ``RunScoped`` factory.
 
@@ -1237,6 +1254,7 @@ class EventGraph:
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
+        context_schema: type | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("EventGraph requires at least one handler")
@@ -1249,6 +1267,7 @@ class EventGraph:
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._store = store
+        self._context_schema = context_schema
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
         _discover_namespace_reducers(self._namespaces, self._reducers)
@@ -1269,6 +1288,7 @@ class EventGraph:
             services
         )
         run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
+        _verify_run_scoped_context(self._services_by_name, context_schema)
 
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
@@ -1283,6 +1303,7 @@ class EventGraph:
                 reducer_names=reducer_names,
                 service_types=service_types,
                 service_names=service_names,
+                context_schema=context_schema,
             )
             _verify_no_unclaimed_params(meta)
             _verify_service_name_types(meta, self._services_by_name, run_scoped_types)
@@ -1422,6 +1443,7 @@ class EventGraph:
             state_schema,
             input_schema=_InputState,  # type: ignore[arg-type]
             output_schema=out_schema,
+            context_schema=self._context_schema,
         )
 
         # --- nodes ---
@@ -1657,6 +1679,21 @@ class EventGraph:
         seeds = seed if isinstance(seed, list) else [seed]
         return {"events": seeds, "causes": [None] * len(seeds)}
 
+    def _require_context(self, context: object) -> None:
+        """Raise ``TypeError`` if the graph has a context schema and no *context*.
+
+        Every run method calls it before the graph runs, so a run never
+        starts without the context that its handlers read.
+        """
+        schema = self._context_schema
+        if schema is None or context is not None:
+            return
+        raise TypeError(
+            f"EventGraph(context_schema={schema.__qualname__}) requires a run "
+            f"context. Pass context={schema.__qualname__}(...) to each run "
+            f"call, including a resume."
+        )
+
     def _run(
         self,
         inp: _GraphInput,
@@ -1665,6 +1702,7 @@ class EventGraph:
         pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> EventLog:
+        self._require_context(kwargs.get("context"))
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
@@ -1678,6 +1716,7 @@ class EventGraph:
         pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> EventLog:
+        self._require_context(kwargs.get("context"))
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
@@ -3243,6 +3282,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
+        self._require_context(kwargs.get("context"))
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         compiled = self._compile()
         if not reducer_names:
@@ -3413,6 +3453,7 @@ class EventGraph:
         path loads no checkpoint, so it has no use for *snapshot*.
         """
         kwargs.pop("stream_mode", None)
+        self._require_context(kwargs.get("context"))
         kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (

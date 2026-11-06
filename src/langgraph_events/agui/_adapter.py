@@ -446,6 +446,7 @@ class AGUIAdapter:
         resume_event: Event,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
+        context: object,
     ) -> AsyncIterator[StreamItem]:
         """Resume path that routes ``FrontendStateMutated`` through both
         reducer dispatch and the LangGraph channel state.
@@ -479,6 +480,7 @@ class AGUIAdapter:
             include_custom_events=True,
             _snapshot=snapshot,
             config=config,
+            context=context,
         ):
             yield item
 
@@ -538,6 +540,7 @@ class AGUIAdapter:
         resume_event: Event | None,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
+        context: object,
     ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream.
 
@@ -545,7 +548,9 @@ class AGUIAdapter:
         graph uses it, so it does not load the checkpoint again.
         """
         if resume_event is not None:
-            return self._resume_event_stream(input_data, resume_event, config, snapshot)
+            return self._resume_event_stream(
+                input_data, resume_event, config, snapshot, context
+            )
         seed: Event | list[Event] = await _call_factory(
             self._seed_factory,
             input_data,
@@ -560,6 +565,7 @@ class AGUIAdapter:
             include_custom_events=True,
             _snapshot=snapshot,
             config=config,
+            context=context,
         )
 
     @staticmethod
@@ -693,6 +699,7 @@ class AGUIAdapter:
         input_data: RunAgentInput,
         ctx: MapperContext,
         config: RunnableConfig,
+        context: object,
     ) -> AsyncIterator[BaseEvent]:
         """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run — lazy checkpoint read
@@ -740,6 +747,7 @@ class AGUIAdapter:
             resume_event,
             config,
             checkpoint_snapshot,
+            context,
         )
 
         async for item in event_stream:
@@ -799,6 +807,7 @@ class AGUIAdapter:
         input_data: RunAgentInput,
         *,
         config: RunnableConfig | None = None,
+        context: object = None,
         client_configurable: AbstractSet[str] = frozenset(),
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
@@ -815,6 +824,11 @@ class AGUIAdapter:
                 ``recursion_limit`` or ``metadata``.  It is the only source of
                 run config.  A handler reads it from its ``RunnableConfig``.
                 ``None`` (default) gives the run only its ``thread_id``.
+            context: The run context, an instance of the graph's
+                ``EventGraph(context_schema=...)``.  The adapter passes it to
+                the run on a start and on a resume.  It is not checkpointed.
+                A client cannot set it.  ``None`` (default) is valid only
+                for a graph without a context schema.
             client_configurable: The names of the client ``configurable``
                 keys that the run accepts from ``forwarded_props``.  The
                 adapter ignores every other part of the client run config.
@@ -842,7 +856,8 @@ class AGUIAdapter:
 
         Raises:
             TypeError: *pause_on* is a class, or has no callable
-                ``is_set``.  Or *client_configurable* is a ``str``.
+                ``is_set``.  Or *client_configurable* is a ``str``.  Or the
+                graph has a context schema and *context* is ``None``.
                 ``stream()`` raises it when it is called, before the stream
                 starts.
             ValueError: *config* ``configurable`` names ``thread_id`` or a
@@ -851,6 +866,7 @@ class AGUIAdapter:
                 ``checkpoint_id`` or ``checkpoint_ns``.  ``stream()`` raises
                 it when it is called, before the stream starts.
         """
+        self._graph._require_context(context)
         ctx = self._run_context(input_data)
         run_config = self._build_config(
             input_data,
@@ -860,7 +876,9 @@ class AGUIAdapter:
             deadline=deadline,
             pause_on=pause_on,
         )
-        return self._as_run(ctx, self._stream_event_source(input_data, ctx, run_config))
+        return self._as_run(
+            ctx, self._stream_event_source(input_data, ctx, run_config, context)
+        )
 
     @staticmethod
     def _run_context(input_data: RunAgentInput) -> MapperContext:

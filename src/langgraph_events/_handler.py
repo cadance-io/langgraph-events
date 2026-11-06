@@ -492,6 +492,9 @@ class HandlerMeta:
     required_reducer_params: frozenset[str] = frozenset()
     config_param: str | None = None
     store_param: str | None = None
+    # Parameter annotated with the graph's ``context_schema``. It receives the
+    # run context of LangGraph's ``Runtime``.
+    context_param: str | None = None
     # Each entry is (field_name, matcher, is_type_matcher). The bool is
     # precomputed at extract time so the hot-path ``matches`` loop avoids
     # an ``isinstance(matcher, type)`` probe per dispatch.
@@ -560,7 +563,7 @@ class HandlerMeta:
 
     @property
     def framework_params(self) -> tuple[str, ...]:
-        """Param names claimed by framework injectables (log/reflection/config/store).
+        """Param names claimed by framework injectables, such as log or config.
 
         The one place that knows the full injectable set — claim/consume
         bookkeeping iterates this instead of hand-listing each field.
@@ -572,6 +575,7 @@ class HandlerMeta:
                 self.reflection_param,
                 self.config_param,
                 self.store_param,
+                self.context_param,
             )
             if p
         )
@@ -667,13 +671,15 @@ def _detect_service_params(
     return tuple(detected)
 
 
-def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
+def _detect_framework_params(
+    hints: dict[str, Any], context_schema: type | None = None
+) -> dict[str, str | None]:
     """Find params annotated with framework injectables, by exact type hint.
 
-    Returns a dict keyed by the ``HandlerMeta`` field names
-    (``log_param`` / ``reflection_param`` / ``config_param`` / ``store_param``)
-    so call sites read each key by name — no positional slots to miswire.
-    First matching param wins for each injectable.
+    Returns a dict keyed by the ``HandlerMeta`` field names, for example
+    ``log_param`` or ``context_param``, so call sites read each key by name.
+    First matching param wins for each injectable. ``context_param`` is
+    detected only when *context_schema* is set.
     """
     from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
     from langgraph.store.base import BaseStore  # noqa: PLC0415
@@ -686,6 +692,8 @@ def _detect_framework_params(hints: dict[str, Any]) -> dict[str, str | None]:
         RunnableConfig: "config_param",
         BaseStore: "store_param",
     }
+    if context_schema is not None:
+        hint_to_field[context_schema] = "context_param"
     detected: dict[str, str | None] = dict.fromkeys(hint_to_field.values())
     for param_name, hint in hints.items():
         field = hint_to_field.get(hint)
@@ -699,6 +707,7 @@ def extract_handler_meta(
     reducer_names: frozenset[str] = frozenset(),
     service_types: frozenset[type] = frozenset(),
     service_names: frozenset[str] = frozenset(),
+    context_schema: type | None = None,
 ) -> HandlerMeta:
     """Extract handler metadata from a decorated function.
 
@@ -713,6 +722,9 @@ def extract_handler_meta(
 
     Only one of the two forms is populated per ``EventGraph`` — they are
     mutually exclusive.
+
+    ``context_schema`` is ``EventGraph(context_schema=...)``. A param whose
+    annotation is exactly that type is recorded as the context param.
     """
     event_types = getattr(fn, "_event_types", None)
     if event_types is None:
@@ -730,7 +742,7 @@ def extract_handler_meta(
             f"type. Make each annotation importable at run time.",
         )
 
-    framework_params = _detect_framework_params(hints)
+    framework_params = _detect_framework_params(hints, context_schema)
 
     # Detect reducer parameters by name match
     sig = inspect.signature(fn)
@@ -814,6 +826,7 @@ def extract_handler_meta(
         reflection_param=framework_params["reflection_param"],
         config_param=framework_params["config_param"],
         store_param=framework_params["store_param"],
+        context_param=framework_params.get("context_param"),
         is_async=asyncio.iscoroutinefunction(fn),
         reducer_params=reducer_params,
         required_reducer_params=required_reducer_params,
