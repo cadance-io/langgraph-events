@@ -25,7 +25,7 @@ from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
 from langgraph_events._services import parse_services
-from langgraph_events._store import EventStore
+from langgraph_events._store import EventStore, _GraphEventStore
 from langgraph_events._topology import EventTopology
 from langgraph_events._warn import warn_user
 
@@ -204,8 +204,10 @@ class EventGraph:
             UserMessageReceived(message=HumanMessage(content="Hi")),
         ])
 
-    ``EventGraph(handlers, ...)`` is ``EventGraph.of(EventTopology(handlers,
-    reducers=...), ...)``. See :class:`EventTopology` and :class:`EventStore`.
+    ``EventGraph(handlers, ...)`` builds the same graph as
+    ``EventGraph.of(EventTopology(handlers, reducers=...), ...)``. It refuses
+    a bad ``services=`` before it builds the topology. See
+    :class:`EventTopology` and :class:`EventStore`.
     """
 
     def __init__(
@@ -220,17 +222,10 @@ class EventGraph:
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
     ) -> None:
-        if not handlers:
-            raise ValueError("EventGraph requires at least one handler")
         _validate_on_unresumable(on_unresumable)
-        topology = EventTopology.__new__(EventTopology)
-        expanded = topology._hold_reducers(handlers, reducers)
-        # A bad services= is refused after the reducer checks and before
-        # any handler check.
         parsed = parse_services(services)
-        topology._hold_handlers(expanded)
-        self._bind(
-            topology,
+        self._init(
+            EventTopology(handlers, reducers=reducers),
             max_rounds=max_rounds,
             services=parsed,
             checkpointer=checkpointer,
@@ -260,7 +255,7 @@ class EventGraph:
         """
         _validate_on_unresumable(on_unresumable)
         graph = cls.__new__(cls)
-        graph._bind(
+        graph._init(
             topology,
             max_rounds=max_rounds,
             services=parse_services(services),
@@ -271,7 +266,7 @@ class EventGraph:
         )
         return graph
 
-    def _bind(
+    def _init(
         self,
         topology: EventTopology,
         *,
@@ -293,7 +288,7 @@ class EventGraph:
         self._handlers = topology._bind(services)
         self._compiled_graph: CompiledStateGraph | None = None
         self._event_store = (
-            EventStore._of_graph(topology, checkpointer, self._compile)
+            _GraphEventStore(topology, checkpointer, self._compile)
             if isinstance(checkpointer, BaseCheckpointSaver)
             else None
         )
@@ -376,7 +371,9 @@ class EventGraph:
         """Compile into a LangGraph ``CompiledStateGraph`` (internal)."""
         if self._compiled_graph is None:
             self._compiled_graph = self._topology._compile(
-                [(b.meta, self._topology._handler_node(b)) for b in self._handlers],
+                lambda meta: self._topology._handler_node(
+                    self._handlers[meta.node_name]
+                ),
                 max_rounds=self._max_rounds,
                 recursion_limit=self._recursion_limit,
                 checkpointer=self._checkpointer,

@@ -104,7 +104,7 @@ def _reactor_leak_msg(
     event_owner: type[Command],
 ) -> str:
     return (
-        f"{meta.blame} is a reactor and emits {_qualname(event_cls)}, which "
+        f"{meta.label} is a reactor and emits {_qualname(event_cls)}, which "
         f"is private to {_qualname(event_owner)}. Only "
         f"{_qualname(event_owner)}.handle() may emit it."
     )

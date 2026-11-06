@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from langgraph_events._handler import _resolve_hints_and_errors
+from langgraph_events._handler import BoundHandler, _resolve_hints_and_errors
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
-    from langgraph_events._handler import BoundHandler, HandlerMeta
+    from langgraph_events._handler import HandlerMeta
 
 T = TypeVar("T")
 
@@ -105,6 +105,28 @@ class RunScoped(Generic[T]):
         if "return" not in getattr(source, "__annotations__", {}):
             raise TypeError(_missing_return_annotation(self.factory, source))
 
+    def provided_type(self, name: str) -> object:
+        """Resolve the return annotation of the factory of service *name*.
+
+        The build compares it with the handler parameter's annotation. A
+        return annotation that does not resolve raises ``TypeError``.
+        """
+        source = _annotation_source(self.factory)
+        if isinstance(source, type):
+            return source
+        hints, errors = _resolve_hints_and_errors(source)
+        if "return" in errors:
+            raise TypeError(
+                f"RunScoped factory {_factory_label(source)!r} for service "
+                f"{name!r} has a "
+                f"return annotation that did not resolve ({errors['return']}). "
+                f"The framework compares it with each handler's parameter "
+                f"annotation at graph build, so it cannot be left unresolvable. "
+                f"Make every name in the annotation importable at run time, or "
+                f"declare the class at module level."
+            )
+        return _resolve_self(hints["return"], source)
+
 
 class TypedServices:
     """The sequence form of ``services=``: each service fills the handler
@@ -131,8 +153,9 @@ class TypedServices:
                 )
             self._by_type[t] = s
 
-    def match(self, meta: HandlerMeta) -> tuple[tuple[str, object], ...]:
-        """The service of each candidate of *meta* whose annotation is a class.
+    def bind(self, meta: HandlerMeta, reducer_names: frozenset[str]) -> BoundHandler:
+        """Fill each candidate of *meta* whose annotation is a class with the
+        service of that class.
 
         The service is the unique registered one whose type is a subclass of
         (or equal to) the annotation. Multi-match is rejected — the user must
@@ -160,7 +183,7 @@ class TypedServices:
             if len(matches) > 1:
                 names = ", ".join(sorted(t.__name__ for t in matches))
                 raise TypeError(
-                    f"{meta.blame} parameter {candidate.param!r} "
+                    f"{meta.label} parameter {candidate.param!r} "
                     f"annotated as {hint.__name__!r} matches multiple "
                     f"registered services ({names}). Disambiguate by "
                     f"narrowing the annotation, or register only one "
@@ -168,7 +191,9 @@ class TypedServices:
                 )
             if matches:
                 detected.append((candidate.param, self._by_type[matches[0]]))
-        return tuple(detected)
+        bound = BoundHandler(meta, tuple(detected))
+        bound.require_claimed(reducer_names)
+        return bound
 
 
 class NamedServices:
@@ -179,22 +204,30 @@ class NamedServices:
 
     def __init__(self, services: Mapping[str, Any]) -> None:
         self._by_name = dict(services)
-        # The type that each ``RunScoped`` factory returns.
+        # The type that each ``RunScoped`` factory returns. Resolved here, so
+        # a bad return annotation does not wait for the first handler.
         self._run_scoped_types = {
-            name: _run_scoped_type(name, value)
+            name: value.provided_type(name)
             for name, value in self._by_name.items()
             if isinstance(value, RunScoped)
         }
 
-    def match(self, meta: HandlerMeta) -> tuple[tuple[str, object], ...]:
-        """The service of each candidate of *meta* whose name is a key."""
-        return tuple(
-            (c.param, self._by_name[c.param])
-            for c in meta.service_candidates
-            if c.param in self._by_name
+    def bind(self, meta: HandlerMeta, reducer_names: frozenset[str]) -> BoundHandler:
+        """Fill each candidate of *meta* with the service of its name, then
+        check each service against the annotation."""
+        bound = BoundHandler(
+            meta,
+            tuple(
+                (c.param, self._by_name[c.param])
+                for c in meta.service_candidates
+                if c.param in self._by_name
+            ),
         )
+        bound.require_claimed(reducer_names)
+        self._verify(bound)
+        return bound
 
-    def verify(self, bound: BoundHandler) -> None:
+    def _verify(self, bound: BoundHandler) -> None:
         """Raise if a service does not satisfy the handler annotation.
 
         Name-keyed binding matches on the parameter name and needs no
@@ -210,7 +243,7 @@ class NamedServices:
         annotated = [
             c
             for c in bound.meta.service_candidates
-            if c.param in bound_params and c.has_annotation
+            if c.param in bound_params and c.has_resolved_annotation
         ]
         if not annotated:
             return
@@ -218,7 +251,7 @@ class NamedServices:
         # with an annotated name-keyed parameter pays it.
         from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
 
-        handler = bound.meta.blame
+        handler = bound.meta.label
         for candidate in annotated:
             param, declared = candidate.param, candidate.annotation
             value = self._by_name[param]
@@ -271,30 +304,6 @@ def parse_services(services: Sequence[Any] | Mapping[str, Any] | None) -> Servic
     if isinstance(services, Mapping):
         return NamedServices(services)
     return TypedServices(services or ())
-
-
-def _run_scoped_type(name: str, value: RunScoped[Any]) -> object:
-    """Resolve the return annotation of a ``RunScoped`` factory.
-
-    The build compares it with the handler parameter's annotation. A return
-    annotation that does not resolve raises ``TypeError`` here, so the failure
-    does not wait for the first handler that names the service.
-    """
-    source = _annotation_source(value.factory)
-    if isinstance(source, type):
-        return source
-    hints, errors = _resolve_hints_and_errors(source)
-    if "return" in errors:
-        raise TypeError(
-            f"RunScoped factory {_factory_label(source)!r} for service "
-            f"{name!r} has a "
-            f"return annotation that did not resolve ({errors['return']}). "
-            f"The framework compares it with each handler's parameter "
-            f"annotation at graph build, so it cannot be left unresolvable. "
-            f"Make every name in the annotation importable at run time, or "
-            f"declare the class at module level."
-        )
-    return _resolve_self(hints["return"], source)
 
 
 def _resolve_self(hint: object, source: Callable[..., object]) -> object:

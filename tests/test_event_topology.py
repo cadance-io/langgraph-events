@@ -267,6 +267,14 @@ def _bad_return(event: Started) -> Event:
     return Ended(result="x")
 
 
+_SERVICE_COLLISION = (
+    "EventGraph(services=...) has two instances of type '_Mailer' "
+    "\u2014 same-type collision. Register only one instance, switch "
+    "to the name-keyed mapping form (services={'primary': a, "
+    "'backup': b}), or use a subclass to distinguish them."
+)
+
+
 def describe_EventGraph():
     def when_the_services_and_a_handler_are_both_invalid():
         def it_refuses_the_services_first():
@@ -277,35 +285,24 @@ def describe_EventGraph():
                 with pytest.raises(TypeError) as info:
                     EventGraph([bad], services=[_Mailer(), _Mailer()])
 
-            assert str(info.value) == (
-                "EventGraph(services=...) has two instances of type '_Mailer' "
-                "\u2014 same-type collision. Register only one instance, switch "
-                "to the name-keyed mapping form (services={'primary': a, "
-                "'backup': b}), or use a subclass to distinguish them."
-            )
+            assert str(info.value) == _SERVICE_COLLISION
             assert not [w for w in caught if w.category is OrphanedEventWarning]
 
     def when_the_services_and_a_reducer_are_both_invalid():
-        def it_refuses_the_reducer_first():
+        def it_refuses_the_services_first():
             reserved = ScalarReducer(name="events", event_type=_Counted, fn=len)
 
-            with pytest.raises(ValueError) as info:
+            with pytest.raises(TypeError) as info:
                 EventGraph([_ask], reducers=[reserved], services=[_Mailer(), _Mailer()])
 
-            assert str(info.value) == (
-                "Reducer name(s) {'events'} conflict with reserved state fields"
-            )
+            assert str(info.value) == _SERVICE_COLLISION
 
     def when_the_services_and_a_command_are_both_invalid():
-        def it_refuses_the_command_first():
+        def it_refuses_the_services_first():
             with pytest.raises(TypeError) as info:
                 EventGraph([_Shop.Unhandled], services=[_Mailer(), _Mailer()])
 
-            assert str(info.value) == (
-                "Command _Shop.Unhandled has no inline handler. Define one public "
-                "method inside the command class (any name — `handle`, `place`, "
-                "`ship`, …)."
-            )
+            assert str(info.value) == _SERVICE_COLLISION
 
     def when_the_graph_has_no_checkpointer():
         def it_has_no_event_store():
@@ -382,14 +379,15 @@ def describe_EventStore():
             store = EventStore(EventTopology(_HANDLERS), MemorySaver())
 
             with pytest.raises(RuntimeError) as info:
-                store._compiled().invoke(
+                store._compiled.invoke(
                     {"events": [Started(data="x")], "causes": [None]},
                     config=_cfg("store-runs"),
                 )
 
             assert str(info.value) == (
-                "EventStore cannot run handler '_ask'. A store has no services. "
-                "Run the thread with an EventGraph."
+                "Handler 'test_event_topology._ask' (node '_ask') cannot run in "
+                "an EventStore. A store has no services. Run the thread with an "
+                "EventGraph."
             )
 
     def when_the_checkpointer_is_not_a_saver():

@@ -202,7 +202,7 @@ def _store_node(meta: HandlerMeta) -> RunnableLambda:
 
     def refuse(state: StateDict) -> StateDict:
         raise RuntimeError(
-            f"EventStore cannot run handler {meta.name!r}. A store has no "
+            f"{meta.label} cannot run in an EventStore. A store has no "
             f"services. Run the thread with an EventGraph."
         )
 
@@ -236,47 +236,26 @@ class EventStore:
                 f"EventStore requires a BaseCheckpointSaver, got "
                 f"{type(checkpointer).__name__}"
             )
-        # A settle writes through ``bulk_update_state(as_node="__seed__")``.
-        # LangGraph runs only the writers of that node and the dispatch
-        # function, never a handler body. Each handler node refuses to run,
-        # so a store can never call a handler without its services. The
-        # round limits are inert for the same reason.
-        self._hold(
-            topology,
-            checkpointer,
-            functools.cache(
-                lambda: topology._compile(
-                    [(meta, _store_node(meta)) for meta in topology._handler_metas],
-                    max_rounds=100,
-                    recursion_limit=None,
-                    checkpointer=checkpointer,
-                    store=None,
-                )
-            ),
-        )
-
-    @classmethod
-    def _of_graph(
-        cls,
-        topology: EventTopology,
-        checkpointer: BaseCheckpointSaver[Any],
-        compiled: Callable[[], CompiledStateGraph],
-    ) -> EventStore:
-        """The store of a graph. It settles through *compiled*, the compiled
-        graph of that graph, with its services."""
-        store = cls.__new__(cls)
-        store._hold(topology, checkpointer, compiled)
-        return store
-
-    def _hold(
-        self,
-        topology: EventTopology,
-        checkpointer: BaseCheckpointSaver[Any],
-        compiled: Callable[[], CompiledStateGraph],
-    ) -> None:
         self._topology = topology
         self._checkpointer = checkpointer
-        self._compiled = compiled
+
+    @functools.cached_property
+    def _compiled(self) -> CompiledStateGraph:
+        """The compiled graph that a settle writes through.
+
+        A settle writes through ``bulk_update_state(as_node="__seed__")``.
+        LangGraph runs only the writers of that node and the dispatch
+        function, never a handler body. Each handler node refuses to run, so
+        a store can never call a handler without its services. The round
+        limits are inert for the same reason.
+        """
+        return self._topology._compile(
+            _store_node,
+            max_rounds=100,
+            recursion_limit=None,
+            checkpointer=self._checkpointer,
+            store=None,
+        )
 
     @property
     def topology(self) -> EventTopology:
@@ -331,22 +310,22 @@ class EventStore:
         # whose snapshot applies the same pending writes the leading
         # clear commits. A direct checkpoint read undercounts `_cursor`
         # without raising an error, and no test in this suite catches it.
-        events = self._events(self._compiled().get_state(config))
-        self._compiled().bulk_update_state(
+        events = self._events(self._compiled.get_state(config))
+        self._compiled.bulk_update_state(
             config,
             self._settle_supersteps(events, terminal),
         )
-        return self._events(self._compiled().get_state(config))
+        return self._events(self._compiled.get_state(config))
 
     async def _asettle(self, config: RunnableConfig, terminal: Event) -> EventLog:
         """Async sibling of :meth:`_settle`."""
         # Same `_cursor` reasoning as `_settle`, via `aget_state`.
-        events = self._events(await self._compiled().aget_state(config))
-        await self._compiled().abulk_update_state(
+        events = self._events(await self._compiled.aget_state(config))
+        await self._compiled.abulk_update_state(
             config,
             self._settle_supersteps(events, terminal),
         )
-        return self._events(await self._compiled().aget_state(config))
+        return self._events(await self._compiled.aget_state(config))
 
     @staticmethod
     def _pending_interrupt_writes(pending_writes: Iterable[Any]) -> _PendingInterrupts:
@@ -618,7 +597,7 @@ class EventStore:
         ``graph.get_state(config).events`` for it.
         """
         with self._tolerant_read() as unresolved:
-            snapshot = self._compiled().get_state(config)
+            snapshot = self._compiled.get_state(config)
             self._require_settleable("abandon", snapshot, config)
             pending = self._read_pending_interrupts(config, "abandon")
             if require_interrupt:
@@ -643,7 +622,7 @@ class EventStore:
     ) -> None:
         """Async version of :meth:`abandon`."""
         with self._tolerant_read() as unresolved:
-            snapshot = await self._compiled().aget_state(config)
+            snapshot = await self._compiled.aget_state(config)
             self._require_settleable("aabandon", snapshot, config)
             pending = await self._aread_pending_interrupts(config, "aabandon")
             if require_interrupt:
@@ -1105,3 +1084,21 @@ class EventStore:
         with serde._record_reads(decoded):
             tup, unresolved = await self._aread_checkpoint_tuple(cfg, method)
         return tup, _plan_read(plan, cfg, tup, unresolved, decoded)
+
+
+class _GraphEventStore(EventStore):
+    """The store of an :class:`EventGraph`. It settles a thread through the
+    compiled graph of that graph, with its services."""
+
+    def __init__(
+        self,
+        topology: EventTopology,
+        checkpointer: BaseCheckpointSaver[Any],
+        compile_graph: Callable[[], CompiledStateGraph],
+    ) -> None:
+        super().__init__(topology, checkpointer)
+        self._compile_graph = compile_graph
+
+    @property
+    def _compiled(self) -> CompiledStateGraph:
+        return self._compile_graph()

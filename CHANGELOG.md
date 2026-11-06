@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Before, every client of a graph had to supply every service value, also a client that
   never runs a handler. Examples are a graph renderer, the migration gate, a store rewrite
   and an abandon script. `EventTopology(handlers, reducers=...)` runs every construction
-  check that needs no service. `topology.requirements` lists each parameter that only a
+  check that needs no service. `topology.reducers` maps each reducer name to its reducer.
+  `topology.requirements` lists each parameter that only a
   service can fill, as `ServiceRequirement(node, qualname, param, annotation)`. `node` is the
   graph-node name of the handler. `qualname` is the module and qualified name of the handler
   function. `annotation` is `Unannotated()` or `UnresolvedAnnotation(reason)` when no
@@ -45,13 +46,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dedup suffix. The node name of a renamed duplicate now shows its suffix, for example
   `handle_2`. The format applies to the service errors, the return-type errors, the node-name
   and `previously=` errors, the `raises=`, `retry=` and invariant checks, and the reactor
-  privacy error. A test that matches the old text must change.
-- **One order change in `EventGraph(...)` errors.** The order of `main` holds up to the
-  services: the command expansion, the namespace collision and the reserved reducer names
-  are checked first, then `services=`. The service checks of each handler now run after every
-  check that needs no service. A handler with an unclaimed parameter and a second fault, for
-  example a `raises=` with no catcher, reports the second fault first. A topology warning,
-  for example `OrphanedEventWarning`, can fire before the unclaimed-parameter `TypeError`.
+  privacy error. The `RuntimeError` of a handler node in an `EventStore` uses it too. A test
+  that matches the old text must change.
+- **`EventGraph(...)` checks `services=` first.** Before, the command expansion, the
+  namespace collision and the reserved reducer names were checked before `services=`. Now a
+  bad `services=` raises its `TypeError` before every check of the handlers and the reducers.
+  The service checks of each handler run after every check that needs no service. A handler
+  with an unclaimed parameter and a second fault, for example a `raises=` with no catcher,
+  reports the second fault first. A topology warning, for example `OrphanedEventWarning`, can
+  fire before the unclaimed-parameter `TypeError`. `EventGraph(handlers=[])` raises
+  `ValueError: EventTopology requires at least one handler`.
 - **`MigrationTarget` names its graph factory when the graph has no checkpointer.** The
   `TargetError` says `MigrationTarget.graph returned a graph with no checkpointer`.
 - **No reducer typo warning for a variadic parameter.** A `*args` or `**kwargs` parameter of

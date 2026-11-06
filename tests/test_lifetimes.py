@@ -364,7 +364,7 @@ def describe_from_namespaces_auto_wiring():
                 first, handlers=[echo], checkpointer=MemorySaver()
             )
 
-            assert graph._topology._namespaces_cache is None
+            assert "_namespace_model" not in vars(graph._topology)
 
 
 def describe_one_class_reached_twice():

@@ -23,7 +23,6 @@ from langgraph_events._warn import warn_user
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from langgraph_events._services import Services
     from langgraph_events._types import F, HandlerReturn
 
 
@@ -496,7 +495,8 @@ class ServiceRequirement(NamedTuple):
 
 
 class ServiceCandidate(NamedTuple):
-    """A handler parameter that the handler itself cannot fill."""
+    """A parameter that the event, the injectables, the reducers and the
+    field matchers do not claim."""
 
     param: str
     annotation: Any
@@ -504,7 +504,8 @@ class ServiceCandidate(NamedTuple):
     :class:`UnresolvedAnnotation`."""
 
     @property
-    def has_annotation(self) -> bool:
+    def has_resolved_annotation(self) -> bool:
+        """``True`` when the parameter has an annotation that resolved."""
         return not isinstance(self.annotation, (Unannotated, UnresolvedAnnotation))
 
 
@@ -512,7 +513,7 @@ class ServiceCandidate(NamedTuple):
 class HandlerMeta:
     """Extracted metadata about a registered handler, with no services.
 
-    :meth:`bind` matches its service candidates to the services of one graph.
+    The ``services=`` of one graph bind to its service candidates.
     """
 
     name: str
@@ -556,7 +557,7 @@ class HandlerMeta:
     invariants: tuple[tuple[type[Invariant], Callable[..., bool]], ...] = ()
     # Each non-variadic param that the event, a framework injectable, a
     # reducer or a field matcher does not claim, in signature order. Only a
-    # service can fill one. ``bind`` matches these against one graph's services.
+    # service can fill one. The ``services=`` of one graph bind to these.
     service_candidates: tuple[ServiceCandidate, ...] = ()
 
     @property
@@ -565,8 +566,9 @@ class HandlerMeta:
         return f"{self.fn.__module__}.{self.fn.__qualname__}"
 
     @property
-    def blame(self) -> str:
-        """The subject of a construction-time error about this handler."""
+    def label(self) -> str:
+        """The subject of a construction-time error or warning about this
+        handler."""
         return f"Handler '{self.qualname}' (node '{self.node_name}')"
 
     @property
@@ -577,10 +579,6 @@ class HandlerMeta:
             for c in self.service_candidates
         )
 
-    def bind(self, services: Services) -> BoundHandler:
-        """Match the service candidates to the services of one graph."""
-        return BoundHandler(meta=self, services=services.match(self))
-
     @classmethod
     def of(
         cls, fn: Callable[..., Any], *, reducer_names: frozenset[str]
@@ -589,8 +587,7 @@ class HandlerMeta:
 
         Each non-variadic parameter that the event, a framework injectable, a
         reducer or a field matcher does not claim is recorded in
-        ``service_candidates``. :meth:`bind` matches them against the services
-        of one graph.
+        ``service_candidates``. The ``services=`` of one graph bind to them.
         """
         event_types = getattr(fn, "_event_types", None)
         if event_types is None:
@@ -758,7 +755,7 @@ class BoundHandler:
             return
         if reducer_names:
             warn_user(
-                f"{meta.blame} has parameter(s) {unclaimed} "
+                f"{meta.label} has parameter(s) {unclaimed} "
                 f"that don't match any reducer. "
                 f"Available reducers: {sorted(reducer_names)}. Typo?",
             )
@@ -780,7 +777,7 @@ class BoundHandler:
                 f"importable at run time."
             )
         raise TypeError(
-            f"{meta.blame} declares parameter(s) {unclaimed} "
+            f"{meta.label} declares parameter(s) {unclaimed} "
             f"that the framework cannot inject.{cause} For service injection, "
             f"register a matching instance via EventGraph(services=[...]); "
             f"for state, register a Reducer; otherwise remove the parameter."

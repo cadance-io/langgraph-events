@@ -233,7 +233,9 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
 - `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
   `reducers`. A requirement that no service matches raises the same `TypeError` as
   `EventGraph(...)`.
-- `EventGraph(handlers, ...)` is `EventGraph.of(EventTopology(handlers, reducers=...), ...)`.
+- `EventGraph(handlers, ...)` builds the same graph as
+  `EventGraph.of(EventTopology(handlers, reducers=...), ...)`. It checks `services=` before it
+  builds the topology.
 - `graph.event_store` is the store of a graph. It settles a thread through the graph, with its
   services. A graph with no checkpointer has no store, and `graph.event_store` raises `ValueError`.
 - `EventStore` does not wire a serde. Set `checkpointer.serde = topology.serde()` before you
