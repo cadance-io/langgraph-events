@@ -632,9 +632,6 @@ class EventTopology:
         Render it via :meth:`NamespaceModel.text`, :meth:`NamespaceModel.mermaid`
         (with ``view="structure"`` or ``view="choreography"``),
         :meth:`NamespaceModel.json`, or read the data attributes directly.
-
-        Handler metadata is immutable after construction, and per-dispatch
-        ``Reflection`` injection reads it.
         """
         return self._namespace_model
 
@@ -741,10 +738,10 @@ class EventTopology:
         self,
         bound: Sequence[BoundHandler] | None,
         *,
-        max_rounds: int,
-        recursion_limit: int | None,
         checkpointer: Checkpointer,
-        store: BaseStore | None,
+        max_rounds: int = 100,
+        recursion_limit: int | None = None,
+        store: BaseStore | None = None,
     ) -> CompiledStateGraph:
         """Compile the topology into a LangGraph ``CompiledStateGraph``.
 

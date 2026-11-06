@@ -224,16 +224,9 @@ class EventStore:
         A settle writes through ``bulk_update_state(as_node="__seed__")``.
         LangGraph runs only the writers of that node and the dispatch
         function, never a handler body. Each handler node refuses to run, so
-        a store can never call a handler without its services. The round
-        limits are inert for the same reason.
+        a store can never call a handler without its services.
         """
-        return self._topology._compile(
-            None,
-            max_rounds=100,
-            recursion_limit=None,
-            checkpointer=self._checkpointer,
-            store=None,
-        )
+        return self._topology._compile(None, checkpointer=self._checkpointer)
 
     @property
     def topology(self) -> EventTopology:
