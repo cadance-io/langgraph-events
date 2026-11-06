@@ -22,8 +22,8 @@ from langgraph_events._identity import command_identity
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
-    from langgraph_events._graph import ReturnInfo
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._topology import ReturnInfo
 
 
 class CommandPrivacyError(TypeError):

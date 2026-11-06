@@ -165,7 +165,7 @@ class MigrationTarget:
                 f"{error}. Write it as def build(checkpointer) -> EventGraph | "
                 f"EventStore, and build it on that checkpointer."
             ) from error
-        from langgraph_events._graph import EventStore as _Store  # noqa: PLC0415
+        from langgraph_events._store import EventStore as _Store  # noqa: PLC0415
 
         built = self.graph(saver)
         try:

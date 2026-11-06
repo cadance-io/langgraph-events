@@ -17,9 +17,9 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
-    from langgraph_events._graph import ReturnContract
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._topology import ReturnContract
 
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002

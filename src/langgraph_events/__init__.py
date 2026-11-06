@@ -49,13 +49,10 @@ from langgraph_events._event_log import (
 )
 from langgraph_events._graph import (
     EventGraph,
-    EventStore,
-    EventTopology,
     GraphState,
     LLMStreamEnd,
     LLMToken,
     LLMToolCallChunk,
-    OrphanedEventWarning,
     UnresumableError,
 )
 from langgraph_events._handler import (
@@ -85,6 +82,8 @@ from langgraph_events._reflection import QueryTool, Reflection
 from langgraph_events._retry import RetryPolicy
 from langgraph_events._rewrite import RewriteReport, ThreadRewrite
 from langgraph_events._services import RunScoped
+from langgraph_events._store import EventStore
+from langgraph_events._topology import EventTopology, OrphanedEventWarning
 from langgraph_events._types import (
     HandlerReturn as HandlerReturn,  # re-exported without promoting into __all__
 )
