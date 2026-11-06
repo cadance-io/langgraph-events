@@ -207,7 +207,7 @@ Topology is derived from handler subscriptions. No manual node or edge wiring is
 |---|---|---|---|
 | `EventTopology` | the handlers, reducers and namespaces | no service, no checkpointer | render the graph, list handler names, feed the migration gate |
 | `EventStore` | a topology and a checkpointer | no service | find, abandon, rewrite and verify stored threads |
-| `EventGraph` | a topology, its services and a checkpointer | every service a handler asks for | run, resume and stream threads |
+| `EventGraph` | a topology, its services and a checkpointer | every service a handler asks for | run, resume and stream threads. `graph.store` is its store |
 
 A client that never runs a handler does not need the services. Build the topology once, and
 bind the services only where a handler runs:
@@ -227,15 +227,17 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
 ```
 
 - `topology.requirements` lists each handler parameter that only a service can fill, as
-  `ServiceRequirement(handler, param, annotation)`. The annotation is
-  `inspect.Parameter.empty` when the parameter has none.
+  `ServiceRequirement(handler, param, annotation)`. The annotation is `Unannotated()` when
+  the parameter has none. It is `UnresolvedAnnotation(reason)` when it did not resolve.
 - `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
   `reducers`. A requirement that no service matches raises the same `TypeError` as
   `EventGraph(...)`.
 - `EventGraph(handlers, ...)` is `EventGraph.of(EventTopology(handlers, reducers=...), ...)`.
-- An `EventGraph` is an `EventStore`, so the store methods stay on the graph.
-- `EventStore` does not wire a serde. Set a `NamespaceAwareSerde` on the checkpointer before
-  you call a method that needs one. See [Event migrations](event-migrations.md).
+- `graph.store` is the store of a graph. It settles a thread through the graph, with its
+  services. A graph with no checkpointer has no store, and `graph.store` raises `ValueError`.
+- `EventStore` does not wire a serde. Set `checkpointer.serde = topology.serde()` before you
+  call a method that needs one. `topology.serde()` is the serde that
+  `from_namespaces(..., checkpointer=...)` wires. See [Event migrations](event-migrations.md).
 
 ### Namespace introspection & visualization
 
@@ -410,7 +412,7 @@ Across graphs the name is free, so one process can run two versions of one names
 
 `SystemEvent` subclasses control runtime flow. Subscribe like any event. See [Control Flow](control-flow.md) for `Interrupted` / `Resumed`, `HandlerRaised`, `HandlerRetried`, `InvariantViolated`. Full table in [API](api.md#system-events).
 
-To retire an `Interrupted` subclass, settle its paused threads first with `graph.abandon(config)` / `.aabandon()`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
+To retire an `Interrupted` subclass, settle its paused threads first with `graph.store.abandon(config)` / `.aabandon()`. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon).
 
 Custom halts subclass `Halted` and nest under their namespace for locality. `graph.namespaces()` groups them with the namespace's events, not with the library's system events:
 

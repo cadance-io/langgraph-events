@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **The store methods move from `EventGraph` to `EventGraph.store`.** `EventGraph` no longer
+  subclasses `EventStore`. It holds one, so the store methods are not declared twice. The
+  methods are `threads_paused_on()`, `abandon()`, `unrevivable_threads()`, `plan_rewrite()`,
+  `rewrite_store()` and each async twin. Migrate each call: `graph.abandon(...)` becomes
+  `graph.store.abandon(...)`. `graph.store` raises `ValueError: store requires a
+  checkpointer` on a graph with no checkpointer. The store of a graph settles a thread
+  through the graph, with its services, as before.
+
 ### Added
 
 - **`EventTopology`, `EventGraph.of()` and `EventStore` split a graph from its services.**
@@ -18,8 +28,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raises the same `TypeError` as `EventGraph(...)` for a missing one. `EventStore(topology,
   checkpointer)` finds, abandons, plans and rewrites stored threads with no services.
   `MigrationTarget(graph=...)` accepts a factory that returns an `EventStore`.
-  `EventGraph(...)` keeps its signature and its behavior. See *Topology, graph and store* in
+  `topology.serde()` builds the `NamespaceAwareSerde` of a topology, the same serde that
+  `from_namespaces(..., checkpointer=...)` wires. `ServiceRequirement.annotation` is
+  `Unannotated()` or `UnresolvedAnnotation(reason)` when no annotation resolved.
+  `EventGraph(...)` keeps its signature and its messages. See *Topology, graph and store* in
   `docs/concepts.md`.
+
+### Changed
+
+- **One order change in `EventGraph(...)` errors.** The service checks of a handler now run
+  after every check that needs no service. A handler with an unclaimed parameter and a second
+  fault, for example a `raises=` with no catcher, reports the second fault first. A topology
+  warning, for example `OrphanedEventWarning`, can fire before the unclaimed-parameter
+  `TypeError`. A bad `services=` is still refused first.
+- **No reducer typo warning for a variadic parameter.** A `*args` or `**kwargs` parameter of
+  a handler no longer gets the "don't match any reducer. Typo?" warning.
 
 ## [0.46.1] - 2026-11-03
 
