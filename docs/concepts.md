@@ -213,11 +213,11 @@ graph.invoke(SomeEvent(), context=RunFacts(language="fr"))
 
 Rules:
 
-- The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model.
-- A handler parameter whose annotation is exactly the schema type receives the context. It is a library type, like `RunnableConfig`, so it is claimed before a service. Without `context_schema`, the parameter stays unclaimed and the build raises `TypeError`.
+- The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model. It coerces with the schema of the top-level graph, so a graph embedded as a subgraph receives the context as the parent passes it.
+- A handler parameter whose annotation is exactly the schema type receives the context. It is claimed like `RunnableConfig`, before a service. Without `context_schema`, the parameter stays unclaimed and the build raises `TypeError`.
 - A `RunScoped` factory with two required positional parameters receives `(config, context)`. A factory with one parameter receives the config only, as before. A two-parameter factory on a graph without `context_schema` raises `TypeError` at build.
 - The context is read through LangGraph's `get_runtime()`. It is not written to the checkpoint state or to the checkpoint metadata.
-- When `context_schema` is set, every run call must pass `context=`. This covers `invoke`, `ainvoke`, `stream_events`, `astream_events`, `resume`, `aresume`, `stream_resume`, `astream_resume` and `AGUIAdapter.stream()`. A missing context raises `TypeError` that names the schema, before the graph runs. A stream method raises it at the first iteration. There is no default context.
+- When `context_schema` is set, every run call must pass `context=`. This includes a resume and `AGUIAdapter.stream()`. A missing context raises `TypeError` that names the schema, before the graph runs. A stream method of `EventGraph` raises it at the first iteration.
 - A resume does not reuse the context of the earlier run. Pass the context again.
 
 ### Return contract

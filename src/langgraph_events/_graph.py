@@ -986,36 +986,29 @@ def _verify_no_unclaimed_params(meta: HandlerMeta) -> None:
         )
 
 
-def _verify_run_scoped_context(
+def _resolve_run_scoped_types(
     services_by_name: dict[str, Any], context_schema: type | None
-) -> None:
-    """Raise if a ``RunScoped`` factory takes a context the graph cannot give."""
-    if context_schema is not None:
-        return
-    for name, value in services_by_name.items():
-        if isinstance(value, RunScoped) and value.takes_context:
-            factory = _factory_label(_annotation_source(value.factory))
-            raise TypeError(
-                f"RunScoped factory {factory!r} for service {name!r} takes "
-                f"(config, context), but the graph has no context_schema. "
-                f"Pass EventGraph(context_schema=...), or give the factory "
-                f"one parameter."
-            )
-
-
-def _resolve_run_scoped_types(services_by_name: dict[str, Any]) -> dict[str, Any]:
+) -> dict[str, Any]:
     """Resolve the return annotation of every ``RunScoped`` factory.
 
     The result maps the service name to the type the factory provides. The
     build compares it with the handler parameter's annotation. A return
     annotation that does not resolve raises ``TypeError`` here, so the failure
-    does not wait for the first handler that names the service.
+    does not wait for the first handler that names the service. A factory that
+    takes the run context on a graph without *context_schema* also raises.
     """
     provided: dict[str, Any] = {}
     for name, value in services_by_name.items():
         if not isinstance(value, RunScoped):
             continue
         source = _annotation_source(value.factory)
+        if value.takes_context and context_schema is None:
+            raise TypeError(
+                f"RunScoped factory {_factory_label(source)!r} for service "
+                f"{name!r} takes (config, context), but the graph has no "
+                f"context_schema. Pass EventGraph(context_schema=...), or give "
+                f"the factory one parameter."
+            )
         if isinstance(source, type):
             provided[name] = source
             continue
@@ -1287,8 +1280,9 @@ class EventGraph:
         self._services_by_type, self._services_by_name = _build_service_registries(
             services
         )
-        run_scoped_types = _resolve_run_scoped_types(self._services_by_name)
-        _verify_run_scoped_context(self._services_by_name, context_schema)
+        run_scoped_types = _resolve_run_scoped_types(
+            self._services_by_name, context_schema
+        )
 
         self._handler_metas: list[HandlerMeta] = []
         self._compiled_graph: CompiledStateGraph | None = None
@@ -1680,11 +1674,7 @@ class EventGraph:
         return {"events": seeds, "causes": [None] * len(seeds)}
 
     def _require_context(self, context: object) -> None:
-        """Raise ``TypeError`` if the graph has a context schema and no *context*.
-
-        Every run method calls it before the graph runs, so a run never
-        starts without the context that its handlers read.
-        """
+        """Raise ``TypeError`` if the graph has a context schema and no *context*."""
         schema = self._context_schema
         if schema is None or context is not None:
             return
@@ -1694,6 +1684,16 @@ class EventGraph:
             f"call, including a resume."
         )
 
+    def _prepare_run(
+        self,
+        kwargs: dict[str, Any],
+        deadline: float | None,
+        pause_on: PauseSignal | None,
+    ) -> None:
+        """Check the run context, then add the pause budget to the run config."""
+        self._require_context(kwargs.get("context"))
+        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+
     def _run(
         self,
         inp: _GraphInput,
@@ -1702,8 +1702,7 @@ class EventGraph:
         pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> EventLog:
-        self._require_context(kwargs.get("context"))
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         compiled = self._compile()
         result = compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
@@ -1716,8 +1715,7 @@ class EventGraph:
         pause_on: PauseSignal | None,
         **kwargs: Any,
     ) -> EventLog:
-        self._require_context(kwargs.get("context"))
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         compiled = self._compile()
         result = await compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
@@ -3282,8 +3280,7 @@ class EventGraph:
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        self._require_context(kwargs.get("context"))
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         compiled = self._compile()
         if not reducer_names:
             yield from seeds
@@ -3453,8 +3450,7 @@ class EventGraph:
         path loads no checkpoint, so it has no use for *snapshot*.
         """
         kwargs.pop("stream_mode", None)
-        self._require_context(kwargs.get("context"))
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        self._prepare_run(kwargs, deadline, pause_on)
         reducer_names = self._resolve_reducer_names(include_reducers)
         delegate = (
             self._astream_v2(

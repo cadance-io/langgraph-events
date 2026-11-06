@@ -358,7 +358,7 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
             )
         inject[meta.store_param] = store
     if meta.context_param:
-        inject[meta.context_param] = _run_context(meta, "the run context")
+        inject[meta.context_param] = _runtime_context(meta)
     if services_by_type and meta.service_params:
         for param_name, svc_type in meta.service_params:
             inject[param_name] = services_by_type[svc_type]
@@ -371,10 +371,9 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
                         f"Handler '{meta.name}' requested the run-scoped service "
                         f"'{param_name}', but runtime config is missing."
                     )
-                args: tuple[Any, ...] = (config,)
-                if svc.takes_context:
-                    wanted = f"the context of {param_name!r}"
-                    args = (config, _run_context(meta, wanted))
+                args = (
+                    (config, _runtime_context(meta)) if svc.takes_context else (config,)
+                )
                 try:
                     svc = svc.factory(*args)
                 except Exception as exc:
@@ -389,7 +388,7 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     return inject
 
 
-def _run_context(meta: HandlerMeta, wanted: str) -> object:
+def _runtime_context(meta: HandlerMeta) -> object:
     """Return the context of the current run from LangGraph's ``Runtime``.
 
     The context is ``None`` only when a caller runs ``EventGraph.compiled``
@@ -400,7 +399,7 @@ def _run_context(meta: HandlerMeta, wanted: str) -> object:
     context = get_runtime().context
     if context is None:
         raise ValueError(
-            f"Handler {meta.name!r} requested {wanted}, but the run has no "
+            f"Handler {meta.name!r} needs the run context, but the run has no "
             f"context. Pass context=... to the run call."
         )
     return context

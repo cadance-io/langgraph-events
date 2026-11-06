@@ -672,7 +672,7 @@ def _detect_service_params(
 
 
 def _detect_framework_params(
-    hints: dict[str, Any], context_schema: type | None = None
+    hints: dict[str, Any], context_schema: type | None
 ) -> dict[str, str | None]:
     """Find params annotated with framework injectables, by exact type hint.
 

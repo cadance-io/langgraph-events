@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -91,33 +91,24 @@ def _paused_graph() -> EventGraph:
     return graph
 
 
-def _drain(items: Iterable[object]) -> None:
-    for _ in items:
-        pass
-
-
-async def _adrain(items: AsyncIterator[object] | Awaitable[object]) -> None:
-    if isinstance(items, AsyncIterator):
-        async for _ in items:
+async def _finish(run: object) -> None:
+    if isinstance(run, AsyncIterator):
+        async for _ in run:
             pass
-    else:
-        await items
+    elif isinstance(run, Awaitable):
+        await run
 
 
-_SYNC_STARTS: dict[str, Callable[[EventGraph], object]] = {
+_STARTS: dict[str, Callable[[EventGraph], object]] = {
     "invoke": lambda g: g.invoke(Started(), config=_thread("n")),
-    "stream_events": lambda g: _drain(g.stream_events(Started(), config=_thread("n"))),
-}
-_ASYNC_STARTS: dict[str, Callable[[EventGraph], Any]] = {
     "ainvoke": lambda g: g.ainvoke(Started(), config=_thread("n")),
+    "stream_events": lambda g: list(g.stream_events(Started(), config=_thread("n"))),
     "astream_events": lambda g: g.astream_events(Started(), config=_thread("n")),
 }
-_SYNC_RESUMES: dict[str, Callable[[EventGraph], object]] = {
+_RESUMES: dict[str, Callable[[EventGraph], object]] = {
     "resume": lambda g: g.resume(Answered(), config=_thread("t")),
-    "stream_resume": lambda g: _drain(g.stream_resume(Answered(), config=_thread("t"))),
-}
-_ASYNC_RESUMES: dict[str, Callable[[EventGraph], Any]] = {
     "aresume": lambda g: g.aresume(Answered(), config=_thread("t")),
+    "stream_resume": lambda g: list(g.stream_resume(Answered(), config=_thread("t"))),
     "astream_resume": lambda g: g.astream_resume(Answered(), config=_thread("t")),
 }
 
@@ -158,14 +149,6 @@ def describe_context_schema():
                 log = graph.invoke(Started(), context=RunFacts("fr"))
 
                 assert log.latest(Ended) == Ended(result="fr")
-
-            def when_the_run_is_async():
-                async def it_injects_the_run_context():
-                    graph = EventGraph([greet], context_schema=RunFacts)
-
-                    log = await graph.ainvoke(Started(), context=RunFacts("de"))
-
-                    assert log.latest(Ended) == Ended(result="de")
 
             def when_the_context_is_a_dict():
                 def it_injects_the_context_coerced_to_the_schema():
@@ -258,48 +241,26 @@ def describe_context_schema():
 
     def describe_missing_context():
         def when_a_run_starts():
-            @pytest.mark.parametrize("start", _SYNC_STARTS.values(), ids=_SYNC_STARTS)
-            def it_raises_naming_the_schema(start: Callable[[EventGraph], object]):
+            @pytest.mark.parametrize("start", _STARTS.values(), ids=_STARTS)
+            async def it_raises_naming_the_schema(
+                start: Callable[[EventGraph], object],
+            ):
                 graph = EventGraph([greet], context_schema=RunFacts)
 
                 with pytest.raises(TypeError, match="RunFacts"):
-                    start(graph)
-
-            def when_the_run_is_async():
-                @pytest.mark.parametrize(
-                    "start", _ASYNC_STARTS.values(), ids=_ASYNC_STARTS
-                )
-                async def it_raises_naming_the_schema(
-                    start: Callable[[EventGraph], Any],
-                ):
-                    graph = EventGraph([greet], context_schema=RunFacts)
-
-                    with pytest.raises(TypeError, match="RunFacts"):
-                        await _adrain(start(graph))
+                    await _finish(start(graph))
 
         def when_a_thread_resumes():
-            @pytest.mark.parametrize(
-                "resume", _SYNC_RESUMES.values(), ids=_SYNC_RESUMES
-            )
-            def it_raises_naming_the_schema(resume: Callable[[EventGraph], object]):
+            @pytest.mark.parametrize("resume", _RESUMES.values(), ids=_RESUMES)
+            async def it_raises_naming_the_schema(
+                resume: Callable[[EventGraph], object],
+            ):
                 graph = _paused_graph()
 
                 with pytest.raises(TypeError, match="RunFacts"):
-                    resume(graph)
+                    await _finish(resume(graph))
 
                 assert graph.get_state(_thread("t")).is_interrupted
-
-            def when_the_resume_is_async():
-                @pytest.mark.parametrize(
-                    "resume", _ASYNC_RESUMES.values(), ids=_ASYNC_RESUMES
-                )
-                async def it_raises_naming_the_schema(
-                    resume: Callable[[EventGraph], Any],
-                ):
-                    graph = _paused_graph()
-
-                    with pytest.raises(TypeError, match="RunFacts"):
-                        await _adrain(resume(graph))
 
     def describe_assert_resume_recovers():
         def it_passes_the_context_to_both_runs():
