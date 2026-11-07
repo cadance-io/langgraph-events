@@ -563,6 +563,9 @@ class EventTopology:
 
     A handler parameter that only a service can fill is listed in
     :attr:`requirements`. :meth:`EventGraph.of` binds the services to them.
+
+    *retired* lists each event class that no handler returns any more, but
+    that a stored thread can still hold. :meth:`serde` reads it too.
     """
 
     def __init__(
@@ -571,9 +574,20 @@ class EventTopology:
         *,
         reducers: list[BaseReducer] | None = None,
         context_schema: type | None = None,
+        retired: Sequence[type[Event]] = (),
     ) -> None:
         if not handlers:
             raise ValueError("EventTopology requires at least one handler")
+        retired = tuple(retired)
+        for cls in retired:
+            if not (isinstance(cls, type) and issubclass(cls, Event)):
+                raise TypeError(f"retired= expects Event subclasses, got {cls!r}")
+            if is_abstract_event(cls):
+                raise TypeError(
+                    f"retired= expects a concrete event class, got abstract "
+                    f"{cls.__qualname__}. A stored thread cannot hold it."
+                )
+        self._retired = tuple(dict.fromkeys(retired))
         self._context_schema = context_schema
         handlers = _expand_command_handlers(handlers)
         self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
@@ -617,6 +631,13 @@ class EventTopology:
                 )
             self._return_contracts[meta.name] = _compute_return_contract(meta, info)
             _verify_inline_outcome_coverage(meta, info)
+            for cls in self._retired:
+                if cls in info.event_types or cls in info.scatter_types:
+                    raise ValueError(
+                        f"{meta.label} returns {cls.__qualname__}, which retired= "
+                        f"lists. A retired event is one that no handler returns. "
+                        f"Stop returning it, or remove it from retired=."
+                    )
 
         self._loose_events = self._register_produced_types()
 
@@ -630,6 +651,7 @@ class EventTopology:
         handlers: list[Callable[..., Any]] | None = None,
         reducers: list[BaseReducer] | None = None,
         context_schema: type | None = None,
+        retired: Sequence[type[Event]] = (),
     ) -> EventTopology:
         """Build the topology of the inline command handlers of *domains*.
 
@@ -644,15 +666,18 @@ class EventTopology:
             namespace_handlers(domains, handlers),
             reducers=reducers,
             context_schema=context_schema,
+            retired=retired,
         )
 
     def _serde_scope(
         self,
     ) -> tuple[tuple[type[Namespace], ...], tuple[type[Event], ...]]:
         """The ``namespaces=`` and ``events=`` of a serde that reads every
-        event class this graph can store: its namespaces, and the events
-        outside every namespace that its handlers subscribe to or return."""
-        return tuple(self._namespaces.values()), self._loose_events
+        event class this graph can store: its namespaces, the events outside
+        every namespace that its handlers subscribe to or return, and the
+        retired events."""
+        events = dict.fromkeys((*self._loose_events, *self._retired))
+        return tuple(self._namespaces.values()), tuple(events)
 
     def serde(
         self, migrations: Sequence[Migration] = (), *, legacy_write: bool = False
@@ -660,9 +685,10 @@ class EventTopology:
         """Build a ``NamespaceAwareSerde`` that reads every event class of
         the topology.
 
-        The serde reads the namespaces of the topology, and each event
-        outside every namespace that a handler subscribes to or returns. It
-        collects each ``@migrate_from`` and ``@backfill`` on those classes.
+        The serde reads the namespaces of the topology, each event outside
+        every namespace that a handler subscribes to or returns, and each
+        retired event. It collects each ``@migrate_from`` and ``@backfill``
+        on those classes.
         ``EventGraph.from_namespaces(..., checkpointer=...)`` wires the same
         serde. *migrations* and *legacy_write* go to the serde unchanged.
         An :class:`EventStore` needs it for a rewrite::
@@ -696,6 +722,11 @@ class EventTopology:
         return NamespaceModel._build(
             self._handler_metas, self._return_info, self._reducers.values()
         )
+
+    @property
+    def retired_events(self) -> tuple[type[Event], ...]:
+        """Each event class of ``retired=``, once, in the order given."""
+        return self._retired
 
     @property
     def reducers(self) -> Mapping[str, BaseReducer]:

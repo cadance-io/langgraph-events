@@ -29,19 +29,17 @@ target = MigrationTarget(
 )
 ```
 
-`graph` receives a checkpointer and returns the graph. The commands use `graph.event_store`. The factory can return an `EventStore` instead, when a command must not build the services of a run. In that case, set the serde of the topology on the checkpointer:
+`graph` receives a checkpointer and returns the graph. The commands use `graph.event_store`. The factory can return an `EventStore` instead, when a command must not build the services of a run:
 
 ```python
 from langgraph_events import EventStore, EventTopology
 
 
 def build_store(checkpointer):
-    topology = EventTopology.from_namespaces(Order, Shipment)
-    checkpointer.serde = topology.serde()
-    return EventStore(topology, checkpointer)
+    return EventStore(EventTopology.from_namespaces(Order, Shipment), checkpointer)
 ```
 
-The factory receives the checkpointer of the gate, so it can set the serde. A serde with `migrations=` goes through `topology.serde(migrations)`.
+When the checkpointer holds the default serde of LangGraph, the target sets `topology.serde()` on it. A serde with `migrations=` goes through `topology.serde(migrations)`. Set that serde in the factory, because the target does not replace a serde that is not the default.
 
 `topology.serde()` reads the same event classes as the serde of `from_namespaces(..., checkpointer=...)`. Both collect each `@migrate_from` on an event outside every namespace, for example an `IntegrationEvent`. So both forms give the gate the same migrations. WARNING: A serde built with `namespaces=` only does not collect a migration on such an event. The gate then reports a different migration set. Use `topology.serde()`.
 

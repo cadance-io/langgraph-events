@@ -254,11 +254,17 @@ class EventGraph:
         recursion_limit: int | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
         context_schema: type | None = None,
+        retired: Sequence[type[Event]] = (),
     ) -> None:
         _validate_on_unresumable(on_unresumable)
         parsed = parse_services(services)
         self._init(
-            EventTopology(handlers, reducers=reducers, context_schema=context_schema),
+            EventTopology(
+                handlers,
+                reducers=reducers,
+                context_schema=context_schema,
+                retired=retired,
+            ),
             max_rounds=max_rounds,
             services=parsed,
             checkpointer=checkpointer,

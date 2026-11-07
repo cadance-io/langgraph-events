@@ -296,6 +296,32 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
   the saver must use the same serde. A process with LangGraph's default serde reads an event
   that a `NamespaceAwareSerde` wrote as `None`. See [Event migrations](event-migrations.md).
 
+#### Retired events { #retired-events }
+
+A retired event is an event class that no handler returns any more. A stored thread can still
+hold it, for example a thread paused on an `Interrupted` subclass whose handler is deleted.
+The topology derives the serde from its handlers, so it does not see such a class. The class
+still revives by import, but the serde does not collect its `@migrate_from` and `@backfill`.
+Pass the class in `retired=`, and `topology.serde()` reads it:
+
+```python
+topology = EventTopology([place, respond], retired=[ApprovalRequested])
+saver.serde = topology.serde()
+store = EventStore(topology, saver)
+```
+
+- `topology.retired_events` returns each class of `retired=` once, in the order given.
+- `EventTopology.from_namespaces(...)`, `EventGraph(...)` and `EventGraph.from_namespaces(...)`
+  take `retired=` and pass it to the topology. `from_namespaces(..., checkpointer=...)` wires a
+  serde that reads the retired events.
+- The [migration gate](migration-gate.md#the-migration-gate) records a retired event as a live
+  class in `events`, because the class still imports. Its `revive` rule keeps checking it.
+  The `retired` list of the baseline file is a different list. It holds each identity whose
+  class is deleted. When you delete the class, `baseline update` moves its identity to that list.
+- An entry that is not an `Event` subclass raises `TypeError`. An abstract event class, for
+  example `IntegrationEvent`, raises `TypeError`. An entry that a handler returns raises
+  `ValueError`. A handler can still subscribe to a retired event.
+
 ### Namespace introspection & visualization
 
 - `topology.namespaces()` returns a `NamespaceModel`: code-derived structure and choreography.
