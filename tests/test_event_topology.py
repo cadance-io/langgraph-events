@@ -106,6 +106,22 @@ def _cfg(tid: str) -> Any:
     return {"configurable": {"thread_id": tid}}
 
 
+def _retired_gate() -> tuple[tuple[str, bytes], type[Interrupted]]:
+    """A payload stored under a deleted interrupt, and the tombstone that a
+    ``@migrate_from`` maps it onto. No handler touches the tombstone."""
+
+    class _OldGate(Interrupted):
+        pass
+
+    stored = NamespaceAwareSerde(events=(_OldGate,)).dumps_typed(_OldGate())
+
+    @migrate_from(_OldGate.__qualname__, in_module=_OldGate.__module__)
+    class _Tombstone(Interrupted):
+        pass
+
+    return stored, _Tombstone
+
+
 def _paused(saver: MemorySaver, tid: str) -> EventTopology:
     """Run *tid* until ``_ask`` pauses it. Return the topology of the run."""
     topology = EventTopology(_HANDLERS)
@@ -226,6 +242,44 @@ def describe_EventTopology():
 
             assert serde.loads_typed(stored) == _NewNote()
 
+    def when_an_event_is_retired():
+        def it_builds_a_serde_that_revives_it():
+            stored, tombstone = _retired_gate()
+
+            serde = EventTopology(_HANDLERS, retired=[tombstone]).serde()
+
+            assert serde.loads_typed(stored) == tombstone()
+
+        def it_lists_each_retired_event_once():
+            topology = EventTopology(_HANDLERS, retired=[_Counted, _Counted])
+
+            assert topology.retired_events == (_Counted,)
+
+    def when_no_event_is_retired():
+        def it_lists_no_retired_event():
+            assert EventTopology(_HANDLERS).retired_events == ()
+
+    def when_a_retired_entry_is_not_an_event_class():
+        def it_raises_a_type_error():
+            with pytest.raises(TypeError) as info:
+                EventTopology(_HANDLERS, retired=[_Mailer])  # type: ignore[list-item]
+
+            assert str(info.value) == (
+                f"retired= expects Event subclasses, got {_Mailer!r}"
+            )
+
+    def when_a_handler_returns_a_retired_event():
+        def it_raises_a_value_error():
+            with pytest.raises(ValueError) as info:
+                EventTopology(_HANDLERS, retired=[_Approval])
+
+            assert str(info.value) == (
+                "Handler 'test_event_topology._ask' (node '_ask') returns "
+                "_Approval, which retired= lists. A "
+                "retired event is one that no handler returns. Stop returning "
+                "it, or remove it from retired=."
+            )
+
 
 class _Desk(Namespace):
     class Book(Command):
@@ -256,6 +310,14 @@ def describe_EventTopology_from_namespaces():
             topology = EventTopology.from_namespaces(_Desk, handlers=[_confirm])
 
             assert [r.param for r in topology.requirements] == ["mailer"]
+
+    def when_an_event_is_retired():
+        def it_lists_the_retired_event():
+            topology = EventTopology.from_namespaces(
+                _Desk, handlers=[_confirm], retired=[_Counted]
+            )
+
+            assert topology.retired_events == (_Counted,)
 
     def when_an_argument_is_not_a_namespace():
         def it_raises_a_type_error():
@@ -390,6 +452,21 @@ def describe_EventGraph():
                 "event_store requires a checkpointer. Pass checkpointer= to "
                 "EventGraph(...), or use EventStore(topology, saver)."
             )
+
+    def when_from_namespaces_retires_an_event():
+        def it_wires_a_serde_that_revives_it():
+            stored, tombstone = _retired_gate()
+            saver = MemorySaver()
+
+            EventGraph.from_namespaces(
+                _Desk,
+                handlers=[_confirm],
+                services=[_Mailer()],
+                checkpointer=saver,
+                retired=[tombstone],
+            )
+
+            assert saver.serde.loads_typed(stored) == tombstone()
 
 
 def describe_EventStore():
@@ -526,6 +603,22 @@ def describe_MigrationTarget():
             report = check(MigrationTarget(graph=store, baseline=baseline))
 
             assert report.findings == ()
+
+    def when_the_topology_retires_an_event():
+        def it_records_the_event_as_live():
+            def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
+                return EventGraph.from_namespaces(
+                    handlers=_HANDLERS,
+                    services=[_Mailer()],
+                    checkpointer=saver,
+                    retired=[_Counted],
+                )
+
+            snapshot = MigrationTarget(graph=graph, baseline=Path("unused")).snapshot()
+
+            assert _Counted.__qualname__ in {
+                identity.qualname for identity in snapshot.live_fields()
+            }
 
     def when_the_store_serde_comes_from_the_topology():
         def it_holds_the_migrations_of_the_graph_serde():

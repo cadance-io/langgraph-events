@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`EventTopology(retired=...)` keeps a retired event class in the serde.** A retired event
+  is one that no handler returns any more, but that a stored thread can still hold. Before,
+  `topology.serde()` read only the classes that the handlers subscribe to or return. A client
+  kept a second list of such classes and built its own `NamespaceAwareSerde`. Now pass them in
+  `retired=`, and `topology.serde()` reads them. `EventTopology.from_namespaces()`,
+  `EventGraph(...)` and `EventGraph.from_namespaces()` take `retired=` too, so the serde that
+  `from_namespaces(..., checkpointer=...)` wires reads them. `topology.retired_events` returns
+  them. The migration gate records each one as a live class in `events`. An entry that is not
+  an `Event` subclass raises `TypeError`. An entry that a handler returns raises `ValueError`.
+
 ## [0.47.0] - 2026-11-06
 
 ### Breaking

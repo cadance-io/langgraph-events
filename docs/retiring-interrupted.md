@@ -125,11 +125,10 @@ graph = EventGraph.from_namespaces(Order, checkpointer=MemorySaver())
 Against a store that holds a paused thread and an answered thread, `threads_paused_on()` lists the paused thread, matched against the live `RetiredApprovalGate`. `abandon(config)` settles it and records `discarded="Order.RetiredApprovalGate"`. The history of the answered thread revives too. `in_module=` defaults to the `__module__` of the decorated class. Pass it when `Order.ApprovalRequired` lived in another module.
 
 !!! note "Two conditions on `from_namespaces(...)`"
-    It keeps a `NamespaceAwareSerde` that the checkpointer already carries. A checkpointer object reused from an earlier graph in this process never gets the tombstone, with no error and no warning. Give the recovery graph a fresh checkpointer object on the same store, or build the serde yourself. It wires `Order` into the serde only because a handler still subscribes to or produces something inside it, the inline command handler of `Order.Approve` above. The tombstone alone does not add `Order`. If the whole namespace is retired, or the tombstone lives at module scope, hand-build the serde:
+    It keeps a `NamespaceAwareSerde` that the checkpointer already carries. A checkpointer object reused from an earlier graph in this process never gets the tombstone, with no error and no warning. Give the recovery graph a fresh checkpointer object on the same store, or build the serde yourself. It wires `Order` into the serde only because a handler still subscribes to or produces something inside it, the inline command handler of `Order.Approve` above. The tombstone alone does not add `Order`. If no handler touches the namespace of the tombstone, or the tombstone lives at module scope, pass the tombstone in `retired=`. See [Retired events](concepts.md#retired-events):
 
 ```python
 ...  # Order and discard_fields as above, without the nested tombstone
-from langgraph_events.serde import NamespaceAwareSerde
 
 
 @migrate_from("Order.ApprovalRequired", transform=discard_fields)
@@ -137,13 +136,12 @@ class RetiredApprovalGate(Interrupted):
     pass
 
 
-checkpointer.serde = NamespaceAwareSerde(
-    namespaces=(Order,), events=(RetiredApprovalGate,)
+graph = EventGraph.from_namespaces(
+    Order, checkpointer=checkpointer, retired=[RetiredApprovalGate]
 )
-graph = EventGraph([Order.Approve], checkpointer=checkpointer)
 ```
 
-`events=` must list every loose event class the graph touches, as for any hand-built `NamespaceAwareSerde`. `Order.Approve` must be in the handler list, because without the namespace walk nothing else registers its inline command handler.
+The serde that `from_namespaces(...)` wires reads `RetiredApprovalGate`. `EventTopology(..., retired=[RetiredApprovalGate]).serde()` is the same serde for an `EventStore`.
 
 **Deleting the tombstone.** The `@migrate_from` ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`, then verify `graph.event_store.unrevivable_threads(thread_ids=thread_ids) == {}`. In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired` and moves the tombstone class to `retired`. Delete that entry by hand, as in step 7.
 
