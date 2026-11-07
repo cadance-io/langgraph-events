@@ -578,9 +578,15 @@ class EventTopology:
     ) -> None:
         if not handlers:
             raise ValueError("EventTopology requires at least one handler")
+        retired = tuple(retired)
         for cls in retired:
             if not (isinstance(cls, type) and issubclass(cls, Event)):
                 raise TypeError(f"retired= expects Event subclasses, got {cls!r}")
+            if is_abstract_event(cls):
+                raise TypeError(
+                    f"retired= expects a concrete event class, got abstract "
+                    f"{cls.__qualname__}. A stored thread cannot hold it."
+                )
         self._retired = tuple(dict.fromkeys(retired))
         self._context_schema = context_schema
         handlers = _expand_command_handlers(handlers)
@@ -628,7 +634,7 @@ class EventTopology:
             for cls in self._retired:
                 if cls in info.event_types or cls in info.scatter_types:
                     raise ValueError(
-                        f"{meta.label} returns {cls.__name__}, which retired= "
+                        f"{meta.label} returns {cls.__qualname__}, which retired= "
                         f"lists. A retired event is one that no handler returns. "
                         f"Stop returning it, or remove it from retired=."
                     )

@@ -141,7 +141,7 @@ graph = EventGraph.from_namespaces(
 )
 ```
 
-The serde that `from_namespaces(...)` wires reads `RetiredApprovalGate`. `EventTopology(..., retired=[RetiredApprovalGate]).serde()` is the same serde for an `EventStore`.
+The serde that `from_namespaces(...)` wires reads `RetiredApprovalGate`. `EventTopology.from_namespaces(Order, retired=[RetiredApprovalGate]).serde()` is the same serde for an `EventStore`.
 
 **Deleting the tombstone.** The `@migrate_from` ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. Once every paused thread is settled, run steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`, then verify `graph.event_store.unrevivable_threads(thread_ids=thread_ids) == {}`. In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired` and moves the tombstone class to `retired`. Delete that entry by hand, as in step 7.
 

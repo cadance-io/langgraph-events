@@ -255,6 +255,12 @@ def describe_EventTopology():
 
             assert topology.retired_events == (_Counted,)
 
+        def when_the_entries_come_from_a_generator():
+            def it_lists_each_one():
+                topology = EventTopology(_HANDLERS, retired=(c for c in [_Counted]))
+
+                assert topology.retired_events == (_Counted,)
+
     def when_no_event_is_retired():
         def it_lists_no_retired_event():
             assert EventTopology(_HANDLERS).retired_events == ()
@@ -266,6 +272,16 @@ def describe_EventTopology():
 
             assert str(info.value) == (
                 f"retired= expects Event subclasses, got {_Mailer!r}"
+            )
+
+    def when_a_retired_entry_is_abstract():
+        def it_raises_a_type_error():
+            with pytest.raises(TypeError) as info:
+                EventTopology(_HANDLERS, retired=[IntegrationEvent])
+
+            assert str(info.value) == (
+                "retired= expects a concrete event class, got abstract "
+                "IntegrationEvent. A stored thread cannot hold it."
             )
 
     def when_a_handler_returns_a_retired_event():
@@ -603,6 +619,20 @@ def describe_MigrationTarget():
             report = check(MigrationTarget(graph=store, baseline=baseline))
 
             assert report.findings == ()
+
+        def when_the_checkpointer_holds_the_default_serde():
+            def it_sets_the_serde_of_the_topology():
+                stored, tombstone = _retired_gate()
+                saver = MemorySaver()
+
+                def store(saver: BaseCheckpointSaver[Any]) -> EventStore:
+                    return EventStore(
+                        EventTopology(_HANDLERS, retired=[tombstone]), saver
+                    )
+
+                MigrationTarget(graph=store, baseline=Path("unused")).build(saver)
+
+                assert saver.serde.loads_typed(stored) == tombstone()
 
     def when_the_topology_retires_an_event():
         def it_records_the_event_as_live():

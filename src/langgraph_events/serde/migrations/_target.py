@@ -54,8 +54,9 @@ class MigrationTarget:
     return an :class:`~langgraph_events.EventGraph`, whose
     :attr:`~langgraph_events.EventGraph.event_store` the commands use, or an
     :class:`~langgraph_events.EventStore` when the commands must not build
-    the services of a run. The gate passes an empty in-memory saver, so
-    building reads no store.
+    the services of a run. The target sets the serde of the topology on
+    the checkpointer of such a store, see :meth:`build`. The gate passes an
+    empty in-memory saver, so building reads no store.
     ``baseline`` is the path of the committed baseline file. ``store``
     returns a context manager that opens the real sync checkpointer. The
     ``backup``, ``rewrite``, ``restore`` and ``drop-backups`` commands use
@@ -152,6 +153,10 @@ class MigrationTarget:
         """The store of the graph on *saver*, its serde and its client
         migrations.
 
+        When ``graph`` returns an :class:`~langgraph_events.EventStore`
+        whose checkpointer holds LangGraph's default serde, the target sets
+        ``topology.serde()`` on that checkpointer.
+
         Raises:
             TargetError: when ``graph`` cannot take a checkpointer, when the
                 graph has no ``NamespaceAwareSerde``, or when a client
@@ -165,9 +170,14 @@ class MigrationTarget:
                 f"{error}. Write it as def build(checkpointer) -> EventGraph | "
                 f"EventStore, and build it on that checkpointer."
             ) from error
+        from langgraph_events._graph import _is_default_serde  # noqa: PLC0415
         from langgraph_events._store import EventStore as _Store  # noqa: PLC0415
 
         built = self.graph(saver)
+        if isinstance(built, _Store) and _is_default_serde(
+            getattr(built._checkpointer, "serde", None)
+        ):
+            built._checkpointer.serde = built.topology.serde()
         try:
             store = built if isinstance(built, _Store) else built.event_store
         except ValueError as error:
