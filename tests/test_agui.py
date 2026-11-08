@@ -2193,6 +2193,31 @@ def describe_connect():
             assert snapshot.get("focus") == "scene-7"
 
 
+def describe_snapshot():
+    def when_the_thread_is_paused_on_an_interrupt():
+
+        @pytest.fixture
+        async def graph():
+            graph = _graph(ask_pending, checkpointer=MemorySaver())
+            await graph.ainvoke(UserAsked(question="go"), config=_config("t-snap"))
+            return graph
+
+        async def it_emits_the_snapshots_of_connect_only(graph):
+            adapter = _adapter(graph)
+            input_data = _make_input(thread_id="t-snap", run_id="run-9")
+
+            snapshot = [event async for event in adapter.snapshot(input_data)]
+            connect = [event async for event in adapter.connect(input_data)]
+
+            assert _types(snapshot) == [
+                EventType.RUN_STARTED,
+                EventType.STATE_SNAPSHOT,
+                EventType.MESSAGES_SNAPSHOT,
+                EventType.RUN_FINISHED,
+            ]
+            assert snapshot == [e for e in connect if e.type != EventType.CUSTOM]
+
+
 class _TenantSaver(MemorySaver):
     """A ``MemorySaver`` that refuses a config without ``configurable["tenant"]``."""
 

@@ -370,24 +370,51 @@ class AGUIAdapter:
         """
         ctx = self._run_context(input_data)
         run_config = self._build_config(input_data, ctx.thread_id, config=config)
-        return self._as_run(ctx, self._replay_checkpoint(ctx, run_config))
+        return self._as_run(
+            ctx, self._replay_checkpoint(ctx, run_config, interrupts=True)
+        )
 
     reconnect = connect
 
-    async def _replay_checkpoint(
-        self, ctx: MapperContext, config: RunnableConfig
+    def snapshot(
+        self,
+        input_data: RunAgentInput,
+        *,
+        config: RunnableConfig | None = None,
     ) -> AsyncIterator[BaseEvent]:
-        """Yield the snapshots and pending interrupts of the checkpoint."""
-        snapshot = await self._aget_checkpoint_snapshot(config)
-        if snapshot is None:
-            yield build_state_snapshot({})
-            yield build_messages_snapshot([])
-            return
+        """Emit the state of the thread without its pending interrupts.
 
-        reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
+        The events are those of :meth:`connect` without the interrupt events.
+        Use it when a live run holds the thread. See "Snapshot while a run
+        holds the thread" in ``docs/agui.md``.
+
+        Args:
+            input_data: AG-UI ``RunAgentInput``.
+            config: The server run config, as for :meth:`connect`.
+
+        Raises:
+            ValueError: As for :meth:`connect`.
+        """
+        ctx = self._run_context(input_data)
+        run_config = self._build_config(input_data, ctx.thread_id, config=config)
+        return self._as_run(
+            ctx, self._replay_checkpoint(ctx, run_config, interrupts=False)
+        )
+
+    async def _replay_checkpoint(
+        self, ctx: MapperContext, config: RunnableConfig, *, interrupts: bool
+    ) -> AsyncIterator[BaseEvent]:
+        """Yield the snapshots, and the pending interrupts if *interrupts*."""
+        snapshot = await self._aget_checkpoint_snapshot(config)
+        reducers = (
+            snapshot.values
+            if snapshot is not None and isinstance(snapshot.values, dict)
+            else {}
+        )
         yield build_state_snapshot(self._project_state(reducers))
         yield build_messages_snapshot(reducers.get("messages") or [])
-
+        if snapshot is None or not interrupts:
+            return
         for interrupted in self._interrupts_from_snapshot(snapshot):
             for agui_event in self._map_event(interrupted, ctx):
                 yield agui_event

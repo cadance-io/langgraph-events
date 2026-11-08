@@ -162,6 +162,7 @@ Requires `[agui]`. See [AG-UI Adapter](agui.md).
 | `AGUI_HELD_PARTS_KEY` | Constant | Reserved `BaseMessage.additional_kwargs` key. It holds each inbound content part with a `file` source, which the model does not receive. The snapshot restores each part at its position. See [Parts the model does not receive](agui.md#parts-the-model-does-not-receive) |
 | `held_parts(message)` | Function | Returns the parts held on a LangChain message as AG-UI `InputContentPart` objects, in their original order. Skips a corrupt entry with a `WARNING`. Never raises |
 | `AGUIAdapter.stream()` / `.connect()` / `.reconnect()` | Method | Execute, rehydrate a checkpoint, refresh. See [Run config](agui.md#run-config) |
+| `AGUIAdapter.snapshot()` | Method | Replay the state of a thread without its pending interrupts, for a thread that a live run holds. See [Snapshot while a run holds the thread](agui.md#snapshot-while-a-run-holds-the-thread) |
 | `FrontendStateMutated` | Event | Adapter-emitted `IntegrationEvent` that carries `RunAgentInput.state` for a reducer that projects client state |
 | `FrontendToolCallRequested` | Event | `Interrupted` subclass for a handler-initiated frontend tool call (CopilotKit `useFrontendTool`) |
 | `InterruptedWithPayload[PayloadT]` | Generic base | `Interrupted` variant with a typed payload from `interrupt_payload(self) -> PayloadT`. See [Typed Interrupt Payloads](agui.md#typed-interrupt-payloads) |
