@@ -8,6 +8,7 @@ RunAgentInput -> SeedFactory -> EventGraph.astream_events -> [Mapper Chain] -> S
                               ResumeFactory -> astream_resume (if resuming)
 
 RunAgentInput -> AGUIAdapter.connect/reconnect -> RunStarted + checkpoint snapshots + interrupts + RunFinished
+RunAgentInput -> AGUIAdapter.snapshot          -> RunStarted + checkpoint snapshots + RunFinished
 ```
 
 `AGUIAdapter` streams LLM tokens and custom events. `AGUIAdapter(...)` raises `ValueError` unless the graph registers [`message_reducer()`](reducers.md#message_reducer). That reducer is the authoritative message channel.
@@ -205,6 +206,15 @@ So one message can store up to 16 KiB in the two slots.
 ## Connect / Reconnect
 
 `connect()`, alias `reconnect()`, runs no handler. It emits `RunStarted`, then `StateSnapshot` and `MessagesSnapshot` from the checkpoint, then each pending `Interrupted` event, then `RunFinished`. If the replay raises, `RunError` ends the stream instead of `RunFinished`. One exception applies: with `on_unmapped="raise"`, an `UnmappedEventError` propagates to the caller and does not become `RunError`. The stream then ends without a terminal event, the same as in `stream()`. An AG-UI client refuses a stream that does not start with `RunStarted`, so do not strip these events. Call `connect` on page load or refresh. Call `stream` only to start or resume execution. Serve it like the Quick Start route: `create_starlette_response(adapter.connect(input_data))`.
+
+### Snapshot while a run holds the thread
+
+`snapshot()` emits the events of `connect()` without the pending interrupts: `RunStarted`, `StateSnapshot`, `MessagesSnapshot`, then `RunFinished`. It takes the same `config=`. Use it when a live run holds the thread, for example after a page refresh during a resume. The live run raises its own interrupts, so `connect()` would show each interrupt two times.
+
+Replay the state with `snapshot()`, then forward the stream of the live run. `snapshot()` ends with `RunFinished`, so the forwarded stream must start with the `RunStarted` of the live run. The `run_id` of the snapshot run must differ from the `run_id` of the live run.
+
+!!! note "Only the caller knows that a run holds the thread"
+    The adapter cannot detect a live run from the checkpoint. While the first step of a resume runs, the checkpoint still lists the answered interrupt. The resume value stays a pending write until that step commits.
 
 ## Custom Mappers
 

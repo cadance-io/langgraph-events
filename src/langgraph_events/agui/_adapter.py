@@ -6,6 +6,7 @@ import copy
 import inspect
 import logging
 import uuid
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
 
 from ag_ui.core import (
@@ -64,7 +65,7 @@ class CheckpointState(TypedDict):
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
     from collections.abc import Set as AbstractSet
 
     from ag_ui.core import RunAgentInput
@@ -370,27 +371,55 @@ class AGUIAdapter:
         """
         ctx = self._run_context(input_data)
         run_config = self._build_config(input_data, ctx.thread_id, config=config)
-        return self._as_run(ctx, self._replay_checkpoint(ctx, run_config))
+        return self._as_run(
+            ctx, self._replay(run_config, partial(self._checkpoint_events, ctx=ctx))
+        )
 
     reconnect = connect
 
-    async def _replay_checkpoint(
-        self, ctx: MapperContext, config: RunnableConfig
+    def snapshot(
+        self,
+        input_data: RunAgentInput,
+        *,
+        config: RunnableConfig | None = None,
     ) -> AsyncIterator[BaseEvent]:
-        """Yield the snapshots and pending interrupts of the checkpoint."""
-        snapshot = await self._aget_checkpoint_snapshot(config)
-        if snapshot is None:
-            yield build_state_snapshot({})
-            yield build_messages_snapshot([])
+        """Emit the events of :meth:`connect` without the pending interrupts.
+
+        It takes the same arguments and raises the same errors. Use it when a
+        live run holds the thread. See ``docs/agui.md``.
+        """
+        ctx = self._run_context(input_data)
+        run_config = self._build_config(input_data, ctx.thread_id, config=config)
+        return self._as_run(ctx, self._replay(run_config, self._snapshot_events))
+
+    async def _replay(
+        self,
+        config: RunnableConfig,
+        events: Callable[[StateSnapshot | None], Iterable[BaseEvent]],
+    ) -> AsyncIterator[BaseEvent]:
+        for agui_event in events(await self._aget_checkpoint_snapshot(config)):
+            yield agui_event
+
+    def _checkpoint_events(
+        self, checkpoint: StateSnapshot | None, ctx: MapperContext
+    ) -> Iterator[BaseEvent]:
+        """Yield the snapshots, then the pending interrupts, of *checkpoint*."""
+        yield from self._snapshot_events(checkpoint)
+        if checkpoint is None:
             return
+        for interrupted in self._interrupts_from_snapshot(checkpoint):
+            yield from self._map_event(interrupted, ctx)
 
-        reducers = snapshot.values if isinstance(snapshot.values, dict) else {}
-        yield build_state_snapshot(self._project_state(reducers))
-        yield build_messages_snapshot(reducers.get("messages") or [])
-
-        for interrupted in self._interrupts_from_snapshot(snapshot):
-            for agui_event in self._map_event(interrupted, ctx):
-                yield agui_event
+    def _snapshot_events(self, checkpoint: StateSnapshot | None) -> list[BaseEvent]:
+        reducers = (
+            checkpoint.values
+            if checkpoint is not None and isinstance(checkpoint.values, dict)
+            else {}
+        )
+        return [
+            build_state_snapshot(self._project_state(reducers)),
+            build_messages_snapshot(reducers.get("messages") or []),
+        ]
 
     def _should_gate_with_checkpoint_replay(
         self,
@@ -731,14 +760,8 @@ class AGUIAdapter:
 
         # Interrupt gate: re-emit state without executing when interrupted
         if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
-            state = cast("CheckpointState", checkpoint_state)
-            yield build_state_snapshot(self._project_state(state["reducers"]))
-            messages = state["messages"]
-            if messages is not None:
-                yield build_messages_snapshot(messages)
-            for interrupted in state["pending_interrupts"]:
-                for agui_event in self._map_event(interrupted, ctx):
-                    yield agui_event
+            for agui_event in self._checkpoint_events(checkpoint_snapshot, ctx):
+                yield agui_event
             return
 
         event_stream = await self._build_event_stream(
