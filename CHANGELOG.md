@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.47.2] - 2026-11-08
+
 ### Added
 
 - **`AGUIAdapter.snapshot()` replays the state of a thread without its pending interrupts.**
@@ -2219,7 +2221,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.47.1...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.47.2...HEAD
+[0.47.2]: https://github.com/cadance-io/langgraph-events/compare/v0.47.1...v0.47.2
 [0.47.1]: https://github.com/cadance-io/langgraph-events/compare/v0.47.0...v0.47.1
 [0.47.0]: https://github.com/cadance-io/langgraph-events/compare/v0.46.1...v0.47.0
 [0.46.1]: https://github.com/cadance-io/langgraph-events/compare/v0.46.0...v0.46.1
