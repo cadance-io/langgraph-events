@@ -366,8 +366,9 @@ class AGUIAdapter:
 
         Raises:
             ValueError: *config* ``configurable`` names ``thread_id`` or a
-                key with the framework prefix ``__lge_``. ``connect()``
-                raises it when it is called, before the stream starts.
+                key with the framework prefix ``__lge_``. Or
+                ``input_data.thread_id`` is empty. ``connect()`` raises it
+                when it is called, before the stream starts.
         """
         ctx = self._run_context(input_data)
         run_config = self._build_config(input_data, ctx.thread_id, config=config)
@@ -886,8 +887,9 @@ class AGUIAdapter:
             ValueError: *config* ``configurable`` names ``thread_id`` or a
                 key with the framework prefix ``__lge_``.  Or
                 *client_configurable* names one of these keys,
-                ``checkpoint_id`` or ``checkpoint_ns``.  ``stream()`` raises
-                it when it is called, before the stream starts.
+                ``checkpoint_id`` or ``checkpoint_ns``.  Or
+                ``input_data.thread_id`` is empty.  ``stream()`` raises it
+                when it is called, before the stream starts.
         """
         self._graph.topology.require_context(context)
         ctx = self._run_context(input_data)
@@ -905,10 +907,15 @@ class AGUIAdapter:
 
     @staticmethod
     def _run_context(input_data: RunAgentInput) -> MapperContext:
-        """Build the mapper context of one run, with a new id for each one absent."""
+        """Build the mapper context of one run, with a new run id if absent."""
+        if not input_data.thread_id:
+            raise ValueError(
+                "RunAgentInput.thread_id must name a thread, not "
+                f"{input_data.thread_id!r}."
+            )
         return MapperContext(
             run_id=input_data.run_id or str(uuid.uuid4()),
-            thread_id=input_data.thread_id or str(uuid.uuid4()),
+            thread_id=input_data.thread_id,
             input_data=input_data,
         )
 

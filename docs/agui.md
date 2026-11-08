@@ -529,6 +529,8 @@ The adapter builds `configurable` in this order. A later source wins over an ear
 | 2 | Server `config=` | Every key |
 | 3 | `RunAgentInput.thread_id` | `thread_id` |
 
+An empty `RunAgentInput.thread_id` raises `ValueError` when `stream()`, `connect()` or `snapshot()` is called. An empty `run_id` gets a new id, because a run id names no checkpoint.
+
 A server `configurable` key `thread_id`, or a key with the prefix `__lge_`, raises `ValueError` when `stream()` is called. The same names in `client_configurable=` raise the same error. A client cannot choose a checkpoint, so `checkpoint_id` and `checkpoint_ns` in `client_configurable=` also raise `ValueError`. The server `config=` can set them. A `str` in `client_configurable=` raises `TypeError`, because the adapter would read each character as a key name.
 
 A `seed_factory` or a `resume_factory` receives `input_data`, not the run config. A handler reads the run config from its `RunnableConfig`.

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **An empty `RunAgentInput.thread_id` raises `ValueError`.** `stream()`, `connect()` and
+  `snapshot()` raise it when they are called. Before, the adapter made up a random thread id,
+  so the run went to a thread that no later request could name. Send the id of the thread. An
+  empty `run_id` still gets a new id.
+
 ## [0.47.2] - 2026-11-08
 
 ### Added

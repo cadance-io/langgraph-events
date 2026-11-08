@@ -2268,6 +2268,17 @@ def describe_snapshot():
                 )
 
 
+def describe_the_thread_id_of_the_input():
+    def when_it_is_empty():
+
+        @pytest.mark.parametrize("method", ["stream", "connect", "snapshot"])
+        def it_raises_at_call_time(method):
+            adapter = _adapter(_graph(reply))
+
+            with pytest.raises(ValueError, match=r"thread_id.*''"):
+                getattr(adapter, method)(_make_input(thread_id=""))
+
+
 class _TenantSaver(MemorySaver):
     """A ``MemorySaver`` that refuses a config without ``configurable["tenant"]``."""
 
