@@ -636,7 +636,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-events"
-version = "0.47.2"
+version = "0.48.0"
 source = { editable = "." }
 dependencies = [
     { name = "beartype" },
