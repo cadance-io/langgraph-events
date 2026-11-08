@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `connect()` without the interrupt events. It takes the same `config=` as `connect()`. Use it
   when a live run holds the thread: replay the state, then forward the stream of that run. The
   live run raises its own interrupts. Before, a client that called `connect()` there got each
-  interrupt two times, or removed the interrupt events itself. `connect()` does not change.
+  interrupt two times, or removed the interrupt events itself.
 
 ## [0.47.1] - 2026-11-07
 

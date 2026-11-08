@@ -209,9 +209,12 @@ So one message can store up to 16 KiB in the two slots.
 
 ### Snapshot while a run holds the thread
 
-`snapshot()` emits the events of `connect()` without the pending interrupts: `RunStarted`, `StateSnapshot`, `MessagesSnapshot`, then `RunFinished`. It takes the same `config=`. Use it when a live run holds the thread, for example after a page refresh during a resume. Replay the state with `snapshot()`, then forward the stream of the live run. `snapshot()` ends with `RunFinished`, so the forwarded stream must start with the `RunStarted` of the live run. The live run raises its own interrupts, so `connect()` would show each interrupt two times.
+`snapshot()` emits the events of `connect()` without the pending interrupts: `RunStarted`, `StateSnapshot`, `MessagesSnapshot`, then `RunFinished`. It takes the same `config=`. Use it when a live run holds the thread, for example after a page refresh during a resume. The live run raises its own interrupts, so `connect()` would show each interrupt two times.
 
-The adapter cannot detect a live run from the checkpoint. While the first step of a resume runs, the checkpoint still lists the answered interrupt. The resume value stays a pending write until that step commits. Only the run gate of the caller knows that a run holds the thread.
+Replay the state with `snapshot()`, then forward the stream of the live run. `snapshot()` ends with `RunFinished`, so the forwarded stream must start with the `RunStarted` of the live run. The `run_id` of the snapshot run must differ from the `run_id` of the live run.
+
+!!! note "Only the caller knows that a run holds the thread"
+    The adapter cannot detect a live run from the checkpoint. While the first step of a resume runs, the checkpoint still lists the answered interrupt. The resume value stays a pending write until that step commits.
 
 ## Custom Mappers
 

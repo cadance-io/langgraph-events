@@ -2202,7 +2202,7 @@ def describe_snapshot():
             await graph.ainvoke(UserAsked(question="go"), config=_config("t-snap"))
             return graph
 
-        async def it_emits_the_snapshots_of_connect_only(graph):
+        async def it_emits_connect_less_the_interrupt_events(graph):
             adapter = _adapter(graph)
             input_data = _make_input(thread_id="t-snap", run_id="run-9")
 
@@ -2215,7 +2215,57 @@ def describe_snapshot():
                 EventType.MESSAGES_SNAPSHOT,
                 EventType.RUN_FINISHED,
             ]
-            assert snapshot == [e for e in connect if e.type != EventType.CUSTOM]
+            interrupted = _custom(connect, "interrupted")
+            assert len(interrupted) == 1
+            assert connect == [*snapshot[:-1], *interrupted, snapshot[-1]]
+
+    def when_the_interrupt_is_a_frontend_tool_call():
+
+        async def it_emits_no_tool_call_event():
+            @on(AskConfirm)
+            def request(event: AskConfirm) -> FrontendToolCallRequested:
+                return FrontendToolCallRequested(
+                    name="confirm", args={}, tool_call_id="tc-snap-1"
+                )
+
+            graph = _graph(request, checkpointer=MemorySaver())
+            await graph.ainvoke(AskConfirm(prompt="Ship?"), config=_config("t-fe"))
+            adapter = _adapter(graph)
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="t-fe"))]
+
+            assert _types(events) == [
+                EventType.RUN_STARTED,
+                EventType.STATE_SNAPSHOT,
+                EventType.MESSAGES_SNAPSHOT,
+                EventType.RUN_FINISHED,
+            ]
+
+    def when_the_thread_has_no_checkpoint():
+
+        async def it_emits_empty_snapshots_in_a_run():
+            adapter = _adapter(_graph(reply, checkpointer=MemorySaver()))
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="t-new"))]
+
+            assert _types(events) == [
+                EventType.RUN_STARTED,
+                EventType.STATE_SNAPSHOT,
+                EventType.MESSAGES_SNAPSHOT,
+                EventType.RUN_FINISHED,
+            ]
+            assert events[1].snapshot == {}
+            assert events[2].messages == []
+
+    def when_the_server_config_names_a_reserved_key():
+
+        def it_raises_at_call_time():
+            adapter = _adapter(_graph(ask_pending, checkpointer=MemorySaver()))
+
+            with pytest.raises(ValueError, match="thread_id"):
+                adapter.snapshot(
+                    _make_input(), config={"configurable": {"thread_id": "x"}}
+                )
 
 
 class _TenantSaver(MemorySaver):
