@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
 import operator
 import uuid
 from abc import ABC, abstractmethod
@@ -18,7 +20,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from langchain_core.messages import BaseMessage
 
@@ -417,6 +419,84 @@ class FoldReducer(BaseReducer, Generic[S]):
                 continue
             state = self.default_factory() if isinstance(result, _ResetType) else result
         return state
+
+
+@dataclass
+class Derived:
+    """A value that a pure function computes from other reducers. It is not stored.
+
+    The parameter names of ``fn`` name its input reducers. Before a handler
+    runs, the framework calls ``fn`` with the values of those reducers. A
+    handler receives the result by parameter name, like a reducer value::
+
+        stage = Derived(
+            name="stage",
+            fn=lambda placed, shipped: "shipped" if shipped else "placed",
+        )
+
+        @on(Checked)
+        def check(event: Checked, stage: str) -> Reported: ...
+
+    The value is never written to the checkpoint, so it cannot drift from
+    its inputs. An input must be a stored reducer, not another ``Derived``.
+    As on a :class:`ScalarReducer` parameter, a non-``None`` annotation opts
+    into :class:`ReducerNotSetError`.
+
+    When declared as a class attribute on a ``Namespace`` subclass, ``name``
+    auto-fills from the attribute name.
+    """
+
+    name: str = ""
+    fn: Callable[..., Any] = field(kw_only=True)
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        from langgraph_events._event import Namespace  # noqa: PLC0415
+
+        if isinstance(owner, type) and issubclass(owner, Namespace) and not self.name:
+            self.name = name
+
+    @functools.cached_property
+    def _parameters(self) -> tuple[inspect.Parameter, ...]:
+        return tuple(inspect.signature(self.fn).parameters.values())
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The names of the input reducers, in the order of ``fn``."""
+        return tuple(p.name for p in self._parameters)
+
+    def value(
+        self, state: Mapping[str, Any], reducers: Mapping[str, BaseReducer]
+    ) -> Any:  # noqa: ANN401 - fn decides the type
+        """Call ``fn`` with each input from *state*, or its empty default."""
+        values = {name: state.get(name, reducers[name].empty) for name in self.inputs}
+        try:
+            return self.fn(**values)
+        except Exception as exc:
+            exc.add_note(f"Derived {self.name!r} raised while it computed its value.")
+            raise
+
+    def _check_inputs(
+        self, reducers: Mapping[str, BaseReducer], derived: Mapping[str, Derived]
+    ) -> None:
+        """Raise ``TypeError`` if an input does not name a stored reducer."""
+        for param in self._parameters:
+            if param.kind not in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
+                raise TypeError(
+                    f"Derived {self.name!r} has the variadic or positional-only "
+                    f"parameter {param.name!r}. Each parameter must name one "
+                    f"input reducer."
+                )
+            if param.name in derived:
+                raise TypeError(
+                    f"Derived {self.name!r} reads the derived {param.name!r}. "
+                    f"An input must be a stored reducer. Read the inputs of "
+                    f"{param.name!r} instead."
+                )
+            if param.name not in reducers:
+                raise TypeError(
+                    f"Derived {self.name!r} reads {param.name!r}, which is not "
+                    f"a registered reducer. Available reducers: {sorted(reducers)}."
+                )
 
 
 def message_reducer(

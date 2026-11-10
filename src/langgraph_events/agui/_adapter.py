@@ -185,6 +185,7 @@ class AGUIAdapter:
                 else ["messages"]
             )
         self._activation: bool | list[str] = include_reducers
+        self._selection = graph.topology._select_reducers(resolved)
         # Pre-compute the allow-list set for fast filtering.  None for
         # bool=True (no filter beyond the framework strip).
         self._allowed_keys: frozenset[str] | None = (
@@ -417,6 +418,8 @@ class AGUIAdapter:
             if checkpoint is not None and isinstance(checkpoint.values, dict)
             else {}
         )
+        if reducers:
+            reducers = reducers | self._selection.derived_values(reducers)
         return [
             build_state_snapshot(self._project_state(reducers)),
             build_messages_snapshot(reducers.get("messages") or []),
@@ -445,12 +448,17 @@ class AGUIAdapter:
         same projection used outbound (framework internals stripped,
         dedicated keys stripped, then the user's ``include_reducers``) so
         a stale or untrusted client can't echo back keys the dev decided
-        are internal.  Empty / non-dict state is treated as "no update."
+        are internal.  A ``Derived`` key is dropped too: the server computes
+        it, so a client cannot set it.  Empty / non-dict state is treated as
+        "no update."
         """
         raw = input_data.state
         if not isinstance(raw, dict) or not raw:
             return None
-        filtered = self._project_state(raw)
+        derived = self._graph.topology.derived
+        filtered = {
+            k: v for k, v in self._project_state(raw).items() if k not in derived
+        }
         return filtered or None
 
     def _prepend_frontend_state(

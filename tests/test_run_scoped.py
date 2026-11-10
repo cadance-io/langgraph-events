@@ -178,6 +178,7 @@ def describe_RunScoped():
                         {"events": []},
                         {},
                         None,
+                        derived={},
                         model_provider=lambda: NamespaceModel([]),
                     )
 

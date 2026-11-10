@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import operator
-from collections.abc import Awaitable, Callable, Coroutine  # noqa: TC003
+from collections.abc import Awaitable, Callable, Coroutine, Mapping  # noqa: TC003
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 if TYPE_CHECKING:
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
     from langgraph_events._namespace import NamespaceModel
-    from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._topology import ReturnContract
 
 from langgraph.graph import END
@@ -317,9 +317,14 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     reducers: dict[str, BaseReducer],
     config: RunnableConfig | None = None,
     *,
+    derived: Mapping[str, Derived],
     model_provider: Callable[[], NamespaceModel],
 ) -> dict[str, Any]:
-    """Build keyword arguments to inject into a handler call."""
+    """Build keyword arguments to inject into a handler call.
+
+    A ``Derived`` value is computed here from the channels in *state*, so a
+    handler reads it as of node start, and it is never written back.
+    """
     meta = bound.meta
     inject: dict[str, Any] = {}
     if meta.log_param or meta.reflection_param:
@@ -332,12 +337,22 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
             from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
             inject[meta.reflection_param] = Reflection(
-                log_view, model=model_provider(), reducers=reducers
+                log_view, model=model_provider(), reducers=reducers, derived=derived
             )
     for param_name in meta.reducer_params:
         r = reducers.get(param_name)
-        value = state.get(param_name, r.empty if r else [])
+        d = derived.get(param_name)
+        if d is not None:
+            value = d.value(state, reducers)
+        else:
+            value = state.get(param_name, r.empty if r else [])
         if value is None and param_name in meta.required_reducer_params:
+            if d is not None:
+                raise ReducerNotSetError(
+                    f"Handler {meta.name!r} requires {param_name!r} to be set, "
+                    f"but Derived {param_name!r} returned None. Change the "
+                    f"annotation to permit None (e.g. '{param_name}: <type> | None')."
+                )
             raise _make_reducer_not_set_error(meta.name, param_name, r)
         inject[param_name] = value
     if meta.config_param and config is not None:
@@ -842,6 +857,7 @@ def make_handler_node(
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: ReturnContract | None = None,
     *,
+    derived: Mapping[str, Derived],
     model_provider: Callable[[], NamespaceModel],
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
@@ -873,6 +889,7 @@ def make_handler_node(
             state,
             reds,
             config,
+            derived=derived,
             model_provider=model_provider,
         )
         return matching, inject, _pause_budget(config)

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Derived` gives a handler a value that a pure function computes from other reducers.**
+  The parameter names of `fn` name the input reducers. A handler receives the value by
+  parameter name, as of node start, like a reducer value. The value is never written to the
+  checkpoint, so it cannot drift from its inputs and needs no backfill. Pass it in
+  `reducers=[...]`, or declare it on a `Namespace`. `include_reducers=` of
+  `stream_events()` and of `AGUIAdapter` accept its name, so a client can get the value in
+  the `STATE_SNAPSHOT`. `reflect(log).state()` includes it. Graph construction raises
+  `TypeError` for an input that is not a stored reducer, and for a name that a reducer
+  also has. See [`Derived`](https://cadance-io.github.io/langgraph-events/reducers/#derived).
+
 ## [0.48.0] - 2026-11-08
 
 ### Breaking

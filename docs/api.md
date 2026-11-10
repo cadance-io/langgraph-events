@@ -121,6 +121,7 @@ The return value is checked against the declared annotation, or against the subs
 | `FoldReducer` | Class | Folds each event into accumulating state through `fold(self, state)`. The next value depends on the prior value. Generic over state type `S` |
 | `Foldable` | Protocol | `@runtime_checkable` structural type for an event with a `fold` method. Types the event argument of `FoldReducer`. Do not inherit it |
 | `BaseReducer` | Class | Abstract base for a custom reducer. Subclass it for a bespoke channel |
+| `Derived` | Class | A value that a pure function computes from other reducers at node start. Injected by parameter name. Never stored. See [`Derived`](reducers.md#derived) |
 | `SKIP` | Sentinel | Return it from `ScalarReducer.fn` or from a `FoldReducer.fold` to leave the value unchanged |
 | `RESET` | Sentinel | Return it from a `FoldReducer.fold` to clear the channel back to `default_factory()` |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |

@@ -107,11 +107,11 @@ Outside the chain, the adapter also emits:
 
 | Value | Behaviour |
 |---|---|
-| `True` (default) | All user reducers |
-| `list[str]` | Allow-list only (e.g. `["focus", "scene"]`) |
+| `True` (default) | All user reducers and every [`Derived`](reducers.md#derived) |
+| `list[str]` | Allow-list only (e.g. `["focus", "scene"]`). A list can name a `Derived` |
 | `False` | No user reducers (`MessagesSnapshot` is still sent) |
 
-The value applies to outbound state and to the inbound `RunAgentInput.state` echo, so a client cannot inject a key you keep internal. Every framework channel, and the `messages` key, is stripped first, whatever `include_reducers` holds. The allow-list also gates **which reducers `EventGraph` computes during streaming**. For redaction or value transformation, write a custom `EventMapper`.
+The value applies to outbound state and to the inbound `RunAgentInput.state` echo, so a client cannot inject a key you keep internal. Every framework channel, and the `messages` key, is stripped first, whatever `include_reducers` holds. The allow-list also gates **which reducers `EventGraph` computes during streaming**. A `Derived` value is computed on the server, so the adapter drops a `Derived` key from the inbound client state. For redaction or value transformation, write a custom `EventMapper`.
 
 Messages reach the client on two paths at the same time. The authoritative path is `MessagesSnapshot` from the `message_reducer()` channel. The real-time path is the `TextMessageStart` / `Content` / `End` tokens. An AG-UI client reconciles them by message id.
 

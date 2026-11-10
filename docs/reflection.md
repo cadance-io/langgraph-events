@@ -153,7 +153,8 @@ overview → locate → evidence-walk → conclusion.
 ## state
 
 `run.state()` (and the `state` op) projects each registered reducer over the
-full log from scratch: `{name: reducer.seed(list(log))}`.
+full log from scratch: `{name: reducer.seed(list(log))}`. Each
+[`Derived`](reducers.md#derived) is then computed from those projections.
 
 !!! note
     Projections use `BaseReducer.seed()`, which does not run a `Reducer`'s

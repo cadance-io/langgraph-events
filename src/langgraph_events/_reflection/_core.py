@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from langgraph_events._event import Event
     from langgraph_events._event_log import EventLog
     from langgraph_events._namespace import NamespaceModel
-    from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._reflection._tool import QueryTool
 
 
@@ -25,7 +25,7 @@ class Reflection:
     annotating a handler parameter with ``Reflection``.
     """
 
-    __slots__ = ("_log", "_model", "_reducers", "_tool")
+    __slots__ = ("_derived", "_log", "_model", "_reducers", "_tool")
 
     def __init__(
         self,
@@ -33,10 +33,12 @@ class Reflection:
         *,
         model: NamespaceModel,
         reducers: Mapping[str, BaseReducer],
+        derived: Mapping[str, Derived] | None = None,
     ) -> None:
         self._log = log
         self._model = model
         self._reducers = reducers
+        self._derived = derived or {}
         self._tool: QueryTool | None = None
 
     @property
@@ -87,14 +89,18 @@ class Reflection:
         return self._model.text()
 
     def state(self) -> dict[str, Any]:
-        """Project each registered reducer over the full log.
+        """Project each registered reducer over the full log, then compute
+        each ``Derived`` from those projections.
 
         Uses ``BaseReducer.seed`` — the framework-blessed from-scratch
         projection. Reducers with custom merge fns (e.g. ``message_reducer``)
         may differ from live channel values, which apply the merge.
         """
         events = list(self._log)
-        return {name: r.seed(events) for name, r in self._reducers.items()}
+        values = {name: r.seed(events) for name, r in self._reducers.items()}
+        for name, d in self._derived.items():
+            values[name] = d.value(values, self._reducers)
+        return values
 
     def _resolve_index(self, event: Event | int) -> int:
         """The single index gate: validate, normalize negatives, or locate.

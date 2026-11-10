@@ -120,7 +120,7 @@ Handler params resolve from:
 - `log: EventLog`: full history
 - `config: RunnableConfig` / `store: BaseStore`: LangGraph injections
 - A parameter annotated with the graph's `context_schema`: the typed run context (see [Run context](#run-context))
-- Reducer channel by **parameter name** (see [Reducers](reducers.md))
+- Reducer channel or [`Derived`](reducers.md#derived) value by **parameter name** (see [Reducers](reducers.md))
 - Field matchers (external only): typed subset dispatch and injection
 - **Services**: project dependencies registered on `EventGraph(services=...)`
 

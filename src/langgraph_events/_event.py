@@ -289,20 +289,21 @@ class Namespace:
 
 
 def _collect_namespace_reducers(cls: type) -> tuple[Any, ...]:
-    """Walk the MRO and collect declarative reducers from class bodies.
+    """Walk the MRO and collect declarative reducers and ``Derived`` values
+    from class bodies.
 
     Namespaces cannot inherit from one another, so the walk only ever reaches
     *cls* itself and any non-Namespace mixins it composes. Dedup by name.
     Runtime import of ``BaseReducer`` to avoid module-level circular
     dependency with ``_reducer``.
     """
-    from langgraph_events._reducer import BaseReducer  # noqa: PLC0415
+    from langgraph_events._reducer import BaseReducer, Derived  # noqa: PLC0415
 
     collected: list[Any] = []
     seen_names: set[str] = set()
     for klass in cls.__mro__[:-1]:
         for attr in klass.__dict__.values():
-            if isinstance(attr, BaseReducer) and attr.name not in seen_names:
+            if isinstance(attr, (BaseReducer, Derived)) and attr.name not in seen_names:
                 collected.append(attr)
                 seen_names.add(attr.name)
     return tuple(collected)

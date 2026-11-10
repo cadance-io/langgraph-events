@@ -155,6 +155,49 @@ To have mypy flag a `default_factory`/`fold` state-shape disagreement, pin the s
 
 For a bespoke channel, subclass the public `BaseReducer` directly.
 
+## `Derived` { #derived }
+
+A derived reducer is a value that a pure function computes from other reducers. Use it when a handler acts on a fact that follows from several stored reducers. Without it, each handler declares every input reducer and computes the fact again.
+
+```python
+from langgraph_events import Derived, EventGraph, ScalarReducer, on
+
+placed = ScalarReducer(name="placed", event_type=Placed, fn=lambda e: True)
+shipped = ScalarReducer(name="shipped", event_type=Shipped, fn=lambda e: True)
+
+
+def stage_of(placed: bool | None, shipped: bool | None) -> str:
+    return "shipped" if shipped else "placed" if placed else "new"
+
+
+stage = Derived(name="stage", fn=stage_of)
+
+
+@on(Checked)
+def check(event: Checked, stage: str) -> Reported:
+    # `stage` is injected by parameter name, like a reducer value.
+    ...
+
+
+graph = EventGraph([check], reducers=[placed, shipped, stage])
+```
+
+- **Inputs by parameter name.** The parameter names of `fn` name its input reducers. Before a handler runs, the framework calls `fn` with the values of those reducers at node start. An unset input gets the empty default of its reducer.
+- **Not stored.** The value is never written to the checkpoint. It cannot drift from its inputs, and a new `Derived` needs no backfill on an existing thread. `pre_seed()` refuses a `Derived` name.
+- **Registration.** Pass it in `reducers=[...]`, or declare it as a `Namespace` class attribute. On a namespace, `name` auto-fills from the attribute name.
+- **Required values.** As on a `ScalarReducer` parameter, a non-`None` annotation opts into [`ReducerNotSetError`](#scalar-reducer-required).
+- **Errors.** `fn` runs before the handler body, outside the `raises=` boundary, like `ReducerNotSetError`. The exception keeps its type and gets a note that names the `Derived`.
+- **Streams and clients.** `stream_events(include_reducers=...)` and `AGUIAdapter(include_reducers=...)` accept a `Derived` name, so a client gets the value in `StreamFrame.reducers` and in the `STATE_SNAPSHOT`. `AGUIAdapter` drops a `Derived` key from the inbound client state. `graph.reflect(log).state()` includes each `Derived`.
+
+Graph construction raises `TypeError` in each of these cases:
+
+| Case | Reason |
+|---|---|
+| A parameter of `fn` names no registered reducer | The input does not exist. The message lists the available reducers |
+| A parameter of `fn` names another `Derived` | An input must be a stored reducer. Read the inputs of the other `Derived` instead |
+| `fn` has a `*args`, `**kwargs` or positional-only parameter | Each parameter must name one input reducer |
+| A reducer and a `Derived` in `reducers=[...]` have the same name | A handler parameter cannot name both |
+
 ## `message_reducer`
 
 Built-in reducer for LangChain messages. It projects `MessageEvent.as_messages()` into the `messages` channel, using `add_messages` for id-based dedup.
