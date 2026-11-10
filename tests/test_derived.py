@@ -411,7 +411,7 @@ def describe_Derived():
                 EventGraph([report], reducers=[placed, shipped, stage, scaled])
 
         def it_rejects_a_builtin_function():
-            builtin = Derived(name="builtin", fn=bool)
+            builtin = Derived(name="builtin", fn=max)
 
             with pytest.raises(
                 TypeError, match=r"Derived 'builtin' cannot read the parameters"
