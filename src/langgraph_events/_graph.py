@@ -28,11 +28,7 @@ from langgraph_events._rewrite import (
 )
 from langgraph_events._services import parse_services
 from langgraph_events._store import EventStore
-from langgraph_events._topology import (
-    EventTopology,
-    ReducerSelection,
-    namespace_handlers,
-)
+from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -51,6 +47,7 @@ if TYPE_CHECKING:
 
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Derived
+    from langgraph_events._reducer_registry import ReducerSelection
     from langgraph_events._reflection import Reflection
     from langgraph_events._services import Services
     from langgraph_events._types import PauseSignal
@@ -375,8 +372,7 @@ class EventGraph:
         return Reflection(
             log,
             model=self.namespaces(),
-            reducers=self._topology.reducers,
-            derived=self._topology.derived,
+            reducers=self._topology._registry.readables,
         )
 
     @property
@@ -1057,7 +1053,7 @@ class EventGraph:
 
         # Yield seed events
         for s in seeds:
-            if selection.shown:
+            if selection.names:
                 changed = frozenset(
                     name
                     for name in channels
@@ -1147,7 +1143,7 @@ class EventGraph:
             if isinstance(chunk, dict):
                 interrupts.extend(chunk.get(_INTERRUPT_CHANNEL, ()))
             for event in self._events_from_chunk(chunk, seen):
-                if selection.shown:
+                if selection.names:
                     changed = self._topology._update_reducer_state(
                         reducer_state,
                         event,
@@ -1197,7 +1193,7 @@ class EventGraph:
         """Shared sync streaming core for stream_events/stream_resume."""
         self._prepare_run(kwargs, deadline, pause_on)
         compiled = self.compiled
-        if not selection.shown:
+        if not selection.names:
             yield from seeds
             seen: set[int] = set()
             for chunk in compiled.stream(inp, stream_mode="updates", **kwargs):
@@ -1223,7 +1219,7 @@ class EventGraph:
     ) -> AsyncIterator[Event | StreamFrame]:
         """Shared async streaming core for astream_events/astream_resume."""
         compiled = self.compiled
-        if not selection.shown:
+        if not selection.names:
             for s in seeds:
                 yield s
             seen: set[int] = set()
@@ -1279,7 +1275,7 @@ class EventGraph:
         kwargs["context"] = context
         inp = self._prepare_input(seed)
         kwargs.pop("stream_mode", None)
-        selection = self._topology._select_reducers(include_reducers)
+        selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
             inp,
             inp["events"],
@@ -1341,7 +1337,7 @@ class EventGraph:
                     yield latest
             return
         kwargs.pop("stream_mode", None)
-        selection = self._topology._select_reducers(include_reducers)
+        selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
             LGCommand(resume=value),
             seeds or [],
@@ -1371,7 +1367,7 @@ class EventGraph:
         """
         kwargs.pop("stream_mode", None)
         self._prepare_run(kwargs, deadline, pause_on)
-        selection = self._topology._select_reducers(include_reducers)
+        selection = self._topology.select_reducers(include_reducers)
         delegate = (
             self._astream_v2(
                 inp,

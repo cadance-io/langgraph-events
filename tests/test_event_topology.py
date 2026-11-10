@@ -218,6 +218,13 @@ def describe_EventTopology():
             assert topology.requirements == ()
             assert topology.reducer_names == frozenset({"total"})
 
+    def when_a_reducer_has_no_name():
+        def it_raises_a_value_error():
+            nameless = ScalarReducer(event_type=_Counted, fn=lambda e: 1)
+
+            with pytest.raises(ValueError, match=r"reducer .* has no name"):
+                EventTopology([_count], reducers=[_TOTAL, nameless])
+
     def when_no_handler_is_given():
         def it_raises_a_value_error():
             with pytest.raises(ValueError, match="at least one handler"):

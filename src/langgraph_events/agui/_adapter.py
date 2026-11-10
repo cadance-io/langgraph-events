@@ -177,15 +177,13 @@ class AGUIAdapter:
         # Note: `False` resolves to activation=["messages"] (so
         # MessagesSnapshot still works) while the projection returns `{}` —
         # empty StateSnapshot, populated MessagesSnapshot.  Intentional.
-        resolved = graph.topology.resolve_reducer_names(include_reducers)
-        if "messages" not in resolved:
-            include_reducers = (
-                [*include_reducers, "messages"]
-                if isinstance(include_reducers, list)
-                else ["messages"]
-            )
+        if include_reducers is False:
+            include_reducers = ["messages"]
+        elif include_reducers is not True and "messages" not in include_reducers:
+            include_reducers = [*include_reducers, "messages"]
         self._activation: bool | list[str] = include_reducers
-        self._selection = graph.topology._select_reducers(resolved)
+        # The stream and the replayed snapshot show the same values.
+        self._selection = graph.topology.select_reducers(include_reducers)
         # Pre-compute the allow-list set for fast filtering.  None for
         # bool=True (no filter beyond the framework strip).
         self._allowed_keys: frozenset[str] | None = (
@@ -413,16 +411,16 @@ class AGUIAdapter:
             yield from self._map_event(interrupted, ctx)
 
     def _snapshot_events(self, checkpoint: StateSnapshot | None) -> list[BaseEvent]:
-        reducers = (
+        channels = (
             checkpoint.values
             if checkpoint is not None and isinstance(checkpoint.values, dict)
             else {}
         )
-        if reducers:
-            reducers = reducers | self._selection.derived_values(reducers)
+        # A fresh thread reads each value from its empty defaults, as a
+        # handler and a stream frame do.
         return [
-            build_state_snapshot(self._project_state(reducers)),
-            build_messages_snapshot(reducers.get("messages") or []),
+            build_state_snapshot(self._project_state(self._selection.values(channels))),
+            build_messages_snapshot(channels.get("messages") or []),
         ]
 
     def _should_gate_with_checkpoint_replay(

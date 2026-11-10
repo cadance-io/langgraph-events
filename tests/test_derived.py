@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from ag_ui.core import EventType, RunAgentInput
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -13,16 +12,16 @@ from langgraph_events import (
     Derived,
     DomainEvent,
     EventGraph,
+    FoldReducer,
     HandlerRaised,
     IntegrationEvent,
     Interrupted,
     Namespace,
     ReducerNotSetError,
+    Resumed,
     ScalarReducer,
-    message_reducer,
     on,
 )
-from langgraph_events.agui import AGUIAdapter, FrontendStateMutated
 from langgraph_events.stream import StreamFrame
 
 
@@ -72,7 +71,7 @@ def check(event: Checked, stage: str | None) -> Reported:
     return Reported(stage=stage or "unset")
 
 
-class Asked2(Interrupted):
+class StageAsked(Interrupted):
     pass
 
 
@@ -81,13 +80,18 @@ class Answered(IntegrationEvent):
 
 
 @on(Placed)
-def ask(event: Placed) -> Asked2:
-    return Asked2()
+def ask(event: Placed) -> StageAsked:
+    return StageAsked()
 
 
 @on(Answered)
 def answered(event: Answered, stage: str | None) -> Reported:
     return Reported(stage=stage or "unset")
+
+
+@on(Checked)
+def read_flag(event: Checked, flag: str) -> Reported:
+    return Reported(stage=flag)
 
 
 def _reports(log: Any) -> list[str]:
@@ -133,6 +137,18 @@ def describe_Derived():
 
             assert _reports(log) == ["unset"]
 
+        def when_a_service_has_the_same_name():
+            def it_injects_the_derived_value():
+                graph = EventGraph(
+                    [check],
+                    reducers=[placed, shipped, stage],
+                    services={"stage": "from-service"},
+                )
+
+                log = graph.invoke([Placed(), Checked()])
+
+                assert _reports(log) == ["placed"]
+
         def when_the_annotation_rejects_none():
             def it_raises_reducer_not_set_error():
                 @on(Checked)
@@ -142,7 +158,9 @@ def describe_Derived():
                 graph = EventGraph([strict], reducers=[placed, shipped, stage])
 
                 with pytest.raises(
-                    ReducerNotSetError, match=r"Derived 'stage' returned None"
+                    ReducerNotSetError,
+                    match=r"requires Derived 'stage' to be set.*Make Derived "
+                    r"'stage' return a non-None value, or change the annotation",
                 ):
                     graph.invoke(Checked())
 
@@ -169,6 +187,23 @@ def describe_Derived():
                 assert caught.value.__notes__[0] == (
                     "Derived 'broken' raised while it computed its value."
                 )
+
+    def when_one_derived_serves_two_graphs():
+        def it_reads_the_empty_defaults_of_each_graph():
+            flag = Derived(name="flag", fn=lambda placed: placed)
+            low = ScalarReducer(
+                name="placed", event_type=Placed, fn=lambda e: "set", default="low"
+            )
+            high = ScalarReducer(
+                name="placed", event_type=Placed, fn=lambda e: "set", default="high"
+            )
+            first = EventGraph([read_flag], reducers=[low, flag])
+            second = EventGraph([read_flag], reducers=[high, flag])
+
+            # reflect() projects from the log, so an unset input reads the
+            # empty default of the reducer that this graph registers.
+            assert first.reflect(first.invoke(Checked())).state()["flag"] == "low"
+            assert second.reflect(second.invoke(Checked())).state()["flag"] == "high"
 
     def when_the_run_is_checkpointed():
         def it_does_not_write_the_value_to_the_checkpoint():
@@ -235,6 +270,37 @@ def describe_Derived():
             with pytest.raises(ValueError, match=r"Derived name\(s\) \['stage'\]"):
                 graph.pre_seed(_config("t3"), {"stage": "shipped"})
 
+        async def it_refuses_to_apre_seed_the_value():
+            graph = EventGraph(
+                [report], reducers=[placed, shipped, stage], checkpointer=MemorySaver()
+            )
+
+            with pytest.raises(ValueError, match=r"Derived name\(s\) \['stage'\]"):
+                await graph.apre_seed(_config("t7"), {"stage": "shipped"})
+
+        def it_shows_the_value_in_a_sync_resume_stream():
+            graph = EventGraph(
+                [ask, answered],
+                reducers=[placed, shipped, stage],
+                checkpointer=MemorySaver(),
+            )
+            graph.invoke(Placed(), config=_config("t6"))
+
+            frames = list(
+                graph.stream_resume(
+                    Answered(), include_reducers=["stage"], config=_config("t6")
+                )
+            )
+
+            assert [type(f.event) for f in frames] == [
+                Placed,
+                StageAsked,
+                Answered,
+                Resumed,
+                Reported,
+            ]
+            assert [f.reducers for f in frames] == [{"stage": "placed"}] * 5
+
     def when_declared_on_a_namespace():
         def it_takes_the_attribute_name():
             graph = EventGraph([Parcel.Look])
@@ -242,6 +308,57 @@ def describe_Derived():
             log = graph.invoke(Parcel.Look())
 
             assert [e.status for e in log.filter(Parcel.Look.Looked)] == ["held"]
+
+        def it_takes_the_enclosing_namespace():
+            assert Parcel.status.namespace is Parcel
+
+        def it_is_injectable_but_not_a_stored_reducer():
+            topology = EventGraph([Parcel.Look]).topology
+
+            assert topology.reducer_names == frozenset({"sent"})
+            assert topology.injectable_names == frozenset({"sent", "status"})
+
+        def when_an_explicit_entry_has_the_same_name():
+            def it_rejects_an_explicit_derived_named_like_a_namespace_reducer():
+                clash = Derived(name="sent", fn=lambda: True)
+
+                with pytest.raises(TypeError, match=r"'sent'.*reducer and a Derived"):
+                    EventGraph([Parcel.Look], reducers=[clash])
+
+            def it_rejects_an_explicit_reducer_named_like_a_namespace_derived():
+                clash = ScalarReducer(name="status", event_type=Placed, fn=str)
+
+                with pytest.raises(TypeError, match=r"'status'.*reducer and a Derived"):
+                    EventGraph([Parcel.Look], reducers=[clash])
+
+            def it_keeps_an_explicit_derived_over_a_namespace_derived():
+                explicit = Derived(name="status", fn=lambda sent: "explicit")
+                graph = EventGraph([Parcel.Look], reducers=[explicit])
+
+                log = graph.invoke(Parcel.Look())
+
+                assert [e.status for e in log.filter(Parcel.Look.Looked)] == [
+                    "explicit"
+                ]
+
+        def when_the_structure_is_rendered():
+            def it_lists_each_input_of_the_derived_in_the_text():
+                text = EventGraph([Parcel.Look]).namespaces().text()
+
+                assert "Derived:\n  status  (reads sent)" in text
+
+            def it_lists_each_input_of_the_derived_in_the_json():
+                payload = EventGraph([Parcel.Look]).namespaces().to_dict()
+
+                assert payload["derived"] == [
+                    {"name": "status", "inputs": ["sent"], "namespace": "Parcel"}
+                ]
+
+            def it_draws_a_reads_arrow_from_each_input_to_the_derived():
+                mermaid = EventGraph([Parcel.Look]).namespaces().mermaid()
+
+                assert "_reducer_status{{status}}:::reducer" in mermaid
+                assert "_reducer_sent -.->|reads| _reducer_status" in mermaid
 
     def when_the_graph_is_built():
         def it_rejects_an_input_that_names_no_reducer():
@@ -271,8 +388,43 @@ def describe_Derived():
         def it_rejects_a_reserved_state_field_name():
             reserved = Derived(name="events", fn=lambda placed: placed)
 
-            with pytest.raises(ValueError, match="reserved state fields"):
+            with pytest.raises(
+                ValueError,
+                match=r"Derived name\(s\) \['events'\] conflict with reserved",
+            ):
                 EventGraph([report], reducers=[placed, shipped, reserved])
+
+        def it_rejects_an_empty_name():
+            nameless = Derived(fn=lambda placed: placed)
+
+            with pytest.raises(ValueError, match=r"Derived .* has no name"):
+                EventGraph([report], reducers=[placed, shipped, nameless])
+
+        def it_rejects_a_defaulted_parameter_that_names_no_reducer():
+            scaled = Derived(name="scaled", fn=lambda placed, factor=2: placed)
+
+            with pytest.raises(
+                TypeError,
+                match=r"'factor'.*A parameter with a default must still name a "
+                r"reducer\. Bind a constant in a closure\.",
+            ):
+                EventGraph([report], reducers=[placed, shipped, stage, scaled])
+
+        def it_rejects_a_builtin_function():
+            builtin = Derived(name="builtin", fn=bool)
+
+            with pytest.raises(
+                TypeError, match=r"Derived 'builtin' cannot read the parameters"
+            ):
+                EventGraph([report], reducers=[placed, shipped, stage, builtin])
+
+        def it_rejects_a_function_that_is_not_callable():
+            broken = Derived(name="broken", fn="placed")  # type: ignore[arg-type]
+
+            with pytest.raises(
+                TypeError, match=r"Derived 'broken' cannot read the parameters"
+            ):
+                EventGraph([report], reducers=[placed, shipped, stage, broken])
 
     def when_a_stream_includes_reducers():
         def it_includes_a_derived_that_the_list_names():
@@ -305,6 +457,48 @@ def describe_Derived():
                 frozenset({"stage"}),
             ]
 
+        async def it_marks_nothing_changed_for_an_event_that_no_input_folds():
+            graph = EventGraph([check], reducers=[placed, shipped, stage])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Checked(), include_reducers=["stage"], include_custom_events=True
+                )
+            ]
+
+            assert [type(f.event) for f in frames] == [Checked, Reported]
+            assert [f.changed_reducers for f in frames] == [frozenset(), frozenset()]
+
+        async def it_never_marks_a_zero_parameter_derived_changed():
+            constant = Derived(name="constant", fn=lambda: 42)
+            graph = EventGraph([ship], reducers=[placed, shipped, constant])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Placed(),
+                    include_reducers=["placed", "constant"],
+                    include_custom_events=True,
+                )
+            ]
+
+            assert [f.reducers for f in frames] == [
+                {"placed": True, "constant": 42},
+                {"placed": True, "constant": 42},
+            ]
+            assert [f.changed_reducers for f in frames] == [
+                frozenset({"placed"}),
+                frozenset(),
+            ]
+
+        def it_lists_every_value_in_registration_order_for_true():
+            graph = EventGraph([ship], reducers=[stage, placed, shipped])
+
+            frames = list(graph.stream_events(Placed(), include_reducers=True))
+
+            assert list(frames[-1].reducers) == ["stage", "placed", "shipped"]
+
         def it_includes_every_derived_for_true():
             graph = EventGraph([ship], reducers=[placed, shipped, stage])
 
@@ -328,76 +522,29 @@ def describe_Derived():
             }
 
 
-class Asked(IntegrationEvent):
-    pass
+class Ticked(IntegrationEvent):
+    def fold(self, state: int) -> int:
+        return state + 1
 
 
-def _agui_graph() -> EventGraph:
-    @on(Asked)
-    def place(event: Asked) -> Placed:
-        return Placed()
-
-    return EventGraph(
-        [place],
-        reducers=[message_reducer(), placed, shipped, stage],
-        checkpointer=MemorySaver(),
-    )
+class Polled(IntegrationEvent):
+    remaining: int
 
 
-def _input(**overrides: Any) -> RunAgentInput:
-    fields: dict[str, Any] = {
-        "thread_id": "agui-1",
-        "run_id": "run-1",
-        "state": {},
-        "messages": [],
-        "tools": [],
-        "context": [],
-        "forwarded_props": {},
-    }
-    return RunAgentInput(**(fields | overrides))
+ticks = FoldReducer(name="ticks", event_type=Ticked, default_factory=int)
+limit = ScalarReducer(name="limit", event_type=Placed, fn=lambda e: 3, default=2)
+remaining = Derived(name="remaining", fn=lambda ticks, limit: limit - ticks)
 
 
-def _snapshots(events: list[Any]) -> list[dict[str, Any]]:
-    return [e.snapshot for e in events if e.type == EventType.STATE_SNAPSHOT]
+@on(Checked)
+def poll(event: Checked, remaining: int) -> Polled:
+    return Polled(remaining=remaining)
 
 
-def describe_AGUIAdapter():
-    def when_include_reducers_names_a_derived():
-        async def it_includes_the_derived_that_include_reducers_names():
-            adapter = AGUIAdapter(
-                _agui_graph(),
-                seed_factory=lambda inp: Asked(),
-                include_reducers=["stage"],
-            )
+def describe_Derived_from_two_kinds_of_reducer():
+    def it_combines_a_fold_and_a_scalar():
+        graph = EventGraph([poll], reducers=[ticks, limit, remaining])
 
-            events = [e async for e in adapter.stream(_input())]
+        log = graph.invoke([Placed(), Ticked(), Ticked(), Checked()])
 
-            assert _snapshots(events)[-1] == {"stage": "placed"}
-
-        async def it_includes_the_derived_in_the_snapshot_of_a_checkpoint():
-            graph = _agui_graph()
-            adapter = AGUIAdapter(
-                graph, seed_factory=lambda inp: Asked(), include_reducers=["stage"]
-            )
-            [e async for e in adapter.stream(_input())]
-
-            events = [e async for e in adapter.snapshot(_input())]
-
-            assert _snapshots(events) == [{"stage": "placed"}]
-
-    def when_the_client_state_holds_a_derived():
-        async def it_drops_the_derived_from_frontend_state_mutated():
-            seen: list[dict[str, Any]] = []
-
-            @on(FrontendStateMutated)
-            def keep(event: FrontendStateMutated) -> None:
-                seen.append(dict(event.state))
-
-            graph = EventGraph(
-                [keep], reducers=[message_reducer(), placed, shipped, stage]
-            )
-            adapter = AGUIAdapter(graph, seed_factory=lambda inp: Asked())
-
-            [e async for e in adapter.stream(_input(state={"stage": "x", "placed": 1}))]
-
-            assert seen == [{"placed": 1}]
+        assert [e.remaining for e in log.filter(Polled)] == [1]

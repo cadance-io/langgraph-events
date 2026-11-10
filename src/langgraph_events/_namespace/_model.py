@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     from langgraph_events._handler import HandlerMeta
     from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reducer import Derived as DerivedValue
     from langgraph_events._retry import RetryPolicy
     from langgraph_events._topology import ReturnInfo
 
@@ -308,6 +309,20 @@ class NamespaceModel:
         namespace: str | None
 
     @dataclass(frozen=True)
+    class Derived:
+        """A ``Derived`` registered on the graph, and the reducers it reads.
+
+        A ``Derived`` is not a stored reducer. Its value is computed from
+        ``inputs``, the names of its input reducers, in the order of its
+        function. ``namespace`` is the name of the declaring namespace, or
+        ``None`` for a ``Derived`` passed to ``EventGraph(reducers=...)``.
+        """
+
+        name: str
+        inputs: tuple[str, ...]
+        namespace: str | None
+
+    @dataclass(frozen=True)
     class Focus:
         """The part of the model that ``mermaid(focus=...)`` draws.
 
@@ -352,6 +367,7 @@ class NamespaceModel:
     seeds: tuple[type[Event], ...]
     invariants: tuple[NamespaceModel.Invariant, ...]
     reducers: tuple[NamespaceModel.Reducer, ...] = ()
+    derived: tuple[NamespaceModel.Derived, ...] = ()
 
     # ---- derived accessors ----
 
@@ -368,9 +384,21 @@ class NamespaceModel:
         handler_metas: list[HandlerMeta],
         return_info: dict[str, ReturnInfo],
         reducers: Iterable[BaseReducer] = (),
+        derived: Iterable[DerivedValue[Any]] = (),
     ) -> NamespaceModel:
         model = _build_domain_model(handler_metas, return_info)
-        return replace(model, reducers=_model_reducers(model, reducers))
+        return replace(
+            model,
+            reducers=_model_reducers(model, reducers),
+            derived=tuple(
+                NamespaceModel.Derived(
+                    name=d.name,
+                    inputs=d.inputs,
+                    namespace=getattr(d.namespace, "__namespace_name__", None),
+                )
+                for d in derived
+            ),
+        )
 
     # ---- renderers ----
 

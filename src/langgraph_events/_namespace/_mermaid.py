@@ -231,13 +231,17 @@ def _add_reducer_node(
     flow: MermaidFlowchart,
     name: str,
     *,
+    derived: bool,
     context: bool = False,
     note: object | None = None,
 ) -> None:
-    """Declare a reducer: cylinder, ``:::reducer`` styling."""
+    """Declare a reducer as a cylinder, or a ``Derived`` as a hexagon.
+
+    Both take the ``:::reducer`` styling.
+    """
     flow.node(
         _reducer_node_id(name),
-        "cylinder",
+        "hex" if derived else "cylinder",
         cls="ctx" if context else "reducer",
         label=_label(name, note),
     )
@@ -258,7 +262,7 @@ def _check_focus_names(d: NamespaceModel, focus: NamespaceModel.Focus) -> None:
     known_by_kind = {
         "namespaces": set(d.namespaces),
         "reactions": {r.name for r in d.reactions},
-        "reducers": {r.name for r in d.reducers},
+        "reducers": {r.name for r in d.reducers} | {dv.name for dv in d.derived},
     }
     for kind, known in known_by_kind.items():
         for name in getattr(focus, kind):
@@ -733,6 +737,15 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             referenced.add(cls)
             all_sources.add(node_id[cls])
             edges.append(_FlowEdge(node_id[cls], red_id, "-.->", "folds", "folds"))
+    # A Derived stores nothing. A dotted ``reads`` arrow joins each input
+    # reducer to it.
+    for dv in d.derived:
+        dv_id = _reducer_node_id(dv.name)
+        all_targets.add(dv_id)
+        for name in dv.inputs:
+            edges.append(
+                _FlowEdge(_reducer_node_id(name), dv_id, "-.->", "reads", "folds")
+            )
 
     # Append rerouted pinned-reactor edges to the flow edge list.  These
     # use the "invariant" tag so they get the same dashed-orange style as
@@ -781,11 +794,14 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
 
     namespace_reducers: dict[str, list[str]] = defaultdict(list)
     loose_reducers: list[str] = []
-    for red in d.reducers:
-        if red.namespace is None:
-            loose_reducers.append(red.name)
+    placed_reducers = [(r.name, r.namespace) for r in d.reducers]
+    placed_reducers += [(dv.name, dv.namespace) for dv in d.derived]
+    for name, namespace in placed_reducers:
+        if namespace is None:
+            loose_reducers.append(name)
         else:
-            namespace_reducers[red.namespace].append(red.name)
+            namespace_reducers[namespace].append(name)
+    derived_names = {dv.name for dv in d.derived}
 
     namespace_of: dict[str, str] = {
         node_id[cls]: ns for ns, members in domain_members.items() for cls in members
@@ -807,7 +823,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         [*edges, *invariant_edges],
         namespace_of,
         {node_id[inv.cls] for inv in d.invariants}
-        | {_reducer_node_id(r.name) for r in d.reducers},
+        | {_reducer_node_id(name) for name, _ in placed_reducers},
     )
     edges = [
         _styled_edge(
@@ -846,7 +862,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     _apply_classdefs(flow)
     if hubs:
         flow.classdef("hub", _HUB_CLASSDEF_STYLE)
-    if d.reducers:
+    if d.reducers or d.derived:
         flow.classdef("reducer", _REDUCER_CLASSDEF_STYLE)
     if focus is not None:
         flow.classdef("ctx", _CONTEXT_CLASSDEF_STYLE)
@@ -908,7 +924,13 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             for reducer_name in namespace_reducers.get(namespace_name, []):
                 context = view.is_context(_reducer_node_id(reducer_name))
                 note = _with_fact(folds_fact(reducer_name), notes.get(reducer_name))
-                _add_reducer_node(flow, reducer_name, context=context, note=note)
+                _add_reducer_node(
+                    flow,
+                    reducer_name,
+                    derived=reducer_name in derived_names,
+                    context=context,
+                    note=note,
+                )
 
     for node in loose_nodes:
         context = view.is_context(node_id[node])
@@ -921,7 +943,13 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     for reducer_name in loose_reducers:
         context = view.is_context(_reducer_node_id(reducer_name))
         note = _with_fact(folds_fact(reducer_name), notes.get(reducer_name))
-        _add_reducer_node(flow, reducer_name, context=context, note=note)
+        _add_reducer_node(
+            flow,
+            reducer_name,
+            derived=reducer_name in derived_names,
+            context=context,
+            note=note,
+        )
 
     # An entry point is a fact about the whole graph, so a focused diagram
     # draws none. Seeds come from every edge, drawn or hidden: an event that

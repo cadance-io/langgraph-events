@@ -117,4 +117,8 @@ def encode_model(d: NamespaceModel) -> dict[str, Any]:
             }
             for r in d.reducers
         ],
+        "derived": [
+            {"name": dv.name, "inputs": list(dv.inputs), "namespace": dv.namespace}
+            for dv in d.derived
+        ],
     }

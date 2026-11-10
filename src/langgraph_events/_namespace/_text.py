@@ -120,6 +120,11 @@ def _render_taxonomy_lines(  # noqa: PLR0912
                 continue
             folds = ", ".join(_event_label(t) for t in r.subscribes)
             lines.append(f"  {r.name}  (folds {folds})")
+    if d.derived:
+        lines.append("Derived:")
+        for dv in d.derived:
+            reads = ", ".join(dv.inputs) if dv.inputs else "no reducer"
+            lines.append(f"  {dv.name}  (reads {reads})")
     return lines
 
 

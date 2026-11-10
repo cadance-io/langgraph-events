@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig, RunnableLambda
 
     from langgraph_events._namespace import NamespaceModel
-    from langgraph_events._reducer import BaseReducer, Derived
+    from langgraph_events._reducer import BaseReducer, Readable
     from langgraph_events._topology import ReturnContract
 
 from langgraph.graph import END
@@ -314,16 +314,16 @@ def make_dispatch(
 def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     bound: BoundHandler,
     state: StateDict,
-    reducers: dict[str, BaseReducer],
+    readables: Mapping[str, Readable],
     config: RunnableConfig | None = None,
     *,
-    derived: Mapping[str, Derived],
     model_provider: Callable[[], NamespaceModel],
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call.
 
-    A ``Derived`` value is computed here from the channels in *state*, so a
-    handler reads it as of node start, and it is never written back.
+    Each reducer parameter reads its value from the channels in *state*, as
+    of node start. A ``Derived`` value is computed here and never written
+    back.
     """
     meta = bound.meta
     inject: dict[str, Any] = {}
@@ -337,23 +337,13 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
             from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
             inject[meta.reflection_param] = Reflection(
-                log_view, model=model_provider(), reducers=reducers, derived=derived
+                log_view, model=model_provider(), reducers=readables
             )
     for param_name in meta.reducer_params:
-        r = reducers.get(param_name)
-        d = derived.get(param_name)
-        if d is not None:
-            value = d.value(state, reducers)
-        else:
-            value = state.get(param_name, r.empty if r else [])
+        readable = readables[param_name]
+        value = readable.read(state)
         if value is None and param_name in meta.required_reducer_params:
-            if d is not None:
-                raise ReducerNotSetError(
-                    f"Handler {meta.name!r} requires {param_name!r} to be set, "
-                    f"but Derived {param_name!r} returned None. Change the "
-                    f"annotation to permit None (e.g. '{param_name}: <type> | None')."
-                )
-            raise _make_reducer_not_set_error(meta.name, param_name, r)
+            raise _make_reducer_not_set_error(meta.name, param_name, readable)
         inject[param_name] = value
     if meta.config_param and config is not None:
         inject[meta.config_param] = config
@@ -418,26 +408,13 @@ def _runtime_context(meta: HandlerMeta) -> object:
 
 
 def _make_reducer_not_set_error(
-    handler_name: str, param_name: str, r: BaseReducer | None
+    handler_name: str, param_name: str, readable: Readable
 ) -> ReducerNotSetError:
-    """Build a ``ReducerNotSetError`` with an actionable message.
-
-    A catch-all reducer (``event_type=Event``) gives no useful hint, so drop
-    the "Ensure an event of type Event…" sentence in that case and keep only
-    the annotation suggestion.
-    """
-    if r is not None and r.event_type is not Event:
-        type_name = getattr(r.event_type, "__name__", str(r.event_type))
-        event_hint = (
-            f"Ensure an event of type {type_name} has been "
-            f"processed before this handler runs, or "
-        )
-    else:
-        event_hint = "Set the reducer before this handler runs, or "
+    """Build a ``ReducerNotSetError`` with an actionable message."""
     return ReducerNotSetError(
-        f"Handler {handler_name!r} requires reducer {param_name!r} to be "
-        f"set, but its value is None. {event_hint}change the annotation to "
-        f"permit None (e.g. '{param_name}: <type> | None')."
+        f"Handler {handler_name!r} requires {readable._describe()} to be "
+        f"set, but its value is None. {readable._not_set_hint()}change the "
+        f"annotation to permit None (e.g. '{param_name}: <type> | None')."
     )
 
 
@@ -857,7 +834,7 @@ def make_handler_node(
     reducers: dict[str, BaseReducer] | None = None,
     return_contract: ReturnContract | None = None,
     *,
-    derived: Mapping[str, Derived],
+    readables: Mapping[str, Readable],
     model_provider: Callable[[], NamespaceModel],
 ) -> RunnableLambda:
     """Wrap a user handler as a LangGraph node.
@@ -887,9 +864,8 @@ def make_handler_node(
         inject = _build_inject(
             bound,
             state,
-            reds,
+            readables,
             config,
-            derived=derived,
             model_provider=model_provider,
         )
         return matching, inject, _pause_budget(config)

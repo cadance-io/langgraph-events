@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import inspect
 import operator
 import uuid
@@ -20,7 +19,7 @@ from typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from langchain_core.messages import BaseMessage
 
@@ -149,6 +148,57 @@ class BaseReducer(ABC):
     @abstractmethod
     def seed(self, events: list[Event]) -> object:
         """Initialize with default + seed event contributions."""
+
+    @property
+    def sources(self) -> tuple[BaseReducer, ...]:
+        """The stored reducers that :meth:`read` reads: this reducer only."""
+        return (self,)
+
+    def read(self, state: Mapping[str, Any]) -> object:
+        """The value of this channel in *state*, or :attr:`empty` if unset."""
+        return state.get(self.name, self.empty)
+
+    def _describe(self) -> str:
+        return f"reducer {self.name!r}"
+
+    def _not_set_hint(self) -> str:
+        """The first fix that a ``ReducerNotSetError`` names.
+
+        A catch-all reducer (``event_type=Event``) gives no useful hint.
+        """
+        from langgraph_events._event import Event  # noqa: PLC0415
+
+        if self.event_type is Event:
+            return "Set the reducer before this handler runs, or "
+        type_name = getattr(self.event_type, "__name__", str(self.event_type))
+        return (
+            f"Ensure an event of type {type_name} has been "
+            f"processed before this handler runs, or "
+        )
+
+
+class Readable(Protocol):
+    """A value that a handler reads by parameter name.
+
+    A stored reducer reads its own channel. A :class:`Derived`, once bound
+    to its input reducers, computes its value from their channels.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def sources(self) -> tuple[BaseReducer, ...]:
+        """The stored reducers whose channels :meth:`read` reads."""
+        ...
+
+    def read(self, state: Mapping[str, Any]) -> Any:  # noqa: ANN401 - the value of a reducer
+        """The value as of *state*, with an empty default for an unset channel."""
+        ...
+
+    def _describe(self) -> str: ...
+
+    def _not_set_hint(self) -> str: ...
 
 
 @dataclass
@@ -421,8 +471,8 @@ class FoldReducer(BaseReducer, Generic[S]):
         return state
 
 
-@dataclass
-class Derived:
+@dataclass(frozen=True)
+class Derived(Generic[T]):
     """A value that a pure function computes from other reducers. It is not stored.
 
     The parameter names of ``fn`` name its input reducers. Before a handler
@@ -443,43 +493,52 @@ class Derived:
     into :class:`ReducerNotSetError`.
 
     When declared as a class attribute on a ``Namespace`` subclass, ``name``
-    auto-fills from the attribute name.
+    auto-fills from the attribute name, and ``namespace`` auto-fills to the
+    enclosing class. The namespace only places the value in the structure
+    views. An input can be any stored reducer of the graph.
     """
 
     name: str = ""
-    fn: Callable[..., Any] = field(kw_only=True)
+    fn: Callable[..., T] = field(kw_only=True)
+    namespace: type[Namespace] | None = field(kw_only=True, default=None)
 
     def __set_name__(self, owner: type, name: str) -> None:
         from langgraph_events._event import Namespace  # noqa: PLC0415
 
-        if isinstance(owner, type) and issubclass(owner, Namespace) and not self.name:
-            self.name = name
-
-    @functools.cached_property
-    def _parameters(self) -> tuple[inspect.Parameter, ...]:
-        return tuple(inspect.signature(self.fn).parameters.values())
+        if isinstance(owner, type) and issubclass(owner, Namespace):
+            # A frozen dataclass refuses attribute writes. The class body
+            # fills in the declaration once, before any graph reads it.
+            if not self.name:
+                object.__setattr__(self, "name", name)
+            if self.namespace is None:
+                object.__setattr__(self, "namespace", owner)
 
     @property
     def inputs(self) -> tuple[str, ...]:
         """The names of the input reducers, in the order of ``fn``."""
-        return tuple(p.name for p in self._parameters)
+        return tuple(p.name for p in self._parameters())
 
-    def value(
-        self, state: Mapping[str, Any], reducers: Mapping[str, BaseReducer]
-    ) -> Any:  # noqa: ANN401 - fn decides the type
-        """Call ``fn`` with each input from *state*, or its empty default."""
-        values = {name: state.get(name, reducers[name].empty) for name in self.inputs}
+    def _parameters(self) -> tuple[inspect.Parameter, ...]:
         try:
-            return self.fn(**values)
-        except Exception as exc:
-            exc.add_note(f"Derived {self.name!r} raised while it computed its value.")
-            raise
+            signature = inspect.signature(self.fn)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"Derived {self.name!r} cannot read the parameters of "
+                f"fn={self.fn!r}. Pass a function whose parameter names name "
+                f"its input reducers."
+            ) from exc
+        return tuple(signature.parameters.values())
 
-    def _check_inputs(
-        self, reducers: Mapping[str, BaseReducer], derived: Mapping[str, Derived]
-    ) -> None:
-        """Raise ``TypeError`` if an input does not name a stored reducer."""
-        for param in self._parameters:
+    def _bind(
+        self, reducers: Mapping[str, BaseReducer], derived: Collection[str]
+    ) -> _BoundDerived[T]:
+        """Bind each input to the stored reducer of its name.
+
+        Raises ``TypeError`` if an input does not name a stored reducer.
+        *derived* holds the names of the other ``Derived`` values.
+        """
+        sources: list[BaseReducer] = []
+        for param in self._parameters():
             if param.kind not in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
                 raise TypeError(
                     f"Derived {self.name!r} has the variadic or positional-only "
@@ -492,11 +551,52 @@ class Derived:
                     f"An input must be a stored reducer. Read the inputs of "
                     f"{param.name!r} instead."
                 )
-            if param.name not in reducers:
+            reducer = reducers.get(param.name)
+            if reducer is None:
+                default_hint = (
+                    " A parameter with a default must still name a reducer. "
+                    "Bind a constant in a closure."
+                    if param.default is not param.empty
+                    else ""
+                )
                 raise TypeError(
                     f"Derived {self.name!r} reads {param.name!r}, which is not "
-                    f"a registered reducer. Available reducers: {sorted(reducers)}."
+                    f"a registered reducer.{default_hint} Available reducers: "
+                    f"{sorted(reducers)}."
                 )
+            sources.append(reducer)
+        return _BoundDerived(self, tuple(sources))
+
+
+@dataclass(frozen=True)
+class _BoundDerived(Generic[T]):
+    """A :class:`Derived` of one graph, bound to its input reducers.
+
+    One ``Derived`` can serve several graphs, so the binding is not stored
+    on it.
+    """
+
+    derived: Derived[T]
+    sources: tuple[BaseReducer, ...]
+
+    @property
+    def name(self) -> str:
+        return self.derived.name
+
+    def read(self, state: Mapping[str, Any]) -> T:
+        """Call ``fn`` with each input from *state*, or its empty default."""
+        values = {r.name: r.read(state) for r in self.sources}
+        try:
+            return self.derived.fn(**values)
+        except Exception as exc:
+            exc.add_note(f"Derived {self.name!r} raised while it computed its value.")
+            raise
+
+    def _describe(self) -> str:
+        return f"Derived {self.name!r}"
+
+    def _not_set_hint(self) -> str:
+        return f"Make Derived {self.name!r} return a non-None value, or "
 
 
 def message_reducer(

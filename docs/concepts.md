@@ -279,7 +279,7 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
 - `EventTopology.from_namespaces(*namespaces, handlers=..., reducers=...)` collects the same
   handlers as `EventGraph.from_namespaces(...)`. A store-only client does not list every handler.
 - Read the static facts of a graph from `topology`: `handler_names`, `reducer_names`,
-  `resumable_node_names`, `reducers`, `requirements` and `namespaces()`. On a graph, use
+  `injectable_names`, `resumable_node_names`, `reducers`, `requirements` and `namespaces()`. On a graph, use
   `graph.topology.handler_names`. The same properties on `EventGraph` forward to the topology.
 - `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
   `reducers`. A requirement that no service matches raises `TypeError`. The error names the

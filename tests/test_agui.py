@@ -40,6 +40,7 @@ from pydantic import BaseModel
 
 from langgraph_events import (
     SKIP,
+    Derived,
     Event,
     EventGraph,
     IntegrationEvent,
@@ -5285,3 +5286,101 @@ def describe_FrontendToolCallRequested_deprecated_top_level_alias():
             import langgraph_events
 
             assert "FrontendToolCallRequested" not in langgraph_events.__all__
+
+
+# ---------------------------------------------------------------------------
+# Derived values in the AG-UI state
+# ---------------------------------------------------------------------------
+
+
+class ParcelPlaced(IntegrationEvent):
+    pass
+
+
+class ParcelAsked(IntegrationEvent):
+    pass
+
+
+_parcel_placed = ScalarReducer(
+    name="placed", event_type=ParcelPlaced, fn=lambda e: True
+)
+_parcel_stage = Derived(name="stage", fn=lambda placed: "placed" if placed else "new")
+
+
+@on(ParcelAsked)
+def _place_parcel(event: ParcelAsked) -> ParcelPlaced:
+    return ParcelPlaced()
+
+
+def _parcel_graph() -> EventGraph:
+    return EventGraph(
+        [_place_parcel],
+        reducers=[message_reducer(), _parcel_placed, _parcel_stage],
+        checkpointer=MemorySaver(),
+    )
+
+
+def _parcel_adapter(graph: EventGraph, **kwargs: Any) -> AGUIAdapter:
+    return AGUIAdapter(graph, seed_factory=lambda inp: ParcelAsked(), **kwargs)
+
+
+def _state_snapshots(events: list[BaseEvent]) -> list[dict[str, Any]]:
+    return [e.snapshot for e in events if e.type == EventType.STATE_SNAPSHOT]
+
+
+def describe_AGUIAdapter_derived_values():
+    def when_include_reducers_names_a_derived():
+        async def it_includes_the_derived_in_the_stream():
+            adapter = _parcel_adapter(_parcel_graph(), include_reducers=["stage"])
+
+            events = await _collect(adapter, _make_input(thread_id="d-1"))
+
+            assert _state_snapshots(events)[-1] == {"stage": "placed"}
+
+        async def it_includes_the_derived_in_the_snapshot_of_a_checkpoint():
+            adapter = _parcel_adapter(_parcel_graph(), include_reducers=["stage"])
+            await _collect(adapter, _make_input(thread_id="d-2"))
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="d-2"))]
+
+            assert _state_snapshots(events) == [{"stage": "placed"}]
+
+    def when_include_reducers_is_the_default():
+        async def it_includes_each_reducer_and_each_derived_in_the_stream():
+            adapter = _parcel_adapter(_parcel_graph())
+
+            events = await _collect(adapter, _make_input(thread_id="d-3"))
+
+            assert _state_snapshots(events)[-1] == {"placed": True, "stage": "placed"}
+
+    def when_the_thread_has_no_checkpoint():
+        async def it_computes_the_derived_from_the_empty_defaults():
+            adapter = _parcel_adapter(_parcel_graph(), include_reducers=["stage"])
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="d-4"))]
+
+            assert _state_snapshots(events) == [{"stage": "new"}]
+
+        async def it_shows_the_empty_default_of_each_stored_reducer():
+            adapter = _parcel_adapter(_parcel_graph())
+
+            events = [e async for e in adapter.connect(_make_input(thread_id="d-5"))]
+
+            assert _state_snapshots(events) == [{"placed": None, "stage": "new"}]
+
+    def when_the_client_state_holds_a_derived():
+        async def it_drops_the_derived_from_frontend_state_mutated():
+            seen: list[dict[str, Any]] = []
+
+            @on(FrontendStateMutated)
+            def keep(event: FrontendStateMutated) -> None:
+                seen.append(dict(event.state))
+
+            graph = EventGraph(
+                [keep], reducers=[message_reducer(), _parcel_placed, _parcel_stage]
+            )
+            adapter = _parcel_adapter(graph)
+
+            await _collect(adapter, _make_input(state={"stage": "x", "placed": 1}))
+
+            assert seen == [{"placed": 1}]
