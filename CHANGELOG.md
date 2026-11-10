@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **A reducer in `reducers=[...]` must have a name.** An empty name raises `ValueError` at
+  graph construction. Before, the graph registered a channel named `""`, which no handler
+  parameter can read. Pass `name=`, or declare the reducer on a `Namespace`.
+- **`BaseReducer` has two new public attributes, `read` and `sources`.** `read(state)` gives
+  the value of the channel in a state, or `empty` when the channel is unset. `sources` is
+  `(self,)`. A subclass that defines its own `read` or `sources` attribute must rename it.
+
+### Added
+
+- **`Derived` gives a handler a value that a pure function computes from stored reducers.**
+  The parameter names of `fn` name the input reducers. A handler receives the value by
+  parameter name, as of node start, like a reducer value. The value is never written to the
+  checkpoint, so it cannot drift from its inputs and needs no backfill. A `Derived` is not a
+  stored reducer. Pass it in `reducers=[...]`, or declare it on a `Namespace`.
+  `Derived[T]` is generic over the return type of `fn`, frozen and hashable. One `Derived`
+  can serve several graphs. See
+  [`Derived`](https://cadance-io.github.io/langgraph-events/reducers/#derived).
+  - `include_reducers=` of `stream_events()`, `stream_resume()` and `AGUIAdapter` accept its
+    name, so a client can get the value in `StreamFrame.reducers` and in the
+    `STATE_SNAPSHOT`. `AGUIAdapter` drops a `Derived` key from the inbound client state.
+  - `reflect(log).state()` includes it. `pre_seed()` and `apre_seed()` refuse its name.
+  - `namespaces().text()`, `.mermaid()` and `.json()` show each `Derived` with its inputs.
+    `NamespaceModel.derived` holds them. The JSON `schema_version` stays `"3"`, because the
+    `derived` key is an addition.
+  - Graph construction raises `TypeError` for an input that is not a stored reducer, for a
+    function whose parameters it cannot read, and for a reducer and a `Derived` of one name.
+    The name clash raises from `reducers=[...]` and from a namespace declaration.
+- `topology.injectable_names` lists every name a handler parameter can read: each stored
+  reducer and each `Derived`. `topology.reducer_names` and `topology.reducers` stay the stored
+  reducers only. `topology.derived` maps each `Derived` by its name.
+- `topology.select_reducers(include_reducers)` gives the values that a stream shows. Its
+  `values(state)` reads each one from a state, with an empty default for an unset channel.
+  `resolve_reducer_names()` keeps its name and gives the same names.
+
+### Changed
+
+- **`AGUIAdapter.connect()` and `snapshot()` show the empty defaults on a thread with no
+  checkpoint.** The `STATE_SNAPSHOT` holds each selected reducer with its empty default,
+  and each `Derived` computed from those defaults. Before, it was `{}`. A handler and a
+  stream frame already read the same defaults. The `MESSAGES_SNAPSHOT` does not change.
+- The reserved-name `ValueError` says `Derived name(s)` for a `Derived`, and lists the names
+  in sorted order.
+
 ## [0.48.0] - 2026-11-08
 
 ### Breaking

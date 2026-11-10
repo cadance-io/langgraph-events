@@ -44,7 +44,8 @@ graph = EventGraph([Order.Place])   # reducer auto-discovered from Order
 - Only sees events whose `__namespace__` matches.
 - Namespaces do not inherit: `class Child(Base)` where `Base` is a `Namespace` raises `TypeError`. To share a reducer, declare it free-standing (no owning namespace) and pass it via `reducers=[...]`.
 - Cross-namespace name collisions raise `TypeError` at graph construction.
-- Explicit `reducers=[...]` wins on conflict with an auto-discovered reducer.
+- Explicit `reducers=[...]` wins on conflict with an auto-discovered reducer. A reducer and a [`Derived`](#derived) of one name raise `TypeError`, from any source.
+- A reducer in `reducers=[...]` must have a `name`. An empty name raises `ValueError`.
 
 ## Graph-wide reducers
 
@@ -154,6 +155,80 @@ def step(state: dict[str, int], event: Foldable) -> dict[str, int]:
 To have mypy flag a `default_factory`/`fold` state-shape disagreement, pin the state type: `FoldReducer[dict[str, int]](...)`. Without a pin, mypy widens `S` to the join of the two and does not catch the mismatch. The generic does not propagate to handler params. Those are injected by name at runtime.
 
 For a bespoke channel, subclass the public `BaseReducer` directly.
+
+## `Derived` { #derived }
+
+A `Derived` is a value that a pure function computes from stored reducers. It is not a stored reducer: it has no channel, and the checkpoint never holds it. Use it when a handler acts on a fact that follows from two or more stored reducers. Without it, each handler declares every input reducer and computes the fact again.
+
+One stored reducer cannot give this value. A `FoldReducer` counts the attempts, and a `ScalarReducer` holds the limit that a configuration event sets:
+
+```python
+from langgraph_events import (
+    Derived, EventGraph, FoldReducer, IntegrationEvent, ScalarReducer, on,
+)
+
+
+class Attempted(IntegrationEvent):
+    def fold(self, state: int) -> int:
+        return state + 1
+
+
+class LimitSet(IntegrationEvent):
+    limit: int
+
+
+attempts = FoldReducer(name="attempts", event_type=Attempted, default_factory=int)
+limit = ScalarReducer(name="limit", event_type=LimitSet, fn=lambda e: e.limit, default=3)
+
+
+def remaining_of(attempts: int, limit: int) -> int:
+    return max(limit - attempts, 0)
+
+
+remaining = Derived(name="remaining", fn=remaining_of)
+
+
+@on(Attempted)
+def retry(event: Attempted, remaining: int) -> Retried | GaveUp:
+    # `remaining` is injected by parameter name, like a reducer value.
+    return Retried() if remaining else GaveUp()
+
+
+graph = EventGraph([retry], reducers=[attempts, limit, remaining])
+```
+
+- **Inputs by parameter name.** The parameter names of `fn` name its input reducers. Before a handler runs, the framework calls `fn` with the values of those reducers at node start. An unset input gets the empty default of its reducer.
+- **Not stored.** The value is never written to the checkpoint. It cannot drift from its inputs, and a new `Derived` needs no backfill on an existing thread. `pre_seed()` and `apre_seed()` refuse a `Derived` name with `ValueError`.
+- **Registration.** Pass it in `reducers=[...]`, or declare it as a `Namespace` class attribute. On a namespace, `name` and `namespace` auto-fill, as on a reducer. An input can be any registered stored reducer. The namespace places the value in the structure views only.
+- **Names.** `topology.reducer_names` and `topology.reducers` hold the stored reducers only. `topology.injectable_names` holds every name a handler can read: each stored reducer and each `Derived`. `topology.derived` maps each `Derived` by its name.
+- **Required values.** As on a `ScalarReducer` parameter, a non-`None` annotation opts into [`ReducerNotSetError`](#scalar-reducer-required). The message asks you to make the `Derived` return a non-`None` value, or to permit `None`.
+- **Errors.** `fn` runs before the handler body, outside the `raises=` boundary, like `ReducerNotSetError`. The exception keeps its type and gets a note that names the `Derived`.
+- **Services.** A `Derived` wins over a service of the same name, as a reducer does.
+- **Streams and clients.** `stream_events(include_reducers=...)`, `stream_resume(include_reducers=...)` and `AGUIAdapter(include_reducers=...)` accept a `Derived` name. A client then gets the value in `StreamFrame.reducers` and in the `STATE_SNAPSHOT`. `include_reducers=True` selects each stored reducer and each `Derived`, in registration order. `AGUIAdapter` drops a `Derived` key from the inbound client state.
+- **A thread with no checkpoint.** `AGUIAdapter.connect()` and `snapshot()` compute each selected value from the empty defaults, as a handler and a stream frame do.
+- **Empty defaults.** `fn` must accept the empty default of each input, for example `None` for an unset `ScalarReducer`. An AG-UI replay of a thread with no checkpoint calls `fn` with these defaults, before any handler runs. If `fn` raises there, `connect()` and `snapshot()` end with `RUN_ERROR`.
+- **Structure views.** `namespaces().text()`, `.mermaid()` and `.json()` show each `Derived` with its inputs. The mermaid diagram draws it as a hexagon, with a dotted `reads` arrow from each input reducer.
+- **Reflection.** `graph.reflect(log).state()` projects each stored reducer over the log, then computes each `Derived` from those projections.
+
+Two limits apply to `StreamFrame.changed_reducers`:
+
+- It names a `Derived` when an event changes one of its inputs, also when the computed value stays the same. The framework does not call `fn` to compare the values.
+- A `Derived` with no parameter reads no input. Its value is the same for each frame, and `changed_reducers` never names it.
+
+Graph construction raises an error in each of these cases:
+
+| Case | Error | Reason |
+|---|---|---|
+| A parameter of `fn` names no registered reducer | `TypeError` | The input does not exist. The message lists the available reducers |
+| A parameter with a default names no registered reducer | `TypeError` | A parameter with a default must still name a reducer. Bind a constant in a closure |
+| A parameter of `fn` names another `Derived` | `TypeError` | An input must be a stored reducer. Read the inputs of the other `Derived` instead |
+| `fn` has a `*args`, `**kwargs` or positional-only parameter | `TypeError` | Each parameter must name one input reducer |
+| `inspect.signature` cannot read `fn`, for example a builtin or a value that is not callable | `TypeError` | The parameter names of `fn` name its inputs. The message names the `Derived` |
+| A reducer and a `Derived` have the same name, from `reducers=[...]` or from a namespace | `TypeError` | A handler parameter cannot name both |
+| A `Derived` has no name | `ValueError` | A handler parameter cannot name it. Pass `name=`, or declare it on a namespace |
+| The name of a `Derived` is a reserved state field, for example `events` | `ValueError` | The framework owns that field. The message says that the name is a `Derived` name |
+
+For two entries of the same kind and name, an entry in `reducers=[...]` wins over a namespace declaration. In `reducers=[...]`, a later entry wins over an earlier one.
 
 ## `message_reducer`
 

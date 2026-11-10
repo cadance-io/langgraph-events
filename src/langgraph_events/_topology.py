@@ -37,7 +37,6 @@ from langgraph_events._handler import (
 )
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
-    _BASE_FIELDS,
     _InputState,
     _leaf_node,
     _OutputState,
@@ -50,6 +49,7 @@ from langgraph_events._internal import (
 from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
+from langgraph_events._reducer_registry import ReducerRegistry, ReducerSelection
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer
 
-    from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._services import Services
     from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import (
@@ -393,38 +393,6 @@ def _collect_graph_namespaces(
     return found
 
 
-def _discover_namespace_reducers(
-    namespaces: dict[str, type[Namespace]],
-    explicit_reducers: dict[str, BaseReducer],
-) -> None:
-    """Auto-register reducers declared on the graph's namespaces.
-
-    Unions each namespace's ``__reducers__`` into *explicit_reducers*.
-    *namespaces* is the graph's own registry from
-    ``_collect_graph_namespaces``, so discovery never reaches a same-named
-    namespace belonging to another graph.
-
-    Collisions:
-    - Two different discovered reducers with the same name → ``TypeError``.
-    - Explicit reducer (already in the dict) shares a name with a discovered
-      one → explicit wins; discovered one is skipped silently.
-    """
-    discovered: dict[str, BaseReducer] = {}
-    for namespace_cls in namespaces.values():
-        for r in namespace_cls.__reducers__:
-            existing = discovered.get(r.name)
-            if existing is None:
-                discovered[r.name] = r
-            elif existing is not r:
-                raise TypeError(
-                    f"Reducer name {r.name!r} collides between domains: "
-                    f"{existing!r} and {r!r}"
-                )
-    # Merge into explicit; explicit wins on name conflict.
-    for name, r in discovered.items():
-        explicit_reducers.setdefault(name, r)
-
-
 _RESERVED_NODE_NAMES = frozenset({"__seed__", "__router__", "__start__", "__end__"})
 """Graph-node names no handler or ``previously=`` alias may claim: the
 framework's own pregel nodes (``__seed__``/``__router__``, registered in the
@@ -572,7 +540,7 @@ class EventTopology:
         self,
         handlers: list[Callable[..., Any]],
         *,
-        reducers: list[BaseReducer] | None = None,
+        reducers: Sequence[BaseReducer | Derived] | None = None,
         context_schema: type | None = None,
         retired: Sequence[type[Event]] = (),
     ) -> None:
@@ -590,18 +558,15 @@ class EventTopology:
         self._retired = tuple(dict.fromkeys(retired))
         self._context_schema = context_schema
         handlers = _expand_command_handlers(handlers)
-        self._reducers: dict[str, BaseReducer] = {r.name: r for r in (reducers or [])}
         self._namespaces = _collect_graph_namespaces(handlers)
-        _discover_namespace_reducers(self._namespaces, self._reducers)
-        conflicts = set(self._reducers.keys()) & set(_BASE_FIELDS.keys())
-        if conflicts:
-            raise ValueError(
-                f"Reducer name(s) {conflicts} conflict with reserved state fields"
-            )
+        self._registry = ReducerRegistry.build(
+            reducers or (), self._namespaces.values()
+        )
+        self._reducers = dict(self._registry.reducers)
 
         self._handler_metas: list[HandlerMeta] = []
 
-        reducer_names = self.reducer_names
+        reducer_names = self.injectable_names
         seen_names: dict[str, int] = {}
         for fn in handlers:
             meta = HandlerMeta.of(
@@ -649,7 +614,7 @@ class EventTopology:
         cls,
         *domains: type[Namespace],
         handlers: list[Callable[..., Any]] | None = None,
-        reducers: list[BaseReducer] | None = None,
+        reducers: Sequence[BaseReducer | Derived] | None = None,
         context_schema: type | None = None,
         retired: Sequence[type[Event]] = (),
     ) -> EventTopology:
@@ -720,7 +685,10 @@ class EventTopology:
     @functools.cached_property
     def _namespace_model(self) -> NamespaceModel:
         return NamespaceModel._build(
-            self._handler_metas, self._return_info, self._reducers.values()
+            self._handler_metas,
+            self._return_info,
+            self._reducers.values(),
+            self._registry.derived.values(),
         )
 
     @property
@@ -730,13 +698,28 @@ class EventTopology:
 
     @property
     def reducers(self) -> Mapping[str, BaseReducer]:
-        """Each registered reducer by its name. Read-only."""
+        """Each stored reducer by its name. Read-only. A :class:`Derived` is
+        not a stored reducer, see :attr:`derived`."""
         return types.MappingProxyType(self._reducers)
 
     @property
     def reducer_names(self) -> frozenset[str]:
-        """The names of all registered reducers."""
+        """The names of the stored reducers. A :class:`Derived` is not one.
+
+        See :attr:`injectable_names` for every name a handler can read.
+        """
         return frozenset(self._reducers.keys())
+
+    @property
+    def derived(self) -> Mapping[str, Derived[Any]]:
+        """Each registered :class:`Derived` by its name. Read-only."""
+        return self._registry.derived
+
+    @property
+    def injectable_names(self) -> frozenset[str]:
+        """Every name a handler parameter can read: each stored reducer and
+        each :class:`Derived`."""
+        return frozenset(self._registry.readables)
 
     @property
     def handler_names(self) -> frozenset[str]:
@@ -809,7 +792,7 @@ class EventTopology:
         the parameter annotation, and for a parameter that no source fills.
         *entry* is the call that received ``services=``, for the error.
         """
-        reducer_names = self.reducer_names
+        reducer_names = self.injectable_names
         bound: list[BoundHandler] = []
         for meta in self._handler_metas:
             handler = services.bind(meta, self._context_schema)
@@ -843,29 +826,30 @@ class EventTopology:
         return frozenset(changed)
 
     def resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
-        """The reducer names that *include_reducers* selects.
+        """The names that *include_reducers* selects, as
+        :meth:`select_reducers` gives them.
 
-        ``True`` selects every reducer, and ``False`` or ``[]`` selects none.
-        A list selects its known names in its order. An unknown name gets a
-        warning and is skipped.
+        A name can be a stored reducer or a :class:`Derived`.
         """
-        if include_reducers is True:
-            return list(self._reducers.keys())
-        if include_reducers:  # non-empty list
-            unknown = set(include_reducers) - set(self._reducers.keys())
-            if unknown:
-                warn_user(
-                    f"Unknown reducer name(s) {unknown} in include_reducers; "
-                    f"available: {set(self._reducers.keys())}",
-                )
-            return [n for n in include_reducers if n in self._reducers]
-        return []
+        return list(self.select_reducers(include_reducers).names)
+
+    def select_reducers(self, include_reducers: bool | list[str]) -> ReducerSelection:
+        """The values that an ``include_reducers=`` value selects for a stream.
+
+        ``True`` selects every stored reducer and every :class:`Derived`, in
+        registration order. ``False`` or ``[]`` selects none. A list selects
+        its known names in its order. An unknown name gets a warning and is
+        skipped. :meth:`ReducerSelection.values` reads each selected value
+        from a state, with an empty default for an unset channel.
+        """
+        return self._registry.select(include_reducers)
 
     def _handler_node(self, bound: BoundHandler) -> RunnableLambda:
         """The node that runs *bound* with its services."""
         return make_handler_node(
             bound,
             reducers=self._reducers,
+            readables=self._registry.readables,
             return_contract=self._return_contracts.get(bound.meta.name),
             model_provider=self.namespaces,
         )

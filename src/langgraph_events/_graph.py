@@ -46,7 +46,8 @@ if TYPE_CHECKING:
     from langgraph.types import Checkpointer, Interrupt, StateSnapshot
 
     from langgraph_events._namespace import NamespaceModel
-    from langgraph_events._reducer import BaseReducer
+    from langgraph_events._reducer import BaseReducer, Derived
+    from langgraph_events._reducer_registry import ReducerSelection
     from langgraph_events._reflection import Reflection
     from langgraph_events._services import Services
     from langgraph_events._types import PauseSignal
@@ -247,7 +248,7 @@ class EventGraph:
         handlers: list[Callable[..., Any]],
         *,
         max_rounds: int = 100,
-        reducers: list[BaseReducer] | None = None,
+        reducers: Sequence[BaseReducer | Derived] | None = None,
         services: Sequence[Any] | Mapping[str, Any] | None = None,
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
@@ -369,7 +370,9 @@ class EventGraph:
         from langgraph_events._reflection import Reflection  # noqa: PLC0415
 
         return Reflection(
-            log, model=self.namespaces(), reducers=self._topology.reducers
+            log,
+            model=self.namespaces(),
+            reducers=self._topology._registry.readables,
         )
 
     @property
@@ -602,17 +605,28 @@ class EventGraph:
 
         Each event in ``values["events"]`` gets a ``None`` cause.
 
-        Requires a checkpointer.
+        Requires a checkpointer. Raises ``ValueError`` for the name of a
+        :class:`Derived`, because the checkpoint does not store it.
         """
         self._require_checkpointer("pre_seed")
+        self._refuse_derived_seed(values)
         self.compiled.update_state(config, pad_causes(values, None), as_node="__seed__")
 
     async def apre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
         """Async version of :meth:`pre_seed`."""
         self._require_checkpointer("apre_seed")
+        self._refuse_derived_seed(values)
         await self.compiled.aupdate_state(
             config, pad_causes(values, None), as_node="__seed__"
         )
+
+    def _refuse_derived_seed(self, values: Mapping[str, Any]) -> None:
+        derived = sorted(set(values) & self._topology.derived.keys())
+        if derived:
+            raise ValueError(
+                f"pre_seed() got the Derived name(s) {derived}. The checkpoint "
+                f"does not store a Derived value. Seed its input reducers instead."
+            )
 
     @staticmethod
     def _awaits_resume(snapshot: StateSnapshot) -> bool:
@@ -962,17 +976,14 @@ class EventGraph:
         self,
         state: dict[str, Any],
         prev_count: int,
-        reducer_names: list[str],
+        selection: ReducerSelection,
     ) -> tuple[int, list[StreamFrame]]:
         """Extract new events and reducer snapshots from a values-mode state."""
         all_events: list[Event] = state.get("events", [])
         new_events = all_events[prev_count:]
         if not new_events:
             return prev_count, []
-        reducers = {
-            name: state.get(name, self._topology.reducers[name].empty)
-            for name in reducer_names
-        }
+        reducers = selection.values(state)
         return len(all_events), [
             StreamFrame(event=e, reducers=reducers, changed_reducers=None)
             for e in new_events
@@ -984,7 +995,7 @@ class EventGraph:
         seeds: list[Event],
         *,
         snapshot: StateSnapshot | None,
-        reducer_names: list[str],
+        selection: ReducerSelection,
         include_llm_tokens: bool,
         include_custom_events: bool,
         **kwargs: Any,
@@ -1001,9 +1012,12 @@ class EventGraph:
         # (subsequent run / resume), start from the checkpointed values so
         # the shadow state matches what the compiled graph already restored.
         # Fall back to r.seed() only on the true first run.
+        # The shadow state follows each stored channel that a shown value
+        # reads. A shown ``Derived`` is computed from it for each frame.
+        channels = list(selection.channels)
         reducer_state: dict[str, Any] = {}
         checkpoint_values: dict[str, Any] | None = None
-        if reducer_names and self._checkpointer is not None:
+        if channels and self._checkpointer is not None:
             config = kwargs.get("config")
             if config is not None:
                 if snapshot is None:
@@ -1011,7 +1025,7 @@ class EventGraph:
                 if snapshot.values:
                     checkpoint_values = snapshot.values
 
-        for name in reducer_names:
+        for name in channels:
             if checkpoint_values is not None:
                 reducer_state[name] = checkpoint_values.get(
                     name, self._topology.reducers[name].empty
@@ -1035,22 +1049,22 @@ class EventGraph:
         #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
         if checkpoint_values is not None and not is_resume:
             for s in seeds:
-                self._topology._update_reducer_state(reducer_state, s, reducer_names)
+                self._topology._update_reducer_state(reducer_state, s, channels)
 
         # Yield seed events
         for s in seeds:
-            if reducer_names:
+            if selection.names:
                 changed = frozenset(
                     name
-                    for name in reducer_names
+                    for name in channels
                     if self._topology.reducers[name].has_contributions(
                         self._topology.reducers[name].collect([s])
                     )
                 )
                 yield StreamFrame(
                     event=s,
-                    reducers=dict(reducer_state),
-                    changed_reducers=changed,
+                    reducers=selection.values(reducer_state),
+                    changed_reducers=selection.changed(changed),
                 )
             else:
                 yield s
@@ -1129,16 +1143,16 @@ class EventGraph:
             if isinstance(chunk, dict):
                 interrupts.extend(chunk.get(_INTERRUPT_CHANNEL, ()))
             for event in self._events_from_chunk(chunk, seen):
-                if reducer_names:
+                if selection.names:
                     changed = self._topology._update_reducer_state(
                         reducer_state,
                         event,
-                        reducer_names,
+                        channels,
                     )
                     yield StreamFrame(
                         event=event,
-                        reducers=dict(reducer_state),
-                        changed_reducers=changed,
+                        reducers=selection.values(reducer_state),
+                        changed_reducers=selection.changed(changed),
                     )
                 else:
                     yield event
@@ -1170,7 +1184,7 @@ class EventGraph:
         self,
         inp: _GraphInput,
         seeds: list[Event],
-        reducer_names: list[str],
+        selection: ReducerSelection,
         *,
         deadline: float | None,
         pause_on: PauseSignal | None,
@@ -1179,7 +1193,7 @@ class EventGraph:
         """Shared sync streaming core for stream_events/stream_resume."""
         self._prepare_run(kwargs, deadline, pause_on)
         compiled = self.compiled
-        if not reducer_names:
+        if not selection.names:
             yield from seeds
             seen: set[int] = set()
             for chunk in compiled.stream(inp, stream_mode="updates", **kwargs):
@@ -1192,7 +1206,7 @@ class EventGraph:
                     first = False
                     continue
                 prev_count, frames = self._frames_from_values(
-                    state, prev_count, reducer_names
+                    state, prev_count, selection
                 )
                 yield from frames
 
@@ -1200,12 +1214,12 @@ class EventGraph:
         self,
         inp: _GraphInput,
         seeds: list[Event],
-        reducer_names: list[str],
+        selection: ReducerSelection,
         **kwargs: Any,
     ) -> AsyncIterator[Event | StreamFrame]:
         """Shared async streaming core for astream_events/astream_resume."""
         compiled = self.compiled
-        if not reducer_names:
+        if not selection.names:
             for s in seeds:
                 yield s
             seen: set[int] = set()
@@ -1220,7 +1234,7 @@ class EventGraph:
                     first = False
                     continue
                 prev_count, frames = self._frames_from_values(
-                    state, prev_count, reducer_names
+                    state, prev_count, selection
                 )
                 for frame in frames:
                     yield frame
@@ -1261,11 +1275,11 @@ class EventGraph:
         kwargs["context"] = context
         inp = self._prepare_input(seed)
         kwargs.pop("stream_mode", None)
-        reducer_names = self._topology.resolve_reducer_names(include_reducers)
+        selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
             inp,
             inp["events"],
-            reducer_names,
+            selection,
             deadline=deadline,
             pause_on=pause_on,
             **kwargs,
@@ -1323,11 +1337,11 @@ class EventGraph:
                     yield latest
             return
         kwargs.pop("stream_mode", None)
-        reducer_names = self._topology.resolve_reducer_names(include_reducers)
+        selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
             LGCommand(resume=value),
             seeds or [],
-            reducer_names,
+            selection,
             deadline=deadline,
             pause_on=pause_on,
             **kwargs,
@@ -1353,19 +1367,19 @@ class EventGraph:
         """
         kwargs.pop("stream_mode", None)
         self._prepare_run(kwargs, deadline, pause_on)
-        reducer_names = self._topology.resolve_reducer_names(include_reducers)
+        selection = self._topology.select_reducers(include_reducers)
         delegate = (
             self._astream_v2(
                 inp,
                 seeds,
                 snapshot=snapshot,
-                reducer_names=reducer_names,
+                selection=selection,
                 include_llm_tokens=include_llm_tokens,
                 include_custom_events=include_custom_events,
                 **kwargs,
             )
             if include_llm_tokens or include_custom_events
-            else self._astream_core(inp, seeds, reducer_names, **kwargs)
+            else self._astream_core(inp, seeds, selection, **kwargs)
         )
         async for item in delegate:
             yield item

@@ -120,7 +120,7 @@ Handler params resolve from:
 - `log: EventLog`: full history
 - `config: RunnableConfig` / `store: BaseStore`: LangGraph injections
 - A parameter annotated with the graph's `context_schema`: the typed run context (see [Run context](#run-context))
-- Reducer channel by **parameter name** (see [Reducers](reducers.md))
+- Reducer channel or [`Derived`](reducers.md#derived) value by **parameter name** (see [Reducers](reducers.md))
 - Field matchers (external only): typed subset dispatch and injection
 - **Services**: project dependencies registered on `EventGraph(services=...)`
 
@@ -279,7 +279,7 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
 - `EventTopology.from_namespaces(*namespaces, handlers=..., reducers=...)` collects the same
   handlers as `EventGraph.from_namespaces(...)`. A store-only client does not list every handler.
 - Read the static facts of a graph from `topology`: `handler_names`, `reducer_names`,
-  `resumable_node_names`, `reducers`, `requirements` and `namespaces()`. On a graph, use
+  `injectable_names`, `resumable_node_names`, `reducers`, `requirements` and `namespaces()`. On a graph, use
   `graph.topology.handler_names`. The same properties on `EventGraph` forward to the topology.
 - `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
   `reducers`. A requirement that no service matches raises `TypeError`. The error names the

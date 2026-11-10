@@ -177,14 +177,13 @@ class AGUIAdapter:
         # Note: `False` resolves to activation=["messages"] (so
         # MessagesSnapshot still works) while the projection returns `{}` —
         # empty StateSnapshot, populated MessagesSnapshot.  Intentional.
-        resolved = graph.topology.resolve_reducer_names(include_reducers)
-        if "messages" not in resolved:
-            include_reducers = (
-                [*include_reducers, "messages"]
-                if isinstance(include_reducers, list)
-                else ["messages"]
-            )
+        if include_reducers is False:
+            include_reducers = ["messages"]
+        elif include_reducers is not True and "messages" not in include_reducers:
+            include_reducers = [*include_reducers, "messages"]
         self._activation: bool | list[str] = include_reducers
+        # The stream and the replayed snapshot show the same values.
+        self._selection = graph.topology.select_reducers(include_reducers)
         # Pre-compute the allow-list set for fast filtering.  None for
         # bool=True (no filter beyond the framework strip).
         self._allowed_keys: frozenset[str] | None = (
@@ -412,14 +411,16 @@ class AGUIAdapter:
             yield from self._map_event(interrupted, ctx)
 
     def _snapshot_events(self, checkpoint: StateSnapshot | None) -> list[BaseEvent]:
-        reducers = (
+        channels = (
             checkpoint.values
             if checkpoint is not None and isinstance(checkpoint.values, dict)
             else {}
         )
+        # A fresh thread reads each value from its empty defaults, as a
+        # handler and a stream frame do.
         return [
-            build_state_snapshot(self._project_state(reducers)),
-            build_messages_snapshot(reducers.get("messages") or []),
+            build_state_snapshot(self._project_state(self._selection.values(channels))),
+            build_messages_snapshot(channels.get("messages") or []),
         ]
 
     def _should_gate_with_checkpoint_replay(
@@ -445,12 +446,17 @@ class AGUIAdapter:
         same projection used outbound (framework internals stripped,
         dedicated keys stripped, then the user's ``include_reducers``) so
         a stale or untrusted client can't echo back keys the dev decided
-        are internal.  Empty / non-dict state is treated as "no update."
+        are internal.  A ``Derived`` key is dropped too: the server computes
+        it, so a client cannot set it.  Empty / non-dict state is treated as
+        "no update."
         """
         raw = input_data.state
         if not isinstance(raw, dict) or not raw:
             return None
-        filtered = self._project_state(raw)
+        derived = self._graph.topology.derived
+        filtered = {
+            k: v for k, v in self._project_state(raw).items() if k not in derived
+        }
         return filtered or None
 
     def _prepend_frontend_state(
