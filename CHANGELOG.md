@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **A reducer in `reducers=[...]` must have a name.** An empty name raises `ValueError` at
+  graph construction. Before, the graph registered a channel named `""`, which no handler
+  parameter can read. Pass `name=`, or declare the reducer on a `Namespace`.
+- **`BaseReducer` has two new public attributes, `read` and `sources`.** `read(state)` gives
+  the value of the channel in a state, or `empty` when the channel is unset. `sources` is
+  `(self,)`. A subclass that defines its own `read` or `sources` attribute must rename it.
+
 ### Added
 
 - **`Derived` gives a handler a value that a pure function computes from stored reducers.**
@@ -33,15 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `topology.select_reducers(include_reducers)` gives the values that a stream shows. Its
   `values(state)` reads each one from a state, with an empty default for an unset channel.
   `resolve_reducer_names()` keeps its name and gives the same names.
-- `BaseReducer.read(state)` gives the value of the channel in a state, or `empty` when the
-  channel is unset. `BaseReducer.sources` is `(self,)`. A subclass that defines its own `read`
-  or `sources` attribute must rename it.
 
 ### Changed
 
-- **A reducer in `reducers=[...]` must have a name.** An empty name raises `ValueError` at
-  graph construction. Before, the graph registered a channel named `""`, which no handler
-  parameter can read. Pass `name=`, or declare the reducer on a `Namespace`.
 - **`AGUIAdapter.connect()` and `snapshot()` show the empty defaults on a thread with no
   checkpoint.** The `STATE_SNAPSHOT` holds each selected reducer with its empty default,
   and each `Derived` computed from those defaults. Before, it was `{}`. A handler and a
