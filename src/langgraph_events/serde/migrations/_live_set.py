@@ -166,6 +166,7 @@ def rewrite_live_set(
     expect: str,
     apply: bool,
     passes: int = 3,
+    drop_retired: bool = False,
     log: TextIO | None = None,
 ) -> LiveSetOutcome | WrongRelease:
     """Rewrite every checkpoint namespace of every thread in the store of
@@ -181,6 +182,10 @@ def rewrite_live_set(
     rewrite. The loop stops when no such checkpoint is left, because a
     refused checkpoint changes only when a person acts. Without *apply*,
     the function only plans.
+
+    With *drop_retired*, each plan and each pass drops the stored
+    instances of each class in ``retired=`` of the topology that the
+    target builds. See :attr:`~langgraph_events.EventTopology.retired_events`.
 
     Raises:
         ValueError: when *passes* is below 1, or when the graph cannot be
@@ -202,14 +207,17 @@ def rewrite_live_set(
     out = sys.stderr if log is None else log
     with target.open_store() as saver:
         store = _same_serde(target.build(saver), running)
+        drop = store.topology.retired_events if drop_retired else ()
+        plan_rewrite = functools.partial(store.plan_rewrite, drop=drop)
+        rewrite_store = functools.partial(store.rewrite_store, drop=drop)
 
         def plan() -> RewriteReport:
-            return _walk(store.plan_rewrite, target.thread_keys(saver), applied=False)
+            return _walk(plan_rewrite, target.thread_keys(saver), applied=False)
 
         reports: list[RewriteReport] = []
         final = plan()
         while apply and _to_rewrite(final) and len(reports) < passes:
-            report = _walk(store.rewrite_store, _to_rewrite(final), applied=True)
+            report = _walk(rewrite_store, _to_rewrite(final), applied=True)
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()

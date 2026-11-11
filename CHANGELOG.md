@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`rewrite --drop-retired` drops the stored instances of each class in `retired=`.** The
+  migration CLI passes `retired_events` of the topology that the target builds as `drop=` to
+  each plan and each pass. So a deploy can drop a tombstone inside the guarded `rewrite`
+  step, under the `--expect` check, before the next release deletes the tombstone. The
+  target can build an `EventGraph` or an `EventStore`. Without the flag, the command drops
+  nothing. The next command that the output names keeps the flag.
+  `rewrite_live_set(..., drop_retired=True)` and `Invocation(..., drop_retired=True)` are
+  the Python forms. See
+  [The steps](https://cadance-io.github.io/langgraph-events/migration-gate/#the-steps).
+
 ## [0.49.0] - 2026-11-10
 
 ### Breaking

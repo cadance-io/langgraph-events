@@ -46,10 +46,12 @@ class Invocation:
 
     ``target`` is the ``module:attr`` of the target. ``previous`` is the
     path of the previous release's baseline, when the caller gave one.
+    ``drop_retired`` is true when the caller gave ``rewrite --drop-retired``.
     """
 
     target: str
     previous: str | None = None
+    drop_retired: bool = False
 
     def baseline_update(self, *, prune: bool = False) -> str:
         """The ``baseline update`` command. *prune* asks for ``--previous``."""
@@ -73,9 +75,11 @@ class Invocation:
         )
 
     def rewrite(self, expect: str, *, apply: bool = False) -> str:
-        """The ``rewrite`` command. *apply* asks for ``--apply``."""
+        """The ``rewrite`` command. *apply* asks for ``--apply``. The
+        command keeps the caller's ``--drop-retired``."""
         flag = " --apply" if apply else ""
-        return f"{PROGRAM} rewrite {self.target}{flag} --expect {expect}"
+        drop = " --drop-retired" if self.drop_retired else ""
+        return f"{PROGRAM} rewrite {self.target}{flag} --expect {expect}{drop}"
 
 
 class PreviousRequiredError(ValueError):
