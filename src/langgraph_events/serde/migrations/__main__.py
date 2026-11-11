@@ -136,11 +136,6 @@ def _parser() -> argparse.ArgumentParser:
         default=str(Verdict.CLEAN),
         help="the worst verdict of the last plan that still exits 0 (default: clean)",
     )
-    rewrite.add_argument(
-        "--drop-retired",
-        action="store_true",
-        help="also drop the stored instances of each event class in retired=",
-    )
     rewrite.set_defaults(run=_rewrite)
 
     restore = commands.add_parser(
@@ -211,10 +206,9 @@ def _rewrite(options: argparse.Namespace) -> int:
         expect=options.expect,
         apply=options.apply,
         passes=options.passes,
-        drop_retired=options.drop_retired,
         log=sys.stdout,
     )
-    invocation = Invocation(options.target, drop_retired=options.drop_retired)
+    invocation = Invocation(options.target)
     if isinstance(outcome, WrongRelease):
         print(outcome.render(invocation, apply=options.apply), file=sys.stderr)
         return _WRONG_RELEASE

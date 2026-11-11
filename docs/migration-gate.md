@@ -239,17 +239,30 @@ Step 3 stops a release that cannot read the store before that release serves. A 
 
 `--expect` is a release check. The command compares the migrations of the running code with the fingerprint before it opens the store. A mismatch exits 3. So the step cannot run under the wrong release, for example after a rollback. The command writes each pass line and its report to stdout, and an error to stderr. Some deploy tools show the stderr of a remote command only when it fails, so a successful run still shows what it changed.
 
-`--drop-retired` drops the stored instances of each event class in `retired=` of the topology that the target builds. See [Retired events](concepts.md#retired-events). The target can build an `EventGraph` or an `EventStore`. Each plan and each pass of the command passes these classes as `drop=` to `plan_rewrite()` and `rewrite_store()`. See [Rewriting the live set](#rewriting-the-live-set). So the drop runs inside the `--expect` check, the passes and the verdict of a normal rewrite. Without the flag, the command drops nothing. A topology with no `retired=` drops nothing with the flag. When the output names the next command, the command keeps `--drop-retired`.
+### Dropping retired events
 
-Use the flag to delete a tombstone through the deploy steps. List the tombstone in `retired=`. Then add `--drop-retired` to the `rewrite` command of steps 3, 4 and 6 of the release that holds the tombstone. When step 6 exits 0, no thread holds the tombstone, so the next release can delete it. See [Deleting the tombstone](retiring-interrupted.md#recovering-a-delete-first-deployment).
+`drop=` on the `MigrationTarget` names the event classes whose stored instances `rewrite` drops. Each plan and each pass of the command passes them as `drop=` to `plan_rewrite()` and `rewrite_store()`. See [Rewriting the live set](#rewriting-the-live-set). So the drop runs inside the `--expect` check, the passes and the verdict of a normal rewrite. The deploy commands do not change. With the default `drop=()`, the command drops nothing.
 
-WARNING: the flag drops every class in `retired=`, not only the tombstones. A plan refuses a thread that is paused on a dropped class, so step 3 exits 1 while such a thread waits. Settle each paused thread of a retired class before you add the flag, or keep that class out of `retired=`. A drop removes the stored event only. Reducer state is not recomputed.
+```python
+target = MigrationTarget(
+    graph=build_graph,
+    baseline=Path(__file__).parent / "lge-baseline.json",
+    store=lambda: PostgresSaver.from_conn_string(os.environ["DATABASE_URL"]),
+    drop=(Order.RetiredApprovalGate,),
+)
+```
+
+Each class in `drop` must be an event class of the topology. A class of `retired=` is one. When a class is not, every command exits 2 with an error that names the class. So `check` in CI refuses the target before a deploy runs it.
+
+Use `drop` to delete a tombstone through the deploy steps. See [Retired events](concepts.md#retired-events). In the release that holds the tombstone, list it in `retired=` and in `drop`. Steps 3, 4 and 6 then drop its stored instances. When step 6 exits 0, no thread holds the tombstone, so the next release can delete it. Remove the class from `drop` in the same change. See [Deleting the tombstone](retiring-interrupted.md#recovering-a-delete-first-deployment).
+
+WARNING: a plan refuses a thread that is paused on a dropped class, so step 3 exits 1 while such a thread waits. Settle each paused thread of a class before you add the class to `drop`. A drop removes the stored event only. Reducer state is not recomputed.
 
 ### What `rewrite` does
 
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
 2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the check judge the serde of step 1, so the serde that writes must be the same.
-3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. With `--drop-retired`, the plan also drops each stored instance of a class in `retired=`. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
+3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. The plan also drops each stored instance of a class in `drop` of the target. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
 4. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stdout.
 5. The verdict of the last plan and `--accept` decide the exit code.
 

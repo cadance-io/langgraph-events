@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from langgraph_events import EventGraph, EventStore
+    from langgraph_events import Event, EventGraph, EventStore
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
     from langgraph_events.serde.migrations._core import MigrationSet
 
@@ -68,12 +68,19 @@ class MigrationTarget:
     ``threads`` declares a store that other graphs can share, so
     :func:`backup_live_set`, :func:`restore_live_set` and
     :func:`drop_backups`, which act on the whole store, refuse it.
+    ``drop`` names the event classes whose stored instances the
+    ``rewrite`` command drops. Each plan and each pass passes them as
+    ``drop=`` to :meth:`~langgraph_events.EventStore.plan_rewrite` and
+    :meth:`~langgraph_events.EventStore.rewrite_store`. Each class must be
+    an event class of the topology, live or in ``retired=``. See
+    :meth:`build`.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph | EventStore]
     baseline: Path
     store: Callable[[], AbstractContextManager[BaseCheckpointSaver[Any]]] | None = None
     threads: Callable[[BaseCheckpointSaver[Any]], Iterable[ThreadKey]] | None = None
+    drop: tuple[type[Event], ...] = ()
 
     def thread_keys(self, saver: BaseCheckpointSaver[Any]) -> tuple[ThreadKey, ...]:
         """Every checkpoint namespace of every thread in *saver*, sorted.
@@ -159,8 +166,9 @@ class MigrationTarget:
 
         Raises:
             TargetError: when ``graph`` cannot take a checkpointer, when the
-                graph has no ``NamespaceAwareSerde``, or when a client
-                migration has no valid key.
+                graph has no ``NamespaceAwareSerde``, when a client
+                migration has no valid key, or when ``drop`` names a class
+                that is not an event class of the topology.
         """
         try:
             inspect.signature(self.graph).bind(saver)
@@ -195,7 +203,17 @@ class MigrationTarget:
             raise TargetError(
                 f"A client migration has no valid key: {error}"
             ) from error
-        return Snapshot(store, serde, migrations)
+        snapshot = Snapshot(store, serde, migrations)
+        known = snapshot._graph_classes()
+        for cls in self.drop:
+            if cls not in known:
+                name = getattr(cls, "__qualname__", repr(cls))
+                raise TargetError(
+                    f"MigrationTarget.drop names {name}, which is not an event "
+                    f"class of the topology. List only a class that the graph "
+                    f"stores, or a class of retired=."
+                )
+        return snapshot
 
 
 def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:

@@ -166,7 +166,6 @@ def rewrite_live_set(
     expect: str,
     apply: bool,
     passes: int = 3,
-    drop_retired: bool = False,
     log: TextIO | None = None,
 ) -> LiveSetOutcome | WrongRelease:
     """Rewrite every checkpoint namespace of every thread in the store of
@@ -183,17 +182,17 @@ def rewrite_live_set(
     refused checkpoint changes only when a person acts. Without *apply*,
     the function only plans.
 
-    With *drop_retired*, each plan and each pass drops the stored
-    instances of each class in ``retired=`` of the topology that the
-    target builds. See :attr:`~langgraph_events.EventTopology.retired_events`.
+    Each plan and each pass drops the stored instances of each class in
+    ``drop`` of *target*. See :class:`MigrationTarget`.
 
     Raises:
         ValueError: when *passes* is below 1, or when the graph cannot be
             rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
-            ``NamespaceAwareSerde``, when ``store`` returns an async context
-            manager, or when the saver that ``store`` opens holds a serde
-            with other migrations than the code.
+            ``NamespaceAwareSerde``, when ``drop`` names a class outside the
+            topology, when ``store`` returns an async context manager, or
+            when the saver that ``store`` opens holds a serde with other
+            migrations than the code.
     """
     if passes < 1:
         raise ValueError(f"passes must be 1 or more, got {passes}.")
@@ -207,9 +206,8 @@ def rewrite_live_set(
     out = sys.stderr if log is None else log
     with target.open_store() as saver:
         store = _same_serde(target.build(saver), running)
-        drop = store.topology.retired_events if drop_retired else ()
-        plan_rewrite = functools.partial(store.plan_rewrite, drop=drop)
-        rewrite_store = functools.partial(store.rewrite_store, drop=drop)
+        plan_rewrite = functools.partial(store.plan_rewrite, drop=target.drop)
+        rewrite_store = functools.partial(store.rewrite_store, drop=target.drop)
 
         def plan() -> RewriteReport:
             return _walk(plan_rewrite, target.thread_keys(saver), applied=False)
