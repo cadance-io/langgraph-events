@@ -258,7 +258,7 @@ target = MigrationTarget(
 )
 ```
 
-Each class in `drop` must be in `retired=` of the graph. `drop` deletes stored events, so it takes only a retired tombstone. The serde of the graph must also revive each class to that same class. `plan_rewrite()` applies this second rule. When a class breaks a rule, every command exits 2 with an error that names the class as `module:qualname`. So `check` in CI refuses a live class, or a class that `retired=` does not list, before a deploy runs it. The `retired=` rule reads the topology of the root graph only. So list a tombstone that only a subgraph retires in `retired=` of the root graph too.
+Each class in `drop` must be in `retired=` of the graph. `drop` deletes stored events, so it takes only a retired tombstone. The serde of the graph must also revive each class to that same class. `plan_rewrite()` applies this second rule. When a class breaks a rule, every command exits 2 with an error that names the class as `module:qualname`. When `drop` holds a value that is not an `Event` class, every command exits 2 with an error that shows that value. So `check` in CI refuses a live class, or a class that `retired=` does not list, before a deploy runs it. The `retired=` rule reads the topology of the root graph only. So list a tombstone that only a subgraph retires in `retired=` of the root graph too.
 
 A plan names each dropped class and its count of stored events, for example `t1: needs a rewrite, drops 2 events of myapp.order:Order.RetiredApprovalGate`. Under each pass line, an apply names them as `t1: dropped 2 events of myapp.order:Order.RetiredApprovalGate`.
 

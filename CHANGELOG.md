@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `drop` must be in `retired=` of the graph. A class that `retired=` does not list, a live
   class included, raises `TargetError`, so `check` exits 2. A class that the serde of the
   graph does not revive raises `TargetError` too. The error names the class as
-  `module:qualname`. `--expect` checks the migrations only, because `drop` is not part of
+  `module:qualname`. A value that is not an `Event` class raises `TargetError`, and
+  the error shows that value. `--expect` checks the migrations only, because `drop` is not part of
   the fingerprint. `check` and code review gate `drop`. The default `drop=()` drops
   nothing. See [Dropping retired events](https://cadance-io.github.io/langgraph-events/migration-gate/#dropping-retired-events).
 - **A plan and an apply pass name what they drop.** `rewrite` prints
