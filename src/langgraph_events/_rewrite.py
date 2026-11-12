@@ -77,6 +77,17 @@ class ThreadRewrite:
             return self.thread_id
         return f"{self.thread_id} in subgraph namespace {self.checkpoint_ns!r}"
 
+    @property
+    def drops(self) -> str:
+        """``dropped`` as text, for example ``"2 entries of module:qualname"``,
+        joined by ``", "``. ``""`` when ``drop`` removes no entry. One event
+        that waits for dispatch is two entries: one in ``events`` and one in
+        ``_pending``."""
+        return ", ".join(
+            f"{count} {'entry' if count == 1 else 'entries'} of {label}"
+            for label, count in self.dropped.items()
+        )
+
 
 @dataclass(frozen=True)
 class RewriteReport:
@@ -107,6 +118,12 @@ class RewriteReport:
             f"{mode}: {total} {noun}, {counts['rewrite']} rewrite, "
             f"{counts['unchanged']} unchanged, {counts['refused']} refused"
         ]
+        verb = "dropped" if self.applied else "drops"
+        lines.extend(
+            f"  {t.location}: {verb} {t.drops}"
+            for t in self.threads
+            if t.status == "rewrite" and t.dropped
+        )
         lines.extend(f"  {t.location}: refused, {t.reason}" for t in self.refused)
         return "\n".join(lines)
 

@@ -127,7 +127,8 @@ class LiveSetOutcome:
         """The verdict, each checkpoint that is not clean, then the next command.
 
         A checkpoint that the last plan reads as a rewrite also names the
-        reason when the last pass refused to write it. The next command is
+        reason when the last pass refused to write it, and each event class
+        that the rewrite drops, with its count of entries. The next command is
         printed when the last plan reads a checkpoint as a rewrite, and the
         verdict is not accepted or the passes ran out. A refused
         checkpoint needs the action that its reason names first.
@@ -146,8 +147,9 @@ class LiveSetOutcome:
         for thread in self.final.threads:
             if thread.status == "rewrite":
                 refusal = pass_refusals.get(_key(thread))
+                drops = f", drops {thread.drops}" if thread.dropped else ""
                 suffix = f", the last pass refused it: {refusal}" if refusal else ""
-                lines.append(f"  {thread.location}: needs a rewrite{suffix}")
+                lines.append(f"  {thread.location}: needs a rewrite{drops}{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.location}: refused, {thread.reason}")
         if _to_rewrite(self.final) and (self.passes or not accepted):
@@ -189,8 +191,9 @@ def rewrite_live_set(
         ValueError: when *passes* is below 1, or when the graph cannot be
             rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
-            ``NamespaceAwareSerde``, when the serde does not revive a class in
-            ``drop``, when ``store`` returns an async context manager, or
+            ``NamespaceAwareSerde``, when ``retired=`` of the graph does not
+            list a class in ``drop``, when the serde does not revive such a
+            class, when ``store`` returns an async context manager, or
             when the saver that ``store`` opens holds a serde with other
             migrations than the code.
     """

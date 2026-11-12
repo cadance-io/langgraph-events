@@ -72,10 +72,11 @@ class MigrationTarget:
     ``drop`` names the event classes whose stored instances the
     ``rewrite`` command drops. Each plan and each pass passes them as
     ``drop=`` to :meth:`~langgraph_events.EventStore.plan_rewrite` and
-    :meth:`~langgraph_events.EventStore.rewrite_store`. The serde of the
-    graph must revive each class to that same class, the rule of
-    ``plan_rewrite``. A live event class and a class of ``retired=`` pass
-    it. See :meth:`build`.
+    :meth:`~langgraph_events.EventStore.rewrite_store`. Each class in
+    ``drop`` must be in ``retired=`` of the graph, because ``drop`` deletes
+    stored events. So a live class or a wrong class fails. The serde of
+    the graph must also revive each class to that same class, the rule of
+    ``plan_rewrite``. See :meth:`build`.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph | EventStore]
@@ -169,8 +170,10 @@ class MigrationTarget:
         Raises:
             TargetError: when ``graph`` cannot take a checkpointer, when the
                 graph has no ``NamespaceAwareSerde``, when a client
-                migration has no valid key, or when ``drop`` names a class
-                that the serde of the graph does not revive.
+                migration has no valid key, when ``drop`` names a class
+                that ``retired=`` of the graph does not list, or when
+                ``drop`` names a class that the serde of the graph does not
+                revive.
         """
         try:
             inspect.signature(self.graph).bind(saver)
@@ -205,11 +208,38 @@ class MigrationTarget:
             raise TargetError(
                 f"A client migration has no valid key: {error}"
             ) from error
-        try:
-            validate_drop(serde, self.drop, "MigrationTarget")
-        except ValueError as error:
-            raise TargetError(str(error)) from error
+        self._check_drop(store, serde)
         return Snapshot(store, serde, migrations)
+
+    def _check_drop(self, store: EventStore, serde: NamespaceAwareSerde) -> None:
+        """Each class in ``drop`` must be in ``retired=`` of the topology of
+        *store*, and *serde* must revive it to that same class. The first
+        rule runs first, so a wrong class or a live class gets its message.
+        """
+        retired = store.topology.retired_events
+        for cls in self.drop:
+            label = (
+                Identity(cls.__module__, cls.__qualname__).label
+                if isinstance(cls, type)
+                else repr(cls)
+            )
+            if cls not in retired:
+                raise TargetError(
+                    f"MigrationTarget(drop=...) names {label}, which retired= of "
+                    f"the graph does not list. drop deletes stored events, so it "
+                    f"takes only a retired tombstone. List the class in retired=, "
+                    f"or remove it from drop."
+                )
+            try:
+                validate_drop(serde, (cls,), "MigrationTarget")
+            except ValueError as error:
+                raise TargetError(
+                    f"MigrationTarget(drop=...) names {label}, which the serde of "
+                    f"the graph does not revive to that class, so the rewrite "
+                    f"cannot find its stored instances. Build the serde of the "
+                    f"checkpointer with topology.serde(), which reads each class "
+                    f"of retired=."
+                ) from error
 
 
 def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
