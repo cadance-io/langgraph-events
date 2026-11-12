@@ -36,10 +36,13 @@ from _migration_fixtures import (
 from conftest import Started
 
 from langgraph_events import (
+    DomainEvent,
     Event,
     EventGraph,
     EventTopology,
     IntegrationEvent,
+    Interrupted,
+    Namespace,
     on,
 )
 from langgraph_events.serde import NamespaceAwareSerde
@@ -51,6 +54,7 @@ from langgraph_events.serde.migrations import (
 from langgraph_events.serde.migrations.__main__ import main
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     import pytest
@@ -71,8 +75,23 @@ class _Gone(IntegrationEvent):
     ``drop=`` tests."""
 
 
-class _Stranger(IntegrationEvent):
-    """An event class outside every topology of the ``drop=`` tests."""
+def _unrevivable() -> type[Event]:
+    """An event class that no serde revives: no import reaches a class
+    that a function defines."""
+
+    class _Stranger(IntegrationEvent):
+        pass
+
+    return _Stranger
+
+
+class _Hold(Interrupted):
+    """A tombstone that pauses the thread that holds it."""
+
+
+class _Retiring(Namespace):
+    class Gone(DomainEvent):
+        """A tombstone nested in a namespace."""
 
 
 @on(Started)
@@ -80,31 +99,70 @@ def _emit_gone(event: Started) -> _Gone:
     return _Gone()
 
 
-def _retired_target(
-    tmp_path: Path, *, drop: tuple[type[Event], ...] = ()
-) -> tuple[MigrationTarget, MemorySaver]:
-    """A target with *drop*, whose topology lists ``_Gone`` in
-    ``retired=``, over a store whose thread ``t1`` holds one ``_Gone``."""
+@on(Started)
+def _pause_on_hold(event: Started) -> _Hold:
+    return _Hold()
+
+
+@on(Started)
+def _emit_nested_gone(event: Started) -> _Retiring.Gone:
+    return _Retiring.Gone()
+
+
+def _seeded(seed: Callable[..., Any]) -> MemorySaver:
+    """A store whose thread ``t1`` ran *seed* on one ``Started``."""
     from langgraph.checkpoint.memory import MemorySaver
 
     saver = MemorySaver()
-    saver.serde = NamespaceAwareSerde(events=(Started, _Gone))
-    EventGraph([_emit_gone], checkpointer=saver).invoke(
-        Started(data="t1"), config=_cfg("t1")
-    )
-    topology = EventTopology([_noop], retired=[_Gone])
+    saver.serde = EventTopology([seed]).serde()
+    EventGraph([seed], checkpointer=saver).invoke(Started(data="t1"), config=_cfg("t1"))
+    return saver
+
+
+def _retired_target(
+    tmp_path: Path,
+    *,
+    drop: tuple[type[Event], ...] = (),
+    seed: Callable[..., Any] = _emit_gone,
+    retired: type[Event] = _Gone,
+    graph: Callable[[BaseCheckpointSaver[Any]], EventGraph] | None = None,
+) -> tuple[MigrationTarget, MemorySaver]:
+    """A target with *drop*, whose topology lists *retired* in
+    ``retired=``, over a store whose thread ``t1`` ran *seed*. *graph*
+    replaces the graph factory of that topology."""
+    saver = _seeded(seed)
+    topology = EventTopology([_noop], retired=[retired])
 
     def current(s: BaseCheckpointSaver[Any]) -> EventGraph:
         s.serde = topology.serde()
         return EventGraph.of(topology, checkpointer=s)
 
     target = MigrationTarget(
-        graph=current,
+        graph=graph or current,
         baseline=tmp_path / "baseline.json",
         store=lambda: contextlib.nullcontext(saver),
         drop=drop,
     )
     return target, saver
+
+
+_APPLIED_CLEAN = (
+    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
+    "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
+    "1 unchanged, 0 refused)\n"
+)
+"""The output of an apply that rewrites thread ``t1`` once, then reads it
+clean."""
+
+
+def _rewrite(
+    target: MigrationTarget, monkeypatch: pytest.MonkeyPatch, *flags: str
+) -> int:
+    """The exit code of ``rewrite`` with *flags* on *target*, under the
+    fingerprint of its code."""
+    expect = target.snapshot().migrations.fingerprint
+    spec = _install(monkeypatch, target)
+    return main(["rewrite", spec, "--expect", expect, *flags])
 
 
 def _stored_types(saver: MemorySaver, tid: str) -> list[type]:
@@ -714,17 +772,11 @@ def describe_rewrite_drop():
                 capsys: pytest.CaptureFixture[str],
             ):
                 target, saver = _retired_target(tmp_path, drop=(_Gone,))
-                expect = target.snapshot().migrations.fingerprint
-                spec = _install(monkeypatch, target)
 
-                code = main(["rewrite", spec, "--expect", expect, "--apply"])
+                code = _rewrite(target, monkeypatch, "--apply")
 
                 assert code == 0
-                assert capsys.readouterr().out == (
-                    "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
-                    "lge rewrite: clean (last plan: plan: 1 thread, 0 rewrite, "
-                    "1 unchanged, 0 refused)\n"
-                )
+                assert capsys.readouterr().out == _APPLIED_CLEAN
                 assert _stored_types(saver, "t1") == [Started]
 
         def when_apply_is_not_given():
@@ -748,24 +800,106 @@ def describe_rewrite_drop():
                 )
                 assert _stored_types(saver, "t1") == [Started, _Gone]
 
-    def when_the_target_drops_a_class_outside_the_topology():
-        def it_exits_two_and_names_the_class(
+    def when_the_serde_does_not_revive_a_class_in_drop():
+        not_revived = (
+            "error: MigrationTarget() cannot drop _unrevivable.<locals>._Stranger: "
+            "the checkpointer's "
+            "serde does not revive that identity to this class. Pass it via "
+            "events= or nest it inside a namespace passed via namespaces=, so "
+            "the walk can recognise its stored instances.\n"
+        )
+
+        def when_the_command_is_rewrite():
+            def it_exits_two_before_it_opens_the_store(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, saver = _retired_target(tmp_path, drop=(_unrevivable(),))
+                opened: list[MemorySaver] = []
+
+                def store() -> contextlib.nullcontext[MemorySaver]:
+                    opened.append(saver)
+                    return contextlib.nullcontext(saver)
+
+                spec = _install(monkeypatch, dataclasses.replace(target, store=store))
+
+                code = main(["rewrite", spec, "--expect", "any", "--apply"])
+
+                assert code == 2
+                assert capsys.readouterr() == ("", not_revived)
+                assert opened == []
+
+        def when_the_command_is_check():
+            def it_exits_two_and_names_the_class(
+                tmp_path: Path,
+                monkeypatch: pytest.MonkeyPatch,
+                capsys: pytest.CaptureFixture[str],
+            ):
+                target, _ = _retired_target(tmp_path, drop=(_unrevivable(),))
+                spec = _install(monkeypatch, target)
+
+                code = main(["check", spec])
+
+                assert code == 2
+                assert capsys.readouterr().err == not_revived
+
+    def when_the_graph_factory_builds_its_own_serde():
+        def it_drops_a_class_that_the_serde_revives(
             tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch,
             capsys: pytest.CaptureFixture[str],
         ):
-            target, saver = _retired_target(tmp_path, drop=(_Stranger,))
-            spec = _install(monkeypatch, target)
+            def current(s: BaseCheckpointSaver[Any]) -> EventGraph:
+                s.serde = NamespaceAwareSerde(events=(Started, _Gone))
+                return EventGraph([_noop], checkpointer=s)
 
-            code = main(["rewrite", spec, "--expect", "any", "--apply"])
+            target, saver = _retired_target(tmp_path, drop=(_Gone,), graph=current)
 
-            assert code == 2
-            assert capsys.readouterr().err == (
-                "error: MigrationTarget.drop names _Stranger, which is not an "
-                "event class of the topology. List only a class that the graph "
-                "stores, or a class of retired=.\n"
+            code = _rewrite(target, monkeypatch, "--apply")
+
+            assert code == 0
+            assert capsys.readouterr().out == _APPLIED_CLEAN
+            assert _stored_types(saver, "t1") == [Started]
+
+    def when_the_dropped_class_is_nested_in_a_namespace():
+        def it_drops_each_stored_instance(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            target, saver = _retired_target(
+                tmp_path,
+                drop=(_Retiring.Gone,),
+                seed=_emit_nested_gone,
+                retired=_Retiring.Gone,
             )
-            assert _stored_types(saver, "t1") == [Started, _Gone]
+
+            code = _rewrite(target, monkeypatch, "--apply")
+
+            assert code == 0
+            assert capsys.readouterr().out == _APPLIED_CLEAN
+            assert _stored_types(saver, "t1") == [Started]
+
+    def when_a_thread_is_paused_on_a_dropped_class():
+        def it_exits_one_under_accept_rewrite_and_names_the_thread(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            target, _ = _retired_target(
+                tmp_path, drop=(_Hold,), seed=_pause_on_hold, retired=_Hold
+            )
+
+            code = _rewrite(target, monkeypatch, "--accept", "rewrite")
+
+            assert code == 1
+            assert capsys.readouterr().out == (
+                "lge rewrite: not clean (last plan: plan: 1 thread, 0 rewrite, "
+                "0 unchanged, 1 refused)\n"
+                "  t1: refused, thread is paused on _Hold, a dropped class; "
+                "abandon it first\n"
+            )
 
     def when_the_target_drops_nothing():
         def it_keeps_each_stored_retired_event(
@@ -774,10 +908,8 @@ def describe_rewrite_drop():
             capsys: pytest.CaptureFixture[str],
         ):
             target, saver = _retired_target(tmp_path)
-            expect = target.snapshot().migrations.fingerprint
-            spec = _install(monkeypatch, target)
 
-            code = main(["rewrite", spec, "--expect", expect, "--apply"])
+            code = _rewrite(target, monkeypatch, "--apply")
 
             assert code == 0
             assert capsys.readouterr().out == (

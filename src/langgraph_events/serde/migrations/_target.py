@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events._identity import Identity
+from langgraph_events._rewrite import validate_drop
 from langgraph_events.serde.migrations._core import (
     _declares_migration,
     _init_fields,
@@ -71,9 +72,10 @@ class MigrationTarget:
     ``drop`` names the event classes whose stored instances the
     ``rewrite`` command drops. Each plan and each pass passes them as
     ``drop=`` to :meth:`~langgraph_events.EventStore.plan_rewrite` and
-    :meth:`~langgraph_events.EventStore.rewrite_store`. Each class must be
-    an event class of the topology, live or in ``retired=``. See
-    :meth:`build`.
+    :meth:`~langgraph_events.EventStore.rewrite_store`. The serde of the
+    graph must revive each class to that same class, the rule of
+    ``plan_rewrite``. A live event class and a class of ``retired=`` pass
+    it. See :meth:`build`.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph | EventStore]
@@ -168,7 +170,7 @@ class MigrationTarget:
             TargetError: when ``graph`` cannot take a checkpointer, when the
                 graph has no ``NamespaceAwareSerde``, when a client
                 migration has no valid key, or when ``drop`` names a class
-                that is not an event class of the topology.
+                that the serde of the graph does not revive.
         """
         try:
             inspect.signature(self.graph).bind(saver)
@@ -203,17 +205,11 @@ class MigrationTarget:
             raise TargetError(
                 f"A client migration has no valid key: {error}"
             ) from error
-        snapshot = Snapshot(store, serde, migrations)
-        known = snapshot._graph_classes()
-        for cls in self.drop:
-            if cls not in known:
-                name = getattr(cls, "__qualname__", repr(cls))
-                raise TargetError(
-                    f"MigrationTarget.drop names {name}, which is not an event "
-                    f"class of the topology. List only a class that the graph "
-                    f"stores, or a class of retired=."
-                )
-        return snapshot
+        try:
+            validate_drop(serde, self.drop, "MigrationTarget")
+        except ValueError as error:
+            raise TargetError(str(error)) from error
+        return Snapshot(store, serde, migrations)
 
 
 def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:

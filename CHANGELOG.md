@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`MigrationTarget(drop=...)` names the event classes whose stored instances `rewrite`
   drops.** Each plan and each pass of `rewrite` passes them as `drop=` to `plan_rewrite()`
-  and `rewrite_store()`. So a deploy can drop a tombstone inside the guarded `rewrite` step,
+  and `rewrite_store()`. A plan reports a stored instance as a rewrite, and an `--apply` pass
+  drops it. So a deploy can drop a tombstone inside the guarded `rewrite` step,
   under the `--expect` check, before the next release deletes the tombstone. The deploy
-  commands do not change. A class in `drop` that is not an event class of the topology
+  commands do not change. A class in `drop` that the serde of the graph does not revive
   raises `TargetError`, and the error names the class. The default `drop=()` drops nothing.
   See [Dropping retired events](https://cadance-io.github.io/langgraph-events/migration-gate/#dropping-retired-events).
 

@@ -182,15 +182,15 @@ def rewrite_live_set(
     refused checkpoint changes only when a person acts. Without *apply*,
     the function only plans.
 
-    Each plan and each pass drops the stored instances of each class in
-    ``drop`` of *target*. See :class:`MigrationTarget`.
+    Each plan reports a stored instance of a class in ``drop`` of *target*
+    as a rewrite, and each apply pass drops it. See :class:`MigrationTarget`.
 
     Raises:
         ValueError: when *passes* is below 1, or when the graph cannot be
             rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
-            ``NamespaceAwareSerde``, when ``drop`` names a class outside the
-            topology, when ``store`` returns an async context manager, or
+            ``NamespaceAwareSerde``, when the serde does not revive a class in
+            ``drop``, when ``store`` returns an async context manager, or
             when the saver that ``store`` opens holds a serde with other
             migrations than the code.
     """

@@ -252,17 +252,19 @@ target = MigrationTarget(
 )
 ```
 
-Each class in `drop` must be an event class of the topology. A class of `retired=` is one. When a class is not, every command exits 2 with an error that names the class. So `check` in CI refuses the target before a deploy runs it.
+The serde of the graph must revive each class in `drop` to that same class. `plan_rewrite()` applies the same rule. A live event class and a class of `retired=` pass it. When a class does not pass, every command exits 2 with an error that names the class. So `check` in CI refuses the target before a deploy runs it.
 
-Use `drop` to delete a tombstone through the deploy steps. See [Retired events](concepts.md#retired-events). In the release that holds the tombstone, list it in `retired=` and in `drop`. Steps 3, 4 and 6 then drop its stored instances. When step 6 exits 0, no thread holds the tombstone, so the next release can delete it. Remove the class from `drop` in the same change. See [Deleting the tombstone](retiring-interrupted.md#recovering-a-delete-first-deployment).
+Use `drop` to delete a tombstone through the deploy steps. See [Retired events](concepts.md#retired-events). In the release that holds the tombstone, list it in `retired=` and in `drop`. Step 4 drops its stored instances. Steps 3 and 6 report each thread that still holds one as a rewrite. When step 6 exits 0, the latest checkpoint of each thread holds no tombstone, so the next release can delete it. An older checkpoint keeps the class, so a time-travel read can still meet it. Remove the class from `drop` in the same change. See [Deleting the tombstone](retiring-interrupted.md#recovering-a-delete-first-deployment).
 
 WARNING: a plan refuses a thread that is paused on a dropped class, so step 3 exits 1 while such a thread waits. Settle each paused thread of a class before you add the class to `drop`. A drop removes the stored event only. Reducer state is not recomputed.
+
+WARNING: `drop` also accepts a live class. Each apply pass then removes the events of that class that the running graph still writes, and a backup is the only way to get them back. List only a tombstone in `drop`, and remove it from `drop` in the change that deletes the tombstone.
 
 ### What `rewrite` does
 
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
 2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the check judge the serde of step 1, so the serde that writes must be the same.
-3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. The plan also drops each stored instance of a class in `drop` of the target. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
+3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. The plan reports a stored instance of a class in `drop` of the target as a rewrite. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
 4. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stdout.
 5. The verdict of the last plan and `--accept` decide the exit code.
 
