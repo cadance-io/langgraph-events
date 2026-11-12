@@ -77,6 +77,15 @@ class ThreadRewrite:
             return self.thread_id
         return f"{self.thread_id} in subgraph namespace {self.checkpoint_ns!r}"
 
+    @property
+    def dropped_label(self) -> str:
+        """``dropped`` as text, for example ``"2 events of module:qualname"``,
+        joined by ``", "``. ``""`` when ``drop`` removes no event."""
+        return ", ".join(
+            f"{count} {'event' if count == 1 else 'events'} of {label}"
+            for label, count in self.dropped.items()
+        )
+
 
 @dataclass(frozen=True)
 class RewriteReport:
@@ -107,6 +116,12 @@ class RewriteReport:
             f"{mode}: {total} {noun}, {counts['rewrite']} rewrite, "
             f"{counts['unchanged']} unchanged, {counts['refused']} refused"
         ]
+        verb = "dropped" if self.applied else "drops"
+        lines.extend(
+            f"  {t.location}: {verb} {t.dropped_label}"
+            for t in self.threads
+            if t.status == "rewrite" and t.dropped
+        )
         lines.extend(f"  {t.location}: refused, {t.reason}" for t in self.refused)
         return "\n".join(lines)
 
@@ -187,15 +202,15 @@ def _log_entries(values: dict[str, Any], channel: str) -> list[Any] | None:
 def _count_drops(
     values: dict[str, Any], drop: tuple[type[Event], ...]
 ) -> dict[str, int]:
-    """How many stored entries of each ``drop`` class leave the log
-    channels. A ``Resumed`` back-reference is cleared, not counted, so
-    the count matches the log entries an operator can see."""
+    """How many stored events of each ``drop`` class leave the log. Only
+    ``events`` is counted, because each ``_pending`` entry is also in
+    ``events``. A ``Resumed`` back-reference is cleared, not counted, so
+    the count matches the log events an operator can see."""
     counts: dict[str, int] = {}
-    for channel in _LOG_CHANNELS:
-        for entry in _log_entries(values, channel) or ():
-            if type(entry) in drop:
-                label = Identity(type(entry).__module__, type(entry).__qualname__).label
-                counts[label] = counts.get(label, 0) + 1
+    for entry in _log_entries(values, "events") or ():
+        if type(entry) in drop:
+            label = Identity(type(entry).__module__, type(entry).__qualname__).label
+            counts[label] = counts.get(label, 0) + 1
     return counts
 
 

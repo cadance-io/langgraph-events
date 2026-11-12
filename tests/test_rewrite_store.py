@@ -2081,6 +2081,18 @@ def describe_rewrite_report():
 
         assert str(report) == "applied: 1 thread, 1 rewrite, 0 unchanged, 0 refused"
 
+    def it_names_each_event_that_a_plan_drops():
+        saver = MemorySaver()
+        graph, _cfg, retiring = _settled_drop_pair(saver, "t1")
+
+        report = graph.event_store.plan_rewrite(drop=(retiring,), thread_ids=["t1"])
+
+        assert str(report) == (
+            "plan: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
+            "  t1: drops 1 event of "
+            "test_rewrite_store:_settled_drop_pair.<locals>._Retiring"
+        )
+
 
 def describe_async_twins():
     # The consumer's AsyncPostgresSaver refuses a sync checkpointer call

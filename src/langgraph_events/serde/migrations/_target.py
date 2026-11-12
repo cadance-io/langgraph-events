@@ -9,7 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from langgraph_events._event import Event
 from langgraph_events._identity import Identity
+from langgraph_events._rewrite import validate_drop
 from langgraph_events.serde.migrations._core import (
     _declares_migration,
     _init_fields,
@@ -68,12 +70,21 @@ class MigrationTarget:
     ``threads`` declares a store that other graphs can share, so
     :func:`backup_live_set`, :func:`restore_live_set` and
     :func:`drop_backups`, which act on the whole store, refuse it.
+    ``drop`` names the event classes whose stored instances the
+    ``rewrite`` command drops. Each plan and each pass passes them as
+    ``drop=`` to :meth:`~langgraph_events.EventStore.plan_rewrite` and
+    :meth:`~langgraph_events.EventStore.rewrite_store`. Each class in
+    ``drop`` must be in ``retired=`` of the graph, because ``drop`` deletes
+    stored events. So a live class or a wrong class fails. The serde of
+    the graph must also revive each class to that same class, the rule of
+    ``plan_rewrite``. See :meth:`build`.
     """
 
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph | EventStore]
     baseline: Path
     store: Callable[[], AbstractContextManager[BaseCheckpointSaver[Any]]] | None = None
     threads: Callable[[BaseCheckpointSaver[Any]], Iterable[ThreadKey]] | None = None
+    drop: tuple[type[Event], ...] = ()
 
     def thread_keys(self, saver: BaseCheckpointSaver[Any]) -> tuple[ThreadKey, ...]:
         """Every checkpoint namespace of every thread in *saver*, sorted.
@@ -159,8 +170,11 @@ class MigrationTarget:
 
         Raises:
             TargetError: when ``graph`` cannot take a checkpointer, when the
-                graph has no ``NamespaceAwareSerde``, or when a client
-                migration has no valid key.
+                graph has no ``NamespaceAwareSerde``, when a client
+                migration has no valid key, when ``drop`` names a class
+                that ``retired=`` of the graph does not list, or when
+                ``drop`` names a class that the serde of the graph does not
+                revive.
         """
         try:
             inspect.signature(self.graph).bind(saver)
@@ -195,7 +209,40 @@ class MigrationTarget:
             raise TargetError(
                 f"A client migration has no valid key: {error}"
             ) from error
+        self._check_drop(store, serde)
         return Snapshot(store, serde, migrations)
+
+    def _check_drop(self, store: EventStore, serde: NamespaceAwareSerde) -> None:
+        """Each entry of ``drop`` must be an ``Event`` class. Each class must
+        be in ``retired=`` of the topology of *store*, and *serde* must
+        revive it to that same class. The rules run in this order, so each
+        wrong entry gets its own message.
+        """
+        retired = store.topology.retired_events
+        for cls in self.drop:
+            if not (isinstance(cls, type) and issubclass(cls, Event)):
+                raise TargetError(
+                    f"MigrationTarget(drop=...) takes Event classes, got {cls!r}. "
+                    f"Pass the class whose stored instances must leave the log."
+                )
+            label = Identity(cls.__module__, cls.__qualname__).label
+            if cls not in retired:
+                raise TargetError(
+                    f"MigrationTarget(drop=...) names {label}, which retired= of "
+                    f"the graph does not list. drop deletes stored events, so it "
+                    f"takes only a retired tombstone. List the class in retired=, "
+                    f"or remove it from drop."
+                )
+            try:
+                validate_drop(serde, (cls,), "MigrationTarget")
+            except ValueError as error:
+                raise TargetError(
+                    f"MigrationTarget(drop=...) names {label}, which the serde of "
+                    f"the graph does not revive to that class, so the rewrite "
+                    f"cannot find its stored instances. Build the serde of the "
+                    f"checkpointer with topology.serde(), which reads each class "
+                    f"of retired=. Cause: {error}"
+                ) from error
 
 
 def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:

@@ -127,7 +127,8 @@ class LiveSetOutcome:
         """The verdict, each checkpoint that is not clean, then the next command.
 
         A checkpoint that the last plan reads as a rewrite also names the
-        reason when the last pass refused to write it. The next command is
+        reason when the last pass refused to write it, and each event class
+        that the rewrite drops, with its count of events. The next command is
         printed when the last plan reads a checkpoint as a rewrite, and the
         verdict is not accepted or the passes ran out. A refused
         checkpoint needs the action that its reason names first.
@@ -146,8 +147,9 @@ class LiveSetOutcome:
         for thread in self.final.threads:
             if thread.status == "rewrite":
                 refusal = pass_refusals.get(_key(thread))
+                drops = f", drops {thread.dropped_label}" if thread.dropped else ""
                 suffix = f", the last pass refused it: {refusal}" if refusal else ""
-                lines.append(f"  {thread.location}: needs a rewrite{suffix}")
+                lines.append(f"  {thread.location}: needs a rewrite{drops}{suffix}")
             elif thread.status == "refused":
                 lines.append(f"  {thread.location}: refused, {thread.reason}")
         if _to_rewrite(self.final) and (self.passes or not accepted):
@@ -182,13 +184,18 @@ def rewrite_live_set(
     refused checkpoint changes only when a person acts. Without *apply*,
     the function only plans.
 
+    Each plan reports a stored instance of a class in ``drop`` of *target*
+    as a rewrite, and each apply pass drops it. See :class:`MigrationTarget`.
+
     Raises:
         ValueError: when *passes* is below 1, or when the graph cannot be
             rewritten, for example under ``legacy_write=True``.
         TargetError: when *target* has no ``store``, or no
-            ``NamespaceAwareSerde``, when ``store`` returns an async context
-            manager, or when the saver that ``store`` opens holds a serde
-            with other migrations than the code.
+            ``NamespaceAwareSerde``, when ``retired=`` of the graph does not
+            list a class in ``drop``, when the serde does not revive such a
+            class, when ``store`` returns an async context manager, or
+            when the saver that ``store`` opens holds a serde with other
+            migrations than the code.
     """
     if passes < 1:
         raise ValueError(f"passes must be 1 or more, got {passes}.")
@@ -202,14 +209,16 @@ def rewrite_live_set(
     out = sys.stderr if log is None else log
     with target.open_store() as saver:
         store = _same_serde(target.build(saver), running)
+        plan_rewrite = functools.partial(store.plan_rewrite, drop=target.drop)
+        rewrite_store = functools.partial(store.rewrite_store, drop=target.drop)
 
         def plan() -> RewriteReport:
-            return _walk(store.plan_rewrite, target.thread_keys(saver), applied=False)
+            return _walk(plan_rewrite, target.thread_keys(saver), applied=False)
 
         reports: list[RewriteReport] = []
         final = plan()
         while apply and _to_rewrite(final) and len(reports) < passes:
-            report = _walk(store.rewrite_store, _to_rewrite(final), applied=True)
+            report = _walk(rewrite_store, _to_rewrite(final), applied=True)
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()
