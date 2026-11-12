@@ -128,7 +128,7 @@ class LiveSetOutcome:
 
         A checkpoint that the last plan reads as a rewrite also names the
         reason when the last pass refused to write it, and each event class
-        that the rewrite drops, with its count of entries. The next command is
+        that the rewrite drops, with its count of events. The next command is
         printed when the last plan reads a checkpoint as a rewrite, and the
         verdict is not accepted or the passes ran out. A refused
         checkpoint needs the action that its reason names first.
@@ -147,7 +147,7 @@ class LiveSetOutcome:
         for thread in self.final.threads:
             if thread.status == "rewrite":
                 refusal = pass_refusals.get(_key(thread))
-                drops = f", drops {thread.drops}" if thread.dropped else ""
+                drops = f", drops {thread.dropped_label}" if thread.dropped else ""
                 suffix = f", the last pass refused it: {refusal}" if refusal else ""
                 lines.append(f"  {thread.location}: needs a rewrite{drops}{suffix}")
             elif thread.status == "refused":

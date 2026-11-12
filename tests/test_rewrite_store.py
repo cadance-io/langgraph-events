@@ -2089,7 +2089,7 @@ def describe_rewrite_report():
 
         assert str(report) == (
             "plan: 1 thread, 1 rewrite, 0 unchanged, 0 refused\n"
-            "  t1: drops 1 entry of "
+            "  t1: drops 1 event of "
             "test_rewrite_store:_settled_drop_pair.<locals>._Retiring"
         )
 

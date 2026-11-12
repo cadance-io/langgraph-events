@@ -801,7 +801,7 @@ def describe_rewrite_drop():
 
                 assert code == 0
                 assert capsys.readouterr().out == _applied_clean(
-                    "2 entries of test_migration_cli:_Gone"
+                    "1 event of test_migration_cli:_Gone"
                 )
                 assert _stored_types(saver, "t1") == [Started]
 
@@ -821,11 +821,26 @@ def describe_rewrite_drop():
                 assert capsys.readouterr().out == (
                     "lge rewrite: not clean (last plan: plan: 1 thread, 1 rewrite, "
                     "0 unchanged, 0 refused)\n"
-                    "  t1: needs a rewrite, drops 2 entries of "
+                    "  t1: needs a rewrite, drops 1 event of "
                     "test_migration_cli:_Gone\n"
                     f"  Run: {_CLI} rewrite {spec} --apply --expect {expect}\n"
                 )
                 assert _stored_types(saver, "t1") == [Started, _Gone]
+
+    def when_drop_holds_a_value_that_is_not_an_event_class():
+        def it_exits_two_and_names_the_value(
+            tmp_path: Path,
+            monkeypatch: pytest.MonkeyPatch,
+            capsys: pytest.CaptureFixture[str],
+        ):
+            target, _ = _retired_target(tmp_path, drop=("test_migration_cli:_Gone",))
+
+            assert _check_error(target, monkeypatch, capsys) == (
+                2,
+                "error: MigrationTarget(drop=...) takes Event classes, got "
+                "'test_migration_cli:_Gone'. Pass the class whose stored instances "
+                "must leave the log.\n",
+            )
 
     def when_retired_does_not_list_a_class_in_drop():
         def _not_retired(label: str) -> str:
@@ -903,7 +918,7 @@ def describe_rewrite_drop():
 
                 assert code == 0
                 assert capsys.readouterr().out == _applied_clean(
-                    "2 entries of test_migration_cli:_Gone"
+                    "1 event of test_migration_cli:_Gone"
                 )
                 assert _stored_types(saver, "t1") == [Started]
 
@@ -926,7 +941,12 @@ def describe_rewrite_drop():
                     "_unimportable.<locals>._Unimportable, which the serde of the "
                     "graph does not revive to that class, so the rewrite cannot "
                     "find its stored instances. Build the serde of the checkpointer "
-                    "with topology.serde(), which reads each class of retired=.\n",
+                    "with topology.serde(), which reads each class of retired=. "
+                    "Cause: MigrationTarget() cannot drop "
+                    "_unimportable.<locals>._Unimportable: the checkpointer's serde "
+                    "does not revive that identity to this class. Pass it via "
+                    "events= or nest it inside a namespace passed via namespaces=, "
+                    "so the walk can recognise its stored instances.\n",
                 )
 
     def when_the_dropped_class_is_nested_in_a_namespace():
@@ -946,7 +966,7 @@ def describe_rewrite_drop():
 
             assert code == 0
             assert capsys.readouterr().out == _applied_clean(
-                "2 entries of test_migration_cli:_Retiring.Gone"
+                "1 event of test_migration_cli:_Retiring.Gone"
             )
             assert _stored_types(saver, "t1") == [Started]
 

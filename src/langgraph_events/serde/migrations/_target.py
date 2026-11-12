@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from langgraph.checkpoint.memory import MemorySaver
 
+from langgraph_events._event import Event
 from langgraph_events._identity import Identity
 from langgraph_events._rewrite import validate_drop
 from langgraph_events.serde.migrations._core import (
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-    from langgraph_events import Event, EventGraph, EventStore
+    from langgraph_events import EventGraph, EventStore
     from langgraph_events.serde._jsonplus import NamespaceAwareSerde
     from langgraph_events.serde.migrations._core import MigrationSet
 
@@ -212,17 +213,19 @@ class MigrationTarget:
         return Snapshot(store, serde, migrations)
 
     def _check_drop(self, store: EventStore, serde: NamespaceAwareSerde) -> None:
-        """Each class in ``drop`` must be in ``retired=`` of the topology of
-        *store*, and *serde* must revive it to that same class. The first
-        rule runs first, so a wrong class or a live class gets its message.
+        """Each entry of ``drop`` must be an ``Event`` class. Each class must
+        be in ``retired=`` of the topology of *store*, and *serde* must
+        revive it to that same class. The rules run in this order, so each
+        wrong entry gets its own message.
         """
         retired = store.topology.retired_events
         for cls in self.drop:
-            label = (
-                Identity(cls.__module__, cls.__qualname__).label
-                if isinstance(cls, type)
-                else repr(cls)
-            )
+            if not (isinstance(cls, type) and issubclass(cls, Event)):
+                raise TargetError(
+                    f"MigrationTarget(drop=...) takes Event classes, got {cls!r}. "
+                    f"Pass the class whose stored instances must leave the log."
+                )
+            label = Identity(cls.__module__, cls.__qualname__).label
             if cls not in retired:
                 raise TargetError(
                     f"MigrationTarget(drop=...) names {label}, which retired= of "
@@ -238,7 +241,7 @@ class MigrationTarget:
                     f"the graph does not revive to that class, so the rewrite "
                     f"cannot find its stored instances. Build the serde of the "
                     f"checkpointer with topology.serde(), which reads each class "
-                    f"of retired=."
+                    f"of retired=. Cause: {error}"
                 ) from error
 
 

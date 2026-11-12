@@ -146,7 +146,17 @@ The serde that `from_namespaces(...)` wires reads `RetiredApprovalGate`. `EventT
 **Deleting the tombstone.** The `@migrate_from` ships in the release that adds it. In the next release, the `release` rule reports its `rename` and `transform` keys as `SurvivedRelease`. While a paused thread still needs the tombstone, hold both keys with `baseline hold`, once in each release. When no paused thread of the tombstone is left, drop its stored instances by one of two routes. If the deploy runs the `rewrite` command of the [deploy steps](migration-gate.md#the-steps), use the deploy route. Otherwise, use the sequence route.
 
 - **Deploy route.** List the tombstone in `retired=` of the graph and in `drop=` of the `MigrationTarget`. Deploy step 4 drops its stored instances. See [Dropping retired events](migration-gate.md#dropping-retired-events). Verify: deploy step 6 exits 0.
-- **Sequence route.** Run sequence steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify: `graph.event_store.unrevivable_threads(thread_ids=thread_ids) == {}`.
+- **Sequence route.** Run sequence steps 4 and 5 of the [sequence](#sequence) with `drop=(Order.RetiredApprovalGate,)`. Verify with a new plan, the same check that deploy step 6 runs:
+
+    ```python
+    report = graph.event_store.plan_rewrite(
+        drop=(Order.RetiredApprovalGate,), thread_ids=thread_ids
+    )
+    assert not report.refused
+    assert not any(thread.dropped for thread in report.threads)
+    ```
+
+    Do not verify with `unrevivable_threads()` here. The tombstone still imports, so that check passes even when the rewrite did not run. Run it only after the next release deletes the tombstone, as in sequence step 7.
 
 In the next release, delete the tombstone and its `@migrate_from`, then run `baseline update --previous <file>`. The update removes the `retired` entry of `Order.ApprovalRequired` and moves the tombstone class to `retired`. Delete that entry by hand, as in sequence step 7.
 

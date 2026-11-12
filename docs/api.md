@@ -89,8 +89,8 @@ The return value is checked against the declared annotation, or against the subs
 | `SourceDropped` | Frozen dataclass | `UnknownCause` `(via, source_type)`: `rewrite_store(drop=...)` deleted the source of the event. See [Causes](concepts.md#causes) |
 | `FrameworkEvent` | Frozen dataclass | The library wrote the event: `RunPaused`, `MaxRoundsExceeded`, `Cancelled`, `Abandoned` or `Unresumable`. `EventLog.cause()` returns `None` only for a seed event. See [Causes](concepts.md#causes) |
 | `GraphState` | NamedTuple | `(events, is_interrupted, interrupted)`. `events` carries the recorded causes of the thread |
-| `RewriteReport` | Dataclass | `(applied, threads)` from `plan_rewrite()` or `rewrite_store()`. `applied` is `False` from a plan. `.refused` is the tuple of refused threads. `str(report)` prints one summary line, then one line per thread that `drop=` removes entries from, then one line per refused thread |
-| `ThreadRewrite` | Dataclass | One thread in a `RewriteReport`: `thread_id`, `checkpoint_ns`, `location`, `status` (`"rewrite"`, `"unchanged"` or `"refused"`), `migrated` as `(stored, live)` identity pairs, `dropped` counts per identity, `drops` as text, and `reason` on a refusal |
+| `RewriteReport` | Dataclass | `(applied, threads)` from `plan_rewrite()` or `rewrite_store()`. `applied` is `False` from a plan. `.refused` is the tuple of refused threads. `str(report)` prints one summary line, then one line per thread that `drop=` removes events from, then one line per refused thread |
+| `ThreadRewrite` | Dataclass | One thread in a `RewriteReport`: `thread_id`, `checkpoint_ns`, `location`, `status` (`"rewrite"`, `"unchanged"` or `"refused"`), `migrated` as `(stored, live)` identity pairs, `dropped` counts of stored events per identity, `dropped_label` as text, and `reason` on a refusal |
 
 ## System Events
 

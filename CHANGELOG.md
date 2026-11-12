@@ -21,10 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the fingerprint. `check` and code review gate `drop`. The default `drop=()` drops
   nothing. See [Dropping retired events](https://cadance-io.github.io/langgraph-events/migration-gate/#dropping-retired-events).
 - **A plan and an apply pass name what they drop.** `rewrite` prints
-  `t1: needs a rewrite, drops 2 entries of module:qualname` for a plan, and
-  `t1: dropped 2 entries of module:qualname` under each pass line. `str(RewriteReport)`
-  prints the same line for each thread that `drop=` removes entries from.
-  `ThreadRewrite.drops` gives the text.
+  `t1: needs a rewrite, drops 2 events of module:qualname` for a plan, and
+  `t1: dropped 2 events of module:qualname` under each pass line. `str(RewriteReport)`
+  prints the same line for each thread that `drop=` removes events from.
+  `ThreadRewrite.dropped_label` gives the text.
+
+### Changed
+
+- **`ThreadRewrite.dropped` counts distinct stored events.** Before, it counted entries in
+  `events` and in `_pending`. So an event in both channels counted twice. Each `_pending`
+  entry is also in `events`, so the count now reads `events` only.
 
 ## [0.49.0] - 2026-11-10
 
