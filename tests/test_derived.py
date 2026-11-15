@@ -141,16 +141,16 @@ def describe_Derived():
             assert _reports(log) == ["unset"]
 
         def when_a_service_has_the_same_name():
-            def it_injects_the_derived_value():
-                graph = EventGraph(
-                    [check],
-                    reducers=[placed, shipped, stage],
-                    services={"stage": "from-service"},
-                )
-
-                log = graph.invoke([Placed(), Checked()])
-
-                assert _reports(log) == ["placed"]
+            def it_raises_at_graph_construction():
+                with pytest.raises(
+                    TypeError,
+                    match=r"name key 'stage', and a Derived has the same name",
+                ):
+                    EventGraph(
+                        [check],
+                        reducers=[placed, shipped, stage],
+                        services={"stage": "from-service"},
+                    )
 
         def when_the_annotation_rejects_none():
             def it_raises_reducer_not_set_error():

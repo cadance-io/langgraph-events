@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
@@ -330,7 +331,8 @@ class EventGraph:
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._base_store = store
-        self._handlers = topology._bind(services, entry=entry)
+        self._factories = topology._bind_factories(services)
+        self._handlers = topology._bind(services, self._factories, entry=entry)
 
     @property
     def topology(self) -> EventTopology:
@@ -357,9 +359,22 @@ class EventGraph:
         return self._checkpointer
 
     def namespaces(self) -> NamespaceModel:
-        """Return the :class:`NamespaceModel` of the topology. See
+        """Return the :class:`NamespaceModel` of the topology, with each
+        ``RunScoped`` service of this graph and its inputs. See
         :meth:`EventTopology.namespaces`."""
-        return self._topology.namespaces()
+        return self._namespace_model
+
+    @functools.cached_property
+    def _namespace_model(self) -> NamespaceModel:
+        from langgraph_events._namespace import NamespaceModel  # noqa: PLC0415
+
+        return dataclasses.replace(
+            self._topology.namespaces(),
+            run_scoped=tuple(
+                NamespaceModel.RunScoped(name=f.name, inputs=f.inputs, reads=f.reads)
+                for f in self._factories.values()
+            ),
+        )
 
     def reflect(self, log: EventLog) -> Reflection:
         """Return a :class:`Reflection` — deterministic query surface over *log*.

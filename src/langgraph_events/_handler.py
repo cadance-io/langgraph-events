@@ -776,10 +776,9 @@ class BoundHandler:
 
     meta: HandlerMeta
     # (param_name, service) for each candidate that a service fills. A
-    # ``RunScoped`` service is resolved per node call at dispatch.
+    # ``RunScoped`` service is its ``BoundFactory``, built per node call at
+    # dispatch.
     services: tuple[tuple[str, object], ...]
-    # The params whose ``RunScoped`` factory also takes the run context.
-    context_services: frozenset[str] = frozenset()
 
     def require_claimed(
         self,

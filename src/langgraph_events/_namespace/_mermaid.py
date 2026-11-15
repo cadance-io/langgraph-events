@@ -227,6 +227,11 @@ def _reducer_node_id(name: str) -> str:
     return "_reducer_" + re.sub(r"\W", "_", name)
 
 
+def _service_node_id(name: str) -> str:
+    """Mermaid-safe node ID of a ``RunScoped`` service."""
+    return "_service_" + re.sub(r"\W", "_", name)
+
+
 def _add_reducer_node(
     flow: MermaidFlowchart,
     name: str,
@@ -746,6 +751,21 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             edges.append(
                 _FlowEdge(_reducer_node_id(name), dv_id, "-.->", "reads", "folds")
             )
+    # A RunScoped service is built per node call. A dotted ``reads`` arrow
+    # joins each input reducer, Derived or other RunScoped service to it.
+    service_names = {rs.name for rs in d.run_scoped}
+    readable_names = {r.name for r in d.reducers} | {dv.name for dv in d.derived}
+    for rs in d.run_scoped:
+        rs_id = _service_node_id(rs.name)
+        all_targets.add(rs_id)
+        for name in rs.reads:
+            if name in service_names:
+                src = _service_node_id(name)
+            elif name in readable_names:
+                src = _reducer_node_id(name)
+            else:
+                continue
+            edges.append(_FlowEdge(src, rs_id, "-.->", "reads", "folds"))
 
     # Append rerouted pinned-reactor edges to the flow edge list.  These
     # use the "invariant" tag so they get the same dashed-orange style as
@@ -823,7 +843,8 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
         [*edges, *invariant_edges],
         namespace_of,
         {node_id[inv.cls] for inv in d.invariants}
-        | {_reducer_node_id(name) for name, _ in placed_reducers},
+        | {_reducer_node_id(name) for name, _ in placed_reducers}
+        | {_service_node_id(rs.name) for rs in d.run_scoped},
     )
     edges = [
         _styled_edge(
@@ -866,7 +887,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
     _apply_classdefs(flow)
     if hubs:
         flow.classdef("hub", _HUB_CLASSDEF_STYLE)
-    if d.reducers or d.derived:
+    if d.reducers or d.derived or d.run_scoped:
         flow.classdef("reducer", _REDUCER_CLASSDEF_STYLE)
     if focus is not None:
         flow.classdef("ctx", _CONTEXT_CLASSDEF_STYLE)
@@ -954,6 +975,15 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             context=context,
             note=note,
         )
+    for rs in d.run_scoped:
+        rs_id = _service_node_id(rs.name)
+        if view.shows(rs_id):
+            flow.node(
+                rs_id,
+                "subroutine",
+                cls="ctx" if view.is_context(rs_id) else "reducer",
+                label=_label(rs.name, notes.get(rs.name)),
+            )
 
     # An entry point is a fact about the whole graph, so a focused diagram
     # draws none. Seeds come from every edge, drawn or hidden: an event that

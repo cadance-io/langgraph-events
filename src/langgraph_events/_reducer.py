@@ -169,6 +169,27 @@ class BaseReducer(ABC):
     def _read(self, read: StateRead) -> object:
         return self.read(read.state)
 
+    def _fits(self, declared: object) -> bool | str:
+        """Whether a value of this channel can satisfy *declared*.
+
+        :meth:`output_type` holds no type argument, so the check erases
+        the type arguments of *declared*. ``None`` is accepted, because a
+        non-``None`` annotation opts into :class:`ReducerNotSetError`. A
+        string is the reason that the check cannot run.
+        """
+        from langgraph_events._services import (  # noqa: PLC0415
+            _erased,
+            _hint_fits,
+            _or_none,
+        )
+
+        return _hint_fits(self.output_type(), _erased(_or_none(declared)))
+
+    def _describe_value(self) -> str:
+        from langgraph_events._services import _hint_label  # noqa: PLC0415
+
+        return f"reducer {self.name!r} holds {_hint_label(self.output_type())}"
+
     def _describe(self) -> str:
         return f"reducer {self.name!r}"
 
@@ -211,6 +232,15 @@ class Readable(Protocol):
 
     def _read(self, read: StateRead) -> Any:  # noqa: ANN401 - the value of a reducer
         """The value in *read*, with an empty default for an unset channel."""
+        ...
+
+    def _fits(self, declared: object) -> bool | str:
+        """Whether the value can satisfy the annotation *declared*. A string
+        is the reason that the check cannot run."""
+        ...
+
+    def _describe_value(self) -> str:
+        """State what the value is known to be, for an error."""
         ...
 
     def _describe(self) -> str: ...
@@ -614,6 +644,14 @@ class _LogInput:
     def _read(self, read: StateRead) -> EventLog:
         return read.log
 
+    def _fits(self, declared: object) -> bool | str:
+        """A log input lives only inside a ``Derived``, which no annotation
+        check reads."""
+        return True
+
+    def _describe_value(self) -> str:
+        return "the EventLog"
+
     def _describe(self) -> str:
         return "the EventLog"
 
@@ -761,6 +799,29 @@ class _BoundDerived(Generic[T]):
         except Exception as exc:
             exc.add_note(f"Derived {self.name!r} raised while it computed its value.")
             raise
+
+    def _returns(self) -> object:
+        """The return annotation of ``fn``, or ``Any`` when it has none or it
+        does not resolve."""
+        from langgraph_events._handler import _resolve_hints_and_errors  # noqa: PLC0415
+
+        hints, _ = _resolve_hints_and_errors(self.derived.fn)
+        return hints.get("return", Any)
+
+    def _fits(self, declared: object) -> bool | str:
+        """Whether the return annotation of ``fn`` satisfies *declared*.
+
+        ``None`` is accepted, because a non-``None`` annotation opts into
+        :class:`ReducerNotSetError`.
+        """
+        from langgraph_events._services import _hint_fits, _or_none  # noqa: PLC0415
+
+        return _hint_fits(self._returns(), _or_none(declared))
+
+    def _describe_value(self) -> str:
+        from langgraph_events._services import _hint_label  # noqa: PLC0415
+
+        return f"Derived {self.name!r} returns {_hint_label(self._returns())}"
 
     def _describe(self) -> str:
         return f"Derived {self.name!r}"

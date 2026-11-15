@@ -4,25 +4,29 @@ from __future__ import annotations
 
 import functools
 import inspect
+import types
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeAlias, TypeVar
 
 from langgraph_events._handler import (
     BoundHandler,
+    ServiceCandidate,
+    _annotation_accepts_none,
     _annotation_source,
+    _context_hint,
     _resolve_hints_and_errors,
     _resolve_parameter_hints,
 )
+from langgraph_events._reducer import BaseReducer
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from langchain_core.runnables import RunnableConfig
-
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._reducer import Readable
 
 T = TypeVar("T")
 
@@ -53,21 +57,28 @@ def _missing_return_annotation(
 
 @dataclass(frozen=True)
 class RunScoped(Generic[T]):
-    """A service derived per run from the node's ``RunnableConfig``.
+    """A service that a factory builds once per node call.
 
-    Place a ``RunScoped`` value in the name-keyed ``services=`` mapping. The
-    factory is called with the run config once per node call. Its result is
-    injected under the handler's parameter name.
+    Place a ``RunScoped`` value in the name-keyed ``services=`` mapping. Its
+    result is injected under the handler's parameter name.
 
-    A factory whose second parameter is annotated with the graph's
-    ``context_schema`` also receives the run context, as
-    ``factory(config, context)``. That parameter must be positional and
-    required. The graph build refuses any other second parameter.
+    Each parameter of the factory binds like a handler parameter. A
+    parameter annotated ``RunnableConfig`` gets the run config. A parameter
+    annotated with the graph's ``context_schema`` gets the run context. By
+    name, ``log`` gets the ``EventLog``, and any other parameter gets the
+    stored reducer, the ``Derived`` or the service of that name. Each
+    parameter must have an annotation and no default value.
+
+    The factory runs only for a handler or a factory that declares it,
+    once per node call. One result serves every reader in that call.
 
     The factory must be a plain callable. A coroutine function is rejected,
     because its result would be injected without an ``await``.
 
     Example::
+
+        def model_for(config: RunnableConfig, language: str) -> ConversationModel:
+            ...
 
         services = {"model": RunScoped(model_for)}
 
@@ -75,7 +86,7 @@ class RunScoped(Generic[T]):
         def handle(event: SomeEvent, model: ConversationModel) -> None: ...
     """
 
-    factory: Callable[[RunnableConfig], T] | Callable[[RunnableConfig, Any], T]
+    factory: Callable[..., T]
 
     def __post_init__(self) -> None:
         if not callable(self.factory):
@@ -101,59 +112,33 @@ class RunScoped(Generic[T]):
         if "return" not in getattr(source, "__annotations__", {}):
             raise TypeError(_missing_return_annotation(self.factory, source))
 
-    def takes_context(self, name: str, context_schema: type | None) -> bool:
-        """Whether the factory of service *name* takes the run context.
+    def _label(self, name: str) -> str:
+        """The subject of an error about the factory of service *name*."""
+        source = _annotation_source(self.factory)
+        return f"RunScoped factory {_factory_label(source)!r} for service {name!r}"
 
-        It does when its second parameter is positional, required and
-        annotated with *context_schema*. A signature that Python cannot read
-        counts as the run config only. Raises ``TypeError`` for any other
-        second parameter, with the fix.
-        """
+    def _parameters(self, name: str) -> tuple[inspect.Parameter, ...]:
+        """The parameters that the node call must fill. A keyword that a
+        ``functools.partial`` binds is filled already."""
+        bound: set[str] = set()
+        factory: object = self.factory
+        while isinstance(factory, functools.partial):
+            bound.update(factory.keywords)
+            factory = factory.func
         try:
             params = inspect.signature(self.factory).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        extra = [p for p in params if p.kind not in variadic][1:]
-        if not extra:
-            return False
-        source = _annotation_source(self.factory)
-        label = f"RunScoped factory {_factory_label(source)!r} for service {name!r}"
-        second = extra[0]
-        positional = second.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        required = second.default is inspect.Parameter.empty
-        if context_schema is None:
-            if not (positional and required):
-                return False
+        except (TypeError, ValueError) as exc:
             raise TypeError(
-                f"{label} takes a second parameter {second.name!r}, but the graph "
-                f"has no context_schema. Pass context_schema= to the graph to give "
-                f"the factory the run context, or give the factory one parameter."
-            )
-        hints, _ = _resolve_parameter_hints(self.factory)
-        annotation = hints.get(second.name, inspect.Parameter.empty)
-        if len(extra) == 1 and positional and required and annotation is context_schema:
-            return True
-        if len(extra) > 1:
-            why = "has more than two parameters"
-        elif not positional:
-            why = f"has a keyword-only parameter {second.name!r}"
-        elif not required:
-            why = f"has an optional parameter {second.name!r}"
-        elif annotation is inspect.Parameter.empty:
-            why = f"has an unannotated parameter {second.name!r}"
-        else:
-            why = f"annotates parameter {second.name!r} as {_hint_label(annotation)}"
-        schema = context_schema.__qualname__
-        raise TypeError(
-            f"{label} {why}. A factory that takes the run context declares it "
-            f"as a second positional parameter, required and annotated with "
-            f"{schema}: (config, {second.name}: {schema}). Change the parameter, "
-            f"or remove it."
-        )
+                f"{self._label(name)}: Python cannot read the parameters of "
+                f"the factory ({exc}). Each parameter names one input, so "
+                f"pass a function, a class or a callable object whose "
+                f"signature Python can read."
+            ) from exc
+        return tuple(p for p in params if p.name not in bound)
+
+    def _hints(self) -> tuple[dict[str, Any], dict[str, str]]:
+        """The resolved parameter annotations of the factory, and the errors."""
+        return _resolve_parameter_hints(self.factory)
 
     def provided_type(self, name: str) -> object:
         """Resolve the return annotation of the factory of service *name*.
@@ -176,6 +161,278 @@ class RunScoped(Generic[T]):
                 f"declare the class at module level."
             )
         return _resolve_self(hints["return"], source)
+
+
+@dataclass(frozen=True)
+class ConfigInput:
+    """A factory parameter annotated ``RunnableConfig``: the run config."""
+
+
+@dataclass(frozen=True)
+class ContextInput:
+    """A factory parameter annotated with the ``context_schema``: the run
+    context."""
+
+
+@dataclass(frozen=True)
+class LogInput:
+    """The factory parameter named ``log``: the ``EventLog`` of the node."""
+
+
+@dataclass(frozen=True)
+class ReadableInput:
+    """A factory parameter that names a stored reducer or a ``Derived``.
+
+    *required* is ``True`` when the annotation rejects ``None``. A ``None``
+    value then raises ``ReducerNotSetError``.
+    """
+
+    readable: Readable
+    required: bool
+
+
+@dataclass(frozen=True)
+class ValueInput:
+    """A factory parameter that names a plain service."""
+
+    value: object
+
+
+FactoryInput: TypeAlias = (
+    "ConfigInput | ContextInput | LogInput | ReadableInput | ValueInput | BoundFactory"
+)
+
+
+@dataclass(frozen=True)
+class BoundFactory:
+    """The ``RunScoped`` factory of service *name* in one graph, with each
+    parameter bound to its input.
+
+    The first *positional* parameters are positional-only. The node call
+    passes them by position, and the others by keyword.
+    """
+
+    name: str
+    scoped: RunScoped[Any]
+    params: tuple[tuple[str, FactoryInput], ...]
+    positional: int = 0
+
+    @property
+    def label(self) -> str:
+        """The subject of an error about this factory."""
+        return self.scoped._label(self.name)
+
+    @property
+    def inputs(self) -> tuple[str, ...]:
+        """The parameter names of the factory, in signature order."""
+        return tuple(param for param, _ in self.params)
+
+    @property
+    def reads(self) -> tuple[str, ...]:
+        """The parameter names that bind by name to a stored reducer, a
+        ``Derived`` or another service."""
+        return tuple(
+            param
+            for param, source in self.params
+            if isinstance(source, ReadableInput | ValueInput | BoundFactory)
+        )
+
+    def call(self, values: Sequence[object]) -> object:
+        """Call the factory with *values*, one for each parameter, in order."""
+        names = self.inputs[self.positional :]
+        keywords = dict(zip(names, values[self.positional :], strict=True))
+        return self.scoped.factory(*values[: self.positional], **keywords)
+
+
+class _FactoryBinder:
+    """Bind each ``RunScoped`` factory of a name-keyed ``services=`` to its
+    inputs, for one graph."""
+
+    def __init__(
+        self,
+        services: Mapping[str, Any],
+        provided: Mapping[str, object],
+        readables: Mapping[str, Readable],
+        context_schema: type | None,
+    ) -> None:
+        self._services = services
+        self._provided = provided
+        self._readables = readables
+        self._context_schema = context_schema
+        self._bound: dict[str, BoundFactory] = {}
+
+    def bind_all(self) -> dict[str, BoundFactory]:
+        for name, value in self._services.items():
+            if isinstance(value, RunScoped):
+                self._bind(name, ())
+        return self._bound
+
+    def _bind(self, name: str, path: tuple[str, ...]) -> BoundFactory:
+        if name in path:
+            cycle = " -> ".join((*path[path.index(name) :], name))
+            raise TypeError(
+                f"RunScoped factories read each other in a cycle: {cycle}. A "
+                f"factory must not read itself, directly or through another "
+                f"factory. Remove one read from the cycle."
+            )
+        if name in self._bound:
+            return self._bound[name]
+        scoped: RunScoped[Any] = self._services[name]
+        hints, errors = scoped._hints()
+        params: list[tuple[str, FactoryInput]] = []
+        positional = 0
+        for param in scoped._parameters(name):
+            if param.kind is inspect.Parameter.POSITIONAL_ONLY:
+                positional += 1
+            source = self._bind_param(name, scoped, param, hints, errors, path)
+            params.append((param.name, source))
+        bound = BoundFactory(name, scoped, tuple(params), positional)
+        self._bound[name] = bound
+        return bound
+
+    def _bind_param(
+        self,
+        name: str,
+        scoped: RunScoped[Any],
+        param: inspect.Parameter,
+        hints: Mapping[str, Any],
+        errors: Mapping[str, str],
+        path: tuple[str, ...],
+    ) -> FactoryInput:
+        from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
+
+        label = scoped._label(name)
+        p = param.name
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise TypeError(
+                f"{label} has the variadic parameter {p!r}. Each parameter "
+                f"must name one input. Replace it with one parameter per input."
+            )
+        if param.default is not inspect.Parameter.empty:
+            raise TypeError(
+                f"{label} gives parameter {p!r} a default value. A default "
+                f"hides a missing input. Remove the default."
+            )
+        if p in errors:
+            raise TypeError(
+                f"{label} has an annotation on parameter {p!r} that did not "
+                f"resolve ({errors[p]}). Make every name in the annotation "
+                f"importable at run time."
+            )
+        if p not in hints:
+            raise TypeError(
+                f"{label} has no annotation on parameter {p!r}. Annotate it "
+                f"with RunnableConfig, the context schema, EventLog, or the "
+                f"type of the reducer, Derived or service that it names."
+            )
+        declared = hints[p]
+        if declared is RunnableConfig:
+            return ConfigInput()
+        if self._context_schema is not None and declared is self._context_schema:
+            return ContextInput()
+        if p == "log":
+            return self._log_input(label, declared)
+        readable = self._readables.get(p)
+        if readable is not None:
+            self._check(
+                label, p, declared, readable._fits(declared), readable._describe_value()
+            )
+            return ReadableInput(readable, not _annotation_accepts_none(declared))
+        if p in self._services:
+            return self._service_input(label, p, declared, (*path, name))
+        reducers = sorted(
+            n for n, r in self._readables.items() if isinstance(r, BaseReducer)
+        )
+        derived = sorted(self._readables.keys() - set(reducers))
+        context = _context_hint([ServiceCandidate(p, declared)], self._context_schema)
+        raise TypeError(
+            f"{label} reads parameter {p!r}, which names no reducer, no Derived "
+            f"and no service. Rename the parameter to one of the available "
+            f"names: reducers {reducers}, Derived values {derived}, services "
+            f"{sorted(self._services)}, or 'log' for the EventLog.{context}"
+        )
+
+    def _log_input(self, label: str, declared: object) -> LogInput:
+        from beartype.door import is_subhint  # noqa: PLC0415
+
+        from langgraph_events._event_log import EventLog  # noqa: PLC0415
+
+        if "log" in self._services:
+            raise TypeError(
+                f"{label} reads 'log', and a service has the name 'log'. In a "
+                f"factory, 'log' names the EventLog. Rename the service."
+            )
+        self._check(
+            label,
+            "log",
+            declared,
+            _satisfies(is_subhint, EventLog, declared),
+            "'log' is the EventLog",
+            fix="EventLog",
+        )
+        return LogInput()
+
+    def _service_input(
+        self, label: str, p: str, declared: object, path: tuple[str, ...]
+    ) -> FactoryInput:
+        from beartype.door import is_bearable  # noqa: PLC0415
+
+        value = self._services[p]
+        if isinstance(value, RunScoped):
+            provided = self._provided[p]
+            returns = _hint_label(provided)
+            self._check(
+                label,
+                p,
+                declared,
+                _hint_fits(provided, declared),
+                f"service {p!r} is RunScoped("
+                f"{_factory_label(_annotation_source(value.factory))}), which "
+                f"returns {returns}",
+                fix=returns,
+            )
+            return self._bind(p, path)
+        self._check(
+            label,
+            p,
+            declared,
+            _satisfies(is_bearable, value, declared),
+            f"service {p!r} is {type(value).__qualname__}",
+            fix=type(value).__qualname__,
+        )
+        return ValueInput(value)
+
+    @staticmethod
+    def _check(
+        label: str,
+        p: str,
+        declared: object,
+        verdict: bool | str,
+        what: str,
+        *,
+        fix: str | None = None,
+    ) -> None:
+        """Raise ``TypeError`` for a ``False`` verdict. Warn for a reason."""
+        wanted = _hint_label(declared)
+        if verdict is False:
+            change = (
+                f"Change the annotation to {fix}"
+                if fix is not None
+                else "Change the annotation"
+            )
+            raise TypeError(
+                f"{label} declares parameter {p!r} as {wanted}, but {what}. "
+                f"{change}, or read another input."
+            )
+        if isinstance(verdict, str):
+            warn_user(
+                f"{label} declares parameter {p!r} as {wanted}, which Python "
+                f"cannot test at run time ({verdict}). The input is not "
+                f"checked against it."
+            )
 
 
 class TypedServices:
@@ -210,7 +467,18 @@ class TypedServices:
         names = sorted(t.__qualname__ for t in self._by_type)
         return f"services= has the types {names}."
 
-    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
+    def bind_factories(
+        self, readables: Mapping[str, Readable], context_schema: type | None
+    ) -> Mapping[str, BoundFactory]:
+        """The type-keyed form holds no ``RunScoped`` factory."""
+        return {}
+
+    def bind(
+        self,
+        meta: HandlerMeta,
+        context_schema: type | None,
+        factories: Mapping[str, BoundFactory],
+    ) -> BoundHandler:
         """Fill each candidate of *meta* whose annotation is a class with the
         service of that class.
 
@@ -287,26 +555,44 @@ class NamedServices:
             return "services= has no service."
         return f"services= has the name keys {sorted(self._by_name)}."
 
-    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
+    def bind_factories(
+        self, readables: Mapping[str, Readable], context_schema: type | None
+    ) -> Mapping[str, BoundFactory]:
+        """Bind each ``RunScoped`` factory to its inputs, by the handler rules.
+
+        Raises ``TypeError`` for a service whose name a reducer or a
+        ``Derived`` also has, because a parameter cannot name both. Raises
+        ``TypeError`` for each factory parameter that cannot bind, and for a
+        cycle among factories.
+        """
+        for name in self._by_name:
+            readable = readables.get(name)
+            if readable is not None:
+                kind = "reducer" if isinstance(readable, BaseReducer) else "Derived"
+                raise TypeError(
+                    f"services= has the name key {name!r}, and a {kind} has the "
+                    f"same name. A parameter cannot name both. Rename the "
+                    f"service or the {kind}."
+                )
+        return _FactoryBinder(
+            self._by_name, self._run_scoped_types, readables, context_schema
+        ).bind_all()
+
+    def bind(
+        self,
+        meta: HandlerMeta,
+        context_schema: type | None,
+        factories: Mapping[str, BoundFactory],
+    ) -> BoundHandler:
         """Fill each candidate of *meta* with the service of its name, then
-        check each service against the annotation. A ``RunScoped`` factory
-        whose second parameter is annotated with *context_schema* also gets
-        the run context."""
+        check each service against the annotation. A ``RunScoped`` service
+        fills its candidate with its bound factory from *factories*."""
         services = tuple(
-            (c.param, self._by_name[c.param])
+            (c.param, factories.get(c.param, self._by_name[c.param]))
             for c in meta.service_candidates
             if c.param in self._by_name
         )
-        bound = BoundHandler(
-            meta,
-            services,
-            frozenset(
-                param
-                for param, value in services
-                if isinstance(value, RunScoped)
-                and value.takes_context(param, context_schema)
-            ),
-        )
+        bound = BoundHandler(meta, services)
         self._verify(bound)
         return bound
 
@@ -420,6 +706,36 @@ def _factory_label(factory: object) -> str:
     if inspect.isroutine(factory):
         return factory.__qualname__
     return _hint_label(factory)
+
+
+def _or_none(hint: object) -> object:
+    """*hint*, widened to accept ``None``."""
+    return typing.Optional[hint]  # noqa: UP045 - a runtime value, not an annotation
+
+
+def _erased(hint: object) -> object:
+    """*hint* without its type arguments, also inside a union.
+
+    ``list[str]`` becomes ``list``. A hint with no class origin, such as
+    ``Annotated``, stays as is.
+    """
+    origin = typing.get_origin(hint)
+    if origin is typing.Union or origin is types.UnionType:
+        return typing.Union[tuple(_erased(a) for a in typing.get_args(hint))]  # noqa: UP007 - a runtime value
+    if isinstance(origin, type):
+        return origin
+    return hint
+
+
+def _hint_fits(provided: object, declared: object) -> bool | str:
+    """Whether *provided* is a subhint of *declared*. ``Any`` and a bare type
+    variable say nothing, so they fit. A string is the reason that the check
+    cannot run."""
+    if provided is Any or isinstance(provided, TypeVar):
+        return True
+    from beartype.door import is_subhint  # noqa: PLC0415
+
+    return _satisfies(is_subhint, provided, declared)
 
 
 def _satisfies(

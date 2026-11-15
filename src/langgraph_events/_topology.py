@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from langgraph.types import Checkpointer, Durability
 
     from langgraph_events._reducer import BaseReducer, Derived
-    from langgraph_events._services import Services
+    from langgraph_events._services import BoundFactory, Services
     from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import (
         NamespaceAwareSerde,
@@ -816,9 +816,24 @@ class EventTopology:
         and signature order. A variadic parameter is not listed."""
         return tuple(r for meta in self._handler_metas for r in meta.requirements)
 
-    def _bind(self, services: Services, *, entry: str) -> tuple[BoundHandler, ...]:
+    def _bind_factories(self, services: Services) -> Mapping[str, BoundFactory]:
+        """Bind each ``RunScoped`` factory of *services* to its inputs.
+
+        Raises ``TypeError`` for a factory parameter that cannot bind, and
+        for a service whose name a reducer or a ``Derived`` also has.
+        """
+        return services.bind_factories(self._registry.readables, self._context_schema)
+
+    def _bind(
+        self,
+        services: Services,
+        factories: Mapping[str, BoundFactory],
+        *,
+        entry: str,
+    ) -> tuple[BoundHandler, ...]:
         """Bind *services* to each handler, in handler order.
 
+        *factories* holds the bound ``RunScoped`` factories of *services*.
         Raises ``TypeError`` for a name-keyed service that does not satisfy
         the parameter annotation, and for a parameter that no source fills.
         *entry* is the call that received ``services=``, for the error.
@@ -826,7 +841,7 @@ class EventTopology:
         reducer_names = self.injectable_names
         bound: list[BoundHandler] = []
         for meta in self._handler_metas:
-            handler = services.bind(meta, self._context_schema)
+            handler = services.bind(meta, self._context_schema, factories)
             handler.require_claimed(
                 reducer_names,
                 received=services.received(),

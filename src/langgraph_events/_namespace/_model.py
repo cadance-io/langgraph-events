@@ -326,6 +326,23 @@ class NamespaceModel:
         reads_log: bool = False
 
     @dataclass(frozen=True)
+    class RunScoped:
+        """A ``RunScoped`` service of an ``EventGraph``, and the inputs that
+        its factory reads.
+
+        ``inputs`` holds the parameter names of the factory, in signature
+        order. Each one names the run config, the run context, ``log``, a
+        stored reducer, a ``Derived`` or another service. ``reads`` holds
+        the inputs that bind by name to a stored reducer, a ``Derived`` or
+        another service. A topology has no services, so only
+        ``EventGraph.namespaces()`` lists them.
+        """
+
+        name: str
+        inputs: tuple[str, ...]
+        reads: tuple[str, ...] = ()
+
+    @dataclass(frozen=True)
     class Focus:
         """The part of the model that ``mermaid(focus=...)`` draws.
 
@@ -371,6 +388,7 @@ class NamespaceModel:
     invariants: tuple[NamespaceModel.Invariant, ...]
     reducers: tuple[NamespaceModel.Reducer, ...] = ()
     derived: tuple[NamespaceModel.Derived, ...] = ()
+    run_scoped: tuple[NamespaceModel.RunScoped, ...] = ()
 
     # ---- derived accessors ----
 

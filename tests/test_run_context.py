@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import Any, TypedDict
 
 import pytest
 from ag_ui.core import EventType, RunAgentInput
 from conftest import Ended, Started
+from langchain_core.runnables import (
+    RunnableConfig,  # noqa: TC002 - a factory annotation resolves at graph build
+)
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -23,9 +26,6 @@ from langgraph_events import (
 )
 from langgraph_events.agui import AGUIAdapter
 from langgraph_events.serde import assert_resume_recovers
-
-if TYPE_CHECKING:
-    from langchain_core.runnables import RunnableConfig
 
 
 @dataclass(frozen=True)
@@ -45,22 +45,12 @@ def _model_for(config: RunnableConfig, context: RunFacts) -> _Model:
     return _Model(context.language, config["configurable"]["thread_id"])
 
 
-def _optional_context(
-    config: RunnableConfig, context: RunFacts | None = None
-) -> _Model:
-    return _Model("", "")
-
-
-def _keyword_context(config: RunnableConfig, *, context: RunFacts) -> _Model:
-    return _Model("", "")
+def _keyword_context(*, facts: RunFacts, run: RunnableConfig) -> _Model:
+    return _Model(facts.language, run["configurable"]["thread_id"])
 
 
 def _other_context(config: RunnableConfig, context: str) -> _Model:
     return _Model("", "")
-
-
-def _config_only(config: RunnableConfig, retries: int = 3) -> _Model:
-    return _Model("none", config["configurable"]["thread_id"])
 
 
 class DictFacts(TypedDict):
@@ -308,60 +298,34 @@ def describe_context_schema():
 
                     assert "'model'" in str(info.value)
 
-        def when_the_second_parameter_is_optional():
-            def without_a_context_schema():
-                def it_passes_the_run_config_only():
-                    graph = EventGraph(
-                        [model_reply], services={"model": RunScoped(_config_only)}
-                    )
+        def when_the_context_is_a_keyword_only_parameter():
+            def it_binds_each_parameter_by_its_annotation():
+                graph = EventGraph(
+                    [model_reply],
+                    context_schema=RunFacts,
+                    services={"model": RunScoped(_keyword_context)},
+                )
 
-                    log = graph.invoke(Started(), config=_thread("t3"))
+                log = graph.invoke(
+                    Started(), config=_thread("t3"), context=RunFacts("nl")
+                )
 
-                    assert log.latest(Ended) == Ended(result="none@t3")
+                assert log.latest(Ended) == Ended(result="nl@t3")
 
-        def when_the_second_parameter_is_not_the_context():
-            @pytest.mark.parametrize(
-                ("factory", "why"),
-                [
-                    (_optional_context, "has an optional parameter 'context'"),
-                    (_keyword_context, "has a keyword-only parameter 'context'"),
-                    (_other_context, "annotates parameter 'context' as str"),
-                ],
-                ids=["optional", "keyword-only", "another-type"],
-            )
-            def it_raises_naming_the_factory_and_the_fix(factory: Any, why: str):
+        def when_a_parameter_has_another_type_than_the_context():
+            def it_raises_naming_the_factory_and_the_parameter():
                 with pytest.raises(TypeError) as info:
                     EventGraph(
                         [model_reply],
                         context_schema=RunFacts,
-                        services={"model": RunScoped(factory)},
+                        services={"model": RunScoped(_other_context)},
                     )
 
-                assert str(info.value) == (
-                    f"RunScoped factory {factory.__qualname__!r} for service "
-                    f"'model' {why}. A factory that takes the run context "
-                    f"declares it as a second positional parameter, required and "
-                    f"annotated with RunFacts: (config, context: RunFacts). "
-                    f"Change the parameter, or remove it."
+                assert str(info.value).startswith(
+                    "RunScoped factory '_other_context' for service 'model' reads "
+                    "parameter 'context', which names no reducer, no Derived and "
+                    "no service."
                 )
-
-        def when_python_cannot_read_the_factory_signature():
-            def it_passes_the_run_config_only():
-                @on(Started)
-                def copy_config(event: Started, copied: dict) -> Ended:  # type: ignore[type-arg]
-                    return Ended(result=copied["configurable"]["thread_id"])
-
-                graph = EventGraph(
-                    [copy_config],
-                    context_schema=RunFacts,
-                    services={"copied": RunScoped(dict)},
-                )
-
-                log = graph.invoke(
-                    Started(), config=_thread("t2"), context=RunFacts("fr")
-                )
-
-                assert log.latest(Ended) == Ended(result="t2")
 
     def describe_type_keyed_services():
         def when_a_service_is_an_instance_of_the_schema():

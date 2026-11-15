@@ -7,8 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+`RunScoped` factory parameters now bind like handler parameters. Graph construction checks
+each parameter and raises `TypeError` that names the factory, the parameter and the fix.
+Each row is one rule that can refuse a graph that built on 0.49.
+
+| Before | Now | Fix |
+|---|---|---|
+| The first factory parameter was the run config, by position, with or without an annotation | A parameter with no annotation raises `TypeError`. An annotation that does not resolve, for example `RunnableConfig` imported under `TYPE_CHECKING`, raises `TypeError` too | Annotate the parameter `RunnableConfig`, and import `RunnableConfig` at run time |
+| A second parameter annotated with the `context_schema` type got the run context. It had to be positional and required | A parameter annotated with the schema type gets the run context at any position, keyword-only included | None for a factory that already declares `(config: RunnableConfig, context: Schema)` |
+| An optional parameter was not passed, for example `def f(config, retries=3)` | A parameter with a default raises `TypeError` | Remove the default. Bind a constant in a closure or a `functools.partial` |
+| A factory with a signature that Python cannot read, for example `RunScoped(dict)`, got the config | `TypeError` | Pass a function whose signature Python can read |
+| Any other parameter name was refused | A parameter binds by name to `log`, a stored reducer, a `Derived` or a service. A name that matches none raises `TypeError` that lists the names | Rename the parameter |
+| A reducer or a `Derived` won over a service of the same name, with no message | A service with the name of a reducer or a `Derived` raises `TypeError`, for handlers and factories alike | Rename the service or the reducer |
+
 ### Added
 
+- **A `RunScoped` factory can read reducers, `Derived` values, `log` and other services.**
+  Each parameter binds by the handler rules: `RunnableConfig` and the `context_schema` type
+  by annotation, then `log`, a stored reducer, a `Derived` or a service by name. A factory
+  runs only for a handler or a factory that declares it, once per node call. One result serves
+  every reader in that call. Graph construction checks each annotation against its input
+  with `beartype.door.is_subhint`. A cycle among factories raises `TypeError` that names the
+  cycle. A non-`None` annotation on an unset reducer raises `ReducerNotSetError` that names
+  the factory. `EventGraph.namespaces()` lists each `RunScoped` service with its inputs in
+  the text, JSON and mermaid views. See
+  [Run-scoped services](https://cadance-io.github.io/langgraph-events/concepts/#run-scoped-services).
 - **A `Derived` can read the `EventLog` and other `Derived` values.** A parameter of `fn`
   annotated with `EventLog` receives the `EventLog` of the state, as on a handler. The
   parameter name does not matter, and the name `log` has no special meaning. A lambda cannot

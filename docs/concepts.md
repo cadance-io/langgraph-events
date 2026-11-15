@@ -157,33 +157,76 @@ Name-keyed injection needs no annotation. When the annotation resolves, the libr
 
 #### Run-scoped services
 
-A plain service is injected as the same object on every dispatch. For a value derived from the run's `RunnableConfig`, wrap a factory in `RunScoped` and place it in the name-keyed mapping. The library calls the factory with the node's `RunnableConfig` once per node call and injects the result under the handler's parameter name.
+A plain service is injected as the same object on every dispatch. For a value built per node call, wrap a factory in `RunScoped` and place it in the name-keyed mapping. The library calls the factory once per node call and injects the result under the handler's parameter name.
 
 ```python
 ...
-from langgraph_events import RunScoped
+from langgraph_events import EventLog, RunScoped
 
 def model_for(config: RunnableConfig) -> ConversationModel:
     return models.main(config)
 
+def planner_for(model: ConversationModel, log: EventLog, stage: str) -> Planner:
+    return Planner(model, log, stage)
+
 EventGraph(
     handlers=[...],
-    services={"model": RunScoped(model_for), "session_factory": session_factory},
+    reducers=[stage],
+    services={
+        "model": RunScoped(model_for),
+        "planner": RunScoped(planner_for),
+        "session_factory": session_factory,
+    },
 )
 
 @on(SomeEvent)
-async def handle(event: SomeEvent, model: ConversationModel) -> ...: ...
+async def handle(event: SomeEvent, planner: Planner) -> ...: ...
 ```
+
+Each factory parameter binds like a handler parameter:
+
+| Parameter | Value |
+|---|---|
+| annotated `RunnableConfig` | the run config of the node |
+| annotated exactly with the `context_schema` type | the run context. See [Run context](#run-context) |
+| named `log` | the `EventLog` of the node |
+| named like a stored reducer or a `Derived` | its value at node start, as a handler parameter of that name receives it |
+| named like a service | that service. A `RunScoped` service gives its result for the same node call |
 
 Rules:
 
-- The factory must be a plain function with a return annotation. A coroutine function, or a factory without a return annotation, raises `TypeError` at `RunScoped(...)`. A `functools.partial` is read through to the wrapped function. A callable object is read through its `__call__`.
+- The factory must be a plain function, a class or a callable object, with a return annotation. A coroutine function, or a factory without a return annotation, raises `TypeError` at `RunScoped(...)`. A `functools.partial` is read through to the wrapped function. A callable object is read through its `__call__`.
 - The return annotation must resolve at graph build, so declare its class at module level. It must be a nominal subtype of the handler parameter's annotation, or the build raises `TypeError`. A factory annotated `-> Any` or with a bare type variable is not checked. `Any` nested in the return type, or an unparameterised generic, is not a subtype of a parameterised annotation.
-- The factory runs synchronously on both the `invoke` and the `ainvoke` path. Do not do I/O in it.
+- A factory runs only for a handler or a factory that declares it. It runs once per node call. One result serves every reader in that call: the handler and each factory that reads it.
+- The factory runs synchronously on both the `invoke` and the `ainvoke` path. Do not do I/O in it. A factory can return an object whose async methods do the I/O.
 - `RunScoped` is rejected in the type-keyed sequence form.
 - A resumed run receives a freshly built config, not a checkpointed one.
-- The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error, with a note that names the handler and the parameter. Keep the factory to a lookup. Validate the config in the factory and raise a clear error.
-- A factory whose second parameter is annotated with the `context_schema` type receives `(config, context)`. See [Run context](#run-context).
+- The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error. A note names each reader that requested the service, from the factory that raised up to the handler. Keep the factory to a lookup. Validate the config in the factory and raise a clear error.
+- A parameter that names a stored reducer or a `Derived`, with an annotation that rejects `None`, raises `ReducerNotSetError` when the value is `None`. The message names the factory.
+- `EventGraph.namespaces()` lists each `RunScoped` service with its inputs, in `.text()`, `.json()` and `.mermaid()`. The mermaid diagram draws a service as a subroutine node, with a dotted `reads` arrow from each input reducer, `Derived` or `RunScoped` service. `EventTopology.namespaces()` has no services, so it lists none.
+
+Graph construction raises `TypeError` in each of these cases. The message names the factory, the parameter and the fix.
+
+| Case | Fix |
+|---|---|
+| A factory parameter has no annotation, or an annotation that does not resolve | Annotate it with `RunnableConfig`, the context schema, `EventLog`, or the type of the reducer, `Derived` or service that it names |
+| A factory parameter has a default value | Remove the default. A default hides a missing input |
+| A factory parameter is `*args` or `**kwargs` | Give each input its own parameter |
+| A factory parameter names no reducer, no `Derived`, no service and not `log` | Rename the parameter. The message lists the available names |
+| A service has the name of a reducer or a `Derived` | Rename the service or the reducer. A handler or a factory parameter cannot name both |
+| A factory reads `log`, and a service has the name `log` | Rename the service. In a factory, `log` names the `EventLog` |
+| The annotation of a factory parameter does not match its input | Change the annotation. See the check below |
+| Factories read each other in a cycle | Remove one read. The message names the cycle, for example `first -> second -> first` |
+| Python cannot read the signature of the factory, for example `dict` | Pass a function, a class or a callable object whose signature Python can read |
+
+The annotation check uses `beartype.door.is_subhint`, as for a handler parameter:
+
+- `log`: `EventLog` must be a subtype of the annotation.
+- A stored reducer: the type that the reducer holds must fit the annotation. A `Reducer` holds a `list`, so the check ignores the type arguments of the annotation. A `ScalarReducer` and a `FoldReducer` give no type, so they are not checked.
+- A `Derived`: the return annotation of its `fn` must fit the annotation. A `fn` with no return annotation is not checked.
+- For a reducer and a `Derived`, `None` always fits. A `None` value raises `ReducerNotSetError` at run time instead.
+- A plain service must be an instance of the annotation. A `RunScoped` service must return a subtype of the annotation.
+- An annotation that Python cannot test at run time, such as a `Protocol` without `@runtime_checkable`, binds the parameter and emits a `UserWarning`.
 
 #### Run context
 
@@ -197,7 +240,7 @@ from dataclasses import dataclass
 class RunFacts:
     language: str
 
-def model_for(config: RunnableConfig, facts: RunFacts) -> ConversationModel:
+def model_for(facts: RunFacts) -> ConversationModel:
     return models.main(facts.language)
 
 @on(SomeEvent)
@@ -217,8 +260,7 @@ Rules:
 - `context_schema` belongs to the topology: `EventTopology(handlers, context_schema=RunFacts)`. `EventGraph(handlers, context_schema=...)` passes it on, and `EventGraph.of(topology, ...)` reads it from the topology.
 - A handler parameter whose annotation is exactly the schema type receives the context. It is claimed like `RunnableConfig`, before a service, so it is not in `topology.requirements`. Only the exact type matches. A parameter annotated `RunFacts | None` or with a subclass stays unclaimed, and the `TypeError` of the build says so. Without `context_schema`, the error of a dataclass, pydantic or `TypedDict` parameter names `context_schema=`.
 - A type-keyed service that is an instance of the schema raises `TypeError` at build. The context fills a parameter of that type, so such a service is never injected.
-- A `RunScoped` factory takes the context when its second parameter is annotated with the schema type: `def model_for(config, facts: RunFacts)`. That parameter must be positional and required. A factory with one parameter receives the config only, as before.
-- On a graph with `context_schema`, the build refuses a second factory parameter that is optional, keyword-only, unannotated or of another type. The `TypeError` names the factory and the fix. On a graph without `context_schema`, a required second parameter raises `TypeError` at build. An optional one is not passed.
+- A `RunScoped` factory parameter annotated exactly with the schema type receives the context, at any position: `def model_for(config: RunnableConfig, facts: RunFacts)`. A parameter annotated with another type binds by its name. On a graph without `context_schema`, the `TypeError` of a parameter that names nothing says to pass `context_schema=` when the annotation is a dataclass, a pydantic model or a `TypedDict`.
 - A factory receives the context typed as its annotation, but `EventGraph` is not generic in the context type. A type checker cannot match the factory to the schema.
 - The context is read through LangGraph's `get_runtime()`. It is not written to the checkpoint state or to the checkpoint metadata.
 - When `context_schema` is set, every run call must pass `context=`. This includes a resume and `AGUIAdapter.stream()`. A missing context, or a context of another type, raises `TypeError` that names the schema, before the graph runs. A stream method of `EventGraph` raises it at the first iteration, because a generator runs no code before then.
