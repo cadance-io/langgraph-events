@@ -8,6 +8,7 @@ import types
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
+from langgraph._internal._constants import CONFIG_KEY_DURABILITY
 from langgraph.graph import END, START, StateGraph
 
 from langgraph_events._causes import CauseEntry
@@ -63,7 +64,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig, RunnableLambda
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import Checkpointer
+    from langgraph.types import Checkpointer, Durability
 
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._services import Services
@@ -861,6 +862,7 @@ class EventTopology:
         checkpointer: Checkpointer,
         max_rounds: int = 100,
         recursion_limit: int | None = None,
+        durability: Durability | None = None,
         store: BaseStore | None = None,
     ) -> CompiledStateGraph:
         """Compile the topology into a LangGraph ``CompiledStateGraph``.
@@ -964,6 +966,14 @@ class EventTopology:
             **(compiled.config or {}),
             "recursion_limit": limit,
         }
+        # LangGraph has no public way to give a compiled graph a default
+        # durability. Each run reads this configurable key when the run
+        # passes no durability=, so a durability= of the run still wins.
+        if durability is not None:
+            compiled.config["configurable"] = {
+                **compiled.config.get("configurable", {}),
+                CONFIG_KEY_DURABILITY: durability,
+            }
 
         return compiled
 

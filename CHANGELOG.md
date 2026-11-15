@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`EventGraph(durability=...)` and `EventGraph.of(..., durability=...)` set when LangGraph
+  stores each checkpoint.** The value is a LangGraph `Durability`: `"sync"`, `"async"` or
+  `"exit"`. It applies to every run of the graph, a run of `graph.compiled` and a run of the
+  AG-UI adapter included. With `"sync"`, the checkpoint of a step is stored before the next
+  step starts. So a crash during a later step does not make a resume run an earlier handler
+  again, for example a handler with an external side effect. A `durability=` on a run call wins over the graph value.
+  The default `None` keeps the LangGraph default `"async"`. LangGraph has no public way to
+  give a compiled graph a default durability, so the library sets the internal
+  `configurable` key that each run reads. See [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution).
 - **`MigrationTarget(drop=...)` names the event classes whose stored instances `rewrite`
   drops.** Each plan and each pass of `rewrite` passes them as `drop=` to `plan_rewrite()`
   and `rewrite_store()`. A plan reports a stored instance as a rewrite, and an `--apply` pass
