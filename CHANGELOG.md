@@ -9,15 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`EventGraph(durability=...)` and `EventGraph.of(..., durability=...)` set when LangGraph
-  stores each checkpoint.** The value is a LangGraph `Durability`: `"sync"`, `"async"` or
-  `"exit"`. It applies to every run of the graph, a run of `graph.compiled` and a run of the
-  AG-UI adapter included. With `"sync"`, the checkpoint of a step is stored before the next
-  step starts. So a crash during a later step does not make a resume run an earlier handler
-  again, for example a handler with an external side effect. A `durability=` on a run call wins over the graph value.
-  The default `None` keeps the LangGraph default `"async"`. LangGraph has no public way to
-  give a compiled graph a default durability, so the library sets the internal
-  `configurable` key that each run reads. See [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution).
 - **`MigrationTarget(drop=...)` names the event classes whose stored instances `rewrite`
   drops.** Each plan and each pass of `rewrite` passes them as `drop=` to `plan_rewrite()`
   and `rewrite_store()`. A plan reports a stored instance as a rewrite, and an `--apply` pass
@@ -38,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A run stores each checkpoint before the next step runs.** A graph with a checkpointer
+  now sets the LangGraph durability to `"sync"` for every run. Before, a run used the LangGraph default
+  `"async"`. In this library, the checkpoint is the event log. Under `"async"`, the store of
+  the checkpoints runs behind the graph. So a crash can lose the events that explain a side
+  effect that a handler already committed. One measurement showed the store about 16
+  supersteps behind, at 20 ms for each checkpoint store. The cost: each superstep waits for
+  the store of its checkpoint. The default applies to each run of the graph, a run of
+  `graph.compiled` and a run of the AG-UI adapter included. To opt out, pass
+  `durability="async"` on the run call. The value of the run wins. LangGraph has no public
+  way to give a compiled graph a default durability. So the library sets the internal
+  `configurable` key that each run reads. A graph with no checkpointer stores no checkpoint,
+  so it gets no key. LangGraph raises `AttributeError` on `"sync"` with no checkpointer. See
+  [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution).
 - **`ThreadRewrite.dropped` counts distinct stored events.** Before, it counted entries in
   `events` and in `_pending`. So an event in both channels counted twice. Each `_pending`
   entry is also in `events`, so the count now reads `events` only.

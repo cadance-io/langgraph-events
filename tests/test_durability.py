@@ -1,4 +1,4 @@
-"""EventGraph(durability=...) sets when LangGraph stores each checkpoint."""
+"""EventGraph stores each checkpoint before the next step runs."""
 
 import asyncio
 import time
@@ -52,8 +52,8 @@ def _handlers(saver: SlowSaver, seen: list[bool]) -> list[Any]:
     return [first, second]
 
 
-def _graph(saver: SlowSaver, seen: list[bool], **kwargs: Any) -> EventGraph:
-    return EventGraph(_handlers(saver, seen), checkpointer=saver, **kwargs)
+def _graph(saver: SlowSaver, seen: list[bool]) -> EventGraph:
+    return EventGraph(_handlers(saver, seen), checkpointer=saver)
 
 
 def _config(thread: str) -> dict[str, Any]:
@@ -61,10 +61,10 @@ def _config(thread: str) -> dict[str, Any]:
 
 
 def describe_EventGraph_durability():
-    def when_durability_is_sync():
+    def when_the_run_passes_no_durability():
         def it_stores_the_checkpoint_before_the_next_handler_starts():
             saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen, durability="sync")
+            graph = _graph(saver, seen)
 
             graph.invoke(Started(data="x"), config=_config("t1"))
 
@@ -73,7 +73,7 @@ def describe_EventGraph_durability():
         def it_applies_to_a_graph_built_with_of():
             saver, seen = SlowSaver(), []
             topology = EventTopology(_handlers(saver, seen))
-            graph = EventGraph.of(topology, checkpointer=saver, durability="sync")
+            graph = EventGraph.of(topology, checkpointer=saver)
 
             graph.invoke(Started(data="x"), config=_config("t1"))
 
@@ -81,7 +81,7 @@ def describe_EventGraph_durability():
 
         def it_applies_to_a_run_of_the_compiled_graph():
             saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen, durability="sync")
+            graph = _graph(saver, seen)
 
             graph.compiled.invoke({"events": [Started(data="x")]}, config=_config("t1"))
 
@@ -89,7 +89,7 @@ def describe_EventGraph_durability():
 
         async def it_applies_to_astream_events():
             saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen, durability="sync")
+            graph = _graph(saver, seen)
 
             async for _ in graph.astream_events(
                 Started(data="x"), config=_config("t1")
@@ -98,22 +98,11 @@ def describe_EventGraph_durability():
 
             assert seen == [True]
 
-        def when_the_run_passes_durability():
-            def it_uses_the_durability_of_the_run():
-                saver, seen = SlowSaver(), []
-                graph = _graph(saver, seen, durability="sync")
-
-                graph.invoke(
-                    Started(data="x"), config=_config("t1"), durability="async"
-                )
-
-                assert seen == [False]
-
-    def when_durability_is_not_set():
-        def it_keeps_the_async_default_of_langgraph():
+    def when_the_run_passes_durability():
+        def it_uses_the_durability_of_the_run():
             saver, seen = SlowSaver(), []
             graph = _graph(saver, seen)
 
-            graph.invoke(Started(data="x"), config=_config("t1"))
+            graph.invoke(Started(data="x"), config=_config("t1"), durability="async")
 
             assert seen == [False]

@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig, RunnableLambda
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import Checkpointer, Durability
+    from langgraph.types import Checkpointer
 
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._services import Services
@@ -862,7 +862,6 @@ class EventTopology:
         checkpointer: Checkpointer,
         max_rounds: int = 100,
         recursion_limit: int | None = None,
-        durability: Durability | None = None,
         store: BaseStore | None = None,
     ) -> CompiledStateGraph:
         """Compile the topology into a LangGraph ``CompiledStateGraph``.
@@ -966,13 +965,18 @@ class EventTopology:
             **(compiled.config or {}),
             "recursion_limit": limit,
         }
-        # LangGraph has no public way to give a compiled graph a default
-        # durability. Each run reads this configurable key when the run
-        # passes no durability=, so a durability= of the run still wins.
-        if durability is not None:
+        # The checkpoint is the event log. Under the LangGraph default
+        # "async", the store runs behind the graph, so a crash can lose the
+        # events that explain a committed side effect. "sync" stores each
+        # checkpoint before the next step runs. LangGraph has no public way to
+        # set a default durability, so this sets the internal configurable key
+        # that each run reads. A durability= of the run still wins.
+        # A run with no checkpointer stores no checkpoint, and LangGraph
+        # raises AttributeError on "sync" there, so such a graph gets no key.
+        if checkpointer is not None and checkpointer is not False:
             compiled.config["configurable"] = {
                 **compiled.config.get("configurable", {}),
-                CONFIG_KEY_DURABILITY: durability,
+                CONFIG_KEY_DURABILITY: "sync",
             }
 
         return compiled

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
 from langgraph.types import Command as LGCommand
-from langgraph.types import Durability
 
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
@@ -254,7 +253,6 @@ class EventGraph:
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
-        durability: Durability | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
         context_schema: type | None = None,
         retired: Sequence[type[Event]] = (),
@@ -273,7 +271,6 @@ class EventGraph:
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
-            durability=durability,
             on_unresumable=on_unresumable,
             entry="EventGraph(services=)",
         )
@@ -288,7 +285,6 @@ class EventGraph:
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
-        durability: Durability | None = None,
         on_unresumable: Literal["raise", "halt", "warn"] = "raise",
     ) -> EventGraph:
         """Build a graph that runs *topology* with *services*.
@@ -307,7 +303,6 @@ class EventGraph:
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
-            durability=durability,
             on_unresumable=on_unresumable,
             entry="EventGraph.of(..., services=)",
         )
@@ -322,7 +317,6 @@ class EventGraph:
         checkpointer: Checkpointer,
         store: BaseStore | None,
         recursion_limit: int | None,
-        durability: Durability | None,
         on_unresumable: Literal["raise", "halt", "warn"],
         entry: str,
     ) -> None:
@@ -332,7 +326,6 @@ class EventGraph:
         self._topology = topology
         self._max_rounds = max_rounds
         self._recursion_limit = recursion_limit
-        self._durability = durability
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._base_store = store
@@ -418,7 +411,6 @@ class EventGraph:
             self._handlers,
             max_rounds=self._max_rounds,
             recursion_limit=self._recursion_limit,
-            durability=self._durability,
             checkpointer=self._checkpointer,
             store=self._base_store,
         )
