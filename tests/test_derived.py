@@ -367,11 +367,48 @@ def describe_Derived():
             with pytest.raises(TypeError, match=r"'placd'.*\['placed', 'shipped'\]"):
                 EventGraph([report], reducers=[placed, shipped, typo])
 
-        def it_rejects_an_input_that_names_another_derived():
-            twice = Derived(name="twice", fn=lambda stage: stage)
+        def it_lists_the_derived_names_and_log_for_an_unknown_input():
+            typo = Derived(name="typo", fn=lambda stag: stag)
 
-            with pytest.raises(TypeError, match=r"'twice' reads the derived 'stage'"):
-                EventGraph([report], reducers=[placed, shipped, stage, twice])
+            with pytest.raises(
+                TypeError,
+                match=r"'stag'.*Available reducers: \['placed', 'shipped'\]\. "
+                r"Available Derived values: \['stage', 'typo'\]\. A parameter named "
+                r"'log' reads the EventLog\.",
+            ):
+                EventGraph([report], reducers=[placed, shipped, stage, typo])
+
+        def it_rejects_two_derived_values_that_read_each_other():
+            first = Derived(name="first", fn=lambda second: second)
+            second = Derived(name="second", fn=lambda first: first)
+
+            with pytest.raises(
+                TypeError,
+                match=r"Derived values read each other in a cycle: "
+                r"first -> second -> first\.",
+            ):
+                EventGraph([report], reducers=[placed, shipped, first, second])
+
+        def it_rejects_a_derived_that_reads_itself():
+            itself = Derived(name="itself", fn=lambda itself: itself)
+
+            with pytest.raises(
+                TypeError,
+                match=r"Derived values read each other in a cycle: itself -> itself\.",
+            ):
+                EventGraph([report], reducers=[placed, shipped, itself])
+
+        def when_a_reducer_has_the_name_log():
+            def it_rejects_a_derived_that_reads_log():
+                log_reducer = ScalarReducer(name="log", event_type=Placed, fn=str)
+                sized = Derived(name="sized", fn=_count)
+
+                with pytest.raises(
+                    TypeError,
+                    match=r"Derived 'sized' reads 'log', and a reducer has the name "
+                    r"'log'\. Rename the reducer",
+                ):
+                    EventGraph([report], reducers=[placed, shipped, log_reducer, sized])
 
         def it_rejects_a_variadic_parameter():
             loose = Derived(name="loose", fn=lambda **values: values)
@@ -548,3 +585,215 @@ def describe_Derived_from_two_kinds_of_reducer():
         log = graph.invoke([Placed(), Ticked(), Ticked(), Checked()])
 
         assert [e.remaining for e in log.filter(Polled)] == [1]
+
+
+class Counted(IntegrationEvent):
+    n: int = 0
+
+
+def _count(log: Any) -> int:
+    return len(log)
+
+
+seen = Derived(name="seen", fn=_count)
+
+
+def _shipped_by(log: Any) -> tuple[str, ...]:
+    return tuple(log.cause(e).via for e in log.filter(Shipped))
+
+
+shipped_by = Derived(name="shipped_by", fn=_shipped_by)
+loud = Derived(name="loud", fn=lambda stage: (stage or "").upper())
+label = Derived(name="label", fn=lambda loud, seen: f"{loud}:{seen}")
+
+
+@on(Shipped)
+def count(event: Shipped, seen: int) -> Counted:
+    return Counted(n=seen)
+
+
+@on(Checked)
+def tell(event: Checked, label: str) -> Reported:
+    return Reported(stage=label)
+
+
+def describe_Derived_that_reads_the_log():
+    def when_a_handler_declares_it():
+        def it_receives_the_value_of_the_log_at_node_start():
+            graph = EventGraph([ship, count], reducers=[seen])
+
+            log = graph.invoke(Placed())
+
+            assert [e.n for e in log.filter(Counted)] == [2]
+
+    def when_a_sync_stream_includes_it():
+        def it_shows_the_value_of_the_log_in_each_frame():
+            graph = EventGraph([ship, count], reducers=[seen])
+
+            frames = list(graph.stream_events(Placed(), include_reducers=["seen"]))
+
+            assert [f.reducers for f in frames] == [
+                {"seen": 1},
+                {"seen": 2},
+                {"seen": 3},
+            ]
+
+    def when_an_async_stream_includes_it():
+        async def it_shows_the_value_of_the_log_in_each_frame():
+            graph = EventGraph([ship, count], reducers=[seen])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Placed(), include_reducers=["seen"], include_custom_events=True
+                )
+            ]
+
+            assert [f.reducers for f in frames] == [
+                {"seen": 1},
+                {"seen": 2},
+                {"seen": 3},
+            ]
+
+        async def it_marks_the_value_changed_on_each_event():
+            graph = EventGraph([ship, count], reducers=[seen])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Placed(), include_reducers=["seen"], include_custom_events=True
+                )
+            ]
+
+            assert [f.changed_reducers for f in frames] == [frozenset({"seen"})] * 3
+
+        async def it_reads_the_causes_of_the_streamed_events():
+            graph = EventGraph([ship], reducers=[shipped_by])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Placed(),
+                    include_reducers=["shipped_by"],
+                    include_custom_events=True,
+                )
+            ]
+
+            assert frames[-1].reducers == {"shipped_by": ("ship",)}
+
+        async def it_counts_the_checkpointed_events_of_a_later_run():
+            graph = EventGraph([ship], reducers=[seen], checkpointer=MemorySaver())
+            await graph.ainvoke(Placed(), config=_config("log-1"))
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Checked(),
+                    include_reducers=["seen"],
+                    include_custom_events=True,
+                    config=_config("log-1"),
+                )
+            ]
+
+            assert [f.reducers for f in frames] == [{"seen": 3}]
+
+    def when_reflected():
+        def it_projects_the_value_over_the_log():
+            graph = EventGraph([ship], reducers=[seen, shipped_by])
+            log = graph.invoke(Placed())
+
+            assert graph.reflect(log).state() == {"seen": 2, "shipped_by": ("ship",)}
+
+    def when_the_structure_is_rendered():
+        def it_lists_log_as_an_input_in_the_text():
+            text = EventGraph([count], reducers=[seen]).namespaces().text()
+
+            assert "  seen  (reads log)" in text
+
+        def it_draws_no_reads_arrow_from_the_log():
+            mermaid = EventGraph([count], reducers=[seen]).namespaces().mermaid()
+
+            assert "_reducer_seen{{seen}}:::reducer" in mermaid
+            assert "_reducer_log" not in mermaid
+
+
+def describe_Derived_that_reads_another_derived():
+    def when_a_handler_declares_it():
+        def it_receives_the_value_computed_from_the_other_derived():
+            graph = EventGraph(
+                [tell], reducers=[placed, shipped, stage, loud, seen, label]
+            )
+
+            log = graph.invoke([Placed(), Checked()])
+
+            assert _reports(log) == ["PLACED:2"]
+
+    def when_an_async_stream_includes_it():
+        async def it_marks_the_value_changed_on_an_input_change_of_the_other():
+            graph = EventGraph([ship], reducers=[placed, shipped, stage, loud])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Placed(), include_reducers=["loud"], include_custom_events=True
+                )
+            ]
+
+            assert [f.reducers for f in frames] == [
+                {"loud": "PLACED"},
+                {"loud": "SHIPPED"},
+            ]
+            assert [f.changed_reducers for f in frames] == [frozenset({"loud"})] * 2
+
+        async def it_marks_nothing_changed_for_an_event_that_no_input_folds():
+            graph = EventGraph([check], reducers=[placed, shipped, stage, loud])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Checked(), include_reducers=["loud"], include_custom_events=True
+                )
+            ]
+
+            assert [f.changed_reducers for f in frames] == [frozenset(), frozenset()]
+
+    def when_a_sync_stream_includes_it():
+        def it_shows_the_value_in_each_frame():
+            graph = EventGraph([ship], reducers=[placed, shipped, stage, loud])
+
+            frames = list(graph.stream_events(Placed(), include_reducers=["loud"]))
+
+            assert [f.reducers for f in frames] == [
+                {"loud": "PLACED"},
+                {"loud": "SHIPPED"},
+            ]
+
+    def when_reflected():
+        def it_projects_the_value_over_the_log():
+            graph = EventGraph(
+                [ship], reducers=[placed, shipped, stage, loud, seen, label]
+            )
+            log = graph.invoke(Placed())
+
+            assert graph.reflect(log).state()["label"] == "SHIPPED:2"
+
+    def when_the_structure_is_rendered():
+        def it_lists_each_input_in_the_json():
+            graph = EventGraph(
+                [tell], reducers=[placed, shipped, stage, loud, seen, label]
+            )
+
+            derived = graph.namespaces().to_dict()["derived"]
+
+            assert {"name": "label", "inputs": ["loud", "seen"], "namespace": None} in (
+                derived
+            )
+
+        def it_draws_a_reads_arrow_from_the_other_derived():
+            graph = EventGraph(
+                [tell], reducers=[placed, shipped, stage, loud, seen, label]
+            )
+
+            mermaid = graph.namespaces().mermaid()
+
+            assert "_reducer_loud -.->|reads| _reducer_label" in mermaid

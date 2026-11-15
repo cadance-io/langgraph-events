@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `Derived` can read `log` and other `Derived` values.** A parameter of `fn` named
+  `log` receives the `EventLog` of the state. A parameter that names another `Derived`
+  receives its computed value. A handler parameter, a `StreamFrame`, the AG-UI
+  `STATE_SNAPSHOT` and `reflect(log).state()` give the same value. `changed_reducers` names
+  a `Derived` that reads `log` on each event. Before, an input that named another `Derived`
+  raised `TypeError`. Now graph construction raises `TypeError` only for a cycle among
+  `Derived` values, and the message names the cycle. A `Derived` that reads `log` while a
+  reducer or a `Derived` has the name `log` raises `TypeError` too. See
+  [`Derived`](https://cadance-io.github.io/langgraph-events/reducers/#derived).
+
 ## [0.50.0] - 2026-11-16
 
 ### Added

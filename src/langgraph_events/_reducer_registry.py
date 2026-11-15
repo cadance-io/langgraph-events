@@ -8,7 +8,7 @@ import types
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._internal import _BASE_FIELDS
-from langgraph_events._reducer import BaseReducer, Derived
+from langgraph_events._reducer import BaseReducer, Derived, bind_derived, log_reader
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -110,10 +110,9 @@ class ReducerRegistry:
             )
         reducers = {n: e for n, e in entries.items() if isinstance(e, BaseReducer)}
         derived = {n: e for n, e in entries.items() if isinstance(e, Derived)}
+        bound = bind_derived(reducers, derived)
         readables: dict[str, Readable] = {
-            name: entry._bind(reducers, derived)
-            if isinstance(entry, Derived)
-            else entry
+            name: bound[name] if isinstance(entry, Derived) else entry
             for name, entry in entries.items()
         }
         return cls(
@@ -163,17 +162,28 @@ class ReducerSelection:
             )
         )
 
+    @functools.cached_property
+    def reads_log(self) -> bool:
+        """Whether a shown value reads the ``EventLog``. A stream must then
+        follow the ``events`` and ``causes`` channels too."""
+        return any(self.readables[name]._reads_log for name in self.names)
+
     def values(self, state: Mapping[str, Any]) -> dict[str, Any]:
         """Each shown value, read or computed from the channels in *state*.
 
-        An unset channel reads as the empty default of its reducer.
+        An unset channel reads as the empty default of its reducer. A value
+        that reads the log gets the ``EventLog`` of the ``events`` and
+        ``causes`` channels of *state*.
         """
-        return {name: self.readables[name].read(state) for name in self.names}
+        log = log_reader(state)
+        return {name: self.readables[name]._read(state, log) for name in self.names}
 
     def changed(self, channels: frozenset[str]) -> frozenset[str]:
-        """The shown names whose value can change when *channels* change."""
+        """The shown names whose value can change when one event changes
+        *channels*. A value that reads the log changes on each event."""
         return frozenset(
             name
             for name in self.names
-            if any(r.name in channels for r in self.readables[name].sources)
+            if self.readables[name]._reads_log
+            or any(r.name in channels for r in self.readables[name].sources)
         )

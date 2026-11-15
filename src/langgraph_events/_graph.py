@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer, Interrupt, StateSnapshot
 
+    from langgraph_events._causes import CauseEntry
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._reducer_registry import ReducerSelection
@@ -953,24 +954,36 @@ class EventGraph:
 
     @staticmethod
     def _events_from_chunk(chunk: object, seen: set[int]) -> list[Event]:
-        """Extract unseen events from an updates-mode stream chunk.
+        """Extract unseen events from an updates-mode stream chunk."""
+        return [event for event, _ in EventGraph._entries_from_chunk(chunk, seen)]
 
-        A chunk marked ``cached`` replays the saved writes of a task that
-        finished before a pause. The run that wrote them streamed them, and
-        the checkpoint already holds them, so they are not new events.
-        LangGraph also marks a node cache hit ``cached``, but ``compiled``
-        sets no node cache, so here the marker means only that replay.
+    @staticmethod
+    def _entries_from_chunk(
+        chunk: object, seen: set[int]
+    ) -> list[tuple[Event, CauseEntry]]:
+        """Extract each unseen event, with its stored cause, from an
+        updates-mode stream chunk.
+
+        Each writer to ``events`` writes one ``causes`` entry per event, in
+        the same order. A chunk marked ``cached`` replays the saved writes of
+        a task that finished before a pause. The run that wrote them
+        streamed them, and the checkpoint already holds them, so they are
+        not new events. LangGraph also marks a node cache hit ``cached``, but
+        ``compiled`` sets no node cache, so here the marker means only that
+        replay.
         """
-        events: list[Event] = []
+        entries: list[tuple[Event, CauseEntry]] = []
         if isinstance(chunk, dict) and not chunk.get("__metadata__", {}).get("cached"):
             for node_output in chunk.values():
                 if isinstance(node_output, dict):
-                    for event in node_output.get("events", []):
+                    events = node_output.get("events", [])
+                    causes = node_output.get("causes", [])
+                    for event, cause in zip(events, causes, strict=True):
                         eid = id(event)
                         if eid not in seen:
                             seen.add(eid)
-                            events.append(event)
-        return events
+                            entries.append((event, cause))
+        return entries
 
     def _frames_from_values(
         self,
@@ -1014,10 +1027,13 @@ class EventGraph:
         # Fall back to r.seed() only on the true first run.
         # The shadow state follows each stored channel that a shown value
         # reads. A shown ``Derived`` is computed from it for each frame.
+        # A shown value that reads the log also needs the ``events`` and
+        # ``causes`` channels in the shadow state.
         channels = list(selection.channels)
+        reads_log = selection.reads_log
         reducer_state: dict[str, Any] = {}
         checkpoint_values: dict[str, Any] | None = None
-        if channels and self._checkpointer is not None:
+        if (channels or reads_log) and self._checkpointer is not None:
             config = kwargs.get("config")
             if config is not None:
                 if snapshot is None:
@@ -1050,6 +1066,13 @@ class EventGraph:
         if checkpoint_values is not None and not is_resume:
             for s in seeds:
                 self._topology._update_reducer_state(reducer_state, s, channels)
+        if reads_log:
+            restored = checkpoint_values or {}
+            reducer_state["events"] = list(restored.get("events", []))
+            reducer_state["causes"] = list(restored.get("causes") or [])
+            if checkpoint_values is None or not is_resume:
+                reducer_state["events"].extend(seeds)
+                reducer_state["causes"].extend([None] * len(seeds))
 
         # Yield seed events
         for s in seeds:
@@ -1142,7 +1165,10 @@ class EventGraph:
             chunk = raw.get("data", {}).get("chunk")
             if isinstance(chunk, dict):
                 interrupts.extend(chunk.get(_INTERRUPT_CHANNEL, ()))
-            for event in self._events_from_chunk(chunk, seen):
+            for event, cause in self._entries_from_chunk(chunk, seen):
+                if reads_log:
+                    reducer_state["events"].append(event)
+                    reducer_state["causes"].append(cause)
                 if selection.names:
                     changed = self._topology._update_reducer_state(
                         reducer_state,
