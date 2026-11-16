@@ -370,8 +370,8 @@ def describe_EventGraph_of():
             assert str(info.value) == (
                 "Handler 'test_event_topology._ask' (node '_ask') declares "
                 "parameter(s) ['mailer'] that the framework cannot inject: "
-                "'mailer' (_Mailer). services= has no service. For service "
-                "injection, register a matching instance via "
+                "'mailer' (_Mailer). services= has no service. For a service, add "
+                "a typed field of that name to the services= object of "
                 "EventGraph.of(..., services=); for state, register a Reducer; "
                 "otherwise remove the parameter."
             )
@@ -391,7 +391,7 @@ def describe_EventGraph_of():
                     EventGraph(_HANDLERS, services=services_from({"mailr": 1}))
 
                 assert "services= has the fields ['mailr']." in str(info.value)
-                assert "via EventGraph(services=)" in str(info.value)
+                assert "object of EventGraph(services=)" in str(info.value)
 
     def when_a_renamed_duplicate_misses_a_service():
         def it_names_the_function_and_the_node():
@@ -401,8 +401,8 @@ def describe_EventGraph_of():
             assert str(info.value) == (
                 "Handler 'test_event_topology.handle' (node 'handle_2') declares "
                 "parameter(s) ['mailer'] that the framework cannot inject: "
-                "'mailer' (_Mailer). services= has no service. For service "
-                "injection, register a matching instance via "
+                "'mailer' (_Mailer). services= has no service. For a service, add "
+                "a typed field of that name to the services= object of "
                 "EventGraph(services=); for state, register a Reducer; "
                 "otherwise remove the parameter."
             )

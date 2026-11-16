@@ -558,7 +558,7 @@ class EventTopology:
 
         topology = EventTopology([classify, route, review])
         print(topology.namespaces().mermaid())
-        graph = EventGraph.of(topology, services={"llm": llm})
+        graph = EventGraph.of(topology, services=Services(llm=llm))
 
     A handler parameter that only a service can fill is listed in
     :attr:`requirements`. :meth:`EventGraph.of` binds the services to them.

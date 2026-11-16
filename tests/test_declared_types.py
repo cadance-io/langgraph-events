@@ -8,6 +8,7 @@ from collections import abc
 from typing import Annotated, Any, Literal, NewType, Optional, TypeVar
 
 import pytest
+import typing_extensions as te
 from langchain_core.messages import BaseMessage  # noqa: TC002 - read at graph build
 from langchain_core.runnables import (
     RunnableConfig,  # noqa: TC002 - a factory annotation resolves at graph build
@@ -22,6 +23,7 @@ from langgraph_events import (
     Reflection,
     RunScoped,
     ScalarReducer,
+    SkipType,
     message_reducer,
     on,
 )
@@ -110,6 +112,7 @@ def describe_the_normalization_rule():
             (bool, int),
             (list[int], abc.Sequence[int]),
             (int, float),
+            (tuple, tuple[()]),
         ],
         ids=[
             "literal-type",
@@ -120,6 +123,7 @@ def describe_the_normalization_rule():
             "subclass",
             "abstract-container",
             "numeric-tower",
+            "empty-tuple",
         ],
     )
     def it_refuses_another_type(source: object, reader: object):
@@ -424,3 +428,195 @@ def describe_the_type_check_of_mypy():
                 'Incompatible return value type (got "str", expected "int | SkipType")'
                 in (stdout)
             )
+
+
+_MESSAGES_TYPE = """
+from typing import assert_type
+
+from langchain_core.messages import BaseMessage
+
+from langgraph_events import MessageEvent, Reducer, message_reducer
+
+assert_type(message_reducer(), Reducer[MessageEvent, BaseMessage])
+"""
+
+
+def describe_the_type_of_message_reducer():
+    def it_is_declared_in_the_annotation(tmp_path: Any):
+        from mypy import api
+
+        source = tmp_path / "messages_type.py"
+        source.write_text(_MESSAGES_TYPE)
+
+        stdout, _, status = api.run(["--strict", "--no-incremental", str(source)])
+
+        assert status == 0, stdout
+
+
+_Alias = te.TypeAliasType("_Alias", int | str)
+_GenericItem = TypeVar("_GenericItem")
+_ListOf = te.TypeAliasType("_ListOf", list[_GenericItem], type_params=(_GenericItem,))
+
+
+def describe_the_normalization_of_nested_forms():
+    def when_the_forms_nest():
+        @pytest.mark.parametrize(
+            ("source", "reader"),
+            [
+                (Annotated[int | str, "doc"] | None, int | str | None),
+                (_Alias | None, int | str | None),
+                (
+                    typing.Union[Annotated[Literal["a"] | int, "m"], Literal["b"]],  # noqa: UP007 - the spelling is the case
+                    Literal["a", "b"] | int,
+                ),
+                (Optional[Literal[1]], Literal[1, None]),  # noqa: UP045 - the spelling is the case
+                (_ListOf[int], list[int]),
+                (list[_Alias], list[int | str]),
+            ],
+            ids=[
+                "annotated-union",
+                "alias-union",
+                "nested-literal",
+                "literal-none",
+                "generic-alias",
+                "alias-argument",
+            ],
+        )
+        def it_accepts_the_same_type(source: object, reader: object):
+            _graph(source, reader)
+
+    def when_a_reducer_declares_an_annotated_union():
+        def it_lets_a_reader_add_none():
+            _graph(Annotated[int | str, "doc"], int | str | None)
+
+
+_Key = TypeVar("_Key")
+_Item = TypeVar("_Item")
+_Kind = TypeVar("_Kind")
+
+
+class _Tagged(ScalarReducer[Set, int], typing.Generic[_Key]):
+    pass
+
+
+class _Swapped(ScalarReducer[_Kind, _Item], typing.Generic[_Item, _Kind]):
+    pass
+
+
+def _reads_value(annotation: object) -> Any:
+    @on(Asked)
+    def show(event: Asked, value: Any) -> None:
+        pass
+
+    show.__annotations__["value"] = annotation
+    return show
+
+
+def describe_a_generic_subclass_of_a_reducer():
+    def when_the_subclass_adds_its_own_parameter():
+        def it_reads_the_type_of_the_base():
+            tagged = _Tagged[str](name="value", event_type=Set, fn=lambda e: 1)
+
+            EventGraph([_reads_value(int | None)], reducers=[tagged])
+
+    def when_the_subclass_reorders_the_parameters():
+        def it_substitutes_them_by_position():
+            swapped = _Swapped[int, Set](name="value", event_type=Set, fn=lambda e: 1)
+
+            EventGraph([_reads_value(int | None)], reducers=[swapped])
+
+
+_Free = TypeVar("_Free")
+
+
+def _free_of(value: Any | None) -> _Free:  # type: ignore[type-var]
+    return value  # type: ignore[no-any-return]
+
+
+def describe_a_derived_return_annotation_that_names_no_class():
+    def it_raises_at_graph_build():
+        free = Derived(name="free", fn=_free_of)
+        scalar = ScalarReducer[Set, Any](name="value", event_type=Set, fn=_value_of)
+
+        with pytest.raises(
+            TypeError, match=r"Derived 'free' has the return annotation ~_Free"
+        ):
+            EventGraph([_shown()], reducers=[scalar, free])
+
+
+def _skipped_items(e: Set) -> list[int] | SkipType:
+    return [1]
+
+
+def _unresolved_items(e: Set) -> list[int]:
+    return [1]
+
+
+_unresolved_items.__annotations__["return"] = "Missing"
+
+
+def describe_a_reducer_fn_return_annotation():
+    def when_a_list_reducer_fn_can_return_skip():
+        def it_raises_because_a_list_reducer_has_no_skip():
+            items = Reducer[Set, int](name="items", event_type=Set, fn=_skipped_items)
+
+            with pytest.raises(
+                TypeError, match=r"Reducer 'items' has a fn that can return SkipType"
+            ):
+                EventGraph([_shown()], reducers=[items])
+
+    def when_it_does_not_resolve():
+        def it_raises_naming_the_cause():
+            items = Reducer[Set, int](
+                name="items", event_type=Set, fn=_unresolved_items
+            )
+
+            with pytest.raises(
+                TypeError,
+                match=r"Reducer 'items' has a fn whose return annotation does not "
+                r"resolve \(NameError",
+            ):
+                EventGraph([_shown()], reducers=[items])
+
+
+@dataclasses.dataclass
+class _FinalServices:
+    label: typing.Final[str] = "x"  # type: ignore[misc]
+
+
+@dataclasses.dataclass
+class _InitVarServices:
+    label: str
+    seed: dataclasses.InitVar[int] = 0
+
+
+class _TupleServices(typing.NamedTuple):
+    label: str
+
+
+def describe_a_services_object_field():
+    def when_it_is_final():
+        def it_reads_the_type_inside():
+            seen: list[str] = []
+
+            @on(Asked)
+            def show(event: Asked, label: str) -> None:
+                seen.append(label)
+
+            EventGraph([show], services=_FinalServices()).invoke(Asked())
+
+            assert seen == ["x"]
+
+    def when_it_is_an_init_var():
+        def it_raises_naming_the_field():
+            with pytest.raises(
+                TypeError, match=r"services= declares the InitVar field 'seed'"
+            ):
+                EventGraph([_shown()], services=_InitVarServices(label="x"))
+
+    def when_the_object_is_a_named_tuple():
+        def it_raises_naming_the_fix():
+            with pytest.raises(
+                TypeError, match=r"services= is a NamedTuple .* use a dataclass"
+            ):
+                EventGraph([_shown()], services=_TupleServices(label="x"))

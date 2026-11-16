@@ -20,6 +20,10 @@ from typing import (
     runtime_checkable,
 )
 
+# Read at run time: ``message_reducer`` declares ``list[BaseMessage]``, and
+# graph construction resolves the return annotation of its ``fn``.
+from langchain_core.messages import BaseMessage
+
 from langgraph_events._event_log import EventLog
 from langgraph_events._hints import (
     UnsettledTypeError,
@@ -32,8 +36,6 @@ from langgraph_events._hints import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
-
-    from langchain_core.messages import BaseMessage
 
     from langgraph_events._event import Event, MessageEvent, Namespace
     from langgraph_events._inputs import BoundDerived
@@ -113,6 +115,33 @@ def _union_args(hint: object) -> tuple[object, ...]:
     return (hint,)
 
 
+def _substituted(hint: object, bound: Mapping[object, object]) -> object:
+    """*hint* with each type variable of *bound* replaced by its value."""
+    if isinstance(hint, TypeVar):
+        return bound.get(hint, hint)
+    params = getattr(hint, "__parameters__", ())
+    if not params:
+        return hint
+    return hint[tuple(bound.get(p, p) for p in params)]  # type: ignore[index]
+
+
+def _base_arguments(
+    klass: type, generic: type, bound: Mapping[object, object]
+) -> tuple[object, ...]:
+    """The type arguments that *klass* gives *generic* through its bases.
+    *bound* maps the type parameters of *klass* to their values."""
+    for base in klass.__dict__.get("__orig_bases__", ()):
+        origin = typing.get_origin(base) or base
+        if not isinstance(origin, type) or not issubclass(origin, generic):
+            continue
+        args = tuple(_substituted(a, bound) for a in typing.get_args(base))
+        if origin is generic:
+            return args
+        inner = dict(zip(getattr(origin, "__parameters__", ()), args, strict=False))
+        return _base_arguments(origin, generic, inner)
+    return ()
+
+
 def _type_name(spec: object) -> str:
     """A short name of an event type spec, for the fix of an error."""
     if isinstance(spec, tuple):
@@ -159,15 +188,18 @@ class BaseReducer(ABC):
         object.__setattr__(self, name, value)
 
     def _type_arguments(self, generic: type) -> tuple[object, ...]:
-        """The type arguments that this reducer declares for *generic*: from
-        the subscription of the call, or from a base of its class."""
-        if self._declared:
+        """The type arguments that this reducer declares for *generic*.
+
+        For *generic* itself, they are the arguments of the subscribed call.
+        For a subclass, they come from its bases, with each type parameter
+        of the subclass replaced by the argument of the call at its
+        position. A parameter with no argument stays a type variable.
+        """
+        if type(self) is generic:
             return self._declared
-        for klass in type(self).__mro__:
-            for base in klass.__dict__.get("__orig_bases__", ()):
-                if typing.get_origin(base) is generic:
-                    return typing.get_args(base)
-        return ()
+        params = getattr(type(self), "__parameters__", ())
+        bound = dict(zip(params, self._declared, strict=False))
+        return _base_arguments(type(self), generic, bound)
 
     def _declared_argument(self, generic: type, example: str) -> object:
         """The last type argument that this reducer declares for *generic*.
@@ -194,13 +226,31 @@ class BaseReducer(ABC):
             ) from None
         return declared
 
-    def _require_fn_returns(self, fn: Callable[..., object], declared: object) -> None:
+    def _require_fn_returns(
+        self, fn: Callable[..., object], declared: object, *, skips: bool
+    ) -> None:
         """Raise ``TypeError`` when the return annotation of *fn*, without
-        ``SkipType``, is not *declared*. A function with no return annotation,
-        such as a lambda, is not checked."""
-        returns = _resolve_parameter_hints(fn)[0].get("return", inspect.Parameter.empty)
+        ``SkipType``, is not *declared*, or does not resolve. A function with
+        no return annotation, such as a lambda, is not checked. *skips* says
+        whether the reducer supports ``SKIP``."""
+        hints, errors = _resolve_parameter_hints(fn)
+        label = f"{type(self).__name__} {self.name!r}"
+        if "return" in errors:
+            raise TypeError(
+                f"{label} has a fn whose return annotation does not resolve "
+                f"({errors['return']}). Make every name in it importable at run "
+                f"time."
+            )
+        returns = hints.get("return", inspect.Parameter.empty)
         if returns is inspect.Parameter.empty:
             return
+        if not skips and SkipType in _union_args(returns):
+            raise TypeError(
+                f"{label} has a fn that can return SkipType, but a "
+                f"{type(self).__name__} does not support SKIP. Return an empty "
+                f"list for no contribution, and remove SkipType from the "
+                f"annotation."
+            )
         kept = tuple(a for a in _union_args(returns) if a is not SkipType)
         if not kept:
             raise TypeError(
@@ -420,7 +470,7 @@ class Reducer(BaseReducer, Generic[E, T]):
             Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
         )
         stored = list[item]  # type: ignore[valid-type]
-        self._require_fn_returns(self.fn, stored)
+        self._require_fn_returns(self.fn, stored, skips=False)
         return stored
 
     def seed(self, events: list[Event]) -> list[Any]:
@@ -507,7 +557,7 @@ class ScalarReducer(BaseReducer, Generic[E, T]):
             ScalarReducer,
             f"ScalarReducer[{_type_name(self.event_type)}, {self._fn_example()}]",
         )
-        self._require_fn_returns(self.fn, declared)
+        self._require_fn_returns(self.fn, declared, skips=True)
         if self.default is None:
             return typing.Optional[declared]  # noqa: UP045 - a runtime value
         return declared
@@ -790,7 +840,7 @@ def message_reducer(
     default: list[BaseMessage] | None = None,
     *,
     name: str = "messages",
-) -> Reducer:
+) -> Reducer[MessageEvent, BaseMessage]:
     """Built-in reducer for MessageEvent -> BaseMessage projection.
 
     Calls ``as_messages()`` on any ``MessageEvent`` and accumulates
@@ -813,7 +863,6 @@ def message_reducer(
         # Using an explicit default list:
         messages = message_reducer([SystemMessage(content="You are helpful")])
     """
-    from langchain_core.messages import BaseMessage  # noqa: PLC0415
     from langgraph.graph.message import add_messages  # noqa: PLC0415
 
     from langgraph_events._event import MessageEvent  # noqa: PLC0415

@@ -23,6 +23,7 @@ from langgraph_events._hints import (
     UnsettledTypeError,
     _annotation_accepts_none,
     _hint_label,
+    _normal,
     _resolve_parameter_hints,
     _same_type,
 )
@@ -568,6 +569,13 @@ def _require_return_annotation(
             f"so use a def, for example: def stage_of(placed: bool | None) -> "
             f"str."
         )
+    try:
+        _normal(hints["return"])
+    except UnsettledTypeError as exc:
+        raise TypeError(
+            f"{owner} has the return annotation {_hint_label(hints['return'])}, "
+            f"but {exc}. Annotate the class that it returns."
+        ) from None
 
 
 _MISSING = {

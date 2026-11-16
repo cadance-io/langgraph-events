@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 import typing
@@ -243,7 +244,7 @@ class _FactoryBinder:
                 missing,
                 reducer_names=self._readables.keys(),
                 received=self._services.received(without=name),
-                entry="services=",
+                entry="the graph",
                 context_schema=self._context_schema,
                 reader="factory",
             )
@@ -378,6 +379,12 @@ def _declared_fields(services: object) -> dict[str, object]:
         "typed with the service type, or RunScoped[T] for a factory, and pass "
         "an instance of it."
     )
+    if isinstance(services, tuple) and hasattr(kind, "_fields"):
+        raise TypeError(
+            f"services= is a NamedTuple {kind.__name__}, which is a tuple of "
+            f"values by position. Declare the services in a class with typed "
+            f"fields instead: use a dataclass with the same fields."
+        )
     if isinstance(services, (Mapping, list, tuple, set, frozenset, str, bytes)):
         raise TypeError(fix)
     try:
@@ -388,12 +395,18 @@ def _declared_fields(services: object) -> dict[str, object]:
             f"resolve ({type(exc).__name__}: {exc}). Make every name in them "
             f"importable at run time."
         ) from exc
-    fields = {
-        name: hint
-        for name, hint in hints.items()
-        if typing.get_origin(hint) is not typing.ClassVar
-        and hint is not typing.ClassVar
-    }
+    fields: dict[str, object] = {}
+    for name, hint in hints.items():
+        if typing.get_origin(hint) is typing.ClassVar or hint is typing.ClassVar:
+            continue
+        if isinstance(hint, dataclasses.InitVar) or hint is dataclasses.InitVar:
+            raise TypeError(
+                f"services= declares the InitVar field {name!r}, which the "
+                f"object does not keep, so it cannot be a service. Make it a "
+                f"field, or move it out of the services object."
+            )
+        final = typing.get_origin(hint) is typing.Final
+        fields[name] = typing.get_args(hint)[0] if final else hint
     if not fields:
         raise TypeError(fix)
     for name in fields:

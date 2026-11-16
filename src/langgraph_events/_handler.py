@@ -641,8 +641,9 @@ def refuse_unclaimed(
         f"inject: {wanted}."
         f"{_framework_hint(missing, reader)}"
         f"{_context_hint(missing, context_schema)} {received} "
-        f"For service injection, register a matching instance via {entry}; "
-        f"for state, register a Reducer; otherwise remove the parameter."
+        f"For a service, add a typed field of that name to the services= "
+        f"object of {entry}; for state, register a Reducer; otherwise remove "
+        f"the parameter."
     )
 
 

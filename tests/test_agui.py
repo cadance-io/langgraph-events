@@ -56,6 +56,7 @@ from langgraph_events import (
     RunPaused,
     RunPausedOnSignal,
     ScalarReducer,
+    SkipType,
     message_reducer,
     on,
 )
@@ -4600,7 +4601,7 @@ def describe_frontend_state_mutated():
 
     def _focus_reducer(transform: Any = None) -> Any:
         """A ``focus`` ScalarReducer fed from ``FrontendStateMutated.state``."""
-        from langgraph_events import SKIP, ScalarReducer, SkipType
+        from langgraph_events import SKIP, ScalarReducer
         from langgraph_events.agui import FrontendStateMutated
 
         def read(event: FrontendStateMutated) -> str | SkipType:

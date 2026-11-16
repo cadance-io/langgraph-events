@@ -808,9 +808,10 @@ def describe_RunScoped_factory_rules():
             assert str(info.value) == (
                 "RunScoped factory '_typo_reader' for service 'reader' declares "
                 "parameter(s) ['choise'] that the framework cannot inject: "
-                "'choise' (str). services= has the fields ['setting']. For "
-                "service injection, register a matching instance via services=; "
-                "for state, register a Reducer; otherwise remove the parameter."
+                "'choise' (str). services= has the fields ['setting']. For a "
+                "service, add a typed field of that name to the services= "
+                "object of the graph; for state, register a Reducer; otherwise "
+                "remove the parameter."
             )
 
         def when_the_parameter_is_named_config():
