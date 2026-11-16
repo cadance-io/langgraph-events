@@ -383,7 +383,8 @@ def describe_Derived():
                 match=r"Derived 'typo' reads 'stag', which names no reducer and no "
                 r"Derived\. Available reducers: \['placed', 'shipped'\]\. "
                 r"Available Derived values: \['stage', 'typo'\]\. To read the "
-                r"EventLog, annotate a parameter of a def with EventLog\.",
+                r"EventLog, annotate the parameter with EventLog, in a def, a "
+                r"functools\.partial of one or a callable object\.",
             ):
                 EventGraph([report], reducers=[placed, shipped, stage, typo])
 
@@ -394,7 +395,7 @@ def describe_Derived():
                 with pytest.raises(
                     TypeError,
                     match=r"Derived 'sized' reads 'log', which names no reducer.*"
-                    r"annotate a parameter of a def with EventLog\.",
+                    r"annotate the parameter with EventLog, in a def",
                 ):
                     EventGraph([report], reducers=[placed, shipped, sized])
 
@@ -1019,3 +1020,19 @@ def describe_Derived_from_a_callable_that_is_not_a_function():
             log = graph.invoke(Placed())
 
             assert [e.n for e in log.filter(Counted)] == [2]
+
+
+def _log_size(log: EventLog) -> int:
+    return len(log)
+
+
+def describe_Derived_from_a_partial_that_binds_the_log():
+    def it_refuses_the_bound_log_parameter():
+        bound_log = Derived(name="seen", fn=functools.partial(_log_size, log=()))
+
+        with pytest.raises(
+            TypeError,
+            match=r"Derived 'seen' gives parameter 'log' a default\. A default does "
+            r"not make a parameter optional",
+        ):
+            EventGraph([ship, count], reducers=[bound_log])

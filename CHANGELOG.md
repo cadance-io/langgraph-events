@@ -33,8 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The text view shows `(reads no input)` for a `Derived` with no parameter.** Before, it
   showed `(reads no reducer)`.
 - **A seed frame of a per-event stream shows the state up to its own seed.** This applies to
-  `AGUIAdapter`, and to `astream_events()` or `astream_resume()` with `include_llm_tokens=True`
-  or `include_custom_events=True`, on a first run with two or more seeds. Before, each seed
+  `AGUIAdapter`, and to `astream_events()` with `include_llm_tokens=True` or
+  `include_custom_events=True`, on a first run with two or more seeds. Before, each seed
   frame showed the state after all the seeds. Now the first run merges each seed as a later
   run on a checkpointed thread does, through the merge function of each reducer.
 

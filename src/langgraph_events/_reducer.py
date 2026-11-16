@@ -584,6 +584,13 @@ class Derived(Generic[T]):
                     f"input."
                 )
             if hints.get(param.name) is EventLog:
+                if param.default is not param.empty:
+                    raise TypeError(
+                        f"Derived {self.name!r} gives parameter {param.name!r} a "
+                        f"default. A default does not make a parameter optional, "
+                        f"and the EventLog is always set. Remove the default, or "
+                        f"bind a constant in a closure."
+                    )
                 inputs.append(_LogInput(param.name))
             else:
                 inputs.append(resolve(param, hint_errors.get(param.name)))
@@ -665,7 +672,8 @@ def bind_derived(
             f"Derived {name!r} reads {param.name!r}, which names no reducer and "
             f"no Derived.{default_hint}{hint_hint} Available reducers: "
             f"{sorted(reducers)}. Available Derived values: {sorted(derived)}. "
-            f"To read the EventLog, annotate a parameter of a def with EventLog."
+            f"To read the EventLog, annotate the parameter with EventLog, in a "
+            f"def, a functools.partial of one or a callable object."
         )
 
     for name in derived:
@@ -695,11 +703,12 @@ class StateRead:
         checkpoint, gives an empty log.
         """
         if self._log is None:
-            # A copy, so a value that keeps the log, such as a view, does
-            # not see a later write to a channel that a stream extends.
+            # The log keeps its own tuple of events, but a reference to the
+            # causes list. Copy it, so a value that keeps the log, such as a
+            # view, does not see a later write that a stream appends.
             causes = self.state.get("causes")
             self._log = EventLog._from_state(
-                list(self.state.get("events", ())),
+                self.state.get("events", ()),
                 None if causes is None else list(causes),
                 check=False,
             )
