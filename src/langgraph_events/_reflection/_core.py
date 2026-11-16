@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from langgraph_events._reducer import StateRead
 from langgraph_events._reflection import _evidence, _text, _tool
 
 if TYPE_CHECKING:
@@ -98,10 +99,8 @@ class Reflection:
         events = list(self._log)
         stored = {r.name: r for rd in self._reducers.values() for r in rd.sources}
         seeded = {name: r.seed(events) for name, r in stored.items()}
-        return {
-            name: r._read(seeded, lambda: self._log)
-            for name, r in self._reducers.items()
-        }
+        read = StateRead(seeded, self._log)
+        return {name: r._read(read) for name, r in self._reducers.items()}
 
     def _resolve_index(self, event: Event | int) -> int:
         """The single index gate: validate, normalize negatives, or locate.

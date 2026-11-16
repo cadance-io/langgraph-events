@@ -43,6 +43,7 @@ from langgraph_events import (
     Derived,
     Event,
     EventGraph,
+    EventLog,
     IntegrationEvent,
     Interrupted,
     MessageEvent,
@@ -5386,7 +5387,7 @@ def describe_AGUIAdapter_derived_values():
             assert seen == [{"placed": 1}]
 
 
-def _count_events(log: Any) -> int:
+def _count_events(log: EventLog) -> int:
     return len(log)
 
 

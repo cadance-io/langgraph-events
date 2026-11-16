@@ -8,7 +8,7 @@ import types
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._internal import _BASE_FIELDS
-from langgraph_events._reducer import BaseReducer, Derived, bind_derived, log_reader
+from langgraph_events._reducer import BaseReducer, Derived, StateRead, bind_derived
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -175,8 +175,8 @@ class ReducerSelection:
         that reads the log gets the ``EventLog`` of the ``events`` and
         ``causes`` channels of *state*.
         """
-        log = log_reader(state)
-        return {name: self.readables[name]._read(state, log) for name in self.names}
+        read = StateRead(state)
+        return {name: self.readables[name]._read(read) for name in self.names}
 
     def changed(self, channels: frozenset[str]) -> frozenset[str]:
         """The shown names whose value can change when one event changes
