@@ -161,7 +161,7 @@ EventGraph(
 def react(event: SomeEvent, primary_chat: BaseChatModel, model: ConversationModel) -> ...: ...
 ```
 
-A dict or a list raises `TypeError` that names this fix. mypy checks each value against its field type when the object is built. A field annotation that does not resolve raises `TypeError` at graph construction.
+A dict, a list or a `NamedTuple` raises `TypeError` that names this fix. A `ClassVar` field is no service. A `Final[T]` field declares `T`. An `InitVar` field raises `TypeError`, because the object does not keep it. mypy checks each value against its field type when the object is built. A field annotation that does not resolve raises `TypeError` at graph construction.
 
 #### Declared types and the exact match { #declared-types }
 
@@ -184,13 +184,16 @@ See [Declared types](reducers.md#declared-types) for the reducer subscriptions. 
 | A bare alias is its origin class | `List` is `list` |
 | `Optional[X]` is `X \| None` | `Optional[int]` is `int \| None` |
 | A union is the set of its members, so the order does not count | `int \| str` is `str \| int` |
-| The `Literal` members of a union merge | `Literal["a"] \| Literal["b"]` is `Literal["a", "b"]` |
+| A union member that is a union, behind `Annotated` or an alias, is flattened | `Annotated[int \| str, "x"] \| None` is `int \| str \| None` |
+| The `Literal` members of a union merge, and `None` in a `Literal` is `None` | `Literal["a"] \| Literal["b"]` is `Literal["a", "b"]`. `Literal[1, None]` is `Optional[Literal[1]]` |
 | A `Literal` is the set of its values, keyed by type and value | `Literal[1]` is not `Literal[True]` |
 | `Annotated` metadata is stripped, at any depth | `list[Annotated[int, "x"]]` is `list[int]` |
 | `Any` equals only `Any` | `Any` is not `object` |
 | A `NewType` is its own type | `UserId` is not `int` |
-| A type alias statement without parameters is its value | `type Ids = list[int]` is `list[int]` |
-| A type variable, a forward reference or a string names no class yet | refused with `TypeError` |
+| A type alias is its value, also a `typing_extensions.TypeAliasType` | `type Ids = list[int]` is `list[int]` |
+| A subscripted alias with parameters is its value with the arguments in place | for `type Items[T] = list[T]`, `Items[int]` is `list[int]` |
+| The empty tuple is its own type | `tuple[()]` is not `tuple` |
+| A type variable, a forward reference, a string or a bare alias with parameters names no class yet | refused with `TypeError` |
 
 Nothing else fits: no subclass, no base class, no abstract container, no numeric tower. One allowance applies to a reducer and a `Derived` only: a reader can leave `None` out of an optional source, because an unset value raises `ReducerNotSetError`. A service is never unset, so a reader of a service matches it exactly.
 

@@ -13,9 +13,9 @@ Each reducer declares the type it stores, by a subscription at construction. The
 | `ScalarReducer` | `ScalarReducer[E, T](...)` | `T`, or `T \| None` when `default` is `None` |
 | `FoldReducer` | `FoldReducer[S](...)` | `S` |
 
-`E` is the event type that `fn` reads. mypy checks `fn` against `E` and `T`, a lambda too. Graph construction refuses a reducer with no type argument, or with a type argument that names no class yet, such as a string or a type variable. The message names the reducer and the subscription to write. When `fn` has a return annotation, it must name `T` (`list[T]` for a `Reducer`), with or without `SkipType`.
+`E` is the event type that `fn` reads. mypy checks `fn` against `E` and `T`, a lambda too. Graph construction refuses a reducer with no type argument, or with a type argument that names no class yet, such as a string or a type variable. The message names the reducer and the subscription to write. When `fn` has a return annotation, it must resolve and name `T` (`list[T]` for a `Reducer`). A `ScalarReducer.fn` can add `SkipType`. A `Reducer` does not support `SKIP`, so its `fn` returns an empty list for no contribution, and an annotation with `SkipType` raises `TypeError`.
 
-The type argument must be part of the call: `ScalarReducer[E, T](...)`. An annotated assignment such as `r: ScalarReducer[E, T] = ScalarReducer(...)` gives mypy the type, but not the running program, so graph construction refuses it. A subclass can declare the type in its base: `class Stage(ScalarReducer[Placed, str])`. `dataclasses.replace` keeps the type.
+The type argument must be part of the call: `ScalarReducer[E, T](...)`. An annotated assignment such as `r: ScalarReducer[E, T] = ScalarReducer(...)` gives mypy the type, but not the running program, so graph construction refuses it. A subclass can declare the type in its base: `class Stage(ScalarReducer[Placed, str])`. A generic subclass passes its own type parameters on by position, so `class Keyed(ScalarReducer[Placed, V], Generic[V])` declares `V` at the call: `Keyed[str](...)`. `dataclasses.replace` keeps the type.
 
 A reader annotates the stored type exactly. See [Signature injection](concepts.md#signature-injection) for the normalization rule. A reader can leave `None` out of the stored type of a reducer, because an unset value raises `ReducerNotSetError`.
 
@@ -158,11 +158,13 @@ counter = FoldReducer[dict[str, int]](
 
 ### Typing { #fold-typing }
 
-`FoldReducer` is generic over its state type `S`. mypy infers it from `default_factory`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`). Graph construction still needs the subscription `FoldReducer[S](...)`, because the running program cannot read an inferred type:
+`FoldReducer` is generic over its state type `S`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`). mypy can infer `S` from `default_factory`, but the running program cannot read an inferred type, so graph construction needs the subscription `FoldReducer[S](...)`:
 
 ```python
 ...
-counter = FoldReducer(default_factory=lambda: {"n": 0}, event_type=(Incremented, Reset), name="counter")
+counter = FoldReducer[dict[str, int]](
+    default_factory=lambda: {"n": 0}, event_type=(Incremented, Reset), name="counter"
+)
 reveal_type(counter.empty)   # dict[str, int]
 ```
 
