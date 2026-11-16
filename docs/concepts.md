@@ -174,9 +174,9 @@ The check uses `beartype.door`. For a stored reducer or a `Derived`, the value t
 | Source | Value type |
 |---|---|
 | `Reducer` | the `list` type that `fn` returns, or `list[Any]` |
-| `ScalarReducer` | the return type of `fn`, without `SkipType`. The type of `default` joins it only when `default` does not fit it. A `None` default always adds `None` |
+| `ScalarReducer` | the return type of `fn`, without `SkipType`. A `fn` that returns only `SkipType` raises `TypeError`, because it never sets a value. The type of `default` joins it only when `default` does not fit it. A `None` default always adds `None` |
 | `FoldReducer` | the class that `default_factory` is, or the return type of `default_factory` |
-| `Derived` | the return annotation of `fn`. A `Derived` must have one |
+| `Derived` | the return annotation of `fn`. A `Derived` must have one. A class gives itself |
 
 - A source whose function has no return annotation gives `Any`, and is not checked.
 - `None` always fits. A `None` value of an annotation that rejects `None` raises `ReducerNotSetError` at run time instead, unless the parameter has a default.

@@ -101,9 +101,7 @@ def _last_write_wins(existing: object, new: T) -> T:
 
 def _return_hint(fn: Callable[..., object]) -> object:
     """The resolved return annotation of *fn*, or ``Any`` when it has none.
-    A class gives itself."""
-    if isinstance(fn, type):
-        return fn
+    A class gives itself, see :func:`_resolve_parameter_hints`."""
     return _resolve_parameter_hints(fn)[0].get("return", Any)
 
 
@@ -405,6 +403,12 @@ class ScalarReducer(BaseReducer):
         if returns is Any:
             return Any
         kept = tuple(a for a in _union_args(returns) if a is not SkipType)
+        if not kept:
+            raise TypeError(
+                f"ScalarReducer {self.name!r} has a fn that returns only "
+                f"SkipType, so it never sets a value. Return the value type "
+                f"too, for example -> str | SkipType, or remove the reducer."
+            )
         returned = typing.Union[kept] if len(kept) > 1 else kept[0]  # noqa: UP007 - a runtime value
         from beartype.door import is_bearable  # noqa: PLC0415
 

@@ -410,3 +410,58 @@ def describe_the_fit_of_a_nested_container():
         else:
             with pytest.raises(TypeError, match=r"reducer 'items' gives"):
                 EventGraph([show], reducers=[scalar])
+
+
+@dataclass(frozen=True)
+class Summary:
+    word: str | None
+
+
+summary = Derived(name="summary", fn=Summary)
+
+
+def describe_a_derived_whose_function_is_a_class():
+    def when_a_reader_names_another_type():
+        def it_raises_naming_the_class():
+            @on(Asked)
+            def show(event: Asked, summary: int) -> None:
+                pass
+
+            with pytest.raises(
+                TypeError, match=r"Derived 'summary' gives Summary\. Change"
+            ):
+                EventGraph([show], reducers=[word, summary])
+
+    def when_a_reader_names_the_class():
+        def it_gives_an_instance():
+            seen: list[object] = []
+
+            @on(Asked)
+            def show(event: Asked, summary: Summary) -> None:
+                seen.append(summary)
+
+            EventGraph([show], reducers=[word, summary]).invoke(
+                [Told(word="a"), Asked()]
+            )
+
+            assert seen == [Summary(word="a")]
+
+
+def _only_skip(e: Told) -> SkipType:
+    return SKIP
+
+
+def describe_a_scalar_reducer_that_only_skips():
+    def it_raises_naming_the_reducer_and_the_fix():
+        never = ScalarReducer(name="never", event_type=Told, fn=_only_skip)
+
+        @on(Asked)
+        def show(event: Asked, never: str | None) -> None:
+            pass
+
+        with pytest.raises(
+            TypeError,
+            match=r"ScalarReducer 'never' has a fn that returns only SkipType, so "
+            r"it never sets a value\.",
+        ):
+            EventGraph([show], reducers=[never])

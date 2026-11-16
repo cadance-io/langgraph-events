@@ -19,7 +19,6 @@ from langgraph_events._hints import (
     _hint_fits,
     _hint_label,
     _open_parameters,
-    _resolve_hints_and_errors,
     _resolve_parameter_hints,
     _satisfies,
 )
@@ -160,9 +159,7 @@ class RunScoped(Generic[T]):
         return annotation that does not resolve raises ``TypeError``.
         """
         source = _annotation_source(self.factory)
-        if isinstance(source, type):
-            return source
-        hints, errors = _resolve_hints_and_errors(source)
+        hints, errors = _resolve_parameter_hints(self.factory)
         if "return" in errors:
             raise TypeError(
                 f"RunScoped factory {_factory_label(source)!r} for service "

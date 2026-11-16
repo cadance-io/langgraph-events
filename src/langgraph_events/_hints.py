@@ -154,11 +154,16 @@ def _resolve_parameter_hints(
 
     The annotations live on the object that :func:`_annotation_source`
     gives: the wrapped function of a ``functools.partial``, the
-    ``__init__`` of a class, or the ``__call__`` of a callable object.
+    ``__init__`` of a class, or the ``__call__`` of a callable object. A
+    class gives itself as the return annotation, because a call of it gives
+    an instance.
     """
     source = _annotation_source(fn)
-    init = source.__init__ if isinstance(source, type) else source  # type: ignore[misc]
-    return _resolve_hints_and_errors(init)
+    if not isinstance(source, type):
+        return _resolve_hints_and_errors(source)
+    hints, errors = _resolve_hints_and_errors(source.__init__)  # type: ignore[misc]
+    errors = {name: e for name, e in errors.items() if name != "return"}
+    return {**hints, "return": source}, errors
 
 
 def _hint_label(hint: object) -> str:

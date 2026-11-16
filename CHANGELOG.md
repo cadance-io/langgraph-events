@@ -34,6 +34,7 @@ that built on 0.49, or change a value. Each error message names the fix of its r
 | A factory parameter after the config was refused | A factory parameter binds to a framework input, a stored reducer, a `Derived` or a service. A parameter that matches nothing raises `TypeError` | Rename the parameter, or register the input |
 | A factory parameter annotation was not checked | A factory parameter annotation that does not fit its source raises `TypeError` | Change the annotation to the type that the message names |
 | A reducer or a `Derived` won over a service of the same name, with no message | A service with the name of a reducer or a `Derived` raises `TypeError`, for handlers and factories alike | Rename the service or the reducer |
+| A `ScalarReducer.fn` annotated to return only `SkipType` built, and never set a value | A reader annotation of that reducer raises `TypeError` that names the reducer | Return the value type too, for example `-> str \| SkipType`, or remove the reducer |
 | Factories could not read each other | Factories that read each other in a cycle raise `TypeError` that names the cycle | Remove one read from the cycle |
 
 ### Added
@@ -53,7 +54,8 @@ that built on 0.49, or change a value. Each error message names the fix of its r
   gives the `list` type that `fn` returns. A `ScalarReducer` gives the return type of `fn`,
   without `SkipType`. The type of `default` joins it only when `default` does not fit it,
   and a `None` default always adds `None`. A `FoldReducer` gives the type of `default_factory`. A
-  `Derived` gives its return annotation. A function without a return annotation gives
+  `Derived` gives its return annotation. A class gives itself, for a `Derived`, a
+  `RunScoped` factory or a reducer function alike. A function without a return annotation gives
   `Any`, which is not checked. The check accepts the numeric tower of PEP 484 at the top
   level, so `int` fits `float`. A bespoke `BaseReducer` subclass gives `Any`.
 - **`SkipType`, the public type of `SKIP`.** Annotate a `ScalarReducer.fn` that can return
