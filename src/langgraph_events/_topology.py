@@ -76,8 +76,8 @@ if TYPE_CHECKING:
 
 
 class _EventCompiledGraph(CompiledStateGraph[Any, Any, Any, Any]):
-    """A ``CompiledStateGraph`` that hides the durability key of its config
-    from the LangGraph check for a ``thread_id``."""
+    """A ``CompiledStateGraph`` that runs with durability ``"sync"`` by default
+    when it has a checkpointer."""
 
     def _defaults(
         self,
@@ -86,15 +86,14 @@ class _EventCompiledGraph(CompiledStateGraph[Any, Any, Any, Any]):
         durability: Durability | None = None,
         **kwargs: Any,
     ) -> tuple[Any, ...]:
-        # LangGraph raises a clear ValueError only for an empty configurable.
-        # The durability key fills it, so remove the key before the check.
-        configurable = dict(config.get(CONF, {}))
-        default = configurable.pop(CONFIG_KEY_DURABILITY, None)
-        return super()._defaults(
-            {**config, CONF: configurable},
-            durability=durability or default,
-            **kwargs,
-        )
+        # LangGraph has no public default durability. LangGraph writes the
+        # resolved value into the config of inner graphs only for an explicit
+        # durability= of the run, so this default stays inside this graph. A
+        # durability= of the run or of a parent run wins. True counts as a
+        # checkpointer: it is a subgraph that stores its own checkpoints.
+        if durability is None and self.checkpointer not in (None, False):
+            durability = config.get(CONF, {}).get(CONFIG_KEY_DURABILITY, "sync")
+        return super()._defaults(config, durability=durability, **kwargs)
 
 
 class OrphanedEventWarning(UserWarning):
@@ -983,20 +982,9 @@ class EventTopology:
             needed = max_rounds * (n_handlers + 1) + 1
             existing = (compiled.config or {}).get("recursion_limit", 25)
             limit = max(needed, existing)
-        # LangGraph has no public default durability, so the graph config sets
-        # the internal key. A durability= of the run wins. True counts as a
-        # checkpointer: it is a subgraph that stores its own checkpoints. False
-        # gets "async", because an inherited "sync" crashes a run with no
-        # checkpointer. None gets no key, so as a subgraph it takes its parent's.
-        configurable = dict((compiled.config or {}).get("configurable", {}))
-        if checkpointer not in (None, False):
-            configurable[CONFIG_KEY_DURABILITY] = "sync"
-        elif checkpointer is False:
-            configurable[CONFIG_KEY_DURABILITY] = "async"
         compiled.config = {
             **(compiled.config or {}),
             "recursion_limit": limit,
-            "configurable": configurable,
         }
         compiled.__class__ = _EventCompiledGraph
 

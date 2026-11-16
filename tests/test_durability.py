@@ -2,7 +2,7 @@
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, TypedDict
 
 import pytest
 from conftest import Ended, Processed, Started
@@ -14,6 +14,10 @@ from langgraph_events import EventGraph, on
 _PUT_DELAY = 0.05
 
 _CONFIG: Any = {"configurable": {"thread_id": "t1"}}
+
+
+class _Count(TypedDict):
+    n: int
 
 
 class SlowSaver(InMemorySaver):
@@ -123,6 +127,25 @@ def describe_EventGraph_durability():
                 log = graph.invoke(Started(data="x"), config=_CONFIG)
 
                 assert log.latest(Ended) == Ended(result="x")
+
+    def when_a_handler_runs_a_state_graph():
+        def without_a_checkpointer():
+            def it_completes_the_run():
+                builder = StateGraph(_Count)
+                builder.add_node("add", lambda state: {"n": state["n"] + 1})
+                builder.add_edge(START, "add")
+                builder.add_edge("add", END)
+                inner = builder.compile(checkpointer=False)
+
+                @on(Started)
+                def outer(event: Started) -> Ended:
+                    return Ended(result=str(inner.invoke({"n": 0})["n"]))
+
+                graph = EventGraph([outer], checkpointer=InMemorySaver())
+
+                log = graph.invoke(Started(data="x"), config=_CONFIG)
+
+                assert log.latest(Ended) == Ended(result="1")
 
     def when_the_run_has_no_thread_id():
         @pytest.mark.parametrize(

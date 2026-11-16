@@ -31,12 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A run stores each checkpoint before the next step runs.** A graph with a checkpointer
   now runs with the LangGraph durability `"sync"` by default, a run of `graph.compiled`
-  included. The cost: each step waits until its checkpoint is stored. Under the old default
-  `"async"`, a crash could lose the events that explain a side effect that a handler already
-  committed. To opt out, pass `durability="async"` or `durability="exit"` on the run call, as
-  the [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution)
-  shows. A third-party graph compiled with `checkpointer=False` and run inside a handler
-  raises `AttributeError`, unless that inner run passes `durability="async"`.
+  included. Under the old default `"async"`, a crash could lose the events that explain a
+  side effect that a handler already committed. The cost: each step waits until its
+  checkpoint is stored. To opt out, pass `durability="async"` or `durability="exit"` on the
+  run call, as the [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution)
+  shows. A subgraph node that is not an `EventGraph` and has its own checkpointer gets the
+  LangGraph default `"async"`, unless the run passes `durability=`.
 - **`ThreadRewrite.dropped` counts distinct stored events.** Before, it counted entries in
   `events` and in `_pending`. So an event in both channels counted twice. Each `_pending`
   entry is also in `events`, so the count now reads `events` only.
