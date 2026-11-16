@@ -194,17 +194,6 @@ def describe_scalar_reducer_required_value():
             graph = EventGraph([handler], reducers=[strategy])
             graph.invoke([Trigger()])
 
-        def it_does_not_raise_for_missing_annotation():
-            strategy = _make_strategy_reducer()
-
-            @on(Trigger)
-            def handler(event: Trigger, strategy) -> Done:
-                assert strategy is None
-                return Done()
-
-            graph = EventGraph([handler], reducers=[strategy])
-            graph.invoke([Trigger()])
-
     def when_value_is_set():
         def it_does_not_raise_after_event_projects_a_value():
             strategy = _make_strategy_reducer()

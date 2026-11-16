@@ -7,8 +7,9 @@ import functools
 import types
 from typing import TYPE_CHECKING, Any
 
+from langgraph_events._inputs import bind_derived
 from langgraph_events._internal import _BASE_FIELDS
-from langgraph_events._reducer import BaseReducer, Derived, StateRead, bind_derived
+from langgraph_events._reducer import BaseReducer, Derived, StateRead
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:

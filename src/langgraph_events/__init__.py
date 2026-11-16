@@ -57,8 +57,6 @@ from langgraph_events._graph import (
 )
 from langgraph_events._handler import (
     ServiceRequirement,
-    Unannotated,
-    UnresolvedAnnotation,
     on,
 )
 from langgraph_events._namespace import NamespaceModel
@@ -177,9 +175,7 @@ __all__ = [
     "SystemEvent",
     "SystemPromptSet",
     "ThreadRewrite",
-    "Unannotated",
     "UnknownCause",
-    "UnresolvedAnnotation",
     "Unresumable",
     "UnresumableError",
     "aemit_custom",

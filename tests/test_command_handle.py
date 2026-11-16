@@ -1092,20 +1092,6 @@ def describe_Command_handle():
 
                 EventGraph([lenient], services={"primary_chat": None})
 
-        def when_a_name_keyed_param_has_no_annotation():
-
-            def it_binds_the_value():
-                observed: dict[str, object] = {}
-
-                @on(Shop.Buy.Bought)
-                def untyped(event: Shop.Buy.Bought, primary_chat) -> None:  # type: ignore[no-untyped-def]
-                    observed["primary_chat"] = primary_chat
-
-                value = object()
-                graph = EventGraph([untyped], services={"primary_chat": value})
-                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
-                assert observed["primary_chat"] is value
-
         def when_a_handler_has_an_unclaimed_param_and_a_mismatch():
 
             def it_reports_the_mismatch_first():

@@ -7,7 +7,9 @@ import functools
 import inspect
 import types
 import typing
-from typing import TYPE_CHECKING, Any, TypeVar
+from collections import abc
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -173,55 +175,128 @@ def _erased(hint: object) -> object:
     return hint
 
 
-def _promoted(hint: object) -> object:
-    """*hint* with the numeric tower of PEP 484: ``float`` also accepts
-    ``int``, and ``complex`` also accepts ``float`` and ``int``.
+@dataclass(frozen=True)
+class Fits:
+    """The provided type fits the annotation."""
 
-    The promotion applies inside a union and inside type arguments. A hint
-    that Python cannot rebuild stays as is.
-    """
-    if hint is float:
-        return float | int
-    if hint is complex:
-        return complex | float | int
+
+@dataclass(frozen=True)
+class Misfit:
+    """The provided type does not fit the annotation."""
+
+
+@dataclass(frozen=True)
+class Untestable:
+    """Python cannot test the annotation at run time, so no check runs."""
+
+    reason: str
+
+
+Verdict: TypeAlias = Fits | Misfit | Untestable
+
+
+_INVARIANT: tuple[type, ...] = (
+    list,
+    dict,
+    set,
+    abc.MutableSequence,
+    abc.MutableMapping,
+    abc.MutableSet,
+)
+"""The containers whose type arguments are invariant, as for mypy."""
+
+
+def _union_members(hint: object) -> tuple[object, ...]:
     origin = typing.get_origin(hint)
-    args = typing.get_args(hint)
-    if origin is None or not args:
-        return hint
-    promoted = tuple(_promoted(a) for a in args)
     if origin is typing.Union or origin is types.UnionType:
-        return typing.Union[promoted]  # noqa: UP007 - a runtime value
-    try:
-        return origin[promoted]
-    except TypeError:
+        return typing.get_args(hint)
+    return (hint,)
+
+
+def _promoted(hint: object) -> object:
+    """*hint* with the numeric tower of PEP 484 at the top level only:
+    ``float`` also accepts ``int``, and ``complex`` also accepts ``float``
+    and ``int``. A type argument is not promoted, so ``list[float]`` does
+    not accept ``list[int]``."""
+    tower: dict[object, tuple[object, ...]] = {
+        float: (float, int),
+        complex: (complex, float, int),
+    }
+    members = [m for h in _union_members(hint) for m in tower.get(h, (h,))]
+    if len(members) == len(_union_members(hint)):
         return hint
+    return typing.Union[tuple(dict.fromkeys(members))]  # noqa: UP007 - a runtime value
 
 
-def _hint_fits(provided: object, declared: object) -> bool | str:
+def _same_arguments(provided: tuple[object, ...], declared: tuple[object, ...]) -> bool:
+    """Whether two argument lists are equal. ``Any`` matches any argument."""
+    return len(provided) == len(declared) and all(
+        p == d or p is Any or d is Any for p, d in zip(provided, declared, strict=True)
+    )
+
+
+def _variance_holds(provided: object, declared: object) -> bool:
+    """Whether the type arguments of *provided* fit *declared* as mypy
+    requires: equal for an invariant container, member by member for any
+    other generic of the same class.
+
+    beartype treats every container as covariant, so it accepts
+    ``list[bool]`` for ``list[int]``. mypy refuses it.
+    """
+    for p in _union_members(provided):
+        p_origin, p_args = typing.get_origin(p), typing.get_args(p)
+        if not isinstance(p_origin, type) or not p_args:
+            continue
+        matches: list[bool] = []
+        for d in _union_members(declared):
+            d_origin, d_args = typing.get_origin(d), typing.get_args(d)
+            if not isinstance(d_origin, type) or not d_args:
+                continue
+            if not issubclass(p_origin, d_origin):
+                continue
+            if issubclass(d_origin, _INVARIANT):
+                matches.append(_same_arguments(p_args, d_args))
+            elif p_origin is d_origin and len(p_args) == len(d_args):
+                matches.append(
+                    all(
+                        _variance_holds(pa, da)
+                        for pa, da in zip(p_args, d_args, strict=True)
+                    )
+                )
+        if matches and not any(matches):
+            return False
+    return True
+
+
+def _hint_fits(provided: object, declared: object) -> Verdict:
     """Whether a value of the type *provided* can fill a parameter annotated
-    *declared*. A string is the reason that the check cannot run.
+    *declared*.
 
     ``Any`` and a bare type variable say nothing, so they fit. The numeric
-    tower applies, so ``int`` fits ``float``. A *provided* type with no
-    type arguments, or with ``Any`` as one, does not state its arguments.
-    Its class is then compared with the class of *declared*.
+    tower applies at the top level only, so ``int`` fits ``float``, but
+    ``list[int]`` does not fit ``list[float]``. An invariant container needs
+    equal type arguments, as for mypy. A *provided* type with no type
+    arguments, or with ``Any`` as one, does not state its arguments. Its
+    class is then compared with the class of *declared*.
     """
     if provided is Any or isinstance(provided, TypeVar):
-        return True
+        return Fits()
     from beartype.door import is_subhint  # noqa: PLC0415
 
     declared = _promoted(declared)
     verdict = _satisfies(is_subhint, provided, declared)
     unstated = _erased(provided) is provided or Any in typing.get_args(provided)
-    if verdict is False and unstated:
+    if isinstance(verdict, Misfit) and unstated:
         return _satisfies(is_subhint, _erased(provided), _erased(declared))
+    if isinstance(verdict, Fits) and not _variance_holds(provided, declared):
+        return Misfit()
     return verdict
 
 
 def _satisfies(
     check: Callable[[Any, Any], bool], subject: object, declared: object
-) -> bool | str:
-    """Apply a ``beartype.door`` check. A string is the reason it cannot run.
+) -> Verdict:
+    """Apply a ``beartype.door`` check.
 
     ``typing`` refuses a ``Protocol`` that is not ``runtime_checkable``, and
     beartype refuses a hint it cannot test at run time, at any nesting depth.
@@ -231,6 +306,6 @@ def _satisfies(
     from beartype.roar import BeartypeException  # noqa: PLC0415
 
     try:
-        return check(subject, declared)
+        return Fits() if check(subject, declared) else Misfit()
     except (TypeError, BeartypeException) as exc:
-        return f"{type(exc).__name__}: {exc}"
+        return Untestable(f"{type(exc).__name__}: {exc}")

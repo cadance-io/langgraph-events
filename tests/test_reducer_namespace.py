@@ -50,7 +50,7 @@ class _AlphaAuto(Namespace):
         class Acted(DomainEvent):
             marker: str = ""
 
-        def handle(self, current_status) -> _AlphaAuto.Act.Acted:
+        def handle(self, current_status: str | None) -> _AlphaAuto.Act.Acted:
             _AUTO_OBSERVED.append(current_status)
             return _AlphaAuto.Act.Acted(marker="after")
 
@@ -65,7 +65,7 @@ class _AlphaExplicit(Namespace):
         class Acted(DomainEvent):
             marker: str = ""
 
-        def handle(self, current_status) -> _AlphaExplicit.Act.Acted:
+        def handle(self, current_status: list[str]) -> _AlphaExplicit.Act.Acted:
             # Explicit list-reducer wins over discovered scalar reducer.
             assert current_status == ["EXPLICIT"]
             return _AlphaExplicit.Act.Acted(marker="done")

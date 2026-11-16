@@ -29,8 +29,6 @@ from langgraph_events import (
     OrphanedEventWarning,
     ScalarReducer,
     ServiceRequirement,
-    Unannotated,
-    UnresolvedAnnotation,
     on,
 )
 from langgraph_events.serde import NamespaceAwareSerde, migrate_from
@@ -178,30 +176,28 @@ def describe_EventTopology():
             assert topology.resumable_node_names == graph.resumable_node_names
 
     def when_a_parameter_has_no_annotation():
-        def it_lists_the_parameter_as_unannotated():
+        def it_raises_at_topology_build():
             @on(Started)
-            def untyped(event: Started, client) -> None:
+            def untyped(event: Started, client) -> None:  # type: ignore[no-untyped-def]
                 return None
 
-            (requirement,) = EventTopology([untyped]).requirements
-
-            assert requirement.annotation == Unannotated()
+            with pytest.raises(TypeError, match=r"no annotation on parameter 'client'"):
+                EventTopology([untyped])
 
     def when_an_annotation_does_not_resolve():
-        def it_lists_the_reason():
+        def it_raises_naming_the_reason():
             @on(Started)
             def broken(event: Started, client: int) -> None:
                 return None
 
             broken.__annotations__["client"] = "MissingClient"
 
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                (requirement,) = EventTopology([broken]).requirements
-
-            assert requirement.annotation == UnresolvedAnnotation(
-                "NameError: name 'MissingClient' is not defined"
-            )
+            with pytest.raises(
+                TypeError,
+                match=r"parameter 'client' does not resolve \(NameError: name "
+                r"'MissingClient' is not defined\)",
+            ):
+                EventTopology([broken])
 
     def when_a_parameter_is_variadic():
         def it_lists_no_requirement():

@@ -480,10 +480,6 @@ def _context_reader(facts: _Facts, run: RunnableConfig) -> _Reader:
     return _Reader(language=facts.language, thread=run["configurable"]["thread_id"])
 
 
-def _unannotated_reader(choice) -> _Reader:  # type: ignore[no-untyped-def]
-    return _Reader(choice=choice)
-
-
 def _defaulted_reader(choice: str = "coffee") -> _Reader:
     return _Reader(choice=choice)
 
@@ -767,14 +763,6 @@ def describe_RunScoped_factory_rules():
             **kwargs,
         )
 
-    def when_a_parameter_has_no_annotation():
-        def it_binds_the_parameter_by_name():
-            _build({"reader": RunScoped(_unannotated_reader)}).invoke(
-                [_Picked(choice="tea"), _Told()]
-            )
-
-            assert [r.inputs for r in _SEEN] == [{"choice": "tea"}]  # type: ignore[attr-defined]
-
     def when_a_parameter_has_a_default():
         def when_the_input_is_unset():
             def it_receives_the_default():
@@ -1013,34 +1001,3 @@ def describe_factory_parameter_defaults():
                 r"in a closure or a functools\.partial\.",
             ):
                 EventGraph([_read_one], services={"reader": RunScoped(with_retries)})
-
-
-def describe_factory_annotation_that_does_not_resolve():
-    def when_the_parameter_names_a_reducer():
-        def it_warns_and_binds_the_parameter_by_name():
-            def late(choice: Missing) -> _Reader:  # type: ignore[name-defined]  # noqa: F821
-                return _Reader(choice=choice)
-
-            with pytest.warns(
-                UserWarning,
-                match=r"Failed to resolve the annotation on parameter\(s\) 'choice'",
-            ):
-                graph = EventGraph(
-                    [_read_one],
-                    reducers=[_choice],
-                    services={"reader": RunScoped(late)},
-                )
-            graph.invoke([_Picked(choice="tea"), _Told()])
-
-            assert [r.inputs for r in _SEEN] == [{"choice": "tea"}]  # type: ignore[attr-defined]
-
-    def when_the_parameter_names_nothing():
-        def it_names_the_usual_cause_of_the_failure():
-            def late(config: RunnableConfigLater) -> _Model:  # type: ignore[name-defined]  # noqa: F821
-                return _Model("en")
-
-            with (
-                pytest.warns(UserWarning),
-                pytest.raises(TypeError, match=r"if TYPE_CHECKING:.*# noqa: TC002"),
-            ):
-                EventGraph([_read_one], services={"reader": RunScoped(late)})

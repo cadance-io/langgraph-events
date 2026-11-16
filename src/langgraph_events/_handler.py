@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 from langgraph_events._event import Event, Invariant
 from langgraph_events._hints import _resolve_hints_and_errors
 from langgraph_events._identity import command_identity
-from langgraph_events._inputs import Param, classify
+from langgraph_events._inputs import Param, classify, resolved_hint
 from langgraph_events._retry import RetryPolicy
 from langgraph_events._validate import normalize_exception_tuple
 from langgraph_events._warn import warn_user
@@ -359,19 +359,6 @@ def on(
     )
 
 
-@dataclass(frozen=True)
-class Unannotated:
-    """The annotation of a handler parameter that has none."""
-
-
-@dataclass(frozen=True)
-class UnresolvedAnnotation:
-    """The annotation of a handler parameter that did not resolve."""
-
-    reason: str
-    """The error that the resolution raised."""
-
-
 class ServiceRequirement(NamedTuple):
     """A handler parameter that only a service can fill.
 
@@ -387,8 +374,7 @@ class ServiceRequirement(NamedTuple):
     param: str
     """The parameter name."""
     annotation: Any
-    """The resolved annotation, :class:`Unannotated` or
-    :class:`UnresolvedAnnotation`."""
+    """The resolved annotation. A handler parameter must have one."""
 
 
 class ServiceCandidate(NamedTuple):
@@ -397,15 +383,9 @@ class ServiceCandidate(NamedTuple):
 
     param: str
     annotation: Any
-    """The resolved annotation, :class:`Unannotated` or
-    :class:`UnresolvedAnnotation`."""
+    """The resolved annotation."""
     default: object = inspect.Parameter.empty
     """The default of the parameter, or ``inspect.Parameter.empty``."""
-
-    @property
-    def has_resolved_annotation(self) -> bool:
-        """``True`` when the parameter has an annotation that resolved."""
-        return not isinstance(self.annotation, (Unannotated, UnresolvedAnnotation))
 
 
 @dataclass(frozen=True)
@@ -494,14 +474,6 @@ class HandlerMeta:
             )
 
         hints, hint_errors = _resolve_hints_and_errors(fn)
-        param_errors = {n: e for n, e in hint_errors.items() if n != "return"}
-        if param_errors:
-            failed = ", ".join(f"{n!r} ({e})" for n, e in param_errors.items())
-            warn_user(
-                f"Failed to resolve the annotation on parameter(s) {failed} of "
-                f"handler {fn.__qualname__!r}; the framework cannot match them by "
-                f"type. Make each annotation importable at run time.",
-            )
 
         name = getattr(fn, "_node_name", None) or fn.__name__
         # Inline command handlers route by their command's qualname (stable,
@@ -515,6 +487,9 @@ class HandlerMeta:
             command_identity(inline_command) if inline_command is not None else name
         )
         label = f"Handler '{fn.__module__}.{fn.__qualname__}' (node '{node_name}')"
+        # Each annotation must resolve, also on the event and a field matcher.
+        for pname in hint_errors.keys() - {"return"}:
+            resolved_hint(label, pname, hints, hint_errors)
 
         # Extract field matchers; classify each now so dispatch avoids isinstance.
         raw_field_matchers: dict[
@@ -541,15 +516,12 @@ class HandlerMeta:
         for pname, param in sig.parameters.items():
             if pname in claimed or param.kind in variadic:
                 continue
-            hint = hints.get(pname, inspect.Parameter.empty)
-            source = classify(label, pname, hint, readables, context_schema)
+            hint = resolved_hint(label, pname, hints, hint_errors)
+            source = classify(label, pname, hint, readables.get, context_schema)
             if source is not None:
                 params.append(Param(pname, source, param.default))
-                continue
-            annotation = _candidate_annotation(pname, hints, param_errors)
-            service_candidates.append(
-                ServiceCandidate(pname, annotation, param.default)
-            )
+            else:
+                service_candidates.append(ServiceCandidate(pname, hint, param.default))
 
         return cls(
             name=name,
@@ -666,34 +638,11 @@ def refuse_unclaimed(
     )
     raise TypeError(
         f"{label} declares parameter(s) {unclaimed} that the framework cannot "
-        f"inject: {wanted}.{_unresolved_hint(missing)}"
+        f"inject: {wanted}."
         f"{_framework_hint(missing, reader)}"
         f"{_context_hint(missing, context_schema)} {received} "
         f"For service injection, register a matching instance via {entry}; "
         f"for state, register a Reducer; otherwise remove the parameter."
-    )
-
-
-def _unresolved_hint(missing: list[ServiceCandidate]) -> str:
-    """The cause for each missing parameter whose annotation did not resolve.
-
-    The framework never saw a type to match, so "register a service" is the
-    wrong instruction. See issue #183.
-    """
-    errors = {
-        c.param: c.annotation.reason
-        for c in missing
-        if isinstance(c.annotation, UnresolvedAnnotation)
-    }
-    if not errors:
-        return ""
-    detail = ", ".join(f"{name!r} ({error})" for name, error in errors.items())
-    return (
-        f" The annotation on {detail} did not resolve, so the framework could "
-        f"not match it by type. Make the annotation importable at run time. A "
-        f"usual cause is an import under 'if TYPE_CHECKING:', which the ruff "
-        f"rules TC001 to TC003 can move there. Keep the import at run time "
-        f"with '# noqa: TC002'."
     )
 
 
@@ -772,18 +721,6 @@ def _context_hint(missing: list[ServiceCandidate], context_schema: type | None) 
 
 def _annotation_label(annotation: object) -> str:
     """Render the annotation of an unclaimed parameter for an error."""
-    if isinstance(annotation, Unannotated):
-        return "no annotation"
-    if isinstance(annotation, UnresolvedAnnotation):
-        return "unresolved annotation"
     if isinstance(annotation, type):
         return annotation.__qualname__
     return repr(annotation)
-
-
-def _candidate_annotation(
-    name: str, hints: dict[str, Any], errors: dict[str, str]
-) -> object:
-    if name in errors:
-        return UnresolvedAnnotation(errors[name])
-    return hints.get(name, Unannotated())

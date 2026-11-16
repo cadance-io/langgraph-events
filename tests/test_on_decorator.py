@@ -709,26 +709,19 @@ def describe_HandlerMeta_of():
 
     def when_type_hints_cannot_be_resolved():
 
-        def it_warns_naming_each_unresolvable_parameter():
+        def it_raises_for_the_event_parameter_too():
             @on(SampleEvent)
-            def handler(event: SampleEvent, log: EventLog) -> None:
+            def handler(event: SampleEvent) -> None:
                 pass
 
             handler.__annotations__["event"] = "MissingEvent"
-            handler.__annotations__["log"] = "MissingLog"
 
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                meta = HandlerMeta.of(handler, readables={})
-
-            assert len(w) == 1
-            message = str(w[0].message)
-            assert "'event'" in message
-            assert "'log'" in message
-            assert "MissingLog" in message
-            assert all(item.filename == __file__ for item in w)
-            assert _names_of_kind(meta, "log") == []
-            assert meta.event_types == (SampleEvent,)
+            with pytest.raises(
+                TypeError,
+                match=r"parameter 'event' does not resolve \(NameError: .*"
+                r"MissingEvent",
+            ):
+                HandlerMeta.of(handler, readables={})
 
 
 def describe_handler_identity():
@@ -822,19 +815,6 @@ def describe_partial_hint_resolution():
 
     def when_one_parameter_annotation_does_not_resolve():
 
-        def it_still_detects_the_resolvable_injectables():
-            @on(SampleEvent)
-            def handler(event: SampleEvent, log: EventLog, dep: EventLog) -> None:
-                pass
-
-            handler.__annotations__["dep"] = "MissingDep"
-
-            with warnings.catch_warnings(record=True):
-                warnings.simplefilter("always")
-                meta = HandlerMeta.of(handler, readables={})
-
-            assert _names_of_kind(meta, "log") == ["log"]
-
         def it_names_the_failing_parameter_in_the_unclaimed_error():
             @on(SampleEvent)
             def handler(event: SampleEvent, log: EventLog, dep: EventLog) -> None:
@@ -851,23 +831,6 @@ def describe_partial_hint_resolution():
             assert "'dep'" in message
             assert "MissingDep" in message
             assert "'log'" not in message
-
-        def it_binds_a_name_keyed_service_despite_the_failed_annotation():
-            @on(SampleEvent)
-            def handler(event: SampleEvent, mailer: EventLog) -> None:
-                pass
-
-            handler.__annotations__["mailer"] = "MissingMailer"
-
-            with warnings.catch_warnings(record=True):
-                warnings.simplefilter("always")
-                mailer = object()
-                graph = EventGraph([handler], services={"mailer": mailer})
-
-            (bound,) = graph._handlers
-            assert [(p.name, p.source) for p in bound.services] == [
-                ("mailer", ValueInput(mailer))
-            ]
 
     def when_a_name_is_declared_after_the_handler():
         # A failed resolution must not be cached. The name exists by the time
@@ -928,12 +891,9 @@ def describe_partial_hint_resolution():
                     "return": None,
                 }
 
-                with warnings.catch_warnings(record=True):
-                    warnings.simplefilter("always")
-                    handler = on(undecorated)
-                    meta = HandlerMeta.of(handler, readables={})
+                handler = on(undecorated)
 
-                assert meta.event_types == (SampleEvent,)
+                assert handler._event_types == (SampleEvent,)  # type: ignore[attr-defined]
 
 
 def describe_unresolvable_return_annotation():

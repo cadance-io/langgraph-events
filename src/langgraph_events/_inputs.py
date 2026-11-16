@@ -9,10 +9,26 @@ from __future__ import annotations
 import inspect
 import typing
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias, assert_never
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    assert_never,
+)
 
 from langgraph_events._event_log import EventLog
-from langgraph_events._hints import _annotation_accepts_none, _hint_fits, _hint_label
+from langgraph_events._hints import (
+    Misfit,
+    Untestable,
+    Verdict,
+    _annotation_accepts_none,
+    _hint_fits,
+    _hint_label,
+    _resolve_parameter_hints,
+)
 from langgraph_events._reducer import BaseReducer, ReducerNotSetError, StateRead
 from langgraph_events._warn import warn_user
 
@@ -22,7 +38,9 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from langgraph_events._namespace import NamespaceModel
-    from langgraph_events._reducer import Readable
+    from langgraph_events._reducer import Derived, Readable
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -153,7 +171,7 @@ def classify(
     owner: str,
     param: str,
     hint: object,
-    readables: Mapping[str, Readable],
+    readable_of: Callable[[str], Readable | None],
     context_schema: type | None,
 ) -> ParamInput | None:
     """The input of parameter *param* of *owner*, by annotation then by name.
@@ -161,9 +179,10 @@ def classify(
     An annotation that is exactly ``RunnableConfig``, the *context_schema*,
     ``BaseStore``, ``EventLog`` or ``Reflection`` names a framework input.
     Otherwise the name of a stored reducer or a ``Derived`` names it, and
-    the annotation must fit its value. ``None`` means that only a service
-    can fill the parameter. *hint* is ``inspect.Parameter.empty`` for a
-    parameter with no resolved annotation.
+    the annotation must fit its value. *readable_of* gives the stored
+    reducer or the ``Derived`` of a name, or ``None``. ``None`` means that
+    only a service can fill the parameter. *hint* is the resolved
+    annotation, see :func:`resolved_hint`.
     """
     from langchain_core.runnables import RunnableConfig  # noqa: PLC0415
     from langgraph.store.base import BaseStore  # noqa: PLC0415
@@ -184,11 +203,9 @@ def classify(
         framework = None
     if framework is not None:
         return framework
-    readable = readables.get(param)
+    readable = readable_of(param)
     if readable is None:
         return None
-    if hint is inspect.Parameter.empty:
-        return ReadableInput(readable, required=False)
     provided = readable._value_type()
     what = f"{readable._describe()} gives {_hint_label(provided)}"
     check_fit(owner, param, hint, _hint_fits(provided, _or_none(hint)), provided, what)
@@ -201,11 +218,37 @@ def _or_none(hint: object) -> object:
     return typing.Optional[hint]  # noqa: UP045 - a runtime value, not an annotation
 
 
+def resolved_hint(
+    owner: str, param: str, hints: Mapping[str, Any], errors: Mapping[str, str]
+) -> object:
+    """The resolved annotation of parameter *param* of *owner*.
+
+    Raises ``TypeError`` when the annotation does not resolve, or when the
+    parameter has none. Each message names the fix.
+    """
+    if param in errors:
+        raise TypeError(
+            f"{owner}: the annotation of parameter {param!r} does not resolve "
+            f"({errors[param]}). Make every name in it importable at run time. "
+            f"A usual cause is an import under 'if TYPE_CHECKING:', which the "
+            f"ruff rules TC001 to TC003 can move there. Keep the import at run "
+            f"time with '# noqa: TC002'."
+        )
+    if param not in hints:
+        raise TypeError(
+            f"{owner} has no annotation on parameter {param!r}. Annotate it with "
+            f"the type of its input: an exact library type such as "
+            f"RunnableConfig or EventLog, or the value type of the reducer, the "
+            f"Derived or the service that it names."
+        )
+    return hints[param]
+
+
 def check_fit(
     owner: str,
     param: str,
     declared: object,
-    verdict: bool | str,
+    verdict: Verdict,
     provided: object,
     what: str,
     fix: str | None = None,
@@ -217,18 +260,18 @@ def check_fit(
     default fix, which changes the annotation to *provided*.
     """
     wanted = _hint_label(declared)
-    if verdict is False:
+    if isinstance(verdict, Misfit):
         fix = fix or (
             f"Change the annotation to {_hint_label(provided)}, or read another input."
         )
         raise TypeError(
             f"{owner} declares parameter {param!r} as {wanted}, but {what}. {fix}"
         )
-    if isinstance(verdict, str):
+    if isinstance(verdict, Untestable):
         warn_user(
             f"{owner} declares parameter {param!r} as {wanted}, which Python "
-            f"cannot test at run time ({verdict}). The input is not checked "
-            f"against it."
+            f"cannot test at run time ({verdict.reason}). The input is not "
+            f"checked against it."
         )
 
 
@@ -281,13 +324,8 @@ class NodeCall:
                 return value
             case BoundFactory():
                 return self._build(source, reader)
-            case ReadableInput(readable=readable, required=required):
-                value = readable._read(self._read)
-                if value is None and param.has_default:
-                    return param.default
-                if value is None and required:
-                    raise _reducer_not_set(reader, noun, param.name, readable)
-                return value
+            case ReadableInput():
+                return _readable_value(source, param, self._read, reader, noun)
             case ConfigInput() | StoreInput() | ContextInput():
                 found = self._framework_value(source)
                 if found is not None:
@@ -334,6 +372,205 @@ class NodeCall:
             raise
         self._built[factory.name] = result
         return result
+
+
+def _readable_value(
+    source: ReadableInput, param: Param, read: StateRead, reader: str, noun: str
+) -> object:
+    """The value of a reducer or a ``Derived`` in *read*. An unset value gives
+    the default of *param*, or raises ``ReducerNotSetError`` for a required
+    one."""
+    value = source.readable._read(read)
+    if value is None and param.has_default:
+        return param.default
+    if value is None and source.required:
+        raise _reducer_not_set(reader, noun, param.name, source.readable)
+    return value
+
+
+@dataclass(frozen=True)
+class BoundDerived(Generic[T]):
+    """A :class:`Derived` of one graph, with each parameter bound to its
+    input: a stored reducer, another ``Derived`` or the log.
+
+    One ``Derived`` can serve several graphs, so the binding is not stored
+    on it.
+    """
+
+    derived: Derived[T]
+    params: tuple[Param, ...]
+
+    @property
+    def name(self) -> str:
+        return self.derived.name
+
+    @property
+    def sources(self) -> tuple[BaseReducer, ...]:
+        """The stored reducers that the value reads, also through another
+        ``Derived``, in input order."""
+        found: dict[str, BaseReducer] = {}
+        for p in self.params:
+            if isinstance(p.source, ReadableInput):
+                for reducer in p.source.readable.sources:
+                    found.setdefault(reducer.name, reducer)
+        return tuple(found.values())
+
+    @property
+    def _reads_log(self) -> bool:
+        return any(
+            isinstance(p.source, LogInput)
+            or (isinstance(p.source, ReadableInput) and p.source.readable._reads_log)
+            for p in self.params
+        )
+
+    def _read(self, read: StateRead) -> T:
+        return read.computed(self)
+
+    def _compute(self, read: StateRead) -> T:
+        values: dict[str, object] = {}
+        for p in self.params:
+            match p.source:
+                case LogInput():
+                    values[p.name] = read.log
+                case ReadableInput():
+                    values[p.name] = _readable_value(
+                        p.source, p, read, self._describe(), "this Derived"
+                    )
+                case _:
+                    raise AssertionError(f"{p.source!r} is no input of a Derived.")
+        try:
+            return self.derived.fn(**values)
+        except Exception as exc:
+            exc.add_note(f"Derived {self.name!r} raised while it computed its value.")
+            raise
+
+    def _value_type(self) -> object:
+        """The return annotation of ``fn``. The bind refuses a ``Derived``
+        without one."""
+        return _resolve_parameter_hints(self.derived.fn)[0]["return"]
+
+    def _describe(self) -> str:
+        return f"Derived {self.name!r}"
+
+    def _not_set_hint(self, reader: str) -> str:
+        return f"Make Derived {self.name!r} return a non-None value, or "
+
+
+def bind_derived(
+    reducers: Mapping[str, BaseReducer], derived: Mapping[str, Derived[Any]]
+) -> dict[str, BoundDerived[Any]]:
+    """Bind each ``Derived`` of *derived* to its inputs, by the rule of a
+    handler parameter.
+
+    A parameter annotated ``EventLog`` reads the log. Each other parameter
+    names a stored reducer or another ``Derived``, and its annotation must
+    fit that value. A ``Derived`` that another one reads is bound once.
+    Raises ``TypeError`` for a parameter that has no annotation, one that
+    does not resolve, one that names no input, and one that names a run
+    input such as the config. Raises ``TypeError`` that names the cycle when
+    ``Derived`` values read each other in a cycle.
+    """
+    bound: dict[str, BoundDerived[Any]] = {}
+
+    def bind(name: str, path: tuple[str, ...]) -> BoundDerived[Any]:
+        if name in path:
+            cycle = " -> ".join((*path[path.index(name) :], name))
+            raise TypeError(
+                f"Derived values read each other in a cycle: {cycle}. A "
+                f"Derived must not read itself, directly or through another "
+                f"Derived. Remove one read from the cycle."
+            )
+        if name in bound:
+            return bound[name]
+
+        def readable_of(dep: str) -> Readable | None:
+            if dep in derived:
+                return bind(dep, (*path, name))
+            return reducers.get(dep)
+
+        value = derived[name]
+        owner = f"Derived {name!r}"
+        hints, errors = _resolve_parameter_hints(value.fn)
+        params = tuple(
+            _derived_param(owner, param, hints, errors, readable_of, no_input)
+            for param in value._parameters()
+        )
+        _require_return_annotation(owner, hints, errors)
+        bound[name] = BoundDerived(value, params)
+        return bound[name]
+
+    def no_input(owner: str, param: inspect.Parameter) -> str:
+        default_hint = (
+            " A default does not make a parameter optional. Bind a constant "
+            "in a closure."
+            if param.default is not param.empty
+            else ""
+        )
+        return (
+            f"{owner} reads {param.name!r}, which names no reducer and no "
+            f"Derived.{default_hint} Available reducers: {sorted(reducers)}. "
+            f"Available Derived values: {sorted(derived)}. To read the "
+            f"EventLog, annotate the parameter with EventLog."
+        )
+
+    for name in derived:
+        bind(name, ())
+    return bound
+
+
+def _derived_param(
+    owner: str,
+    param: inspect.Parameter,
+    hints: Mapping[str, Any],
+    errors: Mapping[str, str],
+    readable_of: Callable[[str], Readable | None],
+    no_input: Callable[[str, inspect.Parameter], str],
+) -> Param:
+    """Bind one parameter of a ``Derived``, or raise ``TypeError``."""
+    if param.kind not in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
+        raise TypeError(
+            f"{owner} has the variadic or positional-only parameter "
+            f"{param.name!r}. Each parameter must name one input."
+        )
+    hint = resolved_hint(owner, param.name, hints, errors)
+    source = classify(owner, param.name, hint, readable_of, None)
+    if source is None:
+        raise TypeError(no_input(owner, param))
+    bound = Param(param.name, source, param.default)
+    if not isinstance(source, LogInput | ReadableInput):
+        raise TypeError(
+            f"{owner} reads the {bound.kind} in parameter {param.name!r}. A "
+            f"Derived reads only stored reducers, Derived values and the "
+            f"EventLog, because a stream frame and a reflection have no run. "
+            f"Read the value in a handler or in a RunScoped factory."
+        )
+    if isinstance(source, LogInput) and bound.has_default:
+        raise TypeError(
+            f"{owner} gives parameter {param.name!r} a default. A default does "
+            f"not make a parameter optional, and the EventLog is always set. "
+            f"Remove the default, or bind a constant in a closure."
+        )
+    return bound
+
+
+def _require_return_annotation(
+    owner: str, hints: Mapping[str, Any], errors: Mapping[str, str]
+) -> None:
+    """Raise ``TypeError`` for a ``Derived`` whose return annotation is
+    missing or does not resolve."""
+    if "return" in errors:
+        raise TypeError(
+            f"{owner} has a return annotation that does not resolve "
+            f"({errors['return']}). Make every name in it importable at run "
+            f"time."
+        )
+    if "return" not in hints:
+        raise TypeError(
+            f"{owner} has no return annotation. The framework checks the "
+            f"annotation of each reader against it. A lambda cannot have one, "
+            f"so use a def, for example: def stage_of(placed: bool | None) -> "
+            f"str."
+        )
 
 
 _MISSING = {

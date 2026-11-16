@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from langgraph_events._handler import (
     BoundHandler,
     ServiceCandidate,
-    _candidate_annotation,
     refuse_unclaimed,
 )
 from langgraph_events._hints import (
@@ -29,9 +28,9 @@ from langgraph_events._inputs import (
     ValueInput,
     check_fit,
     classify,
+    resolved_hint,
 )
 from langgraph_events._reducer import BaseReducer
-from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -79,7 +78,8 @@ class RunScoped(Generic[T]):
     ``context_schema``, ``EventLog``, ``BaseStore`` or ``Reflection`` gets
     that input. Each other parameter gets the stored reducer, the
     ``Derived`` or the name-keyed service of its name, and its annotation
-    must fit that value. A default is the value when the input is unset. A
+    must fit that value. Each parameter must have an annotation that
+    resolves. A default is the value when the input is unset. A
     parameter that names nothing raises ``TypeError`` at graph build.
 
     The factory runs only for a handler or a factory that declares it,
@@ -217,14 +217,6 @@ class _FactoryBinder:
         scoped: RunScoped[Any] = self._services.by_name[name]
         label = scoped._label(name)
         hints, errors = scoped._hints()
-        unresolved = {p: e for p, e in errors.items() if p != "return"}
-        if unresolved:
-            failed = ", ".join(f"{p!r} ({e})" for p, e in unresolved.items())
-            warn_user(
-                f"Failed to resolve the annotation on parameter(s) {failed} of "
-                f"{label}; the framework cannot match them by type. Make each "
-                f"annotation importable at run time."
-            )
         params: list[Param] = []
         missing: list[ServiceCandidate] = []
         positional = 0
@@ -237,15 +229,14 @@ class _FactoryBinder:
                     f"input."
                 )
             positional += param.kind is param.POSITIONAL_ONLY
-            hint = hints.get(p, inspect.Parameter.empty)
+            hint = resolved_hint(label, p, hints, errors)
             source = classify(
-                label, p, hint, self._readables, self._context_schema
+                label, p, hint, self._readables.get, self._context_schema
             ) or self._services._service_input(
                 label, p, hint, lambda dep: self._bind(dep, (*path, name))
             )
             if source is None:
-                annotation = _candidate_annotation(p, hints, errors)
-                missing.append(ServiceCandidate(p, annotation, param.default))
+                missing.append(ServiceCandidate(p, hint, param.default))
             else:
                 params.append(Param(p, source, param.default))
         if missing:
@@ -364,7 +355,7 @@ class TypedServices:
 class NamedServices:
     """The mapping form of ``services=``: each service fills the handler
     parameter of its name, so two instances of one type can coexist (a
-    primary and a backup chat model). Annotation-free parameters are eligible.
+    primary and a backup chat model). The value must fit the annotation.
     """
 
     def __init__(
@@ -430,11 +421,8 @@ class NamedServices:
         fills its candidate with its bound factory."""
         services: list[Param] = []
         for c in meta.service_candidates:
-            hint = (
-                c.annotation if c.has_resolved_annotation else inspect.Parameter.empty
-            )
             source = self._service_input(
-                meta.label, c.param, hint, self._factories.__getitem__
+                meta.label, c.param, c.annotation, self._factories.__getitem__
             )
             if source is not None:
                 services.append(Param(c.param, source, c.default))
@@ -460,45 +448,41 @@ class NamedServices:
             return None
         value = self.by_name[param]
         if isinstance(value, RunScoped):
-            if hint is not inspect.Parameter.empty:
-                provided = self._run_scoped_types[param]
-                factory = _factory_label(_annotation_source(value.factory))
-                returns = _hint_label(provided)
-                check_fit(
-                    owner,
-                    param,
-                    hint,
-                    _hint_fits(provided, hint),
-                    provided,
-                    f"services[{param!r}] is RunScoped({factory}) and that factory "
-                    f"returns {returns}",
-                    f"Change the annotation to {returns}, or register a factory "
-                    f"that returns {_hint_label(hint)}.",
-                )
-            return bind_factory(param)
-        if hint is not inspect.Parameter.empty:
-            # A cold import costs about 200 ms. Only the first graph in the
-            # process with an annotated name-keyed parameter pays it.
-            from beartype.door import is_bearable  # noqa: PLC0415
-
-            label = _hint_label(hint)
-            if value is None:
-                what = f"services[{param!r}] is None"
-                widen = f"Widen the annotation to {label} | None"
-            else:
-                what = (
-                    f"services[{param!r}] is an instance of {type(value).__qualname__}"
-                )
-                widen = "Widen the annotation"
+            provided = self._run_scoped_types[param]
+            factory = _factory_label(_annotation_source(value.factory))
+            returns = _hint_label(provided)
             check_fit(
                 owner,
                 param,
                 hint,
-                _satisfies(is_bearable, value, hint),
-                type(value),
-                f"{what}, not an instance of {label}",
-                f"{widen}, or register a value that satisfies it.",
+                _hint_fits(provided, hint),
+                provided,
+                f"services[{param!r}] is RunScoped({factory}) and that factory "
+                f"returns {returns}",
+                f"Change the annotation to {returns}, or register a factory "
+                f"that returns {_hint_label(hint)}.",
             )
+            return bind_factory(param)
+        # A cold import costs about 200 ms. Only the first graph in the
+        # process with a name-keyed service pays it.
+        from beartype.door import is_bearable  # noqa: PLC0415
+
+        label = _hint_label(hint)
+        if value is None:
+            what = f"services[{param!r}] is None"
+            widen = f"Widen the annotation to {label} | None"
+        else:
+            what = f"services[{param!r}] is an instance of {type(value).__qualname__}"
+            widen = "Widen the annotation"
+        check_fit(
+            owner,
+            param,
+            hint,
+            _satisfies(is_bearable, value, hint),
+            type(value),
+            f"{what}, not an instance of {label}",
+            f"{widen}, or register a value that satisfies it.",
+        )
         return ValueInput(value)
 
 

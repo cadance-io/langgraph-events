@@ -387,52 +387,48 @@ def describe_Derived():
 
     def when_the_graph_is_built():
         def it_rejects_an_input_that_names_no_reducer():
-            typo = Derived(name="stage", fn=lambda placd: placd)
+            def _placd(placd: bool | None) -> bool | None:
+                return placd
+
+            typo = Derived(name="stage", fn=_placd)
 
             with pytest.raises(TypeError, match=r"'placd'.*\['placed', 'shipped'\]"):
                 EventGraph([report], reducers=[placed, shipped, typo])
 
         def it_lists_the_available_names_for_an_unknown_input():
-            typo = Derived(name="typo", fn=lambda stag: stag)
+            def _stag(stag: str | None) -> str | None:
+                return stag
+
+            typo = Derived(name="typo", fn=_stag)
 
             with pytest.raises(
                 TypeError,
                 match=r"Derived 'typo' reads 'stag', which names no reducer and no "
                 r"Derived\. Available reducers: \['placed', 'shipped'\]\. "
                 r"Available Derived values: \['stage', 'typo'\]\. To read the "
-                r"EventLog, annotate the parameter with EventLog, in a def, a "
-                r"functools\.partial of one or a callable object\.",
+                r"EventLog, annotate the parameter with EventLog\.",
             ):
                 EventGraph([report], reducers=[placed, shipped, stage, typo])
 
         def when_no_reducer_has_the_name_log():
-            def it_rejects_a_lambda_that_reads_log():
+            def it_refuses_a_lambda_that_reads_log():
                 sized = Derived(name="sized", fn=lambda log: log)
 
                 with pytest.raises(
                     TypeError,
-                    match=r"Derived 'sized' reads 'log', which names no reducer.*"
-                    r"annotate the parameter with EventLog, in a def",
+                    match=r"Derived 'sized' has no annotation on parameter 'log'\.",
                 ):
                     EventGraph([report], reducers=[placed, shipped, sized])
 
-        def it_names_the_failure_of_an_annotation_that_does_not_resolve():
-            def _late(history: Missing) -> int:  # type: ignore[name-defined]  # noqa: F821
-                return 0
-
-            late = Derived(name="late", fn=_late)
-
-            with pytest.raises(
-                TypeError,
-                match=r"Derived 'late' reads 'history'.*The annotation of "
-                r"'history' does not resolve \(NameError: .*Missing.*\)\. Make it "
-                r"importable at run time\.",
-            ):
-                EventGraph([report], reducers=[placed, shipped, late])
-
         def it_rejects_two_derived_values_that_read_each_other():
-            first = Derived(name="first", fn=lambda second: second)
-            second = Derived(name="second", fn=lambda first: first)
+            def _first(second: int) -> int:
+                return second
+
+            def _second(first: int) -> int:
+                return first
+
+            first = Derived(name="first", fn=_first)
+            second = Derived(name="second", fn=_second)
 
             with pytest.raises(
                 TypeError,
@@ -442,7 +438,10 @@ def describe_Derived():
                 EventGraph([report], reducers=[placed, shipped, first, second])
 
         def it_rejects_a_derived_that_reads_itself():
-            itself = Derived(name="itself", fn=lambda itself: itself)
+            def _itself(itself: int) -> int:
+                return itself
+
+            itself = Derived(name="itself", fn=_itself)
 
             with pytest.raises(
                 TypeError,
@@ -506,7 +505,10 @@ def describe_Derived():
                 EventGraph([report], reducers=[placed, shipped, nameless])
 
         def it_rejects_a_defaulted_parameter_that_names_no_reducer():
-            scaled = Derived(name="scaled", fn=lambda placed, factor=2: placed)
+            def _scaled(placed: bool | None, factor: int = 2) -> bool | None:
+                return placed
+
+            scaled = Derived(name="scaled", fn=_scaled)
 
             with pytest.raises(
                 TypeError,
@@ -1087,9 +1089,12 @@ def describe_Derived_from_a_partial_that_binds_the_log():
 
 
 def describe_Derived_return_annotation():
-    def when_the_function_is_a_lambda():
+    def when_the_function_has_no_return_annotation():
         def it_raises_at_graph_build_naming_the_fix():
-            unannotated = Derived(name="unannotated", fn=lambda placed: placed)
+            def _bare(placed: bool | None):  # type: ignore[no-untyped-def]
+                return placed
+
+            unannotated = Derived(name="unannotated", fn=_bare)
 
             with pytest.raises(
                 TypeError,
