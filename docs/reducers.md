@@ -3,6 +3,22 @@
 - **Use a reducer** in one of three cases. The projection runs in many handlers. You want a value injected by parameter name. A recomputation from the full log each round would be expensive, for example a LangChain message history.
 - **Use `EventLog.filter(T)`** for one-shot lookups inside a single handler.
 
+## Declared types { #declared-types }
+
+Each reducer declares the type it stores, by a subscription at construction. The framework never guesses it from `fn`, a lambda or a merge function:
+
+| Reducer | Subscription | Stored type |
+|---|---|---|
+| `Reducer` | `Reducer[E, T](...)` | `list[T]` |
+| `ScalarReducer` | `ScalarReducer[E, T](...)` | `T`, or `T \| None` when `default` is `None` |
+| `FoldReducer` | `FoldReducer[S](...)` | `S` |
+
+`E` is the event type that `fn` reads. mypy checks `fn` against `E` and `T`, a lambda too. Graph construction refuses a reducer with no type argument, or with a type argument that names no class yet, such as a string or a type variable. The message names the reducer and the subscription to write. When `fn` has a return annotation, it must name `T` (`list[T]` for a `Reducer`), with or without `SkipType`.
+
+The type argument must be part of the call: `ScalarReducer[E, T](...)`. An annotated assignment such as `r: ScalarReducer[E, T] = ScalarReducer(...)` gives mypy the type, but not the running program, so graph construction refuses it. A subclass can declare the type in its base: `class Stage(ScalarReducer[Placed, str])`. `dataclasses.replace` keeps the type.
+
+A reader annotates the stored type exactly. See [Signature injection](concepts.md#signature-injection) for the normalization rule. A reader can leave `None` out of the stored type of a reducer, because an unset value raises `ReducerNotSetError`.
+
 ## On a Namespace { #on-a-namespace }
 
 Declare reducers as `Namespace` class attributes. The channel name auto-fills from the attribute name. The namespace scope auto-fills to the enclosing class. `EventGraph` auto-registers on first subscriber.
@@ -15,7 +31,7 @@ from langgraph_events import ScalarReducer
 
 
 class Order(Namespace):
-    current_status = ScalarReducer(
+    current_status = ScalarReducer[Event, str | None](
         event_type=Event,
         fn=lambda e: (
             "shipped" if isinstance(e, Order.Shipped)
@@ -64,11 +80,13 @@ log = graph.invoke([
 
 ## `Reducer`
 
-List accumulator. The default merge is `operator.add`. Any LangGraph-compatible reducer function works, for example `add_messages` for id-based dedup.
+List accumulator. The default merge is `operator.add`. Any LangGraph-compatible reducer function works, for example `add_messages` for id-based dedup. `Reducer[E, T]` stores `list[T]`, and `fn` returns `list[T]`. A merge that stores another item type needs a `FoldReducer` or a `BaseReducer` subclass.
 
 ```python
 ...
-history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], default=[])
+history = Reducer[UserMsg, str](
+    name="history", event_type=UserMsg, fn=lambda e: [e.text], default=[]
+)
 ```
 
 ## `ScalarReducer`
@@ -77,10 +95,12 @@ Last-write-wins scalar. `None` is valid. Return `SKIP` from `fn` to leave the cu
 
 ```python
 ...
-temperature = ScalarReducer(name="temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7)
+temperature = ScalarReducer[TempSet, float](
+    name="temperature", event_type=TempSet, fn=lambda e: e.value, default=0.7
+)
 
 # Conditional updates with SKIP:
-temperature = ScalarReducer(
+temperature = ScalarReducer[ConfigUpdated, float](
     name="temperature",
     event_type=ConfigUpdated,
     fn=lambda e: e.temp if e.temp is not None else SKIP,
@@ -90,7 +110,7 @@ temperature = ScalarReducer(
 
 ### Required values { #scalar-reducer-required }
 
-The handler parameter annotation declares whether the value can be `None`. A non-`None` annotation opts the parameter into a runtime assertion. `str | None`, `Optional[str]`, `Any` and `object` opt out. A parameter must have an annotation. When the channel value is `None` at injection time, `ReducerNotSetError` raises **before** the handler body runs.
+The handler parameter annotation declares whether the value can be `None`. For a reducer that stores `str | None`, a reader annotated `str` opts into a runtime assertion, and a reader annotated `str | None` opts out. A parameter must have an annotation. When the channel value is `None` at injection time, `ReducerNotSetError` raises **before** the handler body runs.
 
 ```python
 ...
@@ -107,13 +127,13 @@ def permissive(event: TaskReceived, strategy: str | None) -> Completed:
     if strategy is None: ...
 ```
 
-A parameter default is the value when the channel value is `None`. So `strategy: str = "steady"` receives `"steady"` and raises no `ReducerNotSetError`. The annotation must also fit the value type of the reducer, or graph construction raises `TypeError`. See [Signature injection](concepts.md#signature-injection).
+A parameter default is the value when the channel value is `None`. So `strategy: str = "steady"` receives `"steady"` and raises no `ReducerNotSetError`. The annotation must also name the stored type of the reducer, or graph construction raises `TypeError`. See [Signature injection](concepts.md#signature-injection).
 
 `ReducerNotSetError` is raised outside the `raises=` boundary, so a broad `raises=ValueError` cannot swallow it. See [Errors](api.md#errors). A parameter annotation that does not resolve raises `TypeError` at graph construction. Annotate against an importable type.
 
 ## `FoldReducer`
 
-Accumulator whose next value depends on the **prior** state, a left-fold. `Reducer` appends and `ScalarReducer` takes the last write. Use `FoldReducer` for a counter, a merged dict or a re-derived cursor. Each event owns its transition via `fold(self, state)`, the same polymorphic style as `MessageEvent.as_messages()`. Supply only `name`, `event_type` and a `default_factory`.
+Accumulator whose next value depends on the **prior** state, a left-fold. `Reducer` appends and `ScalarReducer` takes the last write. Use `FoldReducer` for a counter, a merged dict or a re-derived cursor. Each event owns its transition via `fold(self, state)`, the same polymorphic style as `MessageEvent.as_messages()`. Supply only `name`, `event_type` and a `default_factory`, and declare the state type: `FoldReducer[S](...)`.
 
 ```python
 from langgraph_events import RESET, FoldReducer, IntegrationEvent
@@ -127,7 +147,7 @@ class Reset(IntegrationEvent):
     def fold(self, state): return RESET   # clears the channel
 
 
-counter = FoldReducer(
+counter = FoldReducer[dict[str, int]](
     name="counter",
     event_type=(Incremented, Reset),
     default_factory=lambda: {"n": 0},
@@ -138,7 +158,7 @@ counter = FoldReducer(
 
 ### Typing { #fold-typing }
 
-`FoldReducer` is generic over its state type `S`, inferred from `default_factory`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`):
+`FoldReducer` is generic over its state type `S`. mypy infers it from `default_factory`, so `reducer.empty` and `reducer.seed(...)` are typed (not `Any`). Graph construction still needs the subscription `FoldReducer[S](...)`, because the running program cannot read an inferred type:
 
 ```python
 ...
@@ -156,7 +176,7 @@ def step(state: dict[str, int], event: Foldable) -> dict[str, int]:
 
 To have mypy flag a `default_factory`/`fold` state-shape disagreement, pin the state type: `FoldReducer[dict[str, int]](...)`. Without a pin, mypy widens `S` to the join of the two and does not catch the mismatch. The generic does not propagate to handler params. Those are injected by name at runtime.
 
-For a bespoke channel, subclass the public `BaseReducer` directly.
+For a bespoke channel, subclass the public `BaseReducer` directly. It must implement `stored_type()`, which gives the declared type that readers name.
 
 ## `Derived` { #derived }
 
@@ -179,8 +199,10 @@ class LimitSet(IntegrationEvent):
     limit: int
 
 
-attempts = FoldReducer(name="attempts", event_type=Attempted, default_factory=int)
-limit = ScalarReducer(name="limit", event_type=LimitSet, fn=lambda e: e.limit, default=3)
+attempts = FoldReducer[int](name="attempts", event_type=Attempted, default_factory=int)
+limit = ScalarReducer[LimitSet, int](
+    name="limit", event_type=LimitSet, fn=lambda e: e.limit, default=3
+)
 
 
 def remaining_of(attempts: int, limit: int) -> int:
@@ -296,7 +318,7 @@ For two entries of the same kind and name, an entry in `reducers=[...]` wins ove
 
 ## `message_reducer`
 
-Built-in reducer for LangChain messages. It projects `MessageEvent.as_messages()` into the `messages` channel, using `add_messages` for id-based dedup.
+Built-in reducer for LangChain messages. It projects `MessageEvent.as_messages()` into the `messages` channel, using `add_messages` for id-based dedup. It is a `Reducer[MessageEvent, BaseMessage]`, so a reader annotates `list[BaseMessage]`.
 
 A message without an id gets a UUID id when the reducer projects it, in place on the message object, as `add_messages` does. The id is then saved with the step's write. So a step that pauses keeps one id for the message, and every `MessagesSnapshot` shows that id.
 

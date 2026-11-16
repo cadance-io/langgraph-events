@@ -122,7 +122,7 @@ Handler params resolve from:
 - A parameter annotated with the graph's `context_schema`: the typed run context (see [Run context](#run-context))
 - Reducer channel or [`Derived`](reducers.md#derived) value by **parameter name** (see [Reducers](reducers.md))
 - Field matchers (external only): typed subset dispatch and injection
-- **Services**: project dependencies registered on `EventGraph(services=...)`
+- **Services**: project dependencies, the typed fields of the `EventGraph(services=...)` object
 
 A handler parameter after the event, and each parameter of a [`RunScoped`](#run-scoped-services) factory, bind by one rule:
 
@@ -130,7 +130,7 @@ A handler parameter after the event, and each parameter of a [`RunScoped`](#run-
 |---|---|---|
 | 1 | annotated exactly `RunnableConfig`, the `context_schema` type, `BaseStore`, `EventLog` or `Reflection` | that input. The parameter name does not matter |
 | 2 | named like a stored reducer or a `Derived` | its value at node start |
-| 3 | named like a name-keyed service, or annotated with the type of a type-keyed service | that service. A `RunScoped` service gives its result for the same node call |
+| 3 | named like a field of the `services=` object | that service. A `RunScoped` service gives its result for the same node call |
 
 The first match is used. So an exact library annotation wins over a reducer of the same name. The name `log` has no special meaning: a parameter reads the `EventLog` only when its annotation is `EventLog`. These rules apply to a handler parameter, a factory parameter and a [`Derived`](reducers.md#derived) parameter alike:
 
@@ -138,57 +138,80 @@ The first match is used. So an exact library annotation wins over a reducer of t
 - **Each annotation must resolve.** An annotation that does not resolve raises `TypeError`, also on the event parameter. A usual cause is an import under `if TYPE_CHECKING:`. Keep the import at run time with `# noqa: TC002`.
 - **A parameter that matches nothing raises `TypeError` at graph construction.** A default does not prevent it. The message gives a hint for a parameter named `config` or `log`, and for a default.
 - **A default is the value when the input is unset.** A reducer or a `Derived` is unset when its value is `None`. A run config, a store or a run context is unset when the run has none. A service is never unset.
-- **The annotation is checked against its source at graph construction.** A misfit raises `TypeError`. The check is described below.
+- **The annotation names the declared type of its source exactly.** A misfit raises `TypeError` at graph construction. The rules are described below.
 
-`services=` accepts two shapes. They are mutually exclusive per graph:
+`services=` takes one object whose class declares one typed field per service, such as a dataclass instance. The field name is the parameter name that reads the service. The field type is the declared type of the service. A factory field is typed `RunScoped[T]`, and its result has the type `T`:
 
 ```python
 ...
-# Type-keyed: handler params resolve by annotation. Same-type
-# collisions rejected at build; subclass annotations match via MRO walk.
-EventGraph(handlers=[...], services=[chat_model, session_factory])
+from dataclasses import dataclass
 
-class Order(Namespace):
-    class Place(Command):
-        class Placed(DomainEvent):
-            order_id: str
+@dataclass
+class Services:
+    primary_chat: BaseChatModel
+    backup_chat: BaseChatModel
+    model: RunScoped[ConversationModel]
 
-        async def handle(self, chat_model: BaseChatModel) -> Order.Place.Placed: ...
-
-# Name-keyed: handler params resolve by name. Multiple instances of same type allowed.
 EventGraph(
     handlers=[...],
-    services={"primary_chat": chat_a, "backup_chat": chat_b},
+    services=Services(primary_chat=chat_a, backup_chat=chat_b, model=RunScoped(model_for)),
 )
 
 @on(SomeEvent)
-def react(event, primary_chat, backup_chat) -> ...: ...
+def react(event: SomeEvent, primary_chat: BaseChatModel, model: ConversationModel) -> ...: ...
 ```
 
-Type-keyed injection matches on the resolved annotation. An annotation imported only under `TYPE_CHECKING` does not resolve, so the parameter stays unclaimed and raises `TypeError` at graph construction.
+A dict or a list raises `TypeError` that names this fix. mypy checks each value against its field type when the object is built. A field annotation that does not resolve raises `TypeError` at graph construction.
 
-Name-keyed injection matches on the name, and the library checks the registered value against the annotation at graph build. A plain value must be an instance of the annotation. A `RunScoped` factory must return a subtype of the annotation. A mismatch raises `TypeError`. An annotation that Python cannot test at run time, such as a `Protocol` without `@runtime_checkable`, still binds the parameter and emits a `UserWarning`.
+#### Declared types and the exact match { #declared-types }
 
-The check uses `beartype.door`. For a stored reducer or a `Derived`, the value type of the source must fit the annotation:
+Each source declares its type, and a reader annotates that type exactly:
 
-| Source | Value type |
+| Source | Declared type |
 |---|---|
-| `Reducer` | the `list` type that `fn` returns, or `list[Any]` |
-| `ScalarReducer` | the return type of `fn`, without `SkipType`. A `fn` that returns only `SkipType` raises `TypeError`, because it never sets a value. The type of `default` joins it only when `default` does not fit it. A `None` default always adds `None` |
-| `FoldReducer` | the class that `default_factory` is, or the return type of `default_factory` |
-| `Derived` | the return annotation of `fn`. A `Derived` must have one. A class gives itself |
+| `Reducer[E, T]` | `list[T]` |
+| `ScalarReducer[E, T]` | `T`, or `T \| None` when `default` is `None` |
+| `FoldReducer[S]` | `S` |
+| `Derived` | the return annotation of `fn`. A class gives itself |
+| A field of the `services=` object | the field type |
+| A `RunScoped[T]` field | `T`. The return annotation of the factory must be `T` too |
 
-- A source whose function has no return annotation gives `Any`, and is not checked.
-- `None` always fits. A `None` value of an annotation that rejects `None` raises `ReducerNotSetError` at run time instead, unless the parameter has a default.
-- The numeric tower of PEP 484 applies at the top level only: `int` fits `float`, and `int` or `float` fits `complex`. A type argument is not promoted, so `list[int]` does not fit `list[float]`.
-- An invariant container needs equal type arguments, as for mypy. So `list[bool]` does not fit `list[int]`. The invariant containers are `list`, `dict`, `set` and their mutable abstract classes. The key of a `Mapping` is invariant too, as in typeshed.
-- Any other generic is checked argument by argument, also when its class is a subclass of the declared one. So `dict[str, list[bool]]` does not fit `Mapping[str, list[int]]`.
-- An unknown type argument takes the declared argument at its position. `Any` is unknown, and so is each argument of a bare generic class such as `dict`. A known argument is still checked, so `dict[str, Any]` fits `dict[str, int]` but not `dict[int, str]`.
-- The annotations of a `functools.partial` or a callable object are read from the wrapped function or from `__call__`. A keyword that a partial binds is no parameter.
+See [Declared types](reducers.md#declared-types) for the reducer subscriptions. Two annotations name the same type when they are equal after this normalization rule table:
+
+| Rule | Example |
+|---|---|
+| A typing alias is its origin class. A typing alias and its `collections.abc` alias compare by origin. The rule applies to each type argument, a `Callable` argument list too | `List[int]` is `list[int]`. `typing.Sequence[int]` is `collections.abc.Sequence[int]` |
+| A bare alias is its origin class | `List` is `list` |
+| `Optional[X]` is `X \| None` | `Optional[int]` is `int \| None` |
+| A union is the set of its members, so the order does not count | `int \| str` is `str \| int` |
+| The `Literal` members of a union merge | `Literal["a"] \| Literal["b"]` is `Literal["a", "b"]` |
+| A `Literal` is the set of its values, keyed by type and value | `Literal[1]` is not `Literal[True]` |
+| `Annotated` metadata is stripped, at any depth | `list[Annotated[int, "x"]]` is `list[int]` |
+| `Any` equals only `Any` | `Any` is not `object` |
+| A `NewType` is its own type | `UserId` is not `int` |
+| A type alias statement without parameters is its value | `type Ids = list[int]` is `list[int]` |
+| A type variable, a forward reference or a string names no class yet | refused with `TypeError` |
+
+Nothing else fits: no subclass, no base class, no abstract container, no numeric tower. One allowance applies to a reducer and a `Derived` only: a reader can leave `None` out of an optional source, because an unset value raises `ReducerNotSetError`. A service is never unset, so a reader of a service matches it exactly.
+
+For a narrow view of a value, declare a `Protocol` as the type of the provider, and name the same `Protocol` in each reader. When two readers need two views, add an adapter: a `RunScoped` factory that reads the service and returns the view. It returns the same object, once per node call:
+
+```python
+...
+def loader_view(initiative_loader: InitiativeLoader) -> LoaderView:
+    return initiative_loader
+
+@dataclass
+class Services:
+    initiative_loader: InitiativeLoader
+    loader_view: RunScoped[LoaderView]
+```
+
+A `Derived` gives a `Sequence` view of a `list` reducer the same way: `def history_view(history: list[str]) -> Sequence[str]: return history`.
 
 #### Run-scoped services
 
-A plain service is injected as the same object on every dispatch. For a value built per node call, wrap a factory in `RunScoped` and place it in the name-keyed mapping. The library calls the factory once per node call and injects the result under the handler's parameter name.
+A plain service is injected as the same object on every dispatch. For a value built per node call, wrap a factory in `RunScoped`, and give the `services=` object a field typed `RunScoped[T]` for it. The library calls the factory once per node call and injects the result under the field name.
 
 ```python
 ...
@@ -200,14 +223,20 @@ def model_for(config: RunnableConfig) -> ConversationModel:
 def planner_for(model: ConversationModel, log: EventLog, stage: str) -> Planner:
     return Planner(model, log, stage)
 
+@dataclass
+class Services:
+    model: RunScoped[ConversationModel]
+    planner: RunScoped[Planner]
+    session_factory: SessionFactory
+
 EventGraph(
     handlers=[...],
     reducers=[stage],
-    services={
-        "model": RunScoped(model_for),
-        "planner": RunScoped(planner_for),
-        "session_factory": session_factory,
-    },
+    services=Services(
+        model=RunScoped(model_for),
+        planner=RunScoped(planner_for),
+        session_factory=session_factory,
+    ),
 )
 
 @on(SomeEvent)
@@ -219,10 +248,9 @@ Each factory parameter binds by the rule of a handler parameter. See [Signature 
 Rules:
 
 - The factory must be a plain function, a class or a callable object, with a return annotation. A coroutine function, or a factory without a return annotation, raises `TypeError` at `RunScoped(...)`. A `functools.partial` is read through to the wrapped function, and a keyword that it binds is filled already. A callable object is read through its `__call__`.
-- The return annotation must resolve at graph build, so declare its class at module level. It must be a nominal subtype of the annotation of each handler or factory parameter that reads it, or the build raises `TypeError`. A factory annotated `-> Any` or with a bare type variable is not checked.
+- The return annotation must resolve at graph build, so declare its class at module level. It must be the `T` of the `RunScoped[T]` field exactly, or the build raises `TypeError`.
 - A factory runs only for a handler or a factory that declares it. It runs once per node call, before the invariants of the handler. One result serves every event that the node handles in that call, every retry attempt, and each factory that reads it.
 - The factory runs synchronously on both the `invoke` and the `ainvoke` path. Do not do I/O in it. A factory can return an object whose async methods do the I/O.
-- `RunScoped` is rejected in the type-keyed sequence form.
 - A resumed run receives a freshly built config, not a checkpointed one.
 - The factory runs before the handler's `raises=` boundary. An error in the factory is not caught by `raises=`, is not retried, and does not produce `HandlerRaised`. It surfaces as an unhandled node error. A note names the reader that requested the service whose factory raised. A factory whose input failed did not run, so it gets no note. Keep the factory to a lookup. Validate the config in the factory and raise a clear error.
 - A parameter that names a stored reducer or a `Derived`, with an annotation that rejects `None` and no default, raises `ReducerNotSetError` when the value is `None`. The message names the factory.
@@ -235,7 +263,8 @@ Graph construction raises `TypeError` in each of these cases. The message names 
 | A factory parameter matches nothing | Rename the parameter, register the input, or annotate it with the exact library type. The message names the other services |
 | A factory parameter is `*args` or `**kwargs` | Give each input its own parameter |
 | A service has the name of a reducer or a `Derived` | Rename the service or the reducer. A handler or a factory parameter cannot name both |
-| The annotation of a factory parameter does not fit its input | Change the annotation to the type that the message names |
+| The annotation of a factory parameter does not name the declared type of its input | Change the annotation to the type that the message names, or add an adapter |
+| The factory returns another type than its `RunScoped[T]` field | Make the factory return `T`, or change the field type |
 | Factories read each other in a cycle | Remove one read. The message names the cycle, for example `first -> second -> first` |
 | Python cannot read the signature of the factory, for example `dict` | Pass a function, a class or a callable object whose signature Python can read |
 
@@ -257,10 +286,14 @@ def model_for(facts: RunFacts) -> ConversationModel:
 @on(SomeEvent)
 def handle(event: SomeEvent, facts: RunFacts, model: ConversationModel) -> ...: ...
 
+@dataclass
+class Services:
+    model: RunScoped[ConversationModel]
+
 graph = EventGraph(
     [handle],
     context_schema=RunFacts,
-    services={"model": RunScoped(model_for)},
+    services=Services(model=RunScoped(model_for)),
 )
 graph.invoke(SomeEvent(), context=RunFacts(language="fr"))
 ```
@@ -270,7 +303,6 @@ Rules:
 - The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model.
 - `context_schema` belongs to the topology: `EventTopology(handlers, context_schema=RunFacts)`. `EventGraph(handlers, context_schema=...)` passes it on, and `EventGraph.of(topology, ...)` reads it from the topology.
 - A handler parameter whose annotation is exactly the schema type receives the context. It is claimed like `RunnableConfig`, before a service, so it is not in `topology.requirements`. Only the exact type matches. A parameter annotated `RunFacts | None` or with a subclass stays unclaimed, and the `TypeError` of the build says so. Without `context_schema`, the error of a dataclass, pydantic or `TypedDict` parameter names `context_schema=`.
-- A type-keyed service that is an instance of the schema raises `TypeError` at build. The context fills a parameter of that type, so such a service is never injected.
 - A `RunScoped` factory parameter annotated exactly with the schema type receives the context, at any position: `def model_for(config: RunnableConfig, facts: RunFacts)`. A parameter annotated with another type binds by its name. On a graph without `context_schema`, the `TypeError` of a parameter that names nothing says to pass `context_schema=` when the annotation is a dataclass, a pydantic model or a `TypedDict`. An `Event` subclass gets no such hint, because a factory cannot read the event.
 - A factory receives the context typed as its annotation, but `EventGraph` is not generic in the context type. A type checker cannot match the factory to the schema.
 - The context is read through LangGraph's `get_runtime()`. It is not written to the checkpoint state or to the checkpoint metadata.
@@ -322,7 +354,7 @@ topology = EventTopology([place, respond], reducers=[messages])
 print(topology.namespaces().mermaid())
 print(topology.requirements)  # one ServiceRequirement per service parameter
 
-graph = EventGraph.of(topology, services={"llm": llm}, checkpointer=saver)
+graph = EventGraph.of(topology, services=Services(llm=llm), checkpointer=saver)
 
 store = EventStore(topology, saver)
 for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
@@ -340,7 +372,7 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
   `graph.topology.handler_names`. The same properties on `EventGraph` forward to the topology.
 - `EventGraph.of(topology, ...)` takes the keyword arguments of `EventGraph(...)` except
   `reducers`. A requirement that no service matches raises `TypeError`. The error names the
-  missing type and the keys or types that `services=` holds, so a near-miss key shows.
+  missing type and the fields that `services=` holds, so a near-miss name shows.
 - `EventGraph(handlers, ...)` builds the same graph as
   `EventGraph.of(EventTopology(handlers, reducers=...), ...)`. It checks `on_unresumable`, then
   `services=`, then builds the topology.
