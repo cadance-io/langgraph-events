@@ -107,6 +107,8 @@ def permissive(event: TaskReceived, strategy: str | None) -> Completed:
     if strategy is None: ...
 ```
 
+A parameter default is the value when the channel value is `None`. So `strategy: str = "steady"` receives `"steady"` and raises no `ReducerNotSetError`. The annotation must also fit the value type of the reducer, or graph construction raises `TypeError`. See [Signature injection](concepts.md#signature-injection).
+
 `ReducerNotSetError` is raised outside the `raises=` boundary, so a broad `raises=ValueError` cannot swallow it. See [Errors](api.md#errors). When a parameter annotation does not resolve, the library emits a `UserWarning` for that parameter and treats it as permissive. Annotate against an importable type.
 
 ## `FoldReducer`
@@ -199,12 +201,12 @@ graph = EventGraph([retry], reducers=[attempts, limit, remaining])
 
 - **Inputs by parameter.** Each parameter of `fn` is one input. Before a handler runs, the framework calls `fn` with the values of the inputs at node start. An unset input gets the empty default of its reducer.
 - **Kinds of input.** A parameter annotated with `EventLog` receives the `EventLog` of the state, with its causes. The parameter name does not matter. For a `functools.partial` or a callable object, the annotations are read from the wrapped function or from `__call__`. Each other parameter name names a stored reducer or another `Derived`. Another `Derived` gives its computed value. `Derived` values must not read each other in a cycle.
-- **The log needs an annotation.** A lambda cannot annotate a parameter, so use a `def`, a `functools.partial` of one, or a callable object. A lambda parameter named `log` names a reducer called `log`, not the `EventLog`. The annotation must resolve at run time. An `EventLog` import under `TYPE_CHECKING` does not resolve. A log parameter must have no default, and a partial must not bind it.
+- **A return annotation.** The framework checks the annotation of each reader against the return annotation of `fn`, so `fn` must have one. A lambda cannot have one, so use a `def`, a `functools.partial` of one, or a callable object. A lambda cannot annotate a parameter either, so a lambda parameter named `log` would name a reducer called `log`, not the `EventLog`. Each annotation must resolve at run time. An `EventLog` import under `TYPE_CHECKING` does not resolve.
 - **Once per state read.** One state read computes each `Derived` once, also when several values read it. A handler injection, a stream frame, an AG-UI snapshot and `reflect(log).state()` are each one state read. Nothing is kept across reads. So `fn` runs again in the next read, and an input that reads the log scans the log again. Keep `fn` cheap, or memoize it yourself.
 - **Not stored.** The value is never written to the checkpoint. It cannot drift from its inputs, and a new `Derived` needs no backfill on an existing thread. `pre_seed()` and `apre_seed()` refuse a `Derived` name with `ValueError`.
 - **Registration.** Pass it in `reducers=[...]`, or declare it as a `Namespace` class attribute. On a namespace, `name` and `namespace` auto-fill, as on a reducer. An input can be any registered stored reducer or `Derived`. The namespace places the value in the structure views only.
 - **Names.** `topology.reducer_names` and `topology.reducers` hold the stored reducers only. `topology.injectable_names` holds every name a handler can read: each stored reducer and each `Derived`. `topology.derived` maps each `Derived` by its name.
-- **Required values.** As on a `ScalarReducer` parameter, a non-`None` annotation opts into [`ReducerNotSetError`](#scalar-reducer-required). The message asks you to make the `Derived` return a non-`None` value, or to permit `None`.
+- **Required values.** As on a `ScalarReducer` parameter, a non-`None` handler annotation opts into [`ReducerNotSetError`](#scalar-reducer-required), and a handler default is the value for `None`. The message asks you to make the `Derived` return a non-`None` value, to give the parameter a default, or to permit `None`.
 - **Errors.** `fn` runs before the handler body, outside the `raises=` boundary, like `ReducerNotSetError`. The exception keeps its type and gets a note that names the `Derived`.
 - **Services.** A service must not have the name of a `Derived` or a reducer. Graph construction raises `TypeError`, because a parameter cannot name both. A `RunScoped` factory can read a `Derived` by name. See [Run-scoped services](concepts.md#run-scoped-services).
 - **Streams and clients.** `stream_events(include_reducers=...)`, `stream_resume(include_reducers=...)` and `AGUIAdapter(include_reducers=...)` accept a `Derived` name. A client then gets the value in `StreamFrame.reducers` and in the `STATE_SNAPSHOT`. `include_reducers=True` selects each stored reducer and each `Derived`, in registration order. `AGUIAdapter` drops a `Derived` key from the inbound client state.
@@ -247,7 +249,11 @@ def carriers_of(log: EventLog) -> tuple[str, ...]:
 
 
 carriers = Derived(name="carriers", fn=carriers_of)
-summary = Derived(name="summary", fn=lambda carriers: ", ".join(carriers) or "none")
+def summary_of(carriers: tuple[str, ...]) -> str:
+    return ", ".join(carriers) or "none"
+
+
+summary = Derived(name="summary", fn=summary_of)
 
 
 @on(Shipped)
@@ -274,6 +280,9 @@ Graph construction raises an error in each of these cases:
 | That parameter has an annotation that does not resolve | `TypeError` | The message names the resolution error. Make the annotation importable at run time |
 | `Derived` values read each other in a cycle, or a `Derived` reads itself | `TypeError` | The value cannot be computed. The message names the cycle, for example `first -> second -> first` |
 | `fn` has a `*args`, `**kwargs` or positional-only parameter | `TypeError` | Each parameter must name one input |
+| `fn` has no return annotation, for example a lambda | `TypeError` | The framework checks each reader against it. Use a `def` with a return annotation |
+| The return annotation of `fn` does not resolve | `TypeError` | Make every name in it importable at run time |
+| A handler or factory annotation does not fit the return annotation | `TypeError` | Change the annotation to the type that the message names |
 | `inspect.signature` cannot read `fn`, for example a builtin or a value that is not callable | `TypeError` | The parameter names of `fn` name its inputs. The message names the `Derived` |
 | A reducer and a `Derived` have the same name, from `reducers=[...]` or from a namespace | `TypeError` | A handler parameter cannot name both |
 | A `Derived` has no name | `ValueError` | A handler parameter cannot name it. Pass `name=`, or declare it on a namespace |

@@ -9,31 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-`RunScoped` factory parameters now bind like handler parameters. Graph construction checks
-each parameter and raises `TypeError` that names the factory, the parameter and the fix.
-Each row is one rule that can refuse a graph that built on 0.49.
+A handler parameter and a `RunScoped` factory parameter now bind by one rule. A default is
+the value when the input is unset. A parameter that matches nothing raises `TypeError`. The
+annotation is checked against its source. Each row is one change that can refuse a graph
+that built on 0.49, or change a value. Each error message names the fix of its row.
 
 | Before | Now | Fix |
 |---|---|---|
-| The first factory parameter was the run config, by position, with or without an annotation | A parameter with no annotation raises `TypeError`. An annotation that does not resolve, for example `RunnableConfig` imported under `TYPE_CHECKING`, raises `TypeError` too | Annotate the parameter `RunnableConfig`, and import `RunnableConfig` at run time |
-| A second parameter annotated with the `context_schema` type got the run context. It had to be positional and required | A parameter annotated with the schema type gets the run context at any position, keyword-only included | None for a factory that already declares `(config: RunnableConfig, context: Schema)` |
-| An optional parameter was not passed, for example `def f(config, retries=3)` | A parameter with a default raises `TypeError` | Remove the default. Bind a constant in a closure or a `functools.partial` |
+| A handler parameter that named a stored reducer or a `Derived` was not checked against its annotation | Graph construction raises `TypeError` when the value type of the source does not fit the annotation. The message names the value type | Change the annotation to the type that the message names |
+| A `Derived` could use a lambda, or a `def` without a return annotation | Graph construction raises `TypeError` for a `Derived` without a return annotation, or with one that does not resolve | Use a `def` with a return annotation, importable at run time |
+| A handler parameter with a default, that read an unset reducer with a non-`None` annotation, raised `ReducerNotSetError` | The parameter receives its default | None. Remove the default to keep the error |
+| The first factory parameter was the run config, by position, with any annotation or none, for example `def f(config)`, `config: dict` or `config: RunnableConfig \| None` | A parameter binds by its annotation, then by its name. A parameter named `config` that is not annotated exactly `RunnableConfig` matches nothing and raises `TypeError` | Annotate the parameter exactly `RunnableConfig`, and import `RunnableConfig` at run time |
+| A second factory parameter annotated with the `context_schema` type got the run context. It had to be positional and required | A parameter annotated with the schema type gets the run context at any position, keyword-only included | None for a factory that declares `(config: RunnableConfig, context: Schema)` |
+| An optional factory parameter was not passed, for example `def f(config, retries=3)` | A parameter with a default that matches nothing raises `TypeError` | Bind a constant in a closure or a `functools.partial` |
 | A factory with a signature that Python cannot read, for example `RunScoped(dict)`, got the config | `TypeError` | Pass a function whose signature Python can read |
-| Any other parameter name was refused | A parameter binds by name to `log`, a stored reducer, a `Derived` or a service. A name that matches none raises `TypeError` that lists the names | Rename the parameter |
+| A factory parameter after the config was refused | A factory parameter binds to a framework input, a stored reducer, a `Derived` or a service. A parameter that matches nothing raises `TypeError` | Rename the parameter, or register the input |
+| A factory parameter annotation was not checked | A factory parameter annotation that does not fit its source raises `TypeError` | Change the annotation to the type that the message names |
 | A reducer or a `Derived` won over a service of the same name, with no message | A service with the name of a reducer or a `Derived` raises `TypeError`, for handlers and factories alike | Rename the service or the reducer |
+| Factories could not read each other | Factories that read each other in a cycle raise `TypeError` that names the cycle | Remove one read from the cycle |
 
 ### Added
 
-- **A `RunScoped` factory can read reducers, `Derived` values, `log` and other services.**
-  Each parameter binds by the handler rules: `RunnableConfig` and the `context_schema` type
-  by annotation, then `log`, a stored reducer, a `Derived` or a service by name. A factory
-  runs only for a handler or a factory that declares it, once per node call. One result serves
-  every reader in that call. Graph construction checks each annotation against its input
-  with `beartype.door.is_subhint`. A cycle among factories raises `TypeError` that names the
-  cycle. A non-`None` annotation on an unset reducer raises `ReducerNotSetError` that names
-  the factory. `EventGraph.namespaces()` lists each `RunScoped` service with its inputs in
-  the text, JSON and mermaid views. See
+- **A `RunScoped` factory can read reducers, `Derived` values, the log and other services.**
+  Each parameter binds by the rule of a handler parameter: an exact annotation of
+  `RunnableConfig`, the `context_schema` type, `BaseStore`, `EventLog` or `Reflection`,
+  then a stored reducer, a `Derived` or a service by name. A factory runs only for a
+  handler or a factory that declares it, once per node call, before the invariants of the
+  handler. One result serves every event of that call, every retry attempt and every
+  factory that reads it. A non-`None` annotation on an unset reducer, with no default,
+  raises `ReducerNotSetError` that names the factory. `EventGraph.namespaces()` lists each
+  `RunScoped` service with its typed inputs in the text, JSON and mermaid views, and
+  `NamespaceModel.run_scoped` holds them. See
   [Run-scoped services](https://cadance-io.github.io/langgraph-events/concepts/#run-scoped-services).
+- **Each reducer reports the type of its value, for the annotation check.** A `Reducer`
+  gives the `list` type that `fn` returns. A `ScalarReducer` gives the return type of `fn`
+  and the type of `default`. A `FoldReducer` gives the type of `default_factory`. A
+  `Derived` gives its return annotation. A function without a return annotation gives
+  `Any`, which is not checked. The check accepts the numeric tower of PEP 484, so `int`
+  fits `float`. A bespoke `BaseReducer` subclass gives `Any`.
+- **A handler can declare two parameters of one framework type.** Each parameter annotated
+  `EventLog`, for example, receives the log. Before, the second one raised `TypeError`.
 - **A `Derived` can read the `EventLog` and other `Derived` values.** A parameter of `fn`
   annotated with `EventLog` receives the `EventLog` of the state, as on a handler. The
   parameter name does not matter, and the name `log` has no special meaning. A lambda cannot
