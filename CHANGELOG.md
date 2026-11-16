@@ -14,7 +14,7 @@ one rule. Each parameter must have an annotation that resolves. A default is the
 the input is unset. A parameter that matches nothing raises `TypeError`. Each source
 declares its type, and the annotation must name that type exactly, after the normalization
 rule table of [Declared types](https://cadance-io.github.io/langgraph-events/concepts/#declared-types).
-Each row is one change that can refuse a graph that built on 0.49, or change a value. Each
+Each row is one change that can refuse a graph that built on 0.50, or change a value. Each
 error message names the fix of its row.
 
 | Before | Now | Fix |
