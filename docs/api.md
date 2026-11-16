@@ -75,7 +75,7 @@ The return value is checked against the declared annotation, or against the subs
 | `NamespaceModel.{Namespace, Command, CommandHandler, Policy, Edge, Invariant}` | Nested dataclasses | Frozen dataclasses for programmatic access |
 | `NamespaceModel.Edge` | Nested dataclass | `source`, `via`, `target`, `kind` (`solid`/`scatter`/`raises`/`retry`/`framework`), `causation` (`intent`/`react`/`orchestrate`/`chain`/`None`) |
 | `NamespaceModel.reducers` | Field | Tuple of `NamespaceModel.Reducer`, each with `name`, `subscribes` and `namespace`. `subscribes` holds the concrete events the reducer projects, or `None` when a `runtime_checkable` Protocol with data members makes them unknown. `namespace` is `None` for a reducer passed to `EventGraph(reducers=...)` |
-| `NamespaceModel.derived` | Field | Tuple of `NamespaceModel.Derived`, each with `name`, `inputs` and `namespace`. `inputs` holds the names of the input reducers, in the order of the function. `namespace` is `None` for a `Derived` passed to `EventGraph(reducers=...)`. `json()` holds them under the `derived` key |
+| `NamespaceModel.derived` | Field | Tuple of `NamespaceModel.Derived`, each with `name`, `inputs`, `namespace` and `reads_log`. `inputs` holds the names of the input reducers and input `Derived` values, in the order of the function. `reads_log` is `True` when a parameter is annotated with `EventLog`. `namespace` is `None` for a `Derived` passed to `EventGraph(reducers=...)`. `json()` holds them under the `derived` key |
 | `NamespaceModel.Focus(namespaces=..., reactions=..., reducers=...)` | Nested dataclass | The part of the graph that `mermaid(focus=...)` draws. Each field takes one name or an iterable of names. An empty `Focus()` raises `ValueError`. See [Focused diagrams](concepts.md#focused-diagrams) |
 | `NamespaceModel.invariants` | Field | Tuple of `NamespaceModel.Invariant`, each with `cls`, `commands`, `declared_by`, `reactors` |
 | `EventGraph.compiled` | Property | The underlying `CompiledStateGraph`, for direct LangGraph calls |
@@ -128,7 +128,7 @@ The return value is checked against the declared annotation, or against the subs
 | `FoldReducer` | Class | Folds each event into accumulating state through `fold(self, state)`. The next value depends on the prior value. Generic over state type `S` |
 | `Foldable` | Protocol | `@runtime_checkable` structural type for an event with a `fold` method. Types the event argument of `FoldReducer`. Do not inherit it |
 | `BaseReducer` | Class | Abstract base for a custom reducer. Subclass it for a bespoke channel |
-| `Derived(name, *, fn, namespace=None)` | Class | A value that a pure function computes from stored reducers at node start. Generic over the return type of `fn`. Injected by parameter name. Never stored, so it is not a stored reducer. Frozen and hashable. See [`Derived`](reducers.md#derived) |
+| `Derived(name, *, fn, namespace=None)` | Class | A value that a pure function computes from stored reducers, other `Derived` values and the `EventLog`. One state read computes it once. Generic over the return type of `fn`. Injected by parameter name. Never stored, so it is not a stored reducer. Frozen and hashable. See [`Derived`](reducers.md#derived) |
 | `SKIP` | Sentinel | Return it from `ScalarReducer.fn` or from a `FoldReducer.fold` to leave the value unchanged |
 | `RESET` | Sentinel | Return it from a `FoldReducer.fold` to clear the channel back to `default_factory()` |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |
