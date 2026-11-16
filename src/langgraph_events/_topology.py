@@ -8,8 +8,9 @@ import types
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
-from langgraph._internal._constants import CONFIG_KEY_DURABILITY
+from langgraph._internal._constants import CONF, CONFIG_KEY_DURABILITY
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from langgraph_events._causes import CauseEntry
 from langgraph_events._event import (
@@ -62,9 +63,8 @@ if TYPE_CHECKING:
     )
 
     from langchain_core.runnables import RunnableConfig, RunnableLambda
-    from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import Checkpointer
+    from langgraph.types import Checkpointer, Durability
 
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._services import Services
@@ -73,6 +73,28 @@ if TYPE_CHECKING:
         NamespaceAwareSerde,
     )
     from langgraph_events.serde.migrations._core import Migration
+
+
+class _EventCompiledGraph(CompiledStateGraph[Any, Any, Any, Any]):
+    """A ``CompiledStateGraph`` that hides the durability key of its config
+    from the LangGraph check for a ``thread_id``."""
+
+    def _defaults(
+        self,
+        config: RunnableConfig,
+        *,
+        durability: Durability | None = None,
+        **kwargs: Any,
+    ) -> tuple[Any, ...]:
+        # LangGraph raises a clear ValueError only for an empty configurable.
+        # The durability key fills it, so remove the key before the check.
+        configurable = dict(config.get(CONF, {}))
+        default = configurable.pop(CONFIG_KEY_DURABILITY, None)
+        return super()._defaults(
+            {**config, CONF: configurable},
+            durability=durability or default,
+            **kwargs,
+        )
 
 
 class OrphanedEventWarning(UserWarning):
@@ -961,23 +983,22 @@ class EventTopology:
             needed = max_rounds * (n_handlers + 1) + 1
             existing = (compiled.config or {}).get("recursion_limit", 25)
             limit = max(needed, existing)
+        # LangGraph has no public default durability, so the graph config sets
+        # the internal key. A durability= of the run wins. True counts as a
+        # checkpointer: it is a subgraph that stores its own checkpoints. False
+        # gets "async", because an inherited "sync" crashes a run with no
+        # checkpointer. None gets no key, so as a subgraph it takes its parent's.
+        configurable = dict((compiled.config or {}).get("configurable", {}))
+        if checkpointer not in (None, False):
+            configurable[CONFIG_KEY_DURABILITY] = "sync"
+        elif checkpointer is False:
+            configurable[CONFIG_KEY_DURABILITY] = "async"
         compiled.config = {
             **(compiled.config or {}),
             "recursion_limit": limit,
+            "configurable": configurable,
         }
-        # The checkpoint is the event log. Under the LangGraph default
-        # "async", the store runs behind the graph, so a crash can lose the
-        # events that explain a committed side effect. "sync" stores each
-        # checkpoint before the next step runs. LangGraph has no public way to
-        # set a default durability, so this sets the internal configurable key
-        # that each run reads. A durability= of the run still wins.
-        # A run with no checkpointer stores no checkpoint, and LangGraph
-        # raises AttributeError on "sync" there, so such a graph gets no key.
-        if checkpointer is not None and checkpointer is not False:
-            compiled.config["configurable"] = {
-                **compiled.config.get("configurable", {}),
-                CONFIG_KEY_DURABILITY: "sync",
-            }
+        compiled.__class__ = _EventCompiledGraph
 
         return compiled
 

@@ -60,6 +60,7 @@ The return value is checked against the declared annotation, or against the subs
 | `EventGraph.from_namespaces(*namespaces, handlers=None, **kwargs)` | Classmethod | Builds a graph from the inline command handlers of the namespaces. `handlers=` appends external handlers. With `checkpointer=`, it replaces LangGraph's untouched default `JsonPlusSerializer` with a `NamespaceAwareSerde` scoped to the graph, and collects every `@migrate_from` and `@backfill` on the graph classes. It keeps a `NamespaceAwareSerde` that the checkpointer holds. Any other serde, for example an `EncryptedSerializer` or a configured `JsonPlusSerializer`, raises `TypeError` and stays on the checkpointer. See [Event migrations](event-migrations.md) |
 | `EventGraph.invoke(seed, *, deadline=None, pause_on=None)` / `.ainvoke()` | Method | Runs the graph and returns an `EventLog` |
 | `EventGraph.resume(value, *, deadline=None, pause_on=None)` / `.aresume()` | Method | Resumes a paused thread. Requires a checkpointer. The resume value must be an `Event`. Another value raises `TypeError` before the graph runs, and the thread stays paused |
+| `durability=` | Run argument | A graph with a checkpointer runs with the LangGraph durability `"sync"` by default. This includes a run of `EventGraph.compiled`. Each step waits until its checkpoint is stored, so a crash cannot lose the events that explain a committed side effect. To opt out, pass `durability="async"` or `durability="exit"` on the run call. A graph with `checkpointer=None` used as a subgraph takes the durability of its parent. A third-party graph compiled with `checkpointer=False` and run inside a handler of a `"sync"` run raises `AttributeError`. Pass `durability="async"` on that inner run |
 | `EventStore.abandon(config, *, reason="", require_interrupt=True)` / `.aabandon()` | Method | Settles a paused thread with a terminal `Abandoned` event, without answering its interrupt. See [Ending a pause without answering it](control-flow.md#ending-a-pause-without-answering-it-abandon) |
 | `EventStore.threads_paused_on(event_type=None, *, thread_ids)` / `.athreads_paused_on()` | Method | Returns the config of each listed thread that is paused, on `event_type` or a subclass when given. `thread_ids=None` or a bare `str` raises `TypeError`. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side) |
 | `EventStore.unrevivable_threads(*, thread_ids)` / `.aunrevivable_threads()` | Method | Maps each listed thread id to the qualnames its latest checkpoint can no longer revive. Raises `ValueError` without a `NamespaceAwareSerde` on the checkpointer. See [Retiring an Interrupted subclass](retiring-interrupted.md) |
@@ -91,12 +92,6 @@ The return value is checked against the declared annotation, or against the subs
 | `GraphState` | NamedTuple | `(events, is_interrupted, interrupted)`. `events` carries the recorded causes of the thread |
 | `RewriteReport` | Dataclass | `(applied, threads)` from `plan_rewrite()` or `rewrite_store()`. `applied` is `False` from a plan. `.refused` is the tuple of refused threads. `str(report)` prints one summary line, then one line per thread that `drop=` removes events from, then one line per refused thread |
 | `ThreadRewrite` | Dataclass | One thread in a `RewriteReport`: `thread_id`, `checkpoint_ns`, `location`, `status` (`"rewrite"`, `"unchanged"` or `"refused"`), `migrated` as `(stored, live)` identity pairs, `dropped` counts of stored events per identity, `dropped_label` as text, and `reason` on a refusal |
-
-Each run stores the checkpoint of a step before the next step runs. A graph with a
-checkpointer sets the LangGraph durability `"sync"` as the default of every run, a run of
-`EventGraph.compiled` included. The checkpoint is the event log, so a crash must not lose the events that explain a
-committed side effect. Each step waits for the store of its checkpoint. To opt out, pass
-`durability="async"` or `durability="exit"` on the run call. The value of the run wins.
 
 ## System Events
 

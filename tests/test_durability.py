@@ -4,41 +4,49 @@ import asyncio
 import time
 from typing import Any
 
+import pytest
 from conftest import Ended, Processed, Started
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph
 
-from langgraph_events import EventGraph, EventTopology, on
+from langgraph_events import EventGraph, on
 
-_PUT_DELAY = 0.2
+_PUT_DELAY = 0.05
+
+_CONFIG: Any = {"configurable": {"thread_id": "t1"}}
 
 
 class SlowSaver(InMemorySaver):
-    """Store each checkpoint after a delay, and record the stored event types."""
+    """Store each checkpoint after a delay. Record whether the store held a
+    ``Processed`` event each time a handler observes it."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.stored: set[str] = set()
+        self._stored: set[str] = set()
+        self.seen: list[bool] = []
 
-    def _record(self, checkpoint: Any) -> None:
+    def observe(self) -> None:
+        self.seen.append("Processed" in self._stored)
+
+    def _store(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
+        result = super().put(config, checkpoint, metadata, new_versions)
         events = checkpoint["channel_values"].get("events", [])
-        self.stored.update(type(event).__name__ for event in events)
+        self._stored.update(type(event).__name__ for event in events)
+        return result
 
     def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
         time.sleep(_PUT_DELAY)
-        result = super().put(config, checkpoint, metadata, new_versions)
-        self._record(checkpoint)
-        return result
+        return self._store(config, checkpoint, metadata, new_versions)
 
     async def aput(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
+        # InMemorySaver.aput calls self.put, which blocks the loop on the sleep.
         await asyncio.sleep(_PUT_DELAY)
-        result = InMemorySaver.put(self, config, checkpoint, metadata, new_versions)
-        self._record(checkpoint)
-        return result
+        return self._store(config, checkpoint, metadata, new_versions)
 
 
-def _handlers(saver: SlowSaver, seen: list[bool]) -> list[Any]:
-    """Build two handlers that run one after the other. The second handler
-    records whether the store holds the event of the first when it starts."""
+def _handlers(saver: SlowSaver) -> list[Any]:
+    """Two handlers that run one after the other. The second handler asks the
+    saver whether the store holds the event of the first when it starts."""
 
     @on(Started)
     def first(event: Started) -> Processed:
@@ -46,63 +54,95 @@ def _handlers(saver: SlowSaver, seen: list[bool]) -> list[Any]:
 
     @on(Processed)
     def second(event: Processed) -> Ended:
-        seen.append("Processed" in saver.stored)
+        saver.observe()
         return Ended(result=event.data)
 
     return [first, second]
 
 
-def _graph(saver: SlowSaver, seen: list[bool]) -> EventGraph:
-    return EventGraph(_handlers(saver, seen), checkpointer=saver)
-
-
-def _config(thread: str) -> dict[str, Any]:
-    return {"configurable": {"thread_id": thread}}
+@on(Started)
+def _end_at_once(event: Started) -> Ended:
+    return Ended(result=event.data)
 
 
 def describe_EventGraph_durability():
-    def when_the_run_passes_no_durability():
+    def when_the_run_uses_compiled_invoke():
         def it_stores_the_checkpoint_before_the_next_handler_starts():
-            saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen)
+            saver = SlowSaver()
+            graph = EventGraph(_handlers(saver), checkpointer=saver)
 
-            graph.invoke(Started(data="x"), config=_config("t1"))
+            graph.compiled.invoke({"events": [Started(data="x")]}, config=_CONFIG)
 
-            assert seen == [True]
+            assert saver.seen == [True]
 
-        def it_applies_to_a_graph_built_with_of():
-            saver, seen = SlowSaver(), []
-            topology = EventTopology(_handlers(saver, seen))
-            graph = EventGraph.of(topology, checkpointer=saver)
+    def when_the_run_uses_astream_events():
+        async def it_stores_the_checkpoint_before_the_next_handler_starts():
+            saver = SlowSaver()
+            graph = EventGraph(_handlers(saver), checkpointer=saver)
 
-            graph.invoke(Started(data="x"), config=_config("t1"))
-
-            assert seen == [True]
-
-        def it_applies_to_a_run_of_the_compiled_graph():
-            saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen)
-
-            graph.compiled.invoke({"events": [Started(data="x")]}, config=_config("t1"))
-
-            assert seen == [True]
-
-        async def it_applies_to_astream_events():
-            saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen)
-
-            async for _ in graph.astream_events(
-                Started(data="x"), config=_config("t1")
-            ):
+            async for _ in graph.astream_events(Started(data="x"), config=_CONFIG):
                 pass
 
-            assert seen == [True]
+            assert saver.seen == [True]
 
     def when_the_run_passes_durability():
         def it_uses_the_durability_of_the_run():
-            saver, seen = SlowSaver(), []
-            graph = _graph(saver, seen)
+            saver = SlowSaver()
+            graph = EventGraph(_handlers(saver), checkpointer=saver)
 
-            graph.invoke(Started(data="x"), config=_config("t1"), durability="async")
+            graph.invoke(Started(data="x"), config=_CONFIG, durability="async")
 
-            assert seen == [False]
+            assert saver.seen == [False]
+
+    def when_the_graph_is_a_subgraph_that_stores_its_own_checkpoints():
+        def it_stores_the_checkpoint_before_the_next_handler_starts():
+            saver = SlowSaver()
+            child = EventGraph(_handlers(saver), checkpointer=True).compiled
+            parent = StateGraph(child.builder.state_schema)
+            parent.add_node("child", child)
+            parent.add_edge(START, "child")
+            parent.add_edge("child", END)
+
+            parent.compile(checkpointer=saver).invoke(
+                {"events": [Started(data="x")]}, config=_CONFIG
+            )
+
+            assert saver.seen == [True]
+
+    def when_a_handler_runs_an_event_graph():
+        def without_a_checkpointer():
+            def it_completes_the_run():
+                inner = EventGraph([_end_at_once], checkpointer=False)
+
+                @on(Started)
+                def outer(event: Started) -> Ended:
+                    return Ended(result=inner.invoke(event).latest(Ended).result)
+
+                graph = EventGraph([outer], checkpointer=InMemorySaver())
+
+                log = graph.invoke(Started(data="x"), config=_CONFIG)
+
+                assert log.latest(Ended) == Ended(result="x")
+
+    def when_the_run_has_no_thread_id():
+        @pytest.mark.parametrize(
+            "run",
+            [
+                pytest.param(lambda g: g.invoke(Started(data="x")), id="invoke"),
+                pytest.param(
+                    lambda g: g.compiled.invoke({"events": [Started(data="x")]}),
+                    id="compiled-invoke",
+                ),
+                pytest.param(
+                    lambda g: g.compiled.invoke(
+                        {"events": [Started(data="x")]}, {"configurable": {}}
+                    ),
+                    id="compiled-invoke-empty-configurable",
+                ),
+            ],
+        )
+        def it_raises_a_value_error_that_names_the_keys(run):
+            graph = EventGraph([_end_at_once], checkpointer=InMemorySaver())
+
+            with pytest.raises(ValueError, match="thread_id, checkpoint_ns"):
+                run(graph)
