@@ -54,7 +54,7 @@ class Order(Namespace):
     # status label from each event's class name. ``SKIP`` for events that
     # do not change status. Surfaced via
     # ``graph.reflect(log).state()["current_status"]``.
-    current_status = ScalarReducer(
+    current_status = ScalarReducer[Event, str](
         event_type=Event,
         fn=lambda e: {
             "Placed": "placed",

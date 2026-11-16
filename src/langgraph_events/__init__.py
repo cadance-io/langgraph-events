@@ -57,8 +57,6 @@ from langgraph_events._graph import (
 )
 from langgraph_events._handler import (
     ServiceRequirement,
-    Unannotated,
-    UnresolvedAnnotation,
     on,
 )
 from langgraph_events._namespace import NamespaceModel
@@ -77,6 +75,7 @@ from langgraph_events._reducer import (
     Reducer,
     ReducerNotSetError,
     ScalarReducer,
+    SkipType,
     message_reducer,
 )
 from langgraph_events._reflection import QueryTool, Reflection
@@ -173,13 +172,12 @@ __all__ = [
     "ScalarReducer",
     "Scatter",
     "ServiceRequirement",
+    "SkipType",
     "SourceDropped",
     "SystemEvent",
     "SystemPromptSet",
     "ThreadRewrite",
-    "Unannotated",
     "UnknownCause",
-    "UnresolvedAnnotation",
     "Unresumable",
     "UnresumableError",
     "aemit_custom",

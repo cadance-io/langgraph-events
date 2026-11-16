@@ -2,27 +2,43 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from langgraph_events._handler import (
     BoundHandler,
-    _annotation_source,
-    _resolve_hints_and_errors,
-    _resolve_parameter_hints,
+    ServiceCandidate,
+    refuse_unclaimed,
 )
-from langgraph_events._warn import warn_user
+from langgraph_events._hints import (
+    UnsettledTypeError,
+    _annotation_source,
+    _hint_label,
+    _normal,
+    _open_parameters,
+    _resolve_parameter_hints,
+    _same_type,
+)
+from langgraph_events._inputs import (
+    BoundFactory,
+    Param,
+    ValueInput,
+    classify,
+    require_same_type,
+    resolved_hint,
+)
+from langgraph_events._reducer import BaseReducer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
-
-    from langchain_core.runnables import RunnableConfig
+    from collections.abc import Callable
 
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._reducer import Readable
 
 T = TypeVar("T")
 
@@ -34,7 +50,8 @@ def _missing_return_annotation(
     lead = "RunScoped(factory=...) requires a return annotation on the factory"
     why = (
         "The framework compares the factory's return annotation with the "
-        "handler parameter's annotation at graph build."
+        "annotation of each handler or factory parameter that reads it, at "
+        "graph build."
     )
     if getattr(source, "__name__", "") == "<lambda>":
         return (
@@ -53,29 +70,48 @@ def _missing_return_annotation(
 
 @dataclass(frozen=True)
 class RunScoped(Generic[T]):
-    """A service derived per run from the node's ``RunnableConfig``.
+    """A service that a factory builds once per node call.
 
-    Place a ``RunScoped`` value in the name-keyed ``services=`` mapping. The
-    factory is called with the run config once per node call. Its result is
-    injected under the handler's parameter name.
+    Give the ``services=`` object a field typed ``RunScoped[T]`` that holds
+    it. The result has the type ``T``, and is injected under the field name.
 
-    A factory whose second parameter is annotated with the graph's
-    ``context_schema`` also receives the run context, as
-    ``factory(config, context)``. That parameter must be positional and
-    required. The graph build refuses any other second parameter.
+    Each parameter of the factory binds by the rules of a handler
+    parameter. An annotation of exactly ``RunnableConfig``, the graph's
+    ``context_schema``, ``EventLog``, ``BaseStore`` or ``Reflection`` gets
+    that input. Each other parameter gets the stored reducer, the
+    ``Derived`` or the name-keyed service of its name, and its annotation
+    must name its declared type. Each parameter must have an annotation that
+    resolves. A default is the value when the input is unset. A
+    parameter that names nothing raises ``TypeError`` at graph build.
+
+    The factory runs only for a handler or a factory that declares it,
+    once per node call, before the invariants of the handler. One result
+    serves every event that the node handles in that call, every retry
+    attempt, and every factory that reads it.
 
     The factory must be a plain callable. A coroutine function is rejected,
     because its result would be injected without an ``await``.
 
     Example::
 
-        services = {"model": RunScoped(model_for)}
+        def model_for(config: RunnableConfig, language: str) -> ConversationModel:
+            ...
+
+        language = ScalarReducer[LanguageSet, str](
+            name="language", event_type=LanguageSet, fn=lambda e: e.language
+        )
+
+        @dataclass
+        class Services:
+            model: RunScoped[ConversationModel]
+
+        services = Services(model=RunScoped(model_for))
 
         @on(SomeEvent)
         def handle(event: SomeEvent, model: ConversationModel) -> None: ...
     """
 
-    factory: Callable[[RunnableConfig], T] | Callable[[RunnableConfig, Any], T]
+    factory: Callable[..., T]
 
     def __post_init__(self) -> None:
         if not callable(self.factory):
@@ -101,59 +137,27 @@ class RunScoped(Generic[T]):
         if "return" not in getattr(source, "__annotations__", {}):
             raise TypeError(_missing_return_annotation(self.factory, source))
 
-    def takes_context(self, name: str, context_schema: type | None) -> bool:
-        """Whether the factory of service *name* takes the run context.
-
-        It does when its second parameter is positional, required and
-        annotated with *context_schema*. A signature that Python cannot read
-        counts as the run config only. Raises ``TypeError`` for any other
-        second parameter, with the fix.
-        """
-        try:
-            params = inspect.signature(self.factory).parameters.values()
-        except (TypeError, ValueError):
-            return False
-        variadic = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        extra = [p for p in params if p.kind not in variadic][1:]
-        if not extra:
-            return False
+    def _label(self, name: str) -> str:
+        """The subject of an error about the factory of service *name*."""
         source = _annotation_source(self.factory)
-        label = f"RunScoped factory {_factory_label(source)!r} for service {name!r}"
-        second = extra[0]
-        positional = second.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        required = second.default is inspect.Parameter.empty
-        if context_schema is None:
-            if not (positional and required):
-                return False
+        return f"RunScoped factory {_factory_label(source)!r} for service {name!r}"
+
+    def _parameters(self, name: str) -> tuple[inspect.Parameter, ...]:
+        """The parameters that the node call must fill. A keyword that a
+        ``functools.partial`` binds is filled already."""
+        try:
+            return _open_parameters(self.factory)
+        except (TypeError, ValueError) as exc:
             raise TypeError(
-                f"{label} takes a second parameter {second.name!r}, but the graph "
-                f"has no context_schema. Pass context_schema= to the graph to give "
-                f"the factory the run context, or give the factory one parameter."
-            )
-        hints, _ = _resolve_parameter_hints(self.factory)
-        annotation = hints.get(second.name, inspect.Parameter.empty)
-        if len(extra) == 1 and positional and required and annotation is context_schema:
-            return True
-        if len(extra) > 1:
-            why = "has more than two parameters"
-        elif not positional:
-            why = f"has a keyword-only parameter {second.name!r}"
-        elif not required:
-            why = f"has an optional parameter {second.name!r}"
-        elif annotation is inspect.Parameter.empty:
-            why = f"has an unannotated parameter {second.name!r}"
-        else:
-            why = f"annotates parameter {second.name!r} as {_hint_label(annotation)}"
-        schema = context_schema.__qualname__
-        raise TypeError(
-            f"{label} {why}. A factory that takes the run context declares it "
-            f"as a second positional parameter, required and annotated with "
-            f"{schema}: (config, {second.name}: {schema}). Change the parameter, "
-            f"or remove it."
-        )
+                f"{self._label(name)}: Python cannot read the parameters of "
+                f"the factory ({exc}). Each parameter names one input, so "
+                f"pass a function, a class or a callable object whose "
+                f"signature Python can read."
+            ) from exc
+
+    def _hints(self) -> tuple[dict[str, Any], dict[str, str]]:
+        """The resolved parameter annotations of the factory, and the errors."""
+        return _resolve_parameter_hints(self.factory)
 
     def provided_type(self, name: str) -> object:
         """Resolve the return annotation of the factory of service *name*.
@@ -162,231 +166,305 @@ class RunScoped(Generic[T]):
         return annotation that does not resolve raises ``TypeError``.
         """
         source = _annotation_source(self.factory)
-        if isinstance(source, type):
-            return source
-        hints, errors = _resolve_hints_and_errors(source)
+        hints, errors = _resolve_parameter_hints(self.factory)
         if "return" in errors:
             raise TypeError(
                 f"RunScoped factory {_factory_label(source)!r} for service "
                 f"{name!r} has a "
                 f"return annotation that did not resolve ({errors['return']}). "
-                f"The framework compares it with each handler's parameter "
-                f"annotation at graph build, so it cannot be left unresolvable. "
+                f"The framework compares it with the annotation of each handler "
+                f"or factory parameter that reads it, at graph build, so it "
+                f"cannot be left unresolvable. "
                 f"Make every name in the annotation importable at run time, or "
                 f"declare the class at module level."
             )
         return _resolve_self(hints["return"], source)
 
 
-class TypedServices:
-    """The sequence form of ``services=``: each service fills the handler
-    parameters that its type satisfies. Two services of one type are refused.
-    """
+class _FactoryBinder:
+    """Bind each ``RunScoped`` factory of a name-keyed ``services=`` to its
+    inputs, for one graph. A factory parameter binds by the rules of a
+    handler parameter."""
 
-    def __init__(self, services: Sequence[Any]) -> None:
-        self._by_type: dict[type, Any] = {}
-        for s in services:
-            if isinstance(s, RunScoped):
+    def __init__(
+        self,
+        services: Services,
+        readables: Mapping[str, Readable],
+        context_schema: type | None,
+    ) -> None:
+        self._services = services
+        self._readables = readables
+        self._context_schema = context_schema
+        self._bound: dict[str, BoundFactory] = {}
+
+    def bind_all(self) -> dict[str, BoundFactory]:
+        for name, value in self._services.by_name.items():
+            if isinstance(value, RunScoped):
+                self._bind(name, ())
+        return self._bound
+
+    def _bind(self, name: str, path: tuple[str, ...]) -> BoundFactory:
+        if name in path:
+            cycle = " -> ".join((*path[path.index(name) :], name))
+            raise TypeError(
+                f"RunScoped factories read each other in a cycle: {cycle}. A "
+                f"factory must not read itself, directly or through another "
+                f"factory. Remove one read from the cycle."
+            )
+        if name in self._bound:
+            return self._bound[name]
+        scoped = cast("RunScoped[Any]", self._services.by_name[name])
+        label = scoped._label(name)
+        hints, errors = scoped._hints()
+        params: list[Param] = []
+        missing: list[ServiceCandidate] = []
+        positional = 0
+        for param in scoped._parameters(name):
+            p = param.name
+            if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
                 raise TypeError(
-                    "RunScoped is only supported in the name-keyed mapping form: "
-                    "services={'name': RunScoped(factory)}. The type-keyed sequence "
-                    "form resolves by annotation, and no handler annotates RunScoped."
+                    f"{label} has the variadic parameter {p!r}. Each parameter "
+                    f"must name one input. Replace it with one parameter per "
+                    f"input."
                 )
-            t = type(s)
-            if t in self._by_type:
-                raise TypeError(
-                    f"EventGraph(services=...) has two instances of type "
-                    f"{t.__name__!r} — same-type collision. Register only "
-                    f"one instance, switch to the name-keyed mapping form "
-                    f"(services={{'primary': a, 'backup': b}}), or use a "
-                    f"subclass to distinguish them."
-                )
-            self._by_type[t] = s
-
-    def received(self) -> str:
-        """State the types that ``services=`` holds, for an error."""
-        if not self._by_type:
-            return "services= has no service."
-        names = sorted(t.__qualname__ for t in self._by_type)
-        return f"services= has the types {names}."
-
-    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
-        """Fill each candidate of *meta* whose annotation is a class with the
-        service of that class.
-
-        Raises ``TypeError`` for a service that is an instance of
-        *context_schema*: the run context fills a parameter of that type.
-
-        The service is the unique registered one whose type is a subclass of
-        (or equal to) the annotation. Multi-match is rejected — the user must
-        disambiguate by narrowing the annotation or registering only one
-        matching service.
-        """
-        # A ``TypedDict`` refuses ``issubclass``, and its instance is a dict.
-        if context_schema is not None and not typing.is_typeddict(context_schema):
-            for t in self._by_type:
-                if issubclass(t, context_schema):
-                    raise TypeError(
-                        f"services= holds an instance of {t.__qualname__}, the "
-                        f"context_schema of the graph. The run context fills a "
-                        f"parameter of that type, so the service is never "
-                        f"injected. Pass the value with context= on each run "
-                        f"call, and remove it from services=."
-                    )
-        detected: list[tuple[str, object]] = []
-        for candidate in meta.service_candidates:
-            hint = candidate.annotation
-            if not isinstance(hint, type):
-                continue
-            # ``object`` matches every registered type; treating it as a service
-            # claim would silently consume an unrelated instance. Skip — the
-            # caller meant "untyped" and ``BoundHandler.require_claimed`` will
-            # surface the missing-source error at graph build.
-            if hint is object:
-                continue
-            # Exact-type match wins over subclass-only match — it lets users
-            # register a base + subclass pair (``[BaseChatModel(), Anthropic()]``)
-            # and resolve `param: BaseChatModel` to the base instance unambiguously.
-            if hint in self._by_type:
-                detected.append((candidate.param, self._by_type[hint]))
-                continue
-            matches = [t for t in self._by_type if issubclass(t, hint)]
-            if len(matches) > 1:
-                names = ", ".join(sorted(t.__name__ for t in matches))
-                raise TypeError(
-                    f"{meta.label} parameter {candidate.param!r} "
-                    f"annotated as {hint.__name__!r} matches multiple "
-                    f"registered services ({names}). Disambiguate by "
-                    f"narrowing the annotation, or register only one "
-                    f"service that satisfies it."
-                )
-            if matches:
-                detected.append((candidate.param, self._by_type[matches[0]]))
-        return BoundHandler(meta, tuple(detected))
-
-
-class NamedServices:
-    """The mapping form of ``services=``: each service fills the handler
-    parameter of its name, so two instances of one type can coexist (a
-    primary and a backup chat model). Annotation-free parameters are eligible.
-    """
-
-    def __init__(self, services: Mapping[str, Any]) -> None:
-        self._by_name = dict(services)
-        # The type that each ``RunScoped`` factory returns. Resolved here, so
-        # a bad return annotation does not wait for the first handler.
-        self._run_scoped_types = {
-            name: value.provided_type(name)
-            for name, value in self._by_name.items()
-            if isinstance(value, RunScoped)
-        }
-
-    def received(self) -> str:
-        """State the name keys that ``services=`` holds, for an error."""
-        if not self._by_name:
-            return "services= has no service."
-        return f"services= has the name keys {sorted(self._by_name)}."
-
-    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
-        """Fill each candidate of *meta* with the service of its name, then
-        check each service against the annotation. A ``RunScoped`` factory
-        whose second parameter is annotated with *context_schema* also gets
-        the run context."""
-        services = tuple(
-            (c.param, self._by_name[c.param])
-            for c in meta.service_candidates
-            if c.param in self._by_name
-        )
-        bound = BoundHandler(
-            meta,
-            services,
-            frozenset(
-                param
-                for param, value in services
-                if isinstance(value, RunScoped)
-                and value.takes_context(param, context_schema)
-            ),
-        )
-        self._verify(bound)
+            positional += param.kind is param.POSITIONAL_ONLY
+            hint = resolved_hint(label, p, hints, errors)
+            source = classify(
+                label, p, hint, self._readables.get, self._context_schema
+            ) or self._services._service_input(
+                label, p, hint, lambda dep: self._bind(dep, (*path, name))
+            )
+            if source is None:
+                missing.append(ServiceCandidate(p, hint, param.default))
+            else:
+                params.append(Param(p, source, param.default))
+        if missing:
+            refuse_unclaimed(
+                label,
+                missing,
+                reducer_names=self._readables.keys(),
+                received=self._services.received(without=name),
+                entry="the graph",
+                context_schema=self._context_schema,
+                reader="factory",
+            )
+        bound = BoundFactory(name, scoped.factory, label, tuple(params), positional)
+        self._bound[name] = bound
         return bound
 
-    def _verify(self, bound: BoundHandler) -> None:
-        """Raise if a service does not satisfy the handler annotation.
 
-        Name-keyed binding matches on the parameter name and needs no
-        annotation. When the parameter has an annotation that resolved, the
-        framework checks the registered service against it. A plain value
-        must be an instance of the annotation. A ``RunScoped`` factory must
-        return a subtype of the annotation. The comparison uses
-        ``beartype.door``. It handles ``Union``, a runtime ``Protocol`` with
-        methods only, and a generic alias. A ``NewType`` is nominal for a
-        factory and erased for a plain value.
+class Services:
+    """The services of a graph: each typed field of the ``services=`` object.
+
+    The class of the object declares one field per service. The field type
+    is the declared type of the service. A ``RunScoped[T]`` field holds a
+    factory whose result has the type ``T``. A reader names the declared
+    type exactly.
+    """
+
+    def __init__(
+        self,
+        values: Mapping[str, object],
+        declared: Mapping[str, object],
+        factories: Mapping[str, BoundFactory] | None = None,
+    ) -> None:
+        """*factories* holds the bound ``RunScoped`` factories, once
+        :meth:`bind_factories` has bound them for one graph."""
+        self.by_name = dict(values)
+        self._declared = dict(declared)
+        self._factories = dict(factories or {})
+
+    @classmethod
+    def parse(cls, services: object) -> Services:
+        """Read the services of a ``services=`` object. ``None`` holds none.
+
+        Raises ``TypeError`` for an object whose class declares no typed
+        field, such as a dict or a list, with the fix.
         """
-        bound_params = {param for param, _ in bound.services}
-        annotated = [
-            c
-            for c in bound.meta.service_candidates
-            if c.param in bound_params and c.has_resolved_annotation
-        ]
-        if not annotated:
-            return
-        # A cold import costs about 200 ms. Only the first graph in the process
-        # with an annotated name-keyed parameter pays it.
-        from beartype.door import is_bearable, is_subhint  # noqa: PLC0415
+        if services is None:
+            return cls({}, {})
+        fields = _declared_fields(services)
+        declared: dict[str, object] = {}
+        for name, hint in fields.items():
+            value = getattr(services, name)
+            declared[name] = _declared_type(name, hint, value)
+        return cls({n: getattr(services, n) for n in fields}, declared)
 
-        handler = bound.meta.label
-        for candidate in annotated:
-            param, declared = candidate.param, candidate.annotation
-            value = self._by_name[param]
-            label = _hint_label(declared)
-            if isinstance(value, RunScoped):
-                provided = self._run_scoped_types[param]
-                # ``Any`` and a bare type variable say nothing about the result.
-                if provided is Any or isinstance(provided, TypeVar):
-                    continue
-                verdict = _satisfies(is_subhint, provided, declared)
-                if verdict is False:
-                    factory = _factory_label(_annotation_source(value.factory))
-                    returns = _hint_label(provided)
-                    raise TypeError(
-                        f"{handler} declares parameter {param!r} as "
-                        f"{label}, but services[{param!r}] is RunScoped({factory}) "
-                        f"and that factory returns {returns}. Change the "
-                        f"annotation to {returns}, or register a factory that "
-                        f"returns {label}."
-                    )
-            else:
-                verdict = _satisfies(is_bearable, value, declared)
-                if verdict is False:
-                    if value is None:
-                        what = "None"
-                        fix = f"Widen the annotation to {label} | None"
-                    else:
-                        what = f"an instance of {type(value).__qualname__}"
-                        fix = "Widen the annotation"
-                    raise TypeError(
-                        f"{handler} declares parameter {param!r} as "
-                        f"{label}, but services[{param!r}] is {what}, not an "
-                        f"instance of {label}. {fix}, or register a value that "
-                        f"satisfies it."
-                    )
-            if isinstance(verdict, str):
-                warn_user(
-                    f"{handler} declares parameter {param!r} as {label}, "
-                    f"which Python cannot test at run time ({verdict}). The "
-                    f"service under services[{param!r}] is not checked against it."
+    @property
+    def factories(self) -> Mapping[str, BoundFactory]:
+        """Each bound ``RunScoped`` factory, by service name."""
+        return self._factories
+
+    def received(self, without: str | None = None) -> str:
+        """State the services that ``services=`` holds, for an error.
+        *without* is a service to leave out: the factory that the error
+        names."""
+        names = sorted(n for n in self.by_name if n != without)
+        if not names:
+            return (
+                "services= has no other service."
+                if without
+                else "services= has no service."
+            )
+        return f"services= has the fields {names}."
+
+    def bind_factories(
+        self, readables: Mapping[str, Readable], context_schema: type | None
+    ) -> Services:
+        """These services, with each ``RunScoped`` factory bound to its
+        inputs by the handler rules.
+
+        Raises ``TypeError`` for a service whose name a reducer or a
+        ``Derived`` also has, because a parameter cannot name both. Raises
+        ``TypeError`` for each factory parameter that cannot bind, and for a
+        cycle among factories.
+        """
+        for name in self.by_name:
+            readable = readables.get(name)
+            if readable is not None:
+                kind = "reducer" if isinstance(readable, BaseReducer) else "Derived"
+                raise TypeError(
+                    f"services= has the field {name!r}, and a {kind} has the "
+                    f"same name. A parameter cannot name both. Rename the "
+                    f"service or the {kind}."
                 )
+        binder = _FactoryBinder(self, readables, context_schema)
+        return Services(self.by_name, self._declared, binder.bind_all())
+
+    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
+        """Fill each candidate of *meta* with the service of its name, and
+        check the annotation against the declared type of the service. A
+        ``RunScoped`` service fills its candidate with its bound factory."""
+        services: list[Param] = []
+        for c in meta.service_candidates:
+            source = self._service_input(
+                meta.label, c.param, c.annotation, self._factories.__getitem__
+            )
+            if source is not None:
+                services.append(Param(c.param, source, c.default))
+        return BoundHandler(meta, tuple(services))
+
+    def _service_input(
+        self,
+        owner: str,
+        param: str,
+        hint: object,
+        bind_factory: Callable[[str], BoundFactory],
+    ) -> ValueInput | BoundFactory | None:
+        """The service of name *param*, or ``None``. The annotation *hint*
+        must name the declared type of the service exactly. *bind_factory*
+        gives the bound factory of a ``RunScoped`` name."""
+        if param not in self.by_name:
+            return None
+        require_same_type(
+            owner, param, hint, self._declared[param], f"service {param!r}", False
+        )
+        value = self.by_name[param]
+        if isinstance(value, RunScoped):
+            return bind_factory(param)
+        return ValueInput(value)
 
 
-Services = TypedServices | NamedServices
+def _declared_fields(services: object) -> dict[str, object]:
+    """The typed fields that the class of *services* declares, by name.
+
+    Raises ``TypeError`` for an object with no typed field, and for an
+    annotation that does not resolve.
+    """
+    kind = type(services)
+    fix = (
+        "services= takes an object whose class declares one typed field per "
+        "service, such as a dataclass instance. Got a "
+        f"{kind.__name__}. Declare a dataclass with one field per service, "
+        "typed with the service type, or RunScoped[T] for a factory, and pass "
+        "an instance of it."
+    )
+    if isinstance(services, tuple) and hasattr(kind, "_fields"):
+        raise TypeError(
+            f"services= is a NamedTuple {kind.__name__}, which is a tuple of "
+            f"values by position. Declare the services in a class with typed "
+            f"fields instead: use a dataclass with the same fields."
+        )
+    if isinstance(services, (Mapping, list, tuple, set, frozenset, str, bytes)):
+        raise TypeError(fix)
+    try:
+        hints = typing.get_type_hints(kind)
+    except Exception as exc:
+        raise TypeError(
+            f"services= is a {kind.__name__} whose field annotations do not "
+            f"resolve ({type(exc).__name__}: {exc}). Make every name in them "
+            f"importable at run time."
+        ) from exc
+    fields: dict[str, object] = {}
+    for name, hint in hints.items():
+        if typing.get_origin(hint) is typing.ClassVar or hint is typing.ClassVar:
+            continue
+        if isinstance(hint, dataclasses.InitVar) or hint is dataclasses.InitVar:
+            raise TypeError(
+                f"services= declares the InitVar field {name!r}, which the "
+                f"object does not keep, so it cannot be a service. Make it a "
+                f"field, or move it out of the services object."
+            )
+        final = typing.get_origin(hint) is typing.Final
+        fields[name] = typing.get_args(hint)[0] if final else hint
+    if not fields:
+        raise TypeError(fix)
+    for name in fields:
+        if not hasattr(services, name):
+            raise TypeError(
+                f"services= declares the field {name!r}, but the object has no "
+                f"value for it. Give it a value."
+            )
+    return fields
 
 
-def parse_services(services: Sequence[Any] | Mapping[str, Any] | None) -> Services:
-    """Parse ``EventGraph(services=...)``. A mapping is name-keyed. A sequence
-    is type-keyed."""
-    if isinstance(services, Mapping):
-        return NamedServices(services)
-    return TypedServices(services or ())
+def _declared_type(name: str, hint: object, value: object) -> object:
+    """The type that readers of service *name* must name: the field type,
+    or ``T`` for a ``RunScoped[T]`` field.
+
+    Raises ``TypeError`` when a ``RunScoped`` value and its field type do
+    not agree, or when the factory returns another type than ``T``.
+    """
+    try:
+        _normal(hint)
+    except UnsettledTypeError as exc:
+        raise TypeError(
+            f"Service {name!r} is declared {_hint_label(hint)}, but {exc}. "
+            f"Declare it with a class."
+        ) from None
+    scoped = typing.get_origin(hint) is RunScoped or hint is RunScoped
+    if isinstance(value, RunScoped) != scoped:
+        raise TypeError(
+            f"Service {name!r} is declared {_hint_label(hint)}, but its value "
+            f"is {'a' if isinstance(value, RunScoped) else 'not a'} RunScoped "
+            f"factory. Type a factory field RunScoped[T], and any other field "
+            f"with the type of its value."
+        )
+    if not scoped:
+        return hint
+    arguments = typing.get_args(hint)
+    if not arguments:
+        raise TypeError(
+            f"Service {name!r} is declared RunScoped with no type. Declare the "
+            f"type of its result: RunScoped[T]."
+        )
+    declared = arguments[0]
+    returns = cast("RunScoped[Any]", value).provided_type(name)
+    try:
+        same = _same_type(returns, declared, may_be_unset=False)
+    except UnsettledTypeError as exc:
+        raise TypeError(
+            f"Service {name!r} is declared RunScoped[{_hint_label(declared)}], "
+            f"but the return annotation of its factory {exc}. Make the factory "
+            f"return {_hint_label(declared)}."
+        ) from None
+    if not same:
+        raise TypeError(
+            f"Service {name!r} is declared RunScoped[{_hint_label(declared)}], "
+            f"but its factory returns {_hint_label(returns)}. Make the factory "
+            f"return {_hint_label(declared)}, or change the field type."
+        )
+    return declared
 
 
 def _resolve_self(hint: object, source: Callable[..., object]) -> object:
@@ -404,37 +482,8 @@ def _resolve_self(hint: object, source: Callable[..., object]) -> object:
     return owner if isinstance(owner, type) else type(owner)
 
 
-def _hint_label(hint: object) -> str:
-    """Render an annotation for an error message.
-
-    A generic alias such as ``list[str]`` forwards ``__qualname__`` to its
-    origin, so only a plain class uses it.
-    """
-    if isinstance(hint, type):
-        return hint.__qualname__
-    return repr(hint)
-
-
 def _factory_label(factory: object) -> str:
     """Render a ``RunScoped`` factory for an error message."""
     if inspect.isroutine(factory):
         return factory.__qualname__
     return _hint_label(factory)
-
-
-def _satisfies(
-    check: Callable[[Any, Any], bool], subject: object, declared: object
-) -> bool | str:
-    """Apply a ``beartype.door`` check. A string is the reason it cannot run.
-
-    ``typing`` refuses a ``Protocol`` that is not ``runtime_checkable``, and
-    beartype refuses a hint it cannot test at run time, at any nesting depth.
-    Such an annotation stays a valid static contract, so the build must not
-    fail on it. The caller warns instead.
-    """
-    from beartype.roar import BeartypeException  # noqa: PLC0415
-
-    try:
-        return check(subject, declared)
-    except (TypeError, BeartypeException) as exc:
-        return f"{type(exc).__name__}: {exc}"

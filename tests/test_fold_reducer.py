@@ -50,7 +50,7 @@ def describe_FoldReducer():
             def it_folds_from_default_factory():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=Incremented,
                     default_factory=lambda: {"n": 0},
@@ -65,7 +65,7 @@ def describe_FoldReducer():
             def it_returns_default_factory_value():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=Incremented,
                     default_factory=lambda: {"n": 0},
@@ -79,7 +79,7 @@ def describe_FoldReducer():
             def it_delegates_to_event_fold_method():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=Incremented,
                     default_factory=lambda: {"n": 0},
@@ -93,7 +93,7 @@ def describe_FoldReducer():
             def it_uses_the_supplied_fold_over_event_method():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=Incremented,
                     default_factory=lambda: {"n": 0},
@@ -108,7 +108,7 @@ def describe_FoldReducer():
             def it_clears_channel_to_default_factory():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=(Incremented, Reset),
                     default_factory=lambda: {"n": 0},
@@ -123,7 +123,7 @@ def describe_FoldReducer():
             def it_leaves_state_unchanged():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=(Incremented, Noop),
                     default_factory=lambda: {"n": 0},
@@ -138,7 +138,7 @@ def describe_FoldReducer():
             def it_stores_None_as_a_real_state_value():
                 from langgraph_events import FoldReducer
 
-                cursor = FoldReducer(
+                cursor = FoldReducer[int](
                     name="cursor",
                     event_type=CursorMoved,
                     default_factory=lambda: 0,
@@ -152,7 +152,7 @@ def describe_FoldReducer():
             def it_resets_then_stores_None():
                 from langgraph_events import FoldReducer
 
-                cursor = FoldReducer(
+                cursor = FoldReducer[int](
                     name="cursor",
                     event_type=(CursorMoved, Reset),
                     default_factory=lambda: 0,
@@ -168,7 +168,7 @@ def describe_FoldReducer():
             def it_exposes_the_binary_merge():
                 from langgraph_events import FoldReducer
 
-                counter = FoldReducer(
+                counter = FoldReducer[dict](
                     name="counter",
                     event_type=(Incremented, Reset),
                     default_factory=lambda: {"n": 0},
@@ -216,7 +216,7 @@ class Logged(IntegrationEvent):
 def _counter() -> object:
     from langgraph_events import FoldReducer
 
-    return FoldReducer(
+    return FoldReducer[dict](
         name="counter",
         event_type=(Incremented, Reset),
         default_factory=lambda: {"n": 0},
@@ -284,7 +284,7 @@ def describe_FoldReducer_in_a_graph():
                     captured.append(cursor)
                     return Completed(result="ok")
 
-                cursor = FoldReducer(
+                cursor = FoldReducer[int | None](
                     name="cursor",
                     event_type=CursorMoved,
                     default_factory=lambda: 0,
@@ -349,7 +349,9 @@ def describe_FoldReducer_in_a_graph():
                 from langgraph_events import FoldReducer
 
                 captured: list[list] = []
-                log = FoldReducer(name="log", event_type=Logged, default_factory=list)
+                log = FoldReducer[list](
+                    name="log", event_type=Logged, default_factory=list
+                )
 
                 @on(Logged)
                 def capture(event: Logged, log: list) -> Completed:
@@ -373,7 +375,9 @@ def describe_FoldReducer_in_a_graph():
                 from langgraph_events import FoldReducer
 
                 captured: list[list] = []
-                log = FoldReducer(name="log", event_type=Logged, default_factory=list)
+                log = FoldReducer[list](
+                    name="log", event_type=Logged, default_factory=list
+                )
 
                 @on(Logged)
                 def capture(event: Logged, log: list) -> Completed:

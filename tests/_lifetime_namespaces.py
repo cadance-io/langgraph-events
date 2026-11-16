@@ -6,6 +6,8 @@ return annotations resolve at runtime. See tests/test_lifetimes.py.
 
 from __future__ import annotations
 
+from typing import Any
+
 from langgraph_events import (
     Command,
     DomainEvent,
@@ -17,7 +19,7 @@ from langgraph_events.serde.migrations import migrate_from
 
 
 class Trading(Namespace):
-    last_symbol = ScalarReducer(
+    last_symbol = ScalarReducer[Command, Any](
         event_type=Command,
         fn=lambda e: getattr(e, "sym", None),
     )

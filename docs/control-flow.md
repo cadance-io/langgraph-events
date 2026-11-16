@@ -290,7 +290,7 @@ def project(event: Event) -> list[BaseMessage]:
         )]
     return []
 
-messages = Reducer(
+messages = Reducer[MessageEvent | RunPaused, BaseMessage](
     name="messages",
     event_type=(MessageEvent, RunPaused),
     fn=project,

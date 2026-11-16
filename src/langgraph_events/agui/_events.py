@@ -21,7 +21,7 @@ class FrontendStateMutated(IntegrationEvent):
         from langgraph_events import ScalarReducer, SKIP
         from langgraph_events.agui import FrontendStateMutated
 
-        focus = ScalarReducer(
+        focus = ScalarReducer[FrontendStateMutated, str](
             name="focus",
             event_type=FrontendStateMutated,
             fn=lambda e: e.state.get("focus", SKIP),

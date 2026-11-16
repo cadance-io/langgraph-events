@@ -384,7 +384,9 @@ def describe_invoke():
 
     def when_the_graph_has_reducers():
         def it_returns_the_causes():
-            seen = Reducer(name="seen", event_type=Started, fn=lambda e: [e.data])
+            seen = Reducer[Started, Any](
+                name="seen", event_type=Started, fn=lambda e: [e.data]
+            )
 
             log = EventGraph([finish], reducers=[seen]).invoke(Started(data="x"))
 

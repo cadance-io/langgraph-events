@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from langgraph_events._namespace._model import NamespaceModel, _event_label, _node_class
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from langgraph_events._retry import RetryPolicy
 
 
@@ -120,12 +122,26 @@ def _render_taxonomy_lines(  # noqa: PLR0912
                 continue
             folds = ", ".join(_event_label(t) for t in r.subscribes)
             lines.append(f"  {r.name}  (folds {folds})")
-    if d.derived:
-        lines.append("Derived:")
-        for dv in d.derived:
-            inputs = [*dv.inputs, *(["log"] if dv.reads_log else [])]
-            reads = ", ".join(inputs) if inputs else "no input"
-            lines.append(f"  {dv.name}  (reads {reads})")
+    derived = [
+        (dv.name, [*dv.inputs, *(["log"] if dv.reads_log else [])]) for dv in d.derived
+    ]
+    lines += _computed_lines("Derived", derived, "no input")
+    run_scoped = [(rs.name, [i.label for i in rs.inputs]) for rs in d.run_scoped]
+    lines += _computed_lines("RunScoped", run_scoped, "nothing")
+    return lines
+
+
+def _computed_lines(
+    title: str, values: Sequence[tuple[str, list[str]]], no_input: str
+) -> list[str]:
+    """One section of values that the framework computes, each with the
+    inputs that it reads. *no_input* stands for an empty input list."""
+    if not values:
+        return []
+    lines = [f"{title}:"]
+    for name, inputs in values:
+        reads = ", ".join(inputs) if inputs else no_input
+        lines.append(f"  {name}  (reads {reads})")
     return lines
 
 

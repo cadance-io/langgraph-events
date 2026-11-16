@@ -46,9 +46,9 @@ from langgraph_events._event import (
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
+from langgraph_events._inputs import NodeCall
 from langgraph_events._pause import _pause_budget, _PauseBudget
-from langgraph_events._reducer import ReducerNotSetError, StateRead
-from langgraph_events._services import RunScoped
+from langgraph_events._reducer import StateRead
 from langgraph_events._types import (  # noqa: TC001
     HandlerReturn,
     StateDict,
@@ -311,7 +311,7 @@ def make_dispatch(
     return dispatch
 
 
-def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
+def _build_inject(
     bound: BoundHandler,
     state: StateDict,
     readables: Mapping[str, Readable],
@@ -321,100 +321,11 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call.
 
-    Each reducer parameter reads its value from the channels in *state*, as
-    of node start. A ``Derived`` value is computed here and never written
-    back.
+    Each parameter reads its value as of node start. A ``Derived`` value is
+    computed here and never written back.
     """
-    meta = bound.meta
-    inject: dict[str, Any] = {}
-    read = StateRead(state)
-    if meta.log_param or meta.reflection_param:
-        log_view = read.log
-        if meta.log_param:
-            inject[meta.log_param] = log_view
-        if meta.reflection_param:
-            from langgraph_events._reflection import Reflection  # noqa: PLC0415
-
-            inject[meta.reflection_param] = Reflection(
-                log_view, model=model_provider(), reducers=readables
-            )
-    for param_name in meta.reducer_params:
-        readable = readables[param_name]
-        value = readable._read(read)
-        if value is None and param_name in meta.required_reducer_params:
-            raise _make_reducer_not_set_error(meta.name, param_name, readable)
-        inject[param_name] = value
-    if meta.config_param and config is not None:
-        inject[meta.config_param] = config
-    if meta.store_param:
-        if config is None:
-            raise ValueError(
-                f"Handler '{meta.name}' requested BaseStore injection, but runtime "
-                "config is missing."
-            )
-        runtime = config.get("configurable", {}).get("__pregel_runtime")
-        store = runtime.store if runtime is not None else None
-        if store is None:
-            raise ValueError(
-                f"Handler '{meta.name}' requested BaseStore injection, but no store "
-                "is configured. Pass store=... to EventGraph(...)."
-            )
-        inject[meta.store_param] = store
-    if meta.context_param:
-        inject[meta.context_param] = _runtime_context(meta)
-    for param_name, service in bound.services:
-        if not isinstance(service, RunScoped):
-            inject[param_name] = service
-            continue
-        if config is None:
-            raise ValueError(
-                f"Handler '{meta.name}' requested the run-scoped service "
-                f"'{param_name}', but runtime config is missing."
-            )
-        args = (
-            (config, _runtime_context(meta))
-            if param_name in bound.context_services
-            else (config,)
-        )
-        try:
-            inject[param_name] = service.factory(*args)
-        except Exception as exc:
-            # Keep the type, so a caller that catches it still can.
-            # The note names the seam, like the missing-config branch.
-            exc.add_note(
-                f"Handler '{meta.name}' requested the run-scoped service "
-                f"'{param_name}', but its factory raised."
-            )
-            raise
-    return inject
-
-
-def _runtime_context(meta: HandlerMeta) -> object:
-    """Return the context of the current run from LangGraph's ``Runtime``.
-
-    The context is ``None`` only when a caller runs ``EventGraph.compiled``
-    directly without ``context=``. The ``EventGraph`` run methods refuse that.
-    """
-    from langgraph.runtime import get_runtime  # noqa: PLC0415
-
-    context = get_runtime().context
-    if context is None:
-        raise ValueError(
-            f"Handler {meta.name!r} needs the run context, but the run has no "
-            f"context. Pass context=... to the run call."
-        )
-    return context
-
-
-def _make_reducer_not_set_error(
-    handler_name: str, param_name: str, readable: Readable
-) -> ReducerNotSetError:
-    """Build a ``ReducerNotSetError`` with an actionable message."""
-    return ReducerNotSetError(
-        f"Handler {handler_name!r} requires {readable._describe()} to be "
-        f"set, but its value is None. {readable._not_set_hint()}change the "
-        f"annotation to permit None (e.g. '{param_name}: <type> | None')."
-    )
+    call = NodeCall(state, config, readables=readables, model_provider=model_provider)
+    return call.values(bound.params, f"Handler {bound.meta.name!r}")
 
 
 def _apply_reducers(

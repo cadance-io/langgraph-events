@@ -6,6 +6,7 @@ import threading
 import time
 import typing
 import warnings
+from typing import Any
 
 import pytest
 from conftest import (
@@ -269,7 +270,9 @@ class _WidgetSuite(Namespace):
 
 def _data_reducer() -> Reducer:
     """Simple reducer that accumulates Started.data values."""
-    return Reducer(name="data_items", event_type=Started, fn=lambda e: [e.data])
+    return Reducer[Started, Any](
+        name="data_items", event_type=Started, fn=lambda e: [e.data]
+    )
 
 
 class _UserSent(IntegrationEvent, MessageEvent):
@@ -349,7 +352,7 @@ def _llm_graph(response: str, prompt: str = "hi") -> EventGraph:
     llm = FakeListChatModel(responses=[response], sleep=0)
 
     @on(_UserSent)
-    async def reply(event: _UserSent, messages: list[typing.Any]) -> _AgentReplied:
+    async def reply(event: _UserSent, messages: list[BaseMessage]) -> _AgentReplied:
         reply_message = await llm.ainvoke([*messages, HumanMessage(content=prompt)])
         return _AgentReplied(message=reply_message)
 
@@ -898,7 +901,7 @@ def describe_EventGraph():
                 reducer = _data_reducer()
 
                 @on(Started)
-                async def step(event: Started, data_items: list) -> Ended:
+                async def step(event: Started, data_items: list[Any]) -> Ended:
                     return Ended(result=",".join(data_items))
 
                 graph = EventGraph([step], reducers=[reducer])
@@ -1176,7 +1179,7 @@ def describe_EventGraph():
             received_messages: list = []
 
             @on(Resumed)
-            def handle_resume(event: Resumed, messages: list) -> Ended:
+            def handle_resume(event: Resumed, messages: list[BaseMessage]) -> Ended:
                 received_messages.extend(messages)
                 return Ended(result="done")
 
@@ -1524,8 +1527,12 @@ def describe_EventGraph():
         def when_reducers_configured():
 
             def it_returns_frozenset_of_reducer_names():
-                r1 = Reducer(name="alpha", event_type=Started, fn=lambda e: [e.data])
-                r2 = Reducer(name="beta", event_type=Started, fn=lambda e: [e.data])
+                r1 = Reducer[Started, Any](
+                    name="alpha", event_type=Started, fn=lambda e: [e.data]
+                )
+                r2 = Reducer[Started, Any](
+                    name="beta", event_type=Started, fn=lambda e: [e.data]
+                )
 
                 @on(Started)
                 def noop(event: Started) -> Completed:
@@ -1551,7 +1558,9 @@ def describe_EventGraph():
                 ["events", "causes", "_cursor", "_pending", "_round"],
             )
             def it_rejects_collisions(reserved_name):
-                r = Reducer(name=reserved_name, event_type=Event, fn=lambda e: [])
+                r = Reducer[Event, Any](
+                    name=reserved_name, event_type=Event, fn=lambda e: []
+                )
 
                 @on(Started)
                 def noop(event: Started) -> Completed:
@@ -1565,18 +1574,20 @@ def describe_EventGraph():
         def describe_injection():
 
             def it_passes_accumulated_values_to_handler():
-                def project(event: Event) -> list:
+                def project(event: Event) -> list[Any]:
                     if isinstance(event, MessageReceived):
                         return [f"in:{event.text}"]
                     if isinstance(event, MessageSent):
                         return [f"out:{event.text}"]
                     return []
 
-                r = Reducer("history", event_type=Event, fn=project, default=["start"])
+                r = Reducer[Event, Any](
+                    "history", event_type=Event, fn=project, default=["start"]
+                )
                 received_history = []
 
                 @on(MessageReceived)
-                def respond(event: MessageReceived, history: list) -> MessageSent:
+                def respond(event: MessageReceived, history: list[Any]) -> MessageSent:
                     received_history.extend(history)
                     return MessageSent(text=event.text.upper())
 
@@ -1590,13 +1601,15 @@ def describe_EventGraph():
                 assert log.latest(Completed) == Completed(result="HELLO")
 
             def it_injects_default_plus_projected_seed():
-                r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
+                r = Reducer[MessageReceived, Any](
+                    "texts", event_type=MessageReceived, fn=lambda e: [e.text]
+                )
 
                 @on(MessageReceived)
                 def step(
                     event: MessageReceived,
                     log: EventLog,
-                    texts: list,
+                    texts: list[Any],
                 ) -> Completed:
                     return Completed(result=f"log={len(log)},texts={len(texts)}")
 
@@ -1612,7 +1625,7 @@ def describe_EventGraph():
                     class ToolResultReturned(IntegrationEvent):
                         result: str = ""
 
-                    def project_all(event: Event) -> list:
+                    def project_all(event: Event) -> list[Any]:
                         if isinstance(event, MessageReceived):
                             return [f"in:{event.text}"]
                         if isinstance(event, MessageSent):
@@ -1621,12 +1634,12 @@ def describe_EventGraph():
                             return [f"tool:{event.result}"]
                         return []
 
-                    r = Reducer("history", event_type=Event, fn=project_all)
+                    r = Reducer[Event, Any]("history", event_type=Event, fn=project_all)
                     call_count = 0
                     snapshots: list[list] = []
 
                     @on(MessageReceived, ToolResultReturned)
-                    def call_llm(event: Event, history: list) -> MessageSent:
+                    def call_llm(event: Event, history: list[Any]) -> MessageSent:
                         nonlocal call_count
                         call_count += 1
                         snapshots.append(list(history))
@@ -1655,7 +1668,7 @@ def describe_EventGraph():
             def when_events_have_no_contribution():
 
                 def it_does_not_change_reducer_value():
-                    r = Reducer(
+                    r = Reducer[MessageReceived, Any](
                         "texts",
                         event_type=MessageReceived,
                         fn=lambda e: [e.text],
@@ -1663,12 +1676,14 @@ def describe_EventGraph():
                     snapshots: list[list] = []
 
                     @on(MessageReceived)
-                    def respond(event: MessageReceived, texts: list) -> MessageSent:
+                    def respond(
+                        event: MessageReceived, texts: list[Any]
+                    ) -> MessageSent:
                         snapshots.append(list(texts))
                         return MessageSent(text=event.text)
 
                     @on(MessageSent)
-                    def finish(event: MessageSent, texts: list) -> Completed:
+                    def finish(event: MessageSent, texts: list[Any]) -> Completed:
                         snapshots.append(list(texts))
                         return Completed(result="ok")
 
@@ -1680,22 +1695,26 @@ def describe_EventGraph():
         def describe_multiple_reducers():
 
             def it_accumulates_independently():
-                def project_upper(event: MessageReceived) -> list:
+                def project_upper(event: MessageReceived) -> list[Any]:
                     return [event.text.upper()]
 
-                def project_lower(event: MessageReceived) -> list:
+                def project_lower(event: MessageReceived) -> list[Any]:
                     return [event.text.lower()]
 
-                upper = Reducer(
+                upper = Reducer[MessageReceived, Any](
                     "upper",
                     event_type=MessageReceived,
                     fn=project_upper,
                     default=["INIT"],
                 )
-                lower = Reducer("lower", event_type=MessageReceived, fn=project_lower)
+                lower = Reducer[MessageReceived, Any](
+                    "lower", event_type=MessageReceived, fn=project_lower
+                )
 
                 @on(MessageReceived)
-                def step(event: MessageReceived, upper: list, lower: list) -> Completed:
+                def step(
+                    event: MessageReceived, upper: list[Any], lower: list[Any]
+                ) -> Completed:
                     return Completed(result=f"upper={upper},lower={lower}")
 
                 graph = EventGraph([step], reducers=[upper, lower])
@@ -1719,7 +1738,7 @@ def describe_EventGraph():
                 class Collected(IntegrationEvent):
                     items: tuple = ()
 
-                def project(event: Event) -> list:
+                def project(event: Event) -> list[Any]:
                     if isinstance(event, Triggered):
                         return [f"trigger:{event.value}"]
                     if isinstance(event, ResultAProduced):
@@ -1728,7 +1747,7 @@ def describe_EventGraph():
                         return [f"b:{event.value}"]
                     return []
 
-                r = Reducer("items", event_type=Event, fn=project)
+                r = Reducer[Event, Any]("items", event_type=Event, fn=project)
 
                 @on(Triggered)
                 def handle_a(event: Triggered) -> ResultAProduced:
@@ -1740,7 +1759,7 @@ def describe_EventGraph():
 
                 @on(ResultAProduced, ResultBProduced)
                 def collect(
-                    event: Event, items: list, log: EventLog
+                    event: Event, items: list[Any], log: EventLog
                 ) -> Collected | None:
                     if log.has(ResultAProduced) and log.has(ResultBProduced):
                         return Collected(items=tuple(items))
@@ -1757,7 +1776,7 @@ def describe_EventGraph():
         def describe_react_loop():
 
             def it_accumulates_system_user_assistant_tool_messages():
-                def to_messages(event: Event) -> list:
+                def to_messages(event: Event) -> list[Any]:
                     if isinstance(event, _UserMsgReceived):
                         return [("user", event.content)]
                     if isinstance(event, _AssistantMsgSent):
@@ -1766,7 +1785,7 @@ def describe_EventGraph():
                         return [("tool", event.result)]
                     return []
 
-                r = Reducer(
+                r = Reducer[Event, Any](
                     "messages",
                     event_type=Event,
                     fn=to_messages,
@@ -1775,7 +1794,7 @@ def describe_EventGraph():
                 message_snapshots: list[list] = []
 
                 @on(_UserMsgReceived, _ToolResultReturned)
-                def call_llm(event: Event, messages: list) -> _AssistantMsgSent:
+                def call_llm(event: Event, messages: list[Any]) -> _AssistantMsgSent:
                     message_snapshots.append(list(messages))
                     if isinstance(event, _UserMsgReceived):
                         return _AssistantMsgSent(content="need tool", needs_tool=True)
@@ -1812,10 +1831,10 @@ def describe_EventGraph():
                 assert log.latest(Completed) == Completed(result="hello")
 
             def it_coexists_alongside_event_log_injection():
-                def project(event: Event) -> list:
+                def project(event: Event) -> list[Any]:
                     return [1]
 
-                r = Reducer("counter", event_type=Event, fn=project)
+                r = Reducer[Event, Any]("counter", event_type=Event, fn=project)
 
                 @on(MessageReceived)
                 def step(event: MessageReceived, log: EventLog) -> Completed:
@@ -1830,10 +1849,12 @@ def describe_EventGraph():
             def when_fn_returns_non_list():
 
                 def it_raises_type_error():
-                    def bad_project(event: Event) -> list:
+                    def bad_project(event: Event) -> list[Any]:
                         return "not a list"  # type: ignore
 
-                    r = Reducer("bad", event_type=MessageReceived, fn=bad_project)
+                    r = Reducer[MessageReceived, Any](
+                        "bad", event_type=MessageReceived, fn=bad_project
+                    )
 
                     @on(MessageReceived)
                     def step(event: MessageReceived) -> Completed:
@@ -1859,7 +1880,7 @@ def describe_EventGraph():
                 def it_does_not_double_values_on_re_invoke():
                     from langgraph.checkpoint.memory import MemorySaver
 
-                    r = Reducer(
+                    r = Reducer[MessageReceived, Any](
                         "texts",
                         event_type=MessageReceived,
                         fn=lambda e: [e.text],
@@ -1867,7 +1888,7 @@ def describe_EventGraph():
                     )
 
                     @on(MessageReceived)
-                    def step(event: MessageReceived, texts: list) -> Completed:
+                    def step(event: MessageReceived, texts: list[Any]) -> Completed:
                         return Completed(result=",".join(texts))
 
                     graph = EventGraph([step], reducers=[r], checkpointer=MemorySaver())
@@ -1889,14 +1910,14 @@ def describe_EventGraph():
                     class Continued(IntegrationEvent):
                         text: str = ""
 
-                    def project_all(event: Event) -> list:
+                    def project_all(event: Event) -> list[Any]:
                         if isinstance(event, MessageReceived):
                             return [event.text]
                         if isinstance(event, Continued):
                             return [event.text]
                         return []
 
-                    r = Reducer(
+                    r = Reducer[Event, Any](
                         "recent",
                         event_type=Event,
                         fn=project_all,
@@ -1906,7 +1927,9 @@ def describe_EventGraph():
                     snapshots: list[list] = []
 
                     @on(MessageReceived, Continued)
-                    def step(event: Event, recent: list) -> MessageSent | Continued:
+                    def step(
+                        event: Event, recent: list[Any]
+                    ) -> MessageSent | Continued:
                         snapshots.append(list(recent))
                         if isinstance(event, MessageReceived):
                             return Continued(text="b")
@@ -1924,7 +1947,7 @@ def describe_EventGraph():
             def when_pre_seeded_via_update_state():
 
                 def _texts_reducer(**kw) -> Reducer:
-                    return Reducer(
+                    return Reducer[MessageReceived, Any](
                         "texts", event_type=MessageReceived, fn=lambda e: [e.text], **kw
                     )
 
@@ -1932,7 +1955,7 @@ def describe_EventGraph():
                     captured: list[list] = []
 
                     @on(trigger)
-                    def _capture_texts(event: Event, texts: list) -> Completed:
+                    def _capture_texts(event: Event, texts: list[Any]) -> Completed:
                         captured.append(list(texts))
                         return Completed(result="ok")
 
@@ -1965,11 +1988,11 @@ def describe_EventGraph():
                     captured: list[object] = []
 
                     @on(Started)
-                    def step(event: Started, proposal: object) -> Completed:
+                    def step(event: Started, proposal: Any) -> Completed:
                         captured.append(proposal)
                         return Completed(result="ok")
 
-                    sr = ScalarReducer(
+                    sr = ScalarReducer[MessageReceived, Any](
                         name="proposal", event_type=MessageReceived, fn=lambda e: e.text
                     )
                     graph, config = _pre_seed_graph(
@@ -1985,11 +2008,11 @@ def describe_EventGraph():
                     captured: list[object] = []
 
                     @on(Started)
-                    def step(event: Started, count: object) -> Completed:
+                    def step(event: Started, count: Any) -> Completed:
                         captured.append(count)
                         return Completed(result="ok")
 
-                    sr = ScalarReducer(
+                    sr = ScalarReducer[MessageReceived, Any](
                         name="count",
                         event_type=MessageReceived,
                         fn=lambda e: int(e.text),
@@ -2052,15 +2075,17 @@ def describe_EventGraph():
                     captured_normal: list[list] = []
 
                     @on(Started)
-                    def step(event: Started, seeded: list, normal: list) -> Completed:
+                    def step(
+                        event: Started, seeded: list[Any], normal: list[Any]
+                    ) -> Completed:
                         captured_seeded.append(list(seeded))
                         captured_normal.append(list(normal))
                         return Completed(result="ok")
 
-                    r_seeded = Reducer(
+                    r_seeded = Reducer[MessageReceived, Any](
                         "seeded", event_type=MessageReceived, fn=lambda e: [e.text]
                     )
-                    r_normal = Reducer(
+                    r_normal = Reducer[Started, Any](
                         "normal",
                         event_type=Started,
                         fn=lambda e: [e.data],
@@ -2102,7 +2127,7 @@ def describe_EventGraph():
                 class TaskDone(IntegrationEvent):
                     result: str = ""
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[StrategyChosen, str](
                     name="strategy",
                     event_type=StrategyChosen,
                     fn=lambda e: e.strategy,
@@ -2123,7 +2148,7 @@ def describe_EventGraph():
                 class Finalized(IntegrationEvent):
                     result: str = ""
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[StepCompleted, Any](
                     name="chosen",
                     event_type=StepCompleted,
                     fn=lambda e: e.value,
@@ -2132,7 +2157,7 @@ def describe_EventGraph():
                 @on(StepCompleted)
                 def advance(
                     event: StepCompleted,
-                    chosen: object,
+                    chosen: Any,
                 ) -> StepCompleted | Finalized:
                     if event.value == "b":
                         return Finalized(result=f"chosen={chosen}")
@@ -2148,7 +2173,7 @@ def describe_EventGraph():
                 class StepCompleted(IntegrationEvent):
                     tag: str = ""
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[StepCompleted, Any](
                     name="val",
                     event_type=StepCompleted,
                     fn=lambda e: e.tag,
@@ -2164,14 +2189,14 @@ def describe_EventGraph():
         def when_no_matching_events():
 
             def it_defaults_to_none():
-                sr = ScalarReducer(
+                sr = ScalarReducer[_Unmatched, str](
                     name="mode",
                     event_type=_Unmatched,
                     fn=lambda e: "irrelevant",
                 )
 
                 @on(_Triggered)
-                def handle(event: _Triggered, mode: object) -> _ResultProduced:
+                def handle(event: _Triggered, mode: str | None) -> _ResultProduced:
                     return _ResultProduced(got=str(mode))
 
                 graph = EventGraph([handle], reducers=[sr])
@@ -2187,7 +2212,7 @@ def describe_EventGraph():
 
                 from langgraph_events import SKIP
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[OtherReceived, Any](
                     name="val", event_type=OtherReceived, fn=lambda e: "x"
                 )
                 assert (
@@ -2198,7 +2223,7 @@ def describe_EventGraph():
             def it_treats_skip_from_fn_as_no_contribution():
                 from langgraph_events import SKIP
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[_Triggered, str](
                     name="mode",
                     event_type=_Triggered,
                     fn=lambda e: SKIP,
@@ -2211,7 +2236,7 @@ def describe_EventGraph():
                 assert sr.seed([_Triggered()]) == "fallback"
 
             def it_uses_custom_default():
-                sr = ScalarReducer(
+                sr = ScalarReducer[_Unmatched, str](
                     name="mode",
                     event_type=_Unmatched,
                     fn=lambda e: "irrelevant",
@@ -2229,12 +2254,12 @@ def describe_EventGraph():
         def when_mixed_list_reducers():
 
             def it_works_alongside_list_reducers():
-                list_r = Reducer(
+                list_r = Reducer[_Triggered, Any](
                     name="tags",
                     event_type=_Triggered,
                     fn=lambda e: [e.tag] if e.tag else [],
                 )
-                scalar_r = ScalarReducer(
+                scalar_r = ScalarReducer[_Triggered, Any](
                     name="last_tag",
                     event_type=_Triggered,
                     fn=lambda e: e.tag,
@@ -2243,8 +2268,8 @@ def describe_EventGraph():
                 @on(_Triggered)
                 def handle(
                     event: _Triggered,
-                    tags: list,
-                    last_tag: object,
+                    tags: list[Any],
+                    last_tag: Any,
                 ) -> _ResultProduced:
                     return _ResultProduced(summary=f"tags={tags},last={last_tag}")
 
@@ -2263,7 +2288,7 @@ def describe_EventGraph():
                 class ResultBProduced(IntegrationEvent):
                     data: str = ""
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[Event, Any](
                     name="latest",
                     event_type=Event,
                     fn=lambda e: (
@@ -2278,11 +2303,11 @@ def describe_EventGraph():
                 )
 
                 @on(_Triggered)
-                def handler_a(event: _Triggered, latest: object) -> ResultAProduced:
+                def handler_a(event: _Triggered, latest: Any) -> ResultAProduced:
                     return ResultAProduced(data=f"a:{event.value}")
 
                 @on(_Triggered)
-                def handler_b(event: _Triggered, latest: object) -> ResultBProduced:
+                def handler_b(event: _Triggered, latest: Any) -> ResultBProduced:
                     return ResultBProduced(data=f"b:{event.value}")
 
                 graph = EventGraph([handler_a, handler_b], reducers=[sr])
@@ -2300,7 +2325,7 @@ def describe_EventGraph():
                 class UnrelatedReceived(IntegrationEvent):
                     pass
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[ValueSet, Any](
                     name="kept",
                     event_type=ValueSet,
                     fn=lambda e: e.value,
@@ -2311,7 +2336,7 @@ def describe_EventGraph():
                     return UnrelatedReceived()
 
                 @on(UnrelatedReceived)
-                def step2(event: UnrelatedReceived, kept: object) -> _ResultProduced:
+                def step2(event: UnrelatedReceived, kept: Any) -> _ResultProduced:
                     return _ResultProduced(got=str(kept))
 
                 graph = EventGraph([step1, step2], reducers=[sr])
@@ -2326,7 +2351,7 @@ def describe_EventGraph():
                 class ClearSignaled(IntegrationEvent):
                     pass
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[ClearSignaled, Any](
                     name="value",
                     event_type=ClearSignaled,
                     fn=lambda e: None,
@@ -2334,7 +2359,7 @@ def describe_EventGraph():
                 )
 
                 @on(ClearSignaled)
-                def handle(event: ClearSignaled, value: object) -> _ResultProduced:
+                def handle(event: ClearSignaled, value: Any) -> _ResultProduced:
                     return _ResultProduced(got=repr(value))
 
                 graph = EventGraph([handle], reducers=[sr])
@@ -2357,20 +2382,18 @@ def describe_EventGraph():
                 class ScoreBRecorded(IntegrationEvent):
                     score: int = 0
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[HasScore, Any](
                     name="last_score",
                     event_type=HasScore,
                     fn=lambda e: e.score,
                 )
 
                 @on(ScoreARecorded)
-                def step_a(event: ScoreARecorded, last_score: object) -> ScoreBRecorded:
+                def step_a(event: ScoreARecorded, last_score: Any) -> ScoreBRecorded:
                     return ScoreBRecorded(score=event.score + 10)
 
                 @on(ScoreBRecorded)
-                def step_b(
-                    event: ScoreBRecorded, last_score: object
-                ) -> _ResultProduced:
+                def step_b(event: ScoreBRecorded, last_score: Any) -> _ResultProduced:
                     return _ResultProduced(got=str(last_score))
 
                 graph = EventGraph([step_a, step_b], reducers=[sr])
@@ -2383,14 +2406,14 @@ def describe_EventGraph():
             def it_does_not_lose_scalar_on_re_invoke():
                 from langgraph.checkpoint.memory import MemorySaver
 
-                sr = ScalarReducer(
+                sr = ScalarReducer[_Triggered, Any](
                     name="latest",
                     event_type=_Triggered,
                     fn=lambda e: e.value,
                 )
 
                 @on(_Triggered)
-                def handle(event: _Triggered, latest: object) -> _ResultProduced:
+                def handle(event: _Triggered, latest: Any) -> _ResultProduced:
                     return _ResultProduced(got=str(latest))
 
                 graph = EventGraph([handle], reducers=[sr], checkpointer=MemorySaver())
@@ -2867,7 +2890,9 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_counts_once_a_reducer_contribution_of_the_paused_step():
-            ended = Reducer("ended", event_type=Ended, fn=lambda e: [e.result])
+            ended = Reducer[Ended, Any](
+                "ended", event_type=Ended, fn=lambda e: [e.result]
+            )
             graph, config = _paused_step_graph(
                 "sr-paused-step-reducer", reducers=[ended]
             )
@@ -2906,7 +2931,9 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_preserves_reducer_state_from_checkpoint_in_v2():
-            r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
+            r = Reducer[MessageReceived, Any](
+                "texts", event_type=MessageReceived, fn=lambda e: [e.text]
+            )
             graph, config = _interruptible_graph("v2-resume-reducer", reducers=[r])
 
             # First run — seed with MessageReceived to populate reducer, then
@@ -2923,7 +2950,9 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_accumulates_reducer_across_v2_astream_events_runs():
-            r = Reducer("texts", event_type=MessageReceived, fn=lambda e: [e.text])
+            r = Reducer[MessageReceived, Any](
+                "texts", event_type=MessageReceived, fn=lambda e: [e.text]
+            )
 
             @on(MessageReceived)
             def step(event: MessageReceived) -> Completed:
@@ -2958,7 +2987,7 @@ def describe_EventGraph():
 
         @pytest.mark.asyncio
         async def it_preserves_scalar_reducer_from_checkpoint_in_v2():
-            sr = ScalarReducer(
+            sr = ScalarReducer[MessageReceived, Any](
                 name="proposal",
                 event_type=MessageReceived,
                 fn=lambda e: e.text,
