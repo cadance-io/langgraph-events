@@ -35,11 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   side effect that a handler already committed. The cost: each step waits until its
   checkpoint is stored. To opt out, pass `durability="async"` or `durability="exit"` on the
   run call, as the [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution)
-  shows. A subgraph node that is not an `EventGraph` and has its own checkpointer gets the
-  LangGraph default `"async"`, unless the run passes `durability=`.
+  shows.
 - **`ThreadRewrite.dropped` counts distinct stored events.** Before, it counted entries in
   `events` and in `_pending`. So an event in both channels counted twice. Each `_pending`
   entry is also in `events`, so the count now reads `events` only.
+
+### Removed
+
+- **An `EventGraph` runs only at the root of a thread.** A nested run now raises
+  `NotImplementedError`. A nested run is the compiled graph used as a subgraph node, or a
+  run started from a handler or a node of another running graph. A root run with a
+  non-empty `checkpoint_ns` raises too. To start a second event stream, start it outside the
+  run context, for example through a task queue or a fresh `contextvars.Context`. See
+  [Supported scope](https://cadance-io.github.io/langgraph-events/concepts/#supported-scope).
 
 ## [0.49.0] - 2026-11-10
 

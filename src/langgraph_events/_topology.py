@@ -8,7 +8,7 @@ import types
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
-from langgraph._internal._constants import CONF, CONFIG_KEY_DURABILITY
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
@@ -86,13 +86,22 @@ class _EventCompiledGraph(CompiledStateGraph[Any, Any, Any, Any]):
         durability: Durability | None = None,
         **kwargs: Any,
     ) -> tuple[Any, ...]:
-        # LangGraph has no public default durability. LangGraph writes the
-        # resolved value into the config of inner graphs only for an explicit
-        # durability= of the run, so this default stays inside this graph. A
-        # durability= of the run or of a parent run wins. True counts as a
-        # checkpointer: it is a subgraph that stores its own checkpoints.
-        if durability is None and self.checkpointer not in (None, False):
-            durability = config.get(CONF, {}).get(CONFIG_KEY_DURABILITY, "sync")
+        # LangGraph sets a non-empty checkpoint_ns only in the config of a task.
+        # A subgraph node gets it, and a run from inside a task inherits it.
+        # Only a root run is supported. LangGraph has no public default
+        # durability, so a graph with a checkpointer gets "sync" here.
+        namespace = config.get("configurable", {}).get("checkpoint_ns")
+        if namespace:
+            raise NotImplementedError(
+                "An EventGraph runs only at the root of a thread. This run has "
+                f"the checkpoint_ns {namespace!r}, so it is nested in another "
+                "graph or a root run carries a non-empty checkpoint_ns. To start "
+                "a second event stream, start it outside the run context, for "
+                "example through a task queue or a fresh context, not from a "
+                "handler."
+            )
+        if durability is None and isinstance(self.checkpointer, BaseCheckpointSaver):
+            durability = "sync"
         return super()._defaults(config, durability=durability, **kwargs)
 
 

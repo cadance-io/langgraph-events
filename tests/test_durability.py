@@ -1,8 +1,10 @@
 """EventGraph stores each checkpoint before the next step runs."""
 
 import asyncio
+import contextvars
+import threading
 import time
-from typing import Any, TypedDict
+from typing import Any
 
 import pytest
 from conftest import Ended, Processed, Started
@@ -14,10 +16,6 @@ from langgraph_events import EventGraph, on
 _PUT_DELAY = 0.05
 
 _CONFIG: Any = {"configurable": {"thread_id": "t1"}}
-
-
-class _Count(TypedDict):
-    n: int
 
 
 class SlowSaver(InMemorySaver):
@@ -45,6 +43,23 @@ class SlowSaver(InMemorySaver):
     async def aput(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
         # InMemorySaver.aput calls self.put, which blocks the loop on the sleep.
         await asyncio.sleep(_PUT_DELAY)
+        return self._store(config, checkpoint, metadata, new_versions)
+
+
+class GatedSaver(SlowSaver):
+    """Hold each checkpoint until a handler observes the store. The observation
+    then cannot see a checkpoint that a later write stores."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._observed = threading.Event()
+
+    def observe(self) -> None:
+        super().observe()
+        self._observed.set()
+
+    def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
+        self._observed.wait(timeout=1)
         return self._store(config, checkpoint, metadata, new_versions)
 
 
@@ -91,61 +106,12 @@ def describe_EventGraph_durability():
 
     def when_the_run_passes_durability():
         def it_uses_the_durability_of_the_run():
-            saver = SlowSaver()
+            saver = GatedSaver()
             graph = EventGraph(_handlers(saver), checkpointer=saver)
 
             graph.invoke(Started(data="x"), config=_CONFIG, durability="async")
 
             assert saver.seen == [False]
-
-    def when_the_graph_is_a_subgraph_that_stores_its_own_checkpoints():
-        def it_stores_the_checkpoint_before_the_next_handler_starts():
-            saver = SlowSaver()
-            child = EventGraph(_handlers(saver), checkpointer=True).compiled
-            parent = StateGraph(child.builder.state_schema)
-            parent.add_node("child", child)
-            parent.add_edge(START, "child")
-            parent.add_edge("child", END)
-
-            parent.compile(checkpointer=saver).invoke(
-                {"events": [Started(data="x")]}, config=_CONFIG
-            )
-
-            assert saver.seen == [True]
-
-    def when_a_handler_runs_an_event_graph():
-        def without_a_checkpointer():
-            def it_completes_the_run():
-                inner = EventGraph([_end_at_once], checkpointer=False)
-
-                @on(Started)
-                def outer(event: Started) -> Ended:
-                    return Ended(result=inner.invoke(event).latest(Ended).result)
-
-                graph = EventGraph([outer], checkpointer=InMemorySaver())
-
-                log = graph.invoke(Started(data="x"), config=_CONFIG)
-
-                assert log.latest(Ended) == Ended(result="x")
-
-    def when_a_handler_runs_a_state_graph():
-        def without_a_checkpointer():
-            def it_completes_the_run():
-                builder = StateGraph(_Count)
-                builder.add_node("add", lambda state: {"n": state["n"] + 1})
-                builder.add_edge(START, "add")
-                builder.add_edge("add", END)
-                inner = builder.compile(checkpointer=False)
-
-                @on(Started)
-                def outer(event: Started) -> Ended:
-                    return Ended(result=str(inner.invoke({"n": 0})["n"]))
-
-                graph = EventGraph([outer], checkpointer=InMemorySaver())
-
-                log = graph.invoke(Started(data="x"), config=_CONFIG)
-
-                assert log.latest(Ended) == Ended(result="1")
 
     def when_the_run_has_no_thread_id():
         @pytest.mark.parametrize(
@@ -169,3 +135,52 @@ def describe_EventGraph_durability():
 
             with pytest.raises(ValueError, match="thread_id, checkpoint_ns"):
                 run(graph)
+
+
+def describe_EventGraph_run_inside_another_graph():
+    def when_the_compiled_graph_is_a_subgraph_node():
+        def it_raises_not_implemented_error():
+            child = EventGraph([_end_at_once]).compiled
+            parent = StateGraph(child.builder.state_schema)
+            parent.add_node("child", child)
+            parent.add_edge(START, "child")
+            parent.add_edge("child", END)
+
+            with pytest.raises(NotImplementedError, match="fresh context"):
+                parent.compile().invoke({"events": [Started(data="x")]})
+
+    def when_a_handler_runs_an_event_graph():
+        def it_raises_not_implemented_error():
+            inner = EventGraph([_end_at_once])
+
+            @on(Started)
+            def outer(event: Started) -> Ended:
+                return Ended(result=inner.invoke(event).latest(Ended).result)
+
+            graph = EventGraph([outer], checkpointer=InMemorySaver())
+
+            with pytest.raises(NotImplementedError, match="fresh context"):
+                graph.invoke(Started(data="x"), config=_CONFIG)
+
+    def when_the_root_run_carries_a_checkpoint_ns():
+        def it_raises_not_implemented_error():
+            graph = EventGraph([_end_at_once], checkpointer=InMemorySaver())
+            config: Any = {"configurable": {"thread_id": "t1", "checkpoint_ns": "x"}}
+
+            with pytest.raises(NotImplementedError, match="checkpoint_ns"):
+                graph.invoke(Started(data="x"), config=config)
+
+    def when_a_handler_runs_an_event_graph_in_a_fresh_context():
+        def it_completes_both_runs():
+            inner = EventGraph([_end_at_once])
+
+            @on(Started)
+            def outer(event: Started) -> Ended:
+                log = contextvars.Context().run(inner.invoke, event)
+                return Ended(result=log.latest(Ended).result)
+
+            graph = EventGraph([outer], checkpointer=InMemorySaver())
+
+            log = graph.invoke(Started(data="x"), config=_CONFIG)
+
+            assert log.latest(Ended) == Ended(result="x")
