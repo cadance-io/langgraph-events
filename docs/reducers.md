@@ -90,7 +90,7 @@ temperature = ScalarReducer(
 
 ### Required values { #scalar-reducer-required }
 
-The handler parameter annotation declares whether the value can be `None`. A non-`None` annotation opts the parameter into a runtime assertion. `str | None`, `Optional[str]`, `Any`, `object` and a missing annotation opt out. When the channel value is `None` at injection time, `ReducerNotSetError` raises **before** the handler body runs.
+The handler parameter annotation declares whether the value can be `None`. A non-`None` annotation opts the parameter into a runtime assertion. `str | None`, `Optional[str]`, `Any` and `object` opt out. A parameter must have an annotation. When the channel value is `None` at injection time, `ReducerNotSetError` raises **before** the handler body runs.
 
 ```python
 ...
@@ -109,7 +109,7 @@ def permissive(event: TaskReceived, strategy: str | None) -> Completed:
 
 A parameter default is the value when the channel value is `None`. So `strategy: str = "steady"` receives `"steady"` and raises no `ReducerNotSetError`. The annotation must also fit the value type of the reducer, or graph construction raises `TypeError`. See [Signature injection](concepts.md#signature-injection).
 
-`ReducerNotSetError` is raised outside the `raises=` boundary, so a broad `raises=ValueError` cannot swallow it. See [Errors](api.md#errors). When a parameter annotation does not resolve, the library emits a `UserWarning` for that parameter and treats it as permissive. Annotate against an importable type.
+`ReducerNotSetError` is raised outside the `raises=` boundary, so a broad `raises=ValueError` cannot swallow it. See [Errors](api.md#errors). A parameter annotation that does not resolve raises `TypeError` at graph construction. Annotate against an importable type.
 
 ## `FoldReducer`
 
@@ -211,7 +211,8 @@ graph = EventGraph([retry], reducers=[attempts, limit, remaining])
 - **Services.** A service must not have the name of a `Derived` or a reducer. Graph construction raises `TypeError`, because a parameter cannot name both. A `RunScoped` factory can read a `Derived` by name. See [Run-scoped services](concepts.md#run-scoped-services).
 - **Streams and clients.** `stream_events(include_reducers=...)`, `stream_resume(include_reducers=...)` and `AGUIAdapter(include_reducers=...)` accept a `Derived` name. A client then gets the value in `StreamFrame.reducers` and in the `STATE_SNAPSHOT`. `include_reducers=True` selects each stored reducer and each `Derived`, in registration order. `AGUIAdapter` drops a `Derived` key from the inbound client state.
 - **A thread with no checkpoint.** `AGUIAdapter.connect()` and `snapshot()` compute each selected value from the empty defaults, as a handler and a stream frame do.
-- **Empty defaults.** `fn` must accept the empty default of each input, for example `None` for an unset `ScalarReducer`. An AG-UI replay of a thread with no checkpoint calls `fn` with these defaults, before any handler runs. If `fn` raises there, `connect()` and `snapshot()` end with `RUN_ERROR`.
+- **Parameters bind by the handler rule.** Each parameter of `fn` must have an annotation that resolves, and the annotation must fit its input. A default is the value of an input that is `None`. An input that is `None`, under an annotation that rejects `None` and with no default, raises `ReducerNotSetError` that names the `Derived`. A parameter annotated with `RunnableConfig`, the context schema, `BaseStore` or `Reflection` raises `TypeError`, because a stream frame and a reflection have no run. See [Signature injection](concepts.md#signature-injection).
+- **Empty defaults.** An AG-UI replay of a thread with no checkpoint computes `fn` from the empty defaults of its inputs, before any handler runs. So annotate an input that can be unset with `| None`, or give it a default. If `fn` raises there, `connect()` and `snapshot()` end with `RUN_ERROR`.
 - **The same value in each place.** A handler parameter, a `StreamFrame`, the AG-UI `STATE_SNAPSHOT` and `reflect(log).state()` compute the value with the same function. A `Derived` that reads the log gets the log of that place. The table below names that log. A thread with no checkpoint gives an empty log.
 - **Structure views.** `namespaces().text()`, `.mermaid()` and `.json()` show each `Derived` with its inputs. The mermaid diagram draws it as a hexagon, with a dotted `reads` arrow from each input reducer or `Derived`. The log is no node, so it gets no arrow. The hexagon of a `Derived` that reads the log has the label `reads: log`. The text lists `log` as an input. The JSON gives `"reads_log": true`.
 - **Reflection.** `graph.reflect(log).state()` projects each stored reducer over the log, then computes each `Derived` from those projections. A `Derived` that reads the log gets the reflected log.
@@ -277,7 +278,10 @@ Graph construction raises an error in each of these cases:
 |---|---|---|
 | A parameter of `fn` is not annotated with `EventLog`, and its name names no registered reducer and no `Derived` | `TypeError` | The input does not exist. The message lists the available reducers and `Derived` values |
 | That parameter has a default | `TypeError` | A default does not make a parameter optional. Bind a constant in a closure |
-| That parameter has an annotation that does not resolve | `TypeError` | The message names the resolution error. Make the annotation importable at run time |
+| A parameter of `fn` has no annotation | `TypeError` | The annotation is checked against the input. Annotate it with the value type of its input, or with `EventLog` |
+| The annotation of a parameter of `fn` does not resolve | `TypeError` | The message names the resolution error. Make the annotation importable at run time |
+| The annotation of a parameter of `fn` does not fit its input | `TypeError` | Change the annotation to the type that the message names |
+| A parameter of `fn` is annotated `RunnableConfig`, the context schema, `BaseStore` or `Reflection` | `TypeError` | A stream frame and a reflection have no run. Read the value in a handler or a `RunScoped` factory |
 | `Derived` values read each other in a cycle, or a `Derived` reads itself | `TypeError` | The value cannot be computed. The message names the cycle, for example `first -> second -> first` |
 | `fn` has a `*args`, `**kwargs` or positional-only parameter | `TypeError` | Each parameter must name one input |
 | `fn` has no return annotation, for example a lambda | `TypeError` | The framework checks each reader against it. Use a `def` with a return annotation |

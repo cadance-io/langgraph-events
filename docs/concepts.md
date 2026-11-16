@@ -132,11 +132,13 @@ A handler parameter after the event, and each parameter of a [`RunScoped`](#run-
 | 2 | named like a stored reducer or a `Derived` | its value at node start |
 | 3 | named like a name-keyed service, or annotated with the type of a type-keyed service | that service. A `RunScoped` service gives its result for the same node call |
 
-The first match is used. So an exact library annotation wins over a reducer of the same name. The name `log` has no special meaning: a parameter reads the `EventLog` only when its annotation is `EventLog`. These rules apply to both kinds of parameter:
+The first match is used. So an exact library annotation wins over a reducer of the same name. The name `log` has no special meaning: a parameter reads the `EventLog` only when its annotation is `EventLog`. These rules apply to a handler parameter, a factory parameter and a [`Derived`](reducers.md#derived) parameter alike:
 
-- **A parameter that matches nothing raises `TypeError` at graph construction.** A default does not prevent it. The message gives a hint for a parameter named `config` or `log`, and for an annotation that did not resolve.
+- **Each parameter must have an annotation.** A parameter with none raises `TypeError` at graph construction. The event parameter of a handler, a field-matcher parameter and a `*args` or `**kwargs` catcher are not inputs, so they need none.
+- **Each annotation must resolve.** An annotation that does not resolve raises `TypeError`, also on the event parameter. A usual cause is an import under `if TYPE_CHECKING:`. Keep the import at run time with `# noqa: TC002`.
+- **A parameter that matches nothing raises `TypeError` at graph construction.** A default does not prevent it. The message gives a hint for a parameter named `config` or `log`, and for a default.
 - **A default is the value when the input is unset.** A reducer or a `Derived` is unset when its value is `None`. A run config, a store or a run context is unset when the run has none. A service is never unset.
-- **The annotation is checked against its source at graph construction.** A misfit raises `TypeError`. The check is described below. An unannotated parameter is not checked.
+- **The annotation is checked against its source at graph construction.** A misfit raises `TypeError`. The check is described below.
 
 `services=` accepts two shapes. They are mutually exclusive per graph:
 
@@ -165,7 +167,7 @@ def react(event, primary_chat, backup_chat) -> ...: ...
 
 Type-keyed injection matches on the resolved annotation. An annotation imported only under `TYPE_CHECKING` does not resolve, so the parameter stays unclaimed and raises `TypeError` at graph construction.
 
-Name-keyed injection needs no annotation. When the annotation resolves, the library checks the registered value against it at graph build. A plain value must be an instance of the annotation. A `RunScoped` factory must return a subtype of the annotation. A mismatch raises `TypeError`. An annotation that does not resolve, or that Python cannot test at run time, such as a `Protocol` without `@runtime_checkable`, still binds the parameter and emits a `UserWarning`.
+Name-keyed injection matches on the name, and the library checks the registered value against the annotation at graph build. A plain value must be an instance of the annotation. A `RunScoped` factory must return a subtype of the annotation. A mismatch raises `TypeError`. An annotation that Python cannot test at run time, such as a `Protocol` without `@runtime_checkable`, still binds the parameter and emits a `UserWarning`.
 
 The check uses `beartype.door`. For a stored reducer or a `Derived`, the value type of the source must fit the annotation:
 
@@ -178,7 +180,8 @@ The check uses `beartype.door`. For a stored reducer or a `Derived`, the value t
 
 - A source whose function has no return annotation gives `Any`, and is not checked.
 - `None` always fits. A `None` value of an annotation that rejects `None` raises `ReducerNotSetError` at run time instead, unless the parameter has a default.
-- The numeric tower of PEP 484 applies: `int` fits `float`, and `int` or `float` fits `complex`.
+- The numeric tower of PEP 484 applies at the top level only: `int` fits `float`, and `int` or `float` fits `complex`. A type argument is not promoted, so `list[int]` does not fit `list[float]`.
+- An invariant container needs equal type arguments, as for mypy. So `list[bool]` does not fit `list[int]`. The invariant containers are `list`, `dict`, `set` and their mutable abstract classes.
 - A value type with no type arguments, or with `Any` as one, compares its class only. So `list[Any]` fits `list[str]`.
 
 #### Run-scoped services
@@ -327,7 +330,7 @@ for config in store.threads_paused_on(ApprovalRequested, thread_ids=ids):
 - `topology.requirements` lists each handler parameter that only a service can fill, as
   `ServiceRequirement(node, qualname, param, annotation)`. `node` is the graph-node name of
   the handler. `qualname` is the module and qualified name of the handler function. The
-  annotation is `Unannotated()` when the parameter has none. It is `UnresolvedAnnotation(reason)` when it did not resolve.
+  annotation is the resolved annotation of the parameter.
 - `EventTopology.from_namespaces(*namespaces, handlers=..., reducers=...)` collects the same
   handlers as `EventGraph.from_namespaces(...)`. A store-only client does not list every handler.
 - Read the static facts of a graph from `topology`: `handler_names`, `reducer_names`,

@@ -9,16 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-A handler parameter and a `RunScoped` factory parameter now bind by one rule. A default is
-the value when the input is unset. A parameter that matches nothing raises `TypeError`. The
-annotation is checked against its source. Each row is one change that can refuse a graph
+A handler parameter, a `RunScoped` factory parameter and a `Derived` parameter now bind by
+one rule. Each parameter must have an annotation that resolves. A default is the value when
+the input is unset. A parameter that matches nothing raises `TypeError`. The annotation is
+checked against its source, with the variance of mypy. Each row is one change that can refuse a graph
 that built on 0.49, or change a value. Each error message names the fix of its row.
 
 | Before | Now | Fix |
 |---|---|---|
+| A handler parameter could have no annotation, for example a name-keyed service `def h(event, mailer)` | A handler, factory or `Derived` parameter with no annotation raises `TypeError` that names the function and the parameter. The event parameter, a field-matcher parameter and a `*args` or `**kwargs` catcher need none | Annotate the parameter with the type of its input |
+| A handler annotation that did not resolve emitted a `UserWarning`, and the parameter bound by its name | An annotation that does not resolve raises `TypeError`, on a handler, a factory or a `Derived`, the event parameter included. The message names the usual `TYPE_CHECKING` cause | Import the type at run time, for example with `# noqa: TC002` |
+| `Unannotated` and `UnresolvedAnnotation` were public, and `ServiceRequirement.annotation` could hold one | Both are removed. `ServiceRequirement.annotation` is always the resolved annotation | Read the annotation directly |
 | A handler parameter that named a stored reducer or a `Derived` was not checked against its annotation | Graph construction raises `TypeError` when the value type of the source does not fit the annotation. The message names the value type | Change the annotation to the type that the message names |
 | A `Derived` could use a lambda, or a `def` without a return annotation | Graph construction raises `TypeError` for a `Derived` without a return annotation, or with one that does not resolve | Use a `def` with a return annotation, importable at run time |
+| The annotation check, where one ran, treated each container as covariant | The check follows mypy. `list[bool]` does not fit `list[int]`, because `list`, `dict`, `set` and their mutable abstract classes are invariant. The numeric tower applies at the top level only, so `int` fits `float`, but `list[int]` does not fit `list[float]` | Change the annotation to the type that the message names |
 | A handler parameter with a default, that read an unset reducer with a non-`None` annotation, raised `ReducerNotSetError` | The parameter receives its default | None. Remove the default to keep the error |
+| A `Derived` parameter was not checked against its input | A `Derived` parameter annotation that does not fit the value type of its input raises `TypeError` | Change the annotation to the type that the message names |
+| A `Derived` parameter got `None` for an unset input, whatever its annotation or default | A default is the value for `None`. A `None` input under an annotation that rejects `None`, with no default, raises `ReducerNotSetError` that names the `Derived`, also in a stream frame and an AG-UI snapshot | Annotate the parameter with `\| None`, or give it a default |
+| A `Derived` parameter annotated `RunnableConfig`, the context schema, `BaseStore` or `Reflection` bound by its name | It raises `TypeError`, because a stream frame and a reflection have no run | Read the value in a handler or a `RunScoped` factory |
 | The first factory parameter was the run config, by position, with any annotation or none, for example `def f(config)`, `config: dict` or `config: RunnableConfig \| None` | A parameter binds by its annotation, then by its name. A parameter named `config` that is not annotated exactly `RunnableConfig` matches nothing and raises `TypeError` | Annotate the parameter exactly `RunnableConfig`, and import `RunnableConfig` at run time |
 | A second factory parameter annotated with the `context_schema` type got the run context. It had to be positional and required | A parameter annotated with the schema type gets the run context at any position, keyword-only included | None for a factory that declares `(config: RunnableConfig, context: Schema)` |
 | An optional factory parameter was not passed, for example `def f(config, retries=3)` | A parameter with a default that matches nothing raises `TypeError` | Bind a constant in a closure or a `functools.partial` |
@@ -45,8 +53,8 @@ that built on 0.49, or change a value. Each error message names the fix of its r
   gives the `list` type that `fn` returns. A `ScalarReducer` gives the return type of `fn`
   and the type of `default`. A `FoldReducer` gives the type of `default_factory`. A
   `Derived` gives its return annotation. A function without a return annotation gives
-  `Any`, which is not checked. The check accepts the numeric tower of PEP 484, so `int`
-  fits `float`. A bespoke `BaseReducer` subclass gives `Any`.
+  `Any`, which is not checked. The check accepts the numeric tower of PEP 484 at the top
+  level, so `int` fits `float`. A bespoke `BaseReducer` subclass gives `Any`.
 - **A handler can declare two parameters of one framework type.** Each parameter annotated
   `EventLog`, for example, receives the log. Before, the second one raised `TypeError`.
 - **A `Derived` can read the `EventLog` and other `Derived` values.** A parameter of `fn`
