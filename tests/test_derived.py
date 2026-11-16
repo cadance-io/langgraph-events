@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from langgraph_events import (
     IntegrationEvent,
     Interrupted,
     Namespace,
+    Reducer,
     ReducerNotSetError,
     Resumed,
     ScalarReducer,
@@ -934,3 +936,86 @@ def describe_Derived_computed_once_per_state_read():
 
             assert graph.reflect(log).state()["top"] == 5
             assert calls.base == 1
+
+
+class Seeded(IntegrationEvent):
+    x: int = 0
+
+
+def _seeded_items(e: Seeded) -> list[int]:
+    return [e.x]
+
+
+seeded = Reducer(name="seeded", event_type=Seeded, fn=_seeded_items, default=[0])
+
+
+@on(Seeded)
+def note_seed(event: Seeded) -> Reported:
+    return Reported()
+
+
+def _whole_log(log: EventLog) -> EventLog:
+    return log
+
+
+placed_view = Derived(name="placed_view", fn=_whole_log)
+
+
+def _offset_count(offset: int, log: EventLog) -> int:
+    return len(log) + offset
+
+
+class _CallableCount:
+    def __call__(self, log: EventLog) -> int:
+        return len(log)
+
+
+def describe_Derived_in_a_per_event_stream():
+    def when_a_value_keeps_the_log():
+        async def it_keeps_the_causes_of_an_earlier_frame():
+            graph = EventGraph([ship], reducers=[placed_view])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    Placed(), include_reducers=True, include_custom_events=True
+                )
+            ]
+
+            view = frames[0].reducers["placed_view"]
+            assert [view.cause(e) for e in view] == [None]
+
+    def when_the_run_has_several_seeds():
+        async def it_shows_the_state_up_to_each_seed():
+            graph = EventGraph([note_seed], reducers=[seeded])
+
+            frames = [
+                f
+                async for f in graph.astream_events(
+                    [Seeded(x=1), Seeded(x=2)],
+                    include_reducers=True,
+                    include_custom_events=True,
+                )
+            ]
+
+            assert [f.reducers["seeded"] for f in frames[:2]] == [[0, 1], [0, 1, 2]]
+
+
+def describe_Derived_from_a_callable_that_is_not_a_function():
+    def when_the_function_is_a_partial():
+        def it_reads_the_log_by_the_annotation_of_the_wrapped_function():
+            sized = Derived(name="seen", fn=functools.partial(_offset_count, 10))
+            graph = EventGraph([ship, count], reducers=[sized])
+
+            log = graph.invoke(Placed())
+
+            assert [e.n for e in log.filter(Counted)] == [12]
+
+    def when_the_function_is_a_callable_object():
+        def it_reads_the_log_by_the_annotation_of_call():
+            sized = Derived(name="seen", fn=_CallableCount())
+            graph = EventGraph([ship, count], reducers=[sized])
+
+            log = graph.invoke(Placed())
+
+            assert [e.n for e in log.filter(Counted)] == [2]

@@ -19,7 +19,7 @@ from typing import (
 )
 
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import _resolve_hints_and_errors
+from langgraph_events._handler import _resolve_parameter_hints
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -548,7 +548,7 @@ class Derived(Generic[T]):
 
     @property
     def _log_params(self) -> frozenset[str]:
-        hints, _ = _resolve_hints_and_errors(self.fn)
+        hints, _ = _resolve_parameter_hints(self.fn)
         return frozenset(
             p.name for p in self._parameters() if hints.get(p.name) is EventLog
         )
@@ -574,7 +574,7 @@ class Derived(Generic[T]):
         its annotation, if any. It raises ``TypeError`` for a parameter that
         names no input.
         """
-        hints, hint_errors = _resolve_hints_and_errors(self.fn)
+        hints, hint_errors = _resolve_parameter_hints(self.fn)
         inputs: list[Readable] = []
         for param in self._parameters():
             if param.kind not in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
@@ -695,8 +695,13 @@ class StateRead:
         checkpoint, gives an empty log.
         """
         if self._log is None:
+            # A copy, so a value that keeps the log, such as a view, does
+            # not see a later write to a channel that a stream extends.
+            causes = self.state.get("causes")
             self._log = EventLog._from_state(
-                self.state.get("events", ()), self.state.get("causes"), check=False
+                list(self.state.get("events", ())),
+                None if causes is None else list(causes),
+                check=False,
             )
         return self._log
 

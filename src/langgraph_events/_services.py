@@ -9,7 +9,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
-from langgraph_events._handler import BoundHandler, _resolve_hints_and_errors
+from langgraph_events._handler import (
+    BoundHandler,
+    _annotation_source,
+    _resolve_hints_and_errors,
+    _resolve_parameter_hints,
+)
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -20,20 +25,6 @@ if TYPE_CHECKING:
     from langgraph_events._handler import HandlerMeta
 
 T = TypeVar("T")
-
-
-def _annotation_source(factory: Callable[..., Any]) -> Callable[..., Any]:
-    """Return the object that carries the factory's return annotation.
-
-    A ``functools.partial`` is read through to the wrapped function. A class
-    is returned as is. Its instances are the provided type. A callable object
-    is read through its ``__call__``.
-    """
-    while isinstance(factory, functools.partial):
-        factory = factory.func
-    if isinstance(factory, type) or inspect.isroutine(factory):
-        return factory
-    return type(factory).__call__
 
 
 def _missing_return_annotation(
@@ -142,8 +133,7 @@ class RunScoped(Generic[T]):
                 f"has no context_schema. Pass context_schema= to the graph to give "
                 f"the factory the run context, or give the factory one parameter."
             )
-        init = source.__init__ if isinstance(source, type) else source  # type: ignore[misc]
-        hints, _ = _resolve_hints_and_errors(init)
+        hints, _ = _resolve_parameter_hints(self.factory)
         annotation = hints.get(second.name, inspect.Parameter.empty)
         if len(extra) == 1 and positional and required and annotation is context_schema:
             return True
