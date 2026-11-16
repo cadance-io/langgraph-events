@@ -48,6 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-empty `checkpoint_ns` raises too. To start a second event stream, start it outside the
   run context, for example through a task queue or a fresh `contextvars.Context`. See
   [Supported scope](https://cadance-io.github.io/langgraph-events/concepts/#supported-scope).
+- **The rewrite tools read the root checkpoint namespace only.** `plan_rewrite()`,
+  `rewrite_store()` and their async twins lose `checkpoint_ns=`. `ThreadRewrite` loses
+  `checkpoint_ns` and `location`. `ThreadKey` is removed. `MigrationTarget(threads=...)` now
+  returns thread ids, and `MigrationTarget.thread_keys()` is now `thread_ids()`.
+  `list_thread_keys` is now `list_thread_ids`. The `rewrite` and `backup` commands read and
+  copy only root checkpoints.
+- **WARNING: `rewrite` no longer reads a subgraph checkpoint.** A store can hold one from a
+  nested run of an earlier release. After the upgrade, that checkpoint keeps its old bytes,
+  and its run cannot resume, because a nested run raises. Before you upgrade, let each
+  paused nested run finish. Delete a thread that nobody needs with `delete_thread()`.
 
 ## [0.49.0] - 2026-11-10
 

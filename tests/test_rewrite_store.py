@@ -253,24 +253,22 @@ def _as_tuple(kw: dict[str, typing.Any]) -> dict[str, typing.Any]:
     return kw
 
 
-def _cfg(tid: str, ns: str = "") -> dict[str, typing.Any]:
-    return {"configurable": {"thread_id": tid, "checkpoint_ns": ns}}
+def _cfg(tid: str) -> dict[str, typing.Any]:
+    return {"configurable": {"thread_id": tid, "checkpoint_ns": ""}}
 
 
 def _identity(cls: type) -> str:
     return f"{cls.__module__}:{cls.__qualname__}"
 
 
-def _stored_identities(
-    saver: MemorySaver, tid: str, ns: str = ""
-) -> set[tuple[str, str]]:
-    """Every event identity in the latest checkpoint blobs of the thread
-    under *ns*, read from the bytes, not through the serde."""
-    tup = saver.get_tuple(_cfg(tid, ns))
+def _stored_identities(saver: MemorySaver, tid: str) -> set[tuple[str, str]]:
+    """Every event identity in the latest checkpoint blobs of the thread,
+    read from the bytes, not through the serde."""
+    tup = saver.get_tuple(_cfg(tid))
     assert tup is not None
     found: set[tuple[str, str]] = set()
     for channel, version in tup.checkpoint["channel_versions"].items():
-        blob = saver.blobs.get((tid, ns, channel, version))
+        blob = saver.blobs.get((tid, "", channel, version))
         if blob is None or blob[0] != "msgpack":
             continue
         found.update(_scan_identities(blob[1]))
@@ -1702,20 +1700,6 @@ def describe_rewrite_report():
         assert [t.thread_id for t in report.refused] == ["gone-a", "gone-b"]
         assert lines[1].startswith("  gone-a: refused, history names")
         assert lines[2].startswith("  gone-b: refused, history names")
-
-    def it_names_the_namespace_of_a_refused_subgraph_checkpoint():
-        saver = MemorySaver()
-        saver.serde = NamespaceAwareSerde(events=(Started,))
-        graph = EventGraph([_completes], checkpointer=saver)
-
-        report = graph.event_store.plan_rewrite(
-            thread_ids=["ghost"], checkpoint_ns="child:1"
-        )
-
-        assert str(report).splitlines()[1] == (
-            "  ghost in subgraph namespace 'child:1': refused, no checkpoint "
-            "for this thread id"
-        )
 
     def it_says_rewritten_once_applied():
         saver = MemorySaver()

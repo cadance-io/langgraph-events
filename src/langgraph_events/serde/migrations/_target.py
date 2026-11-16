@@ -40,14 +40,6 @@ class TargetError(Exception):
         return cls(f"The store refused the thread listing ({_one_line(error)}).")
 
 
-@dataclass(frozen=True, order=True)
-class ThreadKey:
-    """One checkpoint namespace of one thread. ``""`` is the root namespace."""
-
-    thread_id: str
-    checkpoint_ns: str
-
-
 @dataclass(frozen=True)
 class MigrationTarget:
     """One graph, its committed baseline and its store.
@@ -62,10 +54,10 @@ class MigrationTarget:
     ``baseline`` is the path of the committed baseline file. ``store``
     returns a context manager that opens the real sync checkpointer. The
     ``backup``, ``rewrite``, ``restore`` and ``drop-backups`` commands use
-    it. ``threads`` lists the checkpoint namespaces of
-    the store. It is needed only for a saver other than ``PostgresSaver``,
+    it. ``threads`` lists the ids of the threads
+    in the store. It is needed only for a saver other than ``PostgresSaver``,
     ``SqliteSaver`` or ``MemorySaver``, or for a store that more than one
-    graph shares. :func:`list_thread_keys` lists the threads of any saver
+    graph shares. :func:`list_thread_ids` lists the threads of any saver
     through its public ``list()``, for a small store. A target with
     ``threads`` declares a store that other graphs can share, so
     :func:`backup_live_set`, :func:`restore_live_set` and
@@ -83,11 +75,11 @@ class MigrationTarget:
     graph: Callable[[BaseCheckpointSaver[Any]], EventGraph | EventStore]
     baseline: Path
     store: Callable[[], AbstractContextManager[BaseCheckpointSaver[Any]]] | None = None
-    threads: Callable[[BaseCheckpointSaver[Any]], Iterable[ThreadKey]] | None = None
+    threads: Callable[[BaseCheckpointSaver[Any]], Iterable[str]] | None = None
     drop: tuple[type[Event], ...] = ()
 
-    def thread_keys(self, saver: BaseCheckpointSaver[Any]) -> tuple[ThreadKey, ...]:
-        """Every checkpoint namespace of every thread in *saver*, sorted.
+    def thread_ids(self, saver: BaseCheckpointSaver[Any]) -> tuple[str, ...]:
+        """The id of every thread with a root checkpoint in *saver*, sorted.
 
         Raises:
             TargetError: when the target has no ``threads`` and the saver
@@ -100,10 +92,9 @@ class MigrationTarget:
         if isinstance(saver, MemorySaver):
             return tuple(
                 sorted(
-                    ThreadKey(thread_id, ns)
+                    thread_id
                     for thread_id, namespaces in saver.storage.items()
-                    for ns, checkpoints in namespaces.items()
-                    if checkpoints
+                    if namespaces.get("")
                 )
             )
         # ``_postgres`` imports this module, so the import is local.
@@ -113,9 +104,9 @@ class MigrationTarget:
         )
 
         try:
-            rows = _postgres.thread_rows(saver)
+            rows = _postgres.thread_ids(saver)
             if rows is None:
-                rows = _sqlite.thread_rows(saver)
+                rows = _sqlite.thread_ids(saver)
         except TargetError:
             raise
         except Exception as error:
@@ -124,7 +115,7 @@ class MigrationTarget:
             failure = f" ({type(error).__name__}: {error})"
             raise TargetError(_no_thread_listing(saver, failure)) from error
         if rows is not None:
-            return tuple(sorted(ThreadKey(tid, ns) for tid, ns in rows))
+            return tuple(sorted(rows))
         raise TargetError(_no_thread_listing(saver, ""))
 
     def open_store(self) -> AbstractContextManager[BaseCheckpointSaver[Any]]:
@@ -245,11 +236,11 @@ class MigrationTarget:
                 ) from error
 
 
-def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
-    """Every checkpoint namespace of every thread in *saver*, sorted, read
-    through the public ``saver.list(None)``.
+def list_thread_ids(saver: BaseCheckpointSaver[Any]) -> list[str]:
+    """The id of every thread with a root checkpoint in *saver*, sorted,
+    read through the public ``saver.list(None)``.
 
-    Set ``threads=list_thread_keys`` on a :class:`MigrationTarget` whose
+    Set ``threads=list_thread_ids`` on a :class:`MigrationTarget` whose
     saver the target cannot list. A checkpoint that names a class the
     serde cannot revive still lists its thread, so the plan can report it.
 
@@ -257,7 +248,7 @@ def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
     store, older checkpoints included. On a large store this costs time in
     proportion to the whole store, and memory when the saver loads all
     rows at once. For a large store, write a ``threads`` function that
-    asks the store for each distinct thread id and checkpoint namespace.
+    asks the store for each distinct thread id of a root checkpoint.
     """
     from langgraph_events.serde._jsonplus import (  # noqa: PLC0415
         NamespaceAwareSerde,
@@ -270,14 +261,12 @@ def list_thread_keys(saver: BaseCheckpointSaver[Any]) -> list[ThreadKey]:
         else contextlib.nullcontext()
     )
     with tolerant:
-        keys = {
-            ThreadKey(
-                tup.config["configurable"]["thread_id"],
-                tup.config["configurable"].get("checkpoint_ns", ""),
-            )
+        ids = {
+            tup.config["configurable"]["thread_id"]
             for tup in saver.list(None)
+            if not tup.config["configurable"].get("checkpoint_ns")
         }
-    return sorted(keys)
+    return sorted(ids)
 
 
 def _one_line(error: BaseException) -> str:
@@ -291,8 +280,8 @@ def _no_thread_listing(saver: BaseCheckpointSaver[Any], failure: str) -> str:
     return (
         f"The target cannot list the threads of a {type(saver).__name__}"
         f"{failure}. Set threads= on the MigrationTarget to a function that "
-        f"takes the saver and returns a ThreadKey for each thread and "
-        f"checkpoint namespace. For a small store, set threads=list_thread_keys. "
+        f"takes the saver and returns the id of each thread. For a small "
+        f"store, set threads=list_thread_ids. "
         f"It reads every checkpoint through saver.list(None), so its time "
         f"grows with the whole store."
     )
