@@ -57,14 +57,8 @@ def describe_MigrationTarget():
                 graph = _graph(saver)
                 graph.invoke(Started(), config=_cfg("b"))
                 graph.invoke(Started(), config=_cfg("a"))
-                tup = saver.get_tuple(_cfg("a"))
-                assert tup is not None
-                saver.put(
-                    _cfg("a", "child:1"),
-                    tup.checkpoint,
-                    tup.metadata,
-                    tup.checkpoint["channel_versions"],
-                )
+                _copy_to_namespace(saver, "a", "child:1")
+                _copy_to_namespace(saver, "a", "child:1", into="c")
                 target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
                 assert target.thread_ids(saver) == ("a", "b")
@@ -78,6 +72,7 @@ def describe_MigrationTarget():
                     graph.invoke(Started(), config=_cfg("b"))
                     graph.invoke(Started(), config=_cfg("a"))
                     _copy_to_namespace(saver, "a", "child:1")
+                    _copy_to_namespace(saver, "a", "child:1", into="c")
                     target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
                     assert target.thread_ids(saver) == ("a", "b")
@@ -101,6 +96,7 @@ def describe_MigrationTarget():
                     graph.invoke(Started(), config=_cfg("b"))
                     graph.invoke(Started(), config=_cfg("a"))
                     _copy_to_namespace(saver, "a", "child:1")
+                    _copy_to_namespace(saver, "a", "child:1", into="c")
                     target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
                     assert target.thread_ids(saver) == ("a", "b")
@@ -155,6 +151,7 @@ def describe_list_thread_ids():
             graph.invoke(Started(), config=_cfg("a"))
             graph.invoke(Started(), config=_cfg("a"))
             _copy_to_namespace(saver, "a", "child:1")
+            _copy_to_namespace(saver, "a", "child:1", into="c")
 
             assert list_thread_ids(saver) == ["a", "b"]
 
@@ -417,6 +414,27 @@ def describe_rewrite_live_set():
                 for report in outcome.passes
             ] == [[("t1", "rewrite")]]
             assert outcome.clean
+
+    def when_the_store_holds_no_thread():
+        def when_the_serde_keeps_legacy_write():
+            def it_raises_the_legacy_write_error(tmp_path: Path):
+                saver = MemorySaver()
+
+                def legacy(saver):
+                    saver.serde = NamespaceAwareSerde(
+                        events=(Started,), legacy_write=True
+                    )
+                    return EventGraph([_noop], checkpointer=saver)
+
+                target = MigrationTarget(
+                    graph=legacy,
+                    baseline=tmp_path / "b.json",
+                    store=lambda: contextlib.nullcontext(saver),
+                )
+                expect = target.snapshot().migrations.fingerprint
+
+                with pytest.raises(ValueError, match=r"legacy_write=True"):
+                    rewrite_live_set(target, expect=expect, apply=True)
 
     def when_the_store_saver_holds_its_own_serde():
         def it_raises_a_target_error_before_it_reads_a_thread(tmp_path: Path):

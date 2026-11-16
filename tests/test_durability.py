@@ -3,7 +3,6 @@
 import asyncio
 import contextvars
 import threading
-import time
 from typing import Any
 
 import pytest
@@ -13,22 +12,34 @@ from langgraph.graph import END, START, StateGraph
 
 from langgraph_events import EventGraph, on
 
-_PUT_DELAY = 0.05
+_GATE_TIMEOUT = 1.0
 
 _CONFIG: Any = {"configurable": {"thread_id": "t1"}}
 
 
-class SlowSaver(InMemorySaver):
-    """Store each checkpoint after a delay. Record whether the store held a
-    ``Processed`` event each time a handler observes it."""
+class GatedSaver(InMemorySaver):
+    """Hold the first checkpoint that holds a ``Processed`` event until a
+    handler observes the store, or until a timeout. Record whether the store
+    held a ``Processed`` event each time a handler observes it.
+
+    A run that stores the checkpoint before the next step waits for the
+    timeout, then observes ``True``. A run that stores it in the background
+    observes ``False``, because the put cannot finish before the observation.
+    """
 
     def __init__(self) -> None:
         super().__init__()
+        self._observed = threading.Event()
         self._stored: set[str] = set()
         self.seen: list[bool] = []
 
     def observe(self) -> None:
         self.seen.append("Processed" in self._stored)
+        self._observed.set()
+
+    def _held(self, checkpoint) -> bool:  # type: ignore[no-untyped-def]
+        events = checkpoint["channel_values"].get("events", [])
+        return any(type(event).__name__ == "Processed" for event in events)
 
     def _store(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
         result = super().put(config, checkpoint, metadata, new_versions)
@@ -37,33 +48,18 @@ class SlowSaver(InMemorySaver):
         return result
 
     def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
-        time.sleep(_PUT_DELAY)
+        if self._held(checkpoint):
+            self._observed.wait(timeout=_GATE_TIMEOUT)
         return self._store(config, checkpoint, metadata, new_versions)
 
     async def aput(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
-        # InMemorySaver.aput calls self.put, which blocks the loop on the sleep.
-        await asyncio.sleep(_PUT_DELAY)
+        # InMemorySaver.aput calls self.put, which blocks the loop on the wait.
+        if self._held(checkpoint):
+            await asyncio.to_thread(self._observed.wait, _GATE_TIMEOUT)
         return self._store(config, checkpoint, metadata, new_versions)
 
 
-class GatedSaver(SlowSaver):
-    """Hold each checkpoint until a handler observes the store. The observation
-    then cannot see a checkpoint that a later write stores."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._observed = threading.Event()
-
-    def observe(self) -> None:
-        super().observe()
-        self._observed.set()
-
-    def put(self, config, checkpoint, metadata, new_versions):  # type: ignore[no-untyped-def]
-        self._observed.wait(timeout=1)
-        return self._store(config, checkpoint, metadata, new_versions)
-
-
-def _handlers(saver: SlowSaver) -> list[Any]:
+def _handlers(saver: GatedSaver) -> list[Any]:
     """Two handlers that run one after the other. The second handler asks the
     saver whether the store holds the event of the first when it starts."""
 
@@ -87,7 +83,7 @@ def _end_at_once(event: Started) -> Ended:
 def describe_EventGraph_durability():
     def when_the_run_uses_compiled_invoke():
         def it_stores_the_checkpoint_before_the_next_handler_starts():
-            saver = SlowSaver()
+            saver = GatedSaver()
             graph = EventGraph(_handlers(saver), checkpointer=saver)
 
             graph.compiled.invoke({"events": [Started(data="x")]}, config=_CONFIG)
@@ -96,7 +92,7 @@ def describe_EventGraph_durability():
 
     def when_the_run_uses_astream_events():
         async def it_stores_the_checkpoint_before_the_next_handler_starts():
-            saver = SlowSaver()
+            saver = GatedSaver()
             graph = EventGraph(_handlers(saver), checkpointer=saver)
 
             async for _ in graph.astream_events(Started(data="x"), config=_CONFIG):

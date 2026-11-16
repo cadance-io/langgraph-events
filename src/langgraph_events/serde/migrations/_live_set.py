@@ -92,8 +92,7 @@ def _verdict_of(status: RewriteStatus) -> Verdict:
 class LiveSetOutcome:
     """Every apply pass and the last plan.
 
-    Each report holds one ``ThreadRewrite`` per checkpoint namespace of
-    each thread, the root namespace first.
+    Each report holds one ``ThreadRewrite`` per thread.
     """
 
     passes: tuple[RewriteReport, ...]
