@@ -5305,7 +5305,13 @@ class ParcelAsked(IntegrationEvent):
 _parcel_placed = ScalarReducer(
     name="placed", event_type=ParcelPlaced, fn=lambda e: True
 )
-_parcel_stage = Derived(name="stage", fn=lambda placed: "placed" if placed else "new")
+
+
+def _parcel_stage_of(placed: bool | None) -> str:
+    return "placed" if placed else "new"
+
+
+_parcel_stage = Derived(name="stage", fn=_parcel_stage_of)
 
 
 @on(ParcelAsked)

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 import operator
+import types
+import typing
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -19,7 +21,7 @@ from typing import (
 )
 
 from langgraph_events._event_log import EventLog
-from langgraph_events._handler import _resolve_parameter_hints
+from langgraph_events._hints import _resolve_hints_and_errors, _resolve_parameter_hints
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -84,6 +86,19 @@ T = TypeVar("T")
 def _last_write_wins(existing: object, new: T) -> T:
     """Binary operator that always takes the newer value."""
     return new
+
+
+def _return_hint(fn: Callable[..., object]) -> object:
+    """The resolved return annotation of *fn*, or ``Any`` when it has none."""
+    return _resolve_hints_and_errors(fn)[0].get("return", Any)
+
+
+def _union_args(hint: object) -> tuple[object, ...]:
+    """The members of a union *hint*, or *hint* alone."""
+    origin = typing.get_origin(hint)
+    if origin is typing.Union or origin is types.UnionType:
+        return typing.get_args(hint)
+    return (hint,)
 
 
 def _matches_namespace(event: object, dom: type[Namespace] | None) -> bool:
@@ -169,43 +184,28 @@ class BaseReducer(ABC):
     def _read(self, read: StateRead) -> object:
         return self.read(read.state)
 
-    def _fits(self, declared: object) -> bool | str:
-        """Whether a value of this channel can satisfy *declared*.
-
-        :meth:`output_type` holds no type argument, so the check erases
-        the type arguments of *declared*. ``None`` is accepted, because a
-        non-``None`` annotation opts into :class:`ReducerNotSetError`. A
-        string is the reason that the check cannot run.
-        """
-        from langgraph_events._services import (  # noqa: PLC0415
-            _erased,
-            _hint_fits,
-            _or_none,
-        )
-
-        return _hint_fits(self.output_type(), _erased(_or_none(declared)))
-
-    def _describe_value(self) -> str:
-        from langgraph_events._services import _hint_label  # noqa: PLC0415
-
-        return f"reducer {self.name!r} holds {_hint_label(self.output_type())}"
+    def _value_type(self) -> object:
+        """The type of the value that :meth:`read` gives. A subclass that
+        does not know it gives ``Any``, and no annotation check runs."""
+        return Any
 
     def _describe(self) -> str:
         return f"reducer {self.name!r}"
 
-    def _not_set_hint(self) -> str:
-        """The first fix that a ``ReducerNotSetError`` names.
+    def _not_set_hint(self, reader: str) -> str:
+        """The first fix that a ``ReducerNotSetError`` names. *reader* is
+        the kind of reader, such as ``"this handler"``.
 
         A catch-all reducer (``event_type=Event``) gives no useful hint.
         """
         from langgraph_events._event import Event  # noqa: PLC0415
 
         if self.event_type is Event:
-            return "Set the reducer before this handler runs, or "
+            return f"Set the reducer before {reader} runs, or "
         type_name = getattr(self.event_type, "__name__", str(self.event_type))
         return (
             f"Ensure an event of type {type_name} has been "
-            f"processed before this handler runs, or "
+            f"processed before {reader} runs, or "
         )
 
 
@@ -234,18 +234,14 @@ class Readable(Protocol):
         """The value in *read*, with an empty default for an unset channel."""
         ...
 
-    def _fits(self, declared: object) -> bool | str:
-        """Whether the value can satisfy the annotation *declared*. A string
-        is the reason that the check cannot run."""
-        ...
-
-    def _describe_value(self) -> str:
-        """State what the value is known to be, for an error."""
+    def _value_type(self) -> object:
+        """The type of the value, for the check of a reader's annotation.
+        ``Any`` means that the type is not known."""
         ...
 
     def _describe(self) -> str: ...
 
-    def _not_set_hint(self) -> str: ...
+    def _not_set_hint(self, reader: str) -> str: ...
 
 
 @dataclass
@@ -314,6 +310,11 @@ class Reducer(BaseReducer):
     def output_type(self) -> object:
         return list
 
+    def _value_type(self) -> object:
+        """The ``list`` type that ``fn`` returns, or ``list[Any]``."""
+        returns = _return_hint(self.fn)
+        return returns if typing.get_origin(returns) is list else list[Any]
+
     def seed(self, events: list[Event]) -> list[Any]:
         values = list(self.default)
         values.extend(self.collect(events))
@@ -381,6 +382,15 @@ class ScalarReducer(BaseReducer):
 
     def output_type(self) -> object:
         return Any
+
+    def _value_type(self) -> object:
+        """The type that ``fn`` returns, without ``SKIP``, or the type of
+        ``default``. ``Any`` when ``fn`` has no return annotation."""
+        returns = _return_hint(self.fn)
+        if returns is Any:
+            return Any
+        kept = [a for a in _union_args(returns) if a is not _SkipType]
+        return typing.Union[(*kept, type(self.default))]
 
     def seed(self, events: list[Event]) -> object:
         result = self.collect(events)
@@ -493,6 +503,13 @@ class FoldReducer(BaseReducer, Generic[S]):
     def output_type(self) -> object:
         return Any
 
+    def _value_type(self) -> object:
+        """The class that ``default_factory`` is, or the type that it
+        returns. ``Any`` when the factory has no return annotation."""
+        if isinstance(self.default_factory, type):
+            return self.default_factory
+        return _return_hint(self.default_factory)
+
     def seed(self, events: list[Event]) -> S:
         return self._fold_events(self.default_factory(), self.collect(events).events)
 
@@ -528,17 +545,19 @@ class Derived(Generic[T]):
     handler runs, the framework calls ``fn`` with the values of the inputs.
     A handler receives the result by parameter name, like a reducer value::
 
-        stage = Derived(
-            name="stage",
-            fn=lambda placed, shipped: "shipped" if shipped else "placed",
-        )
+        def stage_of(placed: bool | None, shipped: bool | None) -> str:
+            return "shipped" if shipped else "placed"
+
+        stage = Derived(name="stage", fn=stage_of)
 
         @on(Checked)
         def check(event: Checked, stage: str) -> Reported: ...
 
     The value is never written to the checkpoint, so it cannot drift from
-    its inputs. One state read computes each ``Derived`` once. ``Derived``
-    values must not read each other in a cycle. As on a
+    its inputs. One state read computes each ``Derived`` once. ``fn`` must
+    have a return annotation, because the framework checks the annotation
+    of each reader against it. ``Derived`` values must not read each other
+    in a cycle. As on a
     :class:`ScalarReducer` parameter, a non-``None`` annotation opts into
     :class:`ReducerNotSetError`.
 
@@ -624,6 +643,19 @@ class Derived(Generic[T]):
                 inputs.append(_LogInput(param.name))
             else:
                 inputs.append(resolve(param, hint_errors.get(param.name)))
+        if "return" in hint_errors:
+            raise TypeError(
+                f"Derived {self.name!r} has a return annotation that does not "
+                f"resolve ({hint_errors['return']}). Make every name in it "
+                f"importable at run time."
+            )
+        if "return" not in hints:
+            raise TypeError(
+                f"Derived {self.name!r} has no return annotation. The framework "
+                f"checks the annotation of each reader against it. A lambda "
+                f"cannot have one, so use a def, for example: "
+                f"def stage_of(placed: bool | None) -> str."
+            )
         return _BoundDerived(self, tuple(inputs))
 
 
@@ -644,18 +676,13 @@ class _LogInput:
     def _read(self, read: StateRead) -> EventLog:
         return read.log
 
-    def _fits(self, declared: object) -> bool | str:
-        """A log input lives only inside a ``Derived``, which no annotation
-        check reads."""
-        return True
-
-    def _describe_value(self) -> str:
-        return "the EventLog"
+    def _value_type(self) -> object:
+        return EventLog
 
     def _describe(self) -> str:
         return "the EventLog"
 
-    def _not_set_hint(self) -> str:
+    def _not_set_hint(self, reader: str) -> str:
         return ""
 
 
@@ -800,33 +827,15 @@ class _BoundDerived(Generic[T]):
             exc.add_note(f"Derived {self.name!r} raised while it computed its value.")
             raise
 
-    def _returns(self) -> object:
-        """The return annotation of ``fn``, or ``Any`` when it has none or it
-        does not resolve."""
-        from langgraph_events._handler import _resolve_hints_and_errors  # noqa: PLC0415
-
-        hints, _ = _resolve_hints_and_errors(self.derived.fn)
-        return hints.get("return", Any)
-
-    def _fits(self, declared: object) -> bool | str:
-        """Whether the return annotation of ``fn`` satisfies *declared*.
-
-        ``None`` is accepted, because a non-``None`` annotation opts into
-        :class:`ReducerNotSetError`.
-        """
-        from langgraph_events._services import _hint_fits, _or_none  # noqa: PLC0415
-
-        return _hint_fits(self._returns(), _or_none(declared))
-
-    def _describe_value(self) -> str:
-        from langgraph_events._services import _hint_label  # noqa: PLC0415
-
-        return f"Derived {self.name!r} returns {_hint_label(self._returns())}"
+    def _value_type(self) -> object:
+        """The return annotation of ``fn``. The bind refuses a ``Derived``
+        without one."""
+        return _resolve_parameter_hints(self.derived.fn)[0]["return"]
 
     def _describe(self) -> str:
         return f"Derived {self.name!r}"
 
-    def _not_set_hint(self) -> str:
+    def _not_set_hint(self, reader: str) -> str:
         return f"Make Derived {self.name!r} return a non-None value, or "
 
 

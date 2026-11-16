@@ -126,7 +126,7 @@ def _render_taxonomy_lines(  # noqa: PLR0912
         (dv.name, [*dv.inputs, *(["log"] if dv.reads_log else [])]) for dv in d.derived
     ]
     lines += _computed_lines("Derived", derived, "no input")
-    run_scoped = [(rs.name, list(rs.inputs)) for rs in d.run_scoped]
+    run_scoped = [(rs.name, [i.label for i in rs.inputs]) for rs in d.run_scoped]
     lines += _computed_lines("RunScoped", run_scoped, "nothing")
     return lines
 

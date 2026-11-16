@@ -322,9 +322,9 @@ def describe_context_schema():
                     )
 
                 assert str(info.value).startswith(
-                    "RunScoped factory '_other_context' for service 'model' reads "
-                    "parameter 'context', which names no reducer, no Derived and "
-                    "no service."
+                    "RunScoped factory '_other_context' for service 'model' "
+                    "declares parameter(s) ['context'] that the framework cannot "
+                    "inject"
                 )
 
     def describe_type_keyed_services():

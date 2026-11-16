@@ -315,3 +315,98 @@ def describe_scalar_reducer_required_value():
 
                 with pytest.raises(ReducerNotSetError):
                     graph.invoke([Track.Acknowledged(msg="x")])
+
+
+def _tempo_of(e: TempoChosen) -> int:
+    return e.bpm
+
+
+def _name_of(e: StrategyChosen) -> str:
+    return e.name
+
+
+tempo = ScalarReducer(name="tempo", event_type=TempoChosen, fn=_tempo_of)
+strategy = ScalarReducer(name="strategy", event_type=StrategyChosen, fn=_name_of)
+
+
+def describe_handler_reducer_parameter_rules():
+    def when_the_parameter_has_a_default():
+        def when_the_reducer_is_unset():
+            def it_receives_the_default():
+                seen: list[object] = []
+
+                @on(Trigger)
+                def pick(event: Trigger, strategy: str = "steady") -> None:
+                    seen.append(strategy)
+
+                EventGraph([pick], reducers=[strategy]).invoke(Trigger())
+
+                assert seen == ["steady"]
+
+        def when_the_reducer_is_set():
+            def it_receives_the_value():
+                seen: list[object] = []
+
+                @on(Trigger)
+                def pick(event: Trigger, strategy: str = "steady") -> None:
+                    seen.append(strategy)
+
+                EventGraph([pick], reducers=[strategy]).invoke(
+                    [StrategyChosen(name="bold"), Trigger()]
+                )
+
+                assert seen == ["bold"]
+
+    def when_the_annotation_does_not_fit_the_value_type():
+        def it_raises_at_graph_build_naming_the_fix():
+            @on(Trigger)
+            def pick(event: Trigger, tempo: str) -> None:
+                pass
+
+            with pytest.raises(
+                TypeError,
+                match=r"declares parameter 'tempo' as str, but reducer 'tempo' "
+                r"gives int \| None\. Change the annotation to int \| None",
+            ):
+                EventGraph([pick], reducers=[tempo])
+
+    def when_a_float_annotation_reads_an_int_value():
+        def it_accepts_the_numeric_tower():
+            seen: list[object] = []
+
+            @on(Trigger)
+            def pick(event: Trigger, tempo: float) -> None:
+                seen.append(tempo)
+
+            EventGraph([pick], reducers=[tempo]).invoke(
+                [TempoChosen(bpm=90), Trigger()]
+            )
+
+            assert seen == [90]
+
+    def when_the_fold_state_does_not_fit_the_annotation():
+        def it_raises_at_graph_build():
+            class Beat(IntegrationEvent):
+                def fold(self, state: int) -> int:
+                    return state + 1
+
+            beats = langgraph_events.FoldReducer(
+                name="beats", event_type=Beat, default_factory=int
+            )
+
+            @on(Trigger)
+            def pick(event: Trigger, beats: str) -> None:
+                pass
+
+            with pytest.raises(TypeError, match=r"reducer 'beats' gives int"):
+                EventGraph([pick], reducers=[beats])
+
+    def when_the_reducer_function_has_no_return_annotation():
+        def it_checks_nothing():
+            loose = ScalarReducer(name="loose", event_type=TempoChosen, fn=lambda e: 1)
+
+            @on(Trigger)
+            def pick(event: Trigger, loose: str | None) -> None:
+                pass
+
+            EventGraph([pick], reducers=[loose])

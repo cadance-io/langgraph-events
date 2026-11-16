@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json as _json
+import re
 import typing
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
     from langgraph_events._handler import HandlerMeta
+    from langgraph_events._inputs import BoundFactory, InputKind
     from langgraph_events._reducer import BaseReducer
     from langgraph_events._reducer import Derived as DerivedValue
     from langgraph_events._retry import RetryPolicy
@@ -42,6 +44,12 @@ if TYPE_CHECKING:
 
 
 View = Literal["structure", "choreography"]
+
+_NODE_KINDS = frozenset({"reducer", "derived", "run_scoped"})
+"""The kinds of input that the mermaid diagram draws as a node."""
+
+_NAMED_KINDS = _NODE_KINDS | {"service"}
+"""The kinds of input that a parameter name names."""
 
 # Framework-emitted classes: users don't seed these — the framework writes
 # them into the log in response to handler outcomes (exceptions, interrupts,
@@ -77,6 +85,16 @@ def _event_node_id(cls: type) -> str:
     single node.
     """
     return cls.__qualname__.replace("<locals>.", "").replace(".", "_")
+
+
+def _reducer_node_id(name: str) -> str:
+    """Mermaid-safe node ID of a reducer, apart from every event node ID."""
+    return "_reducer_" + re.sub(r"\W", "_", name)
+
+
+def _service_node_id(name: str) -> str:
+    """Mermaid-safe node ID of a ``RunScoped`` service."""
+    return "_service_" + re.sub(r"\W", "_", name)
 
 
 def _build_node_id_map(d: NamespaceModel) -> dict[type, str]:
@@ -326,21 +344,47 @@ class NamespaceModel:
         reads_log: bool = False
 
     @dataclass(frozen=True)
-    class RunScoped:
-        """A ``RunScoped`` service of an ``EventGraph``, and the inputs that
-        its factory reads.
+    class Input:
+        """One parameter of a ``RunScoped`` factory, and the kind of its input.
 
-        ``inputs`` holds the parameter names of the factory, in signature
-        order. Each one names the run config, the run context, ``log``, a
-        stored reducer, a ``Derived`` or another service. ``reads`` holds
-        the inputs that bind by name to a stored reducer, a ``Derived`` or
-        another service. A topology has no services, so only
-        ``EventGraph.namespaces()`` lists them.
+        ``kind`` is ``"config"``, ``"context"``, ``"store"``, ``"log"``,
+        ``"reflection"``, ``"reducer"``, ``"derived"``, ``"service"`` for a
+        plain service, or ``"run_scoped"`` for another ``RunScoped`` service.
         """
 
         name: str
-        inputs: tuple[str, ...]
-        reads: tuple[str, ...] = ()
+        kind: InputKind
+
+        @property
+        def label(self) -> str:
+            """The parameter name for an input that a name names, else the
+            kind."""
+            return self.name if self.kind in _NAMED_KINDS else self.kind
+
+    @dataclass(frozen=True)
+    class RunScoped:
+        """A ``RunScoped`` service of an ``EventGraph``, and the inputs that
+        its factory reads, in signature order.
+
+        A topology has no services, so only ``EventGraph.namespaces()``
+        lists them.
+        """
+
+        name: str
+        inputs: tuple[NamespaceModel.Input, ...]
+
+        @property
+        def reads(self) -> tuple[str, ...]:
+            """The names of the stored reducers, the ``Derived`` values and
+            the other ``RunScoped`` services that the factory reads."""
+            return tuple(i.name for i in self.inputs if i.kind in _NODE_KINDS)
+
+        @classmethod
+        def of(cls, factory: BoundFactory) -> NamespaceModel.RunScoped:
+            return cls(
+                factory.name,
+                tuple(NamespaceModel.Input(p.name, p.kind) for p in factory.params),
+            )
 
     @dataclass(frozen=True)
     class Focus:

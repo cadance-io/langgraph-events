@@ -1190,32 +1190,33 @@ def describe_Command_handle():
 
         def when_param_name_matches_a_reducer_and_type_matches_a_service():
 
-            def it_resolves_to_the_reducer_not_the_service():
-                observed: dict[str, object] = {}
-
+            def it_refuses_the_annotation_that_does_not_fit_the_reducer():
                 @on(Shop.Buy.Bought)
                 def collide(
                     event: Shop.Buy.Bought,
                     chat_model: _StubChatModel,
                 ) -> None:
-                    observed["chat_model"] = chat_model
+                    pass
 
                 # Reducer named "chat_model" — collides with the param name.
-                # Per the resolution order (reducer → framework → service),
-                # the reducer state wins, so the handler receives a list.
+                # The reducer claims the param, so its value type must fit the
+                # annotation. A list does not fit _StubChatModel.
                 chat_log = Reducer(
                     name="chat_model",
                     event_type=Shop.Buy.Bought,
                     fn=lambda e: [e.item],
                 )
-                chat_model_svc = _StubChatModel(value="from-service")
-                graph = EventGraph(
-                    [collide],
-                    reducers=[chat_log],
-                    services=[chat_model_svc],
-                )
-                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
-                assert observed["chat_model"] == ["apple"]
+                with pytest.raises(
+                    TypeError,
+                    match=r"declares parameter 'chat_model' as _StubChatModel, "
+                    r"but reducer 'chat_model' gives list\[Any\]\. Change "
+                    r"the annotation to list\[Any\]",
+                ):
+                    EventGraph(
+                        [collide],
+                        reducers=[chat_log],
+                        services=[_StubChatModel(value="from-service")],
+                    )
 
         def when_external_handler_declares_multiple_service_params():
 

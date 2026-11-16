@@ -32,11 +32,11 @@ from langgraph_events._handler import (
     BoundHandler,
     HandlerMeta,
     ServiceRequirement,
-    _resolve_hints_and_errors,
     is_coercible_schema,
     normalize_previous_names,
     on,
 )
+from langgraph_events._hints import _resolve_hints_and_errors
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _InputState,
@@ -67,7 +67,7 @@ if TYPE_CHECKING:
     from langgraph.types import Checkpointer, Durability
 
     from langgraph_events._reducer import BaseReducer, Derived
-    from langgraph_events._services import BoundFactory, Services
+    from langgraph_events._services import Services
     from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import (
         NamespaceAwareSerde,
@@ -597,11 +597,10 @@ class EventTopology:
 
         self._handler_metas: list[HandlerMeta] = []
 
-        reducer_names = self.injectable_names
         seen_names: dict[str, int] = {}
         for fn in handlers:
             meta = HandlerMeta.of(
-                fn, reducer_names=reducer_names, context_schema=context_schema
+                fn, readables=self._registry.readables, context_schema=context_schema
             )
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
@@ -816,24 +815,10 @@ class EventTopology:
         and signature order. A variadic parameter is not listed."""
         return tuple(r for meta in self._handler_metas for r in meta.requirements)
 
-    def _bind_factories(self, services: Services) -> Mapping[str, BoundFactory]:
-        """Bind each ``RunScoped`` factory of *services* to its inputs.
+    def _bind(self, services: Services, *, entry: str) -> tuple[BoundHandler, ...]:
+        """Bind *services* to each handler, in handler order. Each
+        ``RunScoped`` factory of *services* is bound already.
 
-        Raises ``TypeError`` for a factory parameter that cannot bind, and
-        for a service whose name a reducer or a ``Derived`` also has.
-        """
-        return services.bind_factories(self._registry.readables, self._context_schema)
-
-    def _bind(
-        self,
-        services: Services,
-        factories: Mapping[str, BoundFactory],
-        *,
-        entry: str,
-    ) -> tuple[BoundHandler, ...]:
-        """Bind *services* to each handler, in handler order.
-
-        *factories* holds the bound ``RunScoped`` factories of *services*.
         Raises ``TypeError`` for a name-keyed service that does not satisfy
         the parameter annotation, and for a parameter that no source fills.
         *entry* is the call that received ``services=``, for the error.
@@ -841,7 +826,7 @@ class EventTopology:
         reducer_names = self.injectable_names
         bound: list[BoundHandler] = []
         for meta in self._handler_metas:
-            handler = services.bind(meta, self._context_schema, factories)
+            handler = services.bind(meta, self._context_schema)
             handler.require_claimed(
                 reducer_names,
                 received=services.received(),

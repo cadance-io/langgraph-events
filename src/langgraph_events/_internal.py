@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Readable
-    from langgraph_events._services import FactoryInput
     from langgraph_events._topology import ReturnContract
 
 from langgraph.graph import END
@@ -47,15 +46,9 @@ from langgraph_events._event import (
 )
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
+from langgraph_events._inputs import NodeCall
 from langgraph_events._pause import _pause_budget, _PauseBudget
-from langgraph_events._reducer import ReducerNotSetError, StateRead
-from langgraph_events._services import (
-    BoundFactory,
-    ContextInput,
-    LogInput,
-    ReadableInput,
-    ValueInput,
-)
+from langgraph_events._reducer import StateRead
 from langgraph_events._types import (  # noqa: TC001
     HandlerReturn,
     StateDict,
@@ -328,146 +321,11 @@ def _build_inject(
 ) -> dict[str, Any]:
     """Build keyword arguments to inject into a handler call.
 
-    Each reducer parameter reads its value from the channels in *state*, as
-    of node start. A ``Derived`` value is computed here and never written
-    back.
+    Each parameter reads its value as of node start. A ``Derived`` value is
+    computed here and never written back.
     """
-    meta = bound.meta
-    inject: dict[str, Any] = {}
-    read = StateRead(state)
-    if meta.log_param or meta.reflection_param:
-        log_view = read.log
-        if meta.log_param:
-            inject[meta.log_param] = log_view
-        if meta.reflection_param:
-            from langgraph_events._reflection import Reflection  # noqa: PLC0415
-
-            inject[meta.reflection_param] = Reflection(
-                log_view, model=model_provider(), reducers=readables
-            )
-    for param_name in meta.reducer_params:
-        readable = readables[param_name]
-        value = readable._read(read)
-        if value is None and param_name in meta.required_reducer_params:
-            raise _make_reducer_not_set_error(
-                f"Handler {meta.name!r}", param_name, readable
-            )
-        inject[param_name] = value
-    if meta.config_param and config is not None:
-        inject[meta.config_param] = config
-    if meta.store_param:
-        if config is None:
-            raise ValueError(
-                f"Handler '{meta.name}' requested BaseStore injection, but runtime "
-                "config is missing."
-            )
-        runtime = config.get("configurable", {}).get("__pregel_runtime")
-        store = runtime.store if runtime is not None else None
-        if store is None:
-            raise ValueError(
-                f"Handler '{meta.name}' requested BaseStore injection, but no store "
-                "is configured. Pass store=... to EventGraph(...)."
-            )
-        inject[meta.store_param] = store
-    if meta.context_param:
-        inject[meta.context_param] = _runtime_context(f"Handler {meta.name!r}")
-    scope = _RunScope(meta.name, read, config)
-    for param_name, service in bound.services:
-        inject[param_name] = (
-            scope.build(service, f"Handler {meta.name!r}")
-            if isinstance(service, BoundFactory)
-            else service
-        )
-    return inject
-
-
-class _RunScope:
-    """The ``RunScoped`` services of one node call of handler *handler*.
-
-    Each factory runs at most once. Its result serves every reader in the
-    call: the handler and each factory that reads it.
-    """
-
-    def __init__(
-        self,
-        handler: str,
-        read: StateRead,
-        config: RunnableConfig | None,
-    ) -> None:
-        self._handler = handler
-        self._read = read
-        self._config = config
-        self._built: dict[str, object] = {}
-
-    def build(self, factory: BoundFactory, requester: str) -> object:
-        """The result of *factory* in this call. *requester* names the reader,
-        for the note of an error."""
-        if factory.name in self._built:
-            return self._built[factory.name]
-        try:
-            values = [self._value(factory, p, source) for p, source in factory.params]
-            result = factory.call(values)
-        except Exception as exc:
-            # Keep the type, so a caller that catches it still can.
-            exc.add_note(
-                f"{requester} requested the run-scoped service "
-                f"{factory.name!r}, but its factory raised."
-            )
-            raise
-        self._built[factory.name] = result
-        return result
-
-    def _value(self, factory: BoundFactory, param: str, source: FactoryInput) -> object:
-        if isinstance(source, BoundFactory):
-            return self.build(source, factory.label)
-        if isinstance(source, ValueInput):
-            return source.value
-        if isinstance(source, ReadableInput):
-            value = source.readable._read(self._read)
-            if value is None and source.required:
-                raise _make_reducer_not_set_error(factory.label, param, source.readable)
-            return value
-        if isinstance(source, LogInput):
-            return self._read.log
-        if isinstance(source, ContextInput):
-            return _runtime_context(f"{factory.label} of handler {self._handler!r}")
-        if self._config is None:
-            raise ValueError(
-                f"Handler {self._handler!r} requested the run-scoped service "
-                f"{factory.name!r}, whose factory reads the run config, but "
-                f"runtime config is missing."
-            )
-        return self._config
-
-
-def _runtime_context(subject: str) -> object:
-    """Return the context of the current run from LangGraph's ``Runtime``.
-
-    *subject* names the reader, for the error. The context is ``None`` only
-    when a caller runs ``EventGraph.compiled`` directly without
-    ``context=``. The ``EventGraph`` run methods refuse that.
-    """
-    from langgraph.runtime import get_runtime  # noqa: PLC0415
-
-    context = get_runtime().context
-    if context is None:
-        raise ValueError(
-            f"{subject} needs the run context, but the run has no "
-            f"context. Pass context=... to the run call."
-        )
-    return context
-
-
-def _make_reducer_not_set_error(
-    subject: str, param_name: str, readable: Readable
-) -> ReducerNotSetError:
-    """Build a ``ReducerNotSetError`` with an actionable message. *subject*
-    names the reader: a handler or a ``RunScoped`` factory."""
-    return ReducerNotSetError(
-        f"{subject} requires {readable._describe()} to be "
-        f"set, but its value is None. {readable._not_set_hint()}change the "
-        f"annotation to permit None (e.g. '{param_name}: <type> | None')."
-    )
+    call = NodeCall(state, config, readables=readables, model_provider=model_provider)
+    return call.values(bound.params, f"Handler {bound.meta.name!r}")
 
 
 def _apply_reducers(

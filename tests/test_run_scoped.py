@@ -174,19 +174,21 @@ def describe_RunScoped():
                 assert any("handle" in n and "model" in n for n in notes), notes
 
         def when_the_runtime_config_is_missing():
-            def it_raises_a_value_error_naming_the_handler_and_parameter():
+            def it_raises_a_value_error_naming_the_factory_and_parameter():
                 @on(Started)
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
                 services = NamedServices({"model": RunScoped(_model_for)})
-                bound = services.bind(
-                    HandlerMeta.of(handle, reducer_names=frozenset()),
-                    None,
-                    services.bind_factories({}, None),
+                bound = services.bind_factories({}, None).bind(
+                    HandlerMeta.of(handle, readables={}), None
                 )
 
-                with pytest.raises(ValueError, match=r"handle.*model"):
+                with pytest.raises(
+                    ValueError,
+                    match=r"RunScoped factory '_model_for' for service 'model' "
+                    r"needs the run config for parameter 'config'",
+                ):
                     _build_inject(
                         bound,
                         {"events": []},
@@ -482,7 +484,7 @@ def _unannotated_reader(choice) -> _Reader:  # type: ignore[no-untyped-def]
     return _Reader(choice=choice)
 
 
-def _defaulted_reader(choice: str | None = None) -> _Reader:
+def _defaulted_reader(choice: str = "coffee") -> _Reader:
     return _Reader(choice=choice)
 
 
@@ -731,12 +733,25 @@ def describe_RunScoped_factory_inputs():
             with pytest.raises(LookupError) as info:
                 graph.invoke(_Told())
 
-            assert info.value.__notes__[:2] == [
+            assert info.value.__notes__[0] == (
                 "RunScoped factory '_first_of_base' for service 'reader' "
-                "requested the run-scoped service 'base', but its factory raised.",
-                "Handler '_read_one' requested the run-scoped service 'reader', "
-                "but its factory raised.",
-            ]
+                "requested the run-scoped service 'base', but its factory raised."
+            )
+
+        def it_adds_no_note_for_the_reader_whose_factory_never_ran():
+            graph = EventGraph(
+                [_read_one],
+                reducers=[_choices],
+                services={
+                    "base": RunScoped(_raising_base),
+                    "reader": RunScoped(_first_of_base),
+                },
+            )
+
+            with pytest.raises(LookupError) as info:
+                graph.invoke(_Told())
+
+            assert not any("service 'reader'" in n for n in info.value.__notes__[1:])
 
 
 def _first_of_base(base: _Reader) -> _Reader:
@@ -753,40 +768,76 @@ def describe_RunScoped_factory_rules():
         )
 
     def when_a_parameter_has_no_annotation():
-        def it_raises_naming_the_factory_the_parameter_and_the_fix():
-            with pytest.raises(TypeError) as info:
-                _build({"reader": RunScoped(_unannotated_reader)})
-
-            assert str(info.value).startswith(
-                "RunScoped factory '_unannotated_reader' for service 'reader' "
-                "has no annotation on parameter 'choice'. Annotate it with "
-                "RunnableConfig, the context schema, EventLog, or the type of "
-                "the reducer, Derived or service that it names."
+        def it_binds_the_parameter_by_name():
+            _build({"reader": RunScoped(_unannotated_reader)}).invoke(
+                [_Picked(choice="tea"), _Told()]
             )
+
+            assert [r.inputs for r in _SEEN] == [{"choice": "tea"}]  # type: ignore[attr-defined]
 
     def when_a_parameter_has_a_default():
-        def it_raises_naming_the_factory_the_parameter_and_the_fix():
-            with pytest.raises(TypeError) as info:
-                _build({"reader": RunScoped(_defaulted_reader)})
+        def when_the_input_is_unset():
+            def it_receives_the_default():
+                _build({"reader": RunScoped(_defaulted_reader)}).invoke(_Told())
 
-            assert str(info.value) == (
-                "RunScoped factory '_defaulted_reader' for service 'reader' "
-                "gives parameter 'choice' a default value. A default hides a "
-                "missing input. Remove the default."
-            )
+                assert [r.inputs for r in _SEEN] == [{"choice": "coffee"}]  # type: ignore[attr-defined]
+
+        def when_the_input_is_set():
+            def it_receives_the_value():
+                _build({"reader": RunScoped(_defaulted_reader)}).invoke(
+                    [_Picked(choice="tea"), _Told()]
+                )
+
+                assert [r.inputs for r in _SEEN] == [{"choice": "tea"}]  # type: ignore[attr-defined]
 
     def when_a_parameter_names_nothing():
-        def it_raises_listing_the_available_names():
-            with pytest.raises(TypeError) as info:
+        def it_raises_naming_the_other_services_and_the_fix():
+            with (
+                pytest.warns(UserWarning, match=r"'choise'.*Available reducers"),
+                pytest.raises(TypeError) as info,
+            ):
                 _build({"reader": RunScoped(_typo_reader), "setting": "on"})
 
             assert str(info.value) == (
-                "RunScoped factory '_typo_reader' for service 'reader' reads "
-                "parameter 'choise', which names no reducer, no Derived and no "
-                "service. Rename the parameter to one of the available names: "
-                "reducers ['choice', 'choices'], Derived values ['shout'], "
-                "services ['reader', 'setting'], or 'log' for the EventLog."
+                "RunScoped factory '_typo_reader' for service 'reader' declares "
+                "parameter(s) ['choise'] that the framework cannot inject: "
+                "'choise' (str). services= has the name keys ['setting']. For "
+                "service injection, register a matching instance via services=; "
+                "for state, register a Reducer; otherwise remove the parameter."
             )
+
+        def when_the_parameter_is_named_config():
+            def it_names_the_run_config_fix():
+                def untyped_config(config: dict[str, Any]) -> _Model:
+                    return _Model("en")
+
+                with pytest.raises(
+                    TypeError,
+                    match=r"To read the run config, annotate 'config' with exactly "
+                    r"RunnableConfig\.",
+                ):
+                    _build({"reader": RunScoped(untyped_config)})
+
+        def when_the_parameter_is_named_log():
+            def it_names_the_event_log_fix():
+                with pytest.raises(
+                    TypeError,
+                    match=r"To read the EventLog, annotate 'log' with EventLog\.",
+                ):
+                    _build({"reader": RunScoped(_wrong_log_type)})
+
+        def when_the_parameter_annotation_is_an_event():
+            def it_says_that_a_factory_cannot_read_the_event():
+                def from_event(event: _Told) -> _Model:
+                    return _Model(event.text)
+
+                with pytest.raises(TypeError) as info:
+                    _build({"reader": RunScoped(from_event)})
+
+                assert "A factory cannot read the event _Told. Read it in the " in (
+                    str(info.value)
+                )
+                assert "context_schema" not in str(info.value)
 
     def when_a_parameter_is_variadic():
         def it_raises_naming_the_factory_and_the_parameter():
@@ -815,26 +866,48 @@ def describe_RunScoped_factory_rules():
                 _build({"reader": RunScoped(_choice_reader), "shout": "x"})
 
     def when_a_factory_reads_log_and_a_service_has_the_name_log():
-        def it_raises_naming_the_factory():
-            with pytest.raises(TypeError, match=r"'_log_reader'.*'log'.*service"):
-                _build({"reader": RunScoped(_log_reader), "log": "x"})
+        def it_reads_the_event_log_by_the_annotation():
+            graph = _build({"reader": RunScoped(_log_reader), "log": "x"})
+
+            graph.invoke(_Told())
+
+            assert [type(r.inputs["log"]) for r in _SEEN] == [EventLog]  # type: ignore[attr-defined]
+
+    def when_a_reducer_has_the_name_log():
+        def it_reads_the_reducer_for_a_parameter_that_names_it():
+            def by_name(log: str | None) -> _Reader:
+                return _Reader(log=log)
+
+            named_log = ScalarReducer(name="log", event_type=_Picked, fn=lambda e: "x")
+            graph = EventGraph(
+                [_read_one],
+                reducers=[named_log],
+                services={"reader": RunScoped(by_name)},
+            )
+
+            graph.invoke([_Picked(), _Told()])
+
+            assert [r.inputs for r in _SEEN] == [{"log": "x"}]  # type: ignore[attr-defined]
 
     def when_the_annotation_does_not_match_the_source():
         @pytest.mark.parametrize(
             ("factory", "services", "fragment"),
             [
-                (_wrong_reducer_type, {}, "reducer 'choices' holds list"),
-                (_wrong_derived_type, {}, "Derived 'shout' returns str"),
+                (_wrong_reducer_type, {}, "reducer 'choices' gives list"),
+                (_wrong_derived_type, {}, "Derived 'shout' gives str"),
                 (
                     _wrong_factory_type,
                     {"base": RunScoped(_choice_reader)},
-                    "service 'base' is RunScoped(_choice_reader), which returns "
-                    "_Reader",
+                    "services['base'] is RunScoped(_choice_reader) and that "
+                    "factory returns _Reader",
                 ),
-                (_wrong_service_type, {"setting": "on"}, "service 'setting' is str"),
-                (_wrong_log_type, {}, "'log' is the EventLog"),
+                (
+                    _wrong_service_type,
+                    {"setting": "on"},
+                    "services['setting'] is an instance of str",
+                ),
             ],
-            ids=["reducer", "derived", "factory", "service", "log"],
+            ids=["reducer", "derived", "factory", "service"],
         )
         def it_raises_naming_the_factory_the_parameter_and_the_fix(
             factory: Any, services: dict[str, object], fragment: str
@@ -848,7 +921,7 @@ def describe_RunScoped_factory_rules():
                 f"declares parameter "
             )
             assert fragment in message
-            assert "Change the annotation" in message
+            assert " the annotation" in message
 
     def when_factories_read_each_other_in_a_cycle():
         def it_raises_naming_the_cycle():
@@ -876,22 +949,98 @@ def describe_RunScoped_in_the_structure_views():
             },
         )
 
-    def it_lists_each_factory_and_its_inputs_in_the_text():
-        text = _graph().namespaces().text()
+    def when_the_factories_read_reducers_and_factories():
+        def it_lists_each_factory_and_its_inputs_in_the_text():
+            text = _graph().namespaces().text()
 
-        assert "RunScoped:\n  base  (reads choices)\n  reader  (reads base)" in text
+            assert "RunScoped:\n  base  (reads choices)\n  reader  (reads base)" in text
 
-    def it_lists_each_factory_and_its_inputs_in_the_json():
-        payload = _graph().namespaces().to_dict()
+        def it_lists_each_factory_and_its_inputs_in_the_json():
+            payload = _graph().namespaces().to_dict()
 
-        assert payload["run_scoped"] == [
-            {"name": "base", "inputs": ["choices"], "reads": ["choices"]},
-            {"name": "reader", "inputs": ["base"], "reads": ["base"]},
-        ]
+            assert payload["run_scoped"] == [
+                {"name": "base", "inputs": [{"name": "choices", "kind": "reducer"}]},
+                {"name": "reader", "inputs": [{"name": "base", "kind": "run_scoped"}]},
+            ]
 
-    def it_draws_a_reads_arrow_from_each_input_to_the_factory():
-        mermaid = _graph().namespaces().mermaid()
+        def it_draws_a_reads_arrow_from_each_input_to_the_factory():
+            mermaid = _graph().namespaces().mermaid()
 
-        assert "_service_reader[[reader]]:::reducer" in mermaid
-        assert "_reducer_choices -.->|reads| _service_base" in mermaid
-        assert "_service_base -.->|reads| _service_reader" in mermaid
+            assert "_service_reader[[reader]]:::service" in mermaid
+            assert "_reducer_choices -.->|reads| _service_base" in mermaid
+            assert "_service_base -.->|reads| _service_reader" in mermaid
+
+    def when_a_factory_reads_a_framework_input():
+        def _context_graph() -> EventGraph:
+            return EventGraph(
+                [_read_one],
+                context_schema=_Facts,
+                services={"reader": RunScoped(_context_reader)},
+            )
+
+        def it_lists_the_kind_of_the_input_in_the_text():
+            text = _context_graph().namespaces().text()
+
+            assert "RunScoped:\n  reader  (reads context, config)" in text
+
+        def it_labels_the_input_in_the_mermaid():
+            mermaid = _context_graph().namespaces().mermaid()
+
+            assert '_service_reader[["reader<br>reads: context, config"]]' in mermaid
+
+
+def describe_handler_parameters_of_one_framework_type():
+    def when_two_parameters_are_annotated_event_log():
+        def it_gives_the_log_to_each():
+            @on(_Told)
+            def twice(event: _Told, first: EventLog, second: EventLog) -> None:
+                _SEEN.append(first is second)
+
+            EventGraph([twice]).invoke(_Told())
+
+            assert _SEEN == [True]
+
+
+def describe_factory_parameter_defaults():
+    def when_the_parameter_matches_nothing():
+        def it_says_how_to_bind_a_constant():
+            def with_retries(config: RunnableConfig, retries: int = 3) -> _Model:
+                return _Model("en")
+
+            with pytest.raises(
+                TypeError,
+                match=r"A default does not make 'retries' optional\. Bind a constant "
+                r"in a closure or a functools\.partial\.",
+            ):
+                EventGraph([_read_one], services={"reader": RunScoped(with_retries)})
+
+
+def describe_factory_annotation_that_does_not_resolve():
+    def when_the_parameter_names_a_reducer():
+        def it_warns_and_binds_the_parameter_by_name():
+            def late(choice: Missing) -> _Reader:  # type: ignore[name-defined]  # noqa: F821
+                return _Reader(choice=choice)
+
+            with pytest.warns(
+                UserWarning,
+                match=r"Failed to resolve the annotation on parameter\(s\) 'choice'",
+            ):
+                graph = EventGraph(
+                    [_read_one],
+                    reducers=[_choice],
+                    services={"reader": RunScoped(late)},
+                )
+            graph.invoke([_Picked(choice="tea"), _Told()])
+
+            assert [r.inputs for r in _SEEN] == [{"choice": "tea"}]  # type: ignore[attr-defined]
+
+    def when_the_parameter_names_nothing():
+        def it_names_the_usual_cause_of_the_failure():
+            def late(config: RunnableConfigLater) -> _Model:  # type: ignore[name-defined]  # noqa: F821
+                return _Model("en")
+
+            with (
+                pytest.warns(UserWarning),
+                pytest.raises(TypeError, match=r"if TYPE_CHECKING:.*# noqa: TC002"),
+            ):
+                EventGraph([_read_one], services={"reader": RunScoped(late)})

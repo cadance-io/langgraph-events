@@ -331,8 +331,10 @@ class EventGraph:
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._base_store = store
-        self._factories = topology._bind_factories(services)
-        self._handlers = topology._bind(services, self._factories, entry=entry)
+        self._services = services.bind_factories(
+            topology._registry.readables, topology.context_schema
+        )
+        self._handlers = topology._bind(self._services, entry=entry)
 
     @property
     def topology(self) -> EventTopology:
@@ -371,8 +373,8 @@ class EventGraph:
         return dataclasses.replace(
             self._topology.namespaces(),
             run_scoped=tuple(
-                NamespaceModel.RunScoped(name=f.name, inputs=f.inputs, reads=f.reads)
-                for f in self._factories.values()
+                NamespaceModel.RunScoped.of(f)
+                for f in self._services.factories.values()
             ),
         )
 

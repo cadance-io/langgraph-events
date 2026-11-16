@@ -105,9 +105,25 @@ def _config(thread_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": thread_id}}
 
 
+def _status_of(sent: bool | None) -> str:
+    return "sent" if sent else "held"
+
+
+def _explicit_status(sent: bool | None) -> str:
+    return "explicit"
+
+
+def _flag_of(placed: str) -> str:
+    return placed
+
+
+def _constant() -> int:
+    return 42
+
+
 class Parcel(Namespace):
     sent = ScalarReducer(event_type=DomainEvent, fn=lambda e: True)
-    status = Derived(fn=lambda sent: "sent" if sent else "held")
+    status = Derived(fn=_status_of)
 
     class Look(Command):
         class Looked(DomainEvent):
@@ -163,7 +179,8 @@ def describe_Derived():
                 with pytest.raises(
                     ReducerNotSetError,
                     match=r"requires Derived 'stage' to be set.*Make Derived "
-                    r"'stage' return a non-None value, or change the annotation",
+                    r"'stage' return a non-None value, or give the parameter a "
+                    r"default, or change the annotation",
                 ):
                     graph.invoke(Checked())
 
@@ -193,7 +210,7 @@ def describe_Derived():
 
     def when_one_derived_serves_two_graphs():
         def it_reads_the_empty_defaults_of_each_graph():
-            flag = Derived(name="flag", fn=lambda placed: placed)
+            flag = Derived(name="flag", fn=_flag_of)
             low = ScalarReducer(
                 name="placed", event_type=Placed, fn=lambda e: "set", default="low"
             )
@@ -335,7 +352,7 @@ def describe_Derived():
                     EventGraph([Parcel.Look], reducers=[clash])
 
             def it_keeps_an_explicit_derived_over_a_namespace_derived():
-                explicit = Derived(name="status", fn=lambda sent: "explicit")
+                explicit = Derived(name="status", fn=_explicit_status)
                 graph = EventGraph([Parcel.Look], reducers=[explicit])
 
                 log = graph.invoke(Parcel.Look())
@@ -434,11 +451,14 @@ def describe_Derived():
                 EventGraph([report], reducers=[placed, shipped, itself])
 
         def when_a_reducer_has_the_name_log():
-            def it_reads_the_reducer_for_an_unannotated_parameter_named_log():
+            def it_reads_the_reducer_for_a_parameter_named_log():
+                def _echo(log: str) -> str:
+                    return log
+
                 log_reducer = ScalarReducer(
                     name="log", event_type=Placed, fn=lambda e: "set"
                 )
-                echo = Derived(name="echo", fn=lambda log: log)
+                echo = Derived(name="echo", fn=_echo)
 
                 @on(Checked)
                 def tell_echo(event: Checked, echo: str) -> Reported:
@@ -556,7 +576,7 @@ def describe_Derived():
             assert [f.changed_reducers for f in frames] == [frozenset(), frozenset()]
 
         async def it_never_marks_a_zero_parameter_derived_changed():
-            constant = Derived(name="constant", fn=lambda: 42)
+            constant = Derived(name="constant", fn=_constant)
             graph = EventGraph([ship], reducers=[placed, shipped, constant])
 
             frames = [
@@ -618,7 +638,13 @@ class Polled(IntegrationEvent):
 
 ticks = FoldReducer(name="ticks", event_type=Ticked, default_factory=int)
 limit = ScalarReducer(name="limit", event_type=Placed, fn=lambda e: 3, default=2)
-remaining = Derived(name="remaining", fn=lambda ticks, limit: limit - ticks)
+
+
+def _remaining_of(ticks: int, limit: int) -> int:
+    return limit - ticks
+
+
+remaining = Derived(name="remaining", fn=_remaining_of)
 
 
 @on(Checked)
@@ -651,8 +677,18 @@ def _shipped_by(log: EventLog) -> tuple[str, ...]:
 
 
 shipped_by = Derived(name="shipped_by", fn=_shipped_by)
-loud = Derived(name="loud", fn=lambda stage: (stage or "").upper())
-label = Derived(name="label", fn=lambda loud, seen: f"{loud}:{seen}")
+
+
+def _loud_of(stage: str | None) -> str:
+    return (stage or "").upper()
+
+
+def _label_of(loud: str, seen: int) -> str:
+    return f"{loud}:{seen}"
+
+
+loud = Derived(name="loud", fn=_loud_of)
+label = Derived(name="label", fn=_label_of)
 
 
 @on(Shipped)
@@ -772,7 +808,7 @@ def describe_Derived_that_reads_the_log():
 
         def when_a_derived_has_no_parameter():
             def it_lists_no_input_in_the_text():
-                constant = Derived(name="constant", fn=lambda: 42)
+                constant = Derived(name="constant", fn=_constant)
 
                 text = (
                     EventGraph([count], reducers=[seen, constant]).namespaces().text()
@@ -894,12 +930,24 @@ class _Calls:
         return 1 if placed else 0
 
 
+def _left_of(base: int) -> int:
+    return base + 1
+
+
+def _right_of(base: int) -> int:
+    return base + 2
+
+
+def _top_of(left: int, right: int) -> int:
+    return left + right
+
+
 def _diamond(calls: _Calls) -> list[Derived[Any]]:
     return [
         Derived(name="base", fn=calls.count_base),
-        Derived(name="left", fn=lambda base: base + 1),
-        Derived(name="right", fn=lambda base: base + 2),
-        Derived(name="top", fn=lambda left, right: left + right),
+        Derived(name="left", fn=_left_of),
+        Derived(name="right", fn=_right_of),
+        Derived(name="top", fn=_top_of),
     ]
 
 
@@ -1036,3 +1084,41 @@ def describe_Derived_from_a_partial_that_binds_the_log():
             r"not make a parameter optional",
         ):
             EventGraph([ship, count], reducers=[bound_log])
+
+
+def describe_Derived_return_annotation():
+    def when_the_function_is_a_lambda():
+        def it_raises_at_graph_build_naming_the_fix():
+            unannotated = Derived(name="unannotated", fn=lambda placed: placed)
+
+            with pytest.raises(
+                TypeError,
+                match=r"Derived 'unannotated' has no return annotation\. .*A "
+                r"lambda cannot have one, so use a def",
+            ):
+                EventGraph([report], reducers=[placed, shipped, stage, unannotated])
+
+    def when_a_handler_annotation_does_not_fit_the_return_annotation():
+        def it_raises_at_graph_build():
+            @on(Checked)
+            def wrong(event: Checked, stage: int) -> None:
+                return None
+
+            with pytest.raises(
+                TypeError,
+                match=r"declares parameter 'stage' as int, but Derived 'stage' "
+                r"gives str \| None",
+            ):
+                EventGraph([wrong], reducers=[placed, shipped, stage])
+
+    def when_a_float_annotation_reads_an_int_value():
+        def it_accepts_the_numeric_tower():
+            @on(Checked)
+            def ratio(event: Checked, remaining: float) -> Polled:
+                return Polled(remaining=int(remaining))
+
+            graph = EventGraph([ratio], reducers=[ticks, limit, remaining])
+
+            log = graph.invoke(Checked())
+
+            assert [e.remaining for e in log.filter(Polled)] == [2]

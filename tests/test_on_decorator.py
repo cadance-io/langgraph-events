@@ -13,14 +13,14 @@ from langgraph_events import (
     HandlerRaised,
     IntegrationEvent,
     Invariant,
+    Reducer,
     ScalarReducer,
     on,
 )
 from langgraph_events._event import Interrupted, Resumed
-from langgraph_events._handler import (
-    HandlerMeta,
-    _resolve_each_annotation,
-)
+from langgraph_events._handler import HandlerMeta
+from langgraph_events._hints import _resolve_each_annotation
+from langgraph_events._inputs import ValueInput
 
 
 class _DomainError(Exception):
@@ -499,6 +499,17 @@ def describe_on_annotation_inference():
                 assert handler._field_matchers == {"interrupted": ApprovalRequested}
 
 
+def _list_reducers(*names: str) -> dict[str, Reducer]:
+    return {
+        name: Reducer(name=name, event_type=SampleEvent, fn=lambda e: [])
+        for name in names
+    }
+
+
+def _names_of_kind(meta: HandlerMeta, kind: str) -> list[str]:
+    return [p.name for p in meta.params if p.kind == kind]
+
+
 def describe_HandlerMeta_of():
 
     def when_basic_handler():
@@ -508,7 +519,7 @@ def describe_HandlerMeta_of():
             async def my_handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(my_handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(my_handler, readables={})
             assert meta.event_types == (SampleEvent,)
             assert "my_handler" in meta.name
 
@@ -517,7 +528,7 @@ def describe_HandlerMeta_of():
             async def handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.is_async is True
 
         def it_detects_sync_handlers():
@@ -525,7 +536,7 @@ def describe_HandlerMeta_of():
             def handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.is_async is False
 
     def when_handler_wants_log():
@@ -535,8 +546,8 @@ def describe_HandlerMeta_of():
             async def handler(event: SampleEvent, log: EventLog):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
-            assert meta.log_param == "log"
+            meta = HandlerMeta.of(handler, readables={})
+            assert _names_of_kind(meta, "log") == ["log"]
 
     def when_handler_has_no_log():
 
@@ -545,8 +556,8 @@ def describe_HandlerMeta_of():
             async def handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
-            assert meta.log_param is None
+            meta = HandlerMeta.of(handler, readables={})
+            assert _names_of_kind(meta, "log") == []
 
     def when_function_not_decorated():
 
@@ -555,7 +566,7 @@ def describe_HandlerMeta_of():
                 pass
 
             with pytest.raises(ValueError, match="not decorated"):
-                HandlerMeta.of(plain_fn, reducer_names=frozenset())
+                HandlerMeta.of(plain_fn, readables={})
 
     def when_reducer_params():
 
@@ -565,19 +576,17 @@ def describe_HandlerMeta_of():
                 pass
 
             meta = HandlerMeta.of(
-                handler, reducer_names=frozenset({"messages", "history"})
+                handler, readables=_list_reducers("messages", "history")
             )
-            assert set(meta.reducer_params) == {"messages", "history"}
+            assert _names_of_kind(meta, "reducer") == ["messages", "history"]
 
         def it_ignores_non_reducer_params():
             @on(SampleEvent)
             def handler(event: SampleEvent, messages: list, other: str):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset({"messages"}))
-            assert meta.reducer_params == ("messages",)
-            assert "other" not in meta.reducer_params
-            assert "event" not in meta.reducer_params
+            meta = HandlerMeta.of(handler, readables=_list_reducers("messages"))
+            assert _names_of_kind(meta, "reducer") == ["messages"]
 
     def when_misspelled_reducer_param():
 
@@ -626,9 +635,9 @@ def describe_HandlerMeta_of():
             async def handler(event: Event, log: EventLog):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.event_types == (EventA, EventB)
-            assert meta.log_param == "log"
+            assert _names_of_kind(meta, "log") == ["log"]
 
     def when_field_matchers_in_meta():
 
@@ -637,7 +646,7 @@ def describe_HandlerMeta_of():
             def handler(event: Resumed, interrupted: ApprovalRequested):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.field_matchers == (("interrupted", ApprovalRequested, True),)
 
         def it_identifies_field_inject_params_from_signature():
@@ -645,7 +654,7 @@ def describe_HandlerMeta_of():
             def handler(event: Resumed, interrupted: ApprovalRequested):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.field_inject_params == frozenset({"interrupted"})
 
         def when_field_param_not_in_signature():
@@ -655,7 +664,7 @@ def describe_HandlerMeta_of():
                 def handler(event: Resumed):
                     pass
 
-                meta = HandlerMeta.of(handler, reducer_names=frozenset())
+                meta = HandlerMeta.of(handler, readables={})
                 assert meta.field_inject_params == frozenset()
 
         def it_does_not_warn_about_field_inject_params():
@@ -677,7 +686,7 @@ def describe_HandlerMeta_of():
             def handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.raises == (_DomainError, _OtherError)
 
         def it_extracts_single_as_tuple():
@@ -685,7 +694,7 @@ def describe_HandlerMeta_of():
             def handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.raises == (_DomainError,)
 
     def when_raises_omitted_from_decorator():
@@ -695,7 +704,7 @@ def describe_HandlerMeta_of():
             def handler(event: SampleEvent):
                 pass
 
-            meta = HandlerMeta.of(handler, reducer_names=frozenset())
+            meta = HandlerMeta.of(handler, readables={})
             assert meta.raises == ()
 
     def when_type_hints_cannot_be_resolved():
@@ -710,7 +719,7 @@ def describe_HandlerMeta_of():
 
             with warnings.catch_warnings(record=True) as w:
                 warnings.simplefilter("always")
-                meta = HandlerMeta.of(handler, reducer_names=frozenset())
+                meta = HandlerMeta.of(handler, readables={})
 
             assert len(w) == 1
             message = str(w[0].message)
@@ -718,7 +727,7 @@ def describe_HandlerMeta_of():
             assert "'log'" in message
             assert "MissingLog" in message
             assert all(item.filename == __file__ for item in w)
-            assert meta.log_param is None
+            assert _names_of_kind(meta, "log") == []
             assert meta.event_types == (SampleEvent,)
 
 
@@ -733,7 +742,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert HandlerMeta.of(place, reducer_names=frozenset()).name == "submit"
+            assert HandlerMeta.of(place, readables={}).name == "submit"
 
     def when_node_name_is_omitted():
         def it_defaults_to_the_function_name():
@@ -741,7 +750,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert HandlerMeta.of(place, reducer_names=frozenset()).name == "place"
+            assert HandlerMeta.of(place, readables={}).name == "place"
 
     def when_previously_is_a_single_name():
         def it_records_one_alias():
@@ -749,9 +758,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert HandlerMeta.of(place, reducer_names=frozenset()).previous_names == (
-                "old_place",
-            )
+            assert HandlerMeta.of(place, readables={}).previous_names == ("old_place",)
 
     def when_previously_is_a_tuple():
         def it_records_all_aliases():
@@ -759,7 +766,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert HandlerMeta.of(place, reducer_names=frozenset()).previous_names == (
+            assert HandlerMeta.of(place, readables={}).previous_names == (
                 "a",
                 "b",
             )
@@ -770,7 +777,7 @@ def describe_handler_identity():
             async def place(event: SampleEvent):
                 pass
 
-            assert HandlerMeta.of(place, reducer_names=frozenset()).previous_names == ()
+            assert HandlerMeta.of(place, readables={}).previous_names == ()
 
     def when_previously_contains_a_non_string():
         def it_raises_TypeError_at_decoration():
@@ -824,9 +831,9 @@ def describe_partial_hint_resolution():
 
             with warnings.catch_warnings(record=True):
                 warnings.simplefilter("always")
-                meta = HandlerMeta.of(handler, reducer_names=frozenset())
+                meta = HandlerMeta.of(handler, readables={})
 
-            assert meta.log_param == "log"
+            assert _names_of_kind(meta, "log") == ["log"]
 
         def it_names_the_failing_parameter_in_the_unclaimed_error():
             @on(SampleEvent)
@@ -858,7 +865,9 @@ def describe_partial_hint_resolution():
                 graph = EventGraph([handler], services={"mailer": mailer})
 
             (bound,) = graph._handlers
-            assert bound.services == (("mailer", mailer),)
+            assert [(p.name, p.source) for p in bound.services] == [
+                ("mailer", ValueInput(mailer))
+            ]
 
     def when_a_name_is_declared_after_the_handler():
         # A failed resolution must not be cached. The name exists by the time
@@ -869,7 +878,9 @@ def describe_partial_hint_resolution():
             graph = EventGraph([_forward_ref_handler], services=[dep])
 
             (bound,) = graph._handlers
-            assert bound.services == (("dep", dep),)
+            assert [(p.name, p.source) for p in bound.services] == [
+                ("dep", ValueInput(dep))
+            ]
 
     def when_the_handler_declares_a_pep_695_type_parameter():
         # ``get_type_hints`` puts ``fn.__type_params__`` in scope. The
@@ -920,7 +931,7 @@ def describe_partial_hint_resolution():
                 with warnings.catch_warnings(record=True):
                     warnings.simplefilter("always")
                     handler = on(undecorated)
-                    meta = HandlerMeta.of(handler, reducer_names=frozenset())
+                    meta = HandlerMeta.of(handler, readables={})
 
                 assert meta.event_types == (SampleEvent,)
 
