@@ -565,14 +565,14 @@ class Derived(Generic[T]):
         return tuple(signature.parameters.values())
 
     def _bind(
-        self, resolve: Callable[[str], Readable | None], available: str
+        self, resolve: Callable[[inspect.Parameter, str | None], Readable]
     ) -> _BoundDerived[T]:
         """Bind each parameter to its input.
 
-        *resolve* gives the stored reducer or the bound ``Derived`` of a
-        name, or ``None`` when the name names neither. Raises ``TypeError``
-        for a parameter that names no input. The message ends with
-        *available*, the names that a parameter can name.
+        A parameter annotated ``EventLog`` reads the log. *resolve* gives the
+        input of each other parameter, from the parameter and the error of
+        its annotation, if any. It raises ``TypeError`` for a parameter that
+        names no input.
         """
         hints, hint_errors = _resolve_hints_and_errors(self.fn)
         inputs: list[Readable] = []
@@ -585,35 +585,9 @@ class Derived(Generic[T]):
                 )
             if hints.get(param.name) is EventLog:
                 inputs.append(_LogInput(param.name))
-                continue
-            source = resolve(param.name)
-            if source is None:
-                raise TypeError(
-                    self._no_input_message(param, hint_errors.get(param.name))
-                    + available
-                )
-            inputs.append(source)
+            else:
+                inputs.append(resolve(param, hint_errors.get(param.name)))
         return _BoundDerived(self, tuple(inputs))
-
-    def _no_input_message(
-        self, param: inspect.Parameter, hint_error: str | None
-    ) -> str:
-        default_hint = (
-            " A default does not make a parameter optional. Bind a constant "
-            "in a closure."
-            if param.default is not param.empty
-            else ""
-        )
-        hint_hint = (
-            f" The annotation of {param.name!r} does not resolve ({hint_error})."
-            f" Make it importable at run time."
-            if hint_error is not None
-            else ""
-        )
-        return (
-            f"Derived {self.name!r} reads {param.name!r}, which names no "
-            f"reducer and no Derived.{default_hint}{hint_hint} "
-        )
 
 
 @dataclass(frozen=True)
@@ -651,11 +625,6 @@ def bind_derived(
     ``Derived`` values read each other in a cycle.
     """
     bound: dict[str, _BoundDerived[Any]] = {}
-    available = (
-        f"Available reducers: {sorted(reducers)}. Available Derived values: "
-        f"{sorted(derived)}. To read the EventLog, annotate a parameter of a "
-        f"def with EventLog."
-    )
 
     def bind(name: str, path: tuple[str, ...]) -> _BoundDerived[Any]:
         if name in path:
@@ -667,13 +636,37 @@ def bind_derived(
             )
         if name not in bound:
 
-            def resolve(dep: str) -> Readable | None:
-                if dep in derived:
-                    return bind(dep, (*path, name))
-                return reducers.get(dep)
+            def resolve(param: inspect.Parameter, hint_error: str | None) -> Readable:
+                if param.name in derived:
+                    return bind(param.name, (*path, name))
+                if param.name in reducers:
+                    return reducers[param.name]
+                raise TypeError(_no_input_message(name, param, hint_error))
 
-            bound[name] = derived[name]._bind(resolve, available)
+            bound[name] = derived[name]._bind(resolve)
         return bound[name]
+
+    def _no_input_message(
+        name: str, param: inspect.Parameter, hint_error: str | None
+    ) -> str:
+        default_hint = (
+            " A default does not make a parameter optional. Bind a constant "
+            "in a closure."
+            if param.default is not param.empty
+            else ""
+        )
+        hint_hint = (
+            f" The annotation of {param.name!r} does not resolve ({hint_error})."
+            f" Make it importable at run time."
+            if hint_error is not None
+            else ""
+        )
+        return (
+            f"Derived {name!r} reads {param.name!r}, which names no reducer and "
+            f"no Derived.{default_hint}{hint_hint} Available reducers: "
+            f"{sorted(reducers)}. Available Derived values: {sorted(derived)}. "
+            f"To read the EventLog, annotate a parameter of a def with EventLog."
+        )
 
     for name in derived:
         bind(name, ())

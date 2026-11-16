@@ -836,26 +836,6 @@ class EventTopology:
             bound.append(handler)
         return tuple(bound)
 
-    def _update_reducer_state(
-        self,
-        state: dict[str, Any],
-        event: Event,
-        reducer_names: list[str],
-    ) -> frozenset[str]:
-        """Incrementally update reducer state with a single new event."""
-        changed: set[str] = set()
-        for name in reducer_names:
-            r = self._reducers[name]
-            contribution = r.collect([event])
-            if r.has_contributions(contribution):
-                reducer_fn = getattr(r, "reducer", None)
-                if callable(reducer_fn):
-                    state[name] = reducer_fn(state[name], contribution)
-                else:
-                    state[name] = contribution
-                changed.add(name)
-        return frozenset(changed)
-
     def resolve_reducer_names(self, include_reducers: bool | list[str]) -> list[str]:
         """The names that *include_reducers* selects, as
         :meth:`select_reducers` gives them.
