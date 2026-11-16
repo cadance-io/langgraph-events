@@ -422,7 +422,9 @@ def describe_tool():
             reflection = Reflection(
                 log,
                 model=graph.namespaces(),
-                reducers={"boom": ScalarReducer(event_type=Event, fn=_boom)},
+                reducers={
+                    "boom": ScalarReducer[Event, str](event_type=Event, fn=_boom)
+                },
             )
 
             with pytest.raises(ValueError, match="reducer bug"):

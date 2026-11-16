@@ -7,7 +7,7 @@ import inspect
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from langgraph_events._handler import (
     BoundHandler,
@@ -15,25 +15,26 @@ from langgraph_events._handler import (
     refuse_unclaimed,
 )
 from langgraph_events._hints import (
+    UnsettledTypeError,
     _annotation_source,
-    _hint_fits,
     _hint_label,
+    _normal,
     _open_parameters,
     _resolve_parameter_hints,
-    _satisfies,
+    _same_type,
 )
 from langgraph_events._inputs import (
     BoundFactory,
     Param,
     ValueInput,
-    check_fit,
     classify,
+    require_same_type,
     resolved_hint,
 )
 from langgraph_events._reducer import BaseReducer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable
 
     from langgraph_events._handler import HandlerMeta
     from langgraph_events._reducer import Readable
@@ -70,15 +71,15 @@ def _missing_return_annotation(
 class RunScoped(Generic[T]):
     """A service that a factory builds once per node call.
 
-    Place a ``RunScoped`` value in the name-keyed ``services=`` mapping. Its
-    result is injected under the handler's parameter name.
+    Give the ``services=`` object a field typed ``RunScoped[T]`` that holds
+    it. The result has the type ``T``, and is injected under the field name.
 
     Each parameter of the factory binds by the rules of a handler
     parameter. An annotation of exactly ``RunnableConfig``, the graph's
     ``context_schema``, ``EventLog``, ``BaseStore`` or ``Reflection`` gets
     that input. Each other parameter gets the stored reducer, the
     ``Derived`` or the name-keyed service of its name, and its annotation
-    must fit that value. Each parameter must have an annotation that
+    must name its declared type. Each parameter must have an annotation that
     resolves. A default is the value when the input is unset. A
     parameter that names nothing raises ``TypeError`` at graph build.
 
@@ -95,10 +96,15 @@ class RunScoped(Generic[T]):
         def model_for(config: RunnableConfig, language: str) -> ConversationModel:
             ...
 
-        language = ScalarReducer(
+        language = ScalarReducer[LanguageSet, str](
             name="language", event_type=LanguageSet, fn=lambda e: e.language
         )
-        services = {"model": RunScoped(model_for)}
+
+        @dataclass
+        class Services:
+            model: RunScoped[ConversationModel]
+
+        services = Services(model=RunScoped(model_for))
 
         @on(SomeEvent)
         def handle(event: SomeEvent, model: ConversationModel) -> None: ...
@@ -181,7 +187,7 @@ class _FactoryBinder:
 
     def __init__(
         self,
-        services: NamedServices,
+        services: Services,
         readables: Mapping[str, Readable],
         context_schema: type | None,
     ) -> None:
@@ -206,7 +212,7 @@ class _FactoryBinder:
             )
         if name in self._bound:
             return self._bound[name]
-        scoped: RunScoped[Any] = self._services.by_name[name]
+        scoped = cast("RunScoped[Any]", self._services.by_name[name])
         label = scoped._label(name)
         hints, errors = scoped._hints()
         params: list[Param] = []
@@ -246,126 +252,42 @@ class _FactoryBinder:
         return bound
 
 
-class TypedServices:
-    """The sequence form of ``services=``: each service fills the handler
-    parameters that its type satisfies. Two services of one type are refused.
-    """
+class Services:
+    """The services of a graph: each typed field of the ``services=`` object.
 
-    def __init__(self, services: Sequence[Any]) -> None:
-        self._by_type: dict[type, Any] = {}
-        for s in services:
-            if isinstance(s, RunScoped):
-                raise TypeError(
-                    "RunScoped is only supported in the name-keyed mapping form: "
-                    "services={'name': RunScoped(factory)}. The type-keyed sequence "
-                    "form resolves by annotation, and no handler annotates RunScoped."
-                )
-            t = type(s)
-            if t in self._by_type:
-                raise TypeError(
-                    f"EventGraph(services=...) has two instances of type "
-                    f"{t.__name__!r} — same-type collision. Register only "
-                    f"one instance, switch to the name-keyed mapping form "
-                    f"(services={{'primary': a, 'backup': b}}), or use a "
-                    f"subclass to distinguish them."
-                )
-            self._by_type[t] = s
-
-    def received(self) -> str:
-        """State the types that ``services=`` holds, for an error."""
-        if not self._by_type:
-            return "services= has no service."
-        names = sorted(t.__qualname__ for t in self._by_type)
-        return f"services= has the types {names}."
-
-    @property
-    def factories(self) -> Mapping[str, BoundFactory]:
-        """The type-keyed form holds no ``RunScoped`` factory."""
-        return {}
-
-    def bind_factories(
-        self, readables: Mapping[str, Readable], context_schema: type | None
-    ) -> TypedServices:
-        """The type-keyed form holds no ``RunScoped`` factory."""
-        return self
-
-    def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
-        """Fill each candidate of *meta* whose annotation is a class with the
-        service of that class.
-
-        Raises ``TypeError`` for a service that is an instance of
-        *context_schema*: the run context fills a parameter of that type.
-
-        The service is the unique registered one whose type is a subclass of
-        (or equal to) the annotation. Multi-match is rejected — the user must
-        disambiguate by narrowing the annotation or registering only one
-        matching service.
-        """
-        # A ``TypedDict`` refuses ``issubclass``, and its instance is a dict.
-        if context_schema is not None and not typing.is_typeddict(context_schema):
-            for t in self._by_type:
-                if issubclass(t, context_schema):
-                    raise TypeError(
-                        f"services= holds an instance of {t.__qualname__}, the "
-                        f"context_schema of the graph. The run context fills a "
-                        f"parameter of that type, so the service is never "
-                        f"injected. Pass the value with context= on each run "
-                        f"call, and remove it from services=."
-                    )
-        detected: list[Param] = []
-        for candidate in meta.service_candidates:
-            hint = candidate.annotation
-            if not isinstance(hint, type):
-                continue
-            # ``object`` matches every registered type; treating it as a service
-            # claim would silently consume an unrelated instance. Skip — the
-            # caller meant "untyped" and ``BoundHandler.require_claimed`` will
-            # surface the missing-source error at graph build.
-            if hint is object:
-                continue
-            # Exact-type match wins over subclass-only match — it lets users
-            # register a base + subclass pair (``[BaseChatModel(), Anthropic()]``)
-            # and resolve `param: BaseChatModel` to the base instance unambiguously.
-            if hint in self._by_type:
-                detected.append(_value_param(candidate, self._by_type[hint]))
-                continue
-            matches = [t for t in self._by_type if issubclass(t, hint)]
-            if len(matches) > 1:
-                names = ", ".join(sorted(t.__name__ for t in matches))
-                raise TypeError(
-                    f"{meta.label} parameter {candidate.param!r} "
-                    f"annotated as {hint.__name__!r} matches multiple "
-                    f"registered services ({names}). Disambiguate by "
-                    f"narrowing the annotation, or register only one "
-                    f"service that satisfies it."
-                )
-            if matches:
-                detected.append(_value_param(candidate, self._by_type[matches[0]]))
-        return BoundHandler(meta, tuple(detected))
-
-
-class NamedServices:
-    """The mapping form of ``services=``: each service fills the handler
-    parameter of its name, so two instances of one type can coexist (a
-    primary and a backup chat model). The value must fit the annotation.
+    The class of the object declares one field per service. The field type
+    is the declared type of the service. A ``RunScoped[T]`` field holds a
+    factory whose result has the type ``T``. A reader names the declared
+    type exactly.
     """
 
     def __init__(
         self,
-        services: Mapping[str, Any],
+        values: Mapping[str, object],
+        declared: Mapping[str, object],
         factories: Mapping[str, BoundFactory] | None = None,
     ) -> None:
         """*factories* holds the bound ``RunScoped`` factories, once
         :meth:`bind_factories` has bound them for one graph."""
-        self.by_name = dict(services)
-        # The type that each ``RunScoped`` factory returns. Resolved here, so
-        # a bad return annotation does not wait for the first handler.
-        self._run_scoped_types = {
-            name: value.provided_type(name)
-            for name, value in self.by_name.items()
-            if isinstance(value, RunScoped)
-        }
+        self.by_name = dict(values)
+        self._declared = dict(declared)
         self._factories = dict(factories or {})
+
+    @classmethod
+    def parse(cls, services: object) -> Services:
+        """Read the services of a ``services=`` object. ``None`` holds none.
+
+        Raises ``TypeError`` for an object whose class declares no typed
+        field, such as a dict or a list, with the fix.
+        """
+        if services is None:
+            return cls({}, {})
+        fields = _declared_fields(services)
+        declared: dict[str, object] = {}
+        for name, hint in fields.items():
+            value = getattr(services, name)
+            declared[name] = _declared_type(name, hint, value)
+        return cls({n: getattr(services, n) for n in fields}, declared)
 
     @property
     def factories(self) -> Mapping[str, BoundFactory]:
@@ -373,20 +295,21 @@ class NamedServices:
         return self._factories
 
     def received(self, without: str | None = None) -> str:
-        """State the name keys that ``services=`` holds, for an error.
-        *without* is a key to leave out: the factory that the error names."""
+        """State the services that ``services=`` holds, for an error.
+        *without* is a service to leave out: the factory that the error
+        names."""
         names = sorted(n for n in self.by_name if n != without)
         if not names:
             return (
                 "services= has no other service."
                 if without
-                else ("services= has no service.")
+                else "services= has no service."
             )
-        return f"services= has the name keys {names}."
+        return f"services= has the fields {names}."
 
     def bind_factories(
         self, readables: Mapping[str, Readable], context_schema: type | None
-    ) -> NamedServices:
+    ) -> Services:
         """These services, with each ``RunScoped`` factory bound to its
         inputs by the handler rules.
 
@@ -400,17 +323,17 @@ class NamedServices:
             if readable is not None:
                 kind = "reducer" if isinstance(readable, BaseReducer) else "Derived"
                 raise TypeError(
-                    f"services= has the name key {name!r}, and a {kind} has the "
+                    f"services= has the field {name!r}, and a {kind} has the "
                     f"same name. A parameter cannot name both. Rename the "
                     f"service or the {kind}."
                 )
         binder = _FactoryBinder(self, readables, context_schema)
-        return NamedServices(self.by_name, binder.bind_all())
+        return Services(self.by_name, self._declared, binder.bind_all())
 
     def bind(self, meta: HandlerMeta, context_schema: type | None) -> BoundHandler:
         """Fill each candidate of *meta* with the service of its name, and
-        check the service against the annotation. A ``RunScoped`` service
-        fills its candidate with its bound factory."""
+        check the annotation against the declared type of the service. A
+        ``RunScoped`` service fills its candidate with its bound factory."""
         services: list[Param] = []
         for c in meta.service_candidates:
             source = self._service_input(
@@ -427,71 +350,108 @@ class NamedServices:
         hint: object,
         bind_factory: Callable[[str], BoundFactory],
     ) -> ValueInput | BoundFactory | None:
-        """The service of name *param*, checked against *hint*, or ``None``.
-
-        A plain value must be an instance of *hint*. A ``RunScoped`` factory
-        must return a subtype of *hint*. *bind_factory* gives the bound
-        factory of a ``RunScoped`` name. The comparison uses
-        ``beartype.door``. It handles ``Union``, a runtime ``Protocol`` with
-        methods only, and a generic alias. A ``NewType`` is nominal for a
-        factory and erased for a plain value.
-        """
+        """The service of name *param*, or ``None``. The annotation *hint*
+        must name the declared type of the service exactly. *bind_factory*
+        gives the bound factory of a ``RunScoped`` name."""
         if param not in self.by_name:
             return None
+        require_same_type(
+            owner, param, hint, self._declared[param], f"service {param!r}", False
+        )
         value = self.by_name[param]
         if isinstance(value, RunScoped):
-            provided = self._run_scoped_types[param]
-            factory = _factory_label(_annotation_source(value.factory))
-            returns = _hint_label(provided)
-            check_fit(
-                owner,
-                param,
-                hint,
-                _hint_fits(provided, hint),
-                provided,
-                f"services[{param!r}] is RunScoped({factory}) and that factory "
-                f"returns {returns}",
-                f"Change the annotation to {returns}, or register a factory "
-                f"that returns {_hint_label(hint)}.",
-            )
             return bind_factory(param)
-        # A cold import costs about 200 ms. Only the first graph in the
-        # process with a name-keyed service pays it.
-        from beartype.door import is_bearable  # noqa: PLC0415
-
-        label = _hint_label(hint)
-        if value is None:
-            what = f"services[{param!r}] is None"
-            widen = f"Widen the annotation to {label} | None"
-        else:
-            what = f"services[{param!r}] is an instance of {type(value).__qualname__}"
-            widen = "Widen the annotation"
-        check_fit(
-            owner,
-            param,
-            hint,
-            _satisfies(is_bearable, value, hint),
-            type(value),
-            f"{what}, not an instance of {label}",
-            f"{widen}, or register a value that satisfies it.",
-        )
         return ValueInput(value)
 
 
-def _value_param(candidate: ServiceCandidate, value: object) -> Param:
-    """The parameter of *candidate*, filled with the plain service *value*."""
-    return Param(candidate.param, ValueInput(value), candidate.default)
+def _declared_fields(services: object) -> dict[str, object]:
+    """The typed fields that the class of *services* declares, by name.
+
+    Raises ``TypeError`` for an object with no typed field, and for an
+    annotation that does not resolve.
+    """
+    kind = type(services)
+    fix = (
+        "services= takes an object whose class declares one typed field per "
+        "service, such as a dataclass instance. Got a "
+        f"{kind.__name__}. Declare a dataclass with one field per service, "
+        "typed with the service type, or RunScoped[T] for a factory, and pass "
+        "an instance of it."
+    )
+    if isinstance(services, (Mapping, list, tuple, set, frozenset, str, bytes)):
+        raise TypeError(fix)
+    try:
+        hints = typing.get_type_hints(kind)
+    except Exception as exc:
+        raise TypeError(
+            f"services= is a {kind.__name__} whose field annotations do not "
+            f"resolve ({type(exc).__name__}: {exc}). Make every name in them "
+            f"importable at run time."
+        ) from exc
+    fields = {
+        name: hint
+        for name, hint in hints.items()
+        if typing.get_origin(hint) is not typing.ClassVar
+        and hint is not typing.ClassVar
+    }
+    if not fields:
+        raise TypeError(fix)
+    for name in fields:
+        if not hasattr(services, name):
+            raise TypeError(
+                f"services= declares the field {name!r}, but the object has no "
+                f"value for it. Give it a value."
+            )
+    return fields
 
 
-Services = TypedServices | NamedServices
+def _declared_type(name: str, hint: object, value: object) -> object:
+    """The type that readers of service *name* must name: the field type,
+    or ``T`` for a ``RunScoped[T]`` field.
 
-
-def parse_services(services: Sequence[Any] | Mapping[str, Any] | None) -> Services:
-    """Parse ``EventGraph(services=...)``. A mapping is name-keyed. A sequence
-    is type-keyed."""
-    if isinstance(services, Mapping):
-        return NamedServices(services)
-    return TypedServices(services or ())
+    Raises ``TypeError`` when a ``RunScoped`` value and its field type do
+    not agree, or when the factory returns another type than ``T``.
+    """
+    try:
+        _normal(hint)
+    except UnsettledTypeError as exc:
+        raise TypeError(
+            f"Service {name!r} is declared {_hint_label(hint)}, but {exc}. "
+            f"Declare it with a class."
+        ) from None
+    scoped = typing.get_origin(hint) is RunScoped or hint is RunScoped
+    if isinstance(value, RunScoped) != scoped:
+        raise TypeError(
+            f"Service {name!r} is declared {_hint_label(hint)}, but its value "
+            f"is {'a' if isinstance(value, RunScoped) else 'not a'} RunScoped "
+            f"factory. Type a factory field RunScoped[T], and any other field "
+            f"with the type of its value."
+        )
+    if not scoped:
+        return hint
+    arguments = typing.get_args(hint)
+    if not arguments:
+        raise TypeError(
+            f"Service {name!r} is declared RunScoped with no type. Declare the "
+            f"type of its result: RunScoped[T]."
+        )
+    declared = arguments[0]
+    returns = cast("RunScoped[Any]", value).provided_type(name)
+    try:
+        same = _same_type(returns, declared, may_be_unset=False)
+    except UnsettledTypeError as exc:
+        raise TypeError(
+            f"Service {name!r} is declared RunScoped[{_hint_label(declared)}], "
+            f"but the return annotation of its factory {exc}. Make the factory "
+            f"return {_hint_label(declared)}."
+        ) from None
+    if not same:
+        raise TypeError(
+            f"Service {name!r} is declared RunScoped[{_hint_label(declared)}], "
+            f"but its factory returns {_hint_label(returns)}. Make the factory "
+            f"return {_hint_label(declared)}, or change the field type."
+        )
+    return declared
 
 
 def _resolve_self(hint: object, source: Callable[..., object]) -> object:

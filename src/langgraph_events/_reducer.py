@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import operator
 import types
 import typing
@@ -21,19 +22,20 @@ from typing import (
 
 from langgraph_events._event_log import EventLog
 from langgraph_events._hints import (
-    Fits,
+    UnsettledTypeError,
+    _hint_label,
+    _normal,
     _open_parameters,
     _resolve_parameter_hints,
-    _satisfies,
+    _same_type,
 )
 
 if TYPE_CHECKING:
-    import inspect
     from collections.abc import Callable, Mapping
 
     from langchain_core.messages import BaseMessage
 
-    from langgraph_events._event import Event, Namespace
+    from langgraph_events._event import Event, MessageEvent, Namespace
     from langgraph_events._inputs import BoundDerived
     from langgraph_events._types import EventTypeSpec, ReducerFn
 
@@ -53,7 +55,7 @@ class SkipType:
     """The type of :data:`SKIP`.
 
     Annotate a ``ScalarReducer.fn`` that can return ``SKIP`` as
-    ``-> str | SkipType``. The value type of the reducer leaves ``SkipType``
+    ``-> str | SkipType``. The stored type of the reducer leaves ``SkipType``
     out, because ``SKIP`` is never stored.
     """
 
@@ -99,10 +101,8 @@ def _last_write_wins(existing: object, new: T) -> T:
     return new
 
 
-def _return_hint(fn: Callable[..., object]) -> object:
-    """The resolved return annotation of *fn*, or ``Any`` when it has none.
-    A class gives itself, see :func:`_resolve_parameter_hints`."""
-    return _resolve_parameter_hints(fn)[0].get("return", Any)
+E = TypeVar("E")
+"""The event type that a reducer reads."""
 
 
 def _union_args(hint: object) -> tuple[object, ...]:
@@ -111,6 +111,13 @@ def _union_args(hint: object) -> tuple[object, ...]:
     if origin is typing.Union or origin is types.UnionType:
         return typing.get_args(hint)
     return (hint,)
+
+
+def _type_name(spec: object) -> str:
+    """A short name of an event type spec, for the fix of an error."""
+    if isinstance(spec, tuple):
+        return " | ".join(_type_name(t) for t in spec)
+    return getattr(spec, "__name__", None) or _hint_label(spec)
 
 
 def _matches_namespace(event: object, dom: type[Namespace] | None) -> bool:
@@ -141,6 +148,79 @@ class BaseReducer(ABC):
     name: str
     event_type: EventTypeSpec
     namespace: type[Namespace] | None
+    _declared: tuple[object, ...]
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # ``Reducer[E, T](...)`` sets ``__orig_class__`` after ``__init__``.
+        # Keep its type arguments in a field too, so ``dataclasses.replace``
+        # carries them to the copy.
+        if name == "__orig_class__":
+            object.__setattr__(self, "_declared", typing.get_args(value))
+        object.__setattr__(self, name, value)
+
+    def _type_arguments(self, generic: type) -> tuple[object, ...]:
+        """The type arguments that this reducer declares for *generic*: from
+        the subscription of the call, or from a base of its class."""
+        if self._declared:
+            return self._declared
+        for klass in type(self).__mro__:
+            for base in klass.__dict__.get("__orig_bases__", ()):
+                if typing.get_origin(base) is generic:
+                    return typing.get_args(base)
+        return ()
+
+    def _declared_argument(self, generic: type, example: str) -> object:
+        """The last type argument that this reducer declares for *generic*.
+
+        Raises ``TypeError`` that names the reducer and the fix when the
+        argument is missing, or names no class yet. *example* is the
+        subscription that the fix shows.
+        """
+        arguments = self._type_arguments(generic)
+        label = f"{type(self).__name__} {self.name!r}"
+        if not arguments:
+            raise TypeError(
+                f"{label} declares no stored type. Subscript it: {example}(...). "
+                f"The framework checks each reader against the declared type, "
+                f"and never guesses it."
+            )
+        declared = arguments[-1]
+        try:
+            _normal(declared)
+        except UnsettledTypeError as exc:
+            raise TypeError(
+                f"{label} declares the stored type {declared!r}, but {exc}. "
+                f"Subscript it with a class: {example}(...)."
+            ) from None
+        return declared
+
+    def _require_fn_returns(self, fn: Callable[..., object], declared: object) -> None:
+        """Raise ``TypeError`` when the return annotation of *fn*, without
+        ``SkipType``, is not *declared*. A function with no return annotation,
+        such as a lambda, is not checked."""
+        returns = _resolve_parameter_hints(fn)[0].get("return", inspect.Parameter.empty)
+        if returns is inspect.Parameter.empty:
+            return
+        kept = tuple(a for a in _union_args(returns) if a is not SkipType)
+        if not kept:
+            raise TypeError(
+                f"{type(self).__name__} {self.name!r} has a fn that returns only "
+                f"SkipType, so it never sets a value. Return the value type "
+                f"too, for example -> str | SkipType, or remove the reducer."
+            )
+        returned = typing.Union[kept] if len(kept) > 1 else kept[0]  # noqa: UP007 - a runtime value
+        if not _same_type(returned, declared, may_be_unset=False):
+            merge = (
+                " For a merge that stores another item type, use a FoldReducer "
+                "or a BaseReducer subclass."
+                if isinstance(self, Reducer)
+                else ""
+            )
+            raise TypeError(
+                f"{type(self).__name__} {self.name!r} declares "
+                f"{_hint_label(declared)}, but its fn returns "
+                f"{_hint_label(returned)}. Make the two the same type.{merge}"
+            )
 
     def __set_name__(self, owner: type, name: str) -> None:
         # __set_name__ runs before Namespace.__init_subclass__ stamps
@@ -196,10 +276,16 @@ class BaseReducer(ABC):
     def _read(self, read: StateRead) -> object:
         return self.read(read.state)
 
+    @abstractmethod
+    def stored_type(self) -> object:
+        """The declared type of the value that :meth:`read` gives.
+
+        Graph construction checks the annotation of each reader against it.
+        Raises ``TypeError`` when the reducer declares no type.
+        """
+
     def _value_type(self) -> object:
-        """The type of the value that :meth:`read` gives. A subclass that
-        does not know it gives ``Any``, and no annotation check runs."""
-        return Any
+        return self.stored_type()
 
     def _describe(self) -> str:
         return f"reducer {self.name!r}"
@@ -247,8 +333,8 @@ class Readable(Protocol):
         ...
 
     def _value_type(self) -> object:
-        """The type of the value, for the check of a reader's annotation.
-        ``Any`` means that the type is not known."""
+        """The declared type of the value, for the check of a reader's
+        annotation."""
         ...
 
     def _describe(self) -> str: ...
@@ -257,7 +343,7 @@ class Readable(Protocol):
 
 
 @dataclass
-class Reducer(BaseReducer):
+class Reducer(BaseReducer, Generic[E, T]):
     """Maps events to contributions for a named LangGraph state channel.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on each
@@ -269,7 +355,9 @@ class Reducer(BaseReducer):
     from ``langchain_core.messages`` for smart message deduplication.
 
     Handlers receive the accumulated value by declaring a parameter whose
-    name matches ``self.name``.
+    name matches ``self.name``. ``Reducer[E, T]`` declares the event type
+    ``E`` and the item type ``T``: the channel stores ``list[T]``. A reader
+    annotates ``list[T]`` exactly.
 
     Example::
 
@@ -286,11 +374,14 @@ class Reducer(BaseReducer):
     """
 
     name: str = ""
-    event_type: EventTypeSpec = field(kw_only=True)
-    fn: Callable[[Any], list[Any]] = field(kw_only=True)
+    event_type: type[E] | tuple[type[E], ...] | types.UnionType = field(kw_only=True)
+    fn: Callable[[E], list[T]] = field(kw_only=True)
     reducer: ReducerFn = field(kw_only=True, default=operator.add)
-    default: list[Any] = field(kw_only=True, default_factory=list)
+    default: list[T] = field(kw_only=True, default_factory=list)
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
+    _declared: tuple[object, ...] = field(
+        kw_only=True, default=(), repr=False, compare=False
+    )
 
     def state_annotation(self) -> object:
         return Annotated[list, self.reducer]
@@ -306,7 +397,7 @@ class Reducer(BaseReducer):
                 continue
             if not _matches_namespace(event, self.namespace):
                 continue
-            contrib = self.fn(event)
+            contrib = self.fn(cast("E", event))
             if contrib:
                 if not isinstance(contrib, list):
                     raise TypeError(
@@ -322,10 +413,15 @@ class Reducer(BaseReducer):
     def output_type(self) -> object:
         return list
 
-    def _value_type(self) -> object:
-        """The ``list`` type that ``fn`` returns, or ``list[Any]``."""
-        returns = _return_hint(self.fn)
-        return returns if typing.get_origin(returns) is list else list[Any]
+    def stored_type(self) -> object:
+        """``list[T]``, from ``Reducer[E, T]``. When ``fn`` has a return
+        annotation, it must be ``list[T]`` too."""
+        item = self._declared_argument(
+            Reducer, f"Reducer[{_type_name(self.event_type)}, T]"
+        )
+        stored = list[item]  # type: ignore[valid-type]
+        self._require_fn_returns(self.fn, stored)
+        return stored
 
     def seed(self, events: list[Event]) -> list[Any]:
         values = list(self.default)
@@ -334,7 +430,7 @@ class Reducer(BaseReducer):
 
 
 @dataclass
-class ScalarReducer(BaseReducer):
+class ScalarReducer(BaseReducer, Generic[E, T]):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
@@ -351,9 +447,14 @@ class ScalarReducer(BaseReducer):
     to ``strategy: str | None`` (or ``Optional[str]`` / ``Any`` / ``object``,
     or omit the annotation) to allow ``None``.
 
+    ``ScalarReducer[E, T]`` declares the event type ``E`` and the stored
+    type ``T``. mypy checks ``fn`` against them, a lambda too. The source
+    type of a reader is ``T``, joined with ``None`` when ``default`` is
+    ``None``.
+
     Example::
 
-        strategy = ScalarReducer(
+        strategy = ScalarReducer[StrategyChosen, str](
             name="strategy",
             event_type=StrategyChosen,
             fn=lambda e: e.strategy,
@@ -367,10 +468,13 @@ class ScalarReducer(BaseReducer):
     """
 
     name: str = ""
-    event_type: EventTypeSpec = field(kw_only=True)
-    fn: Callable[[Any], Any] = field(kw_only=True)
-    default: Any = field(kw_only=True, default=None)
+    event_type: type[E] | tuple[type[E], ...] | types.UnionType = field(kw_only=True)
+    fn: Callable[[E], T | SkipType] = field(kw_only=True)
+    default: T | None = field(kw_only=True, default=None)
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
+    _declared: tuple[object, ...] = field(
+        kw_only=True, default=(), repr=False, compare=False
+    )
 
     def state_annotation(self) -> object:
         return Annotated[Any, _last_write_wins]
@@ -387,7 +491,7 @@ class ScalarReducer(BaseReducer):
             if not _matches_namespace(event, self.namespace):
                 continue
             last = event
-        return self.fn(last) if last is not SKIP else SKIP
+        return self.fn(cast("E", last)) if last is not SKIP else SKIP
 
     def has_contributions(self, result: Any) -> bool:  # noqa: ANN401 - a subclass narrows this to its own collect() result
         return result is not SKIP
@@ -395,28 +499,27 @@ class ScalarReducer(BaseReducer):
     def output_type(self) -> object:
         return Any
 
-    def _value_type(self) -> object:
-        """The type that ``fn`` returns, without ``SkipType``, joined with
-        the type of ``default`` when ``default`` does not fit it. A ``None``
-        default adds ``None``. ``Any`` when ``fn`` has no return annotation."""
-        returns = _return_hint(self.fn)
-        if returns is Any:
-            return Any
-        kept = tuple(a for a in _union_args(returns) if a is not SkipType)
-        if not kept:
-            raise TypeError(
-                f"ScalarReducer {self.name!r} has a fn that returns only "
-                f"SkipType, so it never sets a value. Return the value type "
-                f"too, for example -> str | SkipType, or remove the reducer."
-            )
-        returned = typing.Union[kept] if len(kept) > 1 else kept[0]  # noqa: UP007 - a runtime value
-        from beartype.door import is_bearable  # noqa: PLC0415
+    def stored_type(self) -> object:
+        """``T``, from ``ScalarReducer[E, T]``, joined with ``None`` when
+        ``default`` is ``None``. When ``fn`` has a return annotation, it must
+        be ``T``, with or without ``SkipType``."""
+        declared = self._declared_argument(
+            ScalarReducer,
+            f"ScalarReducer[{_type_name(self.event_type)}, {self._fn_example()}]",
+        )
+        self._require_fn_returns(self.fn, declared)
+        if self.default is None:
+            return typing.Optional[declared]  # noqa: UP045 - a runtime value
+        return declared
 
-        if self.default is not None and isinstance(
-            _satisfies(is_bearable, self.default, returned), Fits
-        ):
-            return returned
-        return typing.Union[returned, type(self.default)]  # noqa: UP007 - a runtime value
+    def _fn_example(self) -> str:
+        """The return type of ``fn`` without ``SkipType``, or ``T``, for the
+        fix of an error."""
+        returns = _resolve_parameter_hints(self.fn)[0].get("return")
+        if returns is None:
+            return "T"
+        kept = [a for a in _union_args(returns) if a is not SkipType]
+        return " | ".join(_hint_label(a) for a in kept) or "T"
 
     def seed(self, events: list[Event]) -> object:
         result = self.collect(events)
@@ -469,7 +572,7 @@ class FoldReducer(BaseReducer, Generic[S]):
     :meth:`MessageEvent.as_messages`), so callers usually supply only the
     channel name, the event type(s), and a ``default_factory``::
 
-        counter = FoldReducer(
+        counter = FoldReducer[dict[str, int]](
             name="counter",
             event_type=(Incremented, Reset),
             default_factory=lambda: {"n": 0},
@@ -495,6 +598,9 @@ class FoldReducer(BaseReducer, Generic[S]):
         kw_only=True, default=lambda state, event: event.fold(state)
     )
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
+    _declared: tuple[object, ...] = field(
+        kw_only=True, default=(), repr=False, compare=False
+    )
 
     @property
     def reducer(self) -> Callable[[S, _Contributions | S], S]:
@@ -529,10 +635,9 @@ class FoldReducer(BaseReducer, Generic[S]):
     def output_type(self) -> object:
         return Any
 
-    def _value_type(self) -> object:
-        """The class that ``default_factory`` is, or the type that it
-        returns. ``Any`` when the factory has no return annotation."""
-        return _return_hint(self.default_factory)
+    def stored_type(self) -> object:
+        """``S``, from ``FoldReducer[S]``."""
+        return self._declared_argument(FoldReducer, "FoldReducer[S]")
 
     def seed(self, events: list[Event]) -> S:
         return self._fold_events(self.default_factory(), self.collect(events).events)
@@ -566,8 +671,8 @@ class Derived(Generic[T]):
     Each parameter of ``fn`` is one input, and binds by the rule of a
     handler parameter. A parameter annotated with :class:`EventLog`
     receives the ``EventLog`` of the state. Each other parameter name names
-    a stored reducer or another ``Derived``, and its annotation must fit
-    that value. A default is the value of an input that is ``None``. Before a
+    a stored reducer or another ``Derived``, and its annotation must name
+    its declared type. A default is the value of an input that is ``None``. Before a
     handler runs, the framework calls ``fn`` with the values of the inputs.
     A handler receives the result by parameter name, like a reducer value::
 
@@ -708,6 +813,7 @@ def message_reducer(
         # Using an explicit default list:
         messages = message_reducer([SystemMessage(content="You are helpful")])
     """
+    from langchain_core.messages import BaseMessage  # noqa: PLC0415
     from langgraph.graph.message import add_messages  # noqa: PLC0415
 
     from langgraph_events._event import MessageEvent  # noqa: PLC0415
@@ -724,7 +830,7 @@ def message_reducer(
                 message.id = str(uuid.uuid4())
         return messages
 
-    return Reducer(
+    return Reducer[MessageEvent, BaseMessage](
         name=name,
         event_type=MessageEvent,
         fn=fn,

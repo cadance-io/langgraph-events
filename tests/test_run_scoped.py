@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Self, TypeVar, runtime_checkable
 
 import pytest
-from conftest import Started
+from conftest import Started, services_from, typed_services
 from langchain_core.runnables import (
     RunnableConfig,  # noqa: TC002 - a factory annotation resolves at graph build
 )
@@ -26,7 +26,7 @@ from langgraph_events import (
 from langgraph_events._handler import HandlerMeta
 from langgraph_events._internal import _build_inject
 from langgraph_events._namespace import NamespaceModel
-from langgraph_events._services import NamedServices
+from langgraph_events._services import Services
 
 
 class _Model:
@@ -96,6 +96,19 @@ def _generic_for(config: RunnableConfig) -> T:  # type: ignore[type-var]
     return _model_for(config)  # type: ignore[return-value]
 
 
+class _Talker:
+    def speak(self) -> str:
+        return "hi"
+
+
+def _reads_model() -> Any:
+    @on(Started)
+    def handle(event: Started, model: _Model) -> None:
+        pass
+
+    return handle
+
+
 def describe_RunScoped():
     def describe_injection():
         def when_a_handler_names_a_run_scoped_service():
@@ -106,7 +119,9 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     observed["model"] = model
 
-                graph = EventGraph([handle], services={"model": RunScoped(_model_for)})
+                graph = EventGraph(
+                    [handle], services=services_from({"model": RunScoped(_model_for)})
+                )
                 graph.invoke(Started(), config={"configurable": {"language": "fr"}})
 
                 model = observed["model"]
@@ -125,7 +140,9 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
-                graph = EventGraph([handle], services={"model": RunScoped(counting)})
+                graph = EventGraph(
+                    [handle], services=services_from({"model": RunScoped(counting)})
+                )
                 graph.invoke(
                     [Started(data="a"), Started(data="b")],
                     config={"configurable": {"language": "en"}},
@@ -150,7 +167,8 @@ def describe_RunScoped():
                     pass
 
                 graph = EventGraph(
-                    [first, second], services={"model": RunScoped(counting)}
+                    [first, second],
+                    services=services_from({"model": RunScoped(counting)}),
                 )
                 graph.invoke(Started(), config={"configurable": {"language": "en"}})
 
@@ -165,7 +183,9 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
-                graph = EventGraph([handle], services={"model": RunScoped(broken)})
+                graph = EventGraph(
+                    [handle], services=services_from({"model": RunScoped(broken)})
+                )
 
                 with pytest.raises(KeyError) as info:
                     graph.invoke(Started(), config={"configurable": {}})
@@ -179,7 +199,9 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
-                services = NamedServices({"model": RunScoped(_model_for)})
+                services = Services.parse(
+                    services_from({"model": RunScoped(_model_for)})
+                )
                 bound = services.bind_factories({}, None).bind(
                     HandlerMeta.of(handle, readables={}), None
                 )
@@ -257,15 +279,6 @@ def describe_RunScoped():
                 with pytest.raises(TypeError, match=r"Sub"):
                     RunScoped(Sub())
 
-        def when_placed_in_the_type_keyed_sequence_form():
-            def it_raises_a_type_error_at_graph_construction():
-                @on(Started)
-                def handle(event: Started) -> None:
-                    pass
-
-                with pytest.raises(TypeError, match=r"RunScoped.*mapping"):
-                    EventGraph([handle], services=[RunScoped(_model_for)])
-
     def describe_annotation_check():
         def when_the_factory_return_annotation_does_not_resolve():
             def it_raises_a_type_error_naming_the_factory_and_the_cause():
@@ -279,110 +292,93 @@ def describe_RunScoped():
                     pass
 
                 with pytest.raises(TypeError, match=r"broken.*MissingModel"):
-                    EventGraph([handle], services={"model": RunScoped(broken)})
+                    EventGraph(
+                        [handle], services=services_from({"model": RunScoped(broken)})
+                    )
 
-        def when_the_factory_returns_another_type():
-            def it_raises_a_type_error_naming_handler_parameter_and_both_types():
-                @on(Started)
-                def handle(event: Started, model: _Model) -> None:
-                    pass
-
-                with pytest.raises(TypeError) as info:
-                    EventGraph([handle], services={"model": RunScoped(_other_for)})
-
-                message = str(info.value)
-                assert "'handle'" in message
-                assert "'model'" in message
-                assert "_Model" in message
-                assert "_Other" in message
-                assert "RunScoped(_other_for)" in message
-
-        def when_the_factory_returns_a_subtype():
-            def it_builds_and_injects():
-                seen: list[_Model] = []
-
-                @on(Started)
-                def handle(event: Started, model: _Model) -> None:
-                    seen.append(model)
-
-                graph = EventGraph(
-                    [handle], services={"model": RunScoped(_sub_model_for)}
-                )
-                graph.invoke(Started(), config={"configurable": {"language": "fr"}})
-
-                assert isinstance(seen[0], _SubModel)
-
-        def when_the_factory_returns_any():
-            def it_skips_the_check():
-                @on(Started)
-                def handle(event: Started, model: _Model) -> None:
-                    pass
-
-                EventGraph([handle], services={"model": RunScoped(_any_for)})
+        def when_the_factory_returns_another_type_than_the_field():
+            @pytest.mark.parametrize(
+                "factory",
+                [_other_for, _sub_model_for, _any_for, _Other],
+                ids=["unrelated", "subclass", "any", "class"],
+            )
+            def it_raises_naming_the_service_and_both_types(factory: Any):
+                with pytest.raises(
+                    TypeError,
+                    match=r"Service 'model' is declared RunScoped\[_Model\], but "
+                    r"its factory returns ",
+                ):
+                    EventGraph(
+                        [_reads_model()],
+                        services=typed_services(
+                            model=(RunScoped[_Model], RunScoped(factory))
+                        ),
+                    )
 
         def when_the_factory_returns_a_type_variable():
-            def it_skips_the_check():
+            def it_raises_naming_the_service():
+                with pytest.raises(
+                    TypeError, match=r"Service 'model' .*names no class"
+                ):
+                    EventGraph(
+                        [_reads_model()],
+                        services=typed_services(
+                            model=(RunScoped[_Model], RunScoped(_generic_for))
+                        ),
+                    )
+
+        def when_a_reader_names_another_type_than_the_field():
+            @pytest.mark.parametrize(
+                "annotation", [_SubModel, _Speaks, _Listens, _Model | None]
+            )
+            def it_raises_naming_the_declared_type(annotation: Any):
                 @on(Started)
-                def handle(event: Started, model: _Model) -> None:
+                def handle(event: Started, model: Any) -> None:
                     pass
 
-                EventGraph([handle], services={"model": RunScoped(_generic_for)})
+                handle.__annotations__["model"] = annotation
 
-        def when_the_parameter_annotation_is_a_protocol_that_is_not_runtime_checkable():
-            def it_warns_and_builds():
+                with pytest.raises(TypeError, match=r"service 'model' gives _Model\."):
+                    EventGraph(
+                        [handle],
+                        services=services_from({"model": RunScoped(_model_for)}),
+                    )
+
+        def when_the_field_declares_a_protocol():
+            def it_injects_the_value_under_that_protocol():
+                def speaker_for(config: RunnableConfig) -> _Speaks:
+                    return _Talker()
+
+                seen: list[object] = []
+
                 @on(Started)
                 def handle(event: Started, model: _Speaks) -> None:
-                    pass
+                    seen.append(model.speak())
 
-                with pytest.warns(UserWarning, match=r"'model'.*not checked"):
-                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+                EventGraph(
+                    [handle],
+                    services=typed_services(
+                        model=(RunScoped[_Speaks], RunScoped(speaker_for))
+                    ),
+                ).invoke(Started())
 
-        def when_the_parameter_is_a_runtime_protocol_that_has_a_data_member():
-            def it_warns_and_builds_for_a_run_scoped_factory():
-                @on(Started)
-                def handle(event: Started, model: _HasName) -> None:
-                    pass
-
-                with pytest.warns(UserWarning, match=r"'model'.*not checked"):
-                    EventGraph([handle], services={"model": RunScoped(_model_for)})
-
-        def when_the_parameter_annotation_is_a_runtime_checkable_protocol():
-            def it_checks_the_factory_return_type():
-                @on(Started)
-                def handle(event: Started, model: _Listens) -> None:
-                    pass
-
-                with pytest.raises(TypeError, match=r"'model'.*_Listens"):
-                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+                assert seen == ["hi"]
 
         def when_the_same_handler_is_built_in_two_graphs():
             def it_checks_each_graph_against_its_own_services():
-                @on(Started)
-                def handle(event: Started, model: _Model) -> None:
-                    pass
+                handle = _reads_model()
 
-                EventGraph([handle], services={"model": RunScoped(_model_for)})
+                EventGraph(
+                    [handle], services=services_from({"model": RunScoped(_model_for)})
+                )
                 with pytest.raises(TypeError, match=r"_Other"):
-                    EventGraph([handle], services={"model": RunScoped(_other_for)})
-                EventGraph([handle], services={"model": RunScoped(_model_for)})
-
-        def when_the_factory_is_a_class():
-            def it_uses_the_class_as_the_provided_type():
-                @on(Started)
-                def handle(event: Started, model: _Model) -> None:
-                    pass
-
-                with pytest.raises(TypeError, match=r"'model'.*_Other"):
-                    EventGraph([handle], services={"model": RunScoped(_Other)})
-
-        def when_the_annotation_nests_a_protocol_that_is_not_runtime_checkable():
-            def it_warns_and_builds():
-                @on(Started)
-                def handle(event: Started, model: _Speaks | None) -> None:
-                    pass
-
-                with pytest.warns(UserWarning, match=r"'model'.*not checked"):
-                    EventGraph([handle], services={"model": RunScoped(_model_for)})
+                    EventGraph(
+                        [handle],
+                        services=services_from({"model": RunScoped(_other_for)}),
+                    )
+                EventGraph(
+                    [handle], services=services_from({"model": RunScoped(_model_for)})
+                )
 
         def when_the_factory_is_wrapped_by_a_decorator_from_another_module():
             def it_resolves_the_return_annotation_against_the_factory_module():
@@ -390,17 +386,18 @@ def describe_RunScoped():
                 def handle(event: Started, model: _Model) -> None:
                     pass
 
-                EventGraph([handle], services={"model": RunScoped(_cached_for)})
+                EventGraph(
+                    [handle], services=services_from({"model": RunScoped(_cached_for)})
+                )
 
         def when_the_factory_is_a_classmethod_returning_self():
             def it_compares_the_owner_class():
-                @on(Started)
-                def handle(event: Started, model: _Other) -> None:
-                    pass
-
-                with pytest.raises(TypeError, match=r"returns _Factory\."):
+                with pytest.raises(TypeError, match=r"factory returns _Factory\."):
                     EventGraph(
-                        [handle], services={"model": RunScoped(_Factory.for_run)}
+                        [_reads_model()],
+                        services=typed_services(
+                            model=(RunScoped[_Model], RunScoped(_Factory.for_run))
+                        ),
                     )
 
 
@@ -424,8 +421,12 @@ class _Told(IntegrationEvent):
     text: str = ""
 
 
-_choice = ScalarReducer(name="choice", event_type=_Picked, fn=lambda e: e.choice)
-_choices = Reducer(name="choices", event_type=_Picked, fn=lambda e: [e.choice])
+_choice = ScalarReducer[_Picked, str](
+    name="choice", event_type=_Picked, fn=lambda e: e.choice
+)
+_choices = Reducer[_Picked, str](
+    name="choices", event_type=_Picked, fn=lambda e: [e.choice]
+)
 
 
 def _shout_of(choice: str | None) -> str:
@@ -543,7 +544,7 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [_read_one],
                 reducers=[_choice],
-                services={"reader": RunScoped(_choice_reader)},
+                services=services_from({"reader": RunScoped(_choice_reader)}),
             )
 
             graph.invoke([_Picked(choice="tea"), _Told()])
@@ -555,7 +556,7 @@ def describe_RunScoped_factory_inputs():
                 graph = EventGraph(
                     [_read_one],
                     reducers=[_choice],
-                    services={"reader": RunScoped(_choice_reader)},
+                    services=services_from({"reader": RunScoped(_choice_reader)}),
                 )
 
                 graph.invoke(_Told())
@@ -567,7 +568,7 @@ def describe_RunScoped_factory_inputs():
                     graph = EventGraph(
                         [_read_one],
                         reducers=[_choice],
-                        services={"reader": RunScoped(_strict_reader)},
+                        services=services_from({"reader": RunScoped(_strict_reader)}),
                     )
 
                     with pytest.raises(
@@ -585,7 +586,7 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [_read_one],
                 reducers=[_choice],
-                services={"reader": RunScoped(positional)},
+                services=services_from({"reader": RunScoped(positional)}),
             )
 
             graph.invoke([_Picked(choice="tea"), _Told()])
@@ -600,7 +601,9 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [_read_one],
                 reducers=[_choice],
-                services={"reader": RunScoped(functools.partial(scaled, times=2))},
+                services=services_from(
+                    {"reader": RunScoped(functools.partial(scaled, times=2))}
+                ),
             )
 
             graph.invoke([_Picked(choice="tea"), _Told()])
@@ -616,7 +619,7 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [both],
                 reducers=[_choice, _shout],
-                services={"reader": RunScoped(_shout_reader)},
+                services=services_from({"reader": RunScoped(_shout_reader)}),
             )
 
             graph.invoke([_Picked(choice="tea"), _Told()])
@@ -629,7 +632,9 @@ def describe_RunScoped_factory_inputs():
             def both(event: _Told, reader: _Reader, log: EventLog) -> None:
                 _SEEN.append((list(reader.inputs["log"]), list(log)))  # type: ignore[call-overload]
 
-            graph = EventGraph([both], services={"reader": RunScoped(_log_reader)})
+            graph = EventGraph(
+                [both], services=services_from({"reader": RunScoped(_log_reader)})
+            )
 
             graph.invoke([_Picked(choice="tea"), _Told()])
 
@@ -642,7 +647,7 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [_read_one],
                 context_schema=_Facts,
-                services={"reader": RunScoped(_context_reader)},
+                services=services_from({"reader": RunScoped(_context_reader)}),
             )
 
             graph.invoke(
@@ -657,7 +662,9 @@ def describe_RunScoped_factory_inputs():
         def it_receives_the_service_of_that_name():
             graph = EventGraph(
                 [_read_one],
-                services={"reader": RunScoped(_setting_reader), "setting": "on"},
+                services=services_from(
+                    {"reader": RunScoped(_setting_reader), "setting": "on"}
+                ),
             )
 
             graph.invoke(_Told())
@@ -681,11 +688,13 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [all_three],
                 reducers=[_choices],
-                services={
-                    "base": RunScoped(counting_base),
-                    "left": RunScoped(_left_of),
-                    "right": RunScoped(_right_of),
-                },
+                services=services_from(
+                    {
+                        "base": RunScoped(counting_base),
+                        "left": RunScoped(_left_of),
+                        "right": RunScoped(_right_of),
+                    }
+                ),
             )
 
             graph.invoke(_Told())
@@ -708,7 +717,9 @@ def describe_RunScoped_factory_inputs():
                 pass
 
             graph = EventGraph(
-                [plain], reducers=[_choices], services={"unused": RunScoped(unused)}
+                [plain],
+                reducers=[_choices],
+                services=services_from({"unused": RunScoped(unused)}),
             )
 
             graph.invoke(_Told())
@@ -720,10 +731,12 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [_read_one],
                 reducers=[_choices],
-                services={
-                    "base": RunScoped(_raising_base),
-                    "reader": RunScoped(_first_of_base),
-                },
+                services=services_from(
+                    {
+                        "base": RunScoped(_raising_base),
+                        "reader": RunScoped(_first_of_base),
+                    }
+                ),
             )
 
             with pytest.raises(LookupError) as info:
@@ -738,10 +751,12 @@ def describe_RunScoped_factory_inputs():
             graph = EventGraph(
                 [_read_one],
                 reducers=[_choices],
-                services={
-                    "base": RunScoped(_raising_base),
-                    "reader": RunScoped(_first_of_base),
-                },
+                services=services_from(
+                    {
+                        "base": RunScoped(_raising_base),
+                        "reader": RunScoped(_first_of_base),
+                    }
+                ),
             )
 
             with pytest.raises(LookupError) as info:
@@ -766,13 +781,15 @@ def describe_RunScoped_factory_rules():
     def when_a_parameter_has_a_default():
         def when_the_input_is_unset():
             def it_receives_the_default():
-                _build({"reader": RunScoped(_defaulted_reader)}).invoke(_Told())
+                _build(services_from({"reader": RunScoped(_defaulted_reader)})).invoke(
+                    _Told()
+                )
 
                 assert [r.inputs for r in _SEEN] == [{"choice": "coffee"}]  # type: ignore[attr-defined]
 
         def when_the_input_is_set():
             def it_receives_the_value():
-                _build({"reader": RunScoped(_defaulted_reader)}).invoke(
+                _build(services_from({"reader": RunScoped(_defaulted_reader)})).invoke(
                     [_Picked(choice="tea"), _Told()]
                 )
 
@@ -784,12 +801,14 @@ def describe_RunScoped_factory_rules():
                 pytest.warns(UserWarning, match=r"'choise'.*Available reducers"),
                 pytest.raises(TypeError) as info,
             ):
-                _build({"reader": RunScoped(_typo_reader), "setting": "on"})
+                _build(
+                    services_from({"reader": RunScoped(_typo_reader), "setting": "on"})
+                )
 
             assert str(info.value) == (
                 "RunScoped factory '_typo_reader' for service 'reader' declares "
                 "parameter(s) ['choise'] that the framework cannot inject: "
-                "'choise' (str). services= has the name keys ['setting']. For "
+                "'choise' (str). services= has the fields ['setting']. For "
                 "service injection, register a matching instance via services=; "
                 "for state, register a Reducer; otherwise remove the parameter."
             )
@@ -804,7 +823,7 @@ def describe_RunScoped_factory_rules():
                     match=r"To read the run config, annotate 'config' with exactly "
                     r"RunnableConfig\.",
                 ):
-                    _build({"reader": RunScoped(untyped_config)})
+                    _build(services_from({"reader": RunScoped(untyped_config)}))
 
         def when_the_parameter_is_named_log():
             def it_names_the_event_log_fix():
@@ -812,7 +831,7 @@ def describe_RunScoped_factory_rules():
                     TypeError,
                     match=r"To read the EventLog, annotate 'log' with EventLog\.",
                 ):
-                    _build({"reader": RunScoped(_wrong_log_type)})
+                    _build(services_from({"reader": RunScoped(_wrong_log_type)}))
 
         def when_the_parameter_annotation_is_an_event():
             def it_says_that_a_factory_cannot_read_the_event():
@@ -820,7 +839,7 @@ def describe_RunScoped_factory_rules():
                     return _Model(event.text)
 
                 with pytest.raises(TypeError) as info:
-                    _build({"reader": RunScoped(from_event)})
+                    _build(services_from({"reader": RunScoped(from_event)}))
 
                 assert "A factory cannot read the event _Told. Read it in the " in (
                     str(info.value)
@@ -830,20 +849,24 @@ def describe_RunScoped_factory_rules():
     def when_a_parameter_is_variadic():
         def it_raises_naming_the_factory_and_the_parameter():
             with pytest.raises(TypeError, match=r"'_variadic_reader'.*'inputs'"):
-                _build({"reader": RunScoped(_variadic_reader)})
+                _build(services_from({"reader": RunScoped(_variadic_reader)}))
 
     def when_python_cannot_read_the_signature():
         def it_raises_naming_the_factory():
             with pytest.raises(TypeError, match=r"cannot read the parameters"):
-                _build({"reader": RunScoped(dict)})
+                _build(services_from({"reader": RunScoped(dict)}))
 
     def when_a_service_has_the_name_of_a_reducer():
         def it_raises_for_the_graph():
             with pytest.raises(TypeError) as info:
-                _build({"reader": RunScoped(_choice_reader), "choice": "tea"})
+                _build(
+                    services_from(
+                        {"reader": RunScoped(_choice_reader), "choice": "tea"}
+                    )
+                )
 
             assert str(info.value) == (
-                "services= has the name key 'choice', and a reducer has the "
+                "services= has the field 'choice', and a reducer has the "
                 "same name. A parameter cannot name both. Rename the service "
                 "or the reducer."
             )
@@ -851,11 +874,15 @@ def describe_RunScoped_factory_rules():
     def when_a_service_has_the_name_of_a_derived():
         def it_raises_for_the_graph():
             with pytest.raises(TypeError, match=r"'shout', and a Derived has"):
-                _build({"reader": RunScoped(_choice_reader), "shout": "x"})
+                _build(
+                    services_from({"reader": RunScoped(_choice_reader), "shout": "x"})
+                )
 
     def when_a_factory_reads_log_and_a_service_has_the_name_log():
         def it_reads_the_event_log_by_the_annotation():
-            graph = _build({"reader": RunScoped(_log_reader), "log": "x"})
+            graph = _build(
+                services_from({"reader": RunScoped(_log_reader), "log": "x"})
+            )
 
             graph.invoke(_Told())
 
@@ -866,11 +893,13 @@ def describe_RunScoped_factory_rules():
             def by_name(log: str | None) -> _Reader:
                 return _Reader(log=log)
 
-            named_log = ScalarReducer(name="log", event_type=_Picked, fn=lambda e: "x")
+            named_log = ScalarReducer[_Picked, str](
+                name="log", event_type=_Picked, fn=lambda e: "x"
+            )
             graph = EventGraph(
                 [_read_one],
                 reducers=[named_log],
-                services={"reader": RunScoped(by_name)},
+                services=services_from({"reader": RunScoped(by_name)}),
             )
 
             graph.invoke([_Picked(), _Told()])
@@ -886,13 +915,12 @@ def describe_RunScoped_factory_rules():
                 (
                     _wrong_factory_type,
                     {"base": RunScoped(_choice_reader)},
-                    "services['base'] is RunScoped(_choice_reader) and that "
-                    "factory returns _Reader",
+                    "service 'base' gives _Reader",
                 ),
                 (
                     _wrong_service_type,
                     {"setting": "on"},
-                    "services['setting'] is an instance of str",
+                    "service 'setting' gives str",
                 ),
             ],
             ids=["reducer", "derived", "factory", "service"],
@@ -901,7 +929,7 @@ def describe_RunScoped_factory_rules():
             factory: Any, services: dict[str, object], fragment: str
         ):
             with pytest.raises(TypeError) as info:
-                _build({"reader": RunScoped(factory), **services})
+                _build(services_from({"reader": RunScoped(factory), **services}))
 
             message = str(info.value)
             assert message.startswith(
@@ -915,11 +943,13 @@ def describe_RunScoped_factory_rules():
         def it_raises_naming_the_cycle():
             with pytest.raises(TypeError) as info:
                 _build(
-                    {
-                        "reader": RunScoped(_choice_reader),
-                        "first": RunScoped(_first_of),
-                        "second": RunScoped(_second_of),
-                    }
+                    services_from(
+                        {
+                            "reader": RunScoped(_choice_reader),
+                            "first": RunScoped(_first_of),
+                            "second": RunScoped(_second_of),
+                        }
+                    )
                 )
 
             assert "RunScoped factories read each other in a cycle: " in str(info.value)
@@ -931,10 +961,12 @@ def describe_RunScoped_in_the_structure_views():
         return EventGraph(
             [_read_one],
             reducers=[_choices],
-            services={
-                "base": RunScoped(_base_reader),
-                "reader": RunScoped(_first_of_base),
-            },
+            services=services_from(
+                {
+                    "base": RunScoped(_base_reader),
+                    "reader": RunScoped(_first_of_base),
+                }
+            ),
         )
 
     def when_the_factories_read_reducers_and_factories():
@@ -963,7 +995,7 @@ def describe_RunScoped_in_the_structure_views():
             return EventGraph(
                 [_read_one],
                 context_schema=_Facts,
-                services={"reader": RunScoped(_context_reader)},
+                services=services_from({"reader": RunScoped(_context_reader)}),
             )
 
         def it_lists_the_kind_of_the_input_in_the_text():
@@ -1000,4 +1032,7 @@ def describe_factory_parameter_defaults():
                 match=r"A default does not make 'retries' optional\. Bind a constant "
                 r"in a closure or a functools\.partial\.",
             ):
-                EventGraph([_read_one], services={"reader": RunScoped(with_retries)})
+                EventGraph(
+                    [_read_one],
+                    services=services_from({"reader": RunScoped(with_retries)}),
+                )

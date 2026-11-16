@@ -8,7 +8,7 @@ from typing import Any, TypedDict
 
 import pytest
 from ag_ui.core import EventType, RunAgentInput
-from conftest import Ended, Started
+from conftest import Ended, Started, services_from
 from langchain_core.runnables import (
     RunnableConfig,  # noqa: TC002 - a factory annotation resolves at graph build
 )
@@ -279,7 +279,7 @@ def describe_context_schema():
                 graph = EventGraph(
                     [model_reply],
                     context_schema=RunFacts,
-                    services={"model": RunScoped(_model_for)},
+                    services=services_from({"model": RunScoped(_model_for)}),
                 )
 
                 log = graph.invoke(
@@ -293,7 +293,7 @@ def describe_context_schema():
                     with pytest.raises(TypeError, match="context_schema") as info:
                         EventGraph(
                             [model_reply],
-                            services={"model": RunScoped(_model_for)},
+                            services=services_from({"model": RunScoped(_model_for)}),
                         )
 
                     assert "'model'" in str(info.value)
@@ -303,7 +303,7 @@ def describe_context_schema():
                 graph = EventGraph(
                     [model_reply],
                     context_schema=RunFacts,
-                    services={"model": RunScoped(_keyword_context)},
+                    services=services_from({"model": RunScoped(_keyword_context)}),
                 )
 
                 log = graph.invoke(
@@ -318,7 +318,7 @@ def describe_context_schema():
                     EventGraph(
                         [model_reply],
                         context_schema=RunFacts,
-                        services={"model": RunScoped(_other_context)},
+                        services=services_from({"model": RunScoped(_other_context)}),
                     )
 
                 assert str(info.value).startswith(
@@ -327,24 +327,13 @@ def describe_context_schema():
                     "inject"
                 )
 
-    def describe_type_keyed_services():
-        def when_a_service_is_an_instance_of_the_schema():
-            def it_raises_at_build():
-                with pytest.raises(TypeError) as info:
-                    EventGraph(
-                        [greet], context_schema=RunFacts, services=[RunFacts("fr")]
-                    )
-
-                assert str(info.value).startswith(
-                    "services= holds an instance of RunFacts, the context_schema "
-                    "of the graph."
-                )
-
     def describe_TypedDict_schema():
-        def when_a_type_keyed_service_is_given():
+        def when_a_service_is_given():
             def it_injects_the_context():
                 graph = EventGraph(
-                    [dict_greet], context_schema=DictFacts, services=[_Db()]
+                    [dict_greet],
+                    context_schema=DictFacts,
+                    services=services_from({"db": _Db()}),
                 )
 
                 log = graph.invoke(Started(), context={"language": "nl"})

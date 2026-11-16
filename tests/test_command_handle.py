@@ -8,6 +8,7 @@ from typing import ClassVar
 from typing import ClassVar as CV  # noqa: N817 — alias spelling is under test
 
 import pytest
+from conftest import typed_services
 
 from langgraph_events import (
     Command,
@@ -908,117 +909,115 @@ def describe_Command_handle():
                 assert "node" in str(excinfo.value).lower()
 
     def describe_service_injection():
-
         def when_handle_declares_a_service_parameter():
-
-            def it_injects_the_registered_service_by_type():
+            def it_injects_the_service_of_that_name():
                 chat_model = _StubChatModel(value="injected!")
-                graph = EventGraph([WithService.Cmd], services=[chat_model])
+                graph = EventGraph(
+                    [WithService.Cmd],
+                    services=typed_services(chat_model=(_StubChatModel, chat_model)),
+                )
                 log = graph.invoke(WithService.Cmd())
                 assert log.latest(WithService.Cmd.Done).value == "injected!"
 
         def when_handle_declares_a_service_parameter_but_no_service_registered():
-
             def it_raises_at_graph_construction():
                 with pytest.raises(TypeError, match=r"chat_model"):
                     EventGraph([WithService.Cmd])
 
-        def when_two_services_share_the_same_exact_type():
-
-            def it_rejects_at_graph_construction():
-                a = _StubChatModel(value="a")
-                b = _StubChatModel(value="b")
-                with pytest.raises(TypeError, match=r"_StubChatModel.*collision"):
-                    EventGraph([WithService.Cmd], services=[a, b])
-
-        def when_service_is_subclass_of_param_annotation():
-
-            def it_satisfies_the_base_class_annotation():
+        def when_the_value_is_a_subclass_of_the_declared_type():
+            def it_injects_the_value():
                 subclass_instance = _StubOpenAIChat(value="from-subclass")
-                graph = EventGraph([WithService.Cmd], services=[subclass_instance])
+                graph = EventGraph(
+                    [WithService.Cmd],
+                    services=typed_services(
+                        chat_model=(_StubChatModel, subclass_instance)
+                    ),
+                )
                 log = graph.invoke(WithService.Cmd())
                 assert log.latest(WithService.Cmd.Done).value == "from-subclass"
 
-        def when_two_services_both_match_the_param_annotation():
-
-            def it_rejects_at_graph_construction():
-                openai = _StubOpenAIChat(value="openai")
-                anthropic = _StubAnthropicChat(value="anthropic")
-                with pytest.raises(
-                    TypeError, match=r"chat_model.*multiple.*registered services"
-                ):
-                    EventGraph([WithService.Cmd], services=[openai, anthropic])
-
-        def when_param_is_annotated_object():
-
-            def it_does_not_silently_consume_a_service():
-                # `param: object` matches every registered type via issubclass,
-                # which would silently inject an unrelated service. The framework
-                # must treat the annotation as too broad to claim a service —
-                # falling through to "unclaimed param" and erroring at build.
+        def when_a_reader_names_a_subclass_of_the_declared_type():
+            def it_raises_naming_the_adapter_fix():
                 @on(Shop.Buy.Bought)
-                def overly_broad(
-                    event: Shop.Buy.Bought,
-                    foo: object,
+                def narrow(event: Shop.Buy.Bought, chat_model: _StubOpenAIChat) -> None:
+                    pass
+
+                with pytest.raises(
+                    TypeError,
+                    match=r"service 'chat_model' gives _StubChatModel\. .*adapter",
+                ):
+                    EventGraph(
+                        [narrow],
+                        services=typed_services(
+                            chat_model=(_StubChatModel, _StubOpenAIChat(value="x"))
+                        ),
+                    )
+
+        def when_a_reader_permits_none():
+            def it_raises_because_a_service_is_never_unset():
+                @on(Shop.Buy.Bought)
+                def lenient(
+                    event: Shop.Buy.Bought, chat_model: _StubChatModel | None
                 ) -> None:
                     pass
 
-                chat_model = _StubChatModel(value="x")
+                with pytest.raises(TypeError, match=r"gives _StubChatModel\."):
+                    EventGraph(
+                        [lenient],
+                        services=typed_services(
+                            chat_model=(_StubChatModel, _StubChatModel(value="x"))
+                        ),
+                    )
+
+        def when_param_is_annotated_object():
+            def it_does_not_consume_a_service_of_another_name():
+                @on(Shop.Buy.Bought)
+                def overly_broad(event: Shop.Buy.Bought, foo: object) -> None:
+                    pass
+
                 with pytest.raises(TypeError, match=r"foo"):
-                    EventGraph([overly_broad], services=[chat_model])
+                    EventGraph(
+                        [overly_broad],
+                        services=typed_services(
+                            chat_model=(_StubChatModel, _StubChatModel(value="x"))
+                        ),
+                    )
 
         def when_param_is_resolved_as_a_service_alongside_a_reducer():
-
             def it_does_not_trigger_the_unknown_reducer_warning():
-                # The "unknown reducer" warning fires for any handler
-                # parameter that isn't claimed by a known injection source.
-                # A param resolved via service-type matching MUST count as
-                # claimed — otherwise users get a noisy false-positive
-                # warning every time they declare a service param while
-                # reducers are also registered.
                 import warnings as _warnings
 
                 @on(Shop.Buy.Bought)
                 def with_both(
                     event: Shop.Buy.Bought,
                     chat_model: _StubChatModel,
-                    items: list,
+                    items: list[str],
                 ) -> None:
                     pass
 
-                from langgraph_events import Reducer as _Reducer
-
-                items_reducer = _Reducer(
+                items_reducer = Reducer[Shop.Buy.Bought, str](
                     name="items",
                     event_type=Shop.Buy.Bought,
                     fn=lambda e: [e.item],
                 )
-                chat_model_svc = _StubChatModel(value="x")
 
                 with _warnings.catch_warnings(record=True) as caught:
                     _warnings.simplefilter("always")
                     EventGraph(
                         [with_both],
                         reducers=[items_reducer],
-                        services=[chat_model_svc],
+                        services=typed_services(
+                            chat_model=(_StubChatModel, _StubChatModel(value="x"))
+                        ),
                     )
 
-                # No "don't match any reducer" warning should fire — the
-                # service param is claimed; the reducer param is matched.
                 offending = [
                     w for w in caught if "don't match any reducer" in str(w.message)
                 ]
-                assert not offending, (
-                    f"unexpected typo warning: {[str(w.message) for w in offending]}"
-                )
+                assert not offending
 
-        def when_services_are_passed_as_a_name_keyed_mapping():
-
+        def when_two_fields_have_the_same_type():
             def it_resolves_each_handler_param_by_its_name():
-                # `services={"primary_chat": ..., "backup_chat": ...}` allows
-                # two instances of the same type — the type-keyed list form
-                # would reject that as a collision. Resolution is by handler
-                # parameter name matching the registry key.
                 observed: dict[str, object] = {}
 
                 @on(Shop.Buy.Bought)
@@ -1034,160 +1033,62 @@ def describe_Command_handle():
                 backup = _StubChatModel(value="backup")
                 graph = EventGraph(
                     [two_chats],
-                    services={"primary_chat": primary, "backup_chat": backup},
+                    services=typed_services(
+                        primary_chat=(_StubChatModel, primary),
+                        backup_chat=(_StubChatModel, backup),
+                    ),
                 )
                 graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
                 assert observed["primary_chat"] is primary
                 assert observed["backup_chat"] is backup
 
-        def when_handler_param_name_has_no_matching_service_key():
-
+        def when_handler_param_name_has_no_matching_field():
             def it_raises_at_graph_construction():
-                # Annotation alone is not enough in name-keyed mode — the
-                # framework cannot guess which service to bind. Surface the
-                # missing-binding at graph build.
                 @on(Shop.Buy.Bought)
-                def picky(
-                    event: Shop.Buy.Bought,
-                    chat_model: _StubChatModel,
-                ) -> None:
+                def picky(event: Shop.Buy.Bought, chat_model: _StubChatModel) -> None:
                     pass
 
                 with pytest.raises(TypeError, match=r"chat_model"):
                     EventGraph(
                         [picky],
-                        services={"primary_chat": _StubChatModel(value="x")},
+                        services=typed_services(
+                            primary_chat=(_StubChatModel, _StubChatModel(value="x"))
+                        ),
                     )
 
-        def when_a_name_keyed_value_is_not_an_instance_of_the_annotation():
-
-            def it_raises_at_graph_construction():
-                # Name-keyed binding needs no annotation. An annotation that
-                # is present is a contract, and the value must satisfy it.
+        def when_a_reader_names_another_type_than_the_field():
+            def it_raises_naming_both_types():
                 @on(Shop.Buy.Bought)
-                def picky(
-                    event: Shop.Buy.Bought,
-                    primary_chat: _StubChatModel,
-                ) -> None:
+                def picky(event: Shop.Buy.Bought, primary_chat: _StubChatModel) -> None:
                     pass
 
                 with pytest.raises(TypeError) as info:
-                    EventGraph([picky], services={"primary_chat": object()})
+                    EventGraph(
+                        [picky],
+                        services=typed_services(primary_chat=(object, object())),
+                    )
 
                 message = str(info.value)
                 assert "'picky'" in message
                 assert "'primary_chat'" in message
                 assert "_StubChatModel" in message
-                assert "object" in message
-
-        def when_a_name_keyed_annotation_permits_none():
-
-            def it_accepts_a_none_value():
-                @on(Shop.Buy.Bought)
-                def lenient(
-                    event: Shop.Buy.Bought,
-                    primary_chat: _StubChatModel | None,
-                ) -> None:
-                    pass
-
-                EventGraph([lenient], services={"primary_chat": None})
-
-        def when_a_handler_has_an_unclaimed_param_and_a_mismatch():
-
-            def it_reports_the_mismatch_first():
-                @on(Shop.Buy.Bought)
-                def twice_wrong(
-                    event: Shop.Buy.Bought,
-                    primary_chat: _StubChatModel,
-                    missing: _StubSessionFactory,
-                ) -> None:
-                    pass
-
-                with pytest.raises(
-                    TypeError,
-                    match=r"services\['primary_chat'\] is an instance of object, "
-                    r"not an instance of _StubChatModel\.",
-                ):
-                    EventGraph([twice_wrong], services={"primary_chat": object()})
-
-        def when_a_name_keyed_annotation_is_a_generic_alias():
-
-            def it_names_the_full_annotation_in_the_error():
-                @on(Shop.Buy.Bought)
-                def listy(
-                    event: Shop.Buy.Bought,
-                    primary_chat: list[_StubChatModel],
-                ) -> None:
-                    pass
-
-                with pytest.raises(TypeError, match=r"list\["):
-                    EventGraph([listy], services={"primary_chat": "x"})
-
-        def when_a_name_keyed_value_is_none_under_a_required_annotation():
-
-            def it_says_the_value_is_none():
-                @on(Shop.Buy.Bought)
-                def strict(
-                    event: Shop.Buy.Bought,
-                    primary_chat: _StubChatModel,
-                ) -> None:
-                    pass
-
-                with pytest.raises(TypeError, match=r"is None"):
-                    EventGraph([strict], services={"primary_chat": None})
+                assert "service 'primary_chat' gives object" in message
 
         def when_handler_uses_args_and_kwargs():
-
             def it_does_not_flag_them_as_unclaimed():
-                # Variadic parameters cannot be filled by name- or type-based
-                # injection — they are caller-controlled and should be ignored
-                # by the unclaimed-param check. A generic catcher is a valid
-                # use case and must not raise at graph build.
                 @on(Shop.Buy.Bought)
-                def variadic(event: Shop.Buy.Bought, *args, **kwargs) -> None:
+                def variadic(event: Shop.Buy.Bought, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
                     pass
 
-                # Build should succeed; no unclaimed-param error.
                 EventGraph([variadic])
 
-        def when_base_and_subclass_services_are_both_registered():
-
-            def it_resolves_each_param_to_its_exact_type():
-                # services=[A(), B()] where B(A). Handler annotates one param
-                # as A and another as B. The user has clearly disambiguated by
-                # annotation; multi-match should NOT fire here.
-                observed: dict[str, object] = {}
-
-                @on(Shop.Buy.Bought)
-                def two_typed(
-                    event: Shop.Buy.Bought,
-                    base: _StubChatModel,
-                    sub: _StubOpenAIChat,
-                ) -> None:
-                    observed["base"] = base
-                    observed["sub"] = sub
-
-                base_svc = _StubChatModel(value="base")
-                sub_svc = _StubOpenAIChat(value="sub")
-                graph = EventGraph([two_typed], services=[base_svc, sub_svc])
-                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
-                assert observed["base"] is base_svc
-                assert observed["sub"] is sub_svc
-
-        def when_param_name_matches_a_reducer_and_type_matches_a_service():
-
+        def when_param_name_matches_a_reducer():
             def it_refuses_the_annotation_that_does_not_fit_the_reducer():
                 @on(Shop.Buy.Bought)
-                def collide(
-                    event: Shop.Buy.Bought,
-                    chat_model: _StubChatModel,
-                ) -> None:
+                def collide(event: Shop.Buy.Bought, chat_model: _StubChatModel) -> None:
                     pass
 
-                # Reducer named "chat_model" — collides with the param name.
-                # The reducer claims the param, so its value type must fit the
-                # annotation. A list does not fit _StubChatModel.
-                chat_log = Reducer(
+                chat_log = Reducer[Shop.Buy.Bought, str](
                     name="chat_model",
                     event_type=Shop.Buy.Bought,
                     fn=lambda e: [e.item],
@@ -1195,47 +1096,23 @@ def describe_Command_handle():
                 with pytest.raises(
                     TypeError,
                     match=r"declares parameter 'chat_model' as _StubChatModel, "
-                    r"but reducer 'chat_model' gives list\[Any\]\. Change "
-                    r"the annotation to list\[Any\]",
+                    r"but reducer 'chat_model' gives list\[str\]\. Change "
+                    r"the annotation to list\[str\]",
                 ):
-                    EventGraph(
-                        [collide],
-                        reducers=[chat_log],
-                        services=[_StubChatModel(value="from-service")],
-                    )
-
-        def when_external_handler_declares_multiple_service_params():
-
-            def it_injects_each_service_by_its_type():
-                observed: dict[str, object] = {}
-
-                @on(Shop.Buy.Bought)
-                def two_services(
-                    event: Shop.Buy.Bought,
-                    chat_model: _StubChatModel,
-                    session_factory: _StubSessionFactory,
-                ) -> None:
-                    observed["chat_model"] = chat_model
-                    observed["session_factory"] = session_factory
-
-                chat_model_svc = _StubChatModel(value="chat")
-                session_factory_svc = _StubSessionFactory(label="session")
-                graph = EventGraph(
-                    [two_services],
-                    services=[chat_model_svc, session_factory_svc],
-                )
-                graph.invoke(Shop.Buy.Bought(item="apple", price=1.0))
-                assert observed["chat_model"] is chat_model_svc
-                assert observed["session_factory"] is session_factory_svc
+                    EventGraph([collide], reducers=[chat_log])
 
         def when_inline_handle_is_async_and_declares_a_service_param():
-
             def it_injects_through_ainvoke():
                 import asyncio
 
                 async def run() -> EventLog:
                     chat_model = _StubChatModel(value="async-injected")
-                    graph = EventGraph([WithAsyncService.Cmd], services=[chat_model])
+                    graph = EventGraph(
+                        [WithAsyncService.Cmd],
+                        services=typed_services(
+                            chat_model=(_StubChatModel, chat_model)
+                        ),
+                    )
                     return await graph.ainvoke(WithAsyncService.Cmd())
 
                 log = asyncio.run(run())

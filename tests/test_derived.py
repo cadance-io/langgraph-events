@@ -6,6 +6,7 @@ import functools
 from typing import Any
 
 import pytest
+from conftest import services_from
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import (
@@ -40,8 +41,12 @@ class Reported(IntegrationEvent):
     stage: str = ""
 
 
-placed = ScalarReducer(name="placed", event_type=Placed, fn=lambda e: True)
-shipped = ScalarReducer(name="shipped", event_type=Shipped, fn=lambda e: True)
+placed = ScalarReducer[Placed, bool](
+    name="placed", event_type=Placed, fn=lambda e: True
+)
+shipped = ScalarReducer[Shipped, bool](
+    name="shipped", event_type=Shipped, fn=lambda e: True
+)
 
 
 def _stage_of(placed: bool | None, shipped: bool | None) -> str | None:
@@ -122,7 +127,7 @@ def _constant() -> int:
 
 
 class Parcel(Namespace):
-    sent = ScalarReducer(event_type=DomainEvent, fn=lambda e: True)
+    sent = ScalarReducer[DomainEvent, bool](event_type=DomainEvent, fn=lambda e: True)
     status = Derived(fn=_status_of)
 
     class Look(Command):
@@ -160,12 +165,12 @@ def describe_Derived():
             def it_raises_at_graph_construction():
                 with pytest.raises(
                     TypeError,
-                    match=r"name key 'stage', and a Derived has the same name",
+                    match=r"field 'stage', and a Derived has the same name",
                 ):
                     EventGraph(
                         [check],
                         reducers=[placed, shipped, stage],
-                        services={"stage": "from-service"},
+                        services=services_from({"stage": "from-service"}),
                     )
 
         def when_the_annotation_rejects_none():
@@ -211,10 +216,10 @@ def describe_Derived():
     def when_one_derived_serves_two_graphs():
         def it_reads_the_empty_defaults_of_each_graph():
             flag = Derived(name="flag", fn=_flag_of)
-            low = ScalarReducer(
+            low = ScalarReducer[Placed, str](
                 name="placed", event_type=Placed, fn=lambda e: "set", default="low"
             )
-            high = ScalarReducer(
+            high = ScalarReducer[Placed, str](
                 name="placed", event_type=Placed, fn=lambda e: "set", default="high"
             )
             first = EventGraph([read_flag], reducers=[low, flag])
@@ -346,7 +351,9 @@ def describe_Derived():
                     EventGraph([Parcel.Look], reducers=[clash])
 
             def it_rejects_an_explicit_reducer_named_like_a_namespace_derived():
-                clash = ScalarReducer(name="status", event_type=Placed, fn=str)
+                clash = ScalarReducer[Placed, Any](
+                    name="status", event_type=Placed, fn=str
+                )
 
                 with pytest.raises(TypeError, match=r"'status'.*reducer and a Derived"):
                     EventGraph([Parcel.Look], reducers=[clash])
@@ -454,7 +461,7 @@ def describe_Derived():
                 def _echo(log: str) -> str:
                     return log
 
-                log_reducer = ScalarReducer(
+                log_reducer = ScalarReducer[Placed, str](
                     name="log", event_type=Placed, fn=lambda e: "set"
                 )
                 echo = Derived(name="echo", fn=_echo)
@@ -470,7 +477,9 @@ def describe_Derived():
                 assert _reports(log) == ["set"]
 
             def it_reads_the_event_log_for_a_parameter_annotated_event_log():
-                log_reducer = ScalarReducer(name="log", event_type=Placed, fn=str)
+                log_reducer = ScalarReducer[Placed, str](
+                    name="log", event_type=Placed, fn=str
+                )
                 graph = EventGraph([ship, count], reducers=[log_reducer, seen])
 
                 log = graph.invoke(Placed())
@@ -638,8 +647,10 @@ class Polled(IntegrationEvent):
     remaining: int
 
 
-ticks = FoldReducer(name="ticks", event_type=Ticked, default_factory=int)
-limit = ScalarReducer(name="limit", event_type=Placed, fn=lambda e: 3, default=2)
+ticks = FoldReducer[int](name="ticks", event_type=Ticked, default_factory=int)
+limit = ScalarReducer[Placed, int](
+    name="limit", event_type=Placed, fn=lambda e: 3, default=2
+)
 
 
 def _remaining_of(ticks: int, limit: int) -> int:
@@ -997,7 +1008,9 @@ def _seeded_items(e: Seeded) -> list[int]:
     return [e.x]
 
 
-seeded = Reducer(name="seeded", event_type=Seeded, fn=_seeded_items, default=[0])
+seeded = Reducer[Seeded, int](
+    name="seeded", event_type=Seeded, fn=_seeded_items, default=[0]
+)
 
 
 @on(Seeded)
@@ -1129,15 +1142,3 @@ def describe_Derived_return_annotation():
                 r"gives str \| None",
             ):
                 EventGraph([wrong], reducers=[placed, shipped, stage])
-
-    def when_a_float_annotation_reads_an_int_value():
-        def it_accepts_the_numeric_tower():
-            @on(Checked)
-            def ratio(event: Checked, remaining: float) -> Polled:
-                return Polled(remaining=int(remaining))
-
-            graph = EventGraph([ratio], reducers=[ticks, limit, remaining])
-
-            log = graph.invoke(Checked())
-
-            assert [e.remaining for e in log.filter(Polled)] == [2]

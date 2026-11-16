@@ -446,7 +446,7 @@ def describe_reducer_migration_scenarios():
             # Step 3: replay through a reducer whose projection shape changed
             # since the checkpoint was written. The cache is rebuilt from
             # truth (the events themselves), not patched from the stale cache.
-            notes_reducer = Reducer(
+            notes_reducer = Reducer[Persona.Approve.Approved, Any](
                 name="notes",
                 event_type=Persona.Approve.Approved,
                 fn=lambda e: [e.note],

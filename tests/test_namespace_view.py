@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 import pytest
 
@@ -53,7 +53,9 @@ class _Ledger(Namespace):
         def handle(self) -> _Ledger.Commit.Committed:
             return _Ledger.Commit.Committed()
 
-    commits = ScalarReducer(event_type=Commit.Committed, fn=lambda e: e.edge)
+    commits = ScalarReducer[Commit.Committed, Any](
+        event_type=Commit.Committed, fn=lambda e: e.edge
+    )
 
 
 class _Ops(Namespace):
@@ -64,7 +66,7 @@ class _Ops(Namespace):
         def handle(self) -> _Ops.Ping.Pinged:
             return _Ops.Ping.Pinged()
 
-    pings = ScalarReducer(event_type=DomainEvent, fn=lambda e: 1)
+    pings = ScalarReducer[DomainEvent, Any](event_type=DomainEvent, fn=lambda e: 1)
 
 
 @on(_Clock.Tick.Ticked)
@@ -112,7 +114,7 @@ class _HasEdge(Protocol):
     edge: float
 
 
-proto_total = ScalarReducer(
+proto_total = ScalarReducer[_HasEdge, Any](
     name="proto_total", event_type=_HasEdge, fn=lambda e: e.edge
 )
 
@@ -122,7 +124,7 @@ def commits(event: _Ops.Ping.Pinged) -> None:
     return None
 
 
-edge_total = ScalarReducer(
+edge_total = ScalarReducer[_Ledger.Commit.Committed, Any](
     name="edge_total", event_type=_Ledger.Commit.Committed, fn=lambda e: e.edge
 )
 

@@ -28,7 +28,7 @@ from langgraph_events._reducer_registry import ReducerSelection, StreamState
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
-from langgraph_events._services import parse_services
+from langgraph_events._services import Services
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._reflection import Reflection
-    from langgraph_events._services import Services
     from langgraph_events._types import PauseSignal
 
     _GraphInput = dict[str, Any] | LGCommand
@@ -251,7 +250,7 @@ class EventGraph:
         *,
         max_rounds: int = 100,
         reducers: Sequence[BaseReducer | Derived] | None = None,
-        services: Sequence[Any] | Mapping[str, Any] | None = None,
+        services: object = None,
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
@@ -260,7 +259,7 @@ class EventGraph:
         retired: Sequence[type[Event]] = (),
     ) -> None:
         _validate_on_unresumable(on_unresumable)
-        parsed = parse_services(services)
+        parsed = Services.parse(services)
         self._init(
             EventTopology(
                 handlers,
@@ -283,7 +282,7 @@ class EventGraph:
         topology: EventTopology,
         *,
         max_rounds: int = 100,
-        services: Sequence[Any] | Mapping[str, Any] | None = None,
+        services: object = None,
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
@@ -301,7 +300,7 @@ class EventGraph:
         graph._init(
             topology,
             max_rounds=max_rounds,
-            services=parse_services(services),
+            services=Services.parse(services),
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
@@ -427,6 +426,7 @@ class EventGraph:
         """
         return self._topology._compile(
             self._handlers,
+            model_provider=self.namespaces,
             max_rounds=self._max_rounds,
             recursion_limit=self._recursion_limit,
             checkpointer=self._checkpointer,

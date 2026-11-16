@@ -3,8 +3,10 @@
 import asyncio
 import sys
 import warnings
+from typing import Any
 
 import pytest
+from conftest import typed_services
 
 from langgraph_events import (
     Event,
@@ -39,7 +41,9 @@ class MustBeTrue(Invariant):
     pass
 
 
-_MESSAGES = ScalarReducer(name="messages", event_type=SampleEvent, fn=lambda e: e.x)
+_MESSAGES = ScalarReducer[SampleEvent, Any](
+    name="messages", event_type=SampleEvent, fn=lambda e: e.x
+)
 
 
 # Declared before ``LateService`` on purpose. Bare @on resolves hints at
@@ -501,7 +505,9 @@ def describe_on_annotation_inference():
 
 def _list_reducers(*names: str) -> dict[str, Reducer]:
     return {
-        name: Reducer(name=name, event_type=SampleEvent, fn=lambda e: [])
+        name: Reducer[SampleEvent, Any](
+            name=name, event_type=SampleEvent, fn=lambda e: []
+        )
         for name in names
     }
 
@@ -572,7 +578,7 @@ def describe_HandlerMeta_of():
 
         def it_detects_matching_param_names():
             @on(SampleEvent)
-            def handler(event: SampleEvent, messages: list, history: list):
+            def handler(event: SampleEvent, messages: list[Any], history: list[Any]):
                 pass
 
             meta = HandlerMeta.of(
@@ -582,7 +588,7 @@ def describe_HandlerMeta_of():
 
         def it_ignores_non_reducer_params():
             @on(SampleEvent)
-            def handler(event: SampleEvent, messages: list, other: str):
+            def handler(event: SampleEvent, messages: list[Any], other: str):
                 pass
 
             meta = HandlerMeta.of(handler, readables=_list_reducers("messages"))
@@ -607,7 +613,7 @@ def describe_HandlerMeta_of():
 
         def it_does_not_warn_on_correct_name():
             @on(SampleEvent)
-            def handler(event: SampleEvent, messages: list):
+            def handler(event: SampleEvent, messages: Any):
                 pass
 
             with warnings.catch_warnings(record=True) as w:
@@ -838,7 +844,10 @@ def describe_partial_hint_resolution():
 
         def it_resolves_the_annotation_at_graph_build():
             dep = LateService()
-            graph = EventGraph([_forward_ref_handler], services=[dep])
+            graph = EventGraph(
+                [_forward_ref_handler],
+                services=typed_services(dep=(LateService, dep)),
+            )
 
             (bound,) = graph._handlers
             assert [(p.name, p.source) for p in bound.services] == [

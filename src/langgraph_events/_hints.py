@@ -1,4 +1,4 @@
-"""Resolve annotations, and test whether one annotation fits another."""
+"""Resolve annotations, and test whether two annotations name the same type."""
 
 from __future__ import annotations
 
@@ -7,9 +7,7 @@ import functools
 import inspect
 import types
 import typing
-from collections import abc
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -182,193 +180,92 @@ def _hint_label(hint: object) -> str:
     return repr(hint).replace("typing.", "")
 
 
-def _erased(hint: object) -> object:
-    """*hint* without its type arguments, also inside a union.
+class UnsettledTypeError(TypeError):
+    """A type that names no class yet: a type variable or a string."""
 
-    ``list[str]`` becomes ``list``. A hint with no class origin, such as
-    ``Annotated``, stays as is.
+
+def _normal(hint: object) -> tuple[Any, ...]:  # noqa: PLR0911 - one return per row of the rule table
+    """The canonical form of *hint*, for an exact comparison.
+
+    Two annotations name the same type when their canonical forms are equal.
+    The rule table:
+
+    - ``Annotated`` metadata is stripped, at any depth.
+    - ``None`` is ``NoneType``. ``Optional[X]`` is ``X | None``.
+    - A union is the set of its members, so the order does not count. The
+      ``Literal`` members of a union merge into one ``Literal``.
+    - A ``Literal`` is the set of its values, keyed by type and value, so
+      ``Literal[1]`` is not ``Literal[True]``.
+    - A generic alias is its origin class and the canonical form of each
+      argument, a ``Callable`` argument list included. So ``List[int]`` is
+      ``list[int]``, and ``typing.Sequence[int]`` is
+      ``collections.abc.Sequence[int]``. A bare alias such as ``List`` is
+      its origin class.
+    - ``Any`` equals only ``Any``. A ``NewType`` is its own type.
+    - A type alias statement without parameters is its value.
+
+    Raises :class:`UnsettledTypeError` for a type variable, a forward reference,
+    a string or a type alias with parameters.
     """
-    origin = typing.get_origin(hint)
-    if origin is typing.Union or origin is types.UnionType:
-        return typing.Union[tuple(_erased(a) for a in typing.get_args(hint))]  # noqa: UP007 - a runtime value
-    if isinstance(origin, type):
-        return origin
-    return hint
-
-
-@dataclass(frozen=True)
-class Fits:
-    """The provided type fits the annotation."""
-
-
-@dataclass(frozen=True)
-class Misfit:
-    """The provided type does not fit the annotation."""
-
-
-@dataclass(frozen=True)
-class Untestable:
-    """Python cannot test the annotation at run time, so no check runs."""
-
-    reason: str
-
-
-Verdict: TypeAlias = Fits | Misfit | Untestable
-
-
-_INVARIANT: tuple[type, ...] = (
-    list,
-    dict,
-    set,
-    abc.MutableSequence,
-    abc.MutableMapping,
-    abc.MutableSet,
-)
-"""The containers whose type arguments are invariant, as for mypy."""
-
-
-def _union_members(hint: object) -> tuple[object, ...]:
-    origin = typing.get_origin(hint)
-    if origin is typing.Union or origin is types.UnionType:
-        return typing.get_args(hint)
-    return (hint,)
-
-
-def _promoted(hint: object) -> object:
-    """*hint* with the numeric tower of PEP 484 at the top level only:
-    ``float`` also accepts ``int``, and ``complex`` also accepts ``float``
-    and ``int``. A type argument is not promoted, so ``list[float]`` does
-    not accept ``list[int]``."""
-    tower: dict[object, tuple[object, ...]] = {
-        float: (float, int),
-        complex: (complex, float, int),
-    }
-    members = [m for h in _union_members(hint) for m in tower.get(h, (h,))]
-    if len(members) == len(_union_members(hint)):
-        return hint
-    return typing.Union[tuple(dict.fromkeys(members))]  # noqa: UP007 - a runtime value
-
-
-def _same_arguments(provided: tuple[object, ...], declared: tuple[object, ...]) -> bool:
-    """Whether two argument lists are equal. ``Any`` matches any argument."""
-    return len(provided) == len(declared) and all(
-        p == d or p is Any or d is Any for p, d in zip(provided, declared, strict=True)
-    )
-
-
-def _variance_holds(provided: object, declared: object) -> bool:
-    """Whether the type arguments of *provided* fit *declared* as mypy
-    requires.
-
-    An invariant container needs equal type arguments. The key of a
-    ``Mapping`` is invariant too, as in typeshed. Any other generic whose
-    class is a subclass of the declared class, with as many type arguments,
-    is checked argument by argument. beartype treats every container as
-    covariant, so it accepts ``list[bool]`` for ``list[int]``. mypy refuses
-    it.
-    """
-    for p in _union_members(provided):
-        p_origin, p_args = typing.get_origin(p), typing.get_args(p)
-        if not isinstance(p_origin, type) or not p_args:
-            continue
-        matches: list[bool] = []
-        for d in _union_members(declared):
-            d_origin, d_args = typing.get_origin(d), typing.get_args(d)
-            if not isinstance(d_origin, type) or not d_args:
-                continue
-            if not issubclass(p_origin, d_origin) or len(p_args) != len(d_args):
-                continue
-            if issubclass(d_origin, _INVARIANT):
-                matches.append(_same_arguments(p_args, d_args))
-                continue
-            key_holds = not issubclass(d_origin, abc.Mapping) or _same_arguments(
-                p_args[:1], d_args[:1]
+    alias = getattr(typing, "TypeAliasType", None)
+    if alias is not None and isinstance(hint, alias):
+        if hint.__type_params__:
+            raise UnsettledTypeError(
+                f"the type alias {hint.__name__} has type parameters"
             )
-            matches.append(
-                key_holds
-                and all(
-                    _variance_holds(pa, da)
-                    for pa, da in zip(p_args, d_args, strict=True)
-                )
-            )
-        if matches and not any(matches):
-            return False
-    return True
+        return _normal(hint.__value__)
+    if isinstance(hint, (TypeVar, typing.ForwardRef, str)):
+        raise UnsettledTypeError(f"{hint!r} names no class yet")
+    if hint is None:
+        return ("class", type(None))
+    if hint is Any:
+        return ("any",)
+    origin = typing.get_origin(hint)
+    args = typing.get_args(hint)
+    if origin is typing.Annotated:
+        return _normal(args[0])
+    if origin is Literal:
+        return ("literal", frozenset((type(v), v) for v in args))
+    if origin is typing.Union or origin is types.UnionType:
+        members = {_normal(a) for a in args}
+        literals = [m for m in members if m[0] == "literal"]
+        if len(literals) > 1:
+            members -= set(literals)
+            members.add(("literal", frozenset().union(*(m[1] for m in literals))))
+        return (
+            next(iter(members)) if len(members) == 1 else ("union", frozenset(members))
+        )
+    if origin is not None and not args:
+        return ("class", origin)
+    if origin is not None:
+        return ("generic", origin, tuple(_normal_argument(a) for a in args))
+    return ("class", hint)
 
 
-def _stated(provided: object, declared: object) -> object:  # noqa: PLR0911 - one return per shape of type
-    """*provided*, with each unknown type argument taken from *declared*.
+def _normal_argument(arg: object) -> tuple[Any, ...]:
+    """The canonical form of one type argument. A ``Callable`` argument list
+    is a list, and ``...`` stays as is."""
+    if isinstance(arg, list):
+        return ("arguments", tuple(_normal(a) for a in arg))
+    if arg is Ellipsis:
+        return ("ellipsis",)
+    return _normal(arg)
 
-    A type argument ``Any`` is unknown. A generic class with no type
-    arguments, such as a bare ``dict``, has unknown arguments too. Each
-    known argument stays, so ``dict[str, Any]`` still does not fit
-    ``dict[int, str]``.
+
+def _same_type(reader: object, source: object, *, may_be_unset: bool) -> bool:
+    """Whether the annotation *reader* names exactly the declared type
+    *source*, by the rule table of :func:`_normal`.
+
+    With *may_be_unset*, a reader that leaves ``None`` out of an optional
+    source fits too, because an unset value raises ``ReducerNotSetError``.
     """
-    if provided is Any:
-        return declared
-    members = _union_members(provided)
-    if len(members) > 1:
-        return typing.Union[tuple(_stated(m, declared) for m in members)]  # noqa: UP007 - a runtime value
-    p_origin, p_args = typing.get_origin(provided), typing.get_args(provided)
-    for d in _union_members(declared):
-        d_origin, d_args = typing.get_origin(d), typing.get_args(d)
-        if not isinstance(d_origin, type) or not d_args:
-            continue
-        if p_origin is None and isinstance(provided, type):
-            if issubclass(provided, d_origin) and not typing.get_args(provided):
-                try:
-                    return provided[d_args]  # type: ignore[index]
-                except TypeError:
-                    return d
-            continue
-        if not isinstance(p_origin, type) or not issubclass(p_origin, d_origin):
-            continue
-        if len(p_args) != len(d_args):
-            continue
-        filled = tuple(_stated(pa, da) for pa, da in zip(p_args, d_args, strict=True))
-        try:
-            return p_origin[filled]  # type: ignore[index]
-        except TypeError:
-            return provided
-    return provided
-
-
-def _hint_fits(provided: object, declared: object) -> Verdict:
-    """Whether a value of the type *provided* can fill a parameter annotated
-    *declared*.
-
-    ``Any`` and a bare type variable say nothing, so they fit. The numeric
-    tower applies at the top level only, so ``int`` fits ``float``, but
-    ``list[int]`` does not fit ``list[float]``. The variance follows mypy,
-    see :func:`_variance_holds`. An unknown type argument, ``Any`` or the
-    missing argument of a bare generic class, takes the declared argument
-    at its position. A known argument is checked.
-    """
-    if provided is Any or isinstance(provided, TypeVar):
-        return Fits()
-    from beartype.door import is_subhint  # noqa: PLC0415
-
-    declared = _promoted(declared)
-    provided = _stated(provided, declared)
-    verdict = _satisfies(is_subhint, provided, declared)
-    if isinstance(verdict, Fits) and not _variance_holds(provided, declared):
-        return Misfit()
-    return verdict
-
-
-def _satisfies(
-    check: Callable[[Any, Any], bool], subject: object, declared: object
-) -> Verdict:
-    """Apply a ``beartype.door`` check.
-
-    ``typing`` refuses a ``Protocol`` that is not ``runtime_checkable``, and
-    beartype refuses a hint it cannot test at run time, at any nesting depth.
-    Such an annotation stays a valid static contract, so the build must not
-    fail on it. The caller warns instead.
-    """
-    from beartype.roar import BeartypeException  # noqa: PLC0415
-
-    try:
-        return Fits() if check(subject, declared) else Misfit()
-    except (TypeError, BeartypeException) as exc:
-        return Untestable(f"{type(exc).__name__}: {exc}")
+    wanted = _normal(source)
+    named = _normal(reader)
+    if named == wanted:
+        return True
+    if not may_be_unset or wanted[0] != "union":
+        return False
+    without_none = wanted[1] - {_normal(None)}
+    if len(without_none) == 1:
+        return named == next(iter(without_none))
+    return named == ("union", without_none)

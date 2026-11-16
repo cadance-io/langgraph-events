@@ -111,7 +111,7 @@ class Content(Namespace):
 # ---------------------------------------------------------------------------
 
 
-stages = Reducer(
+stages = Reducer[StageLabelled, str](
     "stages",
     event_type=StageLabelled,
     fn=lambda e: [e.stage_label()],

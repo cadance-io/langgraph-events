@@ -7,7 +7,6 @@ the same rules, and one evaluator gives their values in a node call.
 from __future__ import annotations
 
 import inspect
-import typing
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -21,16 +20,13 @@ from typing import (
 
 from langgraph_events._event_log import EventLog
 from langgraph_events._hints import (
-    Misfit,
-    Untestable,
-    Verdict,
+    UnsettledTypeError,
     _annotation_accepts_none,
-    _hint_fits,
     _hint_label,
     _resolve_parameter_hints,
+    _same_type,
 )
 from langgraph_events._reducer import BaseReducer, ReducerNotSetError, StateRead
-from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -179,7 +175,7 @@ def classify(
     An annotation that is exactly ``RunnableConfig``, the *context_schema*,
     ``BaseStore``, ``EventLog`` or ``Reflection`` names a framework input.
     Otherwise the name of a stored reducer or a ``Derived`` names it, and
-    the annotation must fit its value. *readable_of* gives the stored
+    the annotation must name its declared type. *readable_of* gives the stored
     reducer or the ``Derived`` of a name, or ``None``. ``None`` means that
     only a service can fill the parameter. *hint* is the resolved
     annotation, see :func:`resolved_hint`.
@@ -206,16 +202,10 @@ def classify(
     readable = readable_of(param)
     if readable is None:
         return None
-    provided = readable._value_type()
-    what = f"{readable._describe()} gives {_hint_label(provided)}"
-    check_fit(owner, param, hint, _hint_fits(provided, _or_none(hint)), provided, what)
+    require_same_type(
+        owner, param, hint, readable._value_type(), readable._describe(), True
+    )
     return ReadableInput(readable, required=not _annotation_accepts_none(hint))
-
-
-def _or_none(hint: object) -> object:
-    """*hint*, widened to accept ``None``. A ``None`` value of a required
-    input raises ``ReducerNotSetError`` at run time instead."""
-    return typing.Optional[hint]  # noqa: UP045 - a runtime value, not an annotation
 
 
 def resolved_hint(
@@ -238,40 +228,42 @@ def resolved_hint(
         raise TypeError(
             f"{owner} has no annotation on parameter {param!r}. Annotate it with "
             f"the type of its input: an exact library type such as "
-            f"RunnableConfig or EventLog, or the value type of the reducer, the "
+            f"RunnableConfig or EventLog, or the declared type of the reducer, the "
             f"Derived or the service that it names."
         )
     return hints[param]
 
 
-def check_fit(
+def require_same_type(
     owner: str,
     param: str,
-    declared: object,
-    verdict: Verdict,
-    provided: object,
-    what: str,
-    fix: str | None = None,
+    reader: object,
+    source: object,
+    source_label: str,
+    may_be_unset: bool,
 ) -> None:
-    """Raise ``TypeError`` for a ``False`` *verdict*. Warn for a reason.
+    """Raise ``TypeError`` unless the annotation *reader* names exactly the
+    declared type *source* of *source_label*.
 
-    *what* states the source of the parameter and *provided*, its type, for
-    example ``"reducer 'choices' gives list[str]"``. *fix* replaces the
-    default fix, which changes the annotation to *provided*.
+    With *may_be_unset*, a reader may leave ``None`` out of an optional
+    source: a reducer or a ``Derived`` raises ``ReducerNotSetError`` when it
+    is unset. A service is never unset, so it matches exactly.
     """
-    wanted = _hint_label(declared)
-    if isinstance(verdict, Misfit):
-        fix = fix or (
-            f"Change the annotation to {_hint_label(provided)}, or read another input."
-        )
+    try:
+        same = _same_type(reader, source, may_be_unset=may_be_unset)
+    except UnsettledTypeError as exc:
         raise TypeError(
-            f"{owner} declares parameter {param!r} as {wanted}, but {what}. {fix}"
-        )
-    if isinstance(verdict, Untestable):
-        warn_user(
-            f"{owner} declares parameter {param!r} as {wanted}, which Python "
-            f"cannot test at run time ({verdict.reason}). The input is not "
-            f"checked against it."
+            f"{owner} declares parameter {param!r} as {_hint_label(reader)}, "
+            f"but {exc}. Annotate it with the class that {source_label} gives: "
+            f"{_hint_label(source)}."
+        ) from None
+    if not same:
+        raise TypeError(
+            f"{owner} declares parameter {param!r} as {_hint_label(reader)}, but "
+            f"{source_label} gives {_hint_label(source)}. Change the annotation "
+            f"to {_hint_label(source)}. A reader names the declared type "
+            f"exactly. For another view of the value, add an adapter: a "
+            f"RunScoped factory or a Derived that returns the view."
         )
 
 
@@ -466,7 +458,7 @@ def bind_derived(
 
     A parameter annotated ``EventLog`` reads the log. Each other parameter
     names a stored reducer or another ``Derived``, and its annotation must
-    fit that value. A ``Derived`` that another one reads is bound once.
+    name that declared type. A ``Derived`` that another one reads is bound once.
     Raises ``TypeError`` for a parameter that has no annotation, one that
     does not resolve, one that names no input, and one that names a run
     input such as the config. Raises ``TypeError`` that names the cycle when

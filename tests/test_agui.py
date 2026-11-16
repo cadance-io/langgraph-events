@@ -31,7 +31,13 @@ from ag_ui.core import ToolMessage as AguiToolMessage
 from ag_ui.core import UserMessage as AguiUserMessage
 from conftest import Counted, LoadCountingSaver, count_to_twenty
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.runnables import RunnableConfig  # noqa: TC002 -- @on resolves it
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command as LGCommand
@@ -492,7 +498,9 @@ def _llm_replier(*responses: str) -> Any:
     llm = FakeListChatModel(responses=list(responses), sleep=0)
 
     @on(UserAsked)
-    async def stream_reply(event: UserAsked, messages: list[Any]) -> AgentReplied:
+    async def stream_reply(
+        event: UserAsked, messages: list[BaseMessage]
+    ) -> AgentReplied:
         response = await llm.ainvoke([*messages, HumanMessage(content=event.question)])
         return AgentReplied(message=response)
 
@@ -1900,7 +1908,7 @@ def describe_encode_sse_stream():
         async def it_keeps_a_none_field_as_null():
             from langgraph_events import ScalarReducer
 
-            note = ScalarReducer(
+            note = ScalarReducer[UserAsked, Any](
                 name="note", event_type=UserAsked, fn=lambda e: Note(text=e.question)
             )
             graph = _graph(reply, reducers=[message_reducer(), note])
@@ -2160,7 +2168,7 @@ def describe_connect():
             """
             from langgraph_events import SKIP, ScalarReducer
 
-            focus = ScalarReducer(
+            focus = ScalarReducer[UserAsked, str](
                 name="focus",
                 event_type=UserAsked,
                 fn=lambda e: e.question or SKIP,
@@ -2577,7 +2585,7 @@ def describe_checkpoint_loads_per_turn():
         def when_the_resume_commits_client_state():
             async def it_loads_the_committed_checkpoint_again():
                 saver = LoadCountingSaver()
-                focus = ScalarReducer(
+                focus = ScalarReducer[FrontendStateMutated, str](
                     name="focus",
                     event_type=FrontendStateMutated,
                     fn=lambda e: e.state.get("focus", SKIP),
@@ -2906,7 +2914,7 @@ def describe_llm_streaming_on_resume():
         @on(ApprovalGiven)
         async def approve(
             event: ApprovalGiven,
-            messages: list[Any],
+            messages: list[BaseMessage],
         ) -> AgentReplied:
             response = await llm.ainvoke([*messages, HumanMessage(content="approved")])
             return AgentReplied(message=response)
@@ -2983,7 +2991,7 @@ def describe_snapshot_uses_langchain_ids():
         @on(UserSent)
         async def stream_reply(
             event: UserSent,
-            messages: list[Any],
+            messages: list[BaseMessage],
         ) -> AgentReplied:
             response = await llm.ainvoke(messages)
             return AgentReplied(message=response)
@@ -3015,7 +3023,7 @@ def describe_snapshot_uses_langchain_ids():
         @on(UserAsked)
         async def first_reply(
             event: UserAsked,
-            messages: list[Any],
+            messages: list[BaseMessage],
         ) -> AgentReplied:
             response = await llm.ainvoke(
                 [*messages, HumanMessage(content=event.question)]
@@ -3025,7 +3033,7 @@ def describe_snapshot_uses_langchain_ids():
         @on(AgentReplied)
         async def second_reply(
             event: AgentReplied,
-            messages: list[Any],
+            messages: list[BaseMessage],
         ) -> FollowUpReply:
             response = await llm.ainvoke([*messages, HumanMessage(content="follow up")])
             return FollowUpReply(message=response)
@@ -3843,12 +3851,12 @@ def describe_multiple_custom_reducers():
         async def it_emits_state_snapshot_for_each_change():
             from langgraph_events._reducer import ScalarReducer
 
-            reducer_a = ScalarReducer(
+            reducer_a = ScalarReducer[StepA, Any](
                 name="counter_a",
                 event_type=StepA,
                 fn=lambda e: e.value,
             )
-            reducer_b = ScalarReducer(
+            reducer_b = ScalarReducer[StepB, Any](
                 name="counter_b",
                 event_type=StepB,
                 fn=lambda e: e.value,
@@ -4592,16 +4600,18 @@ def describe_frontend_state_mutated():
 
     def _focus_reducer(transform: Any = None) -> Any:
         """A ``focus`` ScalarReducer fed from ``FrontendStateMutated.state``."""
-        from langgraph_events import SKIP, ScalarReducer
+        from langgraph_events import SKIP, ScalarReducer, SkipType
         from langgraph_events.agui import FrontendStateMutated
 
-        def read(event: Any) -> Any:
+        def read(event: FrontendStateMutated) -> str | SkipType:
             if "focus" not in event.state:
                 return SKIP
             value = event.state["focus"]
             return transform(value) if transform else value
 
-        return ScalarReducer(name="focus", event_type=FrontendStateMutated, fn=read)
+        return ScalarReducer[FrontendStateMutated, str](
+            name="focus", event_type=FrontendStateMutated, fn=read
+        )
 
     def _focus_recorder(seen: list[str | None]) -> Any:
         """A ``UserAsked`` handler recording the ``focus`` channel it was given."""
@@ -4844,7 +4854,7 @@ def describe_frontend_state_mutated():
 
                 # Backend-authoritative: channel only updates from the
                 # domain event, NOT from FrontendStateMutated.
-                strategy = ScalarReducer(
+                strategy = ScalarReducer[ApprovalGiven, str](
                     name="walkthrough_strategy",
                     event_type=ApprovalGiven,
                     fn=lambda e: "guided" if e.approved else "skipped",
@@ -4908,7 +4918,7 @@ def describe_frontend_state_mutated():
 
                 # Append-style reducer: each FSM event contributes
                 # [state["focus"]], merged via operator.add on the channel.
-                focus_log = Reducer(
+                focus_log = Reducer[FrontendStateMutated, Any](
                     name="focus_log",
                     event_type=FrontendStateMutated,
                     fn=lambda e: [e.state["focus"]] if "focus" in e.state else [],
@@ -4956,7 +4966,7 @@ def describe_frontend_state_mutated():
                 # FSM (resume payload), so we can prime with real prior
                 # state then layer the FSM contribution on top.  FocusEcho
                 # is defined at module level so handler annotations resolve.
-                focus_log = Reducer(
+                focus_log = Reducer[FocusEcho | FrontendStateMutated, Any](
                     name="focus_log",
                     event_type=(FocusEcho, FrontendStateMutated),
                     fn=lambda e: (
@@ -5302,7 +5312,7 @@ class ParcelAsked(IntegrationEvent):
     pass
 
 
-_parcel_placed = ScalarReducer(
+_parcel_placed = ScalarReducer[ParcelPlaced, bool](
     name="placed", event_type=ParcelPlaced, fn=lambda e: True
 )
 

@@ -11,7 +11,7 @@ When a handler declares a reducer parameter whose type annotation rejects
 # from real classes (not strings) when ``typing.get_type_hints`` runs at graph
 # build time.
 
-from typing import Any, Optional
+from typing import Optional
 
 import pytest
 
@@ -51,7 +51,7 @@ class Done(IntegrationEvent):
 # plus a Command-with-inline-handle (for the Command.handle path) and a plain
 # DomainEvent (for the non-Command reactor path).
 class Track(Namespace):
-    current_strategy = ScalarReducer(
+    current_strategy = ScalarReducer[StrategyChosen, str](
         event_type=StrategyChosen,
         fn=lambda e: e.name,
     )
@@ -70,7 +70,9 @@ class Track(Namespace):
 
 
 def _make_strategy_reducer() -> ScalarReducer:
-    return ScalarReducer("strategy", event_type=StrategyChosen, fn=lambda e: e.name)
+    return ScalarReducer[StrategyChosen, str](
+        "strategy", event_type=StrategyChosen, fn=lambda e: e.name
+    )
 
 
 def describe_scalar_reducer_required_value():
@@ -172,28 +174,6 @@ def describe_scalar_reducer_required_value():
             graph = EventGraph([handler], reducers=[strategy])
             graph.invoke([Trigger()])
 
-        def it_does_not_raise_for_Any():
-            strategy = _make_strategy_reducer()
-
-            @on(Trigger)
-            def handler(event: Trigger, strategy: Any) -> Done:
-                assert strategy is None
-                return Done()
-
-            graph = EventGraph([handler], reducers=[strategy])
-            graph.invoke([Trigger()])
-
-        def it_does_not_raise_for_object():
-            strategy = _make_strategy_reducer()
-
-            @on(Trigger)
-            def handler(event: Trigger, strategy: object) -> Done:
-                assert strategy is None
-                return Done()
-
-            graph = EventGraph([handler], reducers=[strategy])
-            graph.invoke([Trigger()])
-
     def when_value_is_set():
         def it_does_not_raise_after_event_projects_a_value():
             strategy = _make_strategy_reducer()
@@ -208,7 +188,7 @@ def describe_scalar_reducer_required_value():
 
         def when_default_is_non_none():
             def it_does_not_raise():
-                strategy = ScalarReducer(
+                strategy = ScalarReducer[StrategyChosen, str](
                     "strategy",
                     event_type=StrategyChosen,
                     fn=lambda e: e.name,
@@ -227,7 +207,7 @@ def describe_scalar_reducer_required_value():
         def it_does_not_raise_for_concrete_list_annotation():
             # ``Reducer`` channels initialise to ``[]``, never to ``None`` —
             # so a ``list[str]`` annotation never triggers the assertion.
-            items = Reducer(
+            items = Reducer[StrategyChosen, str](
                 "items",
                 event_type=StrategyChosen,
                 fn=lambda e: [e.name],
@@ -245,7 +225,7 @@ def describe_scalar_reducer_required_value():
         def when_one_required_is_none_and_one_is_permissive():
             def it_raises_only_for_the_required_one():
                 strategy = _make_strategy_reducer()
-                tempo = ScalarReducer(
+                tempo = ScalarReducer[TempoChosen, int](
                     "tempo", event_type=TempoChosen, fn=lambda e: e.bpm
                 )
 
@@ -265,7 +245,7 @@ def describe_scalar_reducer_required_value():
         def when_required_is_set_and_permissive_is_none():
             def it_runs_cleanly():
                 strategy = _make_strategy_reducer()
-                tempo = ScalarReducer(
+                tempo = ScalarReducer[TempoChosen, int](
                     "tempo", event_type=TempoChosen, fn=lambda e: e.bpm
                 )
 
@@ -314,8 +294,12 @@ def _name_of(e: StrategyChosen) -> str:
     return e.name
 
 
-tempo = ScalarReducer(name="tempo", event_type=TempoChosen, fn=_tempo_of)
-strategy = ScalarReducer(name="strategy", event_type=StrategyChosen, fn=_name_of)
+tempo = ScalarReducer[TempoChosen, int](
+    name="tempo", event_type=TempoChosen, fn=_tempo_of
+)
+strategy = ScalarReducer[StrategyChosen, str](
+    name="strategy", event_type=StrategyChosen, fn=_name_of
+)
 
 
 def describe_handler_reducer_parameter_rules():
@@ -359,27 +343,13 @@ def describe_handler_reducer_parameter_rules():
             ):
                 EventGraph([pick], reducers=[tempo])
 
-    def when_a_float_annotation_reads_an_int_value():
-        def it_accepts_the_numeric_tower():
-            seen: list[object] = []
-
-            @on(Trigger)
-            def pick(event: Trigger, tempo: float) -> None:
-                seen.append(tempo)
-
-            EventGraph([pick], reducers=[tempo]).invoke(
-                [TempoChosen(bpm=90), Trigger()]
-            )
-
-            assert seen == [90]
-
     def when_the_fold_state_does_not_fit_the_annotation():
         def it_raises_at_graph_build():
             class Beat(IntegrationEvent):
                 def fold(self, state: int) -> int:
                     return state + 1
 
-            beats = langgraph_events.FoldReducer(
+            beats = langgraph_events.FoldReducer[int](
                 name="beats", event_type=Beat, default_factory=int
             )
 
@@ -392,7 +362,9 @@ def describe_handler_reducer_parameter_rules():
 
     def when_the_reducer_function_has_no_return_annotation():
         def it_checks_nothing():
-            loose = ScalarReducer(name="loose", event_type=TempoChosen, fn=lambda e: 1)
+            loose = ScalarReducer[TempoChosen, str](
+                name="loose", event_type=TempoChosen, fn=lambda e: 1
+            )
 
             @on(Trigger)
             def pick(event: Trigger, loose: str | None) -> None:

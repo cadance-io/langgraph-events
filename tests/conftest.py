@@ -1,5 +1,6 @@
 """Shared fixtures and event classes for the test suite."""
 
+import dataclasses
 import sys
 import uuid
 from collections.abc import Awaitable, Iterator
@@ -101,7 +102,7 @@ def count_to_twenty(event: Counted) -> Counted | Ended:
 # auto-scoped to Order, auto-discovered by any EventGraph that has a
 # handler subscribed to an Order event.
 class Order(Namespace):
-    current_status = ScalarReducer(
+    current_status = ScalarReducer[Event, str](
         event_type=Event,
         fn=lambda e: (
             "shipped"
@@ -219,3 +220,36 @@ def strip_channels(saver: MemorySaver, config: dict[str, Any], *channels: str) -
         }
     }
     saver.put(base, checkpoint, tup.metadata, {})
+
+
+def typed_services(**fields: tuple[Any, object]) -> object:
+    """A ``services=`` object whose class declares each keyword as a field.
+
+    Each keyword is ``(declared type, value)``. A factory field is declared
+    ``RunScoped[T]``.
+    """
+    cls = dataclasses.make_dataclass(
+        "Services", [(name, declared) for name, (declared, _) in fields.items()]
+    )
+    return cls(**{name: value for name, (_, value) in fields.items()})
+
+
+def services_from(services: dict[str, object]) -> object:
+    """A typed ``services=`` object for a name-to-value mapping.
+
+    A ``RunScoped`` value is declared ``RunScoped[T]``, with ``T`` the return
+    annotation of its factory. Any other value is declared with its class.
+    """
+    from langgraph_events import RunScoped
+
+    return typed_services(
+        **{
+            name: (
+                RunScoped[value.provided_type(name)]  # type: ignore[name-defined]
+                if isinstance(value, RunScoped)
+                else type(value),
+                value,
+            )
+            for name, value in services.items()
+        }
+    )

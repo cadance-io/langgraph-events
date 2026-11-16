@@ -855,14 +855,17 @@ class EventTopology:
         """
         return self._registry.select(include_reducers)
 
-    def _handler_node(self, bound: BoundHandler) -> RunnableLambda:
-        """The node that runs *bound* with its services."""
+    def _handler_node(
+        self, bound: BoundHandler, model_provider: Callable[[], NamespaceModel]
+    ) -> RunnableLambda:
+        """The node that runs *bound* with its services. An injected
+        ``Reflection`` reads the model that *model_provider* gives."""
         return make_handler_node(
             bound,
             reducers=self._reducers,
             readables=self._registry.readables,
             return_contract=self._return_contracts.get(bound.meta.name),
-            model_provider=self.namespaces,
+            model_provider=model_provider,
         )
 
     def _compile(
@@ -870,6 +873,7 @@ class EventTopology:
         bound: Sequence[BoundHandler] | None,
         *,
         checkpointer: Checkpointer,
+        model_provider: Callable[[], NamespaceModel] | None = None,
         max_rounds: int = 100,
         recursion_limit: int | None = None,
         store: BaseStore | None = None,
@@ -925,7 +929,10 @@ class EventTopology:
         nodes = (
             ((m, _refusing_node(m)) for m in handler_metas)
             if bound is None
-            else ((b.meta, self._handler_node(b)) for b in bound)
+            else (
+                (b.meta, self._handler_node(b, model_provider or self.namespaces))
+                for b in bound
+            )
         )
         handler_names: list[str] = []
         for meta, handler_node in nodes:

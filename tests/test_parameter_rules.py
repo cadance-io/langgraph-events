@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import functools
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import pytest
+from conftest import services_from
 from langchain_core.runnables import (
     RunnableConfig,  # noqa: TC002 - a factory annotation resolves at graph build
 )
@@ -50,8 +50,8 @@ def _flags_of(e: Told) -> list[bool]:
     return [bool(e.word)]
 
 
-word = ScalarReducer(name="word", event_type=Told, fn=_word_of)
-flags = Reducer(name="flags", event_type=Told, fn=_flags_of)
+word = ScalarReducer[Told, str](name="word", event_type=Told, fn=_word_of)
+flags = Reducer[Told, bool](name="flags", event_type=Told, fn=_flags_of)
 
 
 class Tool:
@@ -93,7 +93,9 @@ def describe_an_unannotated_parameter():
                 match=r"Handler '.*show' \(node 'show'\) has no annotation on "
                 r"parameter 'setting'\. Annotate it with the type of its input",
             ):
-                EventGraph([_unannotated_handler()], services={"setting": "on"})
+                EventGraph(
+                    [_unannotated_handler()], services=services_from({"setting": "on"})
+                )
 
     def when_it_is_a_factory_parameter():
         def it_raises_naming_the_factory_the_parameter_and_the_fix():
@@ -109,7 +111,7 @@ def describe_an_unannotated_parameter():
                 match=r"RunScoped factory '.*tool_for' for service 'tool' has no "
                 r"annotation on parameter 'config'\. Annotate it",
             ):
-                EventGraph([use], services={"tool": RunScoped(tool_for)})
+                EventGraph([use], services=services_from({"tool": RunScoped(tool_for)}))
 
     def when_it_is_a_derived_parameter():
         def it_raises_naming_the_derived_the_parameter_and_the_fix():
@@ -138,7 +140,9 @@ def describe_a_parameter_annotation_that_does_not_resolve():
     def when_it_is_a_handler_parameter():
         def it_raises_naming_the_cause():
             with pytest.raises(TypeError, match=r"parameter 'setting' " + _UNRESOLVED):
-                EventGraph([_unresolved_handler()], services={"setting": "on"})
+                EventGraph(
+                    [_unresolved_handler()], services=services_from({"setting": "on"})
+                )
 
     def when_it_is_a_factory_parameter():
         def it_raises_naming_the_cause():
@@ -150,7 +154,7 @@ def describe_a_parameter_annotation_that_does_not_resolve():
                 pass
 
             with pytest.raises(TypeError, match=r"parameter 'config' " + _UNRESOLVED):
-                EventGraph([use], services={"tool": RunScoped(tool_for)})
+                EventGraph([use], services=services_from({"tool": RunScoped(tool_for)}))
 
     def when_it_is_a_derived_parameter():
         def it_raises_naming_the_cause():
@@ -161,50 +165,6 @@ def describe_a_parameter_annotation_that_does_not_resolve():
 
             with pytest.raises(TypeError, match=r"parameter 'word' " + _UNRESOLVED):
                 EventGraph([_shown_handler()], reducers=[word, loud])
-
-
-def describe_the_numeric_tower():
-    def when_the_annotation_is_float_at_the_top_level():
-        def it_accepts_an_int_value():
-            def count_of(e: Told) -> int:
-                return len(e.word)
-
-            count = ScalarReducer(name="count", event_type=Told, fn=count_of)
-
-            @on(Asked)
-            def show(event: Asked, count: float = 0.0) -> None:
-                pass
-
-            EventGraph([show], reducers=[count])
-
-    def when_the_annotation_nests_float_in_a_list():
-        def it_refuses_a_list_of_int():
-            def counts_of(e: Told) -> list[int]:
-                return [len(e.word)]
-
-            counts = Reducer(name="counts", event_type=Told, fn=counts_of)
-
-            @on(Asked)
-            def show(event: Asked, counts: list[float]) -> None:
-                pass
-
-            with pytest.raises(
-                TypeError, match=r"reducer 'counts' gives list\[int\]\. Change"
-            ):
-                EventGraph([show], reducers=[counts])
-
-
-def describe_an_invariant_container():
-    def when_the_item_type_is_a_subtype():
-        def it_refuses_the_annotation_as_mypy_does():
-            @on(Asked)
-            def show(event: Asked, flags: list[int]) -> None:
-                pass
-
-            with pytest.raises(
-                TypeError, match=r"reducer 'flags' gives list\[bool\]\. Change"
-            ):
-                EventGraph([show], reducers=[flags])
 
 
 def describe_a_derived_parameter():
@@ -248,7 +208,7 @@ def describe_a_derived_parameter():
                 echo = Derived(name="echo", fn=echo_of)
 
                 @on(Asked)
-                def show(event: Asked, echo: str | None) -> None:
+                def show(event: Asked, echo: str) -> None:
                     pass
 
                 graph = EventGraph([show], reducers=[word, echo])
@@ -276,60 +236,21 @@ def describe_a_derived_parameter():
                 EventGraph([_shown_handler()], reducers=[word, echo])
 
 
-def _build_scalar(fn: Any, default: object, annotation: Any) -> None:
-    """Build a graph whose handler reads a ScalarReducer of *fn* as *annotation*."""
-    scalar = ScalarReducer(name="value", event_type=Told, fn=fn, default=default)
-
-    @on(Asked)
-    def show(event: Asked, value: Any) -> None:
-        pass
-
-    show.__annotations__["value"] = annotation
-    EventGraph([show], reducers=[scalar])
-
-
-def _tags_of(e: Told) -> tuple[str, ...]:
-    return (e.word,)
-
-
-def _stage_of(e: Told) -> Literal["draft", "sent"]:
-    return "sent"
-
-
-def _names_of(e: Told) -> list[str]:
-    return [e.word]
-
-
-def _size_of(e: Told) -> int:
-    return len(e.word)
-
-
 def _word_or_skip(e: Told) -> str | SkipType:
     return e.word or SKIP
 
 
-def describe_the_value_type_of_a_scalar_reducer():
-    def when_the_default_fits_the_return_type():
-        @pytest.mark.parametrize(
-            ("fn", "default", "annotation"),
-            [
-                (_tags_of, (), tuple[str, ...]),
-                (_stage_of, "draft", Literal["draft", "sent"]),
-                (_names_of, [], list[str]),
-            ],
-            ids=["tuple", "literal", "list"],
+def describe_a_scalar_reducer_that_can_skip():
+    def it_leaves_skip_out_of_the_stored_type():
+        maybe = ScalarReducer[Told, str](
+            name="maybe", event_type=Told, fn=_word_or_skip
         )
-        def it_adds_no_type_for_the_default(fn: Any, default: object, annotation: Any):
-            _build_scalar(fn, default, annotation)
 
-    def when_the_default_does_not_fit_the_return_type():
-        def it_adds_the_type_of_the_default():
-            with pytest.raises(TypeError, match=r"reducer 'value' gives int \| str"):
-                _build_scalar(_size_of, "none", int)
+        @on(Asked)
+        def show(event: Asked, maybe: str | None) -> None:
+            pass
 
-    def when_the_function_can_return_skip():
-        def it_leaves_skip_out_of_the_value_type():
-            _build_scalar(_word_or_skip, None, str | None)
+        EventGraph([show], reducers=[maybe])
 
 
 def _scaled(word: str | None, factor: int) -> str:
@@ -369,47 +290,6 @@ def describe_a_derived_parameter_that_names_the_context_schema():
             r"Derived reads only",
         ):
             EventGraph([_shown_handler()], reducers=[word, echo], context_schema=Facts)
-
-
-def describe_the_fit_of_a_nested_container():
-    @pytest.mark.parametrize(
-        ("provided", "declared", "fits"),
-        [
-            (dict[str, list[bool]], Mapping[str, list[int]], False),
-            (list[list[bool]], Sequence[list[int]], False),
-            (dict[bool, int], Mapping[int, int], False),
-            (dict[str, bool], Mapping[str, int], True),
-            (dict[str, Any], dict[int, str], False),
-            (dict[str, Any], dict[str, int], True),
-            (dict, dict[str, int], True),
-        ],
-        ids=[
-            "mapping-value-invariant-list",
-            "sequence-of-invariant-list",
-            "mapping-key-invariant",
-            "mapping-value-covariant",
-            "any-value-wrong-key",
-            "any-value-right-key",
-            "bare-dict",
-        ],
-    )
-    def it_follows_the_variance_of_mypy(provided: Any, declared: Any, fits: bool):
-        def items_of(e: Told) -> Any:
-            return {}
-
-        items_of.__annotations__["return"] = provided
-
-        @on(Asked)
-        def show(event: Asked, items: Any) -> None:
-            pass
-
-        show.__annotations__["items"] = declared
-        scalar = ScalarReducer(name="items", event_type=Told, fn=items_of)
-        if fits:
-            EventGraph([show], reducers=[scalar])
-        else:
-            with pytest.raises(TypeError, match=r"reducer 'items' gives"):
-                EventGraph([show], reducers=[scalar])
 
 
 @dataclass(frozen=True)
@@ -453,7 +333,7 @@ def _only_skip(e: Told) -> SkipType:
 
 def describe_a_scalar_reducer_that_only_skips():
     def it_raises_naming_the_reducer_and_the_fix():
-        never = ScalarReducer(name="never", event_type=Told, fn=_only_skip)
+        never = ScalarReducer[Told, Any](name="never", event_type=Told, fn=_only_skip)
 
         @on(Asked)
         def show(event: Asked, never: str | None) -> None:

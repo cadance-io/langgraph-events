@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import Ended, Started
+from conftest import Ended, Started, services_from, typed_services
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -75,7 +75,7 @@ def _count(event: Started, total: int | None) -> _Counted:
     return _Counted()
 
 
-_TOTAL = ScalarReducer(name="total", event_type=_Counted, fn=lambda e: 1)
+_TOTAL = ScalarReducer[_Counted, int](name="total", event_type=_Counted, fn=lambda e: 1)
 
 
 @on(Started)
@@ -123,7 +123,7 @@ def _retired_gate() -> tuple[tuple[str, bytes], type[Interrupted]]:
 def _paused(saver: MemorySaver, tid: str) -> EventTopology:
     """Run *tid* until ``_ask`` pauses it. Return the topology of the run."""
     topology = EventTopology(_HANDLERS)
-    graph = EventGraph.of(topology, services=[_Mailer()], checkpointer=saver)
+    graph = EventGraph.of(topology, services=_mailer_services(), checkpointer=saver)
     graph.invoke(Started(data="x"), config=_cfg(tid))
     return topology
 
@@ -159,7 +159,7 @@ def describe_EventTopology():
             )
 
         def it_renders_the_model_of_the_graph():
-            graph = EventGraph(_HANDLERS, services=[_Mailer()])
+            graph = EventGraph(_HANDLERS, services=_mailer_services())
 
             model = EventTopology(_HANDLERS).namespaces()
 
@@ -168,7 +168,7 @@ def describe_EventTopology():
             assert model.json() == graph.namespaces().json()
 
         def it_lists_the_node_names_of_the_graph():
-            graph = EventGraph(_HANDLERS, services=[_Mailer()])
+            graph = EventGraph(_HANDLERS, services=_mailer_services())
 
             topology = EventTopology(_HANDLERS)
 
@@ -216,7 +216,7 @@ def describe_EventTopology():
 
     def when_a_reducer_has_no_name():
         def it_raises_a_value_error():
-            nameless = ScalarReducer(event_type=_Counted, fn=lambda e: 1)
+            nameless = ScalarReducer[_Counted, Any](event_type=_Counted, fn=lambda e: 1)
 
             with pytest.raises(ValueError, match=r"reducer .* has no name"):
                 EventTopology([_count], reducers=[_TOTAL, nameless])
@@ -319,7 +319,7 @@ def describe_EventTopology_from_namespaces():
         def it_lists_the_handlers_of_from_namespaces():
             topology = EventTopology.from_namespaces(_Desk, handlers=[_confirm])
             graph = EventGraph.from_namespaces(
-                _Desk, handlers=[_confirm], services=[_Mailer()]
+                _Desk, handlers=[_confirm], services=_mailer_services()
             )
 
             assert topology.handler_names == graph.topology.handler_names
@@ -353,7 +353,9 @@ def describe_EventGraph_of():
         def it_injects_the_service():
             saver = MemorySaver()
             topology = EventTopology(_HANDLERS)
-            graph = EventGraph.of(topology, services=[_Mailer()], checkpointer=saver)
+            graph = EventGraph.of(
+                topology, services=_mailer_services(), checkpointer=saver
+            )
             graph.invoke(Started(data="x"), config=_cfg("of-runs"))
 
             log = graph.resume(_Approved(), config=_cfg("of-runs"))
@@ -377,16 +379,18 @@ def describe_EventGraph_of():
         def when_a_name_key_is_a_near_miss():
             def it_lists_the_name_keys_it_received():
                 with pytest.raises(TypeError) as info:
-                    EventGraph.of(EventTopology(_HANDLERS), services={"mailr": 1})
+                    EventGraph.of(
+                        EventTopology(_HANDLERS), services=services_from({"mailr": 1})
+                    )
 
-                assert "services= has the name keys ['mailr']." in str(info.value)
+                assert "services= has the fields ['mailr']." in str(info.value)
 
         def when_the_constructor_raises():
             def it_names_the_constructor():
                 with pytest.raises(TypeError) as info:
-                    EventGraph(_HANDLERS, services=[1])
+                    EventGraph(_HANDLERS, services=services_from({"mailr": 1}))
 
-                assert "services= has the types ['int']." in str(info.value)
+                assert "services= has the fields ['mailr']." in str(info.value)
                 assert "via EventGraph(services=)" in str(info.value)
 
     def when_a_renamed_duplicate_misses_a_service():
@@ -409,11 +413,15 @@ def _bad_return(event: Started) -> Event:
 
 
 _SERVICE_COLLISION = (
-    "EventGraph(services=...) has two instances of type '_Mailer' "
-    "\u2014 same-type collision. Register only one instance, switch "
-    "to the name-keyed mapping form (services={'primary': a, "
-    "'backup': b}), or use a subclass to distinguish them."
+    "services= takes an object whose class declares one typed field per "
+    "service, such as a dataclass instance. Got a dict. Declare a dataclass "
+    "with one field per service, typed with the service type, or RunScoped[T] "
+    "for a factory, and pass an instance of it."
 )
+
+
+def _mailer_services() -> object:
+    return typed_services(mailer=(_Mailer, _Mailer()))
 
 
 def describe_EventGraph():
@@ -424,24 +432,26 @@ def describe_EventGraph():
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 with pytest.raises(TypeError) as info:
-                    EventGraph([bad], services=[_Mailer(), _Mailer()])
+                    EventGraph([bad], services={"mailer": _Mailer()})
 
             assert str(info.value) == _SERVICE_COLLISION
             assert not [w for w in caught if w.category is OrphanedEventWarning]
 
     def when_the_services_and_a_reducer_are_both_invalid():
         def it_refuses_the_services_first():
-            reserved = ScalarReducer(name="events", event_type=_Counted, fn=len)
+            reserved = ScalarReducer[_Counted, Any](
+                name="events", event_type=_Counted, fn=len
+            )
 
             with pytest.raises(TypeError) as info:
-                EventGraph([_ask], reducers=[reserved], services=[_Mailer(), _Mailer()])
+                EventGraph([_ask], reducers=[reserved], services={"mailer": _Mailer()})
 
             assert str(info.value) == _SERVICE_COLLISION
 
     def when_the_services_and_a_command_are_both_invalid():
         def it_refuses_the_services_first():
             with pytest.raises(TypeError) as info:
-                EventGraph([_Shop.Unhandled], services=[_Mailer(), _Mailer()])
+                EventGraph([_Shop.Unhandled], services={"mailer": _Mailer()})
 
             assert str(info.value) == _SERVICE_COLLISION
 
@@ -458,14 +468,14 @@ def describe_EventGraph():
         def when_the_services_are_invalid():
             def it_refuses_the_services_first():
                 with pytest.raises(TypeError) as info:
-                    EventGraph([], services=[_Mailer(), _Mailer()])
+                    EventGraph([], services={"mailer": _Mailer()})
 
                 assert str(info.value) == _SERVICE_COLLISION
 
     def when_the_graph_has_no_checkpointer():
         def it_has_no_event_store():
             with pytest.raises(ValueError) as info:
-                _ = EventGraph(_HANDLERS, services=[_Mailer()]).event_store
+                _ = EventGraph(_HANDLERS, services=_mailer_services()).event_store
 
             assert str(info.value) == (
                 "event_store requires a checkpointer. Pass checkpointer= to "
@@ -480,7 +490,7 @@ def describe_EventGraph():
             EventGraph.from_namespaces(
                 _Desk,
                 handlers=[_confirm],
-                services=[_Mailer()],
+                services=_mailer_services(),
                 checkpointer=saver,
                 retired=[tombstone],
             )
@@ -506,7 +516,9 @@ def describe_EventStore():
 
             EventStore(topology, saver).abandon(_cfg("store-abandon"), reason="r")
 
-            graph = EventGraph.of(topology, services=[_Mailer()], checkpointer=saver)
+            graph = EventGraph.of(
+                topology, services=_mailer_services(), checkpointer=saver
+            )
             last = graph.get_state(_cfg("store-abandon")).events[-1]
             assert last == Abandoned(reason="r", discarded="_Approval")
 
@@ -528,7 +540,9 @@ def describe_EventStore():
             saver.serde = NamespaceAwareSerde(events=(Started, _OldNote))
             _paused(saver, "store-rewrite")
             graph = EventGraph.of(
-                EventTopology(_HANDLERS), services=[_Mailer()], checkpointer=saver
+                EventTopology(_HANDLERS),
+                services=_mailer_services(),
+                checkpointer=saver,
             )
             graph.pre_seed(_cfg("store-rewrite"), {"events": [_OldNote()]})
 
@@ -596,7 +610,7 @@ def describe_MigrationTarget():
     def when_the_factory_ignores_the_checkpointer():
         def it_names_the_graph_factory():
             def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
-                return EventGraph(_HANDLERS, services=[_Mailer()])
+                return EventGraph(_HANDLERS, services=_mailer_services())
 
             with pytest.raises(TargetError) as info:
                 MigrationTarget(graph=graph, baseline=Path("unused")).snapshot()
@@ -610,7 +624,9 @@ def describe_MigrationTarget():
         def it_passes_against_the_baseline_of_the_graph(tmp_path: Path):
             def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
                 saver.serde = NamespaceAwareSerde(events=(Started, Ended))
-                return EventGraph(_HANDLERS, services=[_Mailer()], checkpointer=saver)
+                return EventGraph(
+                    _HANDLERS, services=_mailer_services(), checkpointer=saver
+                )
 
             def store(saver: BaseCheckpointSaver[Any]) -> EventStore:
                 saver.serde = NamespaceAwareSerde(events=(Started, Ended))
@@ -642,7 +658,7 @@ def describe_MigrationTarget():
             def graph(saver: BaseCheckpointSaver[Any]) -> EventGraph:
                 return EventGraph.from_namespaces(
                     handlers=_HANDLERS,
-                    services=[_Mailer()],
+                    services=_mailer_services(),
                     checkpointer=saver,
                     retired=[_Counted],
                 )

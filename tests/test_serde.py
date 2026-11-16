@@ -2418,7 +2418,7 @@ def describe_replay_reducer():
             from langgraph_events import Reducer
             from langgraph_events.serde import replay_reducer
 
-            reducer = Reducer(
+            reducer = Reducer[Persona.Approve.Approved, Any](
                 name="notes",
                 event_type=Persona.Approve.Approved,
                 fn=lambda e: [e.note],

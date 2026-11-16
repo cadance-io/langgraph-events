@@ -462,10 +462,10 @@ class HandlerMeta:
 
         Each parameter after the event binds by the rules of
         :func:`classify`, like a ``RunScoped`` factory parameter. Raises
-        ``TypeError`` for an annotation that does not fit its reducer or
-        ``Derived``. Each other non-variadic parameter that no field matcher
-        claims is recorded in ``service_candidates``. The ``services=`` of
-        one graph bind to them.
+        ``TypeError`` for an annotation that does not name the declared type
+        of its reducer or ``Derived``. Each other non-variadic parameter that
+        no field matcher claims is recorded in ``service_candidates``. The
+        ``services=`` of one graph bind to them.
         """
         event_types = getattr(fn, "_event_types", None)
         if event_types is None:
