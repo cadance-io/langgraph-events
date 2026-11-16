@@ -213,7 +213,7 @@ graph.invoke(SomeEvent(), context=RunFacts(language="fr"))
 
 Rules:
 
-- The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model. It coerces with the schema of the top-level graph, so a graph embedded as a subgraph receives the context as the parent passes it.
+- The schema can be a dataclass, a pydantic model or a `TypedDict`. LangGraph coerces a `dict` context to a dataclass or a pydantic model.
 - `context_schema` belongs to the topology: `EventTopology(handlers, context_schema=RunFacts)`. `EventGraph(handlers, context_schema=...)` passes it on, and `EventGraph.of(topology, ...)` reads it from the topology.
 - A handler parameter whose annotation is exactly the schema type receives the context. It is claimed like `RunnableConfig`, before a service, so it is not in `topology.requirements`. Only the exact type matches. A parameter annotated `RunFacts | None` or with a subclass stays unclaimed, and the `TypeError` of the build says so. Without `context_schema`, the error of a dataclass, pydantic or `TypedDict` parameter names `context_schema=`.
 - A type-keyed service that is an instance of the schema raises `TypeError` at build. The context fills a parameter of that type, so such a service is never injected.
@@ -240,7 +240,11 @@ Rules:
 graph = EventGraph([place, respond], max_rounds=100)
 ```
 
-Topology is derived from handler subscriptions. No manual node or edge wiring is needed. `max_rounds` (default 100) sets the recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) on overflow. `graph.compiled` exposes the underlying `CompiledStateGraph` for subgraph composition or direct state access.
+Topology is derived from handler subscriptions. No manual node or edge wiring is needed. `max_rounds` (default 100) sets the recursion limit and emits `MaxRoundsExceeded` (a `Halted` subtype) on overflow. `graph.compiled` exposes the underlying `CompiledStateGraph` for direct state access.
+
+### Supported scope { #supported-scope }
+
+One root `EventGraph` runs per thread. A nested run raises `NotImplementedError`. A nested run is `graph.compiled` used as a subgraph node, or a run started from a handler or a node of another running graph. A root run with a non-empty `checkpoint_ns` raises too. To start a second event stream, start it outside the run context, for example through a task queue or a fresh `contextvars.Context`. Do not start it from a handler.
 
 ### Topology, graph and store { #topology-graph-and-store }
 

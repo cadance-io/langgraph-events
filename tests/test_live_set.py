@@ -1,4 +1,4 @@
-"""Tests for the live-set rewrite: ``MigrationTarget.thread_keys`` and
+"""Tests for the live-set rewrite: ``MigrationTarget.thread_ids`` and
 ``rewrite_live_set``. The two-release fixtures live in ``_live_set_fixtures``.
 """
 
@@ -38,44 +38,33 @@ from langgraph_events.serde.migrations import (
     MigrationTarget,
     RestoreOutcome,
     TargetError,
-    ThreadKey,
     TransformFields,
     Verdict,
     WrongRelease,
     backup_live_set,
     drop_backups,
-    list_thread_keys,
+    list_thread_ids,
     restore_live_set,
     rewrite_live_set,
 )
 
 
 def describe_MigrationTarget():
-    def describe_thread_keys():
+    def describe_thread_ids():
         def when_the_saver_is_a_memory_saver():
-            def it_lists_each_thread_and_namespace(tmp_path: Path):
+            def it_lists_each_root_thread(tmp_path: Path):
                 saver = MemorySaver()
                 graph = _graph(saver)
                 graph.invoke(Started(), config=_cfg("b"))
                 graph.invoke(Started(), config=_cfg("a"))
-                tup = saver.get_tuple(_cfg("a"))
-                assert tup is not None
-                saver.put(
-                    _cfg("a", "child:1"),
-                    tup.checkpoint,
-                    tup.metadata,
-                    tup.checkpoint["channel_versions"],
-                )
+                _copy_to_namespace(saver, "a", "child:1")
+                _copy_to_namespace(saver, "a", "child:1", into="c")
                 target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
-                assert target.thread_keys(saver) == (
-                    ThreadKey("a", ""),
-                    ThreadKey("a", "child:1"),
-                    ThreadKey("b", ""),
-                )
+                assert target.thread_ids(saver) == ("a", "b")
 
         def when_the_saver_is_a_postgres_saver():
-            def it_lists_each_thread_and_namespace(tmp_path: Path, postgres_url: str):
+            def it_lists_each_root_thread(tmp_path: Path, postgres_url: str):
                 from langgraph.checkpoint.postgres import PostgresSaver
 
                 with PostgresSaver.from_conn_string(postgres_url) as saver:
@@ -83,26 +72,23 @@ def describe_MigrationTarget():
                     graph.invoke(Started(), config=_cfg("b"))
                     graph.invoke(Started(), config=_cfg("a"))
                     _copy_to_namespace(saver, "a", "child:1")
+                    _copy_to_namespace(saver, "a", "child:1", into="c")
                     target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
-                    assert target.thread_keys(saver) == (
-                        ThreadKey("a", ""),
-                        ThreadKey("a", "child:1"),
-                        ThreadKey("b", ""),
-                    )
+                    assert target.thread_ids(saver) == ("a", "b")
 
         def when_the_target_names_its_threads():
             def it_uses_the_target_function(tmp_path: Path):
                 target = MigrationTarget(
                     graph=_graph,
                     baseline=tmp_path / "b.json",
-                    threads=lambda saver: [ThreadKey("x", ""), ThreadKey("x", "")],
+                    threads=lambda saver: ["x", "x"],
                 )
 
-                assert target.thread_keys(MemorySaver()) == (ThreadKey("x", ""),)
+                assert target.thread_ids(MemorySaver()) == ("x",)
 
         def when_the_saver_is_a_sqlite_saver():
-            def it_lists_each_thread_and_namespace(tmp_path: Path):
+            def it_lists_each_root_thread(tmp_path: Path):
                 from langgraph.checkpoint.sqlite import SqliteSaver
 
                 with SqliteSaver.from_conn_string(str(tmp_path / "s.db")) as saver:
@@ -110,16 +96,13 @@ def describe_MigrationTarget():
                     graph.invoke(Started(), config=_cfg("b"))
                     graph.invoke(Started(), config=_cfg("a"))
                     _copy_to_namespace(saver, "a", "child:1")
+                    _copy_to_namespace(saver, "a", "child:1", into="c")
                     target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
-                    assert target.thread_keys(saver) == (
-                        ThreadKey("a", ""),
-                        ThreadKey("a", "child:1"),
-                        ThreadKey("b", ""),
-                    )
+                    assert target.thread_ids(saver) == ("a", "b")
 
             def when_its_internal_cursor_fails():
-                def it_names_list_thread_keys(
+                def it_names_list_thread_ids(
                     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
                 ):
                     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -135,45 +118,42 @@ def describe_MigrationTarget():
                         )
 
                         with pytest.raises(TargetError) as raised:
-                            target.thread_keys(saver)
+                            target.thread_ids(saver)
 
                     message = str(raised.value)
                     assert message.startswith(
                         "The target cannot list the threads of a SqliteSaver "
                         "(AttributeError: cursor). Set threads= "
                     )
-                    assert "threads=list_thread_keys" in message
+                    assert "threads=list_thread_ids" in message
 
         def when_the_saver_has_no_built_in_enumeration():
-            def it_names_list_thread_keys_and_no_sql(tmp_path: Path):
+            def it_names_list_thread_ids_and_no_sql(tmp_path: Path):
                 target = MigrationTarget(graph=_graph, baseline=tmp_path / "b.json")
 
                 with pytest.raises(TargetError) as raised:
-                    target.thread_keys(DictSaver())
+                    target.thread_ids(DictSaver())
 
                 message = str(raised.value)
                 assert message.startswith(
                     "The target cannot list the threads of a DictSaver. Set threads= "
                 )
-                assert "threads=list_thread_keys" in message
+                assert "threads=list_thread_ids" in message
                 assert "SELECT" not in message
 
 
-def describe_list_thread_keys():
-    def when_a_custom_saver_holds_threads_and_namespaces():
-        def it_lists_each_one_once():
+def describe_list_thread_ids():
+    def when_a_custom_saver_holds_root_and_child_checkpoints():
+        def it_lists_each_root_thread_once():
             saver = DictSaver()
             graph = _graph(saver)
             graph.invoke(Started(), config=_cfg("b"))
             graph.invoke(Started(), config=_cfg("a"))
             graph.invoke(Started(), config=_cfg("a"))
             _copy_to_namespace(saver, "a", "child:1")
+            _copy_to_namespace(saver, "a", "child:1", into="c")
 
-            assert sorted(list_thread_keys(saver)) == [
-                ThreadKey("a", ""),
-                ThreadKey("a", "child:1"),
-                ThreadKey("b", ""),
-            ]
+            assert list_thread_ids(saver) == ["a", "b"]
 
     def when_a_checkpoint_names_a_class_the_serde_cannot_revive():
         def it_still_lists_the_thread(tmp_path: Path):
@@ -182,7 +162,7 @@ def describe_list_thread_keys():
             releases.seed("t1")
             _graph(saver)
 
-            assert list(list_thread_keys(saver)) == [ThreadKey("t1", "")]
+            assert list(list_thread_ids(saver)) == ["t1"]
 
 
 class _StaleRun:
@@ -418,11 +398,10 @@ def describe_rewrite_live_set():
                     assert outcome.clean
                     assert releases.plan("t1") == ["unchanged"]
 
-    def when_a_subgraph_checkpoint_holds_the_live_shape():
-        def it_reports_the_run_as_clean(tmp_path: Path):
+    def when_a_child_namespace_holds_an_old_shape():
+        def it_rewrites_only_the_root_checkpoint(tmp_path: Path):
             releases = _releases(tmp_path)
             releases.seed("t1")
-            rewrite_live_set(releases.current, expect=releases.expect, apply=True)
             _copy_to_namespace(releases.saver, "t1", "child:1")
 
             outcome = rewrite_live_set(
@@ -430,112 +409,32 @@ def describe_rewrite_live_set():
             )
 
             assert isinstance(outcome, LiveSetOutcome)
-            assert outcome.passes == ()
-            assert [t.location for t in outcome.final.threads] == [
-                "t1",
-                "t1 in subgraph namespace 'child:1'",
-            ]
+            assert [
+                [(t.thread_id, t.status) for t in report.threads]
+                for report in outcome.passes
+            ] == [[("t1", "rewrite")]]
             assert outcome.clean
 
-    def when_a_subgraph_checkpoint_holds_an_old_shape():
-        def when_apply_is_false():
-            def it_reports_the_run_as_not_clean(tmp_path: Path):
-                releases = _releases(tmp_path)
-                releases.seed("t1")
-                _copy_to_namespace(releases.saver, "t1", "child:1")
+    def when_the_store_holds_no_thread():
+        def when_the_serde_keeps_legacy_write():
+            def it_raises_the_legacy_write_error(tmp_path: Path):
+                saver = MemorySaver()
 
-                outcome = rewrite_live_set(
-                    releases.current, expect=releases.expect, apply=False
-                )
-
-                assert isinstance(outcome, LiveSetOutcome)
-                assert [(t.checkpoint_ns, t.status) for t in outcome.final.threads] == [
-                    ("", "rewrite"),
-                    ("child:1", "rewrite"),
-                ]
-                assert not outcome.clean
-
-        def when_apply_is_true():
-            def it_rewrites_it_until_a_plan_reads_clean(tmp_path: Path):
-                releases = _releases(tmp_path)
-                releases.seed("t1")
-                _copy_to_namespace(releases.saver, "t1", "child:1")
-
-                outcome = rewrite_live_set(
-                    releases.current, expect=releases.expect, apply=True
-                )
-
-                assert isinstance(outcome, LiveSetOutcome)
-                assert outcome.clean
-                assert [
-                    (t.checkpoint_ns, t.status) for t in outcome.passes[0].threads
-                ] == [("", "rewrite"), ("child:1", "rewrite")]
-                graph = releases.current.graph(releases.saver)
-                [child] = graph.event_store.plan_rewrite(
-                    thread_ids=["t1"], checkpoint_ns="child:1"
-                ).threads
-                assert child.status == "unchanged"
-
-        def when_the_store_is_postgres():
-            def it_rewrites_it_until_a_plan_reads_clean(
-                tmp_path: Path, postgres_url: str
-            ):
-                from langgraph.checkpoint.postgres import PostgresSaver
-
-                with PostgresSaver.from_conn_string(postgres_url) as saver:
-                    releases = _releases(tmp_path, saver)
-                    releases.seed("t1")
-                    _copy_to_namespace(saver, "t1", "child:1")
-
-                    outcome = rewrite_live_set(
-                        releases.current, expect=releases.expect, apply=True
+                def legacy(saver):
+                    saver.serde = NamespaceAwareSerde(
+                        events=(Started,), legacy_write=True
                     )
+                    return EventGraph([_noop], checkpointer=saver)
 
-                    assert isinstance(outcome, LiveSetOutcome)
-                    assert outcome.clean
-                    assert len(outcome.passes) == 1
-                    assert releases.plan("t1") == ["unchanged"]
-                    graph = releases.current.graph(saver)
-                    [child] = graph.event_store.plan_rewrite(
-                        thread_ids=["t1"], checkpoint_ns="child:1"
-                    ).threads
-                    assert child.status == "unchanged"
-
-    def when_a_subgraph_checkpoint_holds_a_failed_task_write():
-        def _stuck(tmp_path: Path):
-            releases = _releases(tmp_path)
-            releases.seed("t1", "t2")
-            _copy_to_namespace(releases.saver, "t1", "child:1")
-            child = releases.saver.get_tuple(_cfg("t1", "child:1"))
-            assert child is not None
-            releases.saver.put_writes(child.config, [("__error__", "boom")], "task-1")
-            return releases
-
-        def it_reports_the_run_as_not_clean_after_every_pass(tmp_path: Path):
-            releases = _stuck(tmp_path)
-
-            outcome = rewrite_live_set(
-                releases.current, expect=releases.expect, apply=True
-            )
-
-            assert isinstance(outcome, LiveSetOutcome)
-            assert [t.location for t in outcome.final.refused] == [
-                "t1 in subgraph namespace 'child:1'"
-            ]
-            assert "delete_thread()" in outcome.final.refused[0].reason
-
-        def when_the_thread_is_deleted():
-            def it_reports_the_run_as_clean(tmp_path: Path):
-                releases = _stuck(tmp_path)
-                rewrite_live_set(releases.current, expect=releases.expect, apply=True)
-                releases.saver.delete_thread("t1")
-
-                outcome = rewrite_live_set(
-                    releases.current, expect=releases.expect, apply=True
+                target = MigrationTarget(
+                    graph=legacy,
+                    baseline=tmp_path / "b.json",
+                    store=lambda: contextlib.nullcontext(saver),
                 )
+                expect = target.snapshot().migrations.fingerprint
 
-                assert isinstance(outcome, LiveSetOutcome)
-                assert outcome.clean
+                with pytest.raises(ValueError, match=r"legacy_write=True"):
+                    rewrite_live_set(target, expect=expect, apply=True)
 
     def when_the_store_saver_holds_its_own_serde():
         def it_raises_a_target_error_before_it_reads_a_thread(tmp_path: Path):
@@ -613,7 +512,7 @@ def describe_LiveSetOutcome():
                 releases.seed("t1")
                 target = dataclasses.replace(
                     releases.current,
-                    threads=lambda saver: [ThreadKey("t1", ""), ThreadKey("ghost", "")],
+                    threads=lambda saver: ["t1", "ghost"],
                 )
 
                 outcome = rewrite_live_set(target, expect=releases.expect, apply=False)
@@ -667,6 +566,14 @@ def describe_backup_live_set():
                 added=BackupRows(checkpoints=1, writes=1),
             )
             assert rows.checkpoint("t1", postgres_store.backup_table()) == before
+
+        def when_a_child_namespace_holds_a_checkpoint():
+            def it_copies_only_the_root_checkpoint(postgres_store: _PostgresStore):
+                _copy_to_namespace(postgres_store.releases.saver, "t1", "child:1")
+
+                outcome = backup_live_set(postgres_store.releases.current)
+
+                assert outcome.added.checkpoints == 1
 
         def it_writes_nothing_to_the_live_tables(postgres_store: _PostgresStore):
             before = postgres_store.live_tables()
@@ -1091,7 +998,7 @@ def _keep(kw: dict) -> dict:
     return kw
 
 
-def _no_read(saver: BaseCheckpointSaver) -> list[ThreadKey]:
+def _no_read(saver: BaseCheckpointSaver) -> list[str]:
     raise AssertionError("the rewrite read the store")
 
 

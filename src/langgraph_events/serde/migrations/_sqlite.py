@@ -13,15 +13,17 @@ from langgraph_events.serde.migrations._target import TargetError
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
-_THREAD_KEYS_QUERY = "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints"
+_THREAD_IDS_QUERY = (
+    "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+)
 _HAS_CHECKPOINTS_QUERY = (
     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'checkpoints'"
 )
 
 
-def thread_rows(saver: BaseCheckpointSaver[Any]) -> list[tuple[str, str]] | None:
-    """The thread id and checkpoint namespace of each checkpoint row of a
-    ``SqliteSaver``, or ``None`` for another saver.
+def thread_ids(saver: BaseCheckpointSaver[Any]) -> list[str] | None:
+    """The id of each thread with a root checkpoint in a ``SqliteSaver``,
+    or ``None`` for another saver.
 
     ``SqliteSaver.cursor()`` creates the tables, so the check for the
     ``checkpoints`` table reads the public ``conn`` of the saver first, and
@@ -44,7 +46,7 @@ def thread_rows(saver: BaseCheckpointSaver[Any]) -> list[tuple[str, str]] | None
             if saver.conn.execute(_HAS_CHECKPOINTS_QUERY).fetchone() is None:
                 return []
         with saver.cursor(transaction=False) as cursor:
-            cursor.execute(_THREAD_KEYS_QUERY)
-            return [(tid, ns) for tid, ns in cursor.fetchall()]
+            cursor.execute(_THREAD_IDS_QUERY)
+            return [tid for (tid,) in cursor.fetchall()]
     except sqlite3.Error as error:
         raise TargetError.refused_listing(error) from error

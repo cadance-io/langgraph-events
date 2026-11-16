@@ -38,7 +38,9 @@ if TYPE_CHECKING:
 
 _T = TypeVar("_T")
 
-_THREAD_KEYS_QUERY = "SELECT DISTINCT thread_id, checkpoint_ns FROM checkpoints"
+_THREAD_IDS_QUERY = (
+    "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
+)
 
 # ``to_regclass`` resolves the name as the unqualified SQL of the saver
 # does. ``pg_class`` shows each table to each role, so ``elsewhere`` names
@@ -76,8 +78,9 @@ _COPY_SQL = """
 WITH added AS (
     INSERT INTO {checkpoints} ({c_columns})
     SELECT {c_columns} FROM (
-        SELECT DISTINCT ON (thread_id, checkpoint_ns) * FROM checkpoints
-        ORDER BY thread_id, checkpoint_ns, checkpoint_id DESC
+        SELECT DISTINCT ON (thread_id) * FROM checkpoints
+        WHERE checkpoint_ns = ''
+        ORDER BY thread_id, checkpoint_id DESC
     ) AS latest
     ON CONFLICT DO NOTHING
     RETURNING thread_id, checkpoint_ns, checkpoint_id
@@ -355,9 +358,9 @@ class _Backup:
         )
 
 
-def thread_rows(saver: BaseCheckpointSaver[Any]) -> list[tuple[str, str]] | None:
-    """The thread id and checkpoint namespace of each checkpoint row of a
-    ``PostgresSaver``, or ``None`` for another saver.
+def thread_ids(saver: BaseCheckpointSaver[Any]) -> list[str] | None:
+    """The id of each thread with a root checkpoint in a ``PostgresSaver``,
+    or ``None`` for another saver.
 
     Raises:
         TargetError: when the database refuses a statement.
@@ -371,19 +374,19 @@ def thread_rows(saver: BaseCheckpointSaver[Any]) -> list[tuple[str, str]] | None
         with postgres._cursor() as cursor:
             if not _has_checkpoints(cursor):
                 return []
-            cursor.execute(_THREAD_KEYS_QUERY)
+            cursor.execute(_THREAD_IDS_QUERY)
             rows = cursor.fetchall()
     except psycopg.Error as error:
         raise TargetError.refused_listing(error) from error
-    return [(r["thread_id"], r["checkpoint_ns"]) for r in rows]
+    return [r["thread_id"] for r in rows]
 
 
 def backup_live_set(target: MigrationTarget) -> BackupOutcome:
     """Back up the live set of the ``PostgresSaver`` store of *target*.
 
     The backup is named after the migration fingerprint of the running
-    code: ``checkpoints_bak_<fp>`` holds the latest checkpoint row of each
-    thread in each namespace, and ``checkpoint_writes_bak_<fp>`` holds the
+    code: ``checkpoints_bak_<fp>`` holds the latest root checkpoint row of
+    each thread, and ``checkpoint_writes_bak_<fp>`` holds the
     pending writes of those rows. ``<fp>`` is the fingerprint with ``_``
     for each ``-``. The copy runs in one transaction, and names the
     columns that each backup table and its live table share.

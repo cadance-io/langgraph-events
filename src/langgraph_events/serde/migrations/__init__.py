@@ -65,8 +65,7 @@ from langgraph_events.serde.migrations._postgres import (
 from langgraph_events.serde.migrations._target import (
     MigrationTarget,
     TargetError,
-    ThreadKey,
-    list_thread_keys,
+    list_thread_ids,
 )
 from langgraph_events.serde.migrations.testing import (
     assert_migration_gate,
@@ -97,7 +96,6 @@ __all__ = [
     "SplitEvent",
     "SurvivedRelease",
     "TargetError",
-    "ThreadKey",
     "TransformFields",
     "Uncovered",
     "Unrevivable",
@@ -110,7 +108,7 @@ __all__ = [
     "check",
     "drop_backups",
     "hold_migration",
-    "list_thread_keys",
+    "list_thread_ids",
     "migrate_from",
     "replay_reducer",
     "restore_live_set",

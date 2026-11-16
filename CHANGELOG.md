@@ -29,9 +29,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A run stores each checkpoint before the next step runs.** A graph with a checkpointer
+  now runs with the LangGraph durability `"sync"` by default, a run of `graph.compiled`
+  included. Under the old default `"async"`, a crash could lose the events that explain a
+  side effect that a handler already committed. The cost: each step waits until its
+  checkpoint is stored. To opt out, pass `durability="async"` or `durability="exit"` on the
+  run call, as the [API reference](https://cadance-io.github.io/langgraph-events/api/#graph-execution)
+  shows.
 - **`ThreadRewrite.dropped` counts distinct stored events.** Before, it counted entries in
   `events` and in `_pending`. So an event in both channels counted twice. Each `_pending`
   entry is also in `events`, so the count now reads `events` only.
+
+### Removed
+
+- **An `EventGraph` runs only at the root of a thread.** A nested run now raises
+  `NotImplementedError`. A nested run is the compiled graph used as a subgraph node, or a
+  run started from a handler or a node of another running graph. A root run with a
+  non-empty `checkpoint_ns` raises too. To start a second event stream, start it outside the
+  run context, for example through a task queue or a fresh `contextvars.Context`. See
+  [Supported scope](https://cadance-io.github.io/langgraph-events/concepts/#supported-scope).
+- **The rewrite tools read the root checkpoint namespace only.** `plan_rewrite()`,
+  `rewrite_store()` and their async twins lose `checkpoint_ns=`. `ThreadKey` is removed, and
+  `ThreadRewrite` loses `checkpoint_ns` and `location`. `MigrationTarget(threads=...)` now
+  returns thread ids, and `MigrationTarget.thread_keys()` is now `thread_ids()`.
+  `list_thread_keys` is now `list_thread_ids`. The `rewrite` and `backup` commands read and
+  copy only root checkpoints. `rewrite` on a store with no thread now runs the checks of
+  `plan_rewrite()`, so `legacy_write=True` raises the same `ValueError` as with threads.
+- **WARNING: `rewrite` no longer reads a subgraph checkpoint.** A store can hold one from a
+  nested run of an earlier release. After the upgrade, that checkpoint keeps its old bytes,
+  and its run cannot resume, because a nested run raises. Before you upgrade, let each
+  paused nested run finish. Delete a thread that nobody needs with `delete_thread()`.
 
 ## [0.49.0] - 2026-11-10
 

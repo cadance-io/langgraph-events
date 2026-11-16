@@ -15,7 +15,6 @@ from _live_set_fixtures import (
     _cfg,
     _copy_to_namespace,
     _Counted,
-    _graph,
     _no_store,
     _noop,
     _PostgresRows,
@@ -48,8 +47,7 @@ from langgraph_events import (
 from langgraph_events.serde import NamespaceAwareSerde
 from langgraph_events.serde.migrations import (
     MigrationTarget,
-    ThreadKey,
-    list_thread_keys,
+    list_thread_ids,
 )
 from langgraph_events.serde.migrations.__main__ import main
 
@@ -488,7 +486,7 @@ def describe_rewrite_command():
                     graph=releases.current.graph,
                     baseline=releases.current.baseline,
                     store=releases.current.store,
-                    threads=lambda saver: [ThreadKey("ghost", "")],
+                    threads=lambda saver: ["ghost"],
                 )
                 spec = _install(monkeypatch, target)
 
@@ -500,38 +498,8 @@ def describe_rewrite_command():
                     "  ghost: refused, no checkpoint for this thread id\n"
                 )
 
-        def when_the_last_plan_refuses_a_subgraph_checkpoint():
-            def it_prints_the_reason_and_no_apply_command(
-                tmp_path: Path,
-                monkeypatch: pytest.MonkeyPatch,
-                capsys: pytest.CaptureFixture[str],
-            ):
-                releases = _releases(tmp_path)
-                releases.seed("t1")
-                _copy_to_namespace(releases.saver, "t1", "child:1")
-                del releases.saver.storage["t1"][""]
-                target = MigrationTarget(
-                    graph=_graph,
-                    baseline=tmp_path / "b.json",
-                    store=releases.current.store,
-                )
-                spec = _install(monkeypatch, target)
-                expect = target.snapshot().migrations.fingerprint
-
-                code = main(["rewrite", spec, "--expect", expect, "--apply"])
-
-                out = capsys.readouterr().out.splitlines()
-                assert code == 1
-                assert out[1].startswith(
-                    "  t1 in subgraph namespace 'child:1': refused, history names "
-                )
-                assert out[1].endswith(
-                    "which the serde cannot revive; add a tombstone first"
-                )
-                assert len(out) == 2
-
         def when_the_store_is_a_sqlite_saver():
-            def it_rewrites_each_namespace_and_exits_zero(
+            def it_rewrites_each_root_thread_and_exits_zero(
                 tmp_path: Path,
                 monkeypatch: pytest.MonkeyPatch,
                 capsys: pytest.CaptureFixture[str],
@@ -553,14 +521,14 @@ def describe_rewrite_command():
                 out = capsys.readouterr().out
                 assert code == 0
                 assert out.startswith(
-                    "pass 1: applied: 3 threads, 3 rewrite, 0 unchanged, 0 refused\n"
+                    "pass 1: applied: 2 threads, 2 rewrite, 0 unchanged, 0 refused\n"
                     "lge rewrite: clean"
                 )
 
         def when_the_store_is_a_custom_saver():
             def when_the_target_lists_its_threads():
-                def with_list_thread_keys():
-                    def it_rewrites_each_namespace_and_exits_zero(
+                def with_list_thread_ids():
+                    def it_rewrites_each_root_thread_and_exits_zero(
                         tmp_path: Path,
                         monkeypatch: pytest.MonkeyPatch,
                         capsys: pytest.CaptureFixture[str],
@@ -569,7 +537,7 @@ def describe_rewrite_command():
                         releases.seed("t1")
                         _copy_to_namespace(releases.saver, "t1", "child:1")
                         target = dataclasses.replace(
-                            releases.current, threads=list_thread_keys
+                            releases.current, threads=list_thread_ids
                         )
                         spec = _install(monkeypatch, target)
 
@@ -579,7 +547,7 @@ def describe_rewrite_command():
 
                         assert code == 0
                         assert capsys.readouterr().out.startswith(
-                            "pass 1: applied: 2 threads, 2 rewrite, 0 unchanged, "
+                            "pass 1: applied: 1 thread, 1 rewrite, 0 unchanged, "
                             "0 refused\n"
                         )
 
@@ -595,7 +563,7 @@ def describe_rewrite_command():
                     assert tup is not None
                     checkpoint_id = tup.config["configurable"]["checkpoint_id"]
                     target = dataclasses.replace(
-                        releases.current, threads=list_thread_keys
+                        releases.current, threads=list_thread_ids
                     )
                     spec = _install(monkeypatch, target)
 
@@ -1042,7 +1010,7 @@ def describe_rewrite_accept():
         def _refusing(tmp_path: Path) -> tuple[MigrationTarget, str]:
             releases = _releases(tmp_path)
             target = dataclasses.replace(
-                releases.current, threads=lambda saver: [ThreadKey("ghost", "")]
+                releases.current, threads=lambda saver: ["ghost"]
             )
             return target, releases.expect
 
@@ -1092,7 +1060,7 @@ def describe_rewrite_accept():
             ):
                 releases = _releases(tmp_path, DictSaver(put_overwrites=False))
                 releases.seed("t1")
-                target = dataclasses.replace(releases.current, threads=list_thread_keys)
+                target = dataclasses.replace(releases.current, threads=list_thread_ids)
                 spec = _install(monkeypatch, target)
 
                 code = main(
@@ -1267,7 +1235,7 @@ def describe_backup_command():
             capsys: pytest.CaptureFixture[str],
         ):
             target = dataclasses.replace(
-                _releases(tmp_path).current, store=_no_store, threads=list_thread_keys
+                _releases(tmp_path).current, store=_no_store, threads=list_thread_ids
             )
             spec = _install(monkeypatch, target)
 

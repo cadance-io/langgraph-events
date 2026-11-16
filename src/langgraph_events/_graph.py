@@ -395,9 +395,9 @@ class EventGraph:
         """The underlying LangGraph ``CompiledStateGraph``.
 
         This is the bridge to full LangGraph when you need features
-        beyond the EventGraph API: subgraph composition, custom
-        streaming modes, direct state access, or advanced checkpointer
-        workflows.
+        beyond the EventGraph API: custom streaming modes, direct state
+        access, or advanced checkpointer workflows. It runs only at the root
+        of a thread. A nested run raises ``NotImplementedError``.
 
         The instance is compiled lazily on first access and cached.
 

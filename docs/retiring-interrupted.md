@@ -14,7 +14,7 @@ Both methods read the checkpoint of each thread directly, not the compiled topol
 
 `threads_paused_on()`, `unrevivable_threads()`, `plan_rewrite()`, `rewrite_store()` and their async forms require `thread_ids=`. A missing argument, `None` or a bare `str` raises `TypeError`. The library does not walk the store. Only the store can filter by latest checkpoint and by the `__interrupt__` channel. `thread_ids=` accepts ids from any query, any driver, sync or async.
 
-`threads_paused_on()`, `unrevivable_threads()` and `abandon()` read the root checkpoint namespace only. `plan_rewrite()` and `rewrite_store()` read the namespace in `checkpoint_ns=`, the root by default. So every query filters on `checkpoint_ns = ''`. If one checkpointer stores more than one graph, keep only the thread ids of this graph. Every thread id, on `PostgresSaver` and `SqliteSaver`:
+`threads_paused_on()`, `unrevivable_threads()`, `abandon()`, `plan_rewrite()` and `rewrite_store()` read the root checkpoint namespace only. So every query filters on `checkpoint_ns = ''`. If one checkpointer stores more than one graph, keep only the thread ids of this graph. Every thread id, on `PostgresSaver` and `SqliteSaver`:
 
 ```sql
 SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''

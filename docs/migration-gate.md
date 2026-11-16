@@ -163,7 +163,7 @@ The `backup`, `rewrite`, `restore` and `drop-backups` commands open `store` of t
 
 - `store` returns a context manager of a sync checkpointer. An async context manager, for example from `AsyncPostgresSaver.from_conn_string`, stops the command with exit 2. If your app uses an async saver, give `store` the sync saver of the same database, for example `PostgresSaver.from_conn_string(url)` or `SqliteSaver.from_conn_string(path)`.
 - `PostgresSaver.from_conn_string` takes the plain libpq form, `postgresql://...`. The SQLAlchemy form with a driver, `postgresql+psycopg://...`, fails in psycopg with `missing "=" after ...`. Remove `+psycopg` before you give the URL to the saver. The commands import the target and call `graph`, so the graph factory runs your full app setup. Run each command in an environment that has the configuration of your app, for example its environment variables. If the app setup opens a SQLAlchemy engine, it needs the driver form `postgresql+psycopg://...`. A plain `postgresql://...` there selects psycopg2, and the setup fails with `No module named 'psycopg2'` when only psycopg 3 is installed.
-- The command lists the threads of a `PostgresSaver`, a `SqliteSaver` or a `MemorySaver`. For another saver, or for a store that other graphs share, set `threads=` to a function that takes the saver and returns a `ThreadKey(thread_id, checkpoint_ns)` for each thread and checkpoint namespace of this graph. See [Checkpointers](#checkpointers) and [Backup and restore](#backup-and-restore).
+- The command lists the threads of a `PostgresSaver`, a `SqliteSaver` or a `MemorySaver`. For another saver, or for a store that other graphs share, set `threads=` to a function that takes the saver and returns the id of each thread of this graph. See [Checkpointers](#checkpointers) and [Backup and restore](#backup-and-restore).
 
 ### Checkpointers
 
@@ -179,8 +179,8 @@ pip install "langgraph-events[sqlite]"     # SqliteSaver
 | `PostgresSaver` | Yes | Built in, with one SQL query | Needed. See [Old blob versions](#old-blob-versions) | Built in: `backup`, `restore` and `drop-backups`. See [Backup and restore](#backup-and-restore) |
 | `SqliteSaver` | Yes | Built in, with one SQL query | Not needed. `put()` replaces the whole checkpoint row | None. Copy the database file before the rewrite |
 | `MemorySaver` | Yes | Built in, from its storage | No prune. The old versions stay in memory | None |
-| A custom saver | Yes, when it obeys the three rules below | Set `threads=list_thread_keys` for a small store, or your own function | It depends on the saver | None. Use the tools of its database |
-| `AsyncPostgresSaver`, `AsyncSqliteSaver` | Through `aplan_rewrite()` and `arewrite_store()` only | None. Pass `thread_ids=` and `checkpoint_ns=` | The same as the sync saver of the same database | The same as the sync saver of the same database |
+| A custom saver | Yes, when it obeys the three rules below | Set `threads=list_thread_ids` for a small store, or your own function | It depends on the saver | None. Use the tools of its database |
+| `AsyncPostgresSaver`, `AsyncSqliteSaver` | Through `aplan_rewrite()` and `arewrite_store()` only | None. Pass `thread_ids=` | The same as the sync saver of the same database | The same as the sync saver of the same database |
 
 A custom saver must obey three rules, or the rewrite cannot store a thread:
 
@@ -199,7 +199,7 @@ The base class `BaseCheckpointSaver` does not promise any of the three rules. So
 
 The plan proves before the write that the rewritten bytes settle: a read of them migrates no record. A class-stage transform that changes its own output again, for example one that adds 1 to a field, does not settle. The plan refuses that thread with `a migration of <module>:<qualname> does not settle`, and writes nothing. A transform that builds a tuple from a stored list settles. A tuple and a list store the same bytes.
 
-`list_thread_keys` lists the threads of any saver through its public `list(None)`. WARNING: `list(None)` reads and decodes every checkpoint of the store, older checkpoints included. On a large store it costs time in proportion to the whole store, and memory when the saver loads all rows at once. For a large store, write a `threads` function that asks the store for each distinct thread id and checkpoint namespace.
+`list_thread_ids` lists the root threads of any saver through its public `list(None)`. WARNING: `list(None)` reads and decodes every checkpoint of the store, older checkpoints included. On a large store it costs time in proportion to the whole store, and memory when the saver loads all rows at once. For a large store, write a `threads` function that asks the store for each distinct thread id of a root checkpoint.
 
 ### The steps
 
@@ -258,7 +258,7 @@ target = MigrationTarget(
 )
 ```
 
-Each class in `drop` must be in `retired=` of the graph. `drop` deletes stored events, so it takes only a retired tombstone. The serde of the graph must also revive each class to that same class. `plan_rewrite()` applies this second rule. When a class breaks a rule, every command exits 2 with an error that names the class as `module:qualname`. When `drop` holds a value that is not an `Event` class, every command exits 2 with an error that shows that value. So `check` in CI refuses a live class, or a class that `retired=` does not list, before a deploy runs it. The `retired=` rule reads the topology of the root graph only. So list a tombstone that only a subgraph retires in `retired=` of the root graph too.
+Each class in `drop` must be in `retired=` of the graph. `drop` deletes stored events, so it takes only a retired tombstone. The serde of the graph must also revive each class to that same class. `plan_rewrite()` applies this second rule. When a class breaks a rule, every command exits 2 with an error that names the class as `module:qualname`. When `drop` holds a value that is not an `Event` class, every command exits 2 with an error that shows that value. So `check` in CI refuses a live class, or a class that `retired=` does not list, before a deploy runs it.
 
 A plan names each dropped class and its count of stored events, for example `t1: needs a rewrite, drops 2 events of myapp.order:Order.RetiredApprovalGate`. Under each pass line, an apply names them as `t1: dropped 2 events of myapp.order:Order.RetiredApprovalGate`.
 
@@ -268,7 +268,7 @@ Use `drop` to delete a tombstone through the deploy steps. See [Retired events](
 
 1. It builds the graph on an empty `MemorySaver` and compares its migrations with `--expect`. It opens no store before this check.
 2. It opens the store and builds the graph on its saver. When that saver already holds a serde with other migrations, it exits 2 before it reads a thread. The gate and the check judge the serde of step 1, so the serde that writes must be the same.
-3. It plans the latest checkpoint of each thread in each checkpoint namespace: the root checkpoint namespace and each subgraph checkpoint namespace. The plan reports a stored instance of a class in `drop` of the target as a rewrite. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
+3. It plans the latest checkpoint of each thread in the root checkpoint namespace. An `EventGraph` runs only at the root of a thread, so the command reads no other namespace. The plan reports a stored instance of a class in `drop` of the target as a rewrite. It takes no backup. Run `backup` before it. See [Backup and restore](#backup-and-restore). For a store with no `checkpoints` table, see [A store with no checkpoint table](#a-store-with-no-checkpoint-table).
 4. With `--apply`, it rewrites each checkpoint that the last plan reads as a rewrite. Then it plans every checkpoint again. It repeats this step up to `--passes` times, 3 by default, and stops when the last plan has no checkpoint to rewrite. A refused checkpoint changes only when a person acts, so a pass leaves it out. It logs one line per pass to stdout, then one line per checkpoint that the pass drops events from.
 5. The verdict of the last plan and `--accept` decide the exit code.
 
@@ -355,7 +355,7 @@ The Python forms are `backup_live_set(target) -> BackupOutcome`, `restore_live_s
 
 | Table | It holds |
 |---|---|
-| `checkpoints_bak_<fp>` | The latest row of `checkpoints` for each thread and checkpoint namespace |
+| `checkpoints_bak_<fp>` | The latest row of `checkpoints` for each thread in the root checkpoint namespace |
 | `checkpoint_writes_bak_<fp>` | Each row of `checkpoint_writes` of those checkpoints, as of the last run of `backup` |
 
 `<fp>` is the migration fingerprint of the running code, with `_` for each `-`. For example, `lge-m1-dbc7afada42b30d1` gives `checkpoints_bak_lge_m1_dbc7afada42b30d1`. The backup copies the live set, as defined under [Rewriting the live set](#rewriting-the-live-set). The rewrite overwrites only these rows. `PostgresSaver.put()` stores each changed channel under a new version, and an insert into `checkpoint_blobs` never replaces a stored row. So the old blob versions stay in the store, and the backup does not copy them. A rerun of `backup` under the same fingerprint, for example a hotfix with the same migrations, keeps each row that the backup holds. It adds the latest row of each thread that appeared or changed since, with the pending writes of that row. It also adds each pending write that a run added since to a checkpoint that the backup holds. It keeps each write that the backup holds, also when a rewrite changed the live write since. A thread that changed has two rows in the backup, and the restore puts back both, each under its own key.
@@ -386,20 +386,11 @@ WARNING: A connection to the wrong database finds no `checkpoints` table. The co
 
 A backup of an empty store creates no table. After release N creates the tables, `restore` under release N exits 2 until step 4 runs `backup` again. Release N wrote each checkpoint of that store, so no restore is necessary.
 
-### Subgraph checkpoints
-
-A graph that a handler invokes on the same checkpointer writes its checkpoints under a subgraph checkpoint namespace. The command plans and rewrites the latest checkpoint of each subgraph checkpoint namespace, the same as a root thread. So a completed subgraph run does not keep a migration in the code. A refused subgraph checkpoint prints its namespace and its reason. A completed task write that the rewrite would change refuses a subgraph checkpoint. When the subgraph checkpoint is paused on an interrupt, resume the root thread, then run `rewrite --apply` again. The resume runs the paused subgraph task again under the same namespace, and that run applies the write. A subgraph checkpoint that is paused on a class in `drop` also clears when the root thread resumes. `abandon()` on the root thread clears neither.
-
-A subgraph checkpoint that holds a pending `__error__` write from a failed task is refused on every pass. When the subgraph checkpoint is not paused, a completed task write that the rewrite would change also refuses it on every pass. `abandon()` and `resume()` reach only the root checkpoint namespace. A new run of the root thread writes under a new namespace and leaves the old checkpoint. So no call of this library clears that checkpoint, and `rewrite` cannot exit 0 while it stays. This is a known limit until the refusal rule for an `__error__` write changes. WARNING: `delete_thread()` deletes every checkpoint of the thread, the root checkpoint namespace included. Delete only a thread that nobody needs. The operator has two choices:
-
-- If nobody needs the thread, delete it with the `delete_thread()` method of the checkpointer. Then run `rewrite --apply` again.
-- Otherwise hold the migrations that the checkpoint needs with `baseline hold`, one release at a time.
-
 ## Rewriting the live set
 
 Every migration above is read-side. The stored bytes keep the historic identity and the old field shape until something writes the checkpoint again. A thread at rest is never written again. So its `@migrate_from`, `@transform_fields` or `@split_event` must stay for ever. `graph.event_store.plan_rewrite()` and `graph.event_store.rewrite_store()` rewrite the stored bytes. For a deploy step, use the `rewrite` command. See [Lifecycle of a read-time migration](#lifecycle-of-a-read-time-migration).
 
-The live set is the latest checkpoint of each thread in each checkpoint namespace, plus its pending writes. `rewrite_store()` reads one checkpoint namespace per call. The default `checkpoint_ns=""` is the root checkpoint namespace. Pass `checkpoint_ns=` to read a subgraph checkpoint namespace. It reads each checkpoint through the serde of the checkpointer, so every rename, transform, split and fill applies. It writes the result back through `put()` of the checkpointer, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same reads and the same verification, and writes nothing. The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
+The live set is the latest checkpoint of each thread in the root checkpoint namespace, plus its pending writes. `rewrite_store()` reads no other namespace. It reads each checkpoint through the serde of the checkpointer, so every rename, transform, split and fill applies. It writes the result back through `put()` of the checkpointer, under the same checkpoint id, with a new version for each channel the rewrite touched. `drop=` names event classes whose stored instances leave the `events` and `_pending` channels. `plan_rewrite()` does the same reads and the same verification, and writes nothing. The caller names the threads with `thread_ids=`. The argument is required, and the library does not walk the store. See [Finding candidates server-side](retiring-interrupted.md#finding-candidates-server-side). A listed id with no checkpoint is reported as refused, so a typo stays visible.
 
 ```python
 ...  # graph, Order and thread_ids come from your app
@@ -411,7 +402,7 @@ report = graph.event_store.rewrite_store(drop=(Order.ApprovalRequired,), thread_
 assert not report.refused
 ```
 
-Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran. `"rewrite"` in a plan means that the thread needs a write. In an applied report it means that the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the stored events `drop=` removed, per identity. `reason` says what to do with a refused thread. The reasons are listed under [A checkpoint that a plan refuses](#a-checkpoint-that-a-plan-refuses). `checkpoint_ns` is the checkpoint namespace the call read, and `location` is the thread id with that namespace when it is not the root checkpoint namespace. `str(report)` prints one summary line, then one line per thread that `drop=` removes events from, then one line per refused thread. The async forms are `aplan_rewrite()` and `arewrite_store()`. They take the same arguments. An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is dropped, the rewrite sets the field to `None`. The `Resumed` event stays, and `dropped` does not count the cleared field. `drop=` matches the stored identity exactly. A subclass instance stays in place.
+Both return a `RewriteReport` with one `ThreadRewrite` per thread. `status` is `"rewrite"`, `"unchanged"` or `"refused"`. `report.applied` says whether the rewrite ran. `"rewrite"` in a plan means that the thread needs a write. In an applied report it means that the thread was written. `migrated` lists each `(stored, live)` identity pair the table rewrote. `dropped` counts the stored events `drop=` removed, per identity. `reason` says what to do with a refused thread. The reasons are listed under [A checkpoint that a plan refuses](#a-checkpoint-that-a-plan-refuses). `str(report)` prints one summary line, then one line per thread that `drop=` removes events from, then one line per refused thread. The async forms are `aplan_rewrite()` and `arewrite_store()`. They take the same arguments. An answered interrupt also sits in `Resumed.interrupted`. When that interrupt is dropped, the rewrite sets the field to `None`. The `Resumed` event stays, and `dropped` does not count the cleared field. `drop=` matches the stored identity exactly. A subclass instance stays in place.
 
 WARNING: The checkpoint row is overwritten in place, so take a backup first. For a `PostgresSaver`, the `backup` command takes it. See [Backup and restore](#backup-and-restore). An old pod cannot read the new bytes, so run the rewrite only after every pod runs the release that holds the migration. For the rule on a shared serde instance, see [Live traffic](#live-traffic).
 

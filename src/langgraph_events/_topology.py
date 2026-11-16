@@ -8,7 +8,9 @@ import types
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from langgraph_events._causes import CauseEntry
 from langgraph_events._event import (
@@ -61,9 +63,8 @@ if TYPE_CHECKING:
     )
 
     from langchain_core.runnables import RunnableConfig, RunnableLambda
-    from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
-    from langgraph.types import Checkpointer
+    from langgraph.types import Checkpointer, Durability
 
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._services import Services
@@ -72,6 +73,36 @@ if TYPE_CHECKING:
         NamespaceAwareSerde,
     )
     from langgraph_events.serde.migrations._core import Migration
+
+
+class _EventCompiledGraph(CompiledStateGraph[Any, Any, Any, Any]):
+    """A ``CompiledStateGraph`` that runs with durability ``"sync"`` by default
+    when it has a checkpointer."""
+
+    def _defaults(
+        self,
+        config: RunnableConfig,
+        *,
+        durability: Durability | None = None,
+        **kwargs: Any,
+    ) -> tuple[Any, ...]:
+        # LangGraph sets a non-empty checkpoint_ns only in the config of a task.
+        # A subgraph node gets it, and a run from inside a task inherits it.
+        # Only a root run is supported. LangGraph has no public default
+        # durability, so a graph with a checkpointer gets "sync" here.
+        namespace = config.get("configurable", {}).get("checkpoint_ns")
+        if namespace:
+            raise NotImplementedError(
+                "An EventGraph runs only at the root of a thread. This run has "
+                f"the checkpoint_ns {namespace!r}, so it is nested in another "
+                "graph or a root run carries a non-empty checkpoint_ns. To start "
+                "a second event stream, start it outside the run context, for "
+                "example through a task queue or a fresh context, not from a "
+                "handler."
+            )
+        if durability is None and isinstance(self.checkpointer, BaseCheckpointSaver):
+            durability = "sync"
+        return super()._defaults(config, durability=durability, **kwargs)
 
 
 class OrphanedEventWarning(UserWarning):
@@ -964,6 +995,7 @@ class EventTopology:
             **(compiled.config or {}),
             "recursion_limit": limit,
         }
+        compiled.__class__ = _EventCompiledGraph
 
         return compiled
 

@@ -106,13 +106,19 @@ def _releases(tmp_path: Path, saver: BaseCheckpointSaver | None = None) -> _Rele
     )
 
 
-def _copy_to_namespace(saver: BaseCheckpointSaver, tid: str, ns: str) -> None:
+def _copy_to_namespace(
+    saver: BaseCheckpointSaver, tid: str, ns: str, *, into: str | None = None
+) -> None:
     """Store the latest root checkpoint of *tid* again under *ns*, through
-    the serde the saver holds now."""
+    the serde the saver holds now. *into* names the thread of the copy, and
+    the default is *tid*."""
     tup = saver.get_tuple(_cfg(tid))
     assert tup is not None
     saver.put(
-        _cfg(tid, ns), tup.checkpoint, tup.metadata, tup.checkpoint["channel_versions"]
+        _cfg(into or tid, ns),
+        tup.checkpoint,
+        tup.metadata,
+        tup.checkpoint["channel_versions"],
     )
 
 

@@ -58,8 +58,7 @@ class ThreadRewrite:
     table rewrote, as ``"module:qualname"`` strings, deduped in read
     order. ``dropped`` counts the stored events ``drop`` removed, per
     identity. ``reason`` says what to do when the status is
-    ``"refused"``. ``checkpoint_ns`` is the checkpoint namespace the walk
-    read. ``""`` is the root namespace.
+    ``"refused"``.
     """
 
     thread_id: str
@@ -67,15 +66,6 @@ class ThreadRewrite:
     migrated: tuple[tuple[str, str], ...] = ()
     dropped: dict[str, int] = field(default_factory=dict)
     reason: str = ""
-    checkpoint_ns: str = ""
-
-    @property
-    def location(self) -> str:
-        """The thread id, and the checkpoint namespace when it is not the
-        root namespace."""
-        if not self.checkpoint_ns:
-            return self.thread_id
-        return f"{self.thread_id} in subgraph namespace {self.checkpoint_ns!r}"
 
     @property
     def dropped_label(self) -> str:
@@ -118,11 +108,11 @@ class RewriteReport:
         ]
         verb = "dropped" if self.applied else "drops"
         lines.extend(
-            f"  {t.location}: {verb} {t.dropped_label}"
+            f"  {t.thread_id}: {verb} {t.dropped_label}"
             for t in self.threads
             if t.status == "rewrite" and t.dropped
         )
-        lines.extend(f"  {t.location}: refused, {t.reason}" for t in self.refused)
+        lines.extend(f"  {t.thread_id}: refused, {t.reason}" for t in self.refused)
         return "\n".join(lines)
 
 
@@ -232,7 +222,6 @@ def _clear_resumed(entry: object, drop: tuple[type[Event], ...]) -> object:
 def plan_thread(
     *,
     thread_id: str,
-    checkpoint_ns: str,
     tup: CheckpointTuple,
     unresolved: Sequence[UnrevivedIdentity],
     decoded: Sequence[DecodedValue],
@@ -248,8 +237,7 @@ def plan_thread(
     two collectors. This function runs after both blocks closed, so its
     verification reads are strict. ``drop`` matches the stored identity
     exactly, not the class hierarchy: the rule ``validate_drop`` and the
-    byte scan apply. A non-root *checkpoint_ns* changes only the remedy of
-    a refusal, because ``abandon()`` and ``resume()`` reach the root only.
+    byte scan apply.
     """
     reads = [record for _value, records in decoded for record in records]
     pairs = _migrated_pairs(reads)
@@ -270,9 +258,7 @@ def plan_thread(
     if not pairs and not dropped and not present:
         return ThreadRewrite(thread_id, "unchanged")
 
-    reason = _pending_refusal(
-        pending, values, drop, decoded, subgraph=bool(checkpoint_ns)
-    )
+    reason = _pending_refusal(pending, values, drop, decoded)
     if reason is not None:
         return refused(reason)
 
@@ -376,23 +362,6 @@ def _not_events(log: list[Any]) -> str | None:
     )
 
 
-_RESUME_THE_ROOT = (
-    "resume the root thread, then rerun. abandon() does not clear a subgraph checkpoint"
-)
-"""The remedy for a paused subgraph checkpoint. A resume of the root thread
-continues the subgraph run."""
-
-_NO_CALL_CLEARS = (
-    "abandon() and resume() reach only the root namespace, so no call clears "
-    "this write. If nobody needs the thread, delete every checkpoint of it "
-    "with the checkpointer's delete_thread(), then rerun. Otherwise keep the "
-    "migrations and the classes that this checkpoint needs"
-)
-"""The remedy for a task write in a subgraph checkpoint that is not paused.
-A new run of the root thread writes under a new namespace and leaves this
-checkpoint."""
-
-
 _ABANDON_UNPAUSED = (
     "abandon it with abandon(config, require_interrupt=False), then rerun"
 )
@@ -405,45 +374,33 @@ def _pending_refusal(
     values: dict[str, Any],
     drop: tuple[type[Event], ...],
     decoded: Sequence[DecodedValue],
-    *,
-    subgraph: bool,
 ) -> str | None:
-    """Why the pending writes stop this rewrite, or ``None``. A *subgraph*
-    checkpoint gets the remedy that reaches it."""
+    """Why the pending writes stop this rewrite, or ``None``."""
     interrupt_writes = [w for w in pending if w[1] == _INTERRUPT_CHANNEL]
     for payload in _interrupt_payloads(interrupt_writes):
         if type(payload) in drop:
             return (
                 f"thread is paused on {type(payload).__qualname__}, a dropped "
-                f"class; {_RESUME_THE_ROOT if subgraph else 'abandon it first'}"
+                "class; abandon it first"
             )
     if interrupt_writes and any(
         type(entry) in drop for entry in _log_entries(values, "_pending") or ()
     ):
         # The resumed task would find no matching event, return nothing,
         # and end the thread unpaused with the resume payload lost.
-        remedy = "resume or abandon the thread first"
         return (
-            f"a dropped event is pending dispatch on a paused thread; "
-            f"{_RESUME_THE_ROOT if subgraph else remedy}"
+            "a dropped event is pending dispatch on a paused thread; "
+            "resume or abandon the thread first"
         )
     shifts = any(type(entry) in drop for entry in _log_entries(values, "events") or ())
-    if not subgraph:
-        remedy = (
-            "resume or abandon it, then rerun"
-            if interrupt_writes
-            else _ABANDON_UNPAUSED
-        )
-    else:
-        # A resume of the root thread reruns the paused subgraph task under
-        # the same namespace, and that run applies the completed write.
-        remedy = _RESUME_THE_ROOT if interrupt_writes else _NO_CALL_CLEARS
+    remedy = (
+        "resume or abandon it, then rerun" if interrupt_writes else _ABANDON_UNPAUSED
+    )
     for task_id, channel, value in pending:
         if channel == _ERROR_CHANNEL:
-            rerun = f"run it again, or {_ABANDON_UNPAUSED}"
             return (
                 f"thread has a pending __error__ write from a failed task; "
-                f"{_NO_CALL_CLEARS if subgraph else rerun}"
+                f"run it again, or {_ABANDON_UNPAUSED}"
             )
         if channel == _INTERRUPT_CHANNEL:
             continue

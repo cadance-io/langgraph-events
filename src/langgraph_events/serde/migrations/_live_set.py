@@ -2,7 +2,7 @@
 
 :func:`rewrite_live_set` refuses before it opens the store when the running
 code does not hold the expected migrations. It then rewrites the latest
-checkpoint of each thread in each checkpoint namespace and plans again,
+root checkpoint of each thread and plans again,
 until a plan reads every checkpoint unchanged or the passes run out. Only
 that last plan decides the outcome.
 """
@@ -15,14 +15,13 @@ import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from langgraph_events._rewrite import RewriteReport, RewriteStatus, ThreadRewrite
-from langgraph_events.serde.migrations._target import TargetError, ThreadKey
+from langgraph_events.serde.migrations._target import TargetError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
     from typing import TextIO
 
     from langgraph_events import EventStore
+    from langgraph_events._rewrite import RewriteReport, RewriteStatus
     from langgraph_events.serde.migrations._core import MigrationSet
     from langgraph_events.serde.migrations._gate import Invocation
     from langgraph_events.serde.migrations._target import MigrationTarget, Snapshot
@@ -93,8 +92,7 @@ def _verdict_of(status: RewriteStatus) -> Verdict:
 class LiveSetOutcome:
     """Every apply pass and the last plan.
 
-    Each report holds one ``ThreadRewrite`` per checkpoint namespace of
-    each thread, the root namespace first.
+    Each report holds one ``ThreadRewrite`` per thread.
     """
 
     passes: tuple[RewriteReport, ...]
@@ -143,15 +141,17 @@ class LiveSetOutcome:
             verdict = f"not clean (last plan: {head})"
         lines = [f"lge rewrite: {verdict}"]
         last_pass = self.passes[-1].threads if self.passes else ()
-        pass_refusals = {_key(t): t.reason for t in last_pass if t.status == "refused"}
+        pass_refusals = {
+            t.thread_id: t.reason for t in last_pass if t.status == "refused"
+        }
         for thread in self.final.threads:
             if thread.status == "rewrite":
-                refusal = pass_refusals.get(_key(thread))
+                refusal = pass_refusals.get(thread.thread_id)
                 drops = f", drops {thread.dropped_label}" if thread.dropped else ""
                 suffix = f", the last pass refused it: {refusal}" if refusal else ""
-                lines.append(f"  {thread.location}: needs a rewrite{drops}{suffix}")
+                lines.append(f"  {thread.thread_id}: needs a rewrite{drops}{suffix}")
             elif thread.status == "refused":
-                lines.append(f"  {thread.location}: refused, {thread.reason}")
+                lines.append(f"  {thread.thread_id}: refused, {thread.reason}")
         if _to_rewrite(self.final) and (self.passes or not accepted):
             if self.passes:
                 noun = "pass" if len(self.passes) == 1 else "passes"
@@ -170,7 +170,7 @@ def rewrite_live_set(
     passes: int = 3,
     log: TextIO | None = None,
 ) -> LiveSetOutcome | WrongRelease:
-    """Rewrite every checkpoint namespace of every thread in the store of
+    """Rewrite the latest root checkpoint of every thread in the store of
     *target*, then plan again.
 
     *expect* is the migration fingerprint of the release that must run.
@@ -213,12 +213,12 @@ def rewrite_live_set(
         rewrite_store = functools.partial(store.rewrite_store, drop=target.drop)
 
         def plan() -> RewriteReport:
-            return _walk(plan_rewrite, target.thread_keys(saver), applied=False)
+            return plan_rewrite(thread_ids=target.thread_ids(saver))
 
         reports: list[RewriteReport] = []
         final = plan()
         while apply and _to_rewrite(final) and len(reports) < passes:
-            report = _walk(rewrite_store, _to_rewrite(final), applied=True)
+            report = rewrite_store(thread_ids=_to_rewrite(final))
             reports.append(report)
             out.write(f"pass {len(reports)}: {report}\n")
             final = plan()
@@ -241,28 +241,7 @@ def _same_serde(live: Snapshot, code: MigrationSet) -> EventStore:
     return live.store
 
 
-def _walk(
-    method: Callable[..., RewriteReport], keys: Iterable[ThreadKey], *, applied: bool
-) -> RewriteReport:
-    """One call of *method* per checkpoint namespace, in one report."""
-    by_namespace: dict[str, list[str]] = {}
-    for key in keys:
-        by_namespace.setdefault(key.checkpoint_ns, []).append(key.thread_id)
-    return RewriteReport(
-        applied,
-        tuple(
-            thread
-            for namespace, thread_ids in sorted(by_namespace.items())
-            for thread in method(thread_ids=thread_ids, checkpoint_ns=namespace).threads
-        ),
-    )
-
-
-def _key(thread: ThreadRewrite) -> ThreadKey:
-    return ThreadKey(thread.thread_id, thread.checkpoint_ns)
-
-
-def _to_rewrite(report: RewriteReport) -> list[ThreadKey]:
-    """The checkpoints that a pass can change. A plan refuses a checkpoint
+def _to_rewrite(report: RewriteReport) -> list[str]:
+    """The threads that a pass can change. A plan refuses a checkpoint
     that only a person can clear, so a pass leaves it out."""
-    return [_key(t) for t in report.threads if t.status == "rewrite"]
+    return [t.thread_id for t in report.threads if t.status == "rewrite"]
