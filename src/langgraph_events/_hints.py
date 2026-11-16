@@ -130,6 +130,22 @@ def _annotation_source(factory: Callable[..., Any]) -> Callable[..., Any]:
     return type(factory).__call__
 
 
+def _open_parameters(fn: Callable[..., object]) -> tuple[inspect.Parameter, ...]:
+    """The parameters that a call of *fn* must fill.
+
+    A keyword that a ``functools.partial`` binds is filled already, so it is
+    left out. Raises ``TypeError`` or ``ValueError`` when Python cannot read
+    the signature.
+    """
+    bound: set[str] = set()
+    target: object = fn
+    while isinstance(target, functools.partial):
+        bound.update(target.keywords)
+        target = target.func
+    params = inspect.signature(fn).parameters.values()
+    return tuple(p for p in params if p.name not in bound)
+
+
 def _resolve_parameter_hints(
     fn: Callable[..., object],
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -237,11 +253,14 @@ def _same_arguments(provided: tuple[object, ...], declared: tuple[object, ...]) 
 
 def _variance_holds(provided: object, declared: object) -> bool:
     """Whether the type arguments of *provided* fit *declared* as mypy
-    requires: equal for an invariant container, member by member for any
-    other generic of the same class.
+    requires.
 
-    beartype treats every container as covariant, so it accepts
-    ``list[bool]`` for ``list[int]``. mypy refuses it.
+    An invariant container needs equal type arguments. The key of a
+    ``Mapping`` is invariant too, as in typeshed. Any other generic whose
+    class is a subclass of the declared class, with as many type arguments,
+    is checked argument by argument. beartype treats every container as
+    covariant, so it accepts ``list[bool]`` for ``list[int]``. mypy refuses
+    it.
     """
     for p in _union_members(provided):
         p_origin, p_args = typing.get_origin(p), typing.get_args(p)
@@ -252,20 +271,61 @@ def _variance_holds(provided: object, declared: object) -> bool:
             d_origin, d_args = typing.get_origin(d), typing.get_args(d)
             if not isinstance(d_origin, type) or not d_args:
                 continue
-            if not issubclass(p_origin, d_origin):
+            if not issubclass(p_origin, d_origin) or len(p_args) != len(d_args):
                 continue
             if issubclass(d_origin, _INVARIANT):
                 matches.append(_same_arguments(p_args, d_args))
-            elif p_origin is d_origin and len(p_args) == len(d_args):
-                matches.append(
-                    all(
-                        _variance_holds(pa, da)
-                        for pa, da in zip(p_args, d_args, strict=True)
-                    )
+                continue
+            key_holds = not issubclass(d_origin, abc.Mapping) or _same_arguments(
+                p_args[:1], d_args[:1]
+            )
+            matches.append(
+                key_holds
+                and all(
+                    _variance_holds(pa, da)
+                    for pa, da in zip(p_args, d_args, strict=True)
                 )
+            )
         if matches and not any(matches):
             return False
     return True
+
+
+def _stated(provided: object, declared: object) -> object:  # noqa: PLR0911 - one return per shape of type
+    """*provided*, with each unknown type argument taken from *declared*.
+
+    A type argument ``Any`` is unknown. A generic class with no type
+    arguments, such as a bare ``dict``, has unknown arguments too. Each
+    known argument stays, so ``dict[str, Any]`` still does not fit
+    ``dict[int, str]``.
+    """
+    if provided is Any:
+        return declared
+    members = _union_members(provided)
+    if len(members) > 1:
+        return typing.Union[tuple(_stated(m, declared) for m in members)]  # noqa: UP007 - a runtime value
+    p_origin, p_args = typing.get_origin(provided), typing.get_args(provided)
+    for d in _union_members(declared):
+        d_origin, d_args = typing.get_origin(d), typing.get_args(d)
+        if not isinstance(d_origin, type) or not d_args:
+            continue
+        if p_origin is None and isinstance(provided, type):
+            if issubclass(provided, d_origin) and not typing.get_args(provided):
+                try:
+                    return provided[d_args]  # type: ignore[index]
+                except TypeError:
+                    return d
+            continue
+        if not isinstance(p_origin, type) or not issubclass(p_origin, d_origin):
+            continue
+        if len(p_args) != len(d_args):
+            continue
+        filled = tuple(_stated(pa, da) for pa, da in zip(p_args, d_args, strict=True))
+        try:
+            return p_origin[filled]  # type: ignore[index]
+        except TypeError:
+            return provided
+    return provided
 
 
 def _hint_fits(provided: object, declared: object) -> Verdict:
@@ -274,20 +334,18 @@ def _hint_fits(provided: object, declared: object) -> Verdict:
 
     ``Any`` and a bare type variable say nothing, so they fit. The numeric
     tower applies at the top level only, so ``int`` fits ``float``, but
-    ``list[int]`` does not fit ``list[float]``. An invariant container needs
-    equal type arguments, as for mypy. A *provided* type with no type
-    arguments, or with ``Any`` as one, does not state its arguments. Its
-    class is then compared with the class of *declared*.
+    ``list[int]`` does not fit ``list[float]``. The variance follows mypy,
+    see :func:`_variance_holds`. An unknown type argument, ``Any`` or the
+    missing argument of a bare generic class, takes the declared argument
+    at its position. A known argument is checked.
     """
     if provided is Any or isinstance(provided, TypeVar):
         return Fits()
     from beartype.door import is_subhint  # noqa: PLC0415
 
     declared = _promoted(declared)
+    provided = _stated(provided, declared)
     verdict = _satisfies(is_subhint, provided, declared)
-    unstated = _erased(provided) is provided or Any in typing.get_args(provided)
-    if isinstance(verdict, Misfit) and unstated:
-        return _satisfies(is_subhint, _erased(provided), _erased(declared))
     if isinstance(verdict, Fits) and not _variance_holds(provided, declared):
         return Misfit()
     return verdict

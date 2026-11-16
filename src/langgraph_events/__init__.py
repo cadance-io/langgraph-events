@@ -75,6 +75,7 @@ from langgraph_events._reducer import (
     Reducer,
     ReducerNotSetError,
     ScalarReducer,
+    SkipType,
     message_reducer,
 )
 from langgraph_events._reflection import QueryTool, Reflection
@@ -171,6 +172,7 @@ __all__ = [
     "ScalarReducer",
     "Scatter",
     "ServiceRequirement",
+    "SkipType",
     "SourceDropped",
     "SystemEvent",
     "SystemPromptSet",

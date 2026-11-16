@@ -90,8 +90,13 @@ class ReducerRegistry:
         cls,
         explicit: Sequence[BaseReducer | Derived[Any]],
         namespaces: Iterable[type[Namespace]],
+        context_schema: type | None = None,
     ) -> ReducerRegistry:
         """Register *explicit*, then each declaration of *namespaces*.
+
+        *context_schema* is the run context type of the graph. A ``Derived``
+        parameter annotated with it is refused, because a ``Derived`` reads
+        no run input.
 
         In *explicit*, a later entry of the same kind replaces an earlier
         one. An explicit entry wins over a declaration of the same kind.
@@ -112,7 +117,7 @@ class ReducerRegistry:
             )
         reducers = {n: e for n, e in entries.items() if isinstance(e, BaseReducer)}
         derived = {n: e for n, e in entries.items() if isinstance(e, Derived)}
-        bound = bind_derived(reducers, derived)
+        bound = bind_derived(reducers, derived, context_schema)
         readables: dict[str, Readable] = {
             name: bound[name] if isinstance(entry, Derived) else entry
             for name, entry in entries.items()

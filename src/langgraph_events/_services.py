@@ -18,6 +18,7 @@ from langgraph_events._hints import (
     _annotation_source,
     _hint_fits,
     _hint_label,
+    _open_parameters,
     _resolve_hints_and_errors,
     _resolve_parameter_hints,
     _satisfies,
@@ -138,13 +139,8 @@ class RunScoped(Generic[T]):
     def _parameters(self, name: str) -> tuple[inspect.Parameter, ...]:
         """The parameters that the node call must fill. A keyword that a
         ``functools.partial`` binds is filled already."""
-        bound: set[str] = set()
-        factory: object = self.factory
-        while isinstance(factory, functools.partial):
-            bound.update(factory.keywords)
-            factory = factory.func
         try:
-            params = inspect.signature(self.factory).parameters.values()
+            return _open_parameters(self.factory)
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"{self._label(name)}: Python cannot read the parameters of "
@@ -152,7 +148,6 @@ class RunScoped(Generic[T]):
                 f"pass a function, a class or a callable object whose "
                 f"signature Python can read."
             ) from exc
-        return tuple(p for p in params if p.name not in bound)
 
     def _hints(self) -> tuple[dict[str, Any], dict[str, str]]:
         """The resolved parameter annotations of the factory, and the errors."""

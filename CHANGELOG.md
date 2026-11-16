@@ -22,7 +22,7 @@ that built on 0.49, or change a value. Each error message names the fix of its r
 | `Unannotated` and `UnresolvedAnnotation` were public, and `ServiceRequirement.annotation` could hold one | Both are removed. `ServiceRequirement.annotation` is always the resolved annotation | Read the annotation directly |
 | A handler parameter that named a stored reducer or a `Derived` was not checked against its annotation | Graph construction raises `TypeError` when the value type of the source does not fit the annotation. The message names the value type | Change the annotation to the type that the message names |
 | A `Derived` could use a lambda, or a `def` without a return annotation | Graph construction raises `TypeError` for a `Derived` without a return annotation, or with one that does not resolve | Use a `def` with a return annotation, importable at run time |
-| The annotation check, where one ran, treated each container as covariant | The check follows mypy. `list[bool]` does not fit `list[int]`, because `list`, `dict`, `set` and their mutable abstract classes are invariant. The numeric tower applies at the top level only, so `int` fits `float`, but `list[int]` does not fit `list[float]` | Change the annotation to the type that the message names |
+| The annotation check, where one ran, treated each container as covariant | The check follows mypy. `list[bool]` does not fit `list[int]`, because `list`, `dict`, `set` and their mutable abstract classes are invariant. The key of a `Mapping` is invariant. Each other generic is checked argument by argument, also through a subclass, so `dict[str, list[bool]]` does not fit `Mapping[str, list[int]]`. An `Any` argument takes the declared argument at its position only, so `dict[str, Any]` does not fit `dict[int, str]`. The numeric tower applies at the top level only, so `int` fits `float`, but `list[int]` does not fit `list[float]` | Change the annotation to the type that the message names |
 | A handler parameter with a default, that read an unset reducer with a non-`None` annotation, raised `ReducerNotSetError` | The parameter receives its default | None. Remove the default to keep the error |
 | A `Derived` parameter was not checked against its input | A `Derived` parameter annotation that does not fit the value type of its input raises `TypeError` | Change the annotation to the type that the message names |
 | A `Derived` parameter got `None` for an unset input, whatever its annotation or default | A default is the value for `None`. A `None` input under an annotation that rejects `None`, with no default, raises `ReducerNotSetError` that names the `Derived`, also in a stream frame and an AG-UI snapshot | Annotate the parameter with `\| None`, or give it a default |
@@ -50,11 +50,14 @@ that built on 0.49, or change a value. Each error message names the fix of its r
   `NamespaceModel.run_scoped` holds them. See
   [Run-scoped services](https://cadance-io.github.io/langgraph-events/concepts/#run-scoped-services).
 - **Each reducer reports the type of its value, for the annotation check.** A `Reducer`
-  gives the `list` type that `fn` returns. A `ScalarReducer` gives the return type of `fn`
-  and the type of `default`. A `FoldReducer` gives the type of `default_factory`. A
+  gives the `list` type that `fn` returns. A `ScalarReducer` gives the return type of `fn`,
+  without `SkipType`. The type of `default` joins it only when `default` does not fit it,
+  and a `None` default always adds `None`. A `FoldReducer` gives the type of `default_factory`. A
   `Derived` gives its return annotation. A function without a return annotation gives
   `Any`, which is not checked. The check accepts the numeric tower of PEP 484 at the top
   level, so `int` fits `float`. A bespoke `BaseReducer` subclass gives `Any`.
+- **`SkipType`, the public type of `SKIP`.** Annotate a `ScalarReducer.fn` that can return
+  `SKIP` as `-> float | SkipType`. The value type of the reducer leaves it out.
 - **A handler can declare two parameters of one framework type.** Each parameter annotated
   `EventLog`, for example, receives the log. Before, the second one raised `TypeError`.
 - **A `Derived` can read the `EventLog` and other `Derived` values.** A parameter of `fn`

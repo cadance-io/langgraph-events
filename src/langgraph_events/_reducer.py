@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import operator
 import types
 import typing
@@ -21,9 +20,15 @@ from typing import (
 )
 
 from langgraph_events._event_log import EventLog
-from langgraph_events._hints import _resolve_hints_and_errors, _resolve_parameter_hints
+from langgraph_events._hints import (
+    Fits,
+    _open_parameters,
+    _resolve_parameter_hints,
+    _satisfies,
+)
 
 if TYPE_CHECKING:
+    import inspect
     from collections.abc import Callable, Mapping
 
     from langchain_core.messages import BaseMessage
@@ -44,8 +49,13 @@ class ReducerNotSetError(ValueError):
     """
 
 
-class _SkipType:
-    """Sentinel returned from ``ScalarReducer.fn`` to signal no contribution."""
+class SkipType:
+    """The type of :data:`SKIP`.
+
+    Annotate a ``ScalarReducer.fn`` that can return ``SKIP`` as
+    ``-> str | SkipType``. The value type of the reducer leaves ``SkipType``
+    out, because ``SKIP`` is never stored.
+    """
 
     __slots__ = ()
 
@@ -53,7 +63,7 @@ class _SkipType:
         return "SKIP"
 
 
-SKIP = _SkipType()
+SKIP = SkipType()
 """Return from a ``ScalarReducer.fn`` to signal no contribution.
 
 When ``fn`` returns ``SKIP``, the reducer behaves as if no matching
@@ -90,8 +100,11 @@ def _last_write_wins(existing: object, new: T) -> T:
 
 
 def _return_hint(fn: Callable[..., object]) -> object:
-    """The resolved return annotation of *fn*, or ``Any`` when it has none."""
-    return _resolve_hints_and_errors(fn)[0].get("return", Any)
+    """The resolved return annotation of *fn*, or ``Any`` when it has none.
+    A class gives itself."""
+    if isinstance(fn, type):
+        return fn
+    return _resolve_parameter_hints(fn)[0].get("return", Any)
 
 
 def _union_args(hint: object) -> tuple[object, ...]:
@@ -385,13 +398,21 @@ class ScalarReducer(BaseReducer):
         return Any
 
     def _value_type(self) -> object:
-        """The type that ``fn`` returns, without ``SKIP``, or the type of
-        ``default``. ``Any`` when ``fn`` has no return annotation."""
+        """The type that ``fn`` returns, without ``SkipType``, joined with
+        the type of ``default`` when ``default`` does not fit it. A ``None``
+        default adds ``None``. ``Any`` when ``fn`` has no return annotation."""
         returns = _return_hint(self.fn)
         if returns is Any:
             return Any
-        kept = [a for a in _union_args(returns) if a is not _SkipType]
-        return typing.Union[(*kept, type(self.default))]
+        kept = tuple(a for a in _union_args(returns) if a is not SkipType)
+        returned = typing.Union[kept] if len(kept) > 1 else kept[0]  # noqa: UP007 - a runtime value
+        from beartype.door import is_bearable  # noqa: PLC0415
+
+        if self.default is not None and isinstance(
+            _satisfies(is_bearable, self.default, returned), Fits
+        ):
+            return returned
+        return typing.Union[returned, type(self.default)]  # noqa: UP007 - a runtime value
 
     def seed(self, events: list[Event]) -> object:
         result = self.collect(events)
@@ -466,7 +487,7 @@ class FoldReducer(BaseReducer, Generic[S]):
     name: str = ""
     event_type: EventTypeSpec = field(kw_only=True)
     default_factory: Callable[[], S] = field(kw_only=True)
-    fold: Callable[[S, Foldable], S | _ResetType | _SkipType] = field(
+    fold: Callable[[S, Foldable], S | _ResetType | SkipType] = field(
         kw_only=True, default=lambda state, event: event.fold(state)
     )
     namespace: type[Namespace] | None = field(kw_only=True, default=None)
@@ -507,8 +528,6 @@ class FoldReducer(BaseReducer, Generic[S]):
     def _value_type(self) -> object:
         """The class that ``default_factory`` is, or the type that it
         returns. ``Any`` when the factory has no return annotation."""
-        if isinstance(self.default_factory, type):
-            return self.default_factory
         return _return_hint(self.default_factory)
 
     def seed(self, events: list[Event]) -> S:
@@ -530,7 +549,7 @@ class FoldReducer(BaseReducer, Generic[S]):
             # isinstance (not ``is``) so mypy narrows the result to ``S`` in
             # the else branch — SKIP/RESET are the sole instances of their
             # private types, so this is identity-equivalent in practice.
-            if isinstance(result, _SkipType):
+            if isinstance(result, SkipType):
                 continue
             state = self.default_factory() if isinstance(result, _ResetType) else result
         return state
@@ -606,15 +625,16 @@ class Derived(Generic[T]):
         )
 
     def _parameters(self) -> tuple[inspect.Parameter, ...]:
+        """The parameters that a call of ``fn`` must fill. A keyword that a
+        ``functools.partial`` binds is filled already."""
         try:
-            signature = inspect.signature(self.fn)
+            return _open_parameters(self.fn)
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"Derived {self.name!r} cannot read the parameters of "
                 f"fn={self.fn!r}. Pass a function whose parameters name "
                 f"its inputs."
             ) from exc
-        return tuple(signature.parameters.values())
 
 
 class StateRead:

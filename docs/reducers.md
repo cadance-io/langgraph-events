@@ -73,7 +73,7 @@ history = Reducer(name="history", event_type=UserMsg, fn=lambda e: [e.text], def
 
 ## `ScalarReducer`
 
-Last-write-wins scalar. `None` is valid. Return `SKIP` from `fn` to leave the current value unchanged. This distinguishes "set to `None`" from "do not update".
+Last-write-wins scalar. `None` is valid. Return `SKIP` from `fn` to leave the current value unchanged. This distinguishes "set to `None`" from "do not update". Annotate such a `fn` with the public type of `SKIP`, for example `-> float | SkipType`. The value type of the reducer leaves `SkipType` out, because `SKIP` is never stored.
 
 ```python
 ...

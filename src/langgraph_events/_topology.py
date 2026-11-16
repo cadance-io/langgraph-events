@@ -591,7 +591,7 @@ class EventTopology:
         handlers = _expand_command_handlers(handlers)
         self._namespaces = _collect_graph_namespaces(handlers)
         self._registry = ReducerRegistry.build(
-            reducers or (), self._namespaces.values()
+            reducers or (), self._namespaces.values(), context_schema
         )
         self._reducers = dict(self._registry.reducers)
 

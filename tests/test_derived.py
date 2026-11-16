@@ -1077,15 +1077,29 @@ def _log_size(log: EventLog) -> int:
 
 
 def describe_Derived_from_a_partial_that_binds_the_log():
-    def it_refuses_the_bound_log_parameter():
+    def it_keeps_the_value_that_the_partial_binds():
         bound_log = Derived(name="seen", fn=functools.partial(_log_size, log=()))
+        graph = EventGraph([ship, count], reducers=[bound_log])
+
+        log = graph.invoke(Placed())
+
+        assert [e.n for e in log.filter(Counted)] == [0]
+
+
+def _defaulted_log_size(log: EventLog = ()) -> int:  # type: ignore[assignment]
+    return len(log)
+
+
+def describe_Derived_log_parameter_default():
+    def it_refuses_the_default():
+        defaulted = Derived(name="seen", fn=_defaulted_log_size)
 
         with pytest.raises(
             TypeError,
             match=r"Derived 'seen' gives parameter 'log' a default\. A default does "
             r"not make a parameter optional",
         ):
-            EventGraph([ship, count], reducers=[bound_log])
+            EventGraph([ship, count], reducers=[defaulted])
 
 
 def describe_Derived_return_annotation():

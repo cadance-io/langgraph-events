@@ -457,7 +457,9 @@ class BoundDerived(Generic[T]):
 
 
 def bind_derived(
-    reducers: Mapping[str, BaseReducer], derived: Mapping[str, Derived[Any]]
+    reducers: Mapping[str, BaseReducer],
+    derived: Mapping[str, Derived[Any]],
+    context_schema: type | None = None,
 ) -> dict[str, BoundDerived[Any]]:
     """Bind each ``Derived`` of *derived* to its inputs, by the rule of a
     handler parameter.
@@ -492,7 +494,9 @@ def bind_derived(
         owner = f"Derived {name!r}"
         hints, errors = _resolve_parameter_hints(value.fn)
         params = tuple(
-            _derived_param(owner, param, hints, errors, readable_of, no_input)
+            _derived_param(
+                owner, param, hints, errors, readable_of, context_schema, no_input
+            )
             for param in value._parameters()
         )
         _require_return_annotation(owner, hints, errors)
@@ -524,6 +528,7 @@ def _derived_param(
     hints: Mapping[str, Any],
     errors: Mapping[str, str],
     readable_of: Callable[[str], Readable | None],
+    context_schema: type | None,
     no_input: Callable[[str, inspect.Parameter], str],
 ) -> Param:
     """Bind one parameter of a ``Derived``, or raise ``TypeError``."""
@@ -533,7 +538,7 @@ def _derived_param(
             f"{param.name!r}. Each parameter must name one input."
         )
     hint = resolved_hint(owner, param.name, hints, errors)
-    source = classify(owner, param.name, hint, readable_of, None)
+    source = classify(owner, param.name, hint, readable_of, context_schema)
     if source is None:
         raise TypeError(no_input(owner, param))
     bound = Param(param.name, source, param.default)

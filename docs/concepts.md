@@ -174,15 +174,17 @@ The check uses `beartype.door`. For a stored reducer or a `Derived`, the value t
 | Source | Value type |
 |---|---|
 | `Reducer` | the `list` type that `fn` returns, or `list[Any]` |
-| `ScalarReducer` | the return type of `fn`, without `SKIP`, or the type of `default`. `None` for the default `default=None` |
+| `ScalarReducer` | the return type of `fn`, without `SkipType`. The type of `default` joins it only when `default` does not fit it. A `None` default always adds `None` |
 | `FoldReducer` | the class that `default_factory` is, or the return type of `default_factory` |
 | `Derived` | the return annotation of `fn`. A `Derived` must have one |
 
 - A source whose function has no return annotation gives `Any`, and is not checked.
 - `None` always fits. A `None` value of an annotation that rejects `None` raises `ReducerNotSetError` at run time instead, unless the parameter has a default.
 - The numeric tower of PEP 484 applies at the top level only: `int` fits `float`, and `int` or `float` fits `complex`. A type argument is not promoted, so `list[int]` does not fit `list[float]`.
-- An invariant container needs equal type arguments, as for mypy. So `list[bool]` does not fit `list[int]`. The invariant containers are `list`, `dict`, `set` and their mutable abstract classes.
-- A value type with no type arguments, or with `Any` as one, compares its class only. So `list[Any]` fits `list[str]`.
+- An invariant container needs equal type arguments, as for mypy. So `list[bool]` does not fit `list[int]`. The invariant containers are `list`, `dict`, `set` and their mutable abstract classes. The key of a `Mapping` is invariant too, as in typeshed.
+- Any other generic is checked argument by argument, also when its class is a subclass of the declared one. So `dict[str, list[bool]]` does not fit `Mapping[str, list[int]]`.
+- An unknown type argument takes the declared argument at its position. `Any` is unknown, and so is each argument of a bare generic class such as `dict`. A known argument is still checked, so `dict[str, Any]` fits `dict[str, int]` but not `dict[int, str]`.
+- The annotations of a `functools.partial` or a callable object are read from the wrapped function or from `__call__`. A keyword that a partial binds is no parameter.
 
 #### Run-scoped services
 

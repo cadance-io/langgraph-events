@@ -131,6 +131,7 @@ The return value is checked against the declared annotation, or against the subs
 | `BaseReducer` | Class | Abstract base for a custom reducer. Subclass it for a bespoke channel |
 | `Derived(name, *, fn, namespace=None)` | Class | A value that a pure function computes from stored reducers, other `Derived` values and the `EventLog`. One state read computes it once. Generic over the return type of `fn`. Injected by parameter name. Never stored, so it is not a stored reducer. Frozen and hashable. See [`Derived`](reducers.md#derived) |
 | `SKIP` | Sentinel | Return it from `ScalarReducer.fn` or from a `FoldReducer.fold` to leave the value unchanged |
+| `SkipType` | Class | The type of `SKIP`. Annotate a `fn` that can return `SKIP` with it, for example `-> float \| SkipType` |
 | `RESET` | Sentinel | Return it from a `FoldReducer.fold` to clear the channel back to `default_factory()` |
 | `message_reducer` | Function | Built-in reducer for `MessageEvent` projection |
 
