@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
@@ -27,7 +28,7 @@ from langgraph_events._reducer_registry import ReducerSelection, StreamState
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
-from langgraph_events._services import parse_services
+from langgraph_events._services import Services
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._reflection import Reflection
-    from langgraph_events._services import Services
     from langgraph_events._types import PauseSignal
 
     _GraphInput = dict[str, Any] | LGCommand
@@ -250,7 +250,7 @@ class EventGraph:
         *,
         max_rounds: int = 100,
         reducers: Sequence[BaseReducer | Derived] | None = None,
-        services: Sequence[Any] | Mapping[str, Any] | None = None,
+        services: object = None,
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
@@ -259,7 +259,7 @@ class EventGraph:
         retired: Sequence[type[Event]] = (),
     ) -> None:
         _validate_on_unresumable(on_unresumable)
-        parsed = parse_services(services)
+        parsed = Services.parse(services)
         self._init(
             EventTopology(
                 handlers,
@@ -282,7 +282,7 @@ class EventGraph:
         topology: EventTopology,
         *,
         max_rounds: int = 100,
-        services: Sequence[Any] | Mapping[str, Any] | None = None,
+        services: object = None,
         checkpointer: Checkpointer = None,
         store: BaseStore | None = None,
         recursion_limit: int | None = None,
@@ -300,7 +300,7 @@ class EventGraph:
         graph._init(
             topology,
             max_rounds=max_rounds,
-            services=parse_services(services),
+            services=Services.parse(services),
             checkpointer=checkpointer,
             store=store,
             recursion_limit=recursion_limit,
@@ -330,7 +330,10 @@ class EventGraph:
         self._on_unresumable = on_unresumable
         self._checkpointer = checkpointer
         self._base_store = store
-        self._handlers = topology._bind(services, entry=entry)
+        self._services = services.bind_factories(
+            topology._registry.readables, topology.context_schema
+        )
+        self._handlers = topology._bind(self._services, entry=entry)
 
     @property
     def topology(self) -> EventTopology:
@@ -357,9 +360,22 @@ class EventGraph:
         return self._checkpointer
 
     def namespaces(self) -> NamespaceModel:
-        """Return the :class:`NamespaceModel` of the topology. See
+        """Return the :class:`NamespaceModel` of the topology, with each
+        ``RunScoped`` service of this graph and its inputs. See
         :meth:`EventTopology.namespaces`."""
-        return self._topology.namespaces()
+        return self._namespace_model
+
+    @functools.cached_property
+    def _namespace_model(self) -> NamespaceModel:
+        from langgraph_events._namespace import NamespaceModel  # noqa: PLC0415
+
+        return dataclasses.replace(
+            self._topology.namespaces(),
+            run_scoped=tuple(
+                NamespaceModel.RunScoped.of(f)
+                for f in self._services.factories.values()
+            ),
+        )
 
     def reflect(self, log: EventLog) -> Reflection:
         """Return a :class:`Reflection` — deterministic query surface over *log*.
@@ -410,6 +426,7 @@ class EventGraph:
         """
         return self._topology._compile(
             self._handlers,
+            model_provider=self.namespaces,
             max_rounds=self._max_rounds,
             recursion_limit=self._recursion_limit,
             checkpointer=self._checkpointer,

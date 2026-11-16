@@ -7,8 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+A handler parameter, a `RunScoped` factory parameter and a `Derived` parameter now bind by
+one rule. Each parameter must have an annotation that resolves. A default is the value when
+the input is unset. A parameter that matches nothing raises `TypeError`. Each source
+declares its type, and the annotation must name that type exactly, after the normalization
+rule table of [Declared types](https://cadance-io.github.io/langgraph-events/concepts/#declared-types).
+Each row is one change that can refuse a graph that built on 0.50, or change a value. Each
+error message names the fix of its row.
+
+| Before | Now | Fix |
+|---|---|---|
+| A handler parameter could have no annotation, for example a name-keyed service `def h(event, mailer)` | A handler, factory or `Derived` parameter with no annotation raises `TypeError` that names the function and the parameter. The event parameter, a field-matcher parameter and a `*args` or `**kwargs` catcher need none | Annotate the parameter with the type of its input |
+| A handler annotation that did not resolve emitted a `UserWarning`, and the parameter bound by its name | An annotation that does not resolve raises `TypeError`, on a handler, a factory or a `Derived`, the event parameter included. The message names the usual `TYPE_CHECKING` cause | Import the type at run time, for example with `# noqa: TC002` |
+| `Unannotated` and `UnresolvedAnnotation` were public, and `ServiceRequirement.annotation` could hold one | Both are removed. `ServiceRequirement.annotation` is always the resolved annotation | Read the annotation directly |
+| A `Reducer`, `ScalarReducer` or `FoldReducer` declared no type | A reducer without a type argument raises `TypeError` at graph construction, also when no handler reads it. The message names the reducer and the subscription | Subscript it at the call: `Reducer[E, T](...)`, `ScalarReducer[E, T](...)`, `FoldReducer[S](...)` |
+| An annotated assignment such as `r: ScalarReducer[E, T] = ScalarReducer(...)` was enough | The running program cannot read that annotation, so the reducer declares no type and raises `TypeError` | Subscript the call itself |
+| A reducer type argument could be any object | A string, a forward reference or a type variable as the type argument raises `TypeError` | Subscript it with a class: `ScalarReducer[E, str](...)`, not `ScalarReducer[E, "str"](...)` |
+| A reducer `fn` return annotation was not compared with the stored type | A `fn` return annotation that is not `T` (`list[T]` for a `Reducer`), with or without `SkipType`, raises `TypeError`. So does a return annotation that does not resolve | Make the two the same type, importable at run time |
+| A `Reducer.fn` could be annotated to return `SkipType` | It raises `TypeError`, because a `Reducer` does not support `SKIP` | Return an empty list for no contribution, and remove `SkipType` |
+| A `Reducer` with a custom merge could store another item type than `fn` returns | The stored type is `list[T]`, and `fn` returns `list[T]` | Use a `FoldReducer` or a `BaseReducer` subclass for a merge that changes the item type |
+| A bespoke `BaseReducer` subclass declared no stored type | `BaseReducer.stored_type()` is abstract. A subclass without it cannot be built | Implement `stored_type()` and return the type that `read` gives |
+| A handler parameter that named a stored reducer or a `Derived` was not checked against its annotation | Graph construction raises `TypeError` when the annotation does not name the declared type of the source. The message names the declared type | Change the annotation to the type that the message names |
+| A reader could be annotated `Any` or `object` | `Any` names only an `Any` source, and `object` names only an `object` source | Annotate the declared type |
+| A reader could name a base class, a subclass, an abstract container such as `Sequence[int]` for a `list[int]` source, or `float` for an `int` source | Only the declared type fits. A reader can leave `None` out of the type of a reducer or a `Derived`, and nothing else | Name the declared type, or add an adapter: a `RunScoped` factory or a `Derived` that returns the view |
+| A `Derived` could use a lambda, or a `def` without a return annotation | Graph construction raises `TypeError` for a `Derived` without a return annotation, with one that does not resolve, or with one that names no class, such as a type variable. It raises also when nothing reads the `Derived` | Use a `def` with a return annotation that names a class, importable at run time |
+| `services=[...]` matched each handler parameter to a service by its annotation | The type-keyed sequence form is removed. A list raises `TypeError` | Pass an object whose class declares one typed field per service, such as a dataclass instance |
+| `services={...}` matched each handler parameter to a service by its name | The dict form is removed. A dict or a `NamedTuple` raises `TypeError`, and so does an `InitVar` field | Pass an object whose class declares one typed field per service, such as a dataclass. A factory field is typed `RunScoped[T]` |
+| A service matched any annotation that its value satisfied | A reader names the field type of the service exactly. A service is never unset, so a reader cannot add `None` either | Name the field type, or add an adapter |
+| A `RunScoped` factory could return a subclass of the annotation, `Any` or a type variable | The return annotation of the factory must be the `T` of its `RunScoped[T]` field | Make the factory return `T`, or change the field type |
+| A handler parameter with a default, that read an unset reducer with a non-`None` annotation, raised `ReducerNotSetError` | The parameter receives its default | None. Remove the default to keep the error |
+| A `Derived` parameter was not checked against its input | A `Derived` parameter annotation that does not name the declared type of its input raises `TypeError` | Change the annotation to the type that the message names |
+| A `Derived` parameter got `None` for an unset input, whatever its annotation or default | A default is the value for `None`. A `None` input under an annotation that rejects `None`, with no default, raises `ReducerNotSetError` that names the `Derived`, also in a stream frame and an AG-UI snapshot | Annotate the parameter with `\| None`, or give it a default |
+| A `Derived` parameter annotated `RunnableConfig`, the context schema, `BaseStore` or `Reflection` bound by its name | It raises `TypeError`, because a stream frame and a reflection have no run | Read the value in a handler or a `RunScoped` factory |
+| The first factory parameter was the run config, by position, with any annotation or none, for example `def f(config)`, `config: dict` or `config: RunnableConfig \| None` | A parameter binds by its annotation, then by its name. A parameter named `config` that is not annotated exactly `RunnableConfig` matches nothing and raises `TypeError` | Annotate the parameter exactly `RunnableConfig`, and import `RunnableConfig` at run time |
+| A second factory parameter annotated with the `context_schema` type got the run context. It had to be positional and required | A parameter annotated with the schema type gets the run context at any position, keyword-only included | None for a factory that declares `(config: RunnableConfig, context: Schema)` |
+| An optional factory parameter was not passed, for example `def f(config, retries=3)` | A parameter with a default that matches nothing raises `TypeError` | Bind a constant in a closure or a `functools.partial` |
+| A factory with a signature that Python cannot read, for example `RunScoped(dict)`, got the config | `TypeError` | Pass a function whose signature Python can read |
+| A factory parameter after the config was refused | A factory parameter binds to a framework input, a stored reducer, a `Derived` or a service. A parameter that matches nothing raises `TypeError` | Rename the parameter, or register the input |
+| A factory parameter annotation was not checked | A factory parameter annotation that does not name the declared type of its source raises `TypeError` | Change the annotation to the type that the message names |
+| A reducer or a `Derived` won over a service of the same name, with no message | A service with the name of a reducer or a `Derived` raises `TypeError`, for handlers and factories alike | Rename the service or the reducer |
+| A `ScalarReducer.fn` annotated to return only `SkipType` built, and never set a value | It raises `TypeError` at graph construction that names the reducer | Return the value type too, for example `-> str \| SkipType`, or remove the reducer |
+| `beartype` was a dependency | It is removed. The exact match needs no subtype check | None |
+| Factories could not read each other | Factories that read each other in a cycle raise `TypeError` that names the cycle | Remove one read from the cycle |
+
 ### Added
 
+- **A `RunScoped` factory can read reducers, `Derived` values, the log and other services.**
+  Each parameter binds by the rule of a handler parameter: an exact annotation of
+  `RunnableConfig`, the `context_schema` type, `BaseStore`, `EventLog` or `Reflection`,
+  then a stored reducer, a `Derived` or a service by name. A factory runs only for a
+  handler or a factory that declares it, once per node call, before the invariants of the
+  handler. One result serves every event of that call, every retry attempt and every
+  factory that reads it. A non-`None` annotation on an unset reducer, with no default,
+  raises `ReducerNotSetError` that names the factory. `EventGraph.namespaces()` lists each
+  `RunScoped` service with its typed inputs in the text, JSON and mermaid views, and
+  `NamespaceModel.run_scoped` holds them. See
+  [Run-scoped services](https://cadance-io.github.io/langgraph-events/concepts/#run-scoped-services).
+- **Declared types.** `Reducer[E, T]`, `ScalarReducer[E, T]` and `FoldReducer[S]` declare
+  the event type and the stored type. mypy checks `fn` against them, a lambda too. A
+  `Derived` declares its return annotation, and a field of the `services=` object declares
+  its field type. A class gives itself as its return type, for a `Derived`, a `RunScoped`
+  factory or a reducer function alike. `message_reducer()` is typed
+  `Reducer[MessageEvent, BaseMessage]`. See
+  [Declared types](https://cadance-io.github.io/langgraph-events/concepts/#declared-types).
+- **An injected `Reflection` reads the namespace model of the graph.** It lists each
+  `RunScoped` service, as `graph.reflect(log)` does.
+- **`SkipType`, the public type of `SKIP`.** Annotate a `ScalarReducer.fn` that can return
+  `SKIP` as `-> float | SkipType`. The value type of the reducer leaves it out.
+- **A handler can declare two parameters of one framework type.** Each parameter annotated
+  `EventLog`, for example, receives the log. Before, the second one raised `TypeError`.
 - **A `Derived` can read the `EventLog` and other `Derived` values.** A parameter of `fn`
   annotated with `EventLog` receives the `EventLog` of the state, as on a handler. The
   parameter name does not matter, and the name `log` has no special meaning. A lambda cannot

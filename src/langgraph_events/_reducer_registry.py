@@ -7,8 +7,9 @@ import functools
 import types
 from typing import TYPE_CHECKING, Any
 
+from langgraph_events._inputs import bind_derived
 from langgraph_events._internal import _BASE_FIELDS
-from langgraph_events._reducer import BaseReducer, Derived, StateRead, bind_derived
+from langgraph_events._reducer import BaseReducer, Derived, StateRead
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -89,13 +90,19 @@ class ReducerRegistry:
         cls,
         explicit: Sequence[BaseReducer | Derived[Any]],
         namespaces: Iterable[type[Namespace]],
+        context_schema: type | None = None,
     ) -> ReducerRegistry:
         """Register *explicit*, then each declaration of *namespaces*.
+
+        *context_schema* is the run context type of the graph. A ``Derived``
+        parameter annotated with it is refused, because a ``Derived`` reads
+        no run input.
 
         In *explicit*, a later entry of the same kind replaces an earlier
         one. An explicit entry wins over a declaration of the same kind.
         Raises ``TypeError`` for a reducer and a ``Derived`` of one name,
-        and ``ValueError`` for an empty or a reserved name.
+        and for a reducer that declares no stored type. Raises
+        ``ValueError`` for an empty or a reserved name.
         """
         entries: dict[str, BaseReducer | Derived[Any]] = {}
         for entry in explicit:
@@ -110,8 +117,12 @@ class ReducerRegistry:
                 f"reserved state fields"
             )
         reducers = {n: e for n, e in entries.items() if isinstance(e, BaseReducer)}
+        for reducer in reducers.values():
+            # Each reducer declares its stored type. Refuse a missing one
+            # here, also when no reader names the reducer.
+            reducer.stored_type()
         derived = {n: e for n, e in entries.items() if isinstance(e, Derived)}
-        bound = bind_derived(reducers, derived)
+        bound = bind_derived(reducers, derived, context_schema)
         readables: dict[str, Readable] = {
             name: bound[name] if isinstance(entry, Derived) else entry
             for name, entry in entries.items()

@@ -278,7 +278,7 @@ When `RunAgentInput.state` is populated alongside a resume:
 - **A domain-driven reducer wins for a shared key.** A backend channel stays intact, whatever the client echoes.
 - **An `@on(FrontendStateMutated)` handler does NOT fire on resume.** Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for a resume-time side effect.
 
-A reducer can subscribe to `FrontendStateMutated` to project a selected client-state key on the server. A module-level reducer must set `name=`: `ScalarReducer(name="focus", event_type=FrontendStateMutated, fn=lambda e: e.state.get("focus", SKIP))`.
+A reducer can subscribe to `FrontendStateMutated` to project a selected client-state key on the server. A module-level reducer must set `name=`: `ScalarReducer[FrontendStateMutated, str](name="focus", event_type=FrontendStateMutated, fn=lambda e: e.state.get("focus", SKIP))`.
 
 ## Async Factories and Refusals
 

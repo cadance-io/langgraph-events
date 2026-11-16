@@ -32,11 +32,11 @@ from langgraph_events._handler import (
     BoundHandler,
     HandlerMeta,
     ServiceRequirement,
-    _resolve_hints_and_errors,
     is_coercible_schema,
     normalize_previous_names,
     on,
 )
+from langgraph_events._hints import _resolve_hints_and_errors
 from langgraph_events._identity import command_identity
 from langgraph_events._internal import (
     _InputState,
@@ -558,7 +558,7 @@ class EventTopology:
 
         topology = EventTopology([classify, route, review])
         print(topology.namespaces().mermaid())
-        graph = EventGraph.of(topology, services={"llm": llm})
+        graph = EventGraph.of(topology, services=Services(llm=llm))
 
     A handler parameter that only a service can fill is listed in
     :attr:`requirements`. :meth:`EventGraph.of` binds the services to them.
@@ -591,17 +591,16 @@ class EventTopology:
         handlers = _expand_command_handlers(handlers)
         self._namespaces = _collect_graph_namespaces(handlers)
         self._registry = ReducerRegistry.build(
-            reducers or (), self._namespaces.values()
+            reducers or (), self._namespaces.values(), context_schema
         )
         self._reducers = dict(self._registry.reducers)
 
         self._handler_metas: list[HandlerMeta] = []
 
-        reducer_names = self.injectable_names
         seen_names: dict[str, int] = {}
         for fn in handlers:
             meta = HandlerMeta.of(
-                fn, reducer_names=reducer_names, context_schema=context_schema
+                fn, readables=self._registry.readables, context_schema=context_schema
             )
             # Deduplicate colliding display names positionally; see
             # _dedup_handler_name for how the stable node identity is preserved.
@@ -817,7 +816,8 @@ class EventTopology:
         return tuple(r for meta in self._handler_metas for r in meta.requirements)
 
     def _bind(self, services: Services, *, entry: str) -> tuple[BoundHandler, ...]:
-        """Bind *services* to each handler, in handler order.
+        """Bind *services* to each handler, in handler order. Each
+        ``RunScoped`` factory of *services* is bound already.
 
         Raises ``TypeError`` for a name-keyed service that does not satisfy
         the parameter annotation, and for a parameter that no source fills.
@@ -855,14 +855,17 @@ class EventTopology:
         """
         return self._registry.select(include_reducers)
 
-    def _handler_node(self, bound: BoundHandler) -> RunnableLambda:
-        """The node that runs *bound* with its services."""
+    def _handler_node(
+        self, bound: BoundHandler, model_provider: Callable[[], NamespaceModel]
+    ) -> RunnableLambda:
+        """The node that runs *bound* with its services. An injected
+        ``Reflection`` reads the model that *model_provider* gives."""
         return make_handler_node(
             bound,
             reducers=self._reducers,
             readables=self._registry.readables,
             return_contract=self._return_contracts.get(bound.meta.name),
-            model_provider=self.namespaces,
+            model_provider=model_provider,
         )
 
     def _compile(
@@ -870,6 +873,7 @@ class EventTopology:
         bound: Sequence[BoundHandler] | None,
         *,
         checkpointer: Checkpointer,
+        model_provider: Callable[[], NamespaceModel] | None = None,
         max_rounds: int = 100,
         recursion_limit: int | None = None,
         store: BaseStore | None = None,
@@ -925,7 +929,10 @@ class EventTopology:
         nodes = (
             ((m, _refusing_node(m)) for m in handler_metas)
             if bound is None
-            else ((b.meta, self._handler_node(b)) for b in bound)
+            else (
+                (b.meta, self._handler_node(b, model_provider or self.namespaces))
+                for b in bound
+            )
         )
         handler_names: list[str] = []
         for meta, handler_node in nodes:
