@@ -8,13 +8,14 @@ import types
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._internal import _BASE_FIELDS
-from langgraph_events._reducer import BaseReducer, Derived
+from langgraph_events._reducer import BaseReducer, Derived, StateRead, bind_derived
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
-    from langgraph_events._event import Namespace
+    from langgraph_events._causes import CauseEntry
+    from langgraph_events._event import Event, Namespace
     from langgraph_events._reducer import Readable
 
 
@@ -110,10 +111,9 @@ class ReducerRegistry:
             )
         reducers = {n: e for n, e in entries.items() if isinstance(e, BaseReducer)}
         derived = {n: e for n, e in entries.items() if isinstance(e, Derived)}
+        bound = bind_derived(reducers, derived)
         readables: dict[str, Readable] = {
-            name: entry._bind(reducers, derived)
-            if isinstance(entry, Derived)
-            else entry
+            name: bound[name] if isinstance(entry, Derived) else entry
             for name, entry in entries.items()
         }
         return cls(
@@ -155,25 +155,98 @@ class ReducerSelection:
     readables: Mapping[str, Readable] = dataclasses.field(repr=False)
 
     @functools.cached_property
+    def reducers(self) -> dict[str, BaseReducer]:
+        """The stored reducers that the shown values read, by name, in order."""
+        return {r.name: r for name in self.names for r in self.readables[name].sources}
+
+    @functools.cached_property
     def channels(self) -> tuple[str, ...]:
         """The stored channels that the shown values read, in order."""
-        return tuple(
-            dict.fromkeys(
-                r.name for name in self.names for r in self.readables[name].sources
-            )
-        )
+        return tuple(self.reducers)
+
+    @functools.cached_property
+    def reads_log(self) -> bool:
+        """Whether a shown value reads the ``EventLog``. A stream must then
+        follow the ``events`` and ``causes`` channels too."""
+        return any(self.readables[name]._reads_log for name in self.names)
 
     def values(self, state: Mapping[str, Any]) -> dict[str, Any]:
         """Each shown value, read or computed from the channels in *state*.
 
-        An unset channel reads as the empty default of its reducer.
+        An unset channel reads as the empty default of its reducer. A value
+        that reads the log gets the ``EventLog`` of the ``events`` and
+        ``causes`` channels of *state*.
         """
-        return {name: self.readables[name].read(state) for name in self.names}
+        read = StateRead(state)
+        return {name: self.readables[name]._read(read) for name in self.names}
 
     def changed(self, channels: frozenset[str]) -> frozenset[str]:
-        """The shown names whose value can change when *channels* change."""
+        """The shown names whose value can change when one event changes
+        *channels*. A value that reads the log changes on each event."""
         return frozenset(
             name
             for name in self.names
-            if any(r.name in channels for r in self.readables[name].sources)
+            if self.readables[name]._reads_log
+            or any(r.name in channels for r in self.readables[name].sources)
         )
+
+
+@dataclasses.dataclass
+class StreamState:
+    """The state that a per-event stream follows to show the selected values.
+
+    It holds each stored channel that a shown value reads. When a shown
+    value reads the log, it holds the ``events`` and ``causes`` channels
+    too. It starts from a checkpoint, or from empty channels, and takes
+    each event in the order of the stream.
+    """
+
+    selection: ReducerSelection
+    state: dict[str, Any]
+
+    @classmethod
+    def start(
+        cls, selection: ReducerSelection, checkpoint: Mapping[str, Any] | None
+    ) -> StreamState:
+        """The state of *checkpoint*, or empty channels when it is ``None``."""
+        values = checkpoint or {}
+        state = {
+            name: values.get(name, r.empty) for name, r in selection.reducers.items()
+        }
+        if selection.reads_log:
+            state["events"] = list(values.get("events", []))
+            state["causes"] = list(values.get("causes") or [])
+        return cls(selection, state)
+
+    def apply(self, event: Event, cause: CauseEntry | None) -> frozenset[str]:
+        """Take *event* with its stored *cause*. Give the shown names whose
+        value can change."""
+        if self.selection.reads_log:
+            self.state["events"].append(event)
+            self.state["causes"].append(cause)
+        return self._fold(event, store=True)
+
+    def changes(self, event: Event) -> frozenset[str]:
+        """The shown names whose value *event* can change. The state does not
+        take *event*."""
+        return self._fold(event, store=False)
+
+    def values(self) -> dict[str, Any]:
+        """Each shown value in this state."""
+        return self.selection.values(self.state)
+
+    def _fold(self, event: Event, *, store: bool) -> frozenset[str]:
+        changed: set[str] = set()
+        for name, r in self.selection.reducers.items():
+            contribution = r.collect([event])
+            if not r.has_contributions(contribution):
+                continue
+            changed.add(name)
+            if store:
+                merge = getattr(r, "reducer", None)
+                self.state[name] = (
+                    merge(self.state[name], contribution)
+                    if callable(merge)
+                    else contribution
+                )
+        return self.selection.changed(frozenset(changed))

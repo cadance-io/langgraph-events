@@ -23,6 +23,7 @@ from langgraph_events._internal import (
     pad_causes,
 )
 from langgraph_events._pause import _with_pause_budget
+from langgraph_events._reducer_registry import ReducerSelection, StreamState
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
@@ -45,9 +46,9 @@ if TYPE_CHECKING:
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer, Interrupt, StateSnapshot
 
+    from langgraph_events._causes import CauseEntry
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Derived
-    from langgraph_events._reducer_registry import ReducerSelection
     from langgraph_events._reflection import Reflection
     from langgraph_events._services import Services
     from langgraph_events._types import PauseSignal
@@ -953,24 +954,36 @@ class EventGraph:
 
     @staticmethod
     def _events_from_chunk(chunk: object, seen: set[int]) -> list[Event]:
-        """Extract unseen events from an updates-mode stream chunk.
+        """Extract unseen events from an updates-mode stream chunk."""
+        return [event for event, _ in EventGraph._entries_from_chunk(chunk, seen)]
 
-        A chunk marked ``cached`` replays the saved writes of a task that
-        finished before a pause. The run that wrote them streamed them, and
-        the checkpoint already holds them, so they are not new events.
-        LangGraph also marks a node cache hit ``cached``, but ``compiled``
-        sets no node cache, so here the marker means only that replay.
+    @staticmethod
+    def _entries_from_chunk(
+        chunk: object, seen: set[int]
+    ) -> list[tuple[Event, CauseEntry]]:
+        """Extract each unseen event, with its stored cause, from an
+        updates-mode stream chunk.
+
+        Each writer to ``events`` writes one ``causes`` entry per event, in
+        the same order. A chunk marked ``cached`` replays the saved writes of
+        a task that finished before a pause. The run that wrote them
+        streamed them, and the checkpoint already holds them, so they are
+        not new events. LangGraph also marks a node cache hit ``cached``, but
+        ``compiled`` sets no node cache, so here the marker means only that
+        replay.
         """
-        events: list[Event] = []
+        entries: list[tuple[Event, CauseEntry]] = []
         if isinstance(chunk, dict) and not chunk.get("__metadata__", {}).get("cached"):
             for node_output in chunk.values():
                 if isinstance(node_output, dict):
-                    for event in node_output.get("events", []):
+                    events = node_output.get("events", [])
+                    causes = node_output.get("causes", [])
+                    for event, cause in zip(events, causes, strict=True):
                         eid = id(event)
                         if eid not in seen:
                             seen.add(eid)
-                            events.append(event)
-        return events
+                            entries.append((event, cause))
+        return entries
 
     def _frames_from_values(
         self,
@@ -1008,63 +1021,26 @@ class EventGraph:
         compiled = self.compiled
         is_resume = isinstance(inp, LGCommand)
 
-        # Initialize incremental reducer state.  When a checkpoint exists
-        # (subsequent run / resume), start from the checkpointed values so
-        # the shadow state matches what the compiled graph already restored.
-        # Fall back to r.seed() only on the true first run.
-        # The shadow state follows each stored channel that a shown value
-        # reads. A shown ``Derived`` is computed from it for each frame.
-        channels = list(selection.channels)
-        reducer_state: dict[str, Any] = {}
+        # The shadow state follows what a shown value reads. It starts from
+        # the checkpoint, when one exists, so that it matches what the
+        # compiled graph restored. The seeds then layer on top, except on a
+        # resume: Command(resume=...) routes no seed through the seed node,
+        # and the caller (e.g. AGUIAdapter) pre-seeds their contributions
+        # with apre_seed. Applying them again would double-count an
+        # accumulator reducer. See `AGUIAdapter._resume_event_stream`.
         checkpoint_values: dict[str, Any] | None = None
-        if channels and self._checkpointer is not None:
-            config = kwargs.get("config")
-            if config is not None:
-                if snapshot is None:
-                    snapshot = await compiled.aget_state(config)
-                if snapshot.values:
-                    checkpoint_values = snapshot.values
+        config = kwargs.get("config")
+        if selection.names and self._checkpointer is not None and config is not None:
+            if snapshot is None:
+                snapshot = await compiled.aget_state(config)
+            checkpoint_values = snapshot.values or None
+        shadow = StreamState.start(selection, checkpoint_values)
 
-        for name in channels:
-            if checkpoint_values is not None:
-                reducer_state[name] = checkpoint_values.get(
-                    name, self._topology.reducers[name].empty
-                )
-            else:
-                reducer_state[name] = self._topology.reducers[name].seed(seeds)
-
-        # Merge seed contributions on top of checkpointed state.
-        # - On astream_events second-run: seeds carry new events whose
-        #   contributions need to layer on top of the restored checkpoint
-        #   (LangGraph's seed_node will copy them into state["events"], but
-        #   the in-adapter reducer_state shadow needs the contribution
-        #   computed here so the StreamFrame yielded just below reflects it).
-        # - On astream_resume (is_resume=True): skipped — the caller
-        #   (e.g. AGUIAdapter) is responsible for pre-seeding contributions
-        #   via apre_seed before calling astream_resume, because
-        #   Command(resume=...) doesn't route seeds through the seed_node.
-        #   Re-applying contributions here would double-count for
-        #   accumulator reducers (operator.add channel reducers concatenate
-        #   the contribution twice).  See
-        #   `AGUIAdapter._resume_event_stream` for the canonical pattern.
-        if checkpoint_values is not None and not is_resume:
-            for s in seeds:
-                self._topology._update_reducer_state(reducer_state, s, channels)
-
-        # Yield seed events
         for s in seeds:
             if selection.names:
-                changed = frozenset(
-                    name
-                    for name in channels
-                    if self._topology.reducers[name].has_contributions(
-                        self._topology.reducers[name].collect([s])
-                    )
-                )
+                changed = shadow.changes(s) if is_resume else shadow.apply(s, None)
                 yield StreamFrame(
-                    event=s,
-                    reducers=selection.values(reducer_state),
-                    changed_reducers=selection.changed(changed),
+                    event=s, reducers=shadow.values(), changed_reducers=changed
                 )
             else:
                 yield s
@@ -1142,17 +1118,11 @@ class EventGraph:
             chunk = raw.get("data", {}).get("chunk")
             if isinstance(chunk, dict):
                 interrupts.extend(chunk.get(_INTERRUPT_CHANNEL, ()))
-            for event in self._events_from_chunk(chunk, seen):
+            for event, cause in self._entries_from_chunk(chunk, seen):
                 if selection.names:
-                    changed = self._topology._update_reducer_state(
-                        reducer_state,
-                        event,
-                        channels,
-                    )
+                    changed = shadow.apply(event, cause)
                     yield StreamFrame(
-                        event=event,
-                        reducers=selection.values(reducer_state),
-                        changed_reducers=selection.changed(changed),
+                        event=event, reducers=shadow.values(), changed_reducers=changed
                     )
                 else:
                     yield event

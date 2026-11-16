@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A `Derived` can read the `EventLog` and other `Derived` values.** A parameter of `fn`
+  annotated with `EventLog` receives the `EventLog` of the state, as on a handler. The
+  parameter name does not matter, and the name `log` has no special meaning. A lambda cannot
+  annotate a parameter, so a `Derived` that reads the log must be a `def`, a
+  `functools.partial` of one, or a callable object. A parameter that
+  names another `Derived` receives its computed value. A handler parameter, a `StreamFrame`,
+  the AG-UI `STATE_SNAPSHOT` and `reflect(log).state()` give the same value.
+  `changed_reducers` names a `Derived` that reads the log on each event. Before, an input
+  that named another `Derived` raised `TypeError`. Now graph construction raises `TypeError`
+  only for a cycle among `Derived` values, and the message names the cycle. See
+  [`Derived`](https://cadance-io.github.io/langgraph-events/reducers/#derived).
+- **One state read computes each `Derived` once.** A handler injection, a stream frame, an
+  AG-UI snapshot and `reflect(log).state()` are each one state read. So a `Derived` that
+  several values read runs once in that read. Nothing is kept across reads.
+- **`Derived.reads_log`, `NamespaceModel.Derived.reads_log`, and `"reads_log"` in
+  `json()`.** Each is `True` when a parameter of `fn` is annotated with `EventLog`. The text view lists `log` as an input, and the
+  mermaid hexagon has the label `reads: log`. `inputs` can now hold the name of another
+  `Derived`. `inputs` never holds the log parameter.
+
+### Changed
+
+- **The text view shows `(reads no input)` for a `Derived` with no parameter.** Before, it
+  showed `(reads no reducer)`.
+- **A seed frame of a per-event stream shows the state up to its own seed.** This applies to
+  `AGUIAdapter`, and to `astream_events()` with `include_llm_tokens=True` or
+  `include_custom_events=True`, on a first run with two or more seeds. Before, each seed
+  frame showed the state after all the seeds. Now the first run merges each seed as a later
+  run on a checkpointed thread does, through the merge function of each reducer.
+
 ## [0.50.0] - 2026-11-16
 
 ### Added

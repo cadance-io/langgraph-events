@@ -310,17 +310,20 @@ class NamespaceModel:
 
     @dataclass(frozen=True)
     class Derived:
-        """A ``Derived`` registered on the graph, and the reducers it reads.
+        """A ``Derived`` registered on the graph, and the inputs it reads.
 
         A ``Derived`` is not a stored reducer. Its value is computed from
-        ``inputs``, the names of its input reducers, in the order of its
-        function. ``namespace`` is the name of the declaring namespace, or
-        ``None`` for a ``Derived`` passed to ``EventGraph(reducers=...)``.
+        its inputs. ``inputs`` names each input reducer and each input
+        ``Derived``, in the order of its function. ``reads_log`` is ``True``
+        when a parameter is annotated with ``EventLog``. ``namespace`` is the
+        name of the declaring namespace, or ``None`` for a ``Derived`` passed
+        to ``EventGraph(reducers=...)``.
         """
 
         name: str
         inputs: tuple[str, ...]
         namespace: str | None
+        reads_log: bool = False
 
     @dataclass(frozen=True)
     class Focus:
@@ -395,6 +398,7 @@ class NamespaceModel:
                     name=d.name,
                     inputs=d.inputs,
                     namespace=getattr(d.namespace, "__namespace_name__", None),
+                    reads_log=d.reads_log,
                 )
                 for d in derived
             ),

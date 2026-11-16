@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import inspect
 import types
 import typing
@@ -172,6 +173,35 @@ def _resolve_hints_and_errors(
         with contextlib.suppress(AttributeError):
             target._resolved_hints = hints
     return hints, errors
+
+
+def _annotation_source(factory: Callable[..., Any]) -> Callable[..., Any]:
+    """Return the object that carries the factory's return annotation.
+
+    A ``functools.partial`` is read through to the wrapped function. A class
+    is returned as is. Its instances are the provided type. A callable object
+    is read through its ``__call__``.
+    """
+    while isinstance(factory, functools.partial):
+        factory = factory.func
+    if isinstance(factory, type) or inspect.isroutine(factory):
+        return factory
+    return type(factory).__call__
+
+
+def _resolve_parameter_hints(
+    fn: Callable[..., object],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Resolve the annotations of the callable *fn*, as for
+    :func:`_resolve_hints_and_errors`.
+
+    The annotations live on the object that :func:`_annotation_source`
+    gives: the wrapped function of a ``functools.partial``, the
+    ``__init__`` of a class, or the ``__call__`` of a callable object.
+    """
+    source = _annotation_source(fn)
+    init = source.__init__ if isinstance(source, type) else source  # type: ignore[misc]
+    return _resolve_hints_and_errors(init)
 
 
 def _resolve_type_hints(fn: Callable[..., object]) -> dict[str, Any]:

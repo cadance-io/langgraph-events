@@ -738,7 +738,7 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
             all_sources.add(node_id[cls])
             edges.append(_FlowEdge(node_id[cls], red_id, "-.->", "folds", "folds"))
     # A Derived stores nothing. A dotted ``reads`` arrow joins each input
-    # reducer to it.
+    # reducer or Derived to it. The log is no node, so a label states it.
     for dv in d.derived:
         dv_id = _reducer_node_id(dv.name)
         all_targets.add(dv_id)
@@ -852,7 +852,11 @@ def render_mermaid_choreography(  # noqa: PLR0912, PLR0915
 
     unknown_folds = {r.name for r in d.reducers if r.subscribes is None}
 
+    log_readers = {dv.name for dv in d.derived if dv.reads_log}
+
     def folds_fact(reducer_name: str) -> str | None:
+        if reducer_name in log_readers:
+            return "reads: log"
         return "folds: unknown" if reducer_name in unknown_folds else None
 
     def hidden_fact(cls: type) -> str | None:

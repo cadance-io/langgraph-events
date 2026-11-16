@@ -18,8 +18,11 @@ from typing import (
     runtime_checkable,
 )
 
+from langgraph_events._event_log import EventLog
+from langgraph_events._handler import _resolve_parameter_hints
+
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Mapping
 
     from langchain_core.messages import BaseMessage
 
@@ -158,6 +161,14 @@ class BaseReducer(ABC):
         """The value of this channel in *state*, or :attr:`empty` if unset."""
         return state.get(self.name, self.empty)
 
+    @property
+    def _reads_log(self) -> bool:
+        """A stored reducer reads its own channel only, never the log."""
+        return False
+
+    def _read(self, read: StateRead) -> object:
+        return self.read(read.state)
+
     def _describe(self) -> str:
         return f"reducer {self.name!r}"
 
@@ -178,10 +189,11 @@ class BaseReducer(ABC):
 
 
 class Readable(Protocol):
-    """A value that a handler reads by parameter name.
+    """A value that a handler or a :class:`Derived` reads by parameter name.
 
     A stored reducer reads its own channel. A :class:`Derived`, once bound
-    to its input reducers, computes its value from their channels.
+    to its inputs, computes its value from them. The log input of a
+    ``Derived`` reads the ``EventLog`` of the state.
     """
 
     @property
@@ -189,11 +201,16 @@ class Readable(Protocol):
 
     @property
     def sources(self) -> tuple[BaseReducer, ...]:
-        """The stored reducers whose channels :meth:`read` reads."""
+        """The stored reducers whose channels the value reads."""
         ...
 
-    def read(self, state: Mapping[str, Any]) -> Any:  # noqa: ANN401 - the value of a reducer
-        """The value as of *state*, with an empty default for an unset channel."""
+    @property
+    def _reads_log(self) -> bool:
+        """Whether the value reads the ``EventLog`` of the state."""
+        ...
+
+    def _read(self, read: StateRead) -> Any:  # noqa: ANN401 - the value of a reducer
+        """The value in *read*, with an empty default for an unset channel."""
         ...
 
     def _describe(self) -> str: ...
@@ -473,11 +490,13 @@ class FoldReducer(BaseReducer, Generic[S]):
 
 @dataclass(frozen=True)
 class Derived(Generic[T]):
-    """A value that a pure function computes from other reducers. It is not stored.
+    """A value that a pure function computes from its inputs. It is not stored.
 
-    The parameter names of ``fn`` name its input reducers. Before a handler
-    runs, the framework calls ``fn`` with the values of those reducers. A
-    handler receives the result by parameter name, like a reducer value::
+    Each parameter of ``fn`` is one input. A parameter annotated with
+    :class:`EventLog` receives the ``EventLog`` of the state. Each other
+    parameter name names a stored reducer or another ``Derived``. Before a
+    handler runs, the framework calls ``fn`` with the values of the inputs.
+    A handler receives the result by parameter name, like a reducer value::
 
         stage = Derived(
             name="stage",
@@ -488,14 +507,15 @@ class Derived(Generic[T]):
         def check(event: Checked, stage: str) -> Reported: ...
 
     The value is never written to the checkpoint, so it cannot drift from
-    its inputs. An input must be a stored reducer, not another ``Derived``.
-    As on a :class:`ScalarReducer` parameter, a non-``None`` annotation opts
-    into :class:`ReducerNotSetError`.
+    its inputs. One state read computes each ``Derived`` once. ``Derived``
+    values must not read each other in a cycle. As on a
+    :class:`ScalarReducer` parameter, a non-``None`` annotation opts into
+    :class:`ReducerNotSetError`.
 
     When declared as a class attribute on a ``Namespace`` subclass, ``name``
     auto-fills from the attribute name, and ``namespace`` auto-fills to the
     enclosing class. The namespace only places the value in the structure
-    views. An input can be any stored reducer of the graph.
+    views. An input can be any stored reducer or ``Derived`` of the graph.
     """
 
     name: str = ""
@@ -515,8 +535,23 @@ class Derived(Generic[T]):
 
     @property
     def inputs(self) -> tuple[str, ...]:
-        """The names of the input reducers, in the order of ``fn``."""
-        return tuple(p.name for p in self._parameters())
+        """The names of the input reducers and ``Derived`` values, in the
+        order of ``fn``. A parameter annotated with ``EventLog`` is not in
+        it, see :attr:`reads_log`."""
+        log_params = self._log_params
+        return tuple(p.name for p in self._parameters() if p.name not in log_params)
+
+    @property
+    def reads_log(self) -> bool:
+        """Whether a parameter of ``fn`` is annotated with ``EventLog``."""
+        return bool(self._log_params)
+
+    @property
+    def _log_params(self) -> frozenset[str]:
+        hints, _ = _resolve_parameter_hints(self.fn)
+        return frozenset(
+            p.name for p in self._parameters() if hints.get(p.name) is EventLog
+        )
 
     def _parameters(self) -> tuple[inspect.Parameter, ...]:
         try:
@@ -524,68 +559,203 @@ class Derived(Generic[T]):
         except (TypeError, ValueError) as exc:
             raise TypeError(
                 f"Derived {self.name!r} cannot read the parameters of "
-                f"fn={self.fn!r}. Pass a function whose parameter names name "
-                f"its input reducers."
+                f"fn={self.fn!r}. Pass a function whose parameters name "
+                f"its inputs."
             ) from exc
         return tuple(signature.parameters.values())
 
     def _bind(
-        self, reducers: Mapping[str, BaseReducer], derived: Collection[str]
+        self, resolve: Callable[[inspect.Parameter, str | None], Readable]
     ) -> _BoundDerived[T]:
-        """Bind each input to the stored reducer of its name.
+        """Bind each parameter to its input.
 
-        Raises ``TypeError`` if an input does not name a stored reducer.
-        *derived* holds the names of the other ``Derived`` values.
+        A parameter annotated ``EventLog`` reads the log. *resolve* gives the
+        input of each other parameter, from the parameter and the error of
+        its annotation, if any. It raises ``TypeError`` for a parameter that
+        names no input.
         """
-        sources: list[BaseReducer] = []
+        hints, hint_errors = _resolve_parameter_hints(self.fn)
+        inputs: list[Readable] = []
         for param in self._parameters():
             if param.kind not in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
                 raise TypeError(
                     f"Derived {self.name!r} has the variadic or positional-only "
                     f"parameter {param.name!r}. Each parameter must name one "
-                    f"input reducer."
+                    f"input."
                 )
-            if param.name in derived:
-                raise TypeError(
-                    f"Derived {self.name!r} reads the derived {param.name!r}. "
-                    f"An input must be a stored reducer. Read the inputs of "
-                    f"{param.name!r} instead."
-                )
-            reducer = reducers.get(param.name)
-            if reducer is None:
-                default_hint = (
-                    " A parameter with a default must still name a reducer. "
-                    "Bind a constant in a closure."
-                    if param.default is not param.empty
-                    else ""
-                )
-                raise TypeError(
-                    f"Derived {self.name!r} reads {param.name!r}, which is not "
-                    f"a registered reducer.{default_hint} Available reducers: "
-                    f"{sorted(reducers)}."
-                )
-            sources.append(reducer)
-        return _BoundDerived(self, tuple(sources))
+            if hints.get(param.name) is EventLog:
+                if param.default is not param.empty:
+                    raise TypeError(
+                        f"Derived {self.name!r} gives parameter {param.name!r} a "
+                        f"default. A default does not make a parameter optional, "
+                        f"and the EventLog is always set. Remove the default, or "
+                        f"bind a constant in a closure."
+                    )
+                inputs.append(_LogInput(param.name))
+            else:
+                inputs.append(resolve(param, hint_errors.get(param.name)))
+        return _BoundDerived(self, tuple(inputs))
+
+
+@dataclass(frozen=True)
+class _LogInput:
+    """The input of a :class:`Derived` parameter annotated with ``EventLog``."""
+
+    name: str
+
+    @property
+    def sources(self) -> tuple[BaseReducer, ...]:
+        return ()
+
+    @property
+    def _reads_log(self) -> bool:
+        return True
+
+    def _read(self, read: StateRead) -> EventLog:
+        return read.log
+
+    def _describe(self) -> str:
+        return "the EventLog"
+
+    def _not_set_hint(self) -> str:
+        return ""
+
+
+def bind_derived(
+    reducers: Mapping[str, BaseReducer], derived: Mapping[str, Derived[Any]]
+) -> dict[str, _BoundDerived[Any]]:
+    """Bind each ``Derived`` of *derived* to its inputs, by name.
+
+    A ``Derived`` that another one reads is bound once, and both read the
+    same binding. Raises ``TypeError`` for a name that names no input, with
+    the available names. Raises ``TypeError`` that names the cycle when
+    ``Derived`` values read each other in a cycle.
+    """
+    bound: dict[str, _BoundDerived[Any]] = {}
+
+    def bind(name: str, path: tuple[str, ...]) -> _BoundDerived[Any]:
+        if name in path:
+            cycle = " -> ".join((*path[path.index(name) :], name))
+            raise TypeError(
+                f"Derived values read each other in a cycle: {cycle}. A "
+                f"Derived must not read itself, directly or through another "
+                f"Derived. Remove one read from the cycle."
+            )
+        if name not in bound:
+
+            def resolve(param: inspect.Parameter, hint_error: str | None) -> Readable:
+                if param.name in derived:
+                    return bind(param.name, (*path, name))
+                if param.name in reducers:
+                    return reducers[param.name]
+                raise TypeError(_no_input_message(name, param, hint_error))
+
+            bound[name] = derived[name]._bind(resolve)
+        return bound[name]
+
+    def _no_input_message(
+        name: str, param: inspect.Parameter, hint_error: str | None
+    ) -> str:
+        default_hint = (
+            " A default does not make a parameter optional. Bind a constant "
+            "in a closure."
+            if param.default is not param.empty
+            else ""
+        )
+        hint_hint = (
+            f" The annotation of {param.name!r} does not resolve ({hint_error})."
+            f" Make it importable at run time."
+            if hint_error is not None
+            else ""
+        )
+        return (
+            f"Derived {name!r} reads {param.name!r}, which names no reducer and "
+            f"no Derived.{default_hint}{hint_hint} Available reducers: "
+            f"{sorted(reducers)}. Available Derived values: {sorted(derived)}. "
+            f"To read the EventLog, annotate the parameter with EventLog, in a "
+            f"def, a functools.partial of one or a callable object."
+        )
+
+    for name in derived:
+        bind(name, ())
+    return bound
+
+
+class StateRead:
+    """One read of one state, such as one handler injection or one frame.
+
+    The read builds the ``EventLog`` of the state once, on first use. It
+    computes each ``Derived`` once, keyed by name. It keeps nothing across
+    reads, so a value cannot go stale.
+    """
+
+    def __init__(self, state: Mapping[str, Any], log: EventLog | None = None) -> None:
+        """*log* is the ``EventLog`` of *state*, when the caller holds it."""
+        self.state = state
+        self._log = log
+        self._computed: dict[str, object] = {}
+
+    @property
+    def log(self) -> EventLog:
+        """The ``EventLog`` of the ``events`` and ``causes`` channels.
+
+        A state with no ``events`` channel, such as a thread with no
+        checkpoint, gives an empty log.
+        """
+        if self._log is None:
+            # The log keeps its own tuple of events, but a reference to the
+            # causes list. Copy it, so a value that keeps the log, such as a
+            # view, does not see a later write that a stream appends.
+            causes = self.state.get("causes")
+            self._log = EventLog._from_state(
+                self.state.get("events", ()),
+                None if causes is None else list(causes),
+                check=False,
+            )
+        return self._log
+
+    def computed(self, derived: _BoundDerived[T]) -> T:
+        """The value of *derived* in this read, computed on first use."""
+        if derived.name not in self._computed:
+            self._computed[derived.name] = derived._compute(self)
+        return cast("T", self._computed[derived.name])
 
 
 @dataclass(frozen=True)
 class _BoundDerived(Generic[T]):
-    """A :class:`Derived` of one graph, bound to its input reducers.
+    """A :class:`Derived` of one graph, bound to its inputs.
 
     One ``Derived`` can serve several graphs, so the binding is not stored
-    on it.
+    on it. Each input is a stored reducer, another bound ``Derived``, or the
+    log.
     """
 
     derived: Derived[T]
-    sources: tuple[BaseReducer, ...]
+    inputs: tuple[Readable, ...]
 
     @property
     def name(self) -> str:
         return self.derived.name
 
-    def read(self, state: Mapping[str, Any]) -> T:
-        """Call ``fn`` with each input from *state*, or its empty default."""
-        values = {r.name: r.read(state) for r in self.sources}
+    @property
+    def sources(self) -> tuple[BaseReducer, ...]:
+        """The stored reducers that the value reads, also through another
+        ``Derived``, in input order."""
+        found: dict[str, BaseReducer] = {}
+        for source in self.inputs:
+            for reducer in source.sources:
+                found.setdefault(reducer.name, reducer)
+        return tuple(found.values())
+
+    @property
+    def _reads_log(self) -> bool:
+        return any(source._reads_log for source in self.inputs)
+
+    def _read(self, read: StateRead) -> T:
+        return read.computed(self)
+
+    def _compute(self, read: StateRead) -> T:
+        values = {source.name: source._read(read) for source in self.inputs}
         try:
             return self.derived.fn(**values)
         except Exception as exc:

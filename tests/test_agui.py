@@ -43,6 +43,7 @@ from langgraph_events import (
     Derived,
     Event,
     EventGraph,
+    EventLog,
     IntegrationEvent,
     Interrupted,
     MessageEvent,
@@ -5384,3 +5385,47 @@ def describe_AGUIAdapter_derived_values():
             await _collect(adapter, _make_input(state={"stage": "x", "placed": 1}))
 
             assert seen == [{"placed": 1}]
+
+
+def _count_events(log: EventLog) -> int:
+    return len(log)
+
+
+_parcel_seen = Derived(name="seen", fn=_count_events)
+
+
+def _seen_graph() -> EventGraph:
+    return EventGraph(
+        [_place_parcel],
+        reducers=[message_reducer(), _parcel_seen],
+        checkpointer=MemorySaver(),
+    )
+
+
+def describe_AGUIAdapter_derived_value_that_reads_the_log():
+    def when_the_thread_has_no_checkpoint():
+        async def it_computes_the_value_from_an_empty_log():
+            adapter = _parcel_adapter(_seen_graph(), include_reducers=["seen"])
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="l-1"))]
+
+            assert _state_snapshots(events) == [{"seen": 0}]
+
+    def when_the_thread_has_a_checkpoint():
+        async def it_computes_the_value_from_the_checkpointed_log():
+            graph = _seen_graph()
+            adapter = _parcel_adapter(graph, include_reducers=["seen"])
+            await _collect(adapter, _make_input(thread_id="l-2"))
+            stored = await graph.compiled.aget_state(_config("l-2"))
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="l-2"))]
+
+            assert _state_snapshots(events) == [{"seen": len(stored.values["events"])}]
+
+        async def it_shows_the_same_value_in_the_stream_and_the_snapshot():
+            adapter = _parcel_adapter(_seen_graph(), include_reducers=["seen"])
+            streamed = await _collect(adapter, _make_input(thread_id="l-3"))
+
+            events = [e async for e in adapter.snapshot(_make_input(thread_id="l-3"))]
+
+            assert _state_snapshots(events) == [_state_snapshots(streamed)[-1]]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from langgraph_events._reducer import StateRead
 from langgraph_events._reflection import _evidence, _text, _tool
 
 if TYPE_CHECKING:
@@ -88,7 +89,8 @@ class Reflection:
 
     def state(self) -> dict[str, Any]:
         """Project each registered reducer over the full log, then compute
-        each ``Derived`` from those projections.
+        each ``Derived`` from those projections. A ``Derived`` that reads
+        ``log`` receives this log.
 
         Uses ``BaseReducer.seed`` — the framework-blessed from-scratch
         projection. Reducers with custom merge fns (e.g. ``message_reducer``)
@@ -97,7 +99,8 @@ class Reflection:
         events = list(self._log)
         stored = {r.name: r for rd in self._reducers.values() for r in rd.sources}
         seeded = {name: r.seed(events) for name, r in stored.items()}
-        return {name: r.read(seeded) for name, r in self._reducers.items()}
+        read = StateRead(seeded, self._log)
+        return {name: r._read(read) for name, r in self._reducers.items()}
 
     def _resolve_index(self, event: Event | int) -> int:
         """The single index gate: validate, normalize negatives, or locate.

@@ -47,7 +47,7 @@ from langgraph_events._event import (
 from langgraph_events._event_log import EventLog
 from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._pause import _pause_budget, _PauseBudget
-from langgraph_events._reducer import ReducerNotSetError
+from langgraph_events._reducer import ReducerNotSetError, StateRead
 from langgraph_events._services import RunScoped
 from langgraph_events._types import (  # noqa: TC001
     HandlerReturn,
@@ -327,10 +327,9 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
     """
     meta = bound.meta
     inject: dict[str, Any] = {}
+    read = StateRead(state)
     if meta.log_param or meta.reflection_param:
-        log_view = EventLog._from_state(
-            state["events"], state.get("causes"), check=False
-        )
+        log_view = read.log
         if meta.log_param:
             inject[meta.log_param] = log_view
         if meta.reflection_param:
@@ -341,7 +340,7 @@ def _build_inject(  # noqa: PLR0912 — one branch per injectable kind
             )
     for param_name in meta.reducer_params:
         readable = readables[param_name]
-        value = readable.read(state)
+        value = readable._read(read)
         if value is None and param_name in meta.required_reducer_params:
             raise _make_reducer_not_set_error(meta.name, param_name, readable)
         inject[param_name] = value
@@ -593,9 +592,7 @@ def _check_invariants(
     """
     if not meta.invariants:
         return None
-    inv_cls = _find_failing_invariant(
-        meta, EventLog._from_state(state["events"], state.get("causes"), check=False)
-    )
+    inv_cls = _find_failing_invariant(meta, StateRead(state).log)
     if inv_cls is None:
         return None
     return InvariantViolated(

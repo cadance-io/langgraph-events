@@ -123,7 +123,8 @@ def _render_taxonomy_lines(  # noqa: PLR0912
     if d.derived:
         lines.append("Derived:")
         for dv in d.derived:
-            reads = ", ".join(dv.inputs) if dv.inputs else "no reducer"
+            inputs = [*dv.inputs, *(["log"] if dv.reads_log else [])]
+            reads = ", ".join(inputs) if inputs else "no input"
             lines.append(f"  {dv.name}  (reads {reads})")
     return lines
 
