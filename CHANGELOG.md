@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `FoldReducer` added to a graph now folds the writes of a thread that a checkpoint
+  stored before the reducer existed. The checkpoint holds no value for the new channel,
+  and only the first run of a thread wrote the initial fold state. So the first write
+  stored the private wrapper of the fold events as the state, each reader got that
+  wrapper, and the next write raised `TypeError` in the fold. The channel now starts at
+  `default_factory()`, so each write folds into it, on every path that writes: a run, a
+  handler, a resume. A `Derived` that reads the channel now gets the folded state too. A
+  `ScalarReducer` did not have this defect.
+
 ## [0.54.2] - 2026-11-19
 
 ### Fixed

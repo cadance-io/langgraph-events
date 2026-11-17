@@ -6651,3 +6651,146 @@ def describe_aresume_by_interrupt_id():
             )
 
             assert dismissed == ["second"]
+
+
+# Fixtures for a reducer added to a graph after a thread was stored. The
+# stored checkpoint holds no value for the new channel.
+class _Bumped(IntegrationEvent):
+    by: int = 1
+
+    def fold(self, state: dict[str, int]) -> dict[str, int]:
+        return {"n": state["n"] + self.by}
+
+
+class _Bump(IntegrationEvent):
+    by: int = 1
+
+
+@on(Started)
+def _before_the_reducer(event: Started) -> None:
+    return None
+
+
+@on(_Bump)
+def _bump(event: _Bump) -> _Bumped:
+    return _Bumped(by=event.by)
+
+
+@on(_Go)
+def _bump_on_go(event: _Go) -> _Bumped:
+    return _Bumped(by=2)
+
+
+def _tally() -> Any:
+    from langgraph_events import FoldReducer
+
+    return FoldReducer[dict[str, int]](
+        name="tally", event_type=_Bumped, default_factory=lambda: {"n": 0}
+    )
+
+
+def _stored_thread(saver: MemorySaver, thread_id: str) -> dict[str, Any]:
+    """A thread that a graph with no reducer stored."""
+    cfg: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    EventGraph([_before_the_reducer], checkpointer=saver).invoke(
+        Started(data="x"), config=cfg
+    )
+    return cfg
+
+
+def describe_a_reducer_added_after_a_thread_was_stored():
+
+    def describe_FoldReducer():
+
+        def when_a_handler_writes_twice():
+
+            def it_folds_each_write_from_the_default():
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-handler")
+                seen: list[dict[str, int]] = []
+
+                @on(_Bumped)
+                def read(event: _Bumped, tally: dict[str, int]) -> None:
+                    seen.append(tally)
+
+                graph = EventGraph(
+                    [_bump, read], reducers=[_tally()], checkpointer=saver
+                )
+                graph.invoke(_Bump(by=2), config=cfg)
+                graph.invoke(_Bump(by=3), config=cfg)
+
+                assert seen == [{"n": 2}, {"n": 5}]
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 5}
+
+        def when_the_run_input_writes_twice():
+
+            def it_folds_each_write_from_the_default():
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-seed")
+                graph = EventGraph(
+                    [_before_the_reducer], reducers=[_tally()], checkpointer=saver
+                )
+                graph.invoke(_Bumped(by=2), config=cfg)
+                graph.invoke(_Bumped(by=3), config=cfg)
+
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 5}
+
+        def when_a_paused_thread_resumes():
+
+            def it_folds_the_resumed_write_from_the_default():
+                saver = MemorySaver()
+                cfg: dict[str, Any] = {
+                    "configurable": {"thread_id": "fold-added-paused"}
+                }
+                EventGraph([_waiter, _go_noop], checkpointer=saver).invoke(
+                    Started(data="x"), config=cfg
+                )
+                graph = EventGraph(
+                    [_waiter, _bump_on_go], reducers=[_tally()], checkpointer=saver
+                )
+                graph.resume(_Go(), config=cfg)
+                graph.invoke(_Go(), config=cfg)
+
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 4}
+
+        def when_a_Derived_reads_the_channel():
+
+            def it_reads_the_folded_state():
+                from langgraph_events import Derived
+
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-derived")
+                seen: list[int] = []
+
+                def count_of(tally: dict[str, int]) -> int:
+                    return tally["n"]
+
+                @on(_Bumped)
+                def read(event: _Bumped, count: int) -> None:
+                    seen.append(count)
+
+                graph = EventGraph(
+                    [_bump, read],
+                    reducers=[_tally(), Derived(name="count", fn=count_of)],
+                    checkpointer=saver,
+                )
+                graph.invoke(_Bump(by=2), config=cfg)
+                graph.invoke(_Bump(by=3), config=cfg)
+
+                assert seen == [2, 5]
+
+    def describe_ScalarReducer():
+
+        def when_a_handler_writes_twice():
+
+            def it_keeps_the_last_write():
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "scalar-added")
+                last = ScalarReducer[_Bumped, int](
+                    name="last", event_type=_Bumped, fn=lambda e: e.by, default=0
+                )
+                graph = EventGraph([_bump], reducers=[last], checkpointer=saver)
+                graph.invoke(_Bump(by=2), config=cfg)
+                graph.invoke(_Bump(by=3), config=cfg)
+
+                assert graph.compiled.get_state(cfg).values["last"] == 3
