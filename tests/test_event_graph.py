@@ -6779,6 +6779,34 @@ def describe_a_reducer_added_after_a_thread_was_stored():
 
                 assert seen == [2, 5]
 
+        def when_the_stored_state_is_the_wrapper_of_an_older_release():
+            # 0.51.1 or older stored the private wrapper of the fold events
+            # as the state on such a thread. A stored wrapper is always that
+            # defect.
+
+            def it_folds_the_wrapper_from_the_default_on_load():
+                from typing import Annotated
+
+                from langgraph_events import FoldReducer
+
+                class _OlderFold(FoldReducer[dict[str, int]]):
+                    def state_annotation(self) -> object:
+                        return Annotated[Any, self._merge]
+
+                saver = MemorySaver()
+                cfg = _stored_thread(saver, "fold-added-damaged")
+                older = _OlderFold(
+                    name="tally", event_type=_Bumped, default_factory=lambda: {"n": 0}
+                )
+                EventGraph([_bump], reducers=[older], checkpointer=saver).invoke(
+                    _Bump(by=2), config=cfg
+                )
+                graph = EventGraph([_bump], reducers=[_tally()], checkpointer=saver)
+
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 2}
+                graph.invoke(_Bump(by=3), config=cfg)
+                assert graph.compiled.get_state(cfg).values["tally"] == {"n": 5}
+
     def describe_ScalarReducer():
 
         def when_a_handler_writes_twice():

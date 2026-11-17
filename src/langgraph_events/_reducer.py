@@ -612,10 +612,11 @@ class _FoldChannel(BinaryOperatorAggregate[Any]):
     the initial fold state, ``default_factory()``.
 
     LangGraph's own channel for an ``Any`` value starts unset, and stores the
-    first write as is, without the merge. The seed node writes the initial
-    fold state only on the first run of a thread. A thread stored before the
-    reducer joined the graph holds no value for the channel, so its first
-    write must fold into the initial state too, on every path that writes.
+    first write as is, without the merge. A thread stored before the reducer
+    joined the graph holds no value for the channel, so its first write must
+    fold into the initial state too, on every path that writes. Until that
+    write, each load calls ``default_factory()`` again, so it must return
+    the same value on each call.
     """
 
     __slots__ = ("initial",)
@@ -625,10 +626,10 @@ class _FoldChannel(BinaryOperatorAggregate[Any]):
     def of(
         cls, initial: Callable[[], Any], merge: Callable[[Any, Any], Any]
     ) -> _FoldChannel:
-        # ``Any()`` raises, so the base channel starts unset.
+        # ``Any()`` raises, so the base channel starts unset. LangGraph builds
+        # each running channel through ``from_checkpoint``, which sets it.
         channel = cls(cast("type[Any]", Any), merge)
         channel.initial = initial
-        channel.value = initial()
         return channel
 
     def copy(self) -> typing.Self:
@@ -641,6 +642,11 @@ class _FoldChannel(BinaryOperatorAggregate[Any]):
         channel.initial = self.initial
         if not channel.is_available():
             channel.value = self.initial()
+        elif isinstance(channel.value, _Contributions):
+            # 0.51.1 or older stored the wrapper as the state on a thread
+            # stored before the reducer existed. The wrapper is private, so a
+            # stored one is always that defect: fold it into the initial state.
+            channel.value = channel.operator(self.initial(), channel.value)
         return channel
 
 

@@ -51,7 +51,7 @@ from langgraph_events._event_log import EventLog
 from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._inputs import NodeCall
 from langgraph_events._pause import _pause_budget, _PauseBudget
-from langgraph_events._reducer import StateRead
+from langgraph_events._reducer import FoldReducer, StateRead
 from langgraph_events._run_signals import ResumeStoppedError
 from langgraph_events._stop import (
     STOPPED_HANDLERS,
@@ -164,10 +164,17 @@ def make_seed_node(
         if reds:
             if prev_cursor == 0:
                 for name, r in reds.items():
+                    if isinstance(r, FoldReducer):
+                        # The channel starts at ``default_factory()``, or at a
+                        # pre-seeded state, and the merge folds into it. The
+                        # write is unconditional, so the checkpoint stores the
+                        # initial state on the first run.
+                        result[name] = r.collect(new_events)
+                        continue
                     existing = state.get(name)
-                    # Channel defaults: [] for list channels, None for
-                    # scalar channels.  Anything else means pre-seeded
-                    # via update_state / pre_seed().
+                    # Channel defaults: [] for a list channel, None for a
+                    # scalar channel. Anything else means pre-seeded via
+                    # update_state / pre_seed().
                     if existing is not None and existing != []:
                         # Channel already has data — only apply seed
                         # contributions so the channel reducer merges

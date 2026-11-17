@@ -16,7 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrapper, and the next write raised `TypeError` in the fold. The channel now starts at
   `default_factory()`, so each write folds into it, on every path that writes: a run, a
   handler, a resume. A `Derived` that reads the channel now gets the folded state too. A
-  `ScalarReducer` did not have this defect.
+  `ScalarReducer` did not have this defect. Until the first write on such a thread, each
+  load calls `default_factory()`, so it must return an equal new value on each call.
+- A thread that this defect already damaged heals on load. Its checkpoint stores the
+  private wrapper as the fold state. The load now folds that wrapper into
+  `default_factory()`, and the next write folds into the result.
 
 ## [0.54.2] - 2026-11-19
 
