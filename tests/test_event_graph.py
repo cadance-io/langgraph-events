@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from conftest import (
+    ApprovalRequested,
     Completed,
     Counted,
     Ended,
@@ -18,8 +19,10 @@ from conftest import (
     MessageSent,
     Order,
     Processed,
+    ReviewApproved,
     Started,
     count_to_twenty,
+    to_processed,
 )
 from langchain_core.messages import (
     AIMessage,
@@ -104,20 +107,8 @@ class _OrphanSuite(Namespace):
         label: str = ""
 
 
-class _ApprovalRequested(Interrupted):
-    """Interrupt narrowed on by the field-matcher suites."""
-
-    draft: str = ""
-
-
 class _OtherInterrupted(Interrupted):
-    """Interrupt that must *not* satisfy an ``_ApprovalRequested`` matcher."""
-
     reason: str = ""
-
-
-class _ReviewApproved(IntegrationEvent):
-    """Resume value for the field-matcher suites."""
 
 
 class _Acknowledge(IntegrationEvent):
@@ -125,7 +116,7 @@ class _Acknowledge(IntegrationEvent):
 
 
 class _OtherEvent(IntegrationEvent):
-    """Resume value that must *not* satisfy a ``_ReviewApproved`` matcher."""
+    """Resume value that must *not* satisfy a ``ReviewApproved`` matcher."""
 
 
 class _PauseRequested(Interrupted):
@@ -169,12 +160,6 @@ def _handle_response(
     return _FinalAnswerProduced(answer=event.content)
 
 
-@on(Started)
-def _to_processed(event: Started) -> Processed:
-    """``Started`` leg of the deadline / RunPaused scenarios."""
-    return Processed(data=event.data)
-
-
 @on(MessageReceived)
 def _to_ended(event: MessageReceived) -> Ended:
     """``MessageReceived`` leg of the deadline / RunPaused scenarios."""
@@ -184,7 +169,7 @@ def _to_ended(event: MessageReceived) -> Ended:
 def _pause_graph(thread_id: str) -> tuple[EventGraph, dict[str, typing.Any]]:
     """Checkpointed two-handler graph for the ``deadline=`` and ``pause_on=``
     suites, plus its config."""
-    graph = EventGraph([_to_processed, _to_ended], checkpointer=MemorySaver())
+    graph = EventGraph([to_processed, _to_ended], checkpointer=MemorySaver())
     return graph, {"configurable": {"thread_id": thread_id}}
 
 
@@ -1279,23 +1264,23 @@ def describe_EventGraph():
                 captured = []
 
                 @on(Started)
-                def need_input(event: Started) -> _ApprovalRequested:
-                    return _ApprovalRequested(draft="hello")
+                def need_input(event: Started) -> ApprovalRequested:
+                    return ApprovalRequested(draft="hello")
 
-                @on(Resumed, interrupted=_ApprovalRequested)
+                @on(Resumed, interrupted=ApprovalRequested)
                 def handle_approval(event: Resumed) -> Ended:
                     captured.append(event.interrupted)
                     return Ended(result="approved")
 
                 log = _resume_after_interrupt(
                     [need_input, handle_approval],
-                    _ReviewApproved(),
+                    ReviewApproved(),
                     "field-match-test",
                 )
 
                 assert log.latest(Ended) == Ended(result="approved")
                 assert len(captured) == 1
-                assert isinstance(captured[0], _ApprovalRequested)
+                assert isinstance(captured[0], ApprovalRequested)
 
         def when_field_does_not_match():
 
@@ -1306,18 +1291,18 @@ def describe_EventGraph():
                 def need_input(event: Started) -> _OtherInterrupted:
                     return _OtherInterrupted(reason="different")
 
-                @on(Resumed, interrupted=_ApprovalRequested)
+                @on(Resumed, interrupted=ApprovalRequested)
                 def handle_approval(event: Resumed) -> Ended:
                     captured.append("should not fire")
                     return Ended(result="approved")
 
-                @on(_ReviewApproved)
-                def fallback(event: _ReviewApproved) -> Ended:
+                @on(ReviewApproved)
+                def fallback(event: ReviewApproved) -> Ended:
                     return Ended(result="fallback")
 
                 log = _resume_after_interrupt(
                     [need_input, handle_approval, fallback],
-                    _ReviewApproved(),
+                    ReviewApproved(),
                     "field-no-match-test",
                 )
 
@@ -1334,7 +1319,7 @@ def describe_EventGraph():
                 def need_input(event: Started) -> _OtherInterrupted:
                     return _OtherInterrupted(reason="test")
 
-                @on(Resumed, interrupted=_ApprovalRequested)
+                @on(Resumed, interrupted=ApprovalRequested)
                 def approval_handler(event: Resumed) -> Ended:
                     captured.append("should not fire")
                     return Ended(result="approval")
@@ -1358,25 +1343,25 @@ def describe_EventGraph():
                 injected_values = []
 
                 @on(Started)
-                def need_input(event: Started) -> _ApprovalRequested:
-                    return _ApprovalRequested(draft="my draft")
+                def need_input(event: Started) -> ApprovalRequested:
+                    return ApprovalRequested(draft="my draft")
 
-                @on(Resumed, interrupted=_ApprovalRequested)
+                @on(Resumed, interrupted=ApprovalRequested)
                 def handle_approval(
-                    event: Resumed, interrupted: _ApprovalRequested
+                    event: Resumed, interrupted: ApprovalRequested
                 ) -> Ended:
                     injected_values.append(interrupted)
                     return Ended(result=interrupted.draft)
 
                 log = _resume_after_interrupt(
                     [need_input, handle_approval],
-                    _ReviewApproved(),
+                    ReviewApproved(),
                     "field-inject-test",
                 )
 
                 assert log.latest(Ended) == Ended(result="my draft")
                 assert len(injected_values) == 1
-                assert isinstance(injected_values[0], _ApprovalRequested)
+                assert isinstance(injected_values[0], ApprovalRequested)
                 assert injected_values[0].draft == "my draft"
 
         def when_multiple_field_matchers():
@@ -1385,28 +1370,28 @@ def describe_EventGraph():
                 captured = []
 
                 @on(Started)
-                def need_input(event: Started) -> _ApprovalRequested:
-                    return _ApprovalRequested(draft="hello")
+                def need_input(event: Started) -> ApprovalRequested:
+                    return ApprovalRequested(draft="hello")
 
-                @on(Resumed, interrupted=_ApprovalRequested, value=_ReviewApproved)
+                @on(Resumed, interrupted=ApprovalRequested, value=ReviewApproved)
                 def strict_handler(
                     event: Resumed,
-                    interrupted: _ApprovalRequested,
-                    value: _ReviewApproved,
+                    interrupted: ApprovalRequested,
+                    value: ReviewApproved,
                 ) -> Ended:
                     captured.append((interrupted, value))
                     return Ended(result="strict")
 
                 log = _resume_after_interrupt(
                     [need_input, strict_handler],
-                    _ReviewApproved(),
+                    ReviewApproved(),
                     "multi-field-test",
                 )
 
                 assert log.latest(Ended) == Ended(result="strict")
                 assert len(captured) == 1
-                assert isinstance(captured[0][0], _ApprovalRequested)
-                assert isinstance(captured[0][1], _ReviewApproved)
+                assert isinstance(captured[0][0], ApprovalRequested)
+                assert isinstance(captured[0][1], ReviewApproved)
 
             def when_one_field_does_not_match():
 
@@ -1414,22 +1399,21 @@ def describe_EventGraph():
                     captured = []
 
                     @on(Started)
-                    def need_input(event: Started) -> _ApprovalRequested:
-                        return _ApprovalRequested(draft="hello")
+                    def need_input(event: Started) -> ApprovalRequested:
+                        return ApprovalRequested(draft="hello")
 
-                    # value=_OtherEvent won't match _ReviewApproved
-                    @on(Resumed, interrupted=_ApprovalRequested, value=_OtherEvent)
+                    @on(Resumed, interrupted=ApprovalRequested, value=_OtherEvent)
                     def strict_handler(event: Resumed) -> Ended:
                         captured.append("should not fire")
                         return Ended(result="strict")
 
-                    @on(_ReviewApproved)
-                    def fallback(event: _ReviewApproved) -> Ended:
+                    @on(ReviewApproved)
+                    def fallback(event: ReviewApproved) -> Ended:
                         return Ended(result="fallback")
 
                     log = _resume_after_interrupt(
                         [need_input, strict_handler, fallback],
-                        _ReviewApproved(),
+                        ReviewApproved(),
                         "multi-field-skip",
                     )
 
@@ -3492,12 +3476,12 @@ def describe_EventGraph():
                     another ``RunPaused`` to the events channel.
                     """
                     from langgraph_events._internal import make_router_node
-                    from langgraph_events._pause import _with_pause_budget
+                    from langgraph_events._run_signals import _RunSignals
 
                     router = make_router_node(max_rounds=100)
-                    config = _with_pause_budget(
-                        None, deadline=time.monotonic() - 1, pause_on=None
-                    )
+                    config = _RunSignals(
+                        deadline=time.monotonic() - 1, pause_on=None, stop_on=None
+                    ).apply(None)
                     state: dict[str, typing.Any] = {
                         "events": [Started(data="seed")],
                         "_cursor": 1,

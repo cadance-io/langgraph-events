@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`stop_on=` ends a run at once.** `ainvoke()`, `aresume()`, `astream_events()`,
+  `astream_resume()` and `AGUIAdapter.stream()` accept it. The run stores `CancelledOnSignal`.
+  When a sibling handler interrupts in the same round, the resume stores `HandlerCutOnSignal`
+  for each cut handler. `AGUIAdapter.stream()` ends a stopped run on `RUN_FINISHED` with
+  `RunFinishedCancelledOutcome`. A resume raises `ValueError` when its `stop_on=` is already
+  set. See [Stop on a signal](docs/control-flow.md#stop-on-a-signal-cancelledonsignal).
+
 ## [0.52.0] - 2026-11-17
 
 ### Changed

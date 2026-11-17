@@ -547,6 +547,8 @@ stream = adapter.stream(input_data, context=RunFacts(language="fr"))
 
 `stream()` accepts `deadline=`, an absolute `time.monotonic()` reference, and `pause_on=`, an object with `is_set()` such as an `asyncio.Event`. The router emits a `RunPausedOnDeadline` or a `RunPausedOnSignal`, both `RunPaused` subclasses, and the run finalises through the same `RunFinishedEvent` path as a normal completion. See [Control Flow → Deadline pause](control-flow.md#soft-timeout-runpaused) and [Control Flow → Pause on a signal](control-flow.md#pause-on-a-signal-runpausedonsignal) for the semantics and the resume rule.
 
+`stream()` also accepts `stop_on=`, an object with `is_set()`. When it is set, the run cancels its running async handler, stores `CancelledOnSignal` and ends the stream with `RUN_FINISHED`. That `RUN_FINISHED` carries the outcome `RunFinishedCancelledOutcome`. `CancelledOnSignal` still goes through the mapper chain, so an `EventMapper` can put it on the wire. Its default mapping emits no event, so `on_unmapped=` never warns or raises for it. When a sibling handler interrupts in the same round, the run stores no `CancelledOnSignal`, and `RUN_FINISHED` has no outcome. A resume turn whose `stop_on=` is already set ends with `RUN_ERROR`, and the thread stays paused. A resume stores a `HandlerCutOnSignal` for each handler that the stop cut before the interrupt. The stream does not yield it, so no mapper sees it. For the cleanup grace period, see [Control Flow → Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
+
 `RunPaused` does not implement `AGUISerializable`, so `FallbackMapper` skips it with a one-time warning. An app that wants to send a pause signal to the client registers its own mapper:
 
 ```python

@@ -733,6 +733,18 @@ class Cancelled(Halted):
     """
 
 
+class CancelledOnSignal(Cancelled):
+    """The run's ``stop_on=`` signal ended the run.
+
+    ``discarded`` names each handler whose step the stop cut, as
+    :attr:`HandlerRaised.handler` names it, joined with ``", "``. It is
+    ``""`` when no step was cut. A plain :class:`Cancelled` is the cancel of
+    the run task. See ``docs/control-flow.md``, "Stop on a signal".
+    """
+
+    discarded: str = ""
+
+
 class Abandoned(Halted):
     """A thread that ``abandon()``/``aabandon()`` settled without
     dispatching the ``Interrupted`` it was paused on. Recorded, not
@@ -939,6 +951,17 @@ class HandlerAbandonedOnSignal(HandlerAbandoned):
     give-up in the last round that ``max_rounds`` allows halts the run with
     :class:`MaxRoundsExceeded`. Only a seeded event reaches a catcher.
     """
+
+
+class HandlerCutOnSignal(SystemEvent):
+    """The run's ``stop_on=`` signal cut the step of ``handler``, and the run
+    ended on the interrupt of a sibling handler.
+
+    The resume command stores this event before the paused handler runs
+    again. No handler runs on it.
+    """
+
+    handler: str = ""
 
 
 class HandlerRetried(SystemEvent):

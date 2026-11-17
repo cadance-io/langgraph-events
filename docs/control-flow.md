@@ -270,6 +270,38 @@ stopping.set()
     - The first set read commits the run to a pause, also when the caller clears the signal between the two reads.
     - A backoff wait that is already in progress when the signal is set runs to its end, and `max_delay` bounds it. The policy gives up before the next wait.
 
+### Stop on a signal — `CancelledOnSignal`
+
+A pause waits for the current round to finish. A stop is immediate. To end a run at once, for example when a user stops it, pass `stop_on=` to `ainvoke()`, `aresume()`, `astream_events()`, `astream_resume()` or `AGUIAdapter.stream()`. The value follows the same `PauseSignal` contract as `pause_on=`. When `is_set()` returns `True`, the library cancels each running async handler, and the run ends on `CancelledOnSignal`.
+
+```python
+stopping = asyncio.Event()
+log = await graph.ainvoke(seed, config=config, stop_on=stopping)
+
+# When the user stops the run, the request handler sets the event.
+stopping.set()
+```
+
+- The cancel goes to the handler step only, never to the run task. The checkpoint write is never cancelled.
+- After the first cancel, the handler has a grace period of 1 second to clean up. After the grace period, the cancel repeats every 0.05 seconds until the handler ends.
+- WARNING: a cleanup that takes longer than 1 second is cancelled again. To keep a longer cleanup, run it under `asyncio.shield()`.
+- With `stop_on=` given, a cancel of the run task also gets the grace period and the repeated cancels. The run then stores a plain `Cancelled`.
+- The step of a stopped handler discards all the events of that handler. A sync handler is not interrupted, but its step also discards its events.
+- `CancelledOnSignal.discarded` names each handler whose step the stop cut, joined with `", "`. It is `""` when the signal was set after the last handler step.
+- When a sibling handler interrupts in the same round, the interrupt wins. The thread stores the question and no `CancelledOnSignal`. The resume stores one `HandlerCutOnSignal` for each cut handler, then dispatches the answer. No handler runs on `HandlerCutOnSignal`, and no later `CancelledOnSignal.discarded` names its handler.
+- A stream (`astream_resume()`, `stream_resume()`, `AGUIAdapter.stream()`) does not yield `HandlerCutOnSignal`, because the resume command writes it. Only the stored log shows it.
+- `aresume()`, `astream_resume()` and the resume of `AGUIAdapter.stream()` raise `ValueError` when the signal is already set at the call. The thread stays paused on its question.
+- A signal set while `aresume()` replays the paused handler cuts that replay. The question and the answer are then lost, and `CancelledOnSignal.discarded` names the replayed handler.
+- `abandon()` on a thread paused after a cut stores no `HandlerCutOnSignal`. The next run clears the name of the cut handler.
+- The cursor moves past `CancelledOnSignal`, so a new run on the same `thread_id` continues.
+
+The router reads the signal between rounds, before it checks `max_rounds`:
+
+- When the signal is set, the router stores `CancelledOnSignal`, also when no step discarded events. The events already stored stay, and no handler gets them.
+- When the round already stores a `Halted`, for example the `Cancelled` of a cancelled run task, the router stores no `CancelledOnSignal`.
+- When the signal is set after the last read of the router, the run ends normally.
+- The first set read commits the run to the stop, also when the caller clears the signal later.
+
 ### Surfacing the pause inline
 
 To turn a `RunPaused` into a user-visible system message in the same channel as the chat history, register a custom reducer that handles both `MessageEvent` and `RunPaused`:

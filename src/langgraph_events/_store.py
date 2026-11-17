@@ -9,14 +9,13 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END
 from langgraph.types import StateUpdate
 
-from langgraph_events._causes import FRAMEWORK
+from langgraph_events._causes import FRAMEWORK, pad_causes
 from langgraph_events._event import (
     Abandoned,
     Event,
     Interrupted,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._internal import pad_causes
 from langgraph_events._rewrite import (
     RewritePlan,
     RewriteReport,

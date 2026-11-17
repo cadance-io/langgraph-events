@@ -25,8 +25,10 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 class PauseSignal(Protocol):
-    """A ``pause_on=`` signal: the router calls ``is_set()`` between rounds.
+    """A ``pause_on=`` or ``stop_on=`` signal: an object with ``is_set()``.
 
+    For ``pause_on=``, the router calls ``is_set()`` between rounds. For
+    ``stop_on=``, the async handler node calls it while a handler runs.
     ``asyncio.Event`` and ``threading.Event`` satisfy this protocol.
     """
 

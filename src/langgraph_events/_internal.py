@@ -26,7 +26,7 @@ from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
 from langgraph_events import _retry
-from langgraph_events._causes import FRAMEWORK, CauseEntry
+from langgraph_events._causes import FRAMEWORK, CauseEntry, pad_causes
 from langgraph_events._custom_event import (
     _AsyncEmitter,
     _reset_custom_emitters,
@@ -38,6 +38,7 @@ from langgraph_events._event import (
     Event,
     Halted,
     HandlerAbandonedOnSignal,
+    HandlerCutOnSignal,
     HandlerRaised,
     HandlerRetried,
     InvariantViolated,
@@ -50,6 +51,13 @@ from langgraph_events._handler import BoundHandler, HandlerMeta  # noqa: TC001
 from langgraph_events._inputs import NodeCall
 from langgraph_events._pause import _pause_budget, _PauseBudget
 from langgraph_events._reducer import StateRead
+from langgraph_events._stop import (
+    STOPPED_HANDLERS,
+    add_or_clear,
+    cancelled_on_signal,
+    run_step,
+    stop_is_set,
+)
 from langgraph_events._types import (  # noqa: TC001
     HandlerReturn,
     StateDict,
@@ -72,6 +80,7 @@ _BASE_FIELDS: dict[str, Any] = {
     "_round": int,
     # Router-side gate: one RunPaused per /run regardless of fan-ins (#88).
     "_run_paused_emitted": bool,
+    STOPPED_HANDLERS: Annotated[list[str], add_or_clear],
 }
 
 
@@ -131,21 +140,6 @@ def _leaf_node(
     return _LeafNode(func=func, afunc=afunc, name=name)
 
 
-def pad_causes(update: StateDict, entry: CauseEntry) -> StateDict:
-    """*update* plus one *entry* in ``causes`` for each event that it writes.
-
-    Every writer to ``events`` outside a handler call goes through here. The
-    router, the ``Cancelled`` path and ``abandon()`` pass ``FRAMEWORK``.
-    ``pre_seed()`` passes ``None``, because its events come from outside.
-    Without the padding, ``causes`` falls behind ``events``, and each older
-    cause reads one position late.
-    """
-    events = update.get("events")
-    if not events:
-        return update
-    return {**update, "causes": [entry] * len(events)}
-
-
 def make_seed_node(
     reducers: dict[str, BaseReducer] | None = None,
 ) -> Callable[[StateDict], StateDict]:
@@ -162,6 +156,7 @@ def make_seed_node(
             "_pending": new_events,
             "_round": 0,
             "_run_paused_emitted": False,
+            STOPPED_HANDLERS: None,
         }
         if reds:
             if prev_cursor == 0:
@@ -198,20 +193,38 @@ def make_router_node(
     """Create the router node that collects new events and advances the cursor."""
 
     def router(state: StateDict, config: RunnableConfig) -> StateDict:
-        new_events = state["events"][state["_cursor"] :]
+        events = state["events"]
+        new_events = events[state["_cursor"] :]
         has_resume = any(isinstance(e, Resumed) for e in new_events)
         current_round = 1 if has_resume else state.get("_round", 0) + 1
+
+        stopped = state.get(STOPPED_HANDLERS) or []
+        cancelled = (
+            cancelled_on_signal(stopped, new_events) if stop_is_set(config) else None
+        )
+
+        def route(
+            pending: list[Event], cursor: int, stored: Event | None = None
+        ) -> StateDict:
+            update: StateDict = {
+                "_cursor": cursor,
+                "_pending": pending,
+                "_round": current_round,
+                STOPPED_HANDLERS: None,
+            }
+            if stored is not None:
+                update["events"] = [stored]
+            return pad_causes(update, FRAMEWORK)
+
+        # A new run on the same thread reads its new events from the cursor.
+        # The cursor moves past a stop or a pause, so the next run continues.
+        # It stays on MaxRoundsExceeded, so that halt is terminal across runs.
+        end = len(events)
+        if cancelled is not None:
+            return route([cancelled], end + 1, cancelled)
         if current_round > max_rounds:
             halted = MaxRoundsExceeded(rounds=max_rounds)
-            return pad_causes(
-                {
-                    "_cursor": len(state["events"]),
-                    "_pending": [halted],
-                    "_round": current_round,
-                    "events": [halted],
-                },
-                FRAMEWORK,
-            )
+            return route([halted], end, halted)
         # The resume round always dispatches, like the seed round. A pause
         # here would store the resume value and never dispatch it.
         paused = None if has_resume else _pause_budget(config).pause_now()
@@ -220,32 +233,14 @@ def make_router_node(
                 # Late fan-ins past the pause drain without
                 # re-emitting; in-flight events persist via
                 # operator.add. See #88.
-                return {
-                    "_cursor": len(state["events"]),
-                    "_pending": [],
-                    "_round": current_round,
-                }
-            return pad_causes(
-                {
-                    # Advance cursor PAST the paused event so a fresh /run on
-                    # the same thread excludes it from new_events. Distinct
-                    # from MaxRoundsExceeded above which keeps cursor AT the
-                    # halted (terminal across runs).
-                    "_cursor": len(state["events"]) + 1,
-                    "_pending": [paused],
-                    "_round": current_round,
-                    "events": [paused],
-                    "_run_paused_emitted": True,
-                },
-                FRAMEWORK,
-            )
-        return {
-            "_cursor": len(state["events"]),
-            "_pending": new_events,
-            "_round": current_round,
-        }
+                return route([], end)
+            return {**route([paused], end + 1, paused), "_run_paused_emitted": True}
+        return route(new_events, end)
 
     return router
+
+
+_RECORDS_ONLY = (HandlerAbandonedOnSignal, HandlerCutOnSignal)
 
 
 def _dispatchable(state: StateDict) -> list[tuple[int, Event]]:
@@ -267,7 +262,7 @@ def _dispatchable(state: StateDict) -> list[tuple[int, Event]]:
     return [
         (base + k, e)
         for k, e in enumerate(pending)
-        if not (routed and isinstance(e, HandlerAbandonedOnSignal))
+        if not (routed and isinstance(e, _RECORDS_ONLY))
     ]
 
 
@@ -842,18 +837,22 @@ def make_handler_node(
         new_events: list[Event] = []
         new_causes: list[CauseEntry] = []
         tokens = _bind_custom_emitters(config)
+        work = _process_events_async(
+            meta,
+            matching,
+            state,
+            inject,
+            new_events,
+            new_causes,
+            lg_interrupt,
+            budget,
+            return_contract,
+        )
         try:
-            await _process_events_async(
-                meta,
-                matching,
-                state,
-                inject,
-                new_events,
-                new_causes,
-                lg_interrupt,
-                budget,
-                return_contract,
-            )
+            if await run_step(work, config):
+                return _finalize(
+                    {"events": [], "causes": [], STOPPED_HANDLERS: [meta.name]}
+                )
         except asyncio.CancelledError:
             return _finalize(pad_causes({"events": [Cancelled()]}, FRAMEWORK))
         finally:

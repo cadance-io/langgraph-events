@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from langgraph_events._types import StateDict
+
 CauseEntry = tuple[Any, ...] | None
 """One entry of the ``causes`` channel.
 
@@ -32,6 +34,21 @@ FRAMEWORK: CauseEntry = ("framework",)
 
 NOT_RECORDED: CauseEntry = ("not_recorded",)
 """The entry of an event written before causes existed."""
+
+
+def pad_causes(update: StateDict, entry: CauseEntry) -> StateDict:
+    """*update* plus one *entry* in ``causes`` for each event that it writes.
+
+    Every writer to ``events`` outside a handler call goes through here. The
+    router, the ``Cancelled`` path and ``abandon()`` pass ``FRAMEWORK``.
+    ``pre_seed()`` passes ``None``, because its events come from outside.
+    Without the padding, ``causes`` falls behind ``events``, and each older
+    cause reads one position late.
+    """
+    events = update.get("events")
+    if not events:
+        return update
+    return {**update, "causes": [entry] * len(events)}
 
 
 def dropped(via: str, source_type: str) -> CauseEntry:
