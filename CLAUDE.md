@@ -58,7 +58,7 @@ Run all tooling through `uv`. Do not call bare `python` or `pytest`.
 
 ## Conventions
 
-- Python 3.11+. Line length 88. mypy strict. Ruff lints and formats, configured in
+- Python 3.14+. Line length 88. mypy strict. Ruff lints and formats, configured in
   `pyproject.toml`.
 - `describe_` groups by API surface. `when_` mirrors a code branch. `it_` names the assertion.
 - Test each behaviour once, at the API boundary where it is consumed.
