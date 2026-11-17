@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langgraph-events"
-version = "0.51.1"
+version = "0.52.0"
 description = "Opinionated event-driven abstraction for LangGraph. State IS events."
 requires-python = ">=3.14"
 license = "MIT"
