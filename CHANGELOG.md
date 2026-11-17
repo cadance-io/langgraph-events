@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.51.1] - 2026-11-17
+
 ### Changed
 
 - **BREAKING: a rollback to 0.51.0 or older reads a pending `FoldReducer` write of this
@@ -2459,7 +2461,8 @@ stale pending state. Any completed sibling write from a fanned-out superstep sur
 - BDD-style test suite with pytest-describe
 - CI workflow (lint, typecheck, test)
 
-[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.51.0...HEAD
+[Unreleased]: https://github.com/cadance-io/langgraph-events/compare/v0.51.1...HEAD
+[0.51.1]: https://github.com/cadance-io/langgraph-events/compare/v0.51.0...v0.51.1
 [0.51.0]: https://github.com/cadance-io/langgraph-events/compare/v0.50.0...v0.51.0
 [0.50.0]: https://github.com/cadance-io/langgraph-events/compare/v0.49.0...v0.50.0
 [0.49.0]: https://github.com/cadance-io/langgraph-events/compare/v0.48.0...v0.49.0
