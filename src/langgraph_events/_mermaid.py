@@ -6,8 +6,6 @@ Nothing public — kept inside the package so ``_namespace/_model.py`` can
 focus on the DDD namespace model and leave mermaid syntax concerns here.
 """
 
-from __future__ import annotations
-
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal

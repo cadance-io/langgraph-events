@@ -1,7 +1,5 @@
 """Shared type aliases for langgraph-events."""
 
-from __future__ import annotations
-
 import types
 from collections.abc import Callable
 from typing import Any, Protocol, TypeVar

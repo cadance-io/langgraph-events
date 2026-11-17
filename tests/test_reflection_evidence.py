@@ -1,7 +1,5 @@
 """Tests for the evidence op — a verdict-free join over log + static model."""
 
-from __future__ import annotations
-
 from conftest import Started
 
 from langgraph_events import (

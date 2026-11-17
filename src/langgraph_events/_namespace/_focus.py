@@ -1,7 +1,5 @@
 """The part of a :class:`NamespaceModel` that one mermaid diagram draws."""
 
-from __future__ import annotations
-
 import difflib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING

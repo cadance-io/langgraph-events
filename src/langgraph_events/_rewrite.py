@@ -10,8 +10,6 @@ write, drop the stored events the caller named, and build the
 checkpoint the graph will store. It never touches a store.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -146,7 +144,7 @@ def validate_drop(
             live = _resolve_identity(
                 cls.__module__, cls.__qualname__, scope=serde._scope
             )
-        except (ImportError, AttributeError):
+        except ImportError, AttributeError:
             live = None
         if live is not cls:
             raise ValueError(

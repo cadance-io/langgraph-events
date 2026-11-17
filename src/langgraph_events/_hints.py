@@ -1,7 +1,5 @@
 """Resolve annotations, and test whether two annotations name the same type."""
 
-from __future__ import annotations
-
 import annotationlib
 import contextlib
 import functools
@@ -192,9 +190,9 @@ class UnsettledTypeError(TypeError):
 
 
 def _alias_kinds() -> tuple[type, ...]:
-    """The classes of a type alias statement: ``typing.TypeAliasType`` on
-    Python 3.12 and later, and ``typing_extensions.TypeAliasType``."""
-    kinds = [getattr(typing, "TypeAliasType", None)]
+    """The classes of a type alias statement: ``typing.TypeAliasType`` and
+    ``typing_extensions.TypeAliasType``."""
+    kinds: list[object] = [typing.TypeAliasType]
     try:
         import typing_extensions  # noqa: PLC0415
     except ImportError:  # pragma: no cover - a dependency of langgraph

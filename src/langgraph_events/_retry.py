@@ -18,8 +18,6 @@ policy that re-runs an entire LangGraph node.  This one is scoped to a single
 handler call and composes with ``raises=``/``HandlerRaised``.
 """
 
-from __future__ import annotations
-
 import asyncio
 import random
 import time

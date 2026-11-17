@@ -1,7 +1,5 @@
 """Tests for the natural key of each client read-time migration."""
 
-from __future__ import annotations
-
 import functools
 import re
 from typing import TYPE_CHECKING, Any

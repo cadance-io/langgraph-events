@@ -15,8 +15,6 @@ Usage:
     python examples/order.py
 """
 
-from __future__ import annotations
-
 from typing import ClassVar
 
 from langgraph_events import (

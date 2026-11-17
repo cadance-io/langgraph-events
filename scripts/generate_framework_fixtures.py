@@ -23,8 +23,6 @@ The class list is every concrete ``SystemEvent`` subclass and
 ``BUILDERS`` stops the script.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import sys
 import tomllib

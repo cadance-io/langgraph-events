@@ -1,7 +1,5 @@
 """AGUIAdapter — core orchestrator mapping EventGraph streams to AG-UI events."""
 
-from __future__ import annotations
-
 import annotationlib
 import copy
 import inspect

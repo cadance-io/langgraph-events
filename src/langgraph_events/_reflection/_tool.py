@@ -6,8 +6,6 @@ to a public ``Reflection`` query or an index-preserving mirror of an
 ``EventLog`` query — the tool never grows semantics of its own.
 """
 
-from __future__ import annotations
-
 import difflib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -195,7 +193,7 @@ def _coerce_int(value: str | float) -> int | None:
     """Best-effort int coercion for model-supplied arguments ("3" → 3)."""
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 

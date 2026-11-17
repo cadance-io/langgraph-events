@@ -10,8 +10,6 @@ framework). ``Edge.causation`` says *what causal role* it plays:
 - ``None``        — ``raises`` / ``framework`` edges carry no domain causation
 """
 
-from __future__ import annotations
-
 from langgraph_events import (
     Command,
     DomainEvent,

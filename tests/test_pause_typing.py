@@ -9,8 +9,6 @@ unused ignore is an error, so each ignore below proves that mypy rejects that
 call.
 """
 
-from __future__ import annotations
-
 import asyncio
 import threading
 

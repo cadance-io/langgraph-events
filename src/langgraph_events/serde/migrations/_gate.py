@@ -5,8 +5,6 @@ both call :func:`check`. Each finding owns its explanation and one next
 command, rendered with the caller's own arguments.
 """
 
-from __future__ import annotations
-
 import shlex
 import typing
 from dataclasses import dataclass

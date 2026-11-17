@@ -1,7 +1,5 @@
 """SSE encoding helpers for the AG-UI adapter."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

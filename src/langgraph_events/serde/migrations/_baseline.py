@@ -4,8 +4,6 @@ Version 4. A read accepts versions 1 to 4. A write always gives version 4.
 :meth:`Baseline.updated` computes every value a write stores.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import hashlib
 import json

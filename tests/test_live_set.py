@@ -6,8 +6,8 @@ import contextlib
 import dataclasses
 import io
 import sys
-from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 from _dict_saver import DictSaver
@@ -23,7 +23,6 @@ from _live_set_fixtures import (
     _write_pending,
 )
 from conftest import Started
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
 from test_rewrite_store import _settled_drop_pair
@@ -47,6 +46,11 @@ from langgraph_events.serde.migrations import (
     restore_live_set,
     rewrite_live_set,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
 def describe_MigrationTarget():

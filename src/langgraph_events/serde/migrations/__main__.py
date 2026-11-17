@@ -6,8 +6,6 @@ pass or a done write, 1 is a finding or a verdict worse than ``rewrite
 the wrong release. A report goes to stdout, and an error to stderr.
 """
 
-from __future__ import annotations
-
 import argparse
 import importlib
 import sys

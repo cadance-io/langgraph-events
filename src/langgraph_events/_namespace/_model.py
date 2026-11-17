@@ -1,12 +1,10 @@
 """`NamespaceModel` dataclasses, builder, and shared rendering helpers."""
 
-from __future__ import annotations
-
 import json as _json
 import re
 import typing
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal
 
 from langgraph_events._event import (
     OUTCOMES_ATTR,
@@ -594,7 +592,7 @@ class NamespaceModel:
         return _json.dumps(self.to_dict(), indent=indent)
 
 
-Reaction: TypeAlias = NamespaceModel.CommandHandler | NamespaceModel.Policy
+type Reaction = NamespaceModel.CommandHandler | NamespaceModel.Policy
 """A ``CommandHandler`` or ``Policy`` — the two shapes returned by
 ``NamespaceModel.reactions``."""
 

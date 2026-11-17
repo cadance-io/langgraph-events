@@ -1,7 +1,5 @@
 """Event base class and built-in special events."""
 
-from __future__ import annotations
-
 import annotationlib
 import dataclasses
 import functools

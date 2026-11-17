@@ -1,7 +1,5 @@
 """Text renderers for Reflection output — compact, #index-addressed, deterministic."""
 
-from __future__ import annotations
-
 import dataclasses
 from typing import TYPE_CHECKING
 

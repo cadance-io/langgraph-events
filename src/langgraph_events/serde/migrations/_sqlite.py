@@ -3,8 +3,6 @@
 The saver is an optional dependency, so its import is local.
 """
 
-from __future__ import annotations
-
 import sqlite3
 from typing import TYPE_CHECKING, Any
 

@@ -1,7 +1,5 @@
 """Tests for declarative retry via ``RetryPolicy`` + ``HandlerRetried``."""
 
-from __future__ import annotations
-
 import asyncio
 import gc
 import logging

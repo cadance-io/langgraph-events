@@ -1,7 +1,5 @@
 """Tests for QueryTool — the ReAct-loop tool over Reflection."""
 
-from __future__ import annotations
-
 import re
 
 from conftest import Order, Started

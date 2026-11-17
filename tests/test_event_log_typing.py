@@ -9,8 +9,6 @@ the match without a cast. Under strict ``warn_unused_ignores`` an unused ignore 
 an error, so the ignore below proves that mypy rejects a class that is not an Event.
 """
 
-from __future__ import annotations
-
 from typing import assert_type
 
 from langgraph_events import EventLog, IntegrationEvent

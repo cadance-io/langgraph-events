@@ -7,11 +7,10 @@ value: the handlers below need a ``_Mailer`` that is never built.
 
 import warnings
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from conftest import Ended, Started, services_from, typed_services
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
@@ -38,6 +37,9 @@ from langgraph_events.serde.migrations import (
     check,
     update_baseline,
 )
+
+if TYPE_CHECKING:
+    from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
 class _Mailer:
@@ -305,7 +307,7 @@ class _Desk(Namespace):
         class Booked(DomainEvent):
             pass
 
-        def handle(self) -> "_Desk.Book.Booked":
+        def handle(self) -> _Desk.Book.Booked:
             return _Desk.Book.Booked()
 
 

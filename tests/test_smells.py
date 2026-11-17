@@ -1,7 +1,5 @@
 """Tests for the domain-pattern and command-chain smell warnings."""
 
-from __future__ import annotations
-
 import warnings
 
 from langgraph_events import (

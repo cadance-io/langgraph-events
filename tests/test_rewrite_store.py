@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from _dict_saver import DictSaver
 from conftest import Ended, Started
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.base.id import uuid6
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -48,6 +47,9 @@ from langgraph_events import (
 from langgraph_events.serde import NamespaceAwareSerde, backfill, migrate_from
 from langgraph_events.serde._jsonplus import _scan_identities
 from langgraph_events.serde.migrations import Migration, TransformFields
+
+if typing.TYPE_CHECKING:
+    from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
 class _Go(IntegrationEvent):

@@ -1,7 +1,5 @@
 """Tests for declarative reducers on Namespace classes."""
 
-from __future__ import annotations
-
 from typing import Any
 
 import pytest

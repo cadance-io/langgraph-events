@@ -1,7 +1,5 @@
 """EventTopology: the handlers, reducers and namespaces of a graph."""
 
-from __future__ import annotations
-
 import dataclasses
 import functools
 import types

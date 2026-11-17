@@ -1,7 +1,5 @@
 """The reducers and ``Derived`` values of a graph, and the values a stream shows."""
 
-from __future__ import annotations
-
 import dataclasses
 import functools
 import types

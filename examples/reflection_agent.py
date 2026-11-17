@@ -24,8 +24,6 @@ Usage:
     python examples/reflection_agent.py
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from langgraph_events import (

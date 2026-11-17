@@ -12,8 +12,6 @@ Violations raise :class:`CommandPrivacyError`. Framework events
 ``__command__`` semantics and are exempt.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from langgraph_events._event import Command, DomainEvent

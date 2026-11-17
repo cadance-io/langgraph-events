@@ -1,7 +1,6 @@
 """Tests for the @on decorator and handler metadata extraction."""
 
 import asyncio
-import sys
 import warnings
 from typing import Any
 
@@ -894,19 +893,16 @@ def describe_partial_hint_resolution():
         # per-annotation fallback must do the same, or a valid generic
         # annotation is recorded as a failure.
 
-        @pytest.mark.skipif(
-            sys.version_info < (3, 12), reason="PEP 695 syntax needs 3.12"
-        )
         def it_resolves_the_type_parameter():
-            namespace: dict[str, object] = {"SampleEvent": SampleEvent}
-            exec(  # noqa: S102 — 3.12-only syntax cannot be parsed on 3.11
-                'def gen[T](event: "SampleEvent", item: "T",'
-                ' bad: "Missing") -> "T": ...',
-                namespace,
-            )
-            fn = namespace["gen"]
+            # The quotes stand for a client module with
+            # ``from __future__ import annotations``.
+            def gen[T](
+                event: SampleEvent,
+                item: "T",  # noqa: UP037
+                bad: "Missing",  # type: ignore[name-defined] # noqa: F821, UP037
+            ) -> "T": ...  # noqa: UP037
 
-            hints, errors = _resolve_each_annotation(fn)
+            hints, errors = _resolve_each_annotation(gen)
 
             assert hints["item"] is hints["return"]
             assert set(errors) == {"bad"}

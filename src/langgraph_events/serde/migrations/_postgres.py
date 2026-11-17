@@ -19,10 +19,8 @@ the stored rows, in SQL, through the connection of the saver, in one
 transaction.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from langgraph_events.serde.migrations._target import TargetError, _one_line
 
@@ -36,7 +34,6 @@ if TYPE_CHECKING:
 
     from langgraph_events.serde.migrations._target import MigrationTarget
 
-_T = TypeVar("_T")
 
 _THREAD_IDS_QUERY = (
     "SELECT DISTINCT thread_id FROM checkpoints WHERE checkpoint_ns = ''"
@@ -448,11 +445,11 @@ def drop_backups(target: MigrationTarget) -> tuple[str, ...]:
     return _on_store(target, _DROP, _Backup.drop_others)
 
 
-def _on_store(
+def _on_store[T](
     target: MigrationTarget,
     action: _Action,
-    work: Callable[[_Backup, Cursor[DictRow]], _T],
-) -> _T:
+    work: Callable[[_Backup, Cursor[DictRow]], T],
+) -> T:
     """*work* on the backup of the running code and a cursor of the store
     of *target*, inside one transaction.
 

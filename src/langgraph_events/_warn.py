@@ -11,8 +11,6 @@ importing module's ``import`` line, and the user is none the wiser.
 frame that does not belong to this package and anchors there.
 """
 
-from __future__ import annotations
-
 import inspect
 import warnings
 from pathlib import Path
@@ -34,6 +32,6 @@ def _is_library_frame(filename: str) -> bool:
     """True when *filename* lives inside this package."""
     try:
         return Path(filename).resolve().is_relative_to(_PACKAGE_ROOT.resolve())
-    except (OSError, ValueError):
+    except OSError, ValueError:
         # Synthetic frames (``<stdin>``, ``<string>``) are never library code.
         return False

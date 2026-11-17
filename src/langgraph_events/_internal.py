@@ -4,8 +4,6 @@ Defines the internal state schema, seed/router/dispatch/handler node wrappers
 that implement the hub-and-spoke reactive loop on top of LangGraph's StateGraph.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import operator

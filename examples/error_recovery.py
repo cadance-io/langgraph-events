@@ -22,8 +22,6 @@ Usage:
     python examples/error_recovery.py
 """
 
-from __future__ import annotations
-
 from langgraph_events import (
     Command,
     DomainEvent,

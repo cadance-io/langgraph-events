@@ -518,6 +518,25 @@ def describe_Command_handle():
 
                 assert excinfo.value.__cause__ is None
 
+            def when_the_annotation_is_a_string():
+                def it_translates_the_dataclass_error():
+                    # The quotes stand for a client module with
+                    # ``from __future__ import annotations``. The guard
+                    # leaves a string to dataclasses, and translates its
+                    # mutable-default ValueError without the chained cause.
+                    with pytest.raises(
+                        TypeError, match=r"'invariants'.*ClassVar"
+                    ) as excinfo:
+
+                        class _StrInv(Namespace):
+                            class Cmd(Command):
+                                invariants: "dict" = {}  # noqa: RUF012, UP037
+
+                                def handle(self) -> None:
+                                    return None
+
+                    assert excinfo.value.__cause__ is None
+
     def describe_previously_class_attribute():
         # ``previously`` mirrors ``raises``/``invariants`` as a class-level
         # modifier (inline handlers have no decorator slot): it declares the
@@ -751,6 +770,19 @@ def describe_Command_handle():
 
                             def handle(self) -> None:
                                 return None
+
+            def when_the_annotation_is_a_string():
+                def it_rejects_the_dataclass_field():
+                    # The quotes stand for a client module with
+                    # ``from __future__ import annotations``.
+                    with pytest.raises(TypeError, match="ClassVar"):
+
+                        class _StrBad(Namespace):
+                            class Cmd(Command):
+                                previously: "tuple[str, ...]" = ("x",)  # noqa: UP037
+
+                                def handle(self) -> None:
+                                    return None
 
     def describe_EventGraph_registration():
 

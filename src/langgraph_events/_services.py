@@ -1,7 +1,5 @@
 """Service markers for ``EventGraph(services=...)``."""
 
-from __future__ import annotations
-
 import annotationlib
 import dataclasses
 import functools

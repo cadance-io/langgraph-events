@@ -12,8 +12,6 @@ They have been stable for some time but are technically private — pin a
 compatible LangGraph version.
 """
 
-from __future__ import annotations
-
 import contextlib
 import dataclasses
 import re
@@ -569,7 +567,7 @@ def _library_event_record(
         return True
     try:
         cls = _resolve_identity(module, name, scope=scope)
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         return False
     return isinstance(cls, type) and issubclass(cls, Event)
 

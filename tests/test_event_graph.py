@@ -264,7 +264,7 @@ class _WidgetSuite(Namespace):
         class Placed(DomainEvent):
             order_id: str = ""
 
-        def handle(self) -> "_WidgetSuite.Place.Placed":
+        def handle(self) -> _WidgetSuite.Place.Placed:
             return _WidgetSuite.Place.Placed(order_id="o1")
 
 
@@ -913,7 +913,9 @@ def describe_EventGraph():
         def when_handler_requests_config():
 
             def it_receives_a_runnable_config_dict():
-                from langchain_core.runnables import RunnableConfig
+                from langchain_core.runnables import (
+                    RunnableConfig,  # noqa: TC002 - the handler annotation resolves at graph build
+                )
 
                 captured: list[RunnableConfig] = []
 
@@ -932,7 +934,9 @@ def describe_EventGraph():
             def when_store_configured():
 
                 def it_can_put_and_get_via_store():
-                    from langgraph.store.base import BaseStore
+                    from langgraph.store.base import (
+                        BaseStore,  # noqa: TC002 - the handler annotation resolves at graph build
+                    )
                     from langgraph.store.memory import InMemoryStore
 
                     store = InMemoryStore()
@@ -950,7 +954,9 @@ def describe_EventGraph():
             def when_store_not_configured():
 
                 def it_raises_for_sync_handler():
-                    from langgraph.store.base import BaseStore
+                    from langgraph.store.base import (
+                        BaseStore,  # noqa: TC002 - the handler annotation resolves at graph build
+                    )
 
                     @on(Started)
                     def step(event: Started, store: BaseStore) -> Ended:
@@ -961,7 +967,9 @@ def describe_EventGraph():
                         graph.invoke(Started(data="hello"))
 
                 async def it_raises_for_async_handler():
-                    from langgraph.store.base import BaseStore
+                    from langgraph.store.base import (
+                        BaseStore,  # noqa: TC002 - the handler annotation resolves at graph build
+                    )
 
                     @on(Started)
                     async def step(event: Started, store: BaseStore) -> Ended:
@@ -985,7 +993,9 @@ def describe_EventGraph():
         def when_handler_requests_config_and_log():
 
             def it_injects_both():
-                from langchain_core.runnables import RunnableConfig
+                from langchain_core.runnables import (
+                    RunnableConfig,  # noqa: TC002 - the handler annotation resolves at graph build
+                )
 
                 captured: list[tuple] = []
 

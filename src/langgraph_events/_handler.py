@@ -1,7 +1,5 @@
 """The ``@on`` decorator and handler metadata extraction."""
 
-from __future__ import annotations
-
 import annotationlib
 import inspect
 import typing

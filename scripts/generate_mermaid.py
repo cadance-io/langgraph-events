@@ -17,8 +17,6 @@ Modes:
     --check  — read-only validation, exits 1 if any stale (for tests).
 """
 
-from __future__ import annotations
-
 import argparse
 import importlib.util
 import re

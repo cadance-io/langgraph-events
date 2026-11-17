@@ -1,7 +1,5 @@
 """The graph, the baseline file and the store that every command reads."""
 
-from __future__ import annotations
-
 import annotationlib
 import contextlib
 import inspect

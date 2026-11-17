@@ -1,7 +1,5 @@
 """Exceptions that a caller of the AG-UI adapter can raise."""
 
-from __future__ import annotations
-
 
 class RunRefusedError(Exception):
     """Refuse an AG-UI run from a seed factory or a resume factory.

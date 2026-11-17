@@ -6,8 +6,6 @@ ext-hook between unpack and revive. The wire format is unchanged from
 prior library versions — this is a read-side affordance only. See #70.
 """
 
-from __future__ import annotations
-
 import annotationlib
 import dataclasses
 import enum

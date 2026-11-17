@@ -21,8 +21,6 @@ record. ``NamespaceAwareSerde`` reads such a record of an lge event through
 these migrations too.
 """
 
-from __future__ import annotations
-
 import importlib.util
 from typing import Any
 

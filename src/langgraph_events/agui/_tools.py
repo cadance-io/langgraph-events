@@ -1,7 +1,5 @@
 """Helpers for bridging AG-UI tool definitions and tool results to LangChain."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any
 
 from ._extras import collect_inbound_extras

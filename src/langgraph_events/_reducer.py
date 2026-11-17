@@ -1,7 +1,5 @@
 """Reducer — generic LangGraph-native state channel for event-driven graphs."""
 
-from __future__ import annotations
-
 import inspect
 import operator
 import types
@@ -13,7 +11,6 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Generic,
     Protocol,
     TypeVar,
     cast,
@@ -98,12 +95,11 @@ Use this so a reset event need not know the empty state's shape — and so
 T = TypeVar("T")
 
 
-def _last_write_wins(existing: object, new: T) -> T:
+def _last_write_wins[T](existing: object, new: T) -> T:
     """Binary operator that always takes the newer value."""
     return new
 
 
-E = TypeVar("E")
 """The event type that a reducer reads."""
 
 
@@ -393,7 +389,7 @@ class Readable(Protocol):
 
 
 @dataclass
-class Reducer(BaseReducer, Generic[E, T]):
+class Reducer[E, T](BaseReducer):
     """Maps events to contributions for a named LangGraph state channel.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on each
@@ -480,7 +476,7 @@ class Reducer(BaseReducer, Generic[E, T]):
 
 
 @dataclass
-class ScalarReducer(BaseReducer, Generic[E, T]):
+class ScalarReducer[E, T](BaseReducer):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
@@ -576,7 +572,6 @@ class ScalarReducer(BaseReducer, Generic[E, T]):
         return result if self.has_contributions(result) else self.default
 
 
-S = TypeVar("S")
 """The accumulating state type a ``FoldReducer`` folds events into."""
 
 
@@ -614,7 +609,7 @@ class _Contributions:
 
 
 @dataclass
-class FoldReducer(BaseReducer, Generic[S]):
+class FoldReducer[S](BaseReducer):
     """Folds each matching event into a single accumulating state object.
 
     Where :class:`Reducer` appends and :class:`ScalarReducer` takes the last
@@ -719,7 +714,7 @@ class FoldReducer(BaseReducer, Generic[S]):
 
 
 @dataclass(frozen=True)
-class Derived(Generic[T]):
+class Derived[T]:
     """A value that a pure function computes from its inputs. It is not stored.
 
     Each parameter of ``fn`` is one input, and binds by the rule of a
