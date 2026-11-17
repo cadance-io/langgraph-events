@@ -500,6 +500,51 @@ def describe_EventGraph():
             assert saver.serde.loads_typed(stored) == tombstone()
 
 
+@on(Started)
+def _sync_step(event: Started) -> Ended:
+    return Ended()
+
+
+@on(Ended)
+async def _async_step(event: Ended) -> None:
+    return None
+
+
+def _schema_failures(compiled: Any) -> list[str]:
+    """The nodes and edge paths of *compiled* whose input schema fails.
+
+    LangChain builds an input schema from the signature of each node
+    function and each conditional-edge function.
+    """
+    runnables = [(name, node.runnable) for name, node in compiled.builder.nodes.items()]
+    runnables += [
+        (f"{source} -> {name}", spec.path)
+        for source, branches in compiled.builder.branches.items()
+        for name, spec in branches.items()
+    ]
+    failures = []
+    for label, runnable in runnables:
+        try:
+            runnable.get_input_jsonschema()
+        except Exception as exc:
+            failures.append(f"{label}: {type(exc).__name__}: {exc}")
+    return failures
+
+
+def describe_compiled_node_schemas():
+    def when_an_EventGraph_holds_a_sync_and_an_async_handler():
+        def it_builds_the_input_schema_of_every_node():
+            graph = EventGraph([_sync_step, _async_step])
+
+            assert _schema_failures(graph.compiled) == []
+
+    def when_an_EventStore_compiles_a_topology():
+        def it_builds_the_input_schema_of_every_node():
+            store = EventStore(EventTopology(_HANDLERS), MemorySaver())
+
+            assert _schema_failures(store._compiled) == []
+
+
 def describe_EventStore():
     def when_the_service_of_a_handler_is_never_built():
         def it_finds_the_paused_thread():

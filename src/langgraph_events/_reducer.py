@@ -100,9 +100,6 @@ def _last_write_wins[T](existing: object, new: T) -> T:
     return new
 
 
-"""The event type that a reducer reads."""
-
-
 def _union_args(hint: object) -> tuple[object, ...]:
     """The members of a union *hint*, or *hint* alone."""
     origin = typing.get_origin(hint)
@@ -397,6 +394,8 @@ class Reducer[E, T](BaseReducer):
     the ``reducer`` function (defaults to ``operator.add`` for simple list
     concatenation).
 
+    The type parameter ``E`` is the event type that the reducer reads.
+
     Any LangGraph-compatible reducer can be used — e.g., ``add_messages``
     from ``langchain_core.messages`` for smart message deduplication.
 
@@ -483,6 +482,8 @@ class ScalarReducer[E, T](BaseReducer):
     last matching event.  The return value — including ``None`` — is injected
     directly into the handler.  Return ``SKIP`` from ``fn`` to signal no
     contribution and keep the channel at its current value.
+
+    The type parameter ``E`` is the event type that the reducer reads.
 
     Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
     multiple event types structurally.
@@ -572,9 +573,6 @@ class ScalarReducer[E, T](BaseReducer):
         return result if self.has_contributions(result) else self.default
 
 
-"""The accumulating state type a ``FoldReducer`` folds events into."""
-
-
 @runtime_checkable
 class Foldable(Protocol):
     """An event that knows how to fold itself into accumulating state.
@@ -616,6 +614,9 @@ class FoldReducer[S](BaseReducer):
     write, ``FoldReducer`` computes the next value from the *prior* state and
     the event — a left-fold.  Use it for counters, merging dicts, re-derived
     cursors, or any channel whose update depends on what came before.
+
+    The type parameter ``S`` is the accumulating state type that the reducer
+    folds events into.
 
     Each event owns its transition through ``fold(self, state)`` (mirroring
     :meth:`MessageEvent.as_messages`), so callers usually supply only the

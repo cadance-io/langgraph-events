@@ -6,6 +6,9 @@ import types
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
 
+from langchain_core.runnables import (
+    RunnableConfig,  # noqa: TC002 - LangChain reads the node signatures at run time
+)
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -50,6 +53,9 @@ from langgraph_events._labels import distinct_labels, escalating_labels
 from langgraph_events._namespace import NamespaceModel
 from langgraph_events._namespace._command_privacy import enforce_command_privacy
 from langgraph_events._reducer_registry import ReducerRegistry, ReducerSelection
+from langgraph_events._types import (
+    StateDict,  # noqa: TC001 - LangChain reads the node signatures at run time
+)
 from langgraph_events._warn import warn_user
 
 if TYPE_CHECKING:
@@ -60,13 +66,12 @@ if TYPE_CHECKING:
         Sequence,
     )
 
-    from langchain_core.runnables import RunnableConfig, RunnableLambda
+    from langchain_core.runnables import RunnableLambda
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer, Durability
 
     from langgraph_events._reducer import BaseReducer, Derived
     from langgraph_events._services import Services
-    from langgraph_events._types import StateDict
     from langgraph_events.serde._jsonplus import (
         NamespaceAwareSerde,
     )

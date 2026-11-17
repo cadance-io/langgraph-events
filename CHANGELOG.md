@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **BREAKING: the library requires Python 3.14 or later.** Python 3.11, 3.12 and 3.13
   are no longer supported. CI tests on Python 3.14 only. See #251.
+- The public `CauseValue` is now a `type` alias, a `typing.TypeAliasType`. Before, its value
+  was a string. Read its members through `CauseValue.__value__`. See #251.
 
 ### Fixed
 

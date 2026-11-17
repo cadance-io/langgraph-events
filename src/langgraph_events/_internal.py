@@ -13,12 +13,15 @@ from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 if TYPE_CHECKING:
     from contextvars import Token
 
-    from langchain_core.runnables import RunnableConfig, RunnableLambda
+    from langchain_core.runnables import RunnableLambda
 
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import BaseReducer, Readable
     from langgraph_events._topology import ReturnContract
 
+from langchain_core.runnables import (
+    RunnableConfig,  # noqa: TC002 - LangChain reads the node signatures at run time
+)
 from langgraph.graph import END
 from langgraph.types import Send  # noqa: TC002
 
