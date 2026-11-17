@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: a rollback to 0.51.0 or older reads a pending `FoldReducer` write of this
+  release as `None`.** The older serde does not know the new ext code. The fold then
+  replaces its state with `None`, with no error. No encoding can fix the older reader.
+  Before a rollback, resume or abandon each thread paused with a pending `FoldReducer`
+  write. See [Rolling back to an older release](https://cadance-io.github.io/langgraph-events/event-migrations/#rolling-back-to-an-older-release).
+
+### Fixed
+
+- A `FoldReducer` write that a checkpoint stores as a pending write now revives a nested
+  event. A pending write is the write of a task that completed in a superstep where a
+  sibling task interrupted or failed. `NamespaceAwareSerde` encoded the wrapper of the fold
+  events through the LangGraph dataclass path, which stores each event by `__name__`. An
+  event nested in a `Namespace` then revived as `None` or a `dict`, and the fold raised
+  `AttributeError` on resume. The serde now stores the wrapper under its own ext code, and
+  revives each event by qualname, with the migrations of the serde. A `Reducer` list and a
+  `ScalarReducer` value did not have this defect.
+- A pending `FoldReducer` write that 0.51.0 or older stored now revives as a fold write in
+  the LangGraph strict msgpack mode too. Before, the strict mode revived it as a `dict`, and
+  the fold took that `dict` as its state, with no error. A module-level event in it revives
+  when the LangGraph allowlist allows its class. A nested event in it still does not
+  revive, because the old bytes hold only `__name__`. It revives as `None`, or as a `dict`
+  in the strict mode, so the fold fails on resume as before. Abandon such a thread.
+
 ## [0.51.0] - 2026-11-17
 
 ### Breaking

@@ -604,6 +604,10 @@ class _Contributions:
     events in a nominal type the user can never produce makes that
     distinction unambiguous — so the fold state may be *anything*, including
     a ``list``.
+
+    A checkpoint can store it as a pending write. ``NamespaceAwareSerde``
+    encodes it under its own ext code, so a nested event inside it revives
+    by qualname.
     """
 
     events: list[Event]

@@ -66,6 +66,11 @@ EXT_NAMESPACE_AWARE_EVENT = 100
 # the wrapped value — LangGraph's generic dataclass path uses ``_msgpack_enc``
 # which is hardcoded to ``default=_msgpack_default`` and would bypass us.
 EXT_INTERRUPT = 101
+# A ``FoldReducer`` channel write. LangGraph stores it as a pending write when
+# a sibling task interrupts or fails in the same superstep. Upstream's
+# dataclass path would encode its events by ``__name__``, so a nested event
+# would not revive.
+EXT_FOLD_CONTRIBUTIONS = 102
 
 # The dataclass ``TypeError`` for a kwarg the class does not declare.
 # ``_revival_remedy`` and the revive gate's failure hint both read the
@@ -322,6 +327,11 @@ def _make_default(
                 EXT_INTERRUPT,
                 ormsgpack.packb(fields, default=_default, option=_option),
             )
+        if isinstance(obj, _Contributions):
+            return ormsgpack.Ext(
+                EXT_FOLD_CONTRIBUTIONS,
+                ormsgpack.packb(obj.events, default=_default, option=_option),
+            )
         return _msgpack_default(obj)
 
     return _default
@@ -412,6 +422,20 @@ def _make_ext_hook(
                     f"new fields."
                 )
                 raise
+        if code == EXT_FOLD_CONTRIBUTIONS:
+            return _Contributions(
+                ormsgpack.unpackb(
+                    data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+                )
+            )
+        if code == EXT_CONSTRUCTOR_KW_ARGS and _legacy_contributions(data):
+            # 0.51.0 or older let LangGraph store the wrapper. Unpack it
+            # through this hook, so LangGraph's allowlist cannot demote it to
+            # a dict that the fold merge takes as its state.
+            _module, _name, kwargs = ormsgpack.unpackb(
+                data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+            return _Contributions(kwargs["events"])
         if code == EXT_CONSTRUCTOR_KW_ARGS and _library_event_record(
             data, tables, scope
         ):
@@ -507,6 +531,20 @@ def _make_ext_hook(
     return _ext_hook
 
 
+def _legacy_contributions(data: bytes) -> bool:
+    """*data*, a LangGraph constructor record, holds a ``FoldReducer`` write
+    that 0.51.0 or older stored."""
+    record = ormsgpack.unpackb(
+        data, ext_hook=lambda _code, _payload: None, option=ormsgpack.OPT_NON_STR_KEYS
+    )
+    return (
+        isinstance(record, list)
+        and len(record) == 3
+        and record[0] == _Contributions.__module__
+        and record[1] == _Contributions.__qualname__
+    )
+
+
 def _library_event_record(
     data: bytes, tables: MigrationTables, scope: dict[tuple[str, str], type]
 ) -> bool:
@@ -537,6 +575,7 @@ def _library_event_record(
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)
+from langgraph_events._reducer import _Contributions  # noqa: E402
 from langgraph_events._warn import warn_user  # noqa: E402
 
 
