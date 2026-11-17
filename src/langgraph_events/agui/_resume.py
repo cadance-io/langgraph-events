@@ -5,8 +5,6 @@ for resume events. All public helpers here are pure functions — no I/O, no
 global state.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from typing import TYPE_CHECKING, Any

@@ -1,7 +1,5 @@
 """JSON serialization of a :class:`NamespaceModel`."""
 
-from __future__ import annotations
-
 import dataclasses
 from typing import TYPE_CHECKING, Any
 

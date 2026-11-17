@@ -13,8 +13,6 @@ standard Python warnings machinery::
     warnings.filterwarnings("ignore", category=DomainPatternWarning)
 """
 
-from __future__ import annotations
-
 from collections import defaultdict
 from typing import TYPE_CHECKING
 

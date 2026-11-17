@@ -1,7 +1,5 @@
 """Human-readable text rendering of a :class:`NamespaceModel`."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from langgraph_events._namespace._model import NamespaceModel, _event_label, _node_class

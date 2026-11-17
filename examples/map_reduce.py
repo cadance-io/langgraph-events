@@ -12,8 +12,6 @@ Usage:
     python examples/map_reduce.py
 """
 
-from __future__ import annotations
-
 import asyncio
 
 from langchain_core.messages import HumanMessage, SystemMessage

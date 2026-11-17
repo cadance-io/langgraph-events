@@ -1,7 +1,5 @@
 """Protocol definitions for the AG-UI adapter layer."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:

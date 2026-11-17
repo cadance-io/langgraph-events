@@ -4,17 +4,12 @@ One model serves both: a handler parameter and a factory parameter bind by
 the same rules, and one evaluator gives their values in a node call.
 """
 
-from __future__ import annotations
-
 import inspect
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Generic,
     Literal,
-    TypeAlias,
-    TypeVar,
     assert_never,
 )
 
@@ -36,8 +31,6 @@ if TYPE_CHECKING:
 
     from langgraph_events._namespace import NamespaceModel
     from langgraph_events._reducer import Derived, Readable
-
-T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -105,12 +98,18 @@ class BoundFactory:
         return self.factory(*values[: self.positional], **keywords)
 
 
-ParamInput: TypeAlias = (
-    "ConfigInput | ContextInput | StoreInput | LogInput | ReflectionInput"
-    " | ReadableInput | ValueInput | BoundFactory"
+type ParamInput = (
+    ConfigInput
+    | ContextInput
+    | StoreInput
+    | LogInput
+    | ReflectionInput
+    | ReadableInput
+    | ValueInput
+    | BoundFactory
 )
 
-InputKind: TypeAlias = Literal[
+type InputKind = Literal[
     "config",
     "context",
     "store",
@@ -382,7 +381,7 @@ def _readable_value(
 
 
 @dataclass(frozen=True)
-class BoundDerived(Generic[T]):
+class BoundDerived[T]:
     """A :class:`Derived` of one graph, with each parameter bound to its
     input: a stored reducer, another ``Derived`` or the log.
 

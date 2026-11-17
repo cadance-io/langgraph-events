@@ -1,10 +1,8 @@
 """Built-in events for the AG-UI adapter."""
 
-from __future__ import annotations
-
 import uuid
 from dataclasses import field
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 from langgraph_events import IntegrationEvent
 from langgraph_events._event import Interrupted
@@ -47,10 +45,7 @@ class FrontendStateMutated(IntegrationEvent):
     state: dict[str, Any] = field(default_factory=dict)
 
 
-PayloadT = TypeVar("PayloadT")
-
-
-class InterruptedWithPayload(Interrupted, Generic[PayloadT]):
+class InterruptedWithPayload[PayloadT](Interrupted):
     """Typed-payload variant of ``Interrupted`` for HITL with a discriminated UI.
 
     HITL projects whose frontend needs an action-discriminated payload

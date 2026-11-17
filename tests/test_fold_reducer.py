@@ -1,7 +1,5 @@
 """Tests for FoldReducer — folds matching events into accumulating state."""
 
-from __future__ import annotations
-
 from conftest import Completed, Started
 from langgraph.checkpoint.memory import MemorySaver
 

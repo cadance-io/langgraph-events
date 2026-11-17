@@ -1,10 +1,8 @@
 """Shared fixtures and event classes for the test suite."""
 
 import dataclasses
-import sys
 import uuid
-from collections.abc import Awaitable, Iterator
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
@@ -20,19 +18,11 @@ from langgraph_events import (
     on,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Iterator
+
 # Registers the ``postgres_store`` fixture for every test module.
 pytest_plugins = ("_live_set_fixtures",)
-
-_WRAPS_SET_NAME_ERRORS = sys.version_info < (3, 12)
-"""CPython wrapped a failing ``__set_name__`` in RuntimeError until 3.12."""
-
-SET_NAME_ERRORS = RuntimeError if _WRAPS_SET_NAME_ERRORS else TypeError
-
-
-def set_name_cause(error: BaseException) -> BaseException:
-    """The error ``__set_name__`` raised, unwrapped on the Pythons that wrap it."""
-    return error.__cause__ if _WRAPS_SET_NAME_ERRORS else error
-
 
 _T = TypeVar("_T")
 
@@ -124,7 +114,7 @@ class Order(Namespace):
         class Rejected(DomainEvent):
             reason: str = ""
 
-        def place(self) -> "Order.Place.Placed | Order.Place.Rejected":
+        def place(self) -> Order.Place.Placed | Order.Place.Rejected:
             if self.customer_id == "banned":
                 return Order.Place.Rejected(reason="banned")
             return Order.Place.Placed(order_id="o1")

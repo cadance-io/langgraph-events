@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Automate the release process: bump version, update changelog, commit, tag."""
 
-from __future__ import annotations
-
 import argparse
 import re
 import subprocess

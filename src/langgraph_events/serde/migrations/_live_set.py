@@ -7,8 +7,6 @@ until a plan reads every checkpoint unchanged or the passes run out. Only
 that last plan decides the outcome.
 """
 
-from __future__ import annotations
-
 import enum
 import functools
 import sys

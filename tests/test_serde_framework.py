@@ -6,8 +6,6 @@ The fixtures hold bytes that real old releases wrote. Regenerate them with
 of ``v0_1_1`` and ``v0_5_0`` from the source tree of that release.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import re
 from pathlib import Path

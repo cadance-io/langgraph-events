@@ -4,8 +4,6 @@ Imports nothing from the package, so it is safe to import from any layer
 without a cycle — same contract as :mod:`langgraph_events._identity`.
 """
 
-from __future__ import annotations
-
 
 def normalize_exception_tuple(
     value: type[Exception] | tuple[type[Exception], ...], *, owner: str

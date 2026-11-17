@@ -1,7 +1,5 @@
 """The Reflection facade — deterministic queries over an EventLog."""
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING, Any
 
 from langgraph_events._reducer import StateRead

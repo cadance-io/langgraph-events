@@ -9,13 +9,10 @@ must keep a return annotation that resolves at run time.
 
 import contextlib
 import io
-from collections.abc import Iterator
-from pathlib import Path
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import pytest
 from conftest import Started
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import EventGraph, IntegrationEvent, on
@@ -27,6 +24,12 @@ from langgraph_events.serde.migrations import (
     TransformFields,
     rewrite_live_set,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
 def _graph(saver):

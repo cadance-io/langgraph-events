@@ -1,7 +1,6 @@
 """Event base class and built-in special events."""
 
-from __future__ import annotations
-
+import annotationlib
 import dataclasses
 import functools
 import inspect
@@ -455,8 +454,12 @@ def _validate_handle_signature(
             f"regular method (no @staticmethod / @classmethod)."
         )
     try:
-        sig = inspect.signature(handle)
-    except (TypeError, ValueError):
+        # STRING, not FORWARDREF: this runs at class creation. FORWARDREF
+        # tries the value format first, and Python caches a value that
+        # resolves. On a module reload, a name of the enclosing namespace
+        # still holds the previous class here, so the stale class stays.
+        sig = inspect.signature(handle, annotation_format=annotationlib.Format.STRING)
+    except TypeError, ValueError:
         return  # built-ins / C-implemented — skip silently
     params = list(sig.parameters.values())
     if not params or params[0].name != "self":
@@ -532,18 +535,21 @@ class Command(Event, _event_base=True, metaclass=_NestedEventMeta):
         # Checked first: the shape is wrong regardless of what the body
         # declares.
         _reject_command_subclassing(cls)
-        own_annotations = cls.__dict__.get("__annotations__", {})
+        own_annotations: dict[str, Any] = annotationlib.get_annotations(
+            cls, format=annotationlib.Format.FORWARDREF
+        )
         # Real (non-string) annotations can be judged directly and rejected
-        # before any dataclass processing. PEP 563 string annotations are
-        # deliberately NOT judged here — dataclasses resolves them through
-        # the module globals (handling e.g. module-level ClassVar aliases),
+        # before any dataclass processing. PEP 563 string annotations and
+        # unresolved forward references are deliberately NOT judged here —
+        # dataclasses resolves them through the module globals (handling
+        # e.g. module-level ClassVar aliases),
         # and a framework-side heuristic would risk rejecting spellings
         # dataclasses correctly accepts; those fall through to the
         # translation / dc_fields checks below, where dataclasses' own
         # verdict decides.
         for name in _RESERVED_MODIFIERS:
             ann = own_annotations.get(name)
-            if ann is None or isinstance(ann, str):
+            if ann is None or isinstance(ann, (str, annotationlib.ForwardRef)):
                 continue
             if ann is ClassVar or typing.get_origin(ann) is ClassVar:
                 continue

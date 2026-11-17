@@ -1,7 +1,5 @@
 """``RunScoped``: a service derived per run from the node's ``RunnableConfig``."""
 
-from __future__ import annotations
-
 import functools
 from dataclasses import dataclass
 from typing import Any, Protocol, Self, TypeVar, runtime_checkable
@@ -295,6 +293,23 @@ def describe_RunScoped():
                     EventGraph(
                         [handle], services=services_from({"model": RunScoped(broken)})
                     )
+
+            def when_the_annotation_is_evaluated_lazily():
+                def it_raises_a_type_error_naming_the_factory_and_the_cause():
+                    def broken(
+                        config: RunnableConfig,
+                    ) -> MissingModel:  # type: ignore[name-defined] # noqa: F821
+                        return _model_for(config)
+
+                    @on(Started)
+                    def handle(event: Started) -> None:
+                        pass
+
+                    with pytest.raises(TypeError, match=r"broken.*MissingModel"):
+                        EventGraph(
+                            [handle],
+                            services=services_from({"model": RunScoped(broken)}),
+                        )
 
         def when_the_factory_returns_another_type_than_the_field():
             @pytest.mark.parametrize(

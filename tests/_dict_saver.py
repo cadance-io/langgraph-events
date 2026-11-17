@@ -6,7 +6,11 @@ of the same id, or that ``put_writes`` replaces an ``__interrupt__`` write.
 The two flags turn each promise off.
 """
 
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import (  # noqa: TC003 - LangGraph reads the saver signatures
+    AsyncIterator,
+    Iterator,
+    Sequence,
+)
 from typing import Any
 
 from langgraph.checkpoint.base import (

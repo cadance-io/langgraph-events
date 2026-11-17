@@ -65,7 +65,7 @@ class Track(Namespace):
         class Played(DomainEvent):
             title: str = ""
 
-        def handle(self, current_strategy: str) -> "Track.Play.Played":
+        def handle(self, current_strategy: str) -> Track.Play.Played:
             return Track.Play.Played(title=self.title)
 
 

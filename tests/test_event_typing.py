@@ -11,8 +11,6 @@ ignore is itself an error, so an ignore only survives if what it silences is
 genuinely rejected.
 """
 
-from __future__ import annotations
-
 from typing import assert_type
 
 from langgraph_events import Event, HandlerReturn, IntegrationEvent

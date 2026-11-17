@@ -1,7 +1,5 @@
 """Tests for the migration gate: ``check``, its render and ``assert_migration_gate``."""
 
-from __future__ import annotations
-
 import dataclasses
 import json
 from typing import TYPE_CHECKING, Any, ClassVar

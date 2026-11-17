@@ -14,8 +14,6 @@ User-facing control is via ``AGUIAdapter(include_reducers=...)`` which
 accepts ``bool | list[str]``.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from langgraph_events._internal import _BASE_FIELDS

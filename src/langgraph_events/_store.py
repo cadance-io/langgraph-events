@@ -1,7 +1,5 @@
 """EventStore: maintain the checkpoints of one topology, with no services."""
 
-from __future__ import annotations
-
 import contextlib
 import functools
 from dataclasses import replace

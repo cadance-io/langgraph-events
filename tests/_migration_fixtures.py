@@ -1,8 +1,6 @@
 """Namespaces, targets and two-release fixtures shared by the migration
 tests: the gate, the baseline update and the CLI."""
 
-from __future__ import annotations
-
 import dataclasses
 import json
 from typing import TYPE_CHECKING, Any

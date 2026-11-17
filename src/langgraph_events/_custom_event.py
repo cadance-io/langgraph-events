@@ -4,8 +4,6 @@ These helpers provide an EventGraph-native way to emit LangGraph custom stream
 events from handlers without importing LangGraph callback APIs directly.
 """
 
-from __future__ import annotations
-
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from typing import Any

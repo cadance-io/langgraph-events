@@ -46,8 +46,6 @@ needs no key. Running ``main()`` needs the key::
     python examples/conversation.py
 """
 
-from __future__ import annotations
-
 import asyncio
 from typing import Any
 

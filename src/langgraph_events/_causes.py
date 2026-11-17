@@ -7,14 +7,12 @@ alias of one entry, the constructors of the tagged entries, and
 :func:`resolve`.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-CauseEntry: TypeAlias = tuple[Any, ...] | None
+CauseEntry = tuple[Any, ...] | None
 """One entry of the ``causes`` channel.
 
 - ``None``: a seed. The event came from outside.

@@ -1,12 +1,10 @@
 """Built-in AG-UI event mappers."""
 
-from __future__ import annotations
-
 import json
 import logging
 from collections.abc import Mapping, Sequence
 from functools import cache
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from ag_ui.core import (
     BaseEvent,
@@ -51,7 +49,6 @@ logger = logging.getLogger(__name__)
 _warned_classes: set[type] = set()
 _warned_extras: set[tuple[type, str]] = set()
 
-AGUIMessageT = TypeVar("AGUIMessageT", bound=BaseModel)
 
 TOOL_ERROR_STATUS = "error"
 """The LangChain ``ToolMessage.status`` value that marks a failed tool result.
@@ -137,7 +134,7 @@ def _declared_names(cls: type[BaseModel]) -> frozenset[str]:
     return frozenset(names)
 
 
-def _build_agui_message(
+def _build_agui_message[AGUIMessageT: BaseModel](
     cls: type[AGUIMessageT],
     source: BaseMessage,
     **fields: Any,

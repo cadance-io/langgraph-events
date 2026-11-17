@@ -6,8 +6,6 @@ single object. See the module docstring on :class:`NamespaceModel` for the full
 surface.
 """
 
-from __future__ import annotations
-
 from langgraph_events._namespace._model import NamespaceModel, View
 
 __all__ = ["NamespaceModel", "View"]

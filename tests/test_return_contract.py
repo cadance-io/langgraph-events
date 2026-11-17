@@ -9,8 +9,6 @@ The framework enforces handler return contracts at dispatch time:
   the shape-only check (``Event | None | Scatter``).
 """
 
-from __future__ import annotations
-
 import pytest
 from conftest import Order
 

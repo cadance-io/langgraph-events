@@ -6,8 +6,6 @@ thread. :func:`synthesize_legacy_payload` builds the bytes a prior release
 wrote.
 """
 
-from __future__ import annotations
-
 import uuid
 from typing import TYPE_CHECKING
 

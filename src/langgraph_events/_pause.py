@@ -5,8 +5,6 @@ writes one :class:`_PauseBudget` into the run's ``configurable``. The router
 and the retry loop read it from there.
 """
 
-from __future__ import annotations
-
 import dataclasses
 import time
 from typing import TYPE_CHECKING, Any, NamedTuple, cast

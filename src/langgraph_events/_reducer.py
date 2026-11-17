@@ -1,7 +1,5 @@
 """Reducer — generic LangGraph-native state channel for event-driven graphs."""
 
-from __future__ import annotations
-
 import inspect
 import operator
 import types
@@ -13,7 +11,6 @@ from typing import (
     TYPE_CHECKING,
     Annotated,
     Any,
-    Generic,
     Protocol,
     TypeVar,
     cast,
@@ -98,13 +95,9 @@ Use this so a reset event need not know the empty state's shape — and so
 T = TypeVar("T")
 
 
-def _last_write_wins(existing: object, new: T) -> T:
+def _last_write_wins[T](existing: object, new: T) -> T:
     """Binary operator that always takes the newer value."""
     return new
-
-
-E = TypeVar("E")
-"""The event type that a reducer reads."""
 
 
 def _union_args(hint: object) -> tuple[object, ...]:
@@ -393,13 +386,15 @@ class Readable(Protocol):
 
 
 @dataclass
-class Reducer(BaseReducer, Generic[E, T]):
+class Reducer[E, T](BaseReducer):
     """Maps events to contributions for a named LangGraph state channel.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on each
     matching event.  Its return value is merged into the state channel using
     the ``reducer`` function (defaults to ``operator.add`` for simple list
     concatenation).
+
+    The type parameter ``E`` is the event type that the reducer reads.
 
     Any LangGraph-compatible reducer can be used — e.g., ``add_messages``
     from ``langchain_core.messages`` for smart message deduplication.
@@ -480,13 +475,15 @@ class Reducer(BaseReducer, Generic[E, T]):
 
 
 @dataclass
-class ScalarReducer(BaseReducer, Generic[E, T]):
+class ScalarReducer[E, T](BaseReducer):
     """Last-write-wins reducer that injects a bare value instead of a list.
 
     The reducer filters events by ``event_type``, then calls ``fn`` on the
     last matching event.  The return value — including ``None`` — is injected
     directly into the handler.  Return ``SKIP`` from ``fn`` to signal no
     contribution and keep the channel at its current value.
+
+    The type parameter ``E`` is the event type that the reducer reads.
 
     Use a ``@runtime_checkable Protocol`` as ``event_type`` to match
     multiple event types structurally.
@@ -576,10 +573,6 @@ class ScalarReducer(BaseReducer, Generic[E, T]):
         return result if self.has_contributions(result) else self.default
 
 
-S = TypeVar("S")
-"""The accumulating state type a ``FoldReducer`` folds events into."""
-
-
 @runtime_checkable
 class Foldable(Protocol):
     """An event that knows how to fold itself into accumulating state.
@@ -614,13 +607,16 @@ class _Contributions:
 
 
 @dataclass
-class FoldReducer(BaseReducer, Generic[S]):
+class FoldReducer[S](BaseReducer):
     """Folds each matching event into a single accumulating state object.
 
     Where :class:`Reducer` appends and :class:`ScalarReducer` takes the last
     write, ``FoldReducer`` computes the next value from the *prior* state and
     the event — a left-fold.  Use it for counters, merging dicts, re-derived
     cursors, or any channel whose update depends on what came before.
+
+    The type parameter ``S`` is the accumulating state type that the reducer
+    folds events into.
 
     Each event owns its transition through ``fold(self, state)`` (mirroring
     :meth:`MessageEvent.as_messages`), so callers usually supply only the
@@ -719,7 +715,7 @@ class FoldReducer(BaseReducer, Generic[S]):
 
 
 @dataclass(frozen=True)
-class Derived(Generic[T]):
+class Derived[T]:
     """A value that a pure function computes from its inputs. It is not stored.
 
     Each parameter of ``fn`` is one input, and binds by the rule of a

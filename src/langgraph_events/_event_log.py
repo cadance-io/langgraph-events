@@ -1,11 +1,9 @@
 """EventLog — query interface over the event list."""
 
-from __future__ import annotations
-
 from dataclasses import dataclass
 from functools import cached_property
 from types import UnionType
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, get_args, overload
+from typing import TYPE_CHECKING, Any, TypeVar, get_args, overload
 
 from langgraph_events._causes import FRAMEWORK, NOT_RECORDED, dropped, resolve
 from langgraph_events._event import Event
@@ -91,7 +89,7 @@ class FrameworkEvent:
     ``Cancelled`` or ``Abandoned``. The event type names the mechanism."""
 
 
-CauseValue: TypeAlias = "Cause | UnknownCause | FrameworkEvent | None"
+type CauseValue = Cause | UnknownCause | FrameworkEvent | None
 """What :meth:`EventLog.cause` returns. ``None`` is a seed."""
 
 

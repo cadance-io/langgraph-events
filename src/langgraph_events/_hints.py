@@ -1,7 +1,6 @@
 """Resolve annotations, and test whether two annotations name the same type."""
 
-from __future__ import annotations
-
+import annotationlib
 import contextlib
 import functools
 import inspect
@@ -53,13 +52,17 @@ def _resolve_each_annotation(
     annotation lands in the hints. An unresolvable one lands in the errors,
     keyed by parameter name.
 
+    The annotations are read in the ``FORWARDREF`` format. A read of
+    ``__annotations__`` evaluates every lazy annotation at once, so one
+    undefined name raises ``NameError`` for all of them.
+
     Resolution uses the globals of the innermost wrapped function, exactly
     like the whole-function call, so the fallback never resolves a name the
     fast path would miss. A ``functools.wraps`` decorator copies the
     annotations but not the globals, so the wrapper's own module is wrong.
     """
     target = getattr(fn, "__func__", fn)
-    raw = getattr(target, "__annotations__", {})
+    raw = annotationlib.get_annotations(target, format=annotationlib.Format.FORWARDREF)
     globalns = getattr(inspect.unwrap(target), "__globals__", {})
     # ``get_type_hints`` puts a PEP 695 type parameter in scope for the
     # function that declares it. The probe declares none, so pass them as
@@ -140,7 +143,9 @@ def _open_parameters(fn: Callable[..., object]) -> tuple[inspect.Parameter, ...]
     while isinstance(target, functools.partial):
         bound.update(target.keywords)
         target = target.func
-    params = inspect.signature(fn).parameters.values()
+    params = inspect.signature(
+        fn, annotation_format=annotationlib.Format.FORWARDREF
+    ).parameters.values()
     return tuple(p for p in params if p.name not in bound)
 
 
@@ -185,9 +190,9 @@ class UnsettledTypeError(TypeError):
 
 
 def _alias_kinds() -> tuple[type, ...]:
-    """The classes of a type alias statement: ``typing.TypeAliasType`` on
-    Python 3.12 and later, and ``typing_extensions.TypeAliasType``."""
-    kinds = [getattr(typing, "TypeAliasType", None)]
+    """The classes of a type alias statement: ``typing.TypeAliasType`` and
+    ``typing_extensions.TypeAliasType``."""
+    kinds: list[object] = [typing.TypeAliasType]
     try:
         import typing_extensions  # noqa: PLC0415
     except ImportError:  # pragma: no cover - a dependency of langgraph

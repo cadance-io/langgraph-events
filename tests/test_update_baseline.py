@@ -1,7 +1,5 @@
 """Tests for ``update_baseline`` and ``hold_migration``."""
 
-from __future__ import annotations
-
 import json
 from typing import TYPE_CHECKING
 

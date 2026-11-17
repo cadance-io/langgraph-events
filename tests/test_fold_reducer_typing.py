@@ -10,8 +10,6 @@ A passing mypy run proves two things at once:
   the run only succeeds if the mismatch is genuinely rejected.
 """
 
-from __future__ import annotations
-
 from typing import assert_type
 
 from langgraph_events import Foldable, FoldReducer, IntegrationEvent

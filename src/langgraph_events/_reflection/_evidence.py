@@ -6,8 +6,6 @@ The recorded cause is a fact. Among the candidates, it never selects one: the
 querying agent correlates; this module only joins.
 """
 
-from __future__ import annotations
-
 import dataclasses
 from typing import TYPE_CHECKING
 

@@ -1,7 +1,5 @@
 """The strict parameter rules that handlers, factories and ``Derived`` share."""
 
-from __future__ import annotations
-
 import functools
 from dataclasses import dataclass
 from typing import Any

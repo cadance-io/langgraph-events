@@ -8,8 +8,6 @@ format, so causation-suffix renames or new emitters can't silently re-
 introduce the v11 parse error.
 """
 
-from __future__ import annotations
-
 from langgraph_events._mermaid import MermaidFlowchart
 
 

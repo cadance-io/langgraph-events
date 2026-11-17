@@ -1,7 +1,5 @@
 """MapperContext — shared state during one AG-UI stream."""
 
-from __future__ import annotations
-
 import dataclasses
 import logging
 from typing import TYPE_CHECKING

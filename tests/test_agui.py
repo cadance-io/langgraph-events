@@ -1,7 +1,5 @@
 """AG-UI adapter tests — BDD-style with real EventGraph, no HTTP."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging

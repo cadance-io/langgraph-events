@@ -4,8 +4,6 @@ Module-level so the serde's identity walk resolves it, and so inline handler
 return annotations resolve at runtime. See tests/test_lifetimes.py.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from langgraph_events import (

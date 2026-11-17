@@ -1,8 +1,6 @@
 """The ``@on`` decorator and handler metadata extraction."""
 
-from __future__ import annotations
-
-import asyncio
+import annotationlib
 import inspect
 import typing
 from collections import abc
@@ -52,7 +50,7 @@ def _validate_invariants(
                 f"@on() invariants= predicate for {inv_cls.__name__!r} must "
                 f"be callable, got {pred!r}"
             )
-        if asyncio.iscoroutinefunction(pred):
+        if inspect.iscoroutinefunction(pred):
             raise TypeError(
                 f"@on() invariants= predicate for {inv_cls.__name__!r} must "
                 f"be sync, got async function {pred.__qualname__!r}"
@@ -84,7 +82,7 @@ def _infer_event_type(fn: Callable[..., object]) -> type[Event]:
     modes (missing parameter, missing annotation, non-``Event`` type, Union).
     """
     hints, hint_errors = _resolve_hints_and_errors(fn)
-    sig = inspect.signature(fn)
+    sig = inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
     params = [p for p in sig.parameters if p != "self"]
     if not params:
         raise TypeError(
@@ -499,7 +497,7 @@ class HandlerMeta:
             (name, matcher, isinstance(matcher, type))
             for name, matcher in raw_field_matchers.items()
         )
-        sig = inspect.signature(fn)
+        sig = inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
         field_inject_params = frozenset(
             name for name in sig.parameters if name in raw_field_matchers
         )
@@ -529,7 +527,7 @@ class HandlerMeta:
             fn=fn,
             event_types=tuple(event_types),
             previous_names=getattr(fn, "_previous_names", ()),
-            is_async=asyncio.iscoroutinefunction(fn),
+            is_async=inspect.iscoroutinefunction(fn),
             params=tuple(params),
             field_matchers=field_matchers,
             field_inject_params=field_inject_params,

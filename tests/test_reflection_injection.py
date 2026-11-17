@@ -1,7 +1,5 @@
 """Tests for injecting Reflection into handlers by parameter annotation."""
 
-from __future__ import annotations
-
 from langgraph_events import (
     Command,
     DomainEvent,

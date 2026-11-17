@@ -1,13 +1,12 @@
 """AGUIAdapter — core orchestrator mapping EventGraph streams to AG-UI events."""
 
-from __future__ import annotations
-
+import annotationlib
 import copy
 import inspect
 import logging
 import uuid
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from ag_ui.core import (
     BaseEvent,
@@ -78,8 +77,6 @@ if TYPE_CHECKING:
     from ._protocols import EventMapper, ResumeFactory, SeedFactory
 
 
-_T = TypeVar("_T")
-
 _SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
 """The ``configurable`` keys that a client cannot set. They choose a checkpoint."""
 
@@ -96,13 +93,13 @@ class _FactoryRefusalError(Exception):
         self.refusal = refusal
 
 
-async def _call_factory(
-    factory: Callable[..., _T | Awaitable[_T]],
+async def _call_factory[T](
+    factory: Callable[..., T | Awaitable[T]],
     input_data: RunAgentInput,
     checkpoint_state: CheckpointState | None,
     *,
     accepts_state: bool,
-) -> _T:
+) -> T:
     """Call a sync or async seed or resume *factory*.
 
     A ``RunRefusedError`` from the factory leaves as ``_FactoryRefusalError``.
@@ -255,7 +252,11 @@ class AGUIAdapter:
     @staticmethod
     def _accepts_extra_positional(fn: Callable[..., object]) -> bool:
         """Whether *fn* accepts a second positional arg (checkpoint state)."""
-        parameters = tuple(inspect.signature(fn).parameters.values())
+        parameters = tuple(
+            inspect.signature(
+                fn, annotation_format=annotationlib.Format.FORWARDREF
+            ).parameters.values()
+        )
         if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in parameters):
             return True
         positional = [

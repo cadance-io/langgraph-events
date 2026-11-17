@@ -8,8 +8,6 @@ Two symmetric rules:
   Command-private outcomes are off-limits.
 """
 
-from __future__ import annotations
-
 from typing import Any, TypeVar
 
 import pytest

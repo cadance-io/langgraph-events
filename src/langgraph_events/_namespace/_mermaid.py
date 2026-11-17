@@ -1,7 +1,5 @@
 """Mermaid diagram rendering of a :class:`NamespaceModel`."""
 
-from __future__ import annotations
-
 import difflib
 from collections import defaultdict
 from dataclasses import dataclass, replace

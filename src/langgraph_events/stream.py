@@ -8,8 +8,6 @@ stays focused on event-authoring vocabulary (``Event``, ``@on``,
     from langgraph_events.stream import LLMToken, StreamFrame
 """
 
-from __future__ import annotations
-
 from langgraph_events._graph import (
     CustomEventFrame,
     InterruptFrame,

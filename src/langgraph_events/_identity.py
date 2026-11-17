@@ -6,8 +6,6 @@ never drift apart. Pure string transform — imports nothing from the package, s
 it is safe to import from any layer without a cycle.
 """
 
-from __future__ import annotations
-
 from typing import NamedTuple
 
 

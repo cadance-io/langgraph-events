@@ -1,7 +1,5 @@
 """Tests for Reflection — deterministic query surface over the event log."""
 
-from __future__ import annotations
-
 from conftest import Order, Started, strip_channels
 from langgraph.checkpoint.memory import MemorySaver
 

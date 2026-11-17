@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: the library requires Python 3.14 or later.** Python 3.11, 3.12 and 3.13
+  are no longer supported. CI tests on Python 3.14 only. See #251.
+- The public `CauseValue` is now a `type` alias, a `typing.TypeAliasType`. Before, its value
+  was a string. Read its members through `CauseValue.__value__`. See #251.
+
+### Fixed
+
+- A handler, a `RunScoped` factory or an event class in a module without
+  `from __future__ import annotations` now gets the same result per annotation as one with
+  it. Python 3.14 evaluates such annotations lazily. A read of `__annotations__` or of
+  `inspect.signature` then raised `NameError` on one undefined name. The error report per
+  parameter of #183 and the check of event fields for nested pydantic models now read each
+  annotation on its own. An inline `Command.handle` whose annotation names its enclosing
+  `Namespace` no longer raises `NameError` at class creation. The check of that `handle` no
+  longer evaluates its annotations, so a module reload does not keep the previous class in
+  them. A `RunScoped` factory wrapped
+  in `functools.cache` keeps its return annotation. See #251.
+- The graph build no longer emits a `DeprecationWarning` for
+  `asyncio.iscoroutinefunction` on Python 3.14. The library calls
+  `inspect.iscoroutinefunction` instead.
+
 ## [0.51.1] - 2026-11-17
 
 ### Changed

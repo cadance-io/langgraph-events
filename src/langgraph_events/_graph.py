@@ -1,7 +1,5 @@
 """EventGraph — the main entry point for building event-driven graphs."""
 
-from __future__ import annotations
-
 import dataclasses
 import functools
 import inspect

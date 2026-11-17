@@ -1,7 +1,5 @@
 """Tests for AG-UI ResumeFactory helpers in `langgraph_events.agui`."""
 
-from __future__ import annotations
-
 import json
 from typing import Any
 

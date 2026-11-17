@@ -1,7 +1,5 @@
 """Tests for EventGraph.namespaces() — code-derived NamespaceModel and renderers."""
 
-from __future__ import annotations
-
 import json
 from typing import ClassVar
 

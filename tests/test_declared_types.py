@@ -1,14 +1,11 @@
 """Declared types: each source declares its type, and a reader names it exactly."""
 
-from __future__ import annotations
-
 import dataclasses
 import typing
 from collections import abc
 from typing import Annotated, Any, Literal, NewType, Optional, TypeVar
 
 import pytest
-import typing_extensions as te
 from langchain_core.messages import BaseMessage  # noqa: TC002 - read at graph build
 from langchain_core.runnables import (
     RunnableConfig,  # noqa: TC002 - a factory annotation resolves at graph build
@@ -453,9 +450,9 @@ def describe_the_type_of_message_reducer():
         assert status == 0, stdout
 
 
-_Alias = te.TypeAliasType("_Alias", int | str)
+type _Alias = int | str
 _GenericItem = TypeVar("_GenericItem")
-_ListOf = te.TypeAliasType("_ListOf", list[_GenericItem], type_params=(_GenericItem,))
+type _ListOf[_GenericItem] = list[_GenericItem]
 
 
 def describe_the_normalization_of_nested_forms():
@@ -495,11 +492,11 @@ _Item = TypeVar("_Item")
 _Kind = TypeVar("_Kind")
 
 
-class _Tagged(ScalarReducer[Set, int], typing.Generic[_Key]):
+class _Tagged[Key](ScalarReducer[Set, int]):
     pass
 
 
-class _Swapped(ScalarReducer[_Kind, _Item], typing.Generic[_Item, _Kind]):
+class _Swapped[Item, Kind](ScalarReducer[Kind, Item]):
     pass
 
 

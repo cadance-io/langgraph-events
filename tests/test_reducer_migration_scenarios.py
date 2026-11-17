@@ -27,8 +27,6 @@ demonstrates ``replay_reducer`` — the documented recovery path for
 every silent-fail case.
 """
 
-from __future__ import annotations
-
 import dataclasses
 from typing import Any
 

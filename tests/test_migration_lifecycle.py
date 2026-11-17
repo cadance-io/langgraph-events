@@ -10,7 +10,10 @@ import os
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _TARGET = """\
 import os
@@ -93,7 +96,7 @@ _SURVIVOR = "transform app.graph:Ordered via app.graph:drop_legacy_total"
 class _Release:
     """One release: a source tree under *root* with its own baseline file."""
 
-    def __init__(self, root: Path, events: str, url: str, previous: "_Release | None"):
+    def __init__(self, root: Path, events: str, url: str, previous: _Release | None):
         self.root = root
         self.url = url
         app = root / "app"

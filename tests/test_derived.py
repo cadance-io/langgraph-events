@@ -1,7 +1,5 @@
 """Derived reducers: a value computed from other reducers, never stored."""
 
-from __future__ import annotations
-
 import functools
 from typing import Any
 

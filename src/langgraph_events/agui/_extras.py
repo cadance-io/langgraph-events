@@ -6,8 +6,6 @@ collector live here rather than in ``_mappers``, which imports ``ag_ui`` at
 module level.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from typing import TYPE_CHECKING, Any

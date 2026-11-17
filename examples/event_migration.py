@@ -20,8 +20,6 @@ Usage::
     uv run python examples/event_migration.py
 """
 
-from __future__ import annotations
-
 from langgraph.checkpoint.memory import MemorySaver
 
 from langgraph_events import Command, DomainEvent, EventGraph, Namespace

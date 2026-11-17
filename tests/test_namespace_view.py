@@ -1,7 +1,5 @@
 """Tests for the reducer view of a NamespaceModel and the focused mermaid diagram."""
 
-from __future__ import annotations
-
 import json
 import re
 from typing import Any, ClassVar, Protocol, runtime_checkable

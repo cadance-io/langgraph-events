@@ -17,8 +17,6 @@ Usage:
     python examples/expense_approval.py
 """
 
-from __future__ import annotations
-
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel, Field

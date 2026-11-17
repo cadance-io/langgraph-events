@@ -5,8 +5,6 @@ identity. :func:`synthesize_legacy_payload` is the public byte assembly
 behind it.
 """
 
-from __future__ import annotations
-
 import dataclasses
 from typing import TYPE_CHECKING, Any
 
@@ -151,7 +149,7 @@ def _placeholder_kwargs(
     """
     try:
         obj = _resolve_identity(module, qualname, scope=scope)
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         return {}
     if not dataclasses.is_dataclass(obj):
         return {}
