@@ -1,9 +1,6 @@
 """Tests for inline command handlers (``Command.handle`` + auto-registration)."""
 
-from __future__ import annotations
-
 import re
-import textwrap
 from typing import ClassVar
 from typing import ClassVar as CV  # noqa: N817 — alias spelling is under test
 
@@ -505,7 +502,9 @@ def describe_Command_handle():
                 # field has no class attribute, so invariant enforcement
                 # would silently vanish. That stdlib error must also not
                 # surface as a chained cause — it would display the very
-                # advice the guard exists to override.
+                # advice the guard exists to override. This module has lazy
+                # annotations, so the guard judges a real type object before
+                # dataclass processing.
                 with pytest.raises(
                     TypeError, match=r"'invariants'.*ClassVar"
                 ) as excinfo:
@@ -518,32 +517,6 @@ def describe_Command_handle():
                                 return None
 
                 assert excinfo.value.__cause__ is None
-
-            def when_the_module_evaluates_annotations_eagerly():
-                def it_rejects_before_dataclass_processing():
-                    # Without ``from __future__ import annotations`` the
-                    # annotation is a real type object, so the guard judges
-                    # it directly — the error must not arrive as a chained
-                    # translation of dataclasses' mutable-default ValueError.
-                    src = textwrap.dedent(
-                        """
-                        class _EagerAnn(Namespace):
-                            class Cmd(Command):
-                                invariants: dict = {}
-
-                                def handle(self) -> None:
-                                    return None
-                        """
-                    )
-                    # dont_inherit: without it the exec'd code inherits this
-                    # module's deferred-annotations future flag.
-                    code = compile(src, "<eager>", "exec", dont_inherit=True)
-                    ns = {"Namespace": Namespace, "Command": Command}
-                    with pytest.raises(
-                        TypeError, match=r"'invariants'.*ClassVar"
-                    ) as excinfo:
-                        exec(code, ns)  # noqa: S102
-                    assert excinfo.value.__cause__ is None
 
     def describe_previously_class_attribute():
         # ``previously`` mirrors ``raises``/``invariants`` as a class-level
@@ -750,13 +723,14 @@ def describe_Command_handle():
 
         def when_classvar_is_imported_under_a_module_level_alias():
             def it_accepts_the_aliased_annotation():
-                # dataclasses resolves PEP 563 string annotations through
-                # the module globals, so ``CV`` is a working ClassVar
-                # spelling — the reserved-modifier guard must not
-                # second-guess dataclasses and reject it.
+                # dataclasses resolves a string annotation through the
+                # module globals, so ``CV`` is a working ClassVar spelling —
+                # the reserved-modifier guard must not second-guess
+                # dataclasses and reject it. The quotes stand for a client
+                # module with ``from __future__ import annotations``.
                 class _Aliased(Namespace):
                     class Cmd(Command):
-                        previously: CV = ("legacy_aliased",)
+                        previously: "CV" = ("legacy_aliased",)  # noqa: UP037
 
                         def handle(self) -> None:
                             return None

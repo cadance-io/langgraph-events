@@ -1,7 +1,5 @@
 """Tests for ``langgraph_events.serde`` — namespace-aware checkpoint serde."""
 
-from __future__ import annotations
-
 import contextlib
 import dataclasses
 import warnings
@@ -643,6 +641,15 @@ class _SiblingRefPayloadNs(Namespace):
         cfg: _ModelHolder.Cfg | None = None
 
 
+class _UnresolvableRefPayloadNs(Namespace):
+    """A field typed with a name that no scope defines. The lazy annotations
+    of this module raise NameError on a read of the whole class."""
+
+    class Placed(DomainEvent):
+        other: _NowhereDefined | None = None  # type: ignore[name-defined] # noqa: F821
+        cfg: _ModelHolder.Cfg | None = None
+
+
 _FRAMEWORK_RENAME_SOURCES = frozenset(
     (op.old_module, op.old_qualname)
     for migration in FRAMEWORK_MIGRATIONS
@@ -1139,6 +1146,11 @@ def describe_NamespaceAwareSerde():
             def it_still_finds_the_nested_model():
                 with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
                     NamespaceAwareSerde(namespaces=(_SiblingRefPayloadNs,))
+
+        def when_an_unresolvable_name_sits_beside_a_nested_model():
+            def it_still_finds_the_nested_model():
+                with pytest.raises(ValueError, match=r"_ModelHolder\.Cfg"):
+                    NamespaceAwareSerde(namespaces=(_UnresolvableRefPayloadNs,))
 
         def when_constructor_allowlist_explicitly_admits_a_type():
             # Asymmetric guard that actually proves delegation: with strict

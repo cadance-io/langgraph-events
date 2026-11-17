@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import annotationlib
 import dataclasses
 import functools
 import inspect
 import typing
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from langgraph_events._handler import (
     BoundHandler,
@@ -40,8 +41,6 @@ if TYPE_CHECKING:
     from langgraph_events._handler import HandlerMeta
     from langgraph_events._reducer import Readable
 
-T = TypeVar("T")
-
 
 def _missing_return_annotation(
     factory: Callable[..., object], source: Callable[..., Any]
@@ -69,7 +68,7 @@ def _missing_return_annotation(
 
 
 @dataclass(frozen=True)
-class RunScoped(Generic[T]):
+class RunScoped[T]:
     """A service that a factory builds once per node call.
 
     Give the ``services=`` object a field typed ``RunScoped[T]`` that holds
@@ -134,7 +133,10 @@ class RunScoped(Generic[T]):
         source = _annotation_source(self.factory)
         if isinstance(source, type):
             return
-        if "return" not in getattr(source, "__annotations__", {}):
+        annotations = annotationlib.get_annotations(
+            source, format=annotationlib.Format.FORWARDREF
+        )
+        if "return" not in annotations:
             raise TypeError(_missing_return_annotation(self.factory, source))
 
     def _label(self, name: str) -> str:

@@ -50,7 +50,7 @@ _MESSAGES = ScalarReducer[SampleEvent, Any](
 # decoration, when the name does not exist yet. Resolution must be retried at
 # graph build, when it does. See issue #183 review.
 @on
-def _forward_ref_handler(event: SampleEvent, dep: "LateService") -> None:
+def _forward_ref_handler(event: SampleEvent, dep: LateService) -> None:
     return None
 
 
@@ -837,6 +837,41 @@ def describe_partial_hint_resolution():
             assert "'dep'" in message
             assert "MissingDep" in message
             assert "'log'" not in message
+
+        def when_the_annotation_is_evaluated_lazily():
+            # This module has no ``from __future__ import annotations``. A
+            # read of ``__annotations__`` evaluates every annotation, so one
+            # undefined name raised NameError for the whole handler.
+
+            def it_names_the_failing_parameter_in_the_unclaimed_error():
+                @on(SampleEvent)
+                def handler(
+                    event: SampleEvent,
+                    log: EventLog,
+                    dep: MissingDep,  # type: ignore[name-defined] # noqa: F821
+                ) -> None:
+                    pass
+
+                with warnings.catch_warnings(record=True):
+                    warnings.simplefilter("always")
+                    with pytest.raises(TypeError) as exc:
+                        EventGraph([handler])
+
+                message = str(exc.value)
+                assert "'dep'" in message
+                assert "MissingDep" in message
+                assert "'log'" not in message
+
+            def it_infers_the_event_type_from_the_first_parameter():
+                def undecorated(
+                    event: SampleEvent,
+                    dep: MissingDep,  # type: ignore[name-defined] # noqa: F821
+                ) -> None:
+                    pass
+
+                handler = on(undecorated)
+
+                assert handler._event_types == (SampleEvent,)  # type: ignore[attr-defined]
 
     def when_a_name_is_declared_after_the_handler():
         # A failed resolution must not be cached. The name exists by the time

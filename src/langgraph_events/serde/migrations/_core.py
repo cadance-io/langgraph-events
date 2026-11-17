@@ -8,7 +8,7 @@ prior library versions — this is a read-side affordance only. See #70.
 
 from __future__ import annotations
 
-import contextlib
+import annotationlib
 import dataclasses
 import enum
 import functools
@@ -986,7 +986,7 @@ def _validate_split_target(
         resolved = _resolve_identity(
             target.__module__, target.__qualname__, scope=scope
         )
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         resolved = None
     if resolved is not target:
         raise ValueError(
@@ -1249,7 +1249,7 @@ def _resolves(
     as it does to the read path."""
     try:
         _resolve_identity(module, qualname, scope=scope)
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         return False
     return True
 
@@ -1747,38 +1747,19 @@ def _field_hints(cls: type) -> dict[str, Any]:
     """Resolved annotation per dataclass field of *cls*.
 
     Restricted to ``dataclasses.fields()``: a ``ClassVar`` or ``InitVar``
-    is never checkpointed, so it must not be checked. A forward
-    reference that cannot resolve is skipped one field at a time, not
-    one class at a time, and never raises here. The event class is the
+    is never checkpointed, so it must not be checked. A name that cannot
+    resolve stays a ``ForwardRef`` in the ``FORWARDREF`` format, so it
+    hides one field only, not the class. The event class is the
     caller's. This check must not turn its own annotation problem into
     a serde build failure.
     """
     if not is_dataclass(cls):
         return {}
     names = {f.name for f in fields(cls)}
-    localns = _enclosing_names(cls)
-    try:
-        hints = typing.get_type_hints(cls, localns=localns)
-    except (NameError, TypeError):
-        hints = _hints_per_field(cls, localns)
+    hints = typing.get_type_hints(
+        cls, localns=_enclosing_names(cls), format=annotationlib.Format.FORWARDREF
+    )
     return {name: tp for name, tp in hints.items() if name in names}
-
-
-def _hints_per_field(cls: type, localns: dict[str, Any]) -> dict[str, Any]:
-    """Fallback for :func:`_field_hints` when ``get_type_hints`` fails
-    as a whole: evaluate each annotation on its own and skip the ones
-    that fail, so one bad forward reference hides one field only."""
-    module = sys.modules.get(cls.__module__)
-    globalns = vars(module) if module is not None else {}
-    hints: dict[str, Any] = {}
-    for klass in reversed(cls.__mro__):
-        for name, raw in getattr(klass, "__annotations__", {}).items():
-            if not isinstance(raw, str):
-                hints[name] = raw
-                continue
-            with contextlib.suppress(Exception):
-                hints[name] = eval(raw, globalns, localns)  # noqa: S307
-    return hints
 
 
 def _unimportable_payload_models(
@@ -2018,14 +1999,13 @@ def _unreachable_migrate_from_siblings(
 
 
 V_co = TypeVar("V_co", covariant=True)
-V = TypeVar("V")
 
 
 class _Replayable(Protocol[V_co]):
     def seed(self, events: list[Event]) -> V_co: ...
 
 
-def replay_reducer(reducer: _Replayable[V], events: Iterable[Event]) -> V:
+def replay_reducer[V](reducer: _Replayable[V], events: Iterable[Event]) -> V:
     """Rebuild a reducer's channel value from *events*.
 
     Use after a reducer's projection function or output shape changed

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import annotationlib
 import contextlib
 import inspect
 from dataclasses import dataclass
@@ -168,7 +169,9 @@ class MigrationTarget:
                 revive.
         """
         try:
-            inspect.signature(self.graph).bind(saver)
+            inspect.signature(
+                self.graph, annotation_format=annotationlib.Format.FORWARDREF
+            ).bind(saver)
         except TypeError as error:
             raise TargetError(
                 f"The graph factory of the target cannot take a checkpointer: "
