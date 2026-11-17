@@ -66,6 +66,11 @@ EXT_NAMESPACE_AWARE_EVENT = 100
 # the wrapped value — LangGraph's generic dataclass path uses ``_msgpack_enc``
 # which is hardcoded to ``default=_msgpack_default`` and would bypass us.
 EXT_INTERRUPT = 101
+# A ``FoldReducer`` channel write. LangGraph stores it as a pending write when
+# a sibling task interrupts or fails in the same superstep. Upstream's
+# dataclass path would encode its events by ``__name__``, so a nested event
+# would not revive.
+EXT_FOLD_CONTRIBUTIONS = 102
 
 # The dataclass ``TypeError`` for a kwarg the class does not declare.
 # ``_revival_remedy`` and the revive gate's failure hint both read the
@@ -322,6 +327,11 @@ def _make_default(
                 EXT_INTERRUPT,
                 ormsgpack.packb(fields, default=_default, option=_option),
             )
+        if isinstance(obj, _Contributions):
+            return ormsgpack.Ext(
+                EXT_FOLD_CONTRIBUTIONS,
+                ormsgpack.packb(obj.events, default=_default, option=_option),
+            )
         return _msgpack_default(obj)
 
     return _default
@@ -412,6 +422,12 @@ def _make_ext_hook(
                     f"new fields."
                 )
                 raise
+        if code == EXT_FOLD_CONTRIBUTIONS:
+            return _Contributions(
+                ormsgpack.unpackb(
+                    data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+                )
+            )
         if code == EXT_CONSTRUCTOR_KW_ARGS and _library_event_record(
             data, tables, scope
         ):
@@ -537,6 +553,7 @@ def _library_event_record(
 
 
 from langgraph_events._event import Event  # noqa: E402  (avoid circular import order)
+from langgraph_events._reducer import _Contributions  # noqa: E402
 from langgraph_events._warn import warn_user  # noqa: E402
 
 

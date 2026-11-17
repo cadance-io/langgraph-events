@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `FoldReducer` write that a checkpoint stores as a pending write now revives a nested
+  event. A pending write is the write of a task that completed in a superstep where a
+  sibling task interrupted or failed. `NamespaceAwareSerde` encoded the wrapper of the fold
+  events through the LangGraph dataclass path, which stores each event by `__name__`. An
+  event nested in a `Namespace` then revived as `None` or a `dict`, and the fold raised
+  `AttributeError` on resume. The serde now stores the wrapper under its own ext code, and
+  revives each event by qualname. A `Reducer` list and a `ScalarReducer` value did not have
+  this defect. A pending write that 0.51.0 or older stored keeps its old form: a module-level
+  event in it revives, and a nested event in it does not.
+
 ## [0.51.0] - 2026-11-17
 
 ### Breaking

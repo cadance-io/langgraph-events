@@ -4050,3 +4050,111 @@ def describe_record_reads():
         serde.loads_typed(synthesize_legacy_payload(mod, "_Rec.Old", {}))
 
         assert reads == []
+
+
+# Fixtures for the pending reducer writes. A pending write is the write of a
+# task that completed in a superstep where a sibling task interrupted. The
+# checkpoint stores it, and the resume reads it back through the serde.
+class Tally(Namespace):
+    class Bumped(DomainEvent):
+        by: int = 1
+
+        def fold(self, state: dict[str, int]) -> dict[str, int]:
+            return {"n": state["n"] + self.by}
+
+
+class _TallyPause(Interrupted):
+    pass
+
+
+class _TallyGo(IntegrationEvent):
+    pass
+
+
+@on(Started)
+def _tally_pause(event: Started) -> _TallyPause:
+    return _TallyPause()
+
+
+@on(Started)
+def _tally_bump(event: Started) -> Tally.Bumped:
+    return Tally.Bumped(by=3)
+
+
+def _resume_beside_a_pause(reducer: Any, reader: Any) -> None:
+    """Runs ``_tally_bump`` beside ``_tally_pause`` in one superstep, then
+    resumes. The reducer write of ``_tally_bump`` waits in the checkpoint."""
+    saver = MemorySaver(serde=NamespaceAwareSerde())
+    graph = EventGraph(
+        [_tally_pause, _tally_bump, reader], reducers=[reducer], checkpointer=saver
+    )
+    cfg = {"configurable": {"thread_id": "pending-reducer-write"}}
+    graph.invoke(Started(data="x"), config=cfg)
+    assert graph.get_state(cfg).is_interrupted
+    graph.resume(_TallyGo(), config=cfg)
+
+
+def describe_pending_reducer_write():
+
+    def when_a_namespaced_event_waits_beside_an_interrupt():
+
+        def it_folds_the_revived_event_into_a_FoldReducer():
+            from langgraph_events import FoldReducer
+
+            seen: list[dict[str, int]] = []
+
+            @on(_TallyGo)
+            def read(event: _TallyGo, tally: dict[str, int]) -> None:
+                seen.append(tally)
+
+            tally = FoldReducer[dict[str, int]](
+                name="tally", event_type=Tally.Bumped, default_factory=lambda: {"n": 0}
+            )
+            _resume_beside_a_pause(tally, read)
+
+            assert seen == [{"n": 3}]
+
+        def it_appends_the_revived_event_to_a_Reducer_list():
+            from langgraph_events import Reducer
+
+            seen: list[list[Tally.Bumped]] = []
+
+            @on(_TallyGo)
+            def read(event: _TallyGo, tally: list[Tally.Bumped]) -> None:
+                seen.append(tally)
+
+            tally = Reducer[Tally.Bumped, Tally.Bumped](
+                name="tally", event_type=Tally.Bumped, fn=lambda e: [e]
+            )
+            _resume_beside_a_pause(tally, read)
+
+            assert seen == [[Tally.Bumped(by=3)]]
+
+        def it_stores_the_revived_event_as_a_ScalarReducer_value():
+            from langgraph_events import ScalarReducer
+
+            seen: list[Tally.Bumped] = []
+
+            @on(_TallyGo)
+            def read(event: _TallyGo, tally: Tally.Bumped) -> None:
+                seen.append(tally)
+
+            tally = ScalarReducer[Tally.Bumped, Tally.Bumped](
+                name="tally", event_type=Tally.Bumped, fn=lambda e: e
+            )
+            _resume_beside_a_pause(tally, read)
+
+            assert seen == [Tally.Bumped(by=3)]
+
+    def when_LangGraph_stored_the_FoldReducer_write():
+
+        def it_revives_a_module_level_event_through_LangGraph():
+            from langgraph_events._reducer import _Contributions
+
+            stored = JsonPlusSerializer().dumps_typed(
+                _Contributions([Started(data="x")])
+            )
+
+            revived = NamespaceAwareSerde().loads_typed(stored)
+
+            assert revived == _Contributions([Started(data="x")])
