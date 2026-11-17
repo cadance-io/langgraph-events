@@ -400,6 +400,8 @@ ROLLBACK_FROM_041 = (
 serde = NamespaceAwareSerde(ROLLBACK_FROM_041, namespaces=[Order])
 ```
 
+A rollback to 0.51.0 or older also loses each pending `FoldReducer` write of a later release. A pending write is the write of a task that completed in a superstep where a sibling task interrupted or failed. The later release stores the fold write under an ext code that the older serde does not know. The older serde reads it as `None`, and the fold then replaces its state with `None`, with no error. A read migration cannot fix this. Before the rollback, resume or abandon each thread paused with a pending `FoldReducer` write.
+
 ## What is not migrated
 
 - **A non-Event payload**, such as a Pydantic model, a plain dataclass or a LangGraph `Interrupt` wrapper, goes through LangGraph's default serde. An event nested inside `Interrupt.value` is migrated. A Pydantic model used as an event field must live at module scope. LangGraph's serde stores it by `__name__` and revives it with `getattr` on the module. On a miss it returns a raw `dict` with no error. `NamespaceAwareSerde` raises `ValueError` at construction for a model nested inside a class or a function. A model held behind `Any` or an untyped container is not reachable from an annotation and is not checked.

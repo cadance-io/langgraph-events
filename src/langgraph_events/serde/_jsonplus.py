@@ -428,6 +428,14 @@ def _make_ext_hook(
                     data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
                 )
             )
+        if code == EXT_CONSTRUCTOR_KW_ARGS and _legacy_contributions(data):
+            # 0.51.0 or older let LangGraph store the wrapper. Unpack it
+            # through this hook, so LangGraph's allowlist cannot demote it to
+            # a dict that the fold merge takes as its state.
+            _module, _name, kwargs = ormsgpack.unpackb(
+                data, ext_hook=_ext_hook, option=ormsgpack.OPT_NON_STR_KEYS
+            )
+            return _Contributions(kwargs["events"])
         if code == EXT_CONSTRUCTOR_KW_ARGS and _library_event_record(
             data, tables, scope
         ):
@@ -521,6 +529,20 @@ def _make_ext_hook(
             raise
 
     return _ext_hook
+
+
+def _legacy_contributions(data: bytes) -> bool:
+    """*data*, a LangGraph constructor record, holds a ``FoldReducer`` write
+    that 0.51.0 or older stored."""
+    record = ormsgpack.unpackb(
+        data, ext_hook=lambda _code, _payload: None, option=ormsgpack.OPT_NON_STR_KEYS
+    )
+    return (
+        isinstance(record, list)
+        and len(record) == 3
+        and record[0] == _Contributions.__module__
+        and record[1] == _Contributions.__qualname__
+    )
 
 
 def _library_event_record(

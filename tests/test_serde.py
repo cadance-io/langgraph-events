@@ -29,6 +29,10 @@ from langgraph_events import (
     Resumed,
     on,
 )
+
+# The private wrapper of a ``FoldReducer`` write: the pending-write tests
+# compare a revived value with it.
+from langgraph_events._reducer import _Contributions
 from langgraph_events.serde import NamespaceAwareSerde, synthesize_legacy_payload
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
 
@@ -37,6 +41,7 @@ from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
 # public ``synthesize_legacy_payload`` (single top-level event) doesn't
 # cover. This is the one intentional private-symbol import in the suite.
 from langgraph_events.serde._jsonplus import (
+    EXT_FOLD_CONTRIBUTIONS,
     EXT_INTERRUPT,
     EXT_NAMESPACE_AWARE_EVENT,
     UnrevivedIdentity,
@@ -4094,6 +4099,25 @@ def _resume_beside_a_pause(reducer: Any, reader: Any) -> None:
     graph.resume(_TallyGo(), config=cfg)
 
 
+def _pending_fold_write(
+    module: str, qualname: str, kwargs: dict[str, Any]
+) -> tuple[str, bytes]:
+    """A stored ``FoldReducer`` write that holds one event record."""
+    event = ormsgpack.Ext(
+        EXT_NAMESPACE_AWARE_EVENT,
+        ormsgpack.packb((module, qualname, kwargs), option=_option),
+    )
+    return (
+        "msgpack",
+        ormsgpack.packb(
+            ormsgpack.Ext(
+                EXT_FOLD_CONTRIBUTIONS, ormsgpack.packb([event], option=_option)
+            ),
+            option=_option,
+        ),
+    )
+
+
 def describe_pending_reducer_write():
 
     def when_a_namespaced_event_waits_beside_an_interrupt():
@@ -4147,14 +4171,92 @@ def describe_pending_reducer_write():
             assert seen == [Tally.Bumped(by=3)]
 
     def when_LangGraph_stored_the_FoldReducer_write():
+        # 0.51.0 or older let LangGraph store the wrapper, as a constructor
+        # record, and each event in it under ``__name__``.
 
-        def it_revives_a_module_level_event_through_LangGraph():
-            from langgraph_events._reducer import _Contributions
+        def when_the_event_is_module_level():
 
+            def when_LangGraph_runs_in_default_mode():
+
+                def it_revives_the_wrapper_and_the_event():
+                    stored = JsonPlusSerializer().dumps_typed(
+                        _Contributions([Started(data="x")])
+                    )
+
+                    revived = NamespaceAwareSerde().loads_typed(stored)
+
+                    assert revived == _Contributions([Started(data="x")])
+
+            def when_LangGraph_runs_in_strict_mode():
+
+                def when_the_allowlist_allows_the_event():
+
+                    def it_revives_the_wrapper_and_the_event():
+                        stored = JsonPlusSerializer().dumps_typed(
+                            _Contributions([Started(data="x")])
+                        )
+                        serde = NamespaceAwareSerde(
+                            allowed_msgpack_modules=[(Started.__module__, "Started")]
+                        )
+
+                        revived = serde.loads_typed(stored)
+
+                        assert revived == _Contributions([Started(data="x")])
+
+                def when_the_allowlist_blocks_the_event():
+
+                    def it_keeps_the_wrapper():
+                        stored = JsonPlusSerializer().dumps_typed(
+                            _Contributions([Started(data="x")])
+                        )
+                        serde = NamespaceAwareSerde(allowed_msgpack_modules=None)
+
+                        revived = serde.loads_typed(stored)
+
+                        assert isinstance(revived, _Contributions)
+
+    def when_the_event_is_nested():
+
+        def it_revives_the_event_as_None():
             stored = JsonPlusSerializer().dumps_typed(
-                _Contributions([Started(data="x")])
+                _Contributions([Tally.Bumped(by=3)])
             )
 
             revived = NamespaceAwareSerde().loads_typed(stored)
 
-            assert revived == _Contributions([Started(data="x")])
+            assert revived == _Contributions([None])
+
+    def when_a_stored_nested_event_was_renamed():
+
+        def it_revives_the_event_as_its_current_class():
+            stored = _pending_fold_write(
+                DecoReorg.__module__, "DecoReorg.Persisted", {"note": "n"}
+            )
+
+            revived = NamespaceAwareSerde(namespaces=[DecoReorg]).loads_typed(stored)
+
+            assert revived == _Contributions([DecoReorg.Persist.Persisted(note="n")])
+
+    def when_a_stored_nested_event_has_no_class():
+
+        def it_degrades_to_a_placeholder_under_tolerate_unresolved():
+            stored = _pending_fold_write(Tally.__module__, "Tally.Gone", {})
+            serde = NamespaceAwareSerde()
+
+            with serde.tolerate_unresolved() as unresolved:
+                revived = serde.loads_typed(stored)
+
+            placeholder = UnrevivedIdentity(Tally.__module__, "Tally.Gone")
+            assert revived == _Contributions([placeholder])
+            assert unresolved == [placeholder]
+
+    def when_LangGraph_reads_the_FoldReducer_write():
+        # A release up to 0.51.0 reads an unknown ext code through LangGraph,
+        # as here. The CHANGELOG states this rollback limit.
+
+        def it_reads_None():
+            stored = NamespaceAwareSerde().dumps_typed(
+                _Contributions([Started(data="x")])
+            )
+
+            assert JsonPlusSerializer().loads_typed(stored) is None
