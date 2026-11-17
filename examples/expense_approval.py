@@ -80,7 +80,7 @@ class Expense(Namespace):
     outcomes update it. Intermediate ``Command`` dispatches are ignored.
     """
 
-    status = ScalarReducer(
+    status = ScalarReducer[DomainEvent, str](
         event_type=DomainEvent,
         fn=lambda e: _STATUS_MAP.get(type(e).__name__, "unknown"),
         default="draft",

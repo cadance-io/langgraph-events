@@ -156,7 +156,7 @@ coder_llm = ChatOpenAI(model="gpt-4o-mini")
 # ---------------------------------------------------------------------------
 
 
-context_reducer = Reducer(
+context_reducer = Reducer[Contextualizable, str](
     "context_parts",
     event_type=Contextualizable,
     fn=lambda e: [e.context_part()],
@@ -172,7 +172,7 @@ context_reducer = Reducer(
 async def supervisor(
     event: Task.Run | Task.Research.Completed | Task.Code.Produced,
     log: EventLog,
-    context_parts: list,
+    context_parts: list[str],
 ) -> Task.Research | Task.Code | Task.Finalized:
     """Supervisor hub. Decides the next step based on accumulated results.
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from langgraph_events import (
@@ -18,7 +20,7 @@ from langgraph_events import (
 
 # Module-level domains so handler type hints resolve at runtime.
 class Alpha(Namespace):
-    current_status = ScalarReducer(
+    current_status = ScalarReducer[Event, str](
         event_type=Event,
         fn=lambda e: type(e).__name__,
     )
@@ -41,7 +43,7 @@ _AUTO_OBSERVED: list[str | None] = []
 
 
 class _AlphaAuto(Namespace):
-    current_status = ScalarReducer(
+    current_status = ScalarReducer[Event, str](
         event_type=Event,
         fn=lambda e: type(e).__name__,
     )
@@ -50,13 +52,13 @@ class _AlphaAuto(Namespace):
         class Acted(DomainEvent):
             marker: str = ""
 
-        def handle(self, current_status) -> _AlphaAuto.Act.Acted:
+        def handle(self, current_status: str | None) -> _AlphaAuto.Act.Acted:
             _AUTO_OBSERVED.append(current_status)
             return _AlphaAuto.Act.Acted(marker="after")
 
 
 class _AlphaExplicit(Namespace):
-    current_status = ScalarReducer(
+    current_status = ScalarReducer[Event, str](
         event_type=Event,
         fn=lambda e: type(e).__name__,
     )
@@ -65,7 +67,7 @@ class _AlphaExplicit(Namespace):
         class Acted(DomainEvent):
             marker: str = ""
 
-        def handle(self, current_status) -> _AlphaExplicit.Act.Acted:
+        def handle(self, current_status: list[str]) -> _AlphaExplicit.Act.Acted:
             # Explicit list-reducer wins over discovered scalar reducer.
             assert current_status == ["EXPLICIT"]
             return _AlphaExplicit.Act.Acted(marker="done")
@@ -86,7 +88,7 @@ def describe_BaseReducer():
         def when_declared_outside_domain():
 
             def it_leaves_domain_as_None():
-                external = ScalarReducer(
+                external = ScalarReducer[Event, Any](
                     name="external",
                     event_type=Event,
                     fn=lambda e: e,
@@ -97,7 +99,7 @@ def describe_BaseReducer():
 
             def it_preserves_explicit_name():
                 class HasExplicitName(Namespace):
-                    r = ScalarReducer(
+                    r = ScalarReducer[Event, Any](
                         name="custom",
                         event_type=Event,
                         fn=lambda e: e,
@@ -114,8 +116,8 @@ def describe_Namespace():
 
             def it_collects_them_into_tuple():
                 class WithReducers(Namespace):
-                    r1 = ScalarReducer(event_type=Event, fn=lambda e: None)
-                    r2 = ScalarReducer(event_type=Event, fn=lambda e: None)
+                    r1 = ScalarReducer[Event, Any](event_type=Event, fn=lambda e: None)
+                    r2 = ScalarReducer[Event, Any](event_type=Event, fn=lambda e: None)
 
                 names = {r.name for r in WithReducers.__reducers__}
                 assert names == {"r1", "r2"}
@@ -134,12 +136,16 @@ def describe_Namespace():
             # inherited its parent's reducers. Sharing is now explicit.
             def it_raises():
                 class Parent(Namespace):
-                    shared = ScalarReducer(event_type=Event, fn=lambda e: None)
+                    shared = ScalarReducer[Event, Any](
+                        event_type=Event, fn=lambda e: None
+                    )
 
                 with pytest.raises(TypeError, match=r"Namespace subclassing"):
 
                     class Child(Parent):
-                        extra = ScalarReducer(event_type=Event, fn=lambda e: None)
+                        extra = ScalarReducer[Event, Any](
+                            event_type=Event, fn=lambda e: None
+                        )
 
 
 def describe_namespace_scope_filter():
@@ -199,13 +205,17 @@ def describe_EventGraph_auto_discovery():
 
         def it_raises_TypeError_at_init():
             class Gamma(Namespace):
-                shared_name = ScalarReducer(event_type=Event, fn=lambda e: None)
+                shared_name = ScalarReducer[Event, Any](
+                    event_type=Event, fn=lambda e: None
+                )
 
                 class Go(Command):
                     pass
 
             class Delta(Namespace):
-                shared_name = ScalarReducer(event_type=Event, fn=lambda e: None)
+                shared_name = ScalarReducer[Event, Any](
+                    event_type=Event, fn=lambda e: None
+                )
 
                 class Go(Command):
                     pass
@@ -226,7 +236,7 @@ def describe_EventGraph_auto_discovery():
         def it_prefers_explicit_over_discovered():
             from langgraph_events import Reducer
 
-            explicit = Reducer(
+            explicit = Reducer[Event, str](
                 name="current_status",
                 event_type=Event,
                 fn=lambda e: ["EXPLICIT"],

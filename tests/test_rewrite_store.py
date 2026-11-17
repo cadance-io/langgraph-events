@@ -13,6 +13,7 @@ class was renamed" or "the class was deleted" against real bytes.
 import copy
 import threading
 import typing
+from typing import Any
 
 import pytest
 from _dict_saver import DictSaver
@@ -1451,7 +1452,9 @@ def describe_rewrite_store_refusals():
             def wait(event: Started) -> _Retiring:
                 return _Retiring()
 
-            gates = Reducer("gates", event_type=_Retiring, fn=lambda e: [e])
+            gates = Reducer[_Retiring, Any](
+                "gates", event_type=_Retiring, fn=lambda e: [e]
+            )
             cfg = _cfg("t1")
             saver.serde = NamespaceAwareSerde(events=(Started, _Retiring))
             graph = EventGraph([wait, _go_ends], reducers=[gates], checkpointer=saver)

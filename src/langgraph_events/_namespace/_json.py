@@ -126,4 +126,11 @@ def encode_model(d: NamespaceModel) -> dict[str, Any]:
             }
             for dv in d.derived
         ],
+        "run_scoped": [
+            {
+                "name": rs.name,
+                "inputs": [{"name": i.name, "kind": i.kind} for i in rs.inputs],
+            }
+            for rs in d.run_scoped
+        ],
     }

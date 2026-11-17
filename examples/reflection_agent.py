@@ -58,7 +58,7 @@ def _status_of(event: Event) -> str | None:
 
 
 class Sales(Namespace):
-    order_status = ScalarReducer(event_type=Event, fn=_status_of)
+    order_status = ScalarReducer[Event, str | None](event_type=Event, fn=_status_of)
 
     class Place(Command):
         order_id: str = ""
