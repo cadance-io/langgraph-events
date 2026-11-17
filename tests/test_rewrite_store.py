@@ -11,6 +11,7 @@ class was renamed" or "the class was deleted" against real bytes.
 """
 
 import copy
+import threading
 import typing
 
 import pytest
@@ -395,12 +396,18 @@ def _failed_beside_a_sibling(saver: MemorySaver, tid: str):
     class _OldSide(IntegrationEvent):
         pass
 
+    side_done = threading.Event()
+
     @on(Started)
     def side(event: Started) -> _OldSide:
+        side_done.set()
         return _OldSide()
 
     @on(Started)
     def explode(event: Started) -> None:
+        # The sibling must complete before this task fails, or the
+        # superstep holds no completed write to migrate.
+        assert side_done.wait(timeout=5)
         raise RuntimeError("boom")
 
     cfg = _cfg(tid)
