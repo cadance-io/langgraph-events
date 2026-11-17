@@ -35,7 +35,7 @@ print(log.latest(Order.Place.Placed))
 
 ## Installation
 
-Requires Python 3.11+.
+Requires Python 3.14+.
 
 ```bash
 pip install langgraph-events

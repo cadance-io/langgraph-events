@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: the library requires Python 3.14 or later.** Python 3.11, 3.12 and 3.13
+  are no longer supported. CI tests on Python 3.14 only. See #251.
+
 ## [0.51.1] - 2026-11-17
 
 ### Changed
