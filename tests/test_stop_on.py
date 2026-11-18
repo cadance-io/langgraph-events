@@ -1135,3 +1135,32 @@ def describe_resume_seeds():
                     pass
 
             assert (await graph.aget_state(config)).is_interrupted
+
+
+@on(Started)
+async def _ask_raw_declared(event: Started) -> ApprovalRequested | Ended:
+    answer = lg_interrupt(ApprovalRequested(draft="raw"))
+    return Ended(result=type(answer).__name__)
+
+
+@on(Started)
+async def _ask_raw_unannotated(event: Started):
+    answer = lg_interrupt(ApprovalRequested(draft="raw"))
+    return Ended(result=type(answer).__name__)
+
+
+def describe_resume_seeds_for_a_raw_interrupt():
+    @pytest.mark.parametrize("handler", [_ask_raw_declared, _ask_raw_unannotated])
+    async def it_raises_before_the_run(handler):
+        graph = EventGraph([handler], checkpointer=MemorySaver())
+        config = {"configurable": {"thread_id": f"raw-{handler.__name__}"}}
+        await graph.ainvoke(Started(data="go"), config=config)
+
+        with pytest.raises(ValueError, match="raw"):
+            async for _item in graph.astream_resume(
+                Answered(), seeds=[Noted(text="x")], config=config
+            ):
+                pass
+
+        assert (await graph.aget_state(config)).is_interrupted
+        assert await _notes(graph, config) == []

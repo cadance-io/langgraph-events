@@ -277,7 +277,7 @@ When `RunAgentInput.state` is populated alongside a resume:
 - A `FrontendStateMutated(state=projected)` event is built. It rides in the answer of the resume, so the paused handler stores it, with the share of each reducer that subscribes to it, before the answer. The handlers of the answer then see the updated value. The event appears in the stream and the audit log.
 - The client state reaches the handlers when the paused handler finishes. A handler that pauses again in the resume stores the client state of each resume when it finishes. The re-run of the paused handler does not see it.
 - A stop that cuts the resume stores no client state.
-- When each answered handler paused with a `langgraph.types.interrupt()` call in its body, the run is refused before the graph runs, with `RUN_ERROR` code `raw_interrupt_takes_no_client_state`. Such a call cannot take client state. The thread keeps its questions. Resume without `state`, or return the `Interrupted` from the handler.
+- When each answered handler names `langgraph.types.interrupt` in its code, the run is refused before the graph runs, with `RUN_ERROR` code `raw_interrupt_takes_no_client_state`. A call in a helper function that the handler calls is not seen, see [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal). Such a call cannot take client state. The thread keeps its questions. Resume without `state`, or return the `Interrupted` from the handler.
 - **A domain-driven reducer wins for a shared key.** A backend channel stays intact, whatever the client echoes.
 - An `@on(FrontendStateMutated)` handler fires on resume, once, as on a fresh run.
 

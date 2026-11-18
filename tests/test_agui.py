@@ -6377,10 +6377,17 @@ def ask_raw(event: UserAsked) -> AgentReplied:
     return AgentReplied(message=AIMessage(content=f"approved={answer.approved}"))
 
 
+@on(UserAsked)
+def ask_raw_declared(event: UserAsked) -> ApprovalRequested | AgentReplied:
+    answer = lg_interrupt(ApprovalRequested(draft="raw"))
+    return AgentReplied(message=AIMessage(content=f"approved={answer.approved}"))
+
+
 def describe_client_state_for_a_paused_handler():
     def when_the_handler_paused_on_a_raw_interrupt():
-        async def it_refuses_the_run_and_keeps_the_question():
-            graph = _graph(ask_raw, checkpointer=MemorySaver())
+        @pytest.mark.parametrize("handler", [ask_raw, ask_raw_declared])
+        async def it_refuses_the_run_and_keeps_the_question(handler):
+            graph = _graph(handler, checkpointer=MemorySaver())
             await graph.ainvoke(UserAsked(question="go"), config=_config("raw-state"))
             (interrupt_id,) = await _open_interrupt_ids(graph, "raw-state")
             stored = await _stored_events(graph, "raw-state")

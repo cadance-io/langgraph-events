@@ -70,8 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     pauses again in the resume stores the client state of each resume when it finishes. The
     re-run of the paused handler does not see it.
   - A stopped resume stores no seed.
-  - A resume with seeds for a handler that paused with a `langgraph.types.interrupt()` call
-    in its body raises `ValueError`. `AGUIAdapter.stream()` refuses it with `RUN_ERROR` code
+  - A resume with seeds for a handler whose code names `langgraph.types.interrupt` raises
+    `ValueError`. A call in a helper function of the handler is not seen. `AGUIAdapter.stream()` refuses it with `RUN_ERROR` code
     `raw_interrupt_takes_no_client_state`, and the thread keeps its questions.
 
   Migration: a handler that must not run on a resume checks `Resumed` in the log. A handler
@@ -80,9 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Interrupted` instead.
 
   WARNING: a checkpoint can now store the internal type `SeededAnswer`, in the answer of a
-  handler that pauses a second time. A release older than this one cannot read it. Before a
-  rollback, resume or abandon each thread that pauses a second time after a resume with
-  client state. See #237.
+  resume with client state that leaves the thread paused. That happens when the handler
+  pauses a second time, and when a resume by id answers the seeded question while another
+  question stays open. A release older than this one cannot read it. Before a rollback,
+  resume or abandon each thread that is paused after a resume with client state. See #237.
 - **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
   of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
   `(value, interrupt_id)` or read `frame.value`. See #237.

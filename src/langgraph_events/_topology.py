@@ -2,6 +2,7 @@
 
 import dataclasses
 import functools
+import inspect
 import types
 import typing
 from typing import TYPE_CHECKING, Any, NamedTuple, TypedDict, cast
@@ -106,6 +107,30 @@ class _EventCompiledGraph(CompiledStateGraph[Any, Any, Any, Any]):
         if durability is None and isinstance(self.checkpointer, BaseCheckpointSaver):
             durability = "sync"
         return super()._defaults(config, durability=durability, **kwargs)
+
+
+def _names_raw_interrupt(fn: Callable[..., object]) -> bool:
+    """Whether the code of *fn* names ``langgraph.types.interrupt``.
+
+    It reads the names of the code and of each nested code object, for a
+    lambda or a comprehension. An attribute named ``interrupt`` counts too,
+    for a call such as ``types.interrupt(...)``.
+    """
+    from langgraph.types import interrupt  # noqa: PLC0415
+
+    target = inspect.unwrap(fn)
+    code = getattr(target, "__code__", None)
+    if code is None:
+        return False
+    module_names = getattr(target, "__globals__", {})
+    pending = [code]
+    while pending:
+        current = pending.pop()
+        for name in current.co_names:
+            if name == "interrupt" or module_names.get(name) is interrupt:
+                return True
+        pending.extend(c for c in current.co_consts if inspect.iscode(c))
+    return False
 
 
 class OrphanedEventWarning(UserWarning):
@@ -770,15 +795,18 @@ class EventTopology:
         """Whether the handler of *node_name* paused by returning *value*.
 
         It did when *value* is an ``Interrupted`` that the return contract of
-        the handler allows, or when the handler has no contract. Otherwise the
-        pause came from a ``langgraph.types.interrupt()`` call in its body.
+        the handler allows, or when the handler has no contract, and the body
+        of the handler does not name ``langgraph.types.interrupt``. Otherwise
+        the pause can come from an ``interrupt()`` call in its body. A call in
+        a helper function that the handler calls is not seen.
         """
         if not isinstance(value, Interrupted):
             return False
         for meta in self._handler_metas:
             if node_name == meta.node_name or node_name in meta.previous_names:
                 contract = self._return_contracts.get(meta.name)
-                return contract is None or isinstance(value, contract.types)
+                declared = contract is None or isinstance(value, contract.types)
+                return declared and not _names_raw_interrupt(meta.fn)
         return False
 
     @property
