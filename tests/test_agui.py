@@ -6332,3 +6332,19 @@ def describe_a_stop_during_the_replay_of_the_questions():
                 )
                 assert sorted(replay.answered) == [("first", True), ("second", True)]
                 assert state.values["focus"] == "kept"
+
+
+def describe_the_client_state_of_a_resume():
+    async def it_dispatches_the_client_state_once():
+        seen: list[dict[str, Any]] = []
+
+        @on(FrontendStateMutated)
+        def note(event: FrontendStateMutated) -> None:
+            seen.append(event.state)
+
+        graph = _graph(ask_approval, approve, note, checkpointer=MemorySaver())
+        await graph.ainvoke(UserAsked(question="go"), config=_config("c-state"))
+
+        await _resume(graph, _make_input(thread_id="c-state", state={"focus": "x"}))
+
+        assert seen == [{"focus": "x"}]

@@ -64,7 +64,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   each reducer, through the resume command. Before, the AG-UI adapter wrote
   `FrontendStateMutated` with `apre_seed()` first. That write made a new checkpoint, so the
   open interrupts got new ids, and a resume by id failed. The adapter no longer loads the
-  checkpoint again after it writes the client state. See #237.
+  checkpoint again after it writes the client state. A seed now reaches its handlers on a
+  resume: an `@on(FrontendStateMutated)` handler fires once on an AG-UI resume, where it
+  did not fire before. Migration: a handler that must not run on a resume checks
+  `Resumed` in the log. See #237.
 - **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
   of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
   `(value, interrupt_id)` or read `frame.value`. See #237.

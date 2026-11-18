@@ -24,8 +24,10 @@ class ResumeStoppedError(RuntimeError):
     """The ``stop_on=`` signal stopped a resume before it applied its answers.
 
     The signal was set at the call, or while the resume replayed the paused
-    handlers. The thread stays paused on the same questions, with the same
-    interrupt ids. The resume stores no answer and no seed.
+    handlers. Each cut question stays open, with the same interrupt id, and
+    the resume stores no answer for it. A replay that ended before the stop
+    keeps its answer. The writes of the resume command stay, for example its
+    ``seeds=``.
     """
 
     def __init__(self) -> None:
@@ -119,9 +121,10 @@ class _RunSignals:
         """These signals for the resume of *snapshot*.
 
         The resume replays the paused handlers in the step after *snapshot*.
-        With no *snapshot*, the signals come back unchanged.
+        A thread with no open interrupt has no paused handler to replay, for
+        example after a failed run, so the signals come back unchanged.
         """
-        if snapshot is None or snapshot.metadata is None:
+        if snapshot is None or snapshot.metadata is None or not snapshot.interrupts:
             return self
         return dataclasses.replace(self, replay_step=snapshot.metadata["step"] + 1)
 

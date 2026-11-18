@@ -319,7 +319,7 @@ stopping.set()
     - The signal is set while the resume replays a paused handler. The replay is cut, and its step fails, so LangGraph commits no checkpoint for it.
 - After `ResumeStoppedError`, each cut question stays open with the same interrupt id, and its answer is not stored. Resume again to answer it. This holds for the durability `"sync"` (the default), `"async"` and `"exit"`.
 - Each question is applied whole or not at all. When a resume answers several questions, a replay that ended before the stop keeps its answer. Only the cut questions stay open.
-- The writes of the resume command stay on the paused checkpoint after `ResumeStoppedError`. These are the `HandlerCutOnSignal` records and the `seeds=` of `astream_resume()`. So the client state that `AGUIAdapter.stream()` sent in a stopped turn is stored. The next turn stores its own client state after it.
+- The writes of the resume command stay on the paused checkpoint after `ResumeStoppedError`. These are the `HandlerCutOnSignal` records and the `seeds=` of `astream_resume()`. So the client state that `AGUIAdapter.stream()` sent in a stopped turn is stored. The next run dispatches it, whether that run is a resume or a fresh run. Each stopped resume adds its writes again.
 - The resume of `AGUIAdapter.stream()` does not raise. It ends on `RUN_FINISHED` with `RunFinishedCancelledOutcome`, and the thread stays paused. See [Run outcomes](agui.md#run-outcomes).
 - A stop set after the replay commits ends the run as any stop does, with `CancelledOnSignal`.
 - `abandon()` on a thread paused after a cut stores no `HandlerCutOnSignal`. The next run clears the name of the cut handler.

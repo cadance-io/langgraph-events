@@ -32,14 +32,10 @@ class FrontendStateMutated(IntegrationEvent):
 
     **Resume-path semantics.**  On resume (``RunAgentInput`` carrying both
     ``state`` and a resume signal), reducers subscribed to
-    ``FrontendStateMutated`` *do* fire — the adapter computes their
-    contributions and writes them to channels via ``apre_seed`` before the
-    resume's domain dispatch, so handlers reading reducer state via
-    parameter injection see the updated values.  However,
-    ``@on(FrontendStateMutated)`` *handlers* do not fire on resume — the
-    LangGraph ``Command(resume=...)`` carries a single value and seeds are
-    dispatched out-of-graph.  Use ``@on(Resumed)`` for resume-time side
-    effects.
+    ``FrontendStateMutated`` fire. The resume command writes their
+    contributions before the resume's domain dispatch, so handlers reading
+    reducer state via parameter injection see the updated values. An
+    ``@on(FrontendStateMutated)`` handler also fires once, as on a fresh run.
     """
 
     state: dict[str, Any] = field(default_factory=dict)

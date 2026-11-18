@@ -1034,3 +1034,29 @@ def describe_a_stop_during_the_replay_of_the_questions():
                 )
 
                 assert sorted(replay.answers) == ["first", "stopped second"]
+
+
+def describe_a_resume_of_a_failed_run():
+    def when_the_stop_cuts_the_rerun_of_the_failed_handler():
+        async def it_stores_cancelled_on_signal():
+            stop = asyncio.Event()
+            failing = [True]
+
+            @on(Started)
+            async def work(event: Started) -> Ended:
+                if failing[0]:
+                    raise RuntimeError("boom")
+                stop.set()
+                await asyncio.sleep(100)
+                return Ended(result="late")
+
+            graph = EventGraph([work], checkpointer=MemorySaver())
+            config = {"configurable": {"thread_id": "failed-rerun"}}
+            with pytest.raises(RuntimeError):
+                await graph.ainvoke(Started(data="go"), config=config)
+            failing[0] = False
+
+            async with asyncio.timeout(5):
+                log = await graph.aresume(ReviewApproved(), stop_on=stop, config=config)
+
+            assert type(list(log)[-1]) is CancelledOnSignal

@@ -552,8 +552,7 @@ class AGUIAdapter:
         injects the channel sees the update, and reducer ``fn`` semantics
         (transformations, ``SKIP``) hold.
 
-        **Limitation**: ``@on(FrontendStateMutated)`` handlers do not fire on
-        resume. Use ``@on(Resumed)`` for resume-time side effects.
+        An ``@on(FrontendStateMutated)`` handler fires once on the resume.
         """
         fsm = self._build_resume_frontend_state_event(input_data)
         async for item in self._graph.astream_resume(
