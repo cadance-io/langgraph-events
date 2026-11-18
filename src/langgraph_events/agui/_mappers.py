@@ -22,6 +22,7 @@ from langchain_core.utils.utils import LC_AUTO_PREFIX
 from pydantic import BaseModel, NonNegativeInt, TypeAdapter, ValidationError
 
 from langgraph_events._event import (
+    CancelledOnSignal,
     Event,
     Interrupted,
     Resumed,
@@ -549,6 +550,17 @@ class InterruptedMapper:
         ]
 
 
+class _CancelledOnSignalMapper:
+    """Map an unclaimed ``CancelledOnSignal`` to no event.
+
+    The run reports it as the outcome of ``RUN_FINISHED``, so no
+    ``on_unmapped`` policy applies to it.
+    """
+
+    def map(self, event: Event, ctx: MapperContext) -> list[BaseEvent] | None:
+        return [] if isinstance(event, CancelledOnSignal) else None
+
+
 class FallbackMapper:
     """Map any unclaimed event to AG-UI CustomEvent."""
 
@@ -573,12 +585,11 @@ class FallbackMapper:
 
 
 def default_mappers(on_unmapped: str = "warn") -> list[Any]:
-    """Return the default mapper chain in priority order."""
+    """Return the built-in mappers that run before the app mappers."""
     return [
         SkipInternalMapper(),
         FrontendToolCallRequestedMapper(),
         InterruptedMapper(on_unmapped),
-        # FallbackMapper is always last — added by the adapter after user mappers
     ]
 
 

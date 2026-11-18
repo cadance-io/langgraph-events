@@ -13,6 +13,7 @@ from ag_ui.core import (
     CustomEvent,
     EventType,
     RunErrorEvent,
+    RunFinishedCancelledOutcome,
     RunFinishedEvent,
     RunStartedEvent,
     TextMessageContentEvent,
@@ -23,9 +24,10 @@ from ag_ui.core import (
     ToolCallStartEvent,
 )
 
-from langgraph_events._event import Event, Interrupted
+from langgraph_events._event import CancelledOnSignal, Event, Interrupted
 from langgraph_events._graph import _snapshot_interrupts
-from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX, _with_pause_budget
+from langgraph_events._pause import _FRAMEWORK_KEY_PREFIX
+from langgraph_events._run_signals import _RunSignals
 from langgraph_events.stream import (
     CustomEventFrame,
     InterruptFrame,
@@ -43,6 +45,7 @@ from ._events import FrontendStateMutated
 from ._mappers import (
     FallbackMapper,
     UnmappedEventError,
+    _CancelledOnSignalMapper,
     build_messages_snapshot,
     build_state_snapshot,
     default_mappers,
@@ -79,6 +82,8 @@ if TYPE_CHECKING:
 
 _SERVER_ONLY_KEYS = frozenset({"thread_id", "checkpoint_id", "checkpoint_ns"})
 """The ``configurable`` keys that a client cannot set. They choose a checkpoint."""
+
+type _RunItem = BaseEvent | RunFinishedCancelledOutcome
 
 
 class _FactoryRefusalError(Exception):
@@ -187,11 +192,10 @@ class AGUIAdapter:
             frozenset(include_reducers) if isinstance(include_reducers, list) else None
         )
 
-        # Build mapper chain: built-ins → user mappers → fallback
         chain: list[Any] = default_mappers(on_unmapped)
         if mappers:
             chain.extend(mappers)
-        chain.append(FallbackMapper(on_unmapped))
+        chain.extend([_CancelledOnSignalMapper(), FallbackMapper(on_unmapped)])
         self._mappers: list[EventMapper] = chain
 
     def _project_state(self, reducers: dict[str, Any]) -> dict[str, Any]:
@@ -278,8 +282,6 @@ class AGUIAdapter:
         *,
         config: RunnableConfig | None = None,
         client_configurable: AbstractSet[str] = frozenset(),
-        deadline: float | None = None,
-        pause_on: PauseSignal | None = None,
     ) -> RunnableConfig:
         """Build the LangGraph config of one run at the client trust boundary.
 
@@ -287,9 +289,7 @@ class AGUIAdapter:
         ignores the client run config in ``forwarded_props``. The one exception
         is a client ``configurable`` key that *client_configurable* names. A
         server key wins over a client key of the same name. ``thread_id`` always
-        comes from *thread_id*. Delegates ``deadline`` and ``pause_on`` to
-        :func:`_with_pause_budget`, the same writer as the :class:`EventGraph`
-        entry points.
+        comes from *thread_id*.
         """
         if isinstance(client_configurable, str):
             raise TypeError(
@@ -322,9 +322,7 @@ class AGUIAdapter:
                 "thread_id": thread_id,
             },
         }
-        return _with_pause_budget(
-            cast("RunnableConfig", run_config), deadline, pause_on
-        )
+        return cast("RunnableConfig", run_config)
 
     @staticmethod
     def _client_configurable(input_data: RunAgentInput) -> dict[str, Any]:
@@ -484,6 +482,7 @@ class AGUIAdapter:
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
+        signals: _RunSignals,
     ) -> AsyncIterator[StreamItem]:
         """Resume path that routes ``FrontendStateMutated`` through both
         reducer dispatch and the LangGraph channel state.
@@ -504,6 +503,7 @@ class AGUIAdapter:
         seeds are dispatched out-of-graph.  Use ``@on(Resumed)`` for
         resume-time side effects.
         """
+        signals.refuse_set_stop()
         fsm = self._build_resume_frontend_state_event(input_data)
         if fsm is not None:
             await self._commit_resume_frontend_state(fsm, config)
@@ -578,6 +578,7 @@ class AGUIAdapter:
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
+        signals: _RunSignals,
     ) -> AsyncIterator[StreamItem]:
         """Create the underlying EventGraph async event stream.
 
@@ -586,7 +587,7 @@ class AGUIAdapter:
         """
         if resume_event is not None:
             return self._resume_event_stream(
-                input_data, resume_event, config, snapshot, context
+                input_data, resume_event, config, snapshot, context, signals
             )
         seed: Event | list[Event] = await _call_factory(
             self._seed_factory,
@@ -737,7 +738,8 @@ class AGUIAdapter:
         ctx: MapperContext,
         config: RunnableConfig,
         context: object,
-    ) -> AsyncIterator[BaseEvent]:
+        signals: _RunSignals,
+    ) -> AsyncIterator[_RunItem]:
         """Stream domain events through the mapper chain."""
         # Determine resume vs fresh run — lazy checkpoint read
         needs_checkpoint = (
@@ -779,6 +781,7 @@ class AGUIAdapter:
             config,
             checkpoint_snapshot,
             context,
+            signals,
         )
 
         async for item in event_stream:
@@ -821,6 +824,9 @@ class AGUIAdapter:
                     is_resume=is_resume,
                 ):
                     yield agui_event
+            event = item.event if isinstance(item, StreamFrame) else item
+            if isinstance(event, CancelledOnSignal):
+                yield RunFinishedCancelledOutcome()
 
         for message_id in ctx.drain_open_stream_message_ids():
             yield TextMessageEndEvent(
@@ -842,6 +848,7 @@ class AGUIAdapter:
         client_configurable: AbstractSet[str] = frozenset(),
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        stop_on: PauseSignal | None = None,
     ) -> AsyncIterator[BaseEvent]:
         """Yield AG-UI events for one request.
 
@@ -884,10 +891,14 @@ class AGUIAdapter:
                 the same way as a deadline pause.  Set the signal to stop
                 a live run early, for example when the process shuts down.
                 ``None`` (default) disables.
+            stop_on: An object with ``is_set()``, as
+                :meth:`EventGraph.ainvoke` describes it.  The stream then
+                ends on ``RUN_FINISHED`` with ``RunFinishedCancelledOutcome``.
+                See ``docs/control-flow.md``, "Stop on a signal".
 
         Raises:
-            TypeError: *pause_on* is a class, or has no callable
-                ``is_set``.  Or *client_configurable* is a ``str``.  Or the
+            TypeError: *pause_on* or *stop_on* is a class, or has no
+                callable ``is_set``.  Or *client_configurable* is a ``str``.  Or the
                 graph has a context schema and *context* is ``None``.
                 ``stream()`` raises it when it is called, before the stream
                 starts.
@@ -900,16 +911,18 @@ class AGUIAdapter:
         """
         self._graph.topology.require_context(context)
         ctx = self._run_context(input_data)
-        run_config = self._build_config(
-            input_data,
-            ctx.thread_id,
-            config=config,
-            client_configurable=client_configurable,
-            deadline=deadline,
-            pause_on=pause_on,
+        signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
+        run_config = signals.apply(
+            self._build_config(
+                input_data,
+                ctx.thread_id,
+                config=config,
+                client_configurable=client_configurable,
+            )
         )
         return self._as_run(
-            ctx, self._stream_event_source(input_data, ctx, run_config, context)
+            ctx,
+            self._stream_event_source(input_data, ctx, run_config, context, signals),
         )
 
     @staticmethod
@@ -927,7 +940,7 @@ class AGUIAdapter:
         )
 
     async def _as_run(
-        self, ctx: MapperContext, source: AsyncIterator[BaseEvent]
+        self, ctx: MapperContext, source: AsyncIterator[_RunItem]
     ) -> AsyncIterator[BaseEvent]:
         """Wrap *source* in ``RUN_STARTED`` and ``RUN_FINISHED``.
 
@@ -941,9 +954,13 @@ class AGUIAdapter:
             run_id=ctx.run_id,
         )
 
+        outcome: RunFinishedCancelledOutcome | None = None
         try:
             async for agui_event in source:
-                yield agui_event
+                if isinstance(agui_event, RunFinishedCancelledOutcome):
+                    outcome = agui_event
+                else:
+                    yield agui_event
 
         except UnmappedEventError:
             # on_unmapped="raise" is a strict CI gate — propagate instead of
@@ -982,4 +999,5 @@ class AGUIAdapter:
             type=EventType.RUN_FINISHED,
             thread_id=ctx.thread_id,
             run_id=ctx.run_id,
+            outcome=outcome,
         )

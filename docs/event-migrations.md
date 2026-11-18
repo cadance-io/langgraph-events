@@ -365,6 +365,7 @@ The library owns the read migrations for its own framework events. Every `Namesp
 
 - The `FrontendToolCallRequested` rename exists only when the `agui` extra is installed.
 - `HandlerAbandonedOnSignal` and `RunPausedOnSignal` have no framework migration. No release before 0.41.0 wrote them.
+- `CancelledOnSignal` and `HandlerCutOnSignal` have no framework migration. No release before 0.53.0 wrote them.
 - Before 0.6.0, LangGraph's own `JsonPlusSerializer` wrote each event in its constructor record form. `NamespaceAwareSerde` reads such a record of a framework event through these migrations, and a rewrite stores it in the form of `NamespaceAwareSerde`. A plan reads such a record as a rewrite until then. A record of your own class in that form stays with LangGraph's reader. See [A checkpoint that a plan refuses](migration-gate.md#a-checkpoint-that-a-plan-refuses).
 - A framework event is always written under its own live identity. The `legacy_write=True` guards judge your own migrations only.
 - Only `NamespaceAwareSerde` applies these migrations. With LangGraph's plain `JsonPlusSerializer`, an old `RunPaused` or `HandlerRaised` revives as `None`, with no error. `EventGraph(checkpointer=...)` keeps the serializer of the checkpointer. Only `EventGraph.from_namespaces` puts a `NamespaceAwareSerde` on it. Otherwise, pass `serde=NamespaceAwareSerde(...)` to the checkpointer yourself.

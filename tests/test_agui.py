@@ -20,6 +20,8 @@ from ag_ui.core import (
     ImagePart,
     RunAgentInput,
     RunErrorEvent,
+    RunFinishedCancelledOutcome,
+    RunFinishedEvent,
     TextPart,
     Tool,
     UrlSource,
@@ -44,13 +46,16 @@ from pydantic import BaseModel
 
 from langgraph_events import (
     SKIP,
+    CancelledOnSignal,
     Derived,
     Event,
     EventGraph,
     EventLog,
+    HandlerCutOnSignal,
     IntegrationEvent,
     Interrupted,
     MessageEvent,
+    Reducer,
     RunPaused,
     RunPausedOnSignal,
     ScalarReducer,
@@ -1329,6 +1334,305 @@ def describe_AGUIAdapter():
                     assert len(_custom(events, "run.paused")) == 1
                     assert followed_up == []
                     assert events[-1].type == EventType.RUN_FINISHED
+
+        def when_the_stop_signal_is_set_while_a_handler_awaits():
+
+            async def it_stores_cancelled_and_finishes_the_run():
+                stop = asyncio.Event()
+
+                @on(UserAsked)
+                async def slow(event: UserAsked) -> AgentReplied:
+                    stop.set()
+                    await asyncio.sleep(100)
+                    return AgentReplied(message=AIMessage(content="late"))
+
+                graph = _graph(slow, checkpointer=MemorySaver())
+                adapter = _adapter(graph, seed_factory=_ask("hi"))
+
+                events = [
+                    event
+                    async for event in adapter.stream(
+                        _make_input(thread_id="t-stop"), stop_on=stop
+                    )
+                ]
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="t-stop",
+                    run_id=events[-1].run_id,
+                    outcome=RunFinishedCancelledOutcome(),
+                )
+                state = await graph.compiled.aget_state(_config("t-stop"))
+                assert type(state.values["events"][-1]).__name__ == "CancelledOnSignal"
+
+            def when_a_sibling_handler_interrupts_in_the_same_round():
+
+                async def it_emits_the_interrupt_and_finishes_normally():
+                    stop = asyncio.Event()
+
+                    @on(UserAsked)
+                    async def slow(event: UserAsked) -> AgentReplied:
+                        await asyncio.sleep(0.05)
+                        stop.set()
+                        await asyncio.sleep(100)
+                        return AgentReplied(message=AIMessage(content="late"))
+
+                    graph = _graph(ask_draft, slow, checkpointer=MemorySaver())
+                    adapter = _adapter(graph)
+
+                    events = [
+                        event
+                        async for event in adapter.stream(
+                            _make_input(thread_id="t-stop-ask"), stop_on=stop
+                        )
+                    ]
+
+                    assert [e.value for e in _custom(events, "interrupted")] == [
+                        {"draft": "draft"}
+                    ]
+                    assert events[-1] == RunFinishedEvent(
+                        thread_id="t-stop-ask", run_id=events[-1].run_id
+                    )
+
+                def when_the_next_turn_resumes_the_interrupt():
+
+                    @pytest.mark.parametrize("on_unmapped", ["raise", "warn"])
+                    async def it_stores_the_cut_silently(on_unmapped):
+                        stop = asyncio.Event()
+
+                        @on(UserAsked)
+                        async def slow(event: UserAsked) -> AgentReplied:
+                            await asyncio.sleep(0.05)
+                            stop.set()
+                            await asyncio.sleep(100)
+                            return AgentReplied(message=AIMessage(content="late"))
+
+                        @on(ApprovalGiven)
+                        async def approve(event: ApprovalGiven) -> TaskCreated:
+                            return TaskCreated(title="approved")
+
+                        graph = _graph(
+                            ask_draft, slow, approve, checkpointer=MemorySaver()
+                        )
+                        thread_id = f"t-cut-{on_unmapped}"
+                        [
+                            event
+                            async for event in _adapter(
+                                graph, on_unmapped=on_unmapped
+                            ).stream(_make_input(thread_id=thread_id), stop_on=stop)
+                        ]
+                        resume = _adapter(
+                            graph,
+                            on_unmapped=on_unmapped,
+                            resume_factory=lambda inp: ApprovalGiven(approved=True),
+                        )
+                        _warned_classes.clear()
+
+                        with warnings.catch_warnings(record=True) as caught:
+                            warnings.simplefilter("always")
+                            events = [
+                                event
+                                async for event in resume.stream(
+                                    _make_input(thread_id=thread_id)
+                                )
+                            ]
+                        state = await graph.compiled.aget_state(_config(thread_id))
+
+                        assert [str(w.message) for w in caught] == []
+                        assert events[-1] == RunFinishedEvent(
+                            thread_id=thread_id, run_id=events[-1].run_id
+                        )
+                        assert "HandlerCutOnSignal" not in [
+                            e.name for e in events if isinstance(e, CustomEvent)
+                        ]
+                        assert [
+                            e
+                            for e in state.values["events"]
+                            if isinstance(e, (HandlerCutOnSignal, TaskCreated))
+                        ] == [
+                            HandlerCutOnSignal(handler="slow"),
+                            TaskCreated(title="approved"),
+                        ]
+
+            def when_the_turn_resumes_an_interrupt():
+
+                async def it_cancels_the_answer_handler():
+                    stop = asyncio.Event()
+
+                    @on(ApprovalGiven)
+                    async def approve(event: ApprovalGiven) -> TaskCreated:
+                        stop.set()
+                        await asyncio.sleep(100)
+                        return TaskCreated(title="approved")
+
+                    graph = _graph(ask_draft, approve, checkpointer=MemorySaver())
+                    await graph.ainvoke(
+                        UserAsked(question="go"), config=_config("t-stop-resume")
+                    )
+                    adapter = _adapter(
+                        graph,
+                        resume_factory=lambda inp: ApprovalGiven(approved=True),
+                    )
+
+                    async with asyncio.timeout(5):
+                        events = [
+                            event
+                            async for event in adapter.stream(
+                                _make_input(thread_id="t-stop-resume"), stop_on=stop
+                            )
+                        ]
+
+                    assert events[-1] == RunFinishedEvent(
+                        thread_id="t-stop-resume",
+                        run_id=events[-1].run_id,
+                        outcome=RunFinishedCancelledOutcome(),
+                    )
+
+                def when_the_stop_signal_is_already_set():
+
+                    async def it_ends_on_run_error_and_keeps_the_question():
+                        stop = asyncio.Event()
+                        stop.set()
+                        graph = _graph(ask_draft, approve, checkpointer=MemorySaver())
+                        await graph.ainvoke(
+                            UserAsked(question="go"), config=_config("t-set-stop")
+                        )
+                        adapter = _adapter(
+                            graph,
+                            resume_factory=lambda inp: ApprovalGiven(approved=True),
+                        )
+
+                        events = [
+                            event
+                            async for event in adapter.stream(
+                                _make_input(thread_id="t-set-stop"), stop_on=stop
+                            )
+                        ]
+                        state = await graph.aget_state(_config("t-set-stop"))
+
+                        assert type(events[-1]) is RunErrorEvent
+                        assert "stop_on" in events[-1].message
+                        assert state.interrupted is not None
+
+        def when_the_stop_signal_is_set_after_the_last_handler():
+
+            async def it_reports_the_cancelled_outcome():
+                stop = asyncio.Event()
+
+                @on(UserAsked)
+                async def reply(event: UserAsked) -> AgentReplied:
+                    return AgentReplied(message=AIMessage(content="hi"))
+
+                def set_stop(event: AgentReplied) -> list[str]:
+                    stop.set()
+                    return []
+
+                graph = _graph(
+                    reply,
+                    checkpointer=MemorySaver(),
+                    reducers=[
+                        message_reducer(),
+                        Reducer[AgentReplied, str](
+                            name="replied", event_type=AgentReplied, fn=set_stop
+                        ),
+                    ],
+                )
+                adapter = _adapter(graph, seed_factory=_ask("hi"))
+
+                events = [
+                    event
+                    async for event in adapter.stream(
+                        _make_input(thread_id="t-late-stop"), stop_on=stop
+                    )
+                ]
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="t-late-stop",
+                    run_id=events[-1].run_id,
+                    outcome=RunFinishedCancelledOutcome(),
+                )
+                state = await graph.compiled.aget_state(_config("t-late-stop"))
+                assert [type(e).__name__ for e in state.values["events"]][-2:] == [
+                    "AgentReplied",
+                    "CancelledOnSignal",
+                ]
+
+        def when_a_user_mapper_maps_cancelled_on_signal():
+
+            async def it_emits_the_mapped_event_before_run_finished():
+                stop = asyncio.Event()
+
+                @on(UserAsked)
+                async def slow(event: UserAsked) -> AgentReplied:
+                    stop.set()
+                    await asyncio.sleep(100)
+                    return AgentReplied(message=AIMessage(content="late"))
+
+                class StopMapper:
+                    def map(
+                        self, event: Event, ctx: MapperContext
+                    ) -> list[BaseEvent] | None:
+                        if not isinstance(event, CancelledOnSignal):
+                            return None
+                        return [
+                            CustomEvent(
+                                type=EventType.CUSTOM,
+                                name="run.stopped",
+                                value={"discarded": event.discarded},
+                            )
+                        ]
+
+                adapter = _adapter(
+                    _graph(slow), seed_factory=_ask("hi"), mappers=[StopMapper()]
+                )
+
+                events = [
+                    event
+                    async for event in adapter.stream(
+                        _make_input(thread_id="t-stop-mapped"), stop_on=stop
+                    )
+                ]
+
+                assert [e.value for e in _custom(events, "run.stopped")] == [
+                    {"discarded": "slow"}
+                ]
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="t-stop-mapped",
+                    run_id=events[-1].run_id,
+                    outcome=RunFinishedCancelledOutcome(),
+                )
+
+        def when_the_stop_signal_is_set_under_an_on_unmapped_policy():
+
+            @pytest.mark.parametrize("on_unmapped", ["raise", "warn", "ignore"])
+            async def it_reports_only_the_cancelled_outcome(on_unmapped):
+                stop = asyncio.Event()
+
+                @on(UserAsked)
+                async def slow(event: UserAsked) -> AgentReplied:
+                    stop.set()
+                    await asyncio.sleep(100)
+                    return AgentReplied(message=AIMessage(content="late"))
+
+                adapter = _adapter(
+                    _graph(slow), seed_factory=_ask("hi"), on_unmapped=on_unmapped
+                )
+                _warned_classes.clear()
+
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    events = [
+                        event
+                        async for event in adapter.stream(
+                            _make_input(thread_id="t-stop-unmapped"), stop_on=stop
+                        )
+                    ]
+
+                assert [str(warning.message) for warning in caught] == []
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="t-stop-unmapped",
+                    run_id=events[-1].run_id,
+                    outcome=RunFinishedCancelledOutcome(),
+                )
 
         def when_the_pause_signal_has_no_is_set_method():
 

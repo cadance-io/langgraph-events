@@ -9,6 +9,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
 from langgraph.types import Command as LGCommand
 
+from langgraph_events._causes import pad_causes
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
 from langgraph_events._event import (
     Abandoned,
@@ -18,15 +19,13 @@ from langgraph_events._event import (
     Unresumable,
 )
 from langgraph_events._event_log import EventLog
-from langgraph_events._internal import (
-    pad_causes,
-)
-from langgraph_events._pause import _with_pause_budget
 from langgraph_events._reducer_registry import ReducerSelection, StreamState
 from langgraph_events._rewrite import (
     _INTERRUPT_CHANNEL,
 )
+from langgraph_events._run_signals import _RunSignals
 from langgraph_events._services import Services
+from langgraph_events._stop import resume_command
 from langgraph_events._store import EventStore
 from langgraph_events._topology import EventTopology, namespace_handlers
 from langgraph_events._warn import warn_user
@@ -442,16 +441,11 @@ class EventGraph:
         seeds = seed if isinstance(seed, list) else [seed]
         return {"events": seeds, "causes": [None] * len(seeds)}
 
-    def _prepare_run(
-        self,
-        kwargs: dict[str, Any],
-        deadline: float | None,
-        pause_on: PauseSignal | None,
-    ) -> None:
-        """Check the run with :meth:`_check_run`, then add the pause budget to
-        the run config."""
+    def _prepare_run(self, kwargs: dict[str, Any], signals: _RunSignals) -> None:
+        """Check the run with :meth:`_check_run`, then add *signals* to the
+        run config."""
         self._check_run(kwargs)
-        kwargs["config"] = _with_pause_budget(kwargs.get("config"), deadline, pause_on)
+        kwargs["config"] = signals.apply(kwargs.get("config"))
 
     def _check_run(self, kwargs: dict[str, Any]) -> None:
         """Check the keyword arguments and the context of one run.
@@ -470,27 +464,15 @@ class EventGraph:
             )
         kwargs["context"] = self._topology.require_context(kwargs.get("context"))
 
-    def _run(
-        self,
-        inp: _GraphInput,
-        *,
-        deadline: float | None,
-        pause_on: PauseSignal | None,
-        **kwargs: Any,
-    ) -> EventLog:
-        self._prepare_run(kwargs, deadline, pause_on)
+    def _run(self, inp: _GraphInput, signals: _RunSignals, **kwargs: Any) -> EventLog:
+        self._prepare_run(kwargs, signals)
         result = self.compiled.invoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
     async def _arun(
-        self,
-        inp: _GraphInput,
-        *,
-        deadline: float | None,
-        pause_on: PauseSignal | None,
-        **kwargs: Any,
+        self, inp: _GraphInput, signals: _RunSignals, **kwargs: Any
     ) -> EventLog:
-        self._prepare_run(kwargs, deadline, pause_on)
+        self._prepare_run(kwargs, signals)
         result = await self.compiled.ainvoke(inp, **kwargs)
         return EventLog._from_state(result["events"], result.get("causes"))
 
@@ -588,7 +570,9 @@ class EventGraph:
         """
         kwargs["context"] = context
         return self._run(
-            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+            self._prepare_input(seed),
+            _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
+            **kwargs,
         )
 
     async def ainvoke(
@@ -597,16 +581,31 @@ class EventGraph:
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        stop_on: PauseSignal | None = None,
         context: object | None = None,
         **kwargs: Any,
     ) -> EventLog:
         """Run the graph asynchronously with one or more seed events.
 
-        Takes the same arguments as :meth:`invoke`.
+        Takes the same arguments as :meth:`invoke`, plus *stop_on*.
+
+        Args:
+            stop_on: An object with ``is_set()``, for example an
+                ``asyncio.Event``. When ``is_set()`` returns ``True``, the
+                run cancels its running async handler and ends on
+                ``CancelledOnSignal``. For the cleanup grace period, see
+                ``docs/control-flow.md``, "Stop on a signal". ``None``
+                (default) disables.
+
+        Raises:
+            TypeError: *pause_on* or *stop_on* is a class, or has no callable
+                ``is_set``.
         """
         kwargs["context"] = context
         return await self._arun(
-            self._prepare_input(seed), deadline=deadline, pause_on=pause_on, **kwargs
+            self._prepare_input(seed),
+            _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on),
+            **kwargs,
         )
 
     def pre_seed(self, config: RunnableConfig, values: dict[str, Any]) -> None:
@@ -665,16 +664,19 @@ class EventGraph:
         """
         return bool(snapshot.next) or EventGraph._is_interrupted(snapshot)
 
-    def _resume_is_pending(self, kwargs: dict[str, Any]) -> bool:
-        """Whether the thread of ``kwargs["config"]`` has work to resume into.
-
-        See :meth:`_awaits_resume`. If no ``config`` was passed, assume
-        pending and let the normal path surface any error.
-        """
+    def _resume_snapshot(self, kwargs: dict[str, Any]) -> StateSnapshot | None:
         config = kwargs.get("config")
         if config is None:
-            return True
-        return self._awaits_resume(self.compiled.get_state(config))
+            return None
+        return self.compiled.get_state(config)
+
+    def _resume_is_pending(self, snapshot: StateSnapshot | None) -> bool:
+        """Whether *snapshot* has work to resume into.
+
+        See :meth:`_awaits_resume`. With no ``config``, *snapshot* is
+        ``None``: assume pending and let the normal path surface any error.
+        """
+        return snapshot is None or self._awaits_resume(snapshot)
 
     async def _aresume_snapshot(
         self, kwargs: dict[str, Any], snapshot: StateSnapshot | None
@@ -692,17 +694,6 @@ class EventGraph:
         if config is None:
             return None
         return await self.compiled.aget_state(config)
-
-    async def _aresume_is_pending(
-        self, kwargs: dict[str, Any], snapshot: StateSnapshot | None = None
-    ) -> bool:
-        """Async sibling of :meth:`_resume_is_pending`.
-
-        Pass *snapshot* when the checkpoint is already loaded, so this check
-        does not load it again. See :meth:`_aresume_snapshot`.
-        """
-        snapshot = await self._aresume_snapshot(kwargs, snapshot)
-        return snapshot is None or self._awaits_resume(snapshot)
 
     def _unresumable_message(
         self, log: EventLog | None = None, config: RunnableConfig | None = None
@@ -828,10 +819,13 @@ class EventGraph:
         self._require_checkpointer("resume")
         self._require_resume_event(value)
         self._check_run(kwargs)
-        if not self._resume_is_pending(kwargs):
+        snapshot = self._resume_snapshot(kwargs)
+        if not self._resume_is_pending(snapshot):
             return self._apply_unresumable_policy(value, kwargs)
         return self._run(
-            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
+            resume_command(value, snapshot),
+            _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
+            **kwargs,
         )
 
     async def aresume(
@@ -840,6 +834,7 @@ class EventGraph:
         *,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        stop_on: PauseSignal | None = None,
         context: object | None = None,
         **kwargs: Any,
     ) -> EventLog:
@@ -848,17 +843,19 @@ class EventGraph:
         The event is auto-dispatched (handlers subscribed to its type fire),
         then a ``Resumed`` event is created alongside it. If the thread is not
         awaiting input, the ``on_unresumable`` policy applies (default raise).
-        Takes the same arguments as :meth:`resume`.
+        Takes the same arguments as :meth:`resume`, plus *stop_on*, as
+        :meth:`ainvoke` describes it.
         """
         kwargs["context"] = context
         self._require_checkpointer("aresume")
         self._require_resume_event(value)
+        signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
+        signals.refuse_set_stop()
         self._check_run(kwargs)
-        if not await self._aresume_is_pending(kwargs):
+        snapshot = await self._aresume_snapshot(kwargs, None)
+        if not self._resume_is_pending(snapshot):
             return await self._aapply_unresumable_policy(value, kwargs)
-        return await self._arun(
-            LGCommand(resume=value), deadline=deadline, pause_on=pause_on, **kwargs
-        )
+        return await self._arun(resume_command(value, snapshot), signals, **kwargs)
 
     @staticmethod
     def _is_interrupted(snapshot: StateSnapshot) -> bool:
@@ -1170,13 +1167,11 @@ class EventGraph:
         inp: _GraphInput,
         seeds: list[Event],
         selection: ReducerSelection,
-        *,
-        deadline: float | None,
-        pause_on: PauseSignal | None,
+        signals: _RunSignals,
         **kwargs: Any,
     ) -> Iterator[Event | StreamFrame]:
         """Shared sync streaming core for stream_events/stream_resume."""
-        self._prepare_run(kwargs, deadline, pause_on)
+        self._prepare_run(kwargs, signals)
         compiled = self.compiled
         if not selection.names:
             yield from seeds
@@ -1265,8 +1260,7 @@ class EventGraph:
             inp,
             inp["events"],
             selection,
-            deadline=deadline,
-            pause_on=pause_on,
+            _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
             **kwargs,
         )
 
@@ -1314,7 +1308,8 @@ class EventGraph:
         self._require_checkpointer("stream_resume")
         self._require_resume_event(value)
         self._check_run(kwargs)
-        if not self._resume_is_pending(kwargs):
+        snapshot = self._resume_snapshot(kwargs)
+        if not self._resume_is_pending(snapshot):
             log = self._apply_unresumable_policy(value, kwargs)  # raises for raise
             if self._on_unresumable == "halt":
                 latest = log.latest(Unresumable)
@@ -1324,11 +1319,10 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
         selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
-            LGCommand(resume=value),
+            resume_command(value, snapshot),
             seeds or [],
             selection,
-            deadline=deadline,
-            pause_on=pause_on,
+            _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
             **kwargs,
         )
 
@@ -1341,8 +1335,7 @@ class EventGraph:
         include_llm_tokens: bool,
         include_custom_events: bool,
         snapshot: StateSnapshot | None,
-        deadline: float | None,
-        pause_on: PauseSignal | None,
+        signals: _RunSignals,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
         """Shared async-stream dispatcher — picks v2 vs core based on flags.
@@ -1351,7 +1344,7 @@ class EventGraph:
         path loads no checkpoint, so it has no use for *snapshot*.
         """
         kwargs.pop("stream_mode", None)
-        self._prepare_run(kwargs, deadline, pause_on)
+        self._prepare_run(kwargs, signals)
         selection = self._topology.select_reducers(include_reducers)
         delegate = (
             self._astream_v2(
@@ -1380,6 +1373,7 @@ class EventGraph:
         _snapshot: StateSnapshot | None = None,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        stop_on: PauseSignal | None = None,
         context: object | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
@@ -1417,16 +1411,21 @@ class EventGraph:
                 ``is_set()`` returns ``True``, the router emits
                 ``RunPausedOnSignal`` and the run ends cleanly. ``None``
                 (default) disables.
+            stop_on: An object with ``is_set()``, as :meth:`ainvoke`
+                describes it. ``None`` (default) disables.
 
         Raises:
-            TypeError: *pause_on* is a class, or has no callable ``is_set``.
+            TypeError: *pause_on* or *stop_on* is a class, or has no callable
+                ``is_set``.
         """
         kwargs["context"] = context
         self._require_checkpointer("astream_resume")
         self._require_resume_event(value)
+        signals = _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on)
+        signals.refuse_set_stop()
         self._check_run(kwargs)
         snapshot = await self._aresume_snapshot(kwargs, _snapshot)
-        if not await self._aresume_is_pending(kwargs, snapshot):
+        if not self._resume_is_pending(snapshot):
             # raises for the 'raise' policy; warn/halt return a log to adapt
             log = await self._aapply_unresumable_policy(value, kwargs)
             if self._on_unresumable == "halt":
@@ -1435,14 +1434,13 @@ class EventGraph:
                     yield latest
             return
         async for item in self._astream_entry(
-            LGCommand(resume=value),
+            resume_command(value, snapshot),
             seeds or [],
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
             snapshot=snapshot,
-            deadline=deadline,
-            pause_on=pause_on,
+            signals=signals,
             **kwargs,
         ):
             yield item
@@ -1457,6 +1455,7 @@ class EventGraph:
         _snapshot: StateSnapshot | None = None,
         deadline: float | None = None,
         pause_on: PauseSignal | None = None,
+        stop_on: PauseSignal | None = None,
         context: object | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamItem]:
@@ -1486,9 +1485,12 @@ class EventGraph:
                 ``is_set()`` returns ``True``, the router emits
                 ``RunPausedOnSignal`` and the run ends cleanly. ``None``
                 (default) disables.
+            stop_on: An object with ``is_set()``, as :meth:`ainvoke`
+                describes it. ``None`` (default) disables.
 
         Raises:
-            TypeError: *pause_on* is a class, or has no callable ``is_set``.
+            TypeError: *pause_on* or *stop_on* is a class, or has no callable
+                ``is_set``.
         """
         kwargs["context"] = context
         inp = self._prepare_input(seed)
@@ -1499,8 +1501,7 @@ class EventGraph:
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,
             snapshot=_snapshot,
-            deadline=deadline,
-            pause_on=pause_on,
+            signals=_RunSignals(deadline=deadline, pause_on=pause_on, stop_on=stop_on),
             **kwargs,
         ):
             yield item

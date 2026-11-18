@@ -13,6 +13,7 @@ from langgraph_events import (
     Event,
     EventGraph,
     IntegrationEvent,
+    Interrupted,
     Namespace,
     ScalarReducer,
     on,
@@ -76,6 +77,19 @@ class Completed(IntegrationEvent):
 
 class Counted(IntegrationEvent):
     n: int = 0
+
+
+class ApprovalRequested(Interrupted):
+    draft: str = ""
+
+
+class ReviewApproved(IntegrationEvent):
+    """Resume value that answers an ``ApprovalRequested``."""
+
+
+@on(Started)
+def to_processed(event: Started) -> Processed:
+    return Processed(data=event.data)
 
 
 @on(Counted)
