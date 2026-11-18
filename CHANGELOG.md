@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `resume()`, `aresume()`, `stream_resume()` and `astream_resume()` accept a mapping of
+  LangGraph interrupt ids to answers. One resume then answers parallel interrupts. An open
+  interrupt that the mapping does not name stays open. A key that names no open interrupt
+  raises `ValueError` before the graph runs. See
+  [Answers by interrupt id](docs/control-flow.md#answers-by-interrupt-id). See #237.
+- `Dismissed(interrupted=...)` answers a question that a person dismissed without an
+  answer. It is dispatched, so `@on(Dismissed, interrupted=X)` reacts to one question.
+  Unlike `abandon()`, the thread goes on. WARNING: a release older than this one cannot
+  read a stored `Dismissed`. Before a rollback, check that no thread stores one. See #237.
+- `langgraph_events.agui.AGUIAnswerable`, the `agui_answer(payload)` protocol of an
+  `Interrupted` subclass that reads its AG-UI 1.0 answer. See #237.
+
 ### Changed
 
 - **BREAKING: `AGUIAdapter` ends a paused run with the AG-UI 1.0 interrupt outcome.** Before,
@@ -22,13 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It still runs no handler, and the thread keeps its question. Migration: a client that
   waits for `RUN_ERROR` on this case must read the cancelled outcome. `aresume()` and
   `astream_resume()` still raise `ValueError`. See #237.
-- `extract_resume_input()` reads `RunAgentInput.resume` first. One entry with the status
-  `resolved` gives its `payload`. Another list raises `RunRefusedError` with the code
-  `unsupported_resume`. Without a `resume` list, it reads `forwarded_props.command.resume`
-  as before. See #237.
-- `AGUIAdapter.stream()` drops each `RunAgentInput.resume` entry that names no open
-  interrupt, with a `WARNING`, before it calls the `resume_factory`. The interrupt stays
-  open, and the run ends with the interrupt outcome again. See #237.
+- **BREAKING: `AGUIAdapter.stream()` answers a non-empty `RunAgentInput.resume` list itself,
+  and does not call the `resume_factory` for it.** A `resolved` entry gives the
+  `agui_answer(payload)` of its interrupt. A `cancelled` entry gives `Dismissed`. An entry
+  that names no open interrupt is dropped with a `WARNING`. An open interrupt that no entry
+  names stays open, and the run ends with the interrupt outcome. Two entries for one
+  interrupt end with `RUN_ERROR` code `duplicate_resume_entry`. An entry that its interrupt
+  cannot take ends with `RUN_ERROR` code `unanswerable_interrupt`. Migration: implement
+  `agui_answer()` on each `Interrupted` subclass that an AG-UI 1.0 client answers. A
+  `resume_factory` that read `RunAgentInput.resume` must move that code to `agui_answer()`.
+  The `forwarded_props.command.resume` path and `extract_resume_input()` stay as they were.
+  See [Resume list](docs/agui.md#resume-list). See #237.
 - **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
   of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
   `(value, interrupt_id)` or read `frame.value`. See #237.

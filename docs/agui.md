@@ -73,7 +73,7 @@ Mappers claim events in priority order. The first non-`None` return wins. An unc
 
 | Priority | Mapper | Handles | AG-UI Events Produced |
 |---|---|---|---|
-| 1 | `SkipInternalMapper` | `Resumed`, `SystemPromptSet`, `FrontendStateMutated` | *(suppressed)* |
+| 1 | `SkipInternalMapper` | `Resumed`, `Dismissed`, `SystemPromptSet`, `FrontendStateMutated` | *(suppressed)* |
 | 2 | `FrontendToolCallRequestedMapper` | `FrontendToolCallRequested` | `ToolCallStart` / `ToolCallArgs` / `ToolCallEnd` |
 | 3 | `InterruptedMapper` | `Interrupted` subclasses | `CustomEvent` (name=`"interrupted"`) |
 | 4 | *(user mappers)* | *(your custom logic)* | *(any AG-UI event)* |
@@ -410,7 +410,7 @@ def place(event: OrderConfirmed) -> OrderPlaced:
 
 `detect_new_tool_results` covers the frontend-tool-result path of resume. A result the client marks with `error` becomes a LangChain `ToolMessage` with `status="error"`. In the other path, the frontend sends `Command(resume=…)` plus new chat messages. Three helpers cover that path:
 
-- **`extract_resume_input(input_data)`**: read the answer of an AG-UI 1.0 client from `RunAgentInput.resume`. The list must hold one entry with the status `resolved`. The result is its `payload`. A resume run answers one interrupt, so another list raises `RunRefusedError` with the code `unsupported_resume`. Without a `resume` list, decode `RunAgentInput.forwarded_props["command"]["resume"]`. Every falsy value (`0`, `""`, `[]`, `{}`, `False`) means "no resume". For a "deny" signal, send `{"approved": false}`, not bare `false`.
+- **`extract_resume_input(input_data)`**: decode `RunAgentInput.forwarded_props["command"]["resume"]`. AG-UI 1.0 does not define this field. It stays for the clients that already send it. An AG-UI 1.0 client sends `RunAgentInput.resume`, which the adapter answers itself, see [Resume list](#resume-list). Every falsy value (`0`, `""`, `[]`, `{}`, `False`) means "no resume". For a "deny" signal, send `{"approved": false}`, not bare `false`.
 - **`agui_messages_to_langchain(messages, *, drop_invalid_tool_calls=False)`**: convert AG-UI messages (`UserMessage`, `AssistantMessage`, `SystemMessage`, `ToolMessage`, multimodal content included, see [Message field mapping](#message-field-mapping)) to LangChain `BaseMessage`. `ReasoningMessage` and `DeveloperMessage` are skipped at `DEBUG`. `ActivityMessage` and an unknown role raise `ValueError`. With `drop_invalid_tool_calls=True`, a tool call with unparseable JSON args is dropped with a `WARNING`. A `ToolMessage.error` becomes `status="error"`, and extra fields land under `additional_kwargs[AGUI_EXTRAS_KEY]`. A content part with a `file` source lands under `additional_kwargs[AGUI_HELD_PARTS_KEY]`. Use it directly for custom merging, for example in `seed_factory`.
 - **`detect_new_frontend_messages(input_data, checkpoint_state, *, reducer_name="messages", drop_invalid_tool_calls=True)`**: read the stored messages from `checkpoint_state["reducers"][reducer_name]`, then convert only the inbound messages whose id is not stored. Returns a tuple of the new messages only. A stored message wins over an inbound message with the same id, because AG-UI defines `MessagesSnapshot` as the messages that the server owns. If two inbound messages have the same id, the result holds the last copy, at the position of the first copy.
 
@@ -596,9 +596,51 @@ The adapter also sends the `interrupted` custom event, as before. A client that 
 
 A `FrontendToolCallRequested` is a frontend tool call, not an interrupt. AG-UI 1.0 ends such a run as a success. The client answers the call with a tool message in the next input, and it finds the open call in the `TOOL_CALL_START` events. So the outcome does not name it. When a real interrupt is also open, the outcome names only the real interrupt.
 
-A resume run answers one interrupt. When two handlers pause in parallel, the outcome names both interrupts. A 1.0 client then sends two entries, and `extract_resume_input` refuses them with `unsupported_resume`. A resume entry with the status `cancelled` is also refused. To move such a thread on, call `abandon()` on the server.
+A run on a paused thread with no answer runs no handler. It ends with the interrupt outcome again, so the client gets another chance to answer. A cancelled run waits for nothing, so a 1.0 client clears its pending interrupts. The next run then sends no answer and gets the interrupt outcome again.
 
-A 1.0 client sends its answer in `RunAgentInput.resume`. Read it with [`extract_resume_input`](#resume-helpers) in the `resume_factory`. Before the adapter calls the `resume_factory`, it drops each resume entry that names no open interrupt, with a `WARNING`. An open interrupt that no entry answers then stays open. A run on a paused thread whose `resume_factory` returns `None` runs no handler. It ends with the interrupt outcome again, so the client gets another chance to answer. A cancelled run waits for nothing, so a 1.0 client clears its pending interrupts. The next run then sends no answer and gets the interrupt outcome again.
+### Resume list
+
+An AG-UI 1.0 client answers in `RunAgentInput.resume`, one `ResumeEntry` for each interrupt, named by `interrupt_id`. When the list is not empty, the adapter answers from the list, and it does not call the `resume_factory`:
+
+| Entry | Answer of the interrupt that the entry names |
+|---|---|
+| `status="resolved"` | The result of `agui_answer(payload)` on the interrupt value |
+| `status="cancelled"` | `Dismissed(interrupted=<the interrupt value>)` |
+| An `interrupt_id` that names no open interrupt | None. The adapter drops the entry with a `WARNING`. |
+
+The adapter resumes every answered interrupt in one run. An open interrupt that no entry names stays open, and the run ends with the interrupt outcome for it. The answer to a covered interrupt is stored at once. Its handlers run in the run that answers the last open interrupt of the same round.
+
+Before the graph runs, the adapter refuses the list with `RUN_ERROR` in two cases. The thread then keeps every question.
+
+| Case | `RUN_ERROR.code` |
+|---|---|
+| Two entries name the same interrupt | `duplicate_resume_entry` |
+| A `resolved` entry names an interrupt without `agui_answer()`, or an entry names an interrupt that is not an `Interrupted` | `unanswerable_interrupt` |
+
+An interrupt reads its own answer. Implement `agui_answer()`, the `AGUIAnswerable` protocol, on each `Interrupted` subclass that a 1.0 client answers:
+
+```python
+...
+from typing import Any
+
+from langgraph_events import IntegrationEvent, Interrupted
+
+
+class ApprovalGiven(IntegrationEvent):
+    approved: bool
+
+
+class ApprovalRequested(Interrupted):
+    draft: str
+
+    def agui_dict(self) -> dict[str, Any]:
+        return {"draft": self.draft}
+
+    def agui_answer(self, payload: Any) -> ApprovalGiven:
+        return ApprovalGiven(approved=bool(payload["approved"]))
+```
+
+AG-UI 1.0 lets a client dismiss an interrupt without an answer. What that means for the work is the choice of the app. Subscribe to `Dismissed` to decide it per question, for example `@on(Dismissed, interrupted=ApprovalRequested)`. Without such a handler, the dismissal only closes the question. See [Answers by interrupt id](control-flow.md#answers-by-interrupt-id).
 
 WARNING: a `stop_on=` signal set after the resume turn starts, and before the replayed paused handler commits, cuts that replay. The thread then loses the question and the answer, and the run ends with the cancelled outcome. The adapter keeps the `RunAgentInput.state` that it wrote before the replay. To keep the question, set the stop before the resume turn starts. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 

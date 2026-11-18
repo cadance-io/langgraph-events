@@ -186,6 +186,30 @@ log = graph.resume(ApprovalSubmitted(approved=True), config=config)
 
 The resume value must be an `Event`. Another value raises `TypeError` before the graph runs, so the thread stays paused and a later `resume()` can answer it. A handler that pauses two times in one run is resumed two times. After the first resume, the thread is paused again and `get_state(config).is_interrupted` is `True`. Under the default `on_unresumable="raise"`, `resume()` raises [`UnresumableError`](api.md#warnings) only when no registered handler waits for an answer.
 
+### Answers by interrupt id
+
+When two handlers pause in parallel, one resume can answer both. Pass a mapping of LangGraph interrupt ids to answers to `resume()`, `aresume()`, `stream_resume()` or `astream_resume()`. Read the ids from `graph.compiled.get_state(config).interrupts`:
+
+```python
+...
+snapshot = graph.compiled.get_state(config)
+ids = {type(i.value): i.id for i in snapshot.interrupts}
+graph.resume(
+    {
+        ids[OrderConfirmationRequested]: ApprovalSubmitted(approved=True),
+        ids[AddressRequested]: Dismissed(interrupted=snapshot.interrupts[1].value),
+    },
+    config=config,
+)
+```
+
+- An open interrupt that the mapping does not name stays open. The run stores the answers that it got, and the thread stays paused. The handlers of those answers run when a resume answers the last open interrupt of the round.
+- A key that names no open interrupt raises `ValueError` before the graph runs. The thread keeps every question.
+- An empty mapping, or a value that is not an `Event`, raises `TypeError`.
+- A single `Event` still answers a thread with one open interrupt. With more than one open interrupt, LangGraph refuses it with `RuntimeError`.
+
+`Dismissed(interrupted=...)` is the answer to a question that a person dismissed without an answer. The run dispatches it like any answer. Subscribe with `@on(Dismissed, interrupted=AddressRequested)` to react to one question. Unlike `abandon()`, it closes one question and the thread goes on.
+
 For an interrupt whose frontend needs an action-discriminated dict, subclass `langgraph_events.agui.InterruptedWithPayload[PayloadT]`. See [Typed Interrupt Payloads](agui.md#typed-interrupt-payloads).
 
 See the [approval pattern](patterns.md#expense-hitl) and [What changes safely](event-migrations.md#what-changes-safely).
