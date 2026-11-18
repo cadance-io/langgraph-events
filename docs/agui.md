@@ -274,7 +274,7 @@ adapter = AGUIAdapter(graph, seed_factory=seed_factory, resume_factory=resume_fa
 When `RunAgentInput.state` is populated alongside a resume:
 
 - The state dict is projected via `include_reducers`. Every framework channel and the `messages` key are stripped.
-- A `FrontendStateMutated(state=projected)` event is built. For each reducer that subscribes to it, the adapter writes via `apre_seed` **before** the resume dispatch, so a handler that injects the channel sees the updated value. The event is also a seed event of `astream_resume`, so it appears in the stream and the audit log.
+- A `FrontendStateMutated(state=projected)` event is built. The resume command writes it, with the share of each reducer that subscribes to it, **before** the resume dispatch. So a handler that injects the channel sees the updated value, and the open interrupts keep their ids. The event is also a seed event of `astream_resume`, so it appears in the stream and the audit log.
 - **A domain-driven reducer wins for a shared key.** A backend channel stays intact, whatever the client echoes.
 - **An `@on(FrontendStateMutated)` handler does NOT fire on resume.** Use `@on(Resumed)` or `@on(Resumed, interrupted=...)` for a resume-time side effect.
 
@@ -616,6 +616,11 @@ Before the graph runs, the adapter refuses the list with `RUN_ERROR` in two case
 |---|---|
 | Two entries name the same interrupt | `duplicate_resume_entry` |
 | A `resolved` entry names an interrupt without `agui_answer()`, or an entry names an interrupt that is not an `Interrupted` | `unanswerable_interrupt` |
+| The `resume_factory` returns an event, and not exactly one `FrontendToolCallRequested` is open without an entry | `unanswerable_interrupt` |
+
+AG-UI 1.0 answers a frontend tool call with a tool message, not with a resume entry. So, beside a resume list, the adapter still calls the `resume_factory`. An event that it returns, for example from `detect_new_tool_results`, answers the one open `FrontendToolCallRequested`. A `None` adds no answer.
+
+A raw `langgraph.types.interrupt(value)` with a value that is not an `Interrupted` is in the interrupt outcome, because it is open. A 1.0 client cannot answer it or dismiss it: each entry for it ends with `unanswerable_interrupt`. Pause with an `Interrupted` subclass for a question that a 1.0 client answers.
 
 An interrupt reads its own answer. Implement `agui_answer()`, the `AGUIAnswerable` protocol, on each `Interrupted` subclass that a 1.0 client answers:
 

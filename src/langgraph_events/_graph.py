@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.pregel import Pregel
-from langgraph.types import Command as LGCommand
 
 from langgraph_events._causes import pad_causes
 from langgraph_events._custom_event import STATE_SNAPSHOT_EVENT_NAME
@@ -43,6 +42,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
     from langgraph.store.base import BaseStore
     from langgraph.types import Checkpointer, Interrupt, StateSnapshot
+    from langgraph.types import Command as LGCommand
 
     from langgraph_events._causes import CauseEntry
     from langgraph_events._namespace import NamespaceModel
@@ -638,6 +638,17 @@ class EventGraph:
             config, pad_causes(values, None), as_node="__seed__"
         )
 
+    def _seed_writes(self, seeds: list[Event]) -> dict[str, Any]:
+        """The channel writes of *seeds*: the events and each reducer share."""
+        if not seeds:
+            return {}
+        writes: dict[str, Any] = {"events": list(seeds)}
+        for name, reducer in self._topology.reducers.items():
+            contribution = reducer.collect(seeds)
+            if reducer.has_contributions(contribution):
+                writes[name] = contribution
+        return writes
+
     def _refuse_derived_seed(self, values: Mapping[str, Any]) -> None:
         derived = sorted(set(values) & self._topology.derived.keys())
         if derived:
@@ -817,7 +828,9 @@ class EventGraph:
         round.
 
         Args:
-            value: The domain event to resume with.
+            value: The domain event to resume with, or a mapping of open
+                interrupt ids to answers. A key that names no open interrupt
+                raises ``ValueError`` before the graph runs.
             deadline: A ``time.monotonic()`` instant. At the first round
                 boundary past it, the router emits ``RunPausedOnDeadline``
                 and the run ends cleanly. ``None`` (default) disables.
@@ -1046,15 +1059,11 @@ class EventGraph:
         when the caller did not load it.
         """
         compiled = self.compiled
-        is_resume = isinstance(inp, LGCommand)
 
         # The shadow state follows what a shown value reads. It starts from
         # the checkpoint, when one exists, so that it matches what the
-        # compiled graph restored. The seeds then layer on top, except on a
-        # resume: Command(resume=...) routes no seed through the seed node,
-        # and the caller (e.g. AGUIAdapter) pre-seeds their contributions
-        # with apre_seed. Applying them again would double-count an
-        # accumulator reducer. See `AGUIAdapter._resume_event_stream`.
+        # compiled graph restored. The seeds then layer on top. On a resume,
+        # the resume command writes them.
         checkpoint_values: dict[str, Any] | None = None
         config = kwargs.get("config")
         if selection.names and self._checkpointer is not None and config is not None:
@@ -1065,7 +1074,7 @@ class EventGraph:
 
         for s in seeds:
             if selection.names:
-                changed = shadow.changes(s) if is_resume else shadow.apply(s, None)
+                changed = shadow.apply(s, None)
                 yield StreamFrame(
                     event=s, reducers=shadow.values(), changed_reducers=changed
                 )
@@ -1299,7 +1308,9 @@ class EventGraph:
         stays internal, exactly like ``resume()``.
 
         Args:
-            value: The domain event to resume with.
+            value: The domain event to resume with, or a mapping of open
+                interrupt ids to answers. A key that names no open interrupt
+                raises ``ValueError`` before the graph runs.
             seeds: Optional events to dispatch alongside the resume in the
                 same step.  Their reducer contributions layer onto the
                 checkpointed state *before* the resume's downstream events
@@ -1336,7 +1347,7 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
         selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
-            resume_command(value, snapshot),
+            resume_command(value, snapshot, self._seed_writes(seeds or [])),
             seeds or [],
             selection,
             _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
@@ -1400,7 +1411,9 @@ class EventGraph:
         yields events as they are produced.
 
         Args:
-            value: The domain event to resume with.
+            value: The domain event to resume with, or a mapping of open
+                interrupt ids to answers. A key that names no open interrupt
+                raises ``ValueError`` before the graph runs.
             seeds: Optional events to dispatch alongside the resume in the
                 same step.  Their reducer contributions layer onto the
                 checkpointed state *before* the resume's downstream events
@@ -1451,7 +1464,7 @@ class EventGraph:
                     yield latest
             return
         async for item in self._astream_entry(
-            resume_command(value, snapshot),
+            resume_command(value, snapshot, self._seed_writes(seeds or [])),
             seeds or [],
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,

@@ -43,7 +43,7 @@ from langgraph_events.stream import (
 
 from ._context import MapperContext
 from ._errors import RunRefusedError
-from ._events import FrontendStateMutated
+from ._events import FrontendStateMutated, FrontendToolCallRequested
 from ._mappers import (
     FallbackMapper,
     UnmappedEventError,
@@ -438,21 +438,49 @@ class AGUIAdapter:
             build_messages_snapshot(channels.get("messages") or []),
         ]
 
-    @staticmethod
-    def _answers_from_resume_list(
-        input_data: RunAgentInput, checkpoint: StateSnapshot
+    async def _answers_from_resume_list(
+        self,
+        input_data: RunAgentInput,
+        checkpoint: StateSnapshot,
+        checkpoint_state: CheckpointState | None,
     ) -> dict[str, Event] | None:
         """The answers of an AG-UI 1.0 resume list, or ``None`` for none.
 
-        The list replaces the resume factory. An open interrupt that no entry
-        names stays open, so the run ends with the interrupt outcome again.
+        An open interrupt that no entry names stays open, so the run ends with
+        the interrupt outcome again. AG-UI 1.0 answers a frontend tool call in
+        the messages, not in the list. So the event of the resume factory
+        answers the one open ``FrontendToolCallRequested``.
         """
         open_interrupts = {i.id: i.value for i in _snapshot_interrupts(checkpoint)}
         try:
             answers = answers_by_interrupt_id(input_data.resume or [], open_interrupts)
         except RunRefusedError as refusal:
             raise _FactoryRefusalError(refusal) from refusal
-        return answers or None
+        if self._resume_factory is None:
+            return answers or None
+        tool_answer = await _call_factory(
+            self._resume_factory,
+            input_data,
+            checkpoint_state,
+            accepts_state=self._resume_accepts_state,
+        )
+        if tool_answer is None:
+            return answers or None
+        tool_calls = [
+            interrupt_id
+            for interrupt_id, value in open_interrupts.items()
+            if isinstance(value, FrontendToolCallRequested)
+            and interrupt_id not in answers
+        ]
+        if len(tool_calls) != 1:
+            raise _FactoryRefusalError(
+                RunRefusedError(
+                    "unanswerable_interrupt",
+                    "Beside a resume list, the resume factory answers one open "
+                    f"frontend tool call, but {len(tool_calls)} are open.",
+                )
+            )
+        return {**answers, tool_calls[0]: tool_answer}
 
     def _should_gate_with_checkpoint_replay(
         self,
@@ -515,30 +543,19 @@ class AGUIAdapter:
         snapshot: StateSnapshot | None,
         context: object,
     ) -> AsyncIterator[StreamItem]:
-        """Resume path that routes ``FrontendStateMutated`` through both
+        """Resume path that routes ``FrontendStateMutated`` through the
         reducer dispatch and the LangGraph channel state.
 
-        For each reducer subscribing to ``FrontendStateMutated``, compute the
-        contribution and ``apre_seed`` it to the channel so handlers reading
-        reducer state via parameter injection on the resumed step see the
-        update.  This preserves reducer ``fn`` semantics (transformations,
-        ``SKIP``) — unlike the old ``apre_seed(raw_state)`` bypass that wrote
-        client values directly and could clobber backend-authoritative
-        channels with stale snapshot keys.
-
-        Then pass FSM as a seed to ``astream_resume`` so it appears in the
-        output stream and audit log alongside the resume event.
+        The client state goes in as a seed of ``astream_resume``. The resume
+        command writes it, with the contribution of each reducer that
+        subscribes to it, before the resumed step runs. So a handler that
+        injects the channel sees the update, and reducer ``fn`` semantics
+        (transformations, ``SKIP``) hold.
 
         **Limitation**: ``@on(FrontendStateMutated)`` handlers do not fire on
-        resume — LangGraph's ``Command(resume=...)`` carries one value and
-        seeds are dispatched out-of-graph.  Use ``@on(Resumed)`` for
-        resume-time side effects.
+        resume. Use ``@on(Resumed)`` for resume-time side effects.
         """
         fsm = self._build_resume_frontend_state_event(input_data)
-        if fsm is not None:
-            await self._commit_resume_frontend_state(fsm, config)
-            # The commit writes a new checkpoint, so *snapshot* is stale.
-            snapshot = None
         async for item in self._graph.astream_resume(
             resume_event,
             seeds=[fsm] if fsm is not None else [],
@@ -561,44 +578,6 @@ class AGUIAdapter:
         if filtered is None:
             return None
         return FrontendStateMutated(state=filtered)
-
-    async def _commit_resume_frontend_state(
-        self, fsm: FrontendStateMutated, config: RunnableConfig
-    ) -> None:
-        """Persist FSM into the audit log AND apply reducer contributions
-        to user channels — both before the resume's domain dispatch runs.
-
-        Channel reducers merge the writes (``operator.add`` for ``events``,
-        scalar / accumulator for user reducers).  We do NOT emit FSM via
-        the seed_node here: ``Command(resume=...)`` carries one value and
-        doesn't route seeds through ``inp["events"]``, so this ``apre_seed``
-        is the sole path that lands FSM in the persisted ``events``
-        channel.  ``_astream_v2`` yields seeds into the output stream but
-        deliberately skips re-applying seed contributions on resume to
-        avoid double-counting accumulator reducers.
-
-        If a future refactor unifies seed dispatch through ``inp["events"]``,
-        drop the ``{"events": [fsm]}`` entry to avoid duplication.
-        """
-        updates: dict[str, Any] = {"events": [fsm]}
-        updates.update(self._reducer_updates_for([fsm]))
-        await self._graph.apre_seed(config, updates)
-
-    def _reducer_updates_for(self, events: list[Event]) -> dict[str, Any]:
-        """Compute per-channel reducer contributions for *events*.
-
-        Runs each registered reducer's ``collect`` against *events* and
-        returns the dict of channel updates (only including channels with
-        actual contributions).  Used on the resume path to materialise FSM
-        reducer effects into LangGraph channel state so subsequent handlers
-        see them via parameter injection.
-        """
-        updates: dict[str, Any] = {}
-        for name, reducer in self._graph.topology.reducers.items():
-            contribution = reducer.collect(events)
-            if reducer.has_contributions(contribution):
-                updates[name] = contribution
-        return updates
 
     async def _build_event_stream(
         self,
@@ -789,8 +768,8 @@ class AGUIAdapter:
         )
         resume_event: ResumeValue | None
         if input_data.resume and checkpoint_snapshot is not None:
-            resume_event = self._answers_from_resume_list(
-                input_data, checkpoint_snapshot
+            resume_event = await self._answers_from_resume_list(
+                input_data, checkpoint_snapshot, checkpoint_state
             )
         elif self._resume_factory is not None:
             resume_event = await _call_factory(

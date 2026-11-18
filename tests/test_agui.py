@@ -2918,7 +2918,7 @@ def describe_checkpoint_loads_per_turn():
                 ]
 
         def when_the_resume_commits_client_state():
-            async def it_loads_the_committed_checkpoint_again():
+            async def it_loads_no_extra_checkpoint():
                 saver = LoadCountingSaver()
                 focus = ScalarReducer[FrontendStateMutated, str](
                     name="focus",
@@ -2943,13 +2943,10 @@ def describe_checkpoint_loads_per_turn():
                 )
 
                 # The adapter loads the checkpoint at the start of the turn.
+                # The resume command writes the client state, so the client
+                # state adds no load.
                 turn_load = 1
-                # apre_seed loads the checkpoint to write the client state.
-                commit_load = 1
-                # The commit makes the turn snapshot stale, so the resume
-                # loads the new checkpoint.
-                reload = 1
-                assert loads == run_loads + turn_load + commit_load + reload
+                assert loads == run_loads + turn_load
                 state = _of_type(events, EventType.STATE_SNAPSHOT)[-1].snapshot
                 assert state["focus"] == "x"
 
@@ -5920,7 +5917,7 @@ def describe_run_finished_outcome():
                 )
                 assert _roled(events, "assistant") == []
                 assert [r.getMessage() for r in caplog.records] == [
-                    "Dropping 1 AG-UI resume entry that names no open interrupt."
+                    "Dropping AG-UI resume entries that name no open interrupt: 1."
                 ]
 
         def when_the_resume_list_cancels_the_interrupt():
@@ -6128,3 +6125,104 @@ def describe_run_finished_outcome():
                     assert events[-1] == RunFinishedEvent(
                         thread_id="o-part-next", run_id="run-1"
                     )
+
+
+@on(UserAsked)
+def ask_tool(event: UserAsked) -> FrontendToolCallRequested:
+    return FrontendToolCallRequested(name="confirm", args={}, tool_call_id="tc-mix")
+
+
+def describe_resume_list_beside_other_input():
+    def when_the_input_also_carries_client_state():
+        async def it_answers_the_question():
+            answered: list[bool] = []
+
+            @on(ApprovalGiven)
+            def record(event: ApprovalGiven) -> None:
+                answered.append(event.approved)
+
+            graph = _graph(ask_approval, record, checkpointer=MemorySaver())
+            await graph.ainvoke(UserAsked(question="go"), config=_config("b-state"))
+            (interrupt_id,) = await _open_interrupt_ids(graph, "b-state")
+
+            events = await _stream(
+                graph,
+                _make_input(
+                    thread_id="b-state",
+                    state={"focus": "x"},
+                    resume=[_resolved(interrupt_id, {"approved": True})],
+                ),
+            )
+
+            assert answered == [True]
+            assert events[-1] == RunFinishedEvent(thread_id="b-state", run_id="run-1")
+
+    def when_the_input_also_carries_a_frontend_tool_result():
+        async def it_answers_the_question_and_the_tool_call():
+            seen: list[str] = []
+
+            @on(ApprovalGiven)
+            def record(event: ApprovalGiven) -> None:
+                seen.append("approval")
+
+            @on(ToolsExecuted)
+            def record_tool(event: ToolsExecuted) -> None:
+                seen.append("tool")
+
+            graph = _graph(
+                ask_approval, ask_tool, record, record_tool, checkpointer=MemorySaver()
+            )
+            await graph.ainvoke(UserAsked(question="go"), config=_config("b-tool"))
+            ids = await _open_ids_by_draft_or_tool(graph, "b-tool")
+
+            def factory(input_data, checkpoint_state):
+                results = detect_new_tool_results(input_data, checkpoint_state)
+                return ToolsExecuted(messages=tuple(results)) if results else None
+
+            events = await _stream(
+                graph,
+                _make_input(
+                    thread_id="b-tool",
+                    messages=[
+                        AguiToolMessage(
+                            id="m-tool",
+                            role="tool",
+                            content="yes",
+                            tool_call_id="tc-mix",
+                        )
+                    ],
+                    resume=[_resolved(ids["needs approval"], {"approved": True})],
+                ),
+                resume_factory=factory,
+            )
+
+            assert sorted(seen) == ["approval", "tool"]
+            assert _tool_call_types(events) == []
+            assert events[-1] == RunFinishedEvent(thread_id="b-tool", run_id="run-1")
+
+    def when_the_resume_factory_answers_beside_the_list():
+        def when_no_frontend_tool_call_is_open():
+            async def it_refuses_the_run_and_keeps_the_question():
+                graph = await _paused("b-extra")
+                (interrupt_id,) = await _open_interrupt_ids(graph, "b-extra")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="b-extra",
+                        resume=[_resolved(interrupt_id, {"approved": True})],
+                    ),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+
+                assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+                assert events[-1].code == "unanswerable_interrupt"
+                assert await _open_interrupt_ids(graph, "b-extra") == [interrupt_id]
+
+
+async def _open_ids_by_draft_or_tool(graph: Any, thread_id: str) -> dict[str, str]:
+    snapshot = await graph.compiled.aget_state(_config(thread_id))
+    return {
+        getattr(i.value, "draft", None) or i.value.tool_call_id: i.id
+        for i in snapshot.interrupts
+    }

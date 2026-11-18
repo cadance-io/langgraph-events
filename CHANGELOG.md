@@ -45,8 +45,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot take ends with `RUN_ERROR` code `unanswerable_interrupt`. Migration: implement
   `agui_answer()` on each `Interrupted` subclass that an AG-UI 1.0 client answers. A
   `resume_factory` that read `RunAgentInput.resume` must move that code to `agui_answer()`.
-  The `forwarded_props.command.resume` path and `extract_resume_input()` stay as they were.
-  See [Resume list](docs/agui.md#resume-list). See #237.
+  Beside a list, the `resume_factory` still runs. Its event answers the one open
+  `FrontendToolCallRequested`, as the tool message of the input does in AG-UI 1.0. The
+  `forwarded_props.command.resume` path and `extract_resume_input()` stay as they were,
+  for the clients that send it. See [Resume list](docs/agui.md#resume-list). See #237.
+- `astream_resume()` and `stream_resume()` write their `seeds=` events, with the share of
+  each reducer, through the resume command. Before, the AG-UI adapter wrote
+  `FrontendStateMutated` with `apre_seed()` first. That write made a new checkpoint, so the
+  open interrupts got new ids, and a resume by id failed. The adapter no longer loads the
+  checkpoint again after it writes the client state. See #237.
 - **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
   of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
   `(value, interrupt_id)` or read `frame.value`. See #237.

@@ -306,7 +306,7 @@ def answers_by_interrupt_id(
     known = [e for e in entries if e.interrupt_id in open_interrupts]
     if len(known) < len(entries):
         logger.warning(
-            "Dropping %d AG-UI resume entry that names no open interrupt.",
+            "Dropping AG-UI resume entries that name no open interrupt: %d.",
             len(entries) - len(known),
         )
     ids = [e.interrupt_id for e in known]
