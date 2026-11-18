@@ -15,6 +15,7 @@ from conftest import (
     to_processed,
 )
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import interrupt as lg_interrupt
 
 from langgraph_events import (
     Cancelled,
@@ -1060,3 +1061,77 @@ def describe_a_resume_of_a_failed_run():
                 log = await graph.aresume(ReviewApproved(), stop_on=stop, config=config)
 
             assert type(list(log)[-1]) is CancelledOnSignal
+
+
+class Noted(IntegrationEvent):
+    text: str = ""
+
+
+async def _notes(graph: EventGraph, config: dict) -> list[str]:
+    return [e.text for e in await _stored(graph, config) if isinstance(e, Noted)]
+
+
+def describe_resume_seeds():
+    def when_two_resumes_in_a_row_are_stopped():
+        async def it_stores_only_the_seed_of_the_later_resume():
+            replay, graph, config = await _paused(False, "sync")
+            ids = await _open_ids(graph, config)
+            for _ in range(2):
+                replay.armed = True
+                async with asyncio.timeout(5):
+                    with pytest.raises(ResumeStoppedError):
+                        async for _item in graph.astream_resume(
+                            {ids["first"]: Answered(), ids["second"]: Answered()},
+                            seeds=[Noted(text="stopped")],
+                            stop_on=replay.stop,
+                            config=config,
+                        ):
+                            pass
+                replay.armed = False
+            assert await _notes(graph, config) == []
+
+            async for _item in graph.astream_resume(
+                {ids["first"]: Answered(), ids["second"]: Answered()},
+                seeds=[Noted(text="kept")],
+                config=config,
+            ):
+                pass
+
+            assert await _notes(graph, config) == ["kept"]
+
+    def when_the_handler_pauses_a_second_time():
+        async def it_stores_the_seed_of_each_resume():
+            @on(Started)
+            async def ask(event: Started) -> ApprovalRequested:
+                return ApprovalRequested(draft=event.data)
+
+            graph = EventGraph([ask], checkpointer=MemorySaver())
+            config = {"configurable": {"thread_id": "seeds-twice"}}
+            await graph.ainvoke([Started(data="a"), Started(data="b")], config=config)
+
+            for text in ("one", "two"):
+                async for _item in graph.astream_resume(
+                    Answered(), seeds=[Noted(text=text)], config=config
+                ):
+                    pass
+
+            assert await _notes(graph, config) == ["one", "two"]
+
+    def when_the_handler_paused_on_a_raw_interrupt():
+        async def it_raises_and_keeps_the_question():
+            @on(Started)
+            async def ask(event: Started) -> Ended:
+                answer = lg_interrupt(ApprovalRequested(draft="raw"))
+                return Ended(result=type(answer).__name__)
+
+            graph = EventGraph([ask], checkpointer=MemorySaver())
+            config = {"configurable": {"thread_id": "seeds-raw"}}
+            await graph.ainvoke(Started(data="go"), config=config)
+
+            with pytest.raises(ValueError, match="raw"):
+                async for _item in graph.astream_resume(
+                    Answered(), seeds=[Noted(text="x")], config=config
+                ):
+                    pass
+
+            assert (await graph.aget_state(config)).is_interrupted

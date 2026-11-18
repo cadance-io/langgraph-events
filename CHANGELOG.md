@@ -41,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a paused handler. Before, that stop lost the question and the answer, and the run stored
   `CancelledOnSignal`. Now the replay step fails, so LangGraph commits no checkpoint, and each
   cut question stays open with the same interrupt id. A replay that ended before the stop
-  keeps its answer. The writes of the resume command stay: the `HandlerCutOnSignal` records
-  and the `seeds=`, so the client state of a stopped AG-UI turn is stored.
+  keeps its answer. A stopped resume stores no seed, so a stopped AG-UI turn stores no client
+  state. The `HandlerCutOnSignal` records stay, because they state a fact of the paused round.
   `AGUIAdapter.stream()` ends both cases with `RUN_FINISHED` and the cancelled outcome.
   Migration: catch `ResumeStoppedError` in place of `ValueError`, and resume again to answer
   the question. See [Stop on a signal](docs/control-flow.md#stop-on-a-signal-cancelledonsignal).
@@ -60,14 +60,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FrontendToolCallRequested`, as the tool message of the input does in AG-UI 1.0. The
   `forwarded_props.command.resume` path and `extract_resume_input()` stay as they were,
   for the clients that send it. See [Resume list](docs/agui.md#resume-list). See #237.
-- `astream_resume()` and `stream_resume()` write their `seeds=` events, with the share of
-  each reducer, through the resume command. Before, the AG-UI adapter wrote
-  `FrontendStateMutated` with `apre_seed()` first. That write made a new checkpoint, so the
-  open interrupts got new ids, and a resume by id failed. The adapter no longer loads the
-  checkpoint again after it writes the client state. A seed now reaches its handlers on a
-  resume: an `@on(FrontendStateMutated)` handler fires once on an AG-UI resume, where it
-  did not fire before. Migration: a handler that must not run on a resume checks
-  `Resumed` in the log. See #237.
+- **BREAKING: the `seeds=` of `astream_resume()` and `stream_resume()` ride in the answer.**
+  The paused handler stores them, before the answer, when it applies the answer. Before, the
+  AG-UI adapter wrote `FrontendStateMutated` with `apre_seed()` first. That write made a new
+  checkpoint, so the open interrupts got new ids, and a resume by id failed. Now:
+  - A seed reaches its handlers: an `@on(FrontendStateMutated)` handler fires once on an
+    AG-UI resume, where it did not fire before.
+  - The client state reaches the handlers when the paused handler finishes. A handler that
+    pauses again in the resume stores the client state of each resume when it finishes. The
+    re-run of the paused handler does not see it.
+  - A stopped resume stores no seed.
+  - A resume with seeds for a handler that paused with a `langgraph.types.interrupt()` call
+    in its body raises `ValueError`. `AGUIAdapter.stream()` refuses it with `RUN_ERROR` code
+    `raw_interrupt_takes_no_client_state`, and the thread keeps its questions.
+
+  Migration: a handler that must not run on a resume checks `Resumed` in the log. A handler
+  that reads client state while it re-runs must read it in the answer handlers. A handler
+  that pauses with `interrupt()` in its body and gets client state must return the
+  `Interrupted` instead.
+
+  WARNING: a checkpoint can now store the internal type `SeededAnswer`, in the answer of a
+  handler that pauses a second time. A release older than this one cannot read it. Before a
+  rollback, resume or abandon each thread that pauses a second time after a resume with
+  client state. See #237.
 - **BREAKING: `InterruptFrame` has a second field, `interrupt_id`.** It holds the LangGraph id
   of the interrupt. Migration: code that unpacks the frame as `(value,)` must unpack
   `(value, interrupt_id)` or read `frame.value`. See #237.

@@ -546,15 +546,27 @@ class AGUIAdapter:
         """Resume path that routes ``FrontendStateMutated`` through the
         reducer dispatch and the LangGraph channel state.
 
-        The client state goes in as a seed of ``astream_resume``. The resume
-        command writes it, with the contribution of each reducer that
-        subscribes to it, before the resumed step runs. So a handler that
-        injects the channel sees the update, and reducer ``fn`` semantics
-        (transformations, ``SKIP``) hold.
+        The client state goes in as a seed of ``astream_resume``. It rides in
+        the answer, so the paused handler stores it when it applies the
+        answer. A stop that cuts the replay then stores neither.
 
         An ``@on(FrontendStateMutated)`` handler fires once on the resume.
         """
         fsm = self._build_resume_frontend_state_event(input_data)
+        if (
+            fsm is not None
+            and snapshot is not None
+            and self._graph.seed_target(resume_event, snapshot) is None
+        ):
+            raise _FactoryRefusalError(
+                RunRefusedError(
+                    "raw_interrupt_takes_no_client_state",
+                    "Each answered handler paused with a raw "
+                    "langgraph.types.interrupt() call, which cannot take "
+                    "RunAgentInput.state. Resume without state, or return the "
+                    "Interrupted from the handler.",
+                )
+            )
         async for item in self._graph.astream_resume(
             resume_event,
             seeds=[fsm] if fsm is not None else [],

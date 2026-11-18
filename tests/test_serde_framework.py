@@ -31,7 +31,7 @@ from langgraph_events import (
     SystemEvent,
     SystemPromptSet,
 )
-from langgraph_events._event import is_abstract_event
+from langgraph_events._event import SeededAnswer, is_abstract_event
 from langgraph_events.agui import FrontendToolCallRequested
 from langgraph_events.serde import Migration, NamespaceAwareSerde
 from langgraph_events.serde._framework import FRAMEWORK_MIGRATIONS
@@ -60,10 +60,12 @@ def _releases() -> list[str]:
 
 
 def _exported_framework_classes() -> set[str]:
+    """Each framework class that a checkpoint stores: the exported ones, and
+    the internal ``SeededAnswer``, which a resume stores in its answer."""
     exported = (getattr(langgraph_events, name) for name in langgraph_events.__all__)
     return {
         cls.__qualname__
-        for cls in exported
+        for cls in (*exported, SeededAnswer)
         if isinstance(cls, type)
         and (issubclass(cls, SystemEvent) or cls is SystemPromptSet)
         and not is_abstract_event(cls)

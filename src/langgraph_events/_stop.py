@@ -156,18 +156,13 @@ type ResumeValue = Event | Mapping[str, Event]
 """One answer for the one open interrupt, or answers by LangGraph interrupt id."""
 
 
-def resume_command(
-    value: ResumeValue,
-    snapshot: StateSnapshot | None,
-    seeded: dict[str, Any] | None = None,
-) -> LGCommand:
+def resume_command(value: ResumeValue, snapshot: StateSnapshot | None) -> LGCommand:
     """The input that resumes *snapshot* with *value*.
 
     It also stores a :class:`HandlerCutOnSignal` for each handler that the
-    stop cut in the paused round, then the channel writes of *seeded*. The
-    command writes them on the paused checkpoint. A write before the command
-    makes a new checkpoint, and LangGraph then gives the paused tasks new
-    interrupt ids. An open interrupt that the answers by id do not name stays
+    stop cut in the paused round. The record states a fact of that round, so
+    it stays when a stop cuts this resume, and a later resume does not store
+    it again. An open interrupt that the answers by id do not name stays
     open.
 
     Raises:
@@ -175,16 +170,10 @@ def resume_command(
             *snapshot*.
     """
     resume = value if isinstance(value, Event) else _answers_by_id(value, snapshot)
-    cuts = pad_causes({"events": _cut_records(snapshot)}, FRAMEWORK)
-    seeds = pad_causes(seeded or {}, None)
-    update = {
-        **seeds,
-        "events": [*cuts["events"], *seeds.get("events", [])],
-        "causes": [*cuts.get("causes", []), *seeds.get("causes", [])],
-    }
-    if not update["events"]:
+    cuts = _cut_records(snapshot)
+    if not cuts:
         return LGCommand(resume=resume)
-    return LGCommand(resume=resume, update=update)
+    return LGCommand(resume=resume, update=pad_causes({"events": cuts}, FRAMEWORK))
 
 
 def _answers_by_id(

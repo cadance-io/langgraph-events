@@ -16,6 +16,7 @@ from langgraph_events._event import (
     Event,
     Interrupted,
     Namespace,
+    SeededAnswer,
     Unresumable,
 )
 from langgraph_events._event_log import EventLog
@@ -638,16 +639,41 @@ class EventGraph:
             config, pad_causes(values, None), as_node="__seed__"
         )
 
-    def _seed_writes(self, seeds: list[Event]) -> dict[str, Any]:
-        """The channel writes of *seeds*: the events and each reducer share."""
+    def seed_target(self, value: ResumeValue, snapshot: StateSnapshot) -> str | None:
+        """The open interrupt whose answer carries the ``seeds=`` of a resume.
+
+        It is the first answered interrupt, in checkpoint task order, whose
+        handler paused by returning it. ``None`` when each answered interrupt
+        comes from a ``langgraph.types.interrupt()`` call in a handler body.
+        Such a call receives the resume value as it is, so it cannot unwrap
+        the seeds.
+        """
+        answered = None if isinstance(value, Event) else set(value)
+        for task in snapshot.tasks:
+            for pending in task.interrupts:
+                if answered is not None and pending.id not in answered:
+                    continue
+                if self._topology.returns_interrupt(task.name, pending.value):
+                    return pending.id
+        return None
+
+    def _with_seeds(
+        self, value: ResumeValue, seeds: list[Event], snapshot: StateSnapshot | None
+    ) -> ResumeValue:
+        """*value*, with *seeds* in the answer of :meth:`seed_target`."""
         if not seeds:
-            return {}
-        writes: dict[str, Any] = {"events": list(seeds)}
-        for name, reducer in self._topology.reducers.items():
-            contribution = reducer.collect(seeds)
-            if reducer.has_contributions(contribution):
-                writes[name] = contribution
-        return writes
+            return value
+        target = None if snapshot is None else self.seed_target(value, snapshot)
+        if target is None:
+            raise ValueError(
+                "resume() got seeds=, but each answered interrupt comes from a "
+                "raw langgraph.types.interrupt() call in a handler body, which "
+                "cannot take them. Return the Interrupted from the handler, or "
+                "resume without seeds=."
+            )
+        if isinstance(value, Event):
+            return SeededAnswer(answer=value, seeds=tuple(seeds))
+        return {**value, target: SeededAnswer(answer=value[target], seeds=tuple(seeds))}
 
     def _refuse_derived_seed(self, values: Mapping[str, Any]) -> None:
         derived = sorted(set(values) & self._topology.derived.keys())
@@ -1313,12 +1339,14 @@ class EventGraph:
             value: The domain event to resume with, or a mapping of open
                 interrupt ids to answers. A key that names no open interrupt
                 raises ``ValueError`` before the graph runs.
-            seeds: Optional events to dispatch alongside the resume in the
-                same step.  Their reducer contributions layer onto the
-                checkpointed state *before* the resume's downstream events
-                run, so resume-handler outputs win for shared keys.  Used
-                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
-                the dispatch chain on resume.
+            seeds: Optional events that ride in the answer. The paused
+                handler stores them, before the answer, when it applies the
+                answer, and the next round dispatches them. A stop that cuts
+                the replay stores neither. A handler that pauses again stores
+                them when it finishes. Used by ``AGUIAdapter`` to route
+                ``FrontendStateMutated`` on resume. A paused handler that
+                called ``langgraph.types.interrupt()`` in its body cannot take
+                them: ``ValueError``.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1349,8 +1377,8 @@ class EventGraph:
         kwargs.pop("stream_mode", None)
         selection = self._topology.select_reducers(include_reducers)
         yield from self._stream_sync(
-            resume_command(value, snapshot, self._seed_writes(seeds or [])),
-            seeds or [],
+            resume_command(self._with_seeds(value, seeds or [], snapshot), snapshot),
+            [],
             selection,
             _RunSignals(deadline=deadline, pause_on=pause_on, stop_on=None),
             **kwargs,
@@ -1416,12 +1444,14 @@ class EventGraph:
             value: The domain event to resume with, or a mapping of open
                 interrupt ids to answers. A key that names no open interrupt
                 raises ``ValueError`` before the graph runs.
-            seeds: Optional events to dispatch alongside the resume in the
-                same step.  Their reducer contributions layer onto the
-                checkpointed state *before* the resume's downstream events
-                run, so resume-handler outputs win for shared keys.  Used
-                by ``AGUIAdapter`` to route ``FrontendStateMutated`` through
-                the dispatch chain on resume.
+            seeds: Optional events that ride in the answer. The paused
+                handler stores them, before the answer, when it applies the
+                answer, and the next round dispatches them. A stop that cuts
+                the replay stores neither. A handler that pauses again stores
+                them when it finishes. Used by ``AGUIAdapter`` to route
+                ``FrontendStateMutated`` on resume. A paused handler that
+                called ``langgraph.types.interrupt()`` in its body cannot take
+                them: ``ValueError``.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1466,8 +1496,8 @@ class EventGraph:
                     yield latest
             return
         async for item in self._astream_entry(
-            resume_command(value, snapshot, self._seed_writes(seeds or [])),
-            seeds or [],
+            resume_command(self._with_seeds(value, seeds or [], snapshot), snapshot),
+            [],
             include_reducers=include_reducers,
             include_llm_tokens=include_llm_tokens,
             include_custom_events=include_custom_events,

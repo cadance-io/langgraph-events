@@ -766,6 +766,21 @@ class EventTopology:
         """
         return frozenset(meta.node_name for meta in self._handler_metas)
 
+    def returns_interrupt(self, node_name: str, value: object) -> bool:
+        """Whether the handler of *node_name* paused by returning *value*.
+
+        It did when *value* is an ``Interrupted`` that the return contract of
+        the handler allows, or when the handler has no contract. Otherwise the
+        pause came from a ``langgraph.types.interrupt()`` call in its body.
+        """
+        if not isinstance(value, Interrupted):
+            return False
+        for meta in self._handler_metas:
+            if node_name == meta.node_name or node_name in meta.previous_names:
+                contract = self._return_contracts.get(meta.name)
+                return contract is None or isinstance(value, contract.types)
+        return False
+
     @property
     def resumable_node_names(self) -> frozenset[str]:
         """Every node name a paused checkpoint can resume at: each name in

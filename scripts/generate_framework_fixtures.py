@@ -33,6 +33,7 @@ from langchain_core.messages import SystemMessage
 
 import langgraph_events as lge
 from langgraph_events import Cancelled, SystemEvent, SystemPromptSet
+from langgraph_events._event import SeededAnswer
 from langgraph_events.serde import NamespaceAwareSerde
 
 if TYPE_CHECKING:
@@ -66,6 +67,10 @@ def _handler_raised(cls: type) -> dict[str, object]:
     return {"HandlerRaised": cls(**_raised())}
 
 
+STORED_INTERNAL: tuple[type, ...] = (SeededAnswer,)
+"""Framework events that a checkpoint stores, though ``lge`` does not export them."""
+
+
 BUILDERS: dict[str, Callable[[type], dict[str, object]]] = {
     "Abandoned": _one(reason="stale", discarded="Approval"),
     "Cancelled": _one(),
@@ -84,6 +89,7 @@ BUILDERS: dict[str, Callable[[type], dict[str, object]]] = {
     "RunPaused": _one(elapsed_seconds=2.5),
     "RunPausedOnDeadline": _one(elapsed_seconds=2.5),
     "RunPausedOnSignal": _one(elapsed_seconds=2.5),
+    "SeededAnswer": _one(answer=Cancelled(), seeds=(Cancelled(),)),
     "SystemPromptSet": _one(message=SystemMessage(content="Be terse.")),
     "Unresumable": _one(resume_value="Approval"),
 }
@@ -99,7 +105,7 @@ def _framework_classes() -> list[type]:
     exported = (getattr(lge, name) for name in lge.__all__)
     return [
         cls
-        for cls in exported
+        for cls in (*exported, *STORED_INTERNAL)
         if isinstance(cls, type)
         and (
             (issubclass(cls, SystemEvent) and cls is not SystemEvent)

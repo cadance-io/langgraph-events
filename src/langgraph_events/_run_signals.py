@@ -26,8 +26,7 @@ class ResumeStoppedError(RuntimeError):
     The signal was set at the call, or while the resume replayed the paused
     handlers. Each cut question stays open, with the same interrupt id, and
     the resume stores no answer for it. A replay that ended before the stop
-    keeps its answer. The writes of the resume command stay, for example its
-    ``seeds=``.
+    keeps its answer. The resume stores no seed.
     """
 
     def __init__(self) -> None:

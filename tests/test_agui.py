@@ -5310,7 +5310,9 @@ def describe_frontend_state_mutated():
                 )
 
                 @on(FocusEcho)
-                def prime(event: FocusEcho) -> ApprovalRequested:
+                def prime(event: FocusEcho) -> ApprovalRequested | None:
+                    if event.value != "b":
+                        return None
                     return ApprovalRequested(draft="ok?")
 
                 graph = _graph(
@@ -6309,14 +6311,33 @@ def describe_a_stop_during_the_replay_of_the_questions():
             assert await _open_ids_by_draft(replay.graph, "r-stop") == ids
             assert replay.answered == []
 
-        async def it_keeps_the_client_state_of_the_stopped_run():
+        async def it_stores_no_client_state():
             replay = _StoppedReplay("r-state")
             ids = await replay.pause()
+            stored = await _stored_events(replay.graph, "r-state")
 
             await replay.stopped_run(ids)
 
             state = await replay.graph.compiled.aget_state(_config("r-state"))
-            assert state.values["focus"] == "stopped"
+            assert state.values["focus"] is None
+            assert await _stored_events(replay.graph, "r-state") == stored
+
+        def when_two_runs_in_a_row_are_stopped():
+            async def it_stores_only_the_client_state_of_the_later_run():
+                replay = _StoppedReplay("r-twice")
+                ids = await replay.pause()
+                await replay.stopped_run(ids)
+                await replay.stopped_run(ids)
+
+                await _stream(replay.graph, replay.answer_both(ids, "kept"))
+
+                state = await replay.graph.compiled.aget_state(_config("r-twice"))
+                assert [
+                    e.state
+                    for e in state.values["events"]
+                    if isinstance(e, FrontendStateMutated)
+                ] == [{"focus": "kept"}]
+                assert sorted(replay.answered) == [("first", True), ("second", True)]
 
         def when_a_later_run_answers_them():
             async def it_dispatches_only_the_later_answers():
@@ -6348,3 +6369,75 @@ def describe_the_client_state_of_a_resume():
         await _resume(graph, _make_input(thread_id="c-state", state={"focus": "x"}))
 
         assert seen == [{"focus": "x"}]
+
+
+@on(UserAsked)
+def ask_raw(event: UserAsked) -> AgentReplied:
+    answer = lg_interrupt(ApprovalRequested(draft="raw"))
+    return AgentReplied(message=AIMessage(content=f"approved={answer.approved}"))
+
+
+def describe_client_state_for_a_paused_handler():
+    def when_the_handler_paused_on_a_raw_interrupt():
+        async def it_refuses_the_run_and_keeps_the_question():
+            graph = _graph(ask_raw, checkpointer=MemorySaver())
+            await graph.ainvoke(UserAsked(question="go"), config=_config("raw-state"))
+            (interrupt_id,) = await _open_interrupt_ids(graph, "raw-state")
+            stored = await _stored_events(graph, "raw-state")
+
+            events = await _stream(
+                graph,
+                _make_input(
+                    thread_id="raw-state",
+                    state={"focus": "x"},
+                    resume=[_resolved(interrupt_id, {"approved": True})],
+                ),
+            )
+
+            assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+            assert events[-1].code == "raw_interrupt_takes_no_client_state"
+            assert await _open_interrupt_ids(graph, "raw-state") == [interrupt_id]
+            assert await _stored_events(graph, "raw-state") == stored
+
+        def when_the_input_carries_no_client_state():
+            async def it_answers_the_question():
+                graph = _graph(ask_raw, checkpointer=MemorySaver())
+                await graph.ainvoke(
+                    UserAsked(question="go"), config=_config("raw-plain")
+                )
+                (interrupt_id,) = await _open_interrupt_ids(graph, "raw-plain")
+
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="raw-plain",
+                        resume=[_resolved(interrupt_id, {"approved": True})],
+                    ),
+                )
+
+                assert _roled(events, "assistant")[-1].content == "approved=True"
+
+    def when_the_handler_pauses_a_second_time():
+        async def it_stores_the_client_state_of_each_resume():
+            graph = _graph(ask_approval, approve, checkpointer=MemorySaver())
+            config = _config("twice-state")
+            await graph.ainvoke(
+                [UserAsked(question="a"), UserAsked(question="b")], config=config
+            )
+            for focus in ("one", "two"):
+                (interrupt_id,) = await _open_interrupt_ids(graph, "twice-state")
+                await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="twice-state",
+                        state={"focus": focus},
+                        resume=[_resolved(interrupt_id, {"approved": True})],
+                    ),
+                )
+
+            state = await graph.compiled.aget_state(config)
+            assert [
+                e.state
+                for e in state.values["events"]
+                if isinstance(e, FrontendStateMutated)
+            ] == [{"focus": "one"}, {"focus": "two"}]

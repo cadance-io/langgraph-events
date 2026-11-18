@@ -274,7 +274,10 @@ adapter = AGUIAdapter(graph, seed_factory=seed_factory, resume_factory=resume_fa
 When `RunAgentInput.state` is populated alongside a resume:
 
 - The state dict is projected via `include_reducers`. Every framework channel and the `messages` key are stripped.
-- A `FrontendStateMutated(state=projected)` event is built. The resume command writes it, with the share of each reducer that subscribes to it, **before** the resume dispatch. So a handler that injects the channel sees the updated value, and the open interrupts keep their ids. The event is also a seed event of `astream_resume`, so it appears in the stream and the audit log.
+- A `FrontendStateMutated(state=projected)` event is built. It rides in the answer of the resume, so the paused handler stores it, with the share of each reducer that subscribes to it, before the answer. The handlers of the answer then see the updated value. The event appears in the stream and the audit log.
+- The client state reaches the handlers when the paused handler finishes. A handler that pauses again in the resume stores the client state of each resume when it finishes. The re-run of the paused handler does not see it.
+- A stop that cuts the resume stores no client state.
+- When each answered handler paused with a `langgraph.types.interrupt()` call in its body, the run is refused before the graph runs, with `RUN_ERROR` code `raw_interrupt_takes_no_client_state`. Such a call cannot take client state. The thread keeps its questions. Resume without `state`, or return the `Interrupted` from the handler.
 - **A domain-driven reducer wins for a shared key.** A backend channel stays intact, whatever the client echoes.
 - An `@on(FrontendStateMutated)` handler fires on resume, once, as on a fresh run.
 
@@ -647,7 +650,7 @@ class ApprovalRequested(Interrupted):
 
 AG-UI 1.0 lets a client dismiss an interrupt without an answer. What that means for the work is the choice of the app. Subscribe to `Dismissed` to decide it per question, for example `@on(Dismissed, interrupted=ApprovalRequested)`. Without such a handler, the dismissal only closes the question. See [Answers by interrupt id](control-flow.md#answers-by-interrupt-id).
 
-A `stop_on=` signal set during the replay of a paused handler cuts that replay. The cut question stays open with the same id, and its answer is not stored. A question whose replay ended before the stop keeps its answer. The `RunAgentInput.state` of the stopped turn is stored, and the next run dispatches it, whether that run is a resume or a fresh run. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
+A `stop_on=` signal set during the replay of a paused handler cuts that replay. The cut question stays open with the same id, and its answer is not stored. A question whose replay ended before the stop keeps its answer. The `RunAgentInput.state` of the stopped turn is not stored. See [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal).
 
 AG-UI 1.0 says that the run after a cancelled run is an ordinary run. On a thread that is still paused, the adapter runs no handler for such a run: it sends the interrupt outcome again, and the new input has no effect. The client must answer the open questions first. This deviates from the spec, because the thread keeps its questions.
 

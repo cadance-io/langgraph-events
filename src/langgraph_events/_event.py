@@ -880,6 +880,19 @@ class Resumed(SystemEvent):
     interrupted: Interrupted | None = None
 
 
+class SeededAnswer(SystemEvent):
+    """The answer to one interrupt, with the seeds of the resume that sent it.
+
+    Internal. ``astream_resume(seeds=...)`` sends it as the resume value, so
+    LangGraph stores the seeds in the same write as the answer. The paused
+    handler stores the seeds when it applies the answer. A stop that cuts the
+    replay then stores neither, and a second pause of the handler keeps both.
+    """
+
+    answer: Event
+    seeds: tuple[Event, ...] = ()
+
+
 class Dismissed(SystemEvent):
     """The answer to an interrupt that a person dismissed without an answer.
 
