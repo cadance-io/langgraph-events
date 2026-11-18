@@ -1136,6 +1136,25 @@ def describe_resume_seeds():
 
             assert (await graph.aget_state(config)).is_interrupted
 
+    def when_the_answers_name_no_open_interrupt():
+        async def it_raises_and_keeps_the_question():
+            @on(Started)
+            async def ask(event: Started) -> ApprovalRequested:
+                return ApprovalRequested(draft=event.data)
+
+            graph = EventGraph([ask], checkpointer=MemorySaver())
+            config = {"configurable": {"thread_id": "seeds-not-open"}}
+            await graph.ainvoke(Started(data="go"), config=config)
+
+            with pytest.raises(ValueError, match="answers no open interrupt"):
+                async for _item in graph.astream_resume(
+                    {"not-open": Answered()}, seeds=[Noted(text="x")], config=config
+                ):
+                    pass
+
+            assert (await graph.aget_state(config)).is_interrupted
+            assert await _notes(graph, config) == []
+
 
 @on(Started)
 async def _ask_raw_declared(event: Started) -> ApprovalRequested | Ended:
