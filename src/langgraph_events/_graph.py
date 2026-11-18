@@ -647,15 +647,30 @@ class EventGraph:
         comes from a ``langgraph.types.interrupt()`` call in a handler body.
         Such a call receives the resume value as it is, so it cannot unwrap
         the seeds.
+
+        Raises:
+            ValueError: *value* answers no open interrupt of *snapshot*.
         """
-        answered = None if isinstance(value, Event) else set(value)
-        for task in snapshot.tasks:
-            for pending in task.interrupts:
-                if answered is not None and pending.id not in answered:
-                    continue
-                if self._topology.returns_interrupt(task.name, pending.value):
-                    return pending.id
-        return None
+        answered = [
+            (task.name, pending)
+            for task in snapshot.tasks
+            for pending in task.interrupts
+            if isinstance(value, Event) or pending.id in value
+        ]
+        if not answered:
+            raise ValueError(
+                "The resume answers no open interrupt, so no handler can take "
+                f"its seeds=. The open interrupt ids are "
+                f"{[i.id for i in _snapshot_interrupts(snapshot)]!r}."
+            )
+        return next(
+            (
+                pending.id
+                for name, pending in answered
+                if self._topology.returns_interrupt(name, pending.value)
+            ),
+            None,
+        )
 
     def _with_seeds(
         self, value: ResumeValue, seeds: list[Event], snapshot: StateSnapshot | None
@@ -1346,7 +1361,8 @@ class EventGraph:
                 them when it finishes. Used by ``AGUIAdapter`` to route
                 ``FrontendStateMutated`` on resume. A paused handler that
                 called ``langgraph.types.interrupt()`` in its body cannot take
-                them: ``ValueError``.
+                them: ``ValueError``. A resume that answers no open interrupt
+                cannot take them: ``ValueError``.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.
@@ -1451,7 +1467,8 @@ class EventGraph:
                 them when it finishes. Used by ``AGUIAdapter`` to route
                 ``FrontendStateMutated`` on resume. A paused handler that
                 called ``langgraph.types.interrupt()`` in its body cannot take
-                them: ``ValueError``.
+                them: ``ValueError``. A resume that answers no open interrupt
+                cannot take them: ``ValueError``.
             include_reducers: When truthy, yields ``StreamFrame`` tuples
                 instead of bare events.  Pass ``True`` for all reducers or
                 a list of reducer names for selective inclusion.

@@ -6448,3 +6448,158 @@ def describe_client_state_for_a_paused_handler():
                 for e in state.values["events"]
                 if isinstance(e, FrontendStateMutated)
             ] == [{"focus": "one"}, {"focus": "two"}]
+
+
+def _no_open_interrupt_warning(thread_id: str) -> str:
+    return (
+        f"Dropping the answer of an AG-UI run: the thread {thread_id!r} is not paused."
+    )
+
+
+def _adapter_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """The messages that ``langgraph_events`` logged, without LangGraph ones."""
+    return [
+        r.getMessage() for r in caplog.records if r.name.startswith("langgraph_events")
+    ]
+
+
+async def _answered(thread_id: str) -> EventGraph:
+    """A graph whose thread ``thread_id`` paused once, and got its answer."""
+    graph = await _paused(thread_id)
+    await _resume(graph, _make_input(thread_id=thread_id, state={"focus": "x"}))
+    return graph
+
+
+async def _abandoned(thread_id: str) -> EventGraph:
+    """A graph whose thread ``thread_id`` paused once, then was abandoned."""
+    graph = await _paused(thread_id)
+    await graph.event_store.aabandon(_config(thread_id))
+    return graph
+
+
+async def _completed(thread_id: str) -> EventGraph:
+    """A graph whose thread ``thread_id`` ran to the end without a question."""
+    graph = _graph(reply_hi, approve, checkpointer=MemorySaver())
+    await graph.ainvoke(UserAsked(question="go"), config=_config(thread_id))
+    return graph
+
+
+_failing = {"on": True}
+
+
+@on(ApprovalGiven)
+def approve_or_fail(event: ApprovalGiven) -> AgentReplied:
+    if _failing["on"]:
+        raise RuntimeError("boom")
+    return AgentReplied(message=AIMessage(content="Approved!"))
+
+
+async def _failed_after_answer(thread_id: str) -> EventGraph:
+    """A graph whose answer handler failed: a run is pending, with no question."""
+    graph = _graph(ask_approval, approve_or_fail, checkpointer=MemorySaver())
+    await graph.ainvoke(UserAsked(question="go"), config=_config(thread_id))
+    _failing["on"] = True
+    with pytest.raises(RuntimeError):
+        await graph.aresume(ApprovalGiven(approved=True), config=_config(thread_id))
+    _failing["on"] = False
+    return graph
+
+
+def describe_an_answer_to_a_failed_run():
+    def when_the_input_carries_no_client_state():
+        async def it_resumes_the_pending_run():
+            graph = await _failed_after_answer("pending-run")
+
+            events = await _resume(graph, _make_input(thread_id="pending-run"))
+
+            assert events[-1] == RunFinishedEvent(
+                thread_id="pending-run", run_id="run-1"
+            )
+            assert _roled(events, "assistant")[-1].content == "Approved!"
+
+    def when_the_input_carries_client_state():
+        async def it_refuses_the_run_and_keeps_the_pending_run():
+            graph = await _failed_after_answer("pending-state")
+            before = await graph.compiled.aget_state(_config("pending-state"))
+
+            events = await _resume(
+                graph, _make_input(thread_id="pending-state", state={"focus": "x"})
+            )
+
+            after = await graph.compiled.aget_state(_config("pending-state"))
+            assert _types(events) == [EventType.RUN_STARTED, EventType.RUN_ERROR]
+            assert events[-1].code == "pending_run_takes_no_client_state"
+            assert after.next == before.next
+            assert after.values["events"] == before.values["events"]
+
+
+def describe_an_answer_to_a_thread_that_is_not_paused():
+    def when_the_answer_comes_from_the_resume_factory():
+        def when_the_input_carries_client_state():
+            @pytest.mark.parametrize("thread", [_completed, _abandoned, _answered])
+            async def it_drops_the_answer_and_applies_the_client_state(thread, caplog):
+                graph = await thread("no-open")
+                stored = await _stored_events(graph, "no-open")
+
+                with caplog.at_level(logging.WARNING, "langgraph_events"):
+                    events = await _resume(
+                        graph, _make_input(thread_id="no-open", state={"focus": "y"})
+                    )
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="no-open", run_id="run-1"
+                )
+                assert EventType.RUN_ERROR not in _types(events)
+                assert await _stored_events(graph, "no-open") == [
+                    *stored,
+                    FrontendStateMutated(state={"focus": "y"}),
+                ]
+                assert _adapter_warnings(caplog) == [
+                    _no_open_interrupt_warning("no-open")
+                ]
+
+        def when_the_input_carries_no_client_state():
+            async def it_drops_the_answer_and_stores_nothing(caplog):
+                graph = await _answered("no-open-plain")
+                stored = await _stored_events(graph, "no-open-plain")
+
+                with caplog.at_level(logging.WARNING, "langgraph_events"):
+                    events = await _resume(
+                        graph, _make_input(thread_id="no-open-plain")
+                    )
+
+                assert events[-1] == RunFinishedEvent(
+                    thread_id="no-open-plain", run_id="run-1"
+                )
+                assert EventType.RUN_ERROR not in _types(events)
+                assert await _stored_events(graph, "no-open-plain") == stored
+                assert _adapter_warnings(caplog) == [
+                    _no_open_interrupt_warning("no-open-plain")
+                ]
+
+    def when_the_answer_comes_in_a_resume_list():
+        async def it_drops_the_answer_and_applies_the_client_state(caplog):
+            graph = await _answered("no-open-list")
+            stored = await _stored_events(graph, "no-open-list")
+
+            with caplog.at_level(logging.WARNING, "langgraph_events"):
+                events = await _stream(
+                    graph,
+                    _make_input(
+                        thread_id="no-open-list",
+                        state={"focus": "y"},
+                        resume=[_resolved("answered", {"approved": True})],
+                    ),
+                    resume_factory=lambda inp: ApprovalGiven(approved=True),
+                )
+
+            assert events[-1] == RunFinishedEvent(
+                thread_id="no-open-list", run_id="run-1"
+            )
+            assert await _stored_events(graph, "no-open-list") == [
+                *stored,
+                FrontendStateMutated(state={"focus": "y"}),
+            ]
+            assert _adapter_warnings(caplog) == [
+                _no_open_interrupt_warning("no-open-list")
+            ]

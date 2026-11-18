@@ -277,6 +277,7 @@ When `RunAgentInput.state` is populated alongside a resume:
 - A `FrontendStateMutated(state=projected)` event is built. It rides in the answer of the resume, so the paused handler stores it, with the share of each reducer that subscribes to it, before the answer. The handlers of the answer then see the updated value. The event appears in the stream and the audit log.
 - The client state reaches the handlers when the paused handler finishes. A handler that pauses again in the resume stores the client state of each resume when it finishes. The re-run of the paused handler does not see it.
 - A stop that cuts the resume stores no client state.
+- When the thread is not paused, the adapter drops the answer and applies the client state as on a fresh run. A thread with a pending run but no open interrupt refuses the client state with `RUN_ERROR` code `pending_run_takes_no_client_state`. See [Run outcomes](#run-outcomes).
 - When each answered handler names `langgraph.types.interrupt` in its code, the run is refused before the graph runs, with `RUN_ERROR` code `raw_interrupt_takes_no_client_state`. A call in a helper function that the handler calls is not seen, see [Stop on a signal](control-flow.md#stop-on-a-signal-cancelledonsignal). Such a call cannot take client state. The thread keeps its questions. Resume without `state`, or return the `Interrupted` from the handler.
 - **A domain-driven reducer wins for a shared key.** A backend channel stays intact, whatever the client echoes.
 - An `@on(FrontendStateMutated)` handler fires on resume, once, as on a fresh run.
@@ -600,6 +601,17 @@ The adapter also sends the `interrupted` custom event, as before. A client that 
 A `FrontendToolCallRequested` is a frontend tool call, not an interrupt. AG-UI 1.0 ends such a run as a success. The client answers the call with a tool message in the next input, and it finds the open call in the `TOOL_CALL_START` events. So the outcome does not name it. When a real interrupt is also open, the outcome names only the real interrupt.
 
 A run on a paused thread with no answer runs no handler. It ends with the interrupt outcome again, so the client gets another chance to answer. A cancelled run waits for nothing, so a 1.0 client clears its pending interrupts. The next run then sends no answer and gets the interrupt outcome again.
+
+A run can answer a thread that is not paused. A thread is paused while its checkpoint has a scheduled node or an open interrupt, as for `astream_resume()`. Examples are a double submit of one answer, two views that answer the same question, and a thread that `abandon()` closed. The rule is the same for a resume list and for the `resume_factory`:
+
+- The adapter drops the answer with a `WARNING` that names the thread. No handler gets the answer.
+- The adapter does not call the `seed_factory`.
+- The client state of the run applies as on a fresh run. With no client state, the adapter replays the checkpoint and runs no handler.
+- The run ends with `RUN_FINISHED` and no outcome.
+
+The adapter does not call `astream_resume()` for such a run, so `EventGraph(on_unresumable=...)` does not apply to it. A paused handler that was renamed without `previously=` also leaves the thread not paused, so its answers are dropped in the same way.
+
+A thread can have a scheduled node but no open interrupt, for example after a handler failed. The adapter resumes such a thread, as `astream_resume()` does. Client state cannot ride in that resume, so a run with client state ends with `RUN_ERROR` code `pending_run_takes_no_client_state`, and the thread keeps its pending run.
 
 ### Resume list
 

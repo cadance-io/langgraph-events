@@ -5,6 +5,7 @@ import copy
 import inspect
 import logging
 import uuid
+from enum import Enum
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
@@ -56,6 +57,17 @@ from ._resume import answers_by_interrupt_id
 from ._state import _DEDICATED_EVENT_KEYS, _default_state_projection
 
 logger = logging.getLogger(__name__)
+
+
+class _DroppedAnswer(Enum):
+    """The run answers, but the thread is not paused.
+
+    AG-UI 1.0 drops a resume entry that names no open interrupt. The adapter
+    drops such an answer in the same way, for a double submit or a closed
+    thread. The client state of the run still applies.
+    """
+
+    NOT_PAUSED = "not_paused"
 
 
 class CheckpointState(TypedDict):
@@ -482,12 +494,64 @@ class AGUIAdapter:
             )
         return {**answers, tool_calls[0]: tool_answer}
 
+    async def _run_answer(
+        self,
+        input_data: RunAgentInput,
+        checkpoint: StateSnapshot | None,
+        checkpoint_state: CheckpointState | None,
+    ) -> ResumeValue | _DroppedAnswer | None:
+        """The answers of the run, or ``None`` when the run answers nothing.
+
+        A non-empty resume list answers. So does an event of the resume
+        factory. When the thread is not paused, the answer is dropped with a
+        ``WARNING``. The test is the one of ``astream_resume()``: a pending
+        run without an open interrupt still takes the answer.
+        """
+        answer: ResumeValue | None
+        if input_data.resume and checkpoint is not None:
+            if not self._graph._resume_is_pending(checkpoint):
+                return self._drop_answer(input_data)
+            answer = await self._answers_from_resume_list(
+                input_data, checkpoint, checkpoint_state
+            )
+        elif self._resume_factory is not None:
+            answer = await _call_factory(
+                self._resume_factory,
+                input_data,
+                checkpoint_state,
+                accepts_state=self._resume_accepts_state,
+            )
+        else:
+            answer = None
+        if (
+            answer is not None
+            and checkpoint is not None
+            and not self._graph._resume_is_pending(checkpoint)
+        ):
+            return self._drop_answer(input_data)
+        return answer
+
+    @staticmethod
+    def _drop_answer(input_data: RunAgentInput) -> _DroppedAnswer:
+        logger.warning(
+            "Dropping the answer of an AG-UI run: the thread %r is not paused.",
+            input_data.thread_id,
+        )
+        return _DroppedAnswer.NOT_PAUSED
+
     def _should_gate_with_checkpoint_replay(
         self,
-        resume_event: ResumeValue | None,
+        input_data: RunAgentInput,
+        resume_event: ResumeValue | _DroppedAnswer | None,
         checkpoint_state: CheckpointState | None,
     ) -> bool:
-        """Whether interrupt gate should short-circuit to checkpoint replay."""
+        """Whether the run replays the checkpoint and runs no handler.
+
+        It does for a paused thread that the run does not answer. It does for
+        a dropped answer without client state, because nothing is to apply.
+        """
+        if isinstance(resume_event, _DroppedAnswer):
+            return self._extract_frontend_state(input_data) is None
         return (
             resume_event is None
             and checkpoint_state is not None
@@ -556,6 +620,19 @@ class AGUIAdapter:
         if (
             fsm is not None
             and snapshot is not None
+            and not _snapshot_interrupts(snapshot)
+        ):
+            raise _FactoryRefusalError(
+                RunRefusedError(
+                    "pending_run_takes_no_client_state",
+                    "The thread has a pending run but no open interrupt, so the "
+                    "answer cannot carry RunAgentInput.state. Resume without "
+                    "state.",
+                )
+            )
+        if (
+            fsm is not None
+            and snapshot is not None
             and self._graph.seed_target(resume_event, snapshot) is None
         ):
             raise _FactoryRefusalError(
@@ -594,7 +671,7 @@ class AGUIAdapter:
         self,
         input_data: RunAgentInput,
         checkpoint_state: CheckpointState | None,
-        resume_event: ResumeValue | None,
+        resume_event: ResumeValue | _DroppedAnswer | None,
         config: RunnableConfig,
         snapshot: StateSnapshot | None,
         context: object,
@@ -602,19 +679,24 @@ class AGUIAdapter:
         """Create the underlying EventGraph async event stream.
 
         *snapshot* is the checkpoint that the turn loaded before the run. The
-        graph uses it, so it does not load the checkpoint again.
+        graph uses it, so it does not load the checkpoint again. A dropped
+        answer runs only the client state, and not the seed factory.
         """
-        if resume_event is not None:
+        seeds: list[Event]
+        if isinstance(resume_event, _DroppedAnswer):
+            seeds = self._prepend_frontend_state(input_data, [])
+        elif resume_event is not None:
             return self._resume_event_stream(
                 input_data, resume_event, config, snapshot, context
             )
-        seed: Event | list[Event] = await _call_factory(
-            self._seed_factory,
-            input_data,
-            checkpoint_state,
-            accepts_state=self._seed_accepts_state,
-        )
-        seeds = self._prepend_frontend_state(input_data, seed)
+        else:
+            seed: Event | list[Event] = await _call_factory(
+                self._seed_factory,
+                input_data,
+                checkpoint_state,
+                accepts_state=self._seed_accepts_state,
+            )
+            seeds = self._prepend_frontend_state(input_data, seed)
         return self._graph.astream_events(
             seeds,
             include_reducers=self._activation,
@@ -773,25 +855,18 @@ class AGUIAdapter:
             if checkpoint_snapshot is not None
             else None
         )
-        resume_event: ResumeValue | None
-        if input_data.resume and checkpoint_snapshot is not None:
-            resume_event = await self._answers_from_resume_list(
-                input_data, checkpoint_snapshot, checkpoint_state
-            )
-        elif self._resume_factory is not None:
-            resume_event = await _call_factory(
-                self._resume_factory,
-                input_data,
-                checkpoint_state,
-                accepts_state=self._resume_accepts_state,
-            )
-        else:
-            resume_event = None
-        is_resume = resume_event is not None
+        resume_event = await self._run_answer(
+            input_data, checkpoint_snapshot, checkpoint_state
+        )
+        is_resume = resume_event is not None and not isinstance(
+            resume_event, _DroppedAnswer
+        )
         emitted_state_snapshot = False
 
         # Interrupt gate: re-emit state without executing when interrupted
-        if self._should_gate_with_checkpoint_replay(resume_event, checkpoint_state):
+        if self._should_gate_with_checkpoint_replay(
+            input_data, resume_event, checkpoint_state
+        ):
             for agui_event in self._checkpoint_events(checkpoint_snapshot, ctx):
                 yield agui_event
             return
