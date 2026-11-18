@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`AGUIAdapter.stream()` drops an answer to a thread that is not paused, and ends with
+  `RUN_FINISHED`.** In 0.54.0, such a run with client state ended with `RUN_ERROR` code
+  `raw_interrupt_takes_no_client_state`, which named the wrong cause. A double submit, two
+  views that answer one question, and a thread that `abandon()` closed reach this case. A
+  thread is paused while its checkpoint has a scheduled node or an open interrupt, as for
+  `astream_resume()`. The rule is the same for a resume list and for the `resume_factory`:
+  - The adapter drops the answer with a `WARNING` that names the thread.
+  - The adapter does not call the `seed_factory`.
+  - The client state applies as on a fresh run. Without client state, the adapter replays
+    the checkpoint.
+  - The adapter does not call `astream_resume()` for such a run, so `on_unresumable` does
+    not apply to it.
+
+  A thread with a scheduled node but no open interrupt still resumes. With client state,
+  that run now ends with `RUN_ERROR` code `pending_run_takes_no_client_state`. The
+  `raw_interrupt_takes_no_client_state` refusal stays for an open interrupt that a raw
+  `langgraph.types.interrupt()` raised. See [Run outcomes](docs/agui.md#run-outcomes). See
+  #256.
+- `astream_resume()` and `stream_resume()` with `seeds=` that answer no open interrupt raise
+  a `ValueError` that names this cause. Before, the error named a raw
+  `langgraph.types.interrupt()` call. `EventGraph.seed_target()` raises the same error. See
+  #256.
+
 ## [0.54.0] - 2026-11-18
 
 ### Added
